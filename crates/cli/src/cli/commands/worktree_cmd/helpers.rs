@@ -8,7 +8,21 @@ use repo::Repository;
 
 use super::super::advice::RecoveryAdvice;
 
-pub(crate) fn prepare_worktree_target(repo: &Repository, path: &Path) -> Result<PathBuf> {
+/// The prepared `--path` target plus whether THIS invocation created the
+/// target directory. A compensating rollback must only undo what this
+/// invocation created: a directory we created is removed entirely, but a
+/// pre-existing empty directory the user supplied is preserved (only the
+/// contents we materialized inside it are cleared) — never destroy user
+/// state we merely wrote into.
+pub(crate) struct PreparedWorktreeTarget {
+    pub path: PathBuf,
+    pub target_dir_created: bool,
+}
+
+pub(crate) fn prepare_worktree_target(
+    repo: &Repository,
+    path: &Path,
+) -> Result<PreparedWorktreeTarget> {
     let requested = absolute_path(path)?;
     if let Ok(metadata) = std::fs::symlink_metadata(&requested)
         && metadata.file_type().is_symlink()
@@ -17,11 +31,18 @@ pub(crate) fn prepare_worktree_target(repo: &Repository, path: &Path) -> Result<
     }
     let resolved = canonicalize_existing_ancestor(&requested)?;
     validate_worktree_target(repo, &resolved)?;
+    // Capture pre-existence BEFORE we create the dir: this is the only
+    // point where "the user gave us an existing empty dir" vs "we made
+    // it" is still distinguishable.
+    let target_dir_created = !resolved.exists();
     std::fs::create_dir_all(&resolved).map_err(|error| {
         anyhow::anyhow!(worktree_target_prepare_failed_advice(&requested, error))
     })?;
     validate_worktree_target(repo, &resolved)?;
-    Ok(resolved)
+    Ok(PreparedWorktreeTarget {
+        path: resolved,
+        target_dir_created,
+    })
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf> {
@@ -229,6 +250,14 @@ pub(crate) fn write_isolated_checkout(
         pointer_file.sync_all()?;
     }
     std::fs::create_dir_all(heddle_dir.join("state"))?;
+    // Fault point for the partial-materialize rollback test (heddle#356):
+    // the checkout's `.heddle` metadata is already on disk here but no tree
+    // bytes are, modeling a materialize that fails partway. The transaction's
+    // checkout-rewind inverse must remove the whole created tree (incl
+    // `.heddle`) — or, for a user-supplied pre-existing dir, clear its
+    // contents. No-op in production (env var unset).
+    objects::fault_inject::maybe_fail_at("start_materialize_checkout")
+        .map_err(|error| anyhow::anyhow!(error))?;
 
     let checkout_head = heddle_dir.join("HEAD");
     let head_content = match thread {

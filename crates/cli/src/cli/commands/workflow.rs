@@ -938,6 +938,10 @@ pub fn cmd_delegate(cli: &Cli, args: DelegateArgs) -> Result<()> {
                     // shouldn't make filesystem-layout decisions for
                     // the user.
                     shared_target: false,
+                    // Delegated children don't auto-hydrate: delegate is a
+                    // thin orchestration verb and shouldn't symlink deps
+                    // into a spawned checkout without an explicit ask.
+                    hydrate: false,
                 },
             )?;
             Ok(DelegatedThreadOutput {

@@ -71,6 +71,26 @@ pub fn maybe_panic_at(name: &str) {
     }
 }
 
+/// Like [`maybe_panic_at`], but returns an `io::Error` instead of
+/// panicking — for exercising *in-process* error-recovery paths (a
+/// graceful failure that drives a rollback) rather than crash recovery.
+///
+/// Production callers thread this where a returned error must unwind a
+/// partially-applied operation; tests opt in by listing the checkpoint
+/// name in `HEDDLE_FAULT_INJECT` and assert the rollback left no
+/// partial state. With the env var unset the cached `None`
+/// short-circuits, exactly like [`maybe_panic_at`].
+pub fn maybe_fail_at(name: &str) -> std::io::Result<()> {
+    if let Some(points) = active_points().as_ref()
+        && points.iter().any(|active| active == name)
+    {
+        return Err(std::io::Error::other(format!(
+            "HEDDLE_FAULT_INJECT: failing at checkpoint `{name}` (intentional)"
+        )));
+    }
+    Ok(())
+}
+
 /// Test-only helper: clear the cached env-var read so a single
 /// process can re-parse `HEDDLE_FAULT_INJECT` between phases. Not
 /// for production use — the cache is what makes the production

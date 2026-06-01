@@ -41,6 +41,7 @@ use super::{
     },
     operator_loop::{primary_next_action, primary_next_action_with_verification},
     snapshot::{ensure_current_state, summarize_confidence, summarize_verification},
+    start_atomic,
     thread_cmd::{refresh_thread_freshness, thread_not_found_advice},
     worktree_cmd::{
         helpers::{prepare_worktree_target, write_isolated_checkout},
@@ -1641,27 +1642,6 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
 
     let actor_identity = resolve_start_actor_identity(repo, &args)?;
 
-    let thread_name = ThreadName::new(&args.name);
-    if let Some(existing) = existing_thread_state {
-        repo.refs()
-            .set_thread_cas(&thread_name, RefExpectation::Value(existing), &base_state)?;
-    } else {
-        repo.refs()
-            .set_thread_cas(&thread_name, RefExpectation::Missing, &base_state)?;
-        // `cmd_start` writes the ThreadManager record only after
-        // materializing the worktree below — there's no record yet to
-        // snapshot, so pass `None`. The `ensure_thread_worktree_undo_safe`
-        // gate (undo.rs) refuses undo whenever this create has a live
-        // materialized worktree on disk, so the only path where redo
-        // would actually run for a `start` op is one where the user has
-        // manually torn the worktree down. Redo then restores the ref
-        // only (no record body to put back); a subsequent `heddle
-        // thread start` re-establishes the record if the user wants
-        // one. heddle#23 r2.
-        repo.oplog()
-            .record_thread_create(&thread_name, &base_state, None, Some(&repo.op_scope()))?;
-    }
-
     let thread_mode = resolve_thread_mode(repo, &args);
     // Honesty pass for explicit `--workspace materialized` on a
     // filesystem that doesn't support reflinks. `resolve_thread_mode`
@@ -1706,7 +1686,9 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     if args.path.is_some() {
         ensure_explicit_start_path_outside_repo(repo, &args.name, &path)?;
     }
-    let abs_path = normalize_path_for_containment(&prepare_worktree_target(repo, &path)?)?;
+    let prepared_target = prepare_worktree_target(repo, &path)?;
+    let target_dir_created = prepared_target.target_dir_created;
+    let abs_path = normalize_path_for_containment(&prepared_target.path)?;
 
     // Item 2.1 of the heddle 6→8 plan: when starting a heavy
     // (materialized/lightweight) thread in a Rust workspace, redirect
@@ -1750,61 +1732,8 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
         shared_target::print_advisory(&args.name);
     }
 
-    // Track whether `write_cargo_config` actually applied the
-    // redirect. When the user has pre-staged `.cargo/config.toml`
-    // the writer is a no-op and we must NOT advertise a
-    // `shared_target_dir` on the thread record — `thread show`
-    // would otherwise lie about a redirect that isn't in effect.
-    let mut shared_target_dir_path = shared_target_dir_path;
-    match thread_mode {
-        ThreadMode::Solid | ThreadMode::Materialized => {
-            write_isolated_checkout(repo, &abs_path, &base_state, Some(&args.name))?;
-            // Materialized threads ship with a manifest sidecar that
-            // ties the on-disk worktree to the captured state via a
-            // per-file stat-cache. Solid threads are full file copies
-            // with no shared extents and stat-cache reuse wouldn't be
-            // semantically right (the bytes can drift without us
-            // noticing the way clonefile shares would expose).
-            if matches!(thread_mode, ThreadMode::Materialized) {
-                repo.record_thread_manifest(&args.name, &base_state, &abs_path)?;
-            }
-            if let Some(dir) = shared_target_dir_path.as_ref() {
-                let applied = shared_target::write_cargo_config(&abs_path, dir)?;
-                if !applied {
-                    tracing::info!(
-                        thread = %args.name,
-                        config = %abs_path.join(".cargo").join("config.toml").display(),
-                        "existing .cargo/config.toml preserved; --shared-target redirect not applied"
-                    );
-                    shared_target_dir_path = None;
-                }
-            }
-        }
-        ThreadMode::Virtualized => {
-            // Light workspaces use the daemon-owned mount by default:
-            // `heddled` keeps the FUSE
-            // session alive after this CLI exits and across subsequent
-            // invocations. `--no-daemon` opts out and pins the mount to
-            // this process (the legacy behaviour). When the daemon is
-            // unavailable on this host (no `fusermount`, exec failed,
-            // etc.) we silently fall back to the in-process path with
-            // a warning so the user still gets a working mount. See
-            // `docs/design/mount-daemon.md` § History.
-            let ownership =
-                mount_lifecycle::MountOwnership::from_flags(args.daemon, args.no_daemon);
-            mount_lifecycle::establish_virtualized_mount(
-                repo.root(),
-                &args.name,
-                &abs_path,
-                ownership,
-            )?;
-        }
-    }
-
-    let registry = AgentRegistry::new(repo.heddle_dir());
-    let task = args.task.clone();
-    let path_for_entry = abs_path.clone();
-    let thread_name = args.name.clone();
+    // Reads the thread record + the post-commit agent entry both need;
+    // computed before the transaction (the record carries them in).
     let current_target_thread = match repo.head_ref()? {
         Head::Attached { thread } => Some(thread.to_string()),
         Head::Detached { .. } => None,
@@ -1827,7 +1756,6 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             ))
         })?;
     let (base_root, verification_summary, confidence_summary) = base_state_summary;
-    let thread_manager = ThreadManager::new(repo.heddle_dir());
     let thread_state = Thread {
         id: args.name.clone(),
         thread: args.name.clone(),
@@ -1839,7 +1767,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
         base_root: base_root.clone(),
         current_state: Some(base_short.clone()),
         merged_state: None,
-        task: task.clone(),
+        task: args.task.clone(),
         execution_path: abs_path.clone(),
         materialized_path: match thread_mode {
             ThreadMode::Solid | ThreadMode::Materialized => Some(abs_path.clone()),
@@ -1860,9 +1788,70 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
         updated_at: Utc::now(),
         ephemeral: None,
         auto: false,
+        // The candidate redirect; the transaction clears it if the cargo
+        // config writer no-ops on a pre-staged `.cargo/config.toml` (so
+        // `thread show` never advertises a redirect that isn't in effect).
         shared_target_dir: shared_target_dir_path.clone(),
     };
-    thread_manager.save(&thread_state)?;
+
+    // The ENTIRE start write-path — thread ref, checkout materialize, manifest,
+    // cargo-config redirect, `--hydrate` symlinks, and the ThreadManager record
+    // — runs as ONE atomic transaction on the heddle#330 primitive (impl-c). A
+    // failure anywhere mid-materialize rewinds every applied effect, with
+    // precise directory + symlink rewind, back to the exact pre-start state;
+    // the oplog `ThreadCreateV2` is the staged commit record appended once at
+    // the single commit point. See `start_atomic::StartThread`.
+    let mount_ownership =
+        mount_lifecycle::MountOwnership::from_flags(args.daemon, args.no_daemon);
+    let scope = repo.op_scope();
+    let generation = repo.oplog().head_id()?;
+    // Stable across retries of the same logical start (generation-keyed like
+    // undo/redo, so a legitimately-repeated `(scope, name)` at a later
+    // generation never collides on the dedup key — heddle#355 idempotency note).
+    let transaction_id = format!("thread-start:{scope}:{}:gen{generation}", args.name);
+    let hydrate_requested =
+        args.hydrate && matches!(thread_mode, ThreadMode::Solid | ThreadMode::Materialized);
+    let linked = repo::atomic::execute(
+        repo,
+        start_atomic::StartThread {
+            transaction_id,
+            name: args.name.clone(),
+            base_state,
+            existing_thread_state,
+            thread_mode: thread_mode.clone(),
+            abs_path: abs_path.clone(),
+            target_dir_created,
+            shared_target_dir: shared_target_dir_path,
+            hydrate: hydrate_requested,
+            mount_ownership,
+            record: thread_state,
+        },
+    )
+    .map_err(|e| anyhow!(e))?;
+
+    // Post-commit hydrate note (stderr; JSON consumers on stdout unaffected).
+    if hydrate_requested {
+        if linked.is_empty() {
+            eprintln!(
+                "{}: --hydrate found no ignored dependency directories at the origin \
+                 checkout root to link.",
+                style::warn("note"),
+            );
+        } else {
+            eprintln!(
+                "{}: hydrated {} ignored dependency dir(s) into '{}' via symlink: {} \
+                 (shared with the origin checkout; they stay ignored and are not captured).",
+                style::warn("note"),
+                linked.len(),
+                args.name,
+                linked.join(", "),
+            );
+        }
+    }
+
+    let registry = AgentRegistry::new(repo.heddle_dir());
+    let path_for_entry = abs_path.clone();
+    let thread_name = args.name.clone();
     let entry = registry.create_generated_entry_for_thread(&thread_name, |session_id| {
         Ok(AgentEntry {
             session_id: session_id.to_string(),

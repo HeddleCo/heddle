@@ -54,6 +54,8 @@ mod git_overlay_sync_adoption;
 mod git_replacement_matrix;
 #[path = "cli_integration/hooks.rs"]
 mod hooks;
+#[path = "cli_integration/hydrate.rs"]
+mod hydrate;
 #[path = "cli_integration/misc.rs"]
 mod misc;
 #[path = "cli_integration/oss_cli_polish.rs"]

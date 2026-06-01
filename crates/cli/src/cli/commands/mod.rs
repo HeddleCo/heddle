@@ -76,6 +76,7 @@ mod shell;
 mod show;
 pub(crate) mod snapshot;
 mod stack;
+mod start_atomic;
 mod stash;
 mod stash_ops;
 mod status;
