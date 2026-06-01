@@ -3,6 +3,7 @@ use objects::store::ObjectStore;
 use std::fs;
 
 use objects::object::{ChangeId, ThreadName};
+use oplog::OpRecord;
 use refs::Head;
 use serde_json::json;
 use tempfile::TempDir;
@@ -181,6 +182,62 @@ fn snapshot_failure_leaves_ref_unchanged() {
 
     // Clean up so the harness's drop doesn't trip on a stale merge.
     repo.merge_state_manager().abort().unwrap();
+}
+
+#[test]
+fn snapshot_atomic_mutation_fault_and_exactly_once_contract() {
+    let (temp_dir, repo) = create_test_repo();
+    fs::write(temp_dir.path().join("tracked.txt"), "baseline").unwrap();
+    let baseline = repo.snapshot(Some("baseline".to_string()), None).unwrap();
+
+    fs::write(temp_dir.path().join("tracked.txt"), "pre-commit crash").unwrap();
+    // SAFETY: this test owns the process-local fault-injection env var for the
+    // duration of the catch_unwind block and clears it before continuing.
+    unsafe {
+        std::env::set_var(
+            "HEDDLE_FAULT_INJECT",
+            "snapshot_after_stage_before_atomic_commit",
+        );
+    }
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = repo.snapshot(Some("must not commit".to_string()), None);
+    }));
+    unsafe {
+        std::env::remove_var("HEDDLE_FAULT_INJECT");
+    }
+    assert!(
+        crashed.is_err(),
+        "the pre-commit checkpoint must crash the in-flight capture"
+    );
+    assert_eq!(
+        repo.head().unwrap(),
+        Some(baseline.change_id),
+        "a pre-commit crash must leave the previous capture visible"
+    );
+
+    fs::write(temp_dir.path().join("tracked.txt"), "committed once").unwrap();
+    let captured = repo
+        .snapshot(Some("committed exactly once".to_string()), None)
+        .unwrap();
+    let recent = repo.oplog().recent(16).unwrap();
+    let snapshot_count = recent
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.operation,
+                OpRecord::Snapshot { new_state, .. } if new_state == captured.change_id
+            )
+        })
+        .count();
+    let transaction_count = recent
+        .iter()
+        .filter(|entry| matches!(entry.operation, OpRecord::TransactionCommit { .. }))
+        .count();
+    assert_eq!(snapshot_count, 1, "capture must append one snapshot record");
+    assert_eq!(
+        transaction_count, 1,
+        "capture must commit through AtomicMutation with one transaction marker"
+    );
 }
 
 #[test]
