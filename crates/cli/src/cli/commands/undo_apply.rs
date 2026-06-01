@@ -1493,13 +1493,33 @@ fn change_contains(repo: &Repository, ancestor: &ChangeId, descendant: &ChangeId
     graph.is_ancestor(ancestor, descendant).unwrap_or(false)
 }
 
-/// Remove the ThreadManager record matching `thread_name`. No-op when no
-/// record exists. Used by the `ThreadCreate` inverse to keep refs and
-/// record-store state in lockstep (cross-thread undo contract rule 4).
+/// Remove EVERY ThreadManager record filed under `thread_name`, converging the
+/// name to empty. No-op when none exist. Used by the `ThreadCreate` inverse to
+/// keep refs and record-store state in lockstep (cross-thread undo contract
+/// rule 4). Converging to empty — rather than deleting only the
+/// `find_by_thread` winner — is what closes the duplicate class the converge
+/// primitive tolerates: if multiple records are filed under the name, deleting
+/// just the `max_by_key(updated_at)` winner leaves the older same-name records
+/// as phantoms after the thread ref is gone, and `find_by_thread` would then
+/// surface a thread whose ref no longer exists. Each record is deleted via its
+/// own `delete_thread_record` (a `step_nonatomic` whose inverse re-saves that
+/// exact record), so a later transaction failure rolls back ALL of them, not
+/// just the winner — preserving the per-record rollback granularity invariant.
+///
+/// RESIDUAL: the `list()` snapshot → per-record-delete sequence has a narrow
+/// window vs a concurrent NON-undo writer (a `thread start` racing an in-flight
+/// undo). That window is a pre-existing property of the thread store (plain
+/// thread commands already race each other identically) and is not introduced
+/// by this migration; the per-effect `step_nonatomic` ledger model cannot hold
+/// a file lock across a whole multi-step entry.
 fn remove_thread_manager_record(steps: &mut EntrySteps, thread_name: &str) -> HeddleResult<()> {
     let manager = ThreadManager::new(steps.repo().heddle_dir());
-    if let Some(thread) = manager.find_by_thread(thread_name)? {
-        steps.delete_thread_record(thread)?;
+    for record in manager
+        .list()?
+        .into_iter()
+        .filter(|t| t.thread == thread_name)
+    {
+        steps.delete_thread_record(record)?;
     }
     Ok(())
 }
@@ -2868,6 +2888,116 @@ mod atomic_tests {
             "find_by_thread returns ONLY prev"
         );
         assert_eq!(restored.current_state.as_deref(), Some("current-A"));
+    }
+
+    /// Test-only deferred mutation that runs `remove_thread_manager_record` — the
+    /// `ThreadCreate`/`ThreadCreateV2` inverse — through the `EntrySteps` applier,
+    /// so its per-record `delete_thread_record` (`step_nonatomic`) granularity and
+    /// rollback can be exercised in isolation.
+    struct RemoveRecordOnly {
+        name: String,
+    }
+
+    impl AtomicMutation for RemoveRecordOnly {
+        type Output = ();
+
+        fn transaction_id(&self) -> String {
+            "test-remove-record-only".to_string()
+        }
+
+        fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<()>> {
+            let mut steps = EntrySteps::new(tx);
+            remove_thread_manager_record(&mut steps, &self.name)?;
+            Ok(StagedCommit::pure(()))
+        }
+    }
+
+    impl DeferredMutation for RemoveRecordOnly {}
+
+    /// The created-thread inverse converges the name to EMPTY: when the store holds
+    /// MULTIPLE records under the name (the duplicate class the converge tolerates),
+    /// undoing the `ThreadCreate` must drop EVERY same-name record, not just the
+    /// `find_by_thread` winner. The pre-fix arm deleted only the winner, leaving the
+    /// older duplicate as a phantom whose thread ref is gone — this test fails
+    /// against that arm (the older record survives) and passes against converge-to-
+    /// empty.
+    #[test]
+    fn remove_thread_manager_record_converges_name_to_empty() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let manager = ThreadManager::new(repo.heddle_dir());
+
+        // Two records under "main": a winner (newer) + an older duplicate.
+        let mut winner = sample_main_thread("current-A", "/work/A");
+        winner.id = "rec-winner".to_string();
+        winner.updated_at = chrono::Utc::now();
+        manager.save(&winner).unwrap();
+        let mut older = sample_main_thread("current-B", "/work/B");
+        older.id = "rec-older".to_string();
+        older.updated_at = winner.updated_at - chrono::Duration::seconds(60);
+        manager.save(&older).unwrap();
+        assert_eq!(manager.list().unwrap().len(), 2, "precondition: two records");
+
+        repo::atomic::execute(&repo, RemoveRecordOnly { name: "main".to_string() }).unwrap();
+
+        assert!(
+            manager.find_by_thread("main").unwrap().is_none(),
+            "converge-to-empty: no record survives under the name"
+        );
+        assert!(
+            manager.list().unwrap().iter().all(|t| t.thread != "main"),
+            "EVERY same-name record removed, not just the find_by_thread winner"
+        );
+    }
+
+    /// Per-record rollback granularity for the converge-to-empty inverse: when a
+    /// LATER step in the same transaction fails after BOTH same-name records were
+    /// deleted, the rollback must re-save ALL of them (each `delete_thread_record`
+    /// is its own `step_nonatomic` with its own re-save inverse), not just the
+    /// winner. Arming the fault at the 2nd `step_nonatomic` also proves the inverse
+    /// issues a delete PER record: pre-fix there is only ONE delete (winner only),
+    /// so the index-1 fault never trips and the op wrongly succeeds.
+    #[test]
+    fn remove_thread_manager_record_rollback_resaves_all_records() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let manager = ThreadManager::new(repo.heddle_dir());
+
+        let mut winner = sample_main_thread("current-A", "/work/A");
+        winner.id = "rec-winner".to_string();
+        winner.updated_at = chrono::Utc::now();
+        manager.save(&winner).unwrap();
+        let mut older = sample_main_thread("current-B", "/work/B");
+        older.id = "rec-older".to_string();
+        older.updated_at = winner.updated_at - chrono::Duration::seconds(60);
+        manager.save(&older).unwrap();
+
+        // Fault the 2nd per-record delete's forward: both records get deleted, then
+        // the op fails — the rollback must re-save BOTH via their per-record
+        // inverses. (Two records ⇒ two `step_nonatomic` deletes; index 1 is the
+        // last one.)
+        let result = with_nonatomic_forward_fault(1, || {
+            repo::atomic::execute(&repo, RemoveRecordOnly { name: "main".to_string() })
+        });
+        assert!(result.is_err(), "the injected forward fault must fail the op");
+
+        let remaining = manager.list().unwrap();
+        assert_eq!(
+            remaining.len(),
+            2,
+            "rollback re-saved ALL same-name records, not just the winner"
+        );
+        let ids: std::collections::HashSet<_> =
+            remaining.iter().map(|t| t.id.clone()).collect();
+        assert!(
+            ids.contains("rec-winner") && ids.contains("rec-older"),
+            "both the winner and the older duplicate were restored"
+        );
+        assert_eq!(
+            manager.find_by_thread("main").unwrap().unwrap().id,
+            "rec-winner",
+            "find_by_thread still selects the newer winner after rollback"
+        );
     }
 
     /// Undoing a `Redact` removes the per-blob sidecar (re-exposing the blob). If

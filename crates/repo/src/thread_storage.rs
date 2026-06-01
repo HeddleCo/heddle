@@ -336,14 +336,24 @@ impl ThreadManager {
     /// left behind. Correct-by-construction: the leaked record's id never has to
     /// be known, because every non-target record under the name is dropped.
     pub fn restore_to_snapshot(&self, name: &str, target: Option<&Thread>) -> Result<()> {
+        // Acquire the write lock ONCE and perform the whole enumerate→delete→save
+        // under that single guard, via the PRIVATE file-level helpers. The public
+        // `list`/`delete`/`save` each re-acquire `write_lock()`, which is NOT
+        // re-entrant (flock on a second FD in the same process blocks), so calling
+        // them here would deadlock — and a concurrent same-name writer between an
+        // unlocked `list()` snapshot and the deletes could leak a record that
+        // survives the converge.
+        let _lock = self.write_lock()?;
         let keep = target.map(|t| t.id.as_str());
-        for record in self.list()? {
+        for record in self.list_record_files()? {
             if record.thread == name && Some(record.id.as_str()) != keep {
-                self.delete(&record.id)?;
+                self.record_store.delete_value(&record.id)?;
+                self.workspace_store.delete_value(&record.id)?;
             }
         }
         if let Some(target) = target {
-            self.save(target)?;
+            self.save_record_file(&target.to_record())?;
+            self.save_workspace_file(&target.id, &target.workspace_state())?;
         }
         Ok(())
     }
@@ -667,6 +677,74 @@ mod tests {
             1,
             "exactly the target remains filed under the name"
         );
+    }
+
+    /// Lock-atomic converge over MULTIPLE same-name records (heddle#355 r7, Codex
+    /// cid 3331420787). With the target PLUS two other same-name records (one
+    /// newer-timestamped, so it would shadow the target via
+    /// `find_by_thread`'s `max_by_key(updated_at)`), the converge enumerates and
+    /// deletes them all under a SINGLE write lock via the private file-level
+    /// helpers — never re-acquiring the (non-re-entrant) lock through the public
+    /// `list`/`delete`/`save`. Both storage halves (record + workspace file) of
+    /// each dropped record must be gone.
+    #[test]
+    fn restore_to_snapshot_converges_multiple_same_name_records() {
+        let temp = TempDir::new().unwrap();
+        let manager = ThreadManager::new(temp.path());
+        let name = "feature/multi";
+
+        let mut target = sample_thread();
+        target.id = "rec-target".to_string();
+        target.thread = name.to_string();
+        target.updated_at = Utc::now();
+        manager.save(&target).unwrap();
+
+        let mut older = sample_thread();
+        older.id = "rec-older".to_string();
+        older.thread = name.to_string();
+        older.updated_at = target.updated_at - chrono::Duration::seconds(30);
+        manager.save(&older).unwrap();
+
+        let mut newer = sample_thread();
+        newer.id = "rec-newer".to_string();
+        newer.thread = name.to_string();
+        newer.updated_at = target.updated_at + chrono::Duration::seconds(30);
+        manager.save(&newer).unwrap();
+        assert_eq!(
+            manager.find_by_thread(name).unwrap().unwrap().id,
+            "rec-newer",
+            "precondition: the newer same-name record shadows the target"
+        );
+
+        manager.restore_to_snapshot(name, Some(&target)).unwrap();
+
+        let under_name: Vec<_> = manager
+            .list()
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.thread == name)
+            .collect();
+        assert_eq!(under_name.len(), 1, "exactly the target remains under the name");
+        assert_eq!(under_name[0].id, "rec-target");
+        assert_eq!(
+            manager.find_by_thread(name).unwrap().unwrap().id,
+            "rec-target",
+            "converge returns find_by_thread to the target"
+        );
+        // Both storage halves of every dropped record are gone.
+        for dropped in ["rec-older", "rec-newer"] {
+            assert!(
+                manager.load_record_file(dropped).unwrap().is_none(),
+                "{dropped} record file deleted"
+            );
+            assert!(
+                manager.load_workspace_file(dropped).unwrap().is_none(),
+                "{dropped} workspace file deleted"
+            );
+        }
+        // The target keeps both halves.
+        assert!(manager.load_record_file("rec-target").unwrap().is_some());
+        assert!(manager.load_workspace_file("rec-target").unwrap().is_some());
     }
 
     /// `target = None` empties the name: every record filed under it is dropped,
