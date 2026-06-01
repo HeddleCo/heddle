@@ -3,10 +3,12 @@ use objects::store::ObjectStore;
 use std::fs;
 
 use objects::object::{ChangeId, ThreadName};
+use oplog::OpRecord;
 use refs::Head;
 use serde_json::json;
 use tempfile::TempDir;
 
+use super::repository_snapshot::{with_snapshot_fault, SnapshotFault};
 use crate::{
     ChangedPathFilters, HeddleError, HistoryQuery, RepoConfig, Repository, RepositoryCapability,
     ThreadFreshness, ThreadManager, WorktreeIndex,
@@ -181,6 +183,72 @@ fn snapshot_failure_leaves_ref_unchanged() {
 
     // Clean up so the harness's drop doesn't trip on a stale merge.
     repo.merge_state_manager().abort().unwrap();
+}
+
+#[test]
+fn snapshot_atomic_mutation_fault_and_exactly_once_contract() {
+    let (temp_dir, repo) = create_test_repo();
+    fs::write(temp_dir.path().join("tracked.txt"), "baseline").unwrap();
+    let baseline = repo.snapshot(Some("baseline".to_string()), None).unwrap();
+
+    fs::write(temp_dir.path().join("tracked.txt"), "pre-commit crash").unwrap();
+    let crashed = with_snapshot_fault(SnapshotFault::AfterStageBeforeAtomicCommit, || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = repo.snapshot(Some("must not commit".to_string()), None);
+        }))
+    });
+    assert!(
+        crashed.is_err(),
+        "the pre-commit checkpoint must crash the in-flight capture"
+    );
+    assert_eq!(
+        repo.head().unwrap(),
+        Some(baseline.change_id),
+        "a pre-commit crash must leave the previous capture visible"
+    );
+
+    fs::write(temp_dir.path().join("tracked.txt"), "committed once").unwrap();
+    let committed_crash =
+        with_snapshot_fault(SnapshotFault::AfterAtomicCommitBeforeRefPublish, || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = repo.snapshot(Some("committed exactly once".to_string()), None);
+            }))
+        });
+    assert!(
+        committed_crash.is_err(),
+        "the post-commit checkpoint must crash after the oplog append"
+    );
+    let captured = repo
+        .snapshot(Some("committed exactly once".to_string()), None)
+        .unwrap();
+    let recent = repo.oplog().recent(16).unwrap();
+    let snapshot_batch = recent
+        .iter()
+        .find(|entry| {
+            matches!(
+                entry.operation,
+                OpRecord::Snapshot { new_state, .. } if new_state == captured.change_id
+            )
+        })
+        .map(|entry| entry.batch_id)
+        .expect("capture must append a snapshot record");
+    let batch_entries = recent
+        .iter()
+        .filter(|entry| entry.batch_id == snapshot_batch)
+        .collect::<Vec<_>>();
+    let snapshot_count = batch_entries
+        .iter()
+        .filter(|entry| matches!(entry.operation, OpRecord::Snapshot { .. }))
+        .count();
+    let transaction_count = batch_entries
+        .iter()
+        .filter(|entry| matches!(entry.operation, OpRecord::TransactionCommit { .. }))
+        .count();
+    assert_eq!(snapshot_count, 1, "capture batch must contain one snapshot record");
+    assert_eq!(
+        transaction_count, 1,
+        "capture batch must contain one transaction marker"
+    );
 }
 
 #[test]

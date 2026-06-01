@@ -2538,19 +2538,27 @@ fn git_overlay_matrix_undo_rewinds_git_checkpoint_when_safe() {
     let operations = undo_list["batches"][0]["operations"]
         .as_array()
         .expect("undo list should expose operations");
+    let logical_operations: Vec<_> = operations
+        .iter()
+        .filter(|op| {
+            !op["description"]
+                .as_str()
+                .is_some_and(|description| description.starts_with("transaction commit "))
+        })
+        .collect();
     assert_eq!(
-        operations.len(),
+        logical_operations.len(),
         2,
         "compat commit should be one logical undo batch containing capture + Git checkpoint: {undo_list}"
     );
     assert!(
-        operations.iter().any(|op| op["description"]
+        logical_operations.iter().any(|op| op["description"]
             .as_str()
             .is_some_and(|description| description.starts_with("snapshot "))),
         "commit undo batch should include the captured Heddle state: {undo_list}"
     );
     assert!(
-        operations.iter().any(|op| op["description"]
+        logical_operations.iter().any(|op| op["description"]
             .as_str()
             .is_some_and(|description| description.starts_with("git checkpoint "))),
         "commit undo batch should include the Git checkpoint: {undo_list}"

@@ -1919,6 +1919,20 @@ mod atomic_tests {
             .count()
     }
 
+    fn commit_marker_count_for(repo: &Repository, txid: &str) -> usize {
+        repo.oplog()
+            .recent(256)
+            .unwrap()
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.operation,
+                    OpRecord::TransactionCommit { transaction_id, .. } if transaction_id == txid
+                )
+            })
+            .count()
+    }
+
     fn main_thread(repo: &Repository) -> Option<ChangeId> {
         repo.refs().get_thread(&ThreadName::new("main")).unwrap()
     }
@@ -1996,7 +2010,9 @@ mod atomic_tests {
         let batches = repo.oplog().undo_batches_scoped(1, Some(&scope)).unwrap();
         let generation = repo.oplog().head_id().unwrap();
         let txid = undo_redo_transaction_id("undo", &scope, generation, &batches);
-        let updated = repo::atomic::execute(&repo, UndoOp::new(batches, recovery_head, txid)).unwrap();
+        let updated =
+            repo::atomic::execute(&repo, UndoOp::new(batches, recovery_head, txid.clone()))
+                .unwrap();
 
         assert_eq!(updated.len(), 1);
         assert!(updated[0].entries.iter().all(|e| e.undone));
@@ -2009,7 +2025,11 @@ mod atomic_tests {
             Some(s2),
             "recovery pointer pins the pre-undo tip"
         );
-        assert_eq!(commit_marker_count(&repo), 1, "exactly one commit marker");
+        assert_eq!(
+            commit_marker_count_for(&repo, &txid),
+            1,
+            "exactly one undo commit marker"
+        );
     }
 
     /// Fault-injection: a failure mid-undo (after the first batch is fully
