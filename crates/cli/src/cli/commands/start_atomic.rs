@@ -39,6 +39,8 @@
 //! all lives here, exactly like undo/redo's `EntrySteps`.
 
 use std::cell::Cell;
+#[cfg(unix)]
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -53,9 +55,7 @@ use repo::{
 
 use super::mount_lifecycle::{self, MountOwnership};
 use super::worktree_cmd::{
-    helpers::write_isolated_checkout,
-    hydrate,
-    shared_target::write_cargo_config,
+    helpers::write_isolated_checkout, hydrate, shared_target::write_cargo_config,
 };
 
 /// Wrap an `anyhow` error from a materialize/hydrate helper into the
@@ -126,45 +126,179 @@ fn hydrate_fault_trips() -> bool {
 }
 
 /// What the target-dir claim ([`create_target_dir`]) established about the
-/// worktree leaf, and how the two directory rewinds may treat it. This is the
-/// SINGLE determination both the checkout writer (implicitly — a refusal aborts
-/// the transaction before the writer's step runs) and BOTH rewinds key on, so
-/// nothing writes through, clears, or deletes a path that was not established as
-/// a real, empty directory we own (heddle#356 cid 3335586962 / 3335052857).
+/// worktree leaf, and how writers/rewinds may treat it. This is the SINGLE
+/// determination both the checkout writer and BOTH rewinds key on, and it carries
+/// the opened directory handle captured at claim time. Later writes use that
+/// handle-backed path instead of re-resolving `abs_path`, so a post-claim path
+/// swap cannot redirect checkout bytes into a symlink target (heddle#356 cid
+/// 3336120590).
 ///
 /// A leaf that is anything else — a symlink, a non-directory file, or a
 /// non-empty directory — is NOT representable here: `create_target_dir` refuses
 /// the start with an `Err` instead, so there is no "owned" value that can stand
 /// for a foreign object.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum TargetDirKind {
+    Created,
+    AdoptedEmpty,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) enum TargetDir {
     /// THIS invocation created the leaf as a fresh, real, empty directory →
     /// rollback removes it wholesale (restoring "didn't exist"). Its dep symlinks
     /// go with it: `remove_dir_all` unlinks symlinks without following them.
-    Created,
+    Created(TargetDirHandle),
     /// A real, EMPTY directory already existed at the leaf that we may safely
     /// write into — a user-supplied `--path`, or a concurrent process that
     /// created a *real empty dir* between plan time and the transaction. The
     /// checkout writes into it; rollback clears ONLY the contents we wrote and
     /// never removes the directory itself (it is not ours to delete).
-    AdoptedEmpty,
+    AdoptedEmpty(TargetDirHandle),
+}
+
+impl TargetDir {
+    fn created(handle: TargetDirHandle) -> Self {
+        Self::Created(handle)
+    }
+
+    fn adopted_empty(handle: TargetDirHandle) -> Self {
+        Self::AdoptedEmpty(handle)
+    }
+
+    fn kind(&self) -> TargetDirKind {
+        match self {
+            Self::Created(_) => TargetDirKind::Created,
+            Self::AdoptedEmpty(_) => TargetDirKind::AdoptedEmpty,
+        }
+    }
+
+    fn handle(&self) -> &TargetDirHandle {
+        match self {
+            Self::Created(handle) | Self::AdoptedEmpty(handle) => handle,
+        }
+    }
+}
+
+/// The open directory identity captured by `create_target_dir`. The handle is
+/// the root of trust: checkout writes and rollback cleanup use `io_path()`, a
+/// path that names this open directory (`/proc/self/fd/N` on Linux) rather than
+/// the mutable user-facing leaf path.
+#[derive(Clone)]
+pub(crate) struct TargetDirHandle {
+    #[cfg(unix)]
+    dir: Rc<File>,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(not(unix))]
+    path: PathBuf,
+}
+
+impl std::fmt::Debug for TargetDirHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        #[cfg(unix)]
+        {
+            f.debug_struct("TargetDirHandle")
+                .field("dev", &self.dev)
+                .field("ino", &self.ino)
+                .finish_non_exhaustive()
+        }
+        #[cfg(not(unix))]
+        {
+            f.debug_struct("TargetDirHandle")
+                .field("path", &self.path)
+                .finish()
+        }
+    }
+}
+
+impl TargetDirHandle {
+    fn open(abs_path: &Path) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+            let dir = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+                .open(abs_path)?;
+            let metadata = dir.metadata()?;
+            if !metadata.is_dir() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "target is not a directory",
+                ));
+            }
+            Ok(Self {
+                dir: Rc::new(dir),
+                dev: metadata.dev(),
+                ino: metadata.ino(),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let metadata = std::fs::symlink_metadata(abs_path)?;
+            if !metadata.is_dir() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "target is not a directory",
+                ));
+            }
+            Ok(Self {
+                path: abs_path.to_path_buf(),
+            })
+        }
+    }
+
+    fn io_path(&self) -> PathBuf {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+
+            let fd = self.dir.as_raw_fd();
+            if Path::new("/proc/self/fd").is_dir() {
+                PathBuf::from(format!("/proc/self/fd/{fd}"))
+            } else {
+                PathBuf::from(format!("/dev/fd/{fd}"))
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            self.path.clone()
+        }
+    }
+
+    fn same_identity_at_path(&self, abs_path: &Path) -> std::io::Result<bool> {
+        #[cfg(unix)]
+        {
+            let current = Self::open(abs_path)?;
+            Ok(current.dev == self.dev && current.ino == self.ino)
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(abs_path == self.path)
+        }
+    }
+}
+
+fn claim_from_cell(target_claim: &Cell<Option<TargetDir>>) -> Option<TargetDir> {
+    let claim = target_claim.take();
+    let snapshot = claim.clone();
+    target_claim.set(claim);
+    snapshot
 }
 
 /// Validate that `abs_path` is, on disk RIGHT NOW, a real (non-symlink) EMPTY
-/// directory we may write the isolated checkout into and clear-on-rollback —
-/// refuse the start otherwise. Uses `symlink_metadata` so a symlink leaf is
-/// detected AS a symlink and never followed: writing the checkout through it (or
-/// `clear_dir_contents`-ing it on rollback) would mutate/delete data in the
-/// symlink's target (heddle#356 cid 3335586962, data loss).
-fn adopt_existing_empty_dir(abs_path: &Path) -> HeddleResult<TargetDir> {
-    let meta = std::fs::symlink_metadata(abs_path).map_err(HeddleError::from)?;
-    if meta.file_type().is_symlink() {
-        return Err(target_dir_shape_refusal(abs_path, "is a symlink"));
-    }
-    if !meta.is_dir() {
-        return Err(target_dir_shape_refusal(abs_path, "is not a directory"));
-    }
-    if std::fs::read_dir(abs_path)
+/// directory we may write the isolated checkout into and clear-on-rollback, and
+/// retain the directory handle that later writes/rewinds must use. Opening uses
+/// `O_NOFOLLOW | O_DIRECTORY` on Unix, so a symlink leaf is refused before it can
+/// become an owned claim.
+fn adopt_existing_empty_dir(abs_path: &Path) -> HeddleResult<TargetDirHandle> {
+    let handle = TargetDirHandle::open(abs_path)
+        .map_err(|_| target_dir_shape_refusal(abs_path, &target_dir_shape_reason(abs_path)))?;
+    if std::fs::read_dir(handle.io_path())
         .map_err(HeddleError::from)?
         .next()
         .transpose()
@@ -173,7 +307,17 @@ fn adopt_existing_empty_dir(abs_path: &Path) -> HeddleResult<TargetDir> {
     {
         return Err(target_dir_shape_refusal(abs_path, "is not empty"));
     }
-    Ok(TargetDir::AdoptedEmpty)
+    Ok(handle)
+}
+
+fn target_dir_shape_reason(abs_path: &Path) -> String {
+    match std::fs::symlink_metadata(abs_path) {
+        Ok(meta) if meta.file_type().is_symlink() => "is a symlink".to_string(),
+        Ok(meta) if !meta.is_dir() => "is not a directory".to_string(),
+        Ok(_) => "could not be opened as a real directory".to_string(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => "does not exist".to_string(),
+        Err(err) => format!("could not be inspected ({err})"),
+    }
 }
 
 /// The refusal raised when the target leaf is not a real, empty, ownable
@@ -210,6 +354,15 @@ fn clear_dir_contents(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn clear_claimed_dir_contents(claim: &TargetDir) -> HeddleResult<()> {
+    match clear_dir_contents(&claim.handle().io_path()) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotADirectory => Ok(()),
+        Err(err) => Err(HeddleError::from(err)),
+    }
+}
+
 /// The precise checkout-rewind inverse, keyed on the runtime [`TargetDir`] claim
 /// from [`create_target_dir`] (NOT a stale plan-time bool — cid 3335052857 /
 /// 3335586962):
@@ -227,15 +380,51 @@ fn clear_dir_contents(dir: &Path) -> std::io::Result<()> {
 ///
 /// Tolerant of an already-absent target so it composes with other rewind steps.
 fn rewind_checkout(abs_path: &Path, claim: Option<TargetDir>) -> HeddleResult<()> {
-    let result = match claim {
-        Some(TargetDir::Created) => std::fs::remove_dir_all(abs_path),
-        Some(TargetDir::AdoptedEmpty) => clear_dir_contents(abs_path),
-        None => return Ok(()),
+    let Some(claim) = claim else {
+        return Ok(());
     };
-    match result {
+    match claim.kind() {
+        TargetDirKind::Created => {
+            clear_claimed_dir_contents(&claim)?;
+            remove_claimed_created_dir_if_still_at_path(abs_path, &claim)
+        }
+        TargetDirKind::AdoptedEmpty => clear_claimed_dir_contents(&claim),
+    }
+}
+
+fn remove_claimed_created_dir_if_still_at_path(
+    abs_path: &Path,
+    claim: &TargetDir,
+) -> HeddleResult<()> {
+    match claim.handle().same_identity_at_path(abs_path) {
+        Ok(true) => {}
+        Ok(false) => return Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotADirectory => return Ok(()),
+        Err(err) => return Err(HeddleError::from(err)),
+    }
+    match std::fs::remove_dir(abs_path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::DirectoryNotEmpty => Ok(()),
         Err(err) => Err(HeddleError::from(err)),
+    }
+}
+
+fn claimed_worktree_path(claim: Option<TargetDir>, abs_path: &Path) -> HeddleResult<PathBuf> {
+    match claim {
+        Some(claim) => match claim.handle().same_identity_at_path(abs_path) {
+            Ok(true) => Ok(claim.handle().io_path()),
+            Ok(false) => Err(target_dir_shape_refusal(
+                abs_path,
+                "changed since it was claimed",
+            )),
+            Err(err) => Err(target_dir_shape_refusal(
+                abs_path,
+                &format!("changed since it was claimed ({err})"),
+            )),
+        },
+        None => Err(target_dir_shape_refusal(abs_path, "was not established")),
     }
 }
 
@@ -266,15 +455,17 @@ fn rewind_checkout(abs_path: &Path, claim: Option<TargetDir>) -> HeddleResult<()
 /// place on rollback — `remove_self_created_dir` only targets the leaf).
 fn create_target_dir(abs_path: &Path, plan_created: bool) -> HeddleResult<TargetDir> {
     if !plan_created {
-        return adopt_existing_empty_dir(abs_path);
+        return adopt_existing_empty_dir(abs_path).map(TargetDir::adopted_empty);
     }
     if let Some(parent) = abs_path.parent() {
         std::fs::create_dir_all(parent).map_err(HeddleError::from)?;
     }
     match std::fs::create_dir(abs_path) {
-        Ok(()) => Ok(TargetDir::Created),
+        Ok(()) => TargetDirHandle::open(abs_path)
+            .map(TargetDir::created)
+            .map_err(HeddleError::from),
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            adopt_existing_empty_dir(abs_path)
+            adopt_existing_empty_dir(abs_path).map(TargetDir::adopted_empty)
         }
         Err(err) => Err(HeddleError::from(err)),
     }
@@ -289,13 +480,11 @@ fn create_target_dir(abs_path: &Path, plan_created: bool) -> HeddleResult<Target
 /// checkout rewind (which removes a self-created dir first; this then no-ops on
 /// `NotFound`).
 fn remove_self_created_dir(abs_path: &Path, claim: Option<TargetDir>) -> HeddleResult<()> {
-    if claim != Some(TargetDir::Created) {
-        return Ok(());
-    }
-    match std::fs::remove_dir_all(abs_path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(HeddleError::from(err)),
+    match claim {
+        Some(claim) if claim.kind() == TargetDirKind::Created => {
+            remove_claimed_created_dir_if_still_at_path(abs_path, &claim)
+        }
+        _ => Ok(()),
     }
 }
 
@@ -433,7 +622,7 @@ impl StartThread {
                 fwd_claim.set(Some(established));
                 Ok(())
             },
-            move || remove_self_created_dir(&rewind_abs, target_claim.get()),
+            move || remove_self_created_dir(&rewind_abs, claim_from_cell(&target_claim)),
         )
     }
 
@@ -447,7 +636,13 @@ impl StartThread {
                 let fwd_name = ThreadName::new(&self.name);
                 let inv_name = ThreadName::new(&self.name);
                 tx.step(
-                    move || repo.refs().set_thread_cas(&fwd_name, RefExpectation::Value(existing), &base_state),
+                    move || {
+                        repo.refs().set_thread_cas(
+                            &fwd_name,
+                            RefExpectation::Value(existing),
+                            &base_state,
+                        )
+                    },
                     move || cas_guarded_ref_rollback(repo, &inv_name, base_state, Some(existing)),
                 )?;
             }
@@ -455,7 +650,10 @@ impl StartThread {
                 let fwd_name = ThreadName::new(&self.name);
                 let inv_name = ThreadName::new(&self.name);
                 tx.step(
-                    move || repo.refs().set_thread_cas(&fwd_name, RefExpectation::Missing, &base_state),
+                    move || {
+                        repo.refs()
+                            .set_thread_cas(&fwd_name, RefExpectation::Missing, &base_state)
+                    },
                     move || cas_guarded_ref_rollback(repo, &inv_name, base_state, None),
                 )?;
                 // The domain commit record. `manager_snapshot = None` matches the
@@ -484,6 +682,7 @@ impl StartThread {
         let rewind_abs = self.abs_path.clone();
         let base_state = self.base_state;
         let name = self.name.clone();
+        let rewind_claim = Rc::clone(&target_claim);
         // The [`TargetDir`] claim set by `stage_target_dir`'s forward (which ran
         // first), read at rewind time when it is settled — never the stale
         // plan-time bool. An adopted dir is cleared (not deleted), a self-created
@@ -491,7 +690,7 @@ impl StartThread {
         // left untouched (cid 3335052857 / 3335586962).
         tx.step_nonatomic(
             move || Ok(()),
-            move |()| rewind_checkout(&rewind_abs, target_claim.get()),
+            move |()| rewind_checkout(&rewind_abs, claim_from_cell(&rewind_claim)),
             move || {
                 #[cfg(test)]
                 if materialize_fault_trips() {
@@ -499,7 +698,9 @@ impl StartThread {
                         "injected materialize fault".to_string(),
                     ));
                 }
-                write_isolated_checkout(repo, &abs, &base_state, Some(&name)).map_err(apply_error)
+                let checkout_root = claimed_worktree_path(claim_from_cell(&target_claim), &abs)?;
+                write_isolated_checkout(repo, &checkout_root, &base_state, Some(&name))
+                    .map_err(apply_error)
             },
         )
     }
@@ -537,22 +738,45 @@ impl StartThread {
     /// untouched). Capture-restore on the config file so a later failure
     /// restores the pre-write state precisely even though the checkout rewind
     /// would also reach it.
-    fn stage_cargo_config(&self, tx: &mut Tx<'_>, dir: &Path) -> HeddleResult<bool> {
-        let cfg = self.abs_path.join(".cargo").join("config.toml");
-        let restore_cfg = cfg.clone();
-        let abs = self.abs_path.clone();
+    fn stage_cargo_config(
+        &self,
+        tx: &mut Tx<'_>,
+        dir: &Path,
+        target_claim: Rc<Cell<Option<TargetDir>>>,
+    ) -> HeddleResult<bool> {
+        let cap_abs = self.abs_path.clone();
+        let restore_abs = self.abs_path.clone();
+        let fwd_abs = self.abs_path.clone();
         let dir = dir.to_path_buf();
+        let cap_claim = Rc::clone(&target_claim);
+        let restore_claim = Rc::clone(&target_claim);
         tx.step_nonatomic(
-            move || Ok(std::fs::read(&cfg).ok()),
-            move |prior| match prior {
-                Some(bytes) => std::fs::write(&restore_cfg, bytes).map_err(HeddleError::from),
-                None => match std::fs::remove_file(&restore_cfg) {
-                    Ok(()) => Ok(()),
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                    Err(err) => Err(HeddleError::from(err)),
-                },
+            move || {
+                let checkout_root = claimed_worktree_path(claim_from_cell(&cap_claim), &cap_abs)?;
+                Ok(std::fs::read(checkout_root.join(".cargo").join("config.toml")).ok())
             },
-            move || write_cargo_config(&abs, &dir).map_err(apply_error),
+            move |prior| match prior {
+                Some(bytes) => {
+                    let checkout_root =
+                        claimed_worktree_path(claim_from_cell(&restore_claim), &restore_abs)?;
+                    std::fs::write(checkout_root.join(".cargo").join("config.toml"), bytes)
+                        .map_err(HeddleError::from)
+                }
+                None => {
+                    let checkout_root =
+                        claimed_worktree_path(claim_from_cell(&restore_claim), &restore_abs)?;
+                    match std::fs::remove_file(checkout_root.join(".cargo").join("config.toml")) {
+                        Ok(()) => Ok(()),
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                        Err(err) => Err(HeddleError::from(err)),
+                    }
+                }
+            },
+            move || {
+                let checkout_root =
+                    claimed_worktree_path(claim_from_cell(&target_claim), &fwd_abs)?;
+                write_cargo_config(&checkout_root, &dir).map_err(apply_error)
+            },
         )
     }
 
@@ -561,17 +785,22 @@ impl StartThread {
     /// all-or-nothing `symlink`), so its unlink inverse is registered only after
     /// the link is created and a partial hydrate unwinds every created link.
     /// Returns the names linked (for the post-commit note).
-    fn stage_hydrate(&self, tx: &mut Tx<'_>) -> HeddleResult<Vec<String>> {
+    fn stage_hydrate(
+        &self,
+        tx: &mut Tx<'_>,
+        target_claim: Rc<Cell<Option<TargetDir>>>,
+    ) -> HeddleResult<Vec<String>> {
         let repo = tx.repo();
         let sources = hydrate::hydratable_ignored_dirs(repo).map_err(apply_error)?;
         let mut linked: Vec<String> = Vec::new();
+        let checkout_root = claimed_worktree_path(claim_from_cell(&target_claim), &self.abs_path)?;
         for source in &sources {
-            let Some((dest, link_name)) = hydrate::plan_link(&self.abs_path, source) else {
+            let Some((dest, link_name)) = hydrate::plan_link(&checkout_root, source) else {
                 continue;
             };
             let src = source.clone();
             let dest_fwd = dest.clone();
-            let inv_checkout = self.abs_path.clone();
+            let inv_checkout = checkout_root.clone();
             let inv_name = link_name.clone();
             let err_name = link_name.clone();
             tx.step(
@@ -595,9 +824,9 @@ impl StartThread {
         // possibly-tracked `.heddleignore` — keeps a successful `start
         // --hydrate` from dirtying tracked state (heddle#356 cid 3333881577).
         if !linked.is_empty() {
-            let exclude_path = hydrate::hydrate_exclude_path(&self.abs_path);
+            let exclude_path = hydrate::hydrate_exclude_path(&checkout_root);
             let restore_path = exclude_path.clone();
-            let abs = self.abs_path.clone();
+            let abs = checkout_root.clone();
             let linked_fwd = linked.clone();
             tx.step_nonatomic(
                 move || Ok(std::fs::read(&exclude_path).ok()),
@@ -683,7 +912,7 @@ impl AtomicMutation for StartThread {
                     self.stage_manifest(tx)?;
                 }
                 if let Some(dir) = self.shared_target_dir.clone() {
-                    let applied = self.stage_cargo_config(tx, &dir)?;
+                    let applied = self.stage_cargo_config(tx, &dir, Rc::clone(&target_claim))?;
                     // The writer no-ops on a pre-staged config; don't advertise a
                     // redirect that isn't in effect (`thread show` would lie).
                     if !applied {
@@ -691,7 +920,7 @@ impl AtomicMutation for StartThread {
                     }
                 }
                 if self.hydrate {
-                    self.stage_hydrate(tx)?
+                    self.stage_hydrate(tx, Rc::clone(&target_claim))?
                 } else {
                     Vec::new()
                 }
@@ -756,7 +985,12 @@ mod tests {
     /// A `--path` solid-thread start that pins its base on `from` (no current-
     /// state bootstrap) and never spawns a daemon — minimal machinery for the
     /// in-process rollback assertions.
-    fn solid_args(name: &str, path: &std::path::Path, from: &ChangeId, hydrate: bool) -> ThreadStartArgs {
+    fn solid_args(
+        name: &str,
+        path: &std::path::Path,
+        from: &ChangeId,
+        hydrate: bool,
+    ) -> ThreadStartArgs {
         ThreadStartArgs {
             name: name.to_string(),
             from: Some(from.to_string()),
@@ -796,10 +1030,7 @@ mod tests {
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("a.txt"), "a").unwrap();
         if !deps.is_empty() {
-            let ignore = deps
-                .iter()
-                .map(|d| format!("{d}/\n"))
-                .collect::<String>();
+            let ignore = deps.iter().map(|d| format!("{d}/\n")).collect::<String>();
             std::fs::write(temp.path().join(".heddleignore"), ignore).unwrap();
             for dep in deps {
                 std::fs::create_dir_all(temp.path().join(dep)).unwrap();
@@ -814,10 +1045,20 @@ mod tests {
         let (temp, repo, state) = repo_with_state(&["dep_a", "dep_b"]);
         let checkout = temp.path().join("iso");
         let out = start_thread(&repo, solid_args("iso", &checkout, &state, true));
-        assert!(out.is_ok(), "happy-path start should succeed: {:?}", out.err());
+        assert!(
+            out.is_ok(),
+            "happy-path start should succeed: {:?}",
+            out.err()
+        );
 
-        assert!(checkout.join(".heddle").is_dir(), "checkout .heddle should exist");
-        assert!(checkout.join("a.txt").is_file(), "tracked file should materialize");
+        assert!(
+            checkout.join(".heddle").is_dir(),
+            "checkout .heddle should exist"
+        );
+        assert!(
+            checkout.join("a.txt").is_file(),
+            "tracked file should materialize"
+        );
         // Both ignored dep dirs hydrated as symlinks.
         for dep in ["dep_a", "dep_b"] {
             assert!(
@@ -828,7 +1069,38 @@ mod tests {
             );
         }
         assert!(has_thread_ref(&repo, "iso"), "thread ref should be created");
-        assert!(has_thread_record(&repo, "iso"), "thread record should be persisted");
+        assert!(
+            has_thread_record(&repo, "iso"),
+            "thread record should be persisted"
+        );
+    }
+
+    #[test]
+    fn start_shared_target_writes_cargo_config_through_claimed_dir() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
+        let state = repo.snapshot(Some("rust workspace".to_string()), None).unwrap();
+        let checkout = temp.path().join("iso");
+        let mut args = solid_args("iso", &checkout, &state.change_id, false);
+        args.shared_target = true;
+
+        start_thread(&repo, args).expect("shared-target start should succeed");
+
+        let config = std::fs::read_to_string(checkout.join(".cargo").join("config.toml"))
+            .expect("cargo config should be written inside the checkout");
+        assert!(
+            config.contains(".heddle/targets"),
+            "cargo config should point at the shared target dir: {config}"
+        );
+        let record = ThreadManager::new(repo.heddle_dir())
+            .load("iso")
+            .unwrap()
+            .expect("thread record should persist");
+        assert!(
+            record.shared_target_dir.is_some(),
+            "record should advertise the applied shared target"
+        );
     }
 
     #[test]
@@ -843,8 +1115,14 @@ mod tests {
             std::fs::symlink_metadata(&checkout).is_err(),
             "the self-created checkout must be removed on rollback"
         );
-        assert!(!has_thread_ref(&repo, "iso"), "the thread ref must be rolled back");
-        assert!(!has_thread_record(&repo, "iso"), "no record must survive the rollback");
+        assert!(
+            !has_thread_ref(&repo, "iso"),
+            "the thread ref must be rolled back"
+        );
+        assert!(
+            !has_thread_record(&repo, "iso"),
+            "no record must survive the rollback"
+        );
     }
 
     #[test]
@@ -857,13 +1135,22 @@ mod tests {
         });
         assert!(out.is_err(), "a materialize fault must fail the start");
         // The user-supplied dir survives, emptied of what we materialized.
-        assert!(checkout.is_dir(), "a pre-existing user dir must not be deleted");
+        assert!(
+            checkout.is_dir(),
+            "a pre-existing user dir must not be deleted"
+        );
         let remaining: Vec<_> = std::fs::read_dir(&checkout)
             .unwrap()
             .map(|e| e.unwrap().file_name())
             .collect();
-        assert!(remaining.is_empty(), "rollback must clear materialized contents: {remaining:?}");
-        assert!(!has_thread_ref(&repo, "iso"), "the thread ref must be rolled back");
+        assert!(
+            remaining.is_empty(),
+            "rollback must clear materialized contents: {remaining:?}"
+        );
+        assert!(
+            !has_thread_ref(&repo, "iso"),
+            "the thread ref must be rolled back"
+        );
     }
 
     #[test]
@@ -880,7 +1167,10 @@ mod tests {
             std::fs::symlink_metadata(&checkout).is_err(),
             "a partial hydrate must remove the checkout (and every created link)"
         );
-        assert!(!has_thread_ref(&repo, "iso"), "the thread ref must be rolled back");
+        assert!(
+            !has_thread_ref(&repo, "iso"),
+            "the thread ref must be rolled back"
+        );
         // The origin's dep dirs are untouched (we unlink, never follow).
         assert!(temp.path().join("dep_a").is_dir());
         assert!(temp.path().join("dep_b").is_dir());
@@ -945,7 +1235,11 @@ mod tests {
         let epoch = resolve_start_epoch(&repo, "iso").unwrap();
         let retry_id = start_transaction_id(&scope, "iso", &state, epoch);
         assert!(
-            !repo.oplog().committed_batch_records(&retry_id).unwrap().is_empty(),
+            !repo
+                .oplog()
+                .committed_batch_records(&retry_id)
+                .unwrap()
+                .is_empty(),
             "a crash-retry must re-derive the committed key (the Active record's epoch) so \
              the executor dedups it instead of re-applying the committed start"
         );
@@ -1013,7 +1307,10 @@ mod tests {
         // marker + the post-commit AgentRegistry reservation.
         start_thread(&repo, solid_args("iso", &checkout, &state, false))
             .expect("first start should succeed");
-        assert!(checkout.join(".heddle").is_dir(), "the first start materialized the checkout");
+        assert!(
+            checkout.join(".heddle").is_dir(),
+            "the first start materialized the checkout"
+        );
 
         // Recreate the crash window: the write-path committed, but the post-commit
         // bookkeeping never landed — delete the reservation so no live owner
@@ -1040,8 +1337,14 @@ mod tests {
 
         // The committed checkout is left exactly as it was — neither re-created nor
         // cleared (the short-circuit never ran the write-path or its rewind).
-        assert!(checkout.join(".heddle").is_dir(), "the committed checkout survives the retry");
-        assert!(checkout.join("a.txt").is_file(), "the committed tree survives the retry");
+        assert!(
+            checkout.join(".heddle").is_dir(),
+            "the committed checkout survives the retry"
+        );
+        assert!(
+            checkout.join("a.txt").is_file(),
+            "the committed tree survives the retry"
+        );
 
         // The record stays the single committed Active record (no duplicate, no
         // Abandoned). And the interrupted reservation is now completed.
@@ -1154,13 +1457,13 @@ mod tests {
         std::fs::create_dir(&target).unwrap();
         let claim = create_target_dir(&target, true).unwrap();
         assert_eq!(
-            claim,
-            TargetDir::AdoptedEmpty,
+            claim.kind(),
+            TargetDirKind::AdoptedEmpty,
             "a real empty dir a concurrent process created is ADOPTED, not claimed as created \
              (a stale plan-time bool would have claimed it)"
         );
         // The rewind keys on the runtime claim, so it must spare their dir.
-        remove_self_created_dir(&target, Some(claim)).unwrap();
+        remove_self_created_dir(&target, Some(claim.clone())).unwrap();
         rewind_checkout(&target, Some(claim)).unwrap();
         assert!(
             target.is_dir(),
@@ -1176,8 +1479,15 @@ mod tests {
         let target = temp.path().join("nested").join("iso");
 
         let claim = create_target_dir(&target, true).unwrap();
-        assert_eq!(claim, TargetDir::Created, "an absent target this start creates is owned by us");
-        assert!(target.is_dir(), "the forward must create the leaf (and its parents)");
+        assert_eq!(
+            claim.kind(),
+            TargetDirKind::Created,
+            "an absent target this start creates is owned by us"
+        );
+        assert!(
+            target.is_dir(),
+            "the forward must create the leaf (and its parents)"
+        );
         remove_self_created_dir(&target, Some(claim)).unwrap();
         assert!(
             std::fs::symlink_metadata(&target).is_err(),
@@ -1195,12 +1505,102 @@ mod tests {
 
         let claim = create_target_dir(&target, false).unwrap();
         assert_eq!(
-            claim,
-            TargetDir::AdoptedEmpty,
+            claim.kind(),
+            TargetDirKind::AdoptedEmpty,
             "a user-supplied pre-existing empty dir is adopted, not ours to own/remove"
         );
         remove_self_created_dir(&target, Some(claim)).unwrap();
         assert!(target.is_dir(), "a user-supplied dir must survive rollback");
+    }
+
+    // ---- heddle#356 r5 close-the-class: write-time target-dir identity (cid 3336120590) ----
+
+    /// cid 3336120590: after the target claim is established, a concurrent
+    /// process swaps the leaf for a symlink to an outside dir before checkout
+    /// materialization. The writer must refuse from the claim's handle identity
+    /// check (not follow the symlink), and rollback must clear/delete only
+    /// through the retained handle, never through the substituted path.
+    #[cfg(unix)]
+    #[test]
+    fn claimed_target_swap_refuses_write_and_spares_symlink_target() {
+        let (temp, repo, state) = repo_with_state(&[]);
+        let checkout = temp.path().join("iso");
+        let victim = temp.path().join("victim");
+        std::fs::create_dir(&victim).unwrap();
+        std::fs::write(victim.join("precious.txt"), b"precious").unwrap();
+
+        let claim = create_target_dir(&checkout, true).unwrap();
+        assert_eq!(claim.kind(), TargetDirKind::Created);
+
+        std::fs::remove_dir(&checkout).unwrap();
+        std::os::unix::fs::symlink(&victim, &checkout).unwrap();
+
+        let checkout_root = claimed_worktree_path(Some(claim.clone()), &checkout);
+        assert!(
+            checkout_root.is_err(),
+            "a post-claim leaf swap must refuse before any checkout write"
+        );
+
+        rewind_checkout(&checkout, Some(claim.clone())).unwrap();
+        remove_self_created_dir(&checkout, Some(claim)).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&checkout)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "rollback must not remove the substituted symlink"
+        );
+        assert!(
+            !victim.join("a.txt").exists() && !victim.join(".heddle").exists(),
+            "checkout materialization must not write into the symlink target"
+        );
+        assert_eq!(
+            std::fs::read(victim.join("precious.txt")).unwrap(),
+            b"precious",
+            "rollback must not clear the symlink target's existing data"
+        );
+
+        let _ = (repo, state);
+    }
+
+    #[test]
+    fn claimed_created_and_adopted_dirs_still_write_and_rewind() {
+        let (temp, repo, state) = repo_with_state(&[]);
+
+        let created = temp.path().join("created");
+        let created_claim = create_target_dir(&created, true).unwrap();
+        let created_root = claimed_worktree_path(Some(created_claim.clone()), &created).unwrap();
+        write_isolated_checkout(&repo, &created_root, &state, Some("created")).unwrap();
+        assert!(
+            created.join("a.txt").is_file(),
+            "created dir still receives checkout bytes"
+        );
+        rewind_checkout(&created, Some(created_claim)).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&created).is_err(),
+            "created dir is removed on rollback"
+        );
+
+        let adopted = temp.path().join("adopted");
+        std::fs::create_dir(&adopted).unwrap();
+        let adopted_claim = create_target_dir(&adopted, false).unwrap();
+        let adopted_root = claimed_worktree_path(Some(adopted_claim.clone()), &adopted).unwrap();
+        write_isolated_checkout(&repo, &adopted_root, &state, Some("adopted")).unwrap();
+        assert!(
+            adopted.join("a.txt").is_file(),
+            "adopted dir still receives checkout bytes"
+        );
+        rewind_checkout(&adopted, Some(adopted_claim)).unwrap();
+        assert!(adopted.is_dir(), "adopted dir itself survives rollback");
+        let remaining: Vec<_> = std::fs::read_dir(&adopted)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(
+            remaining.is_empty(),
+            "adopted dir contents are cleared: {remaining:?}"
+        );
     }
 
     // ---- heddle#356 r4 close-the-class: target-dir SHAPE validation (cid 3335586962) ----
@@ -1234,7 +1634,10 @@ mod tests {
         rewind_checkout(&leaf, None).unwrap();
         remove_self_created_dir(&leaf, None).unwrap();
         assert!(
-            std::fs::symlink_metadata(&leaf).unwrap().file_type().is_symlink(),
+            std::fs::symlink_metadata(&leaf)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
             "the symlink itself must be left untouched"
         );
         assert!(
@@ -1258,7 +1661,10 @@ mod tests {
 
         let claim = create_target_dir(&leaf, true);
         assert!(claim.is_err(), "a non-directory leaf must refuse the start");
-        assert!(leaf.is_file(), "the pre-existing file must be left untouched");
+        assert!(
+            leaf.is_file(),
+            "the pre-existing file must be left untouched"
+        );
         assert_eq!(std::fs::read(&leaf).unwrap(), b"i am a file, not a dir");
     }
 
@@ -1272,7 +1678,10 @@ mod tests {
         std::fs::write(leaf.join("someone-elses-work.txt"), b"keep me").unwrap();
 
         let claim = create_target_dir(&leaf, true);
-        assert!(claim.is_err(), "a non-empty dir at the leaf must refuse the start");
+        assert!(
+            claim.is_err(),
+            "a non-empty dir at the leaf must refuse the start"
+        );
         assert!(
             leaf.join("someone-elses-work.txt").is_file(),
             "the pre-existing contents must be left untouched"
