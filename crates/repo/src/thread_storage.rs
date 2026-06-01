@@ -327,6 +327,27 @@ impl ThreadManager {
         self.workspace_store.delete_value(thread_id)
     }
 
+    /// Converge the persisted state for thread `name` to `target`: delete EVERY
+    /// record currently filed under `name` whose record id differs from the
+    /// target's, then (if `Some`) ensure `target` is saved. Post-condition: the
+    /// set of records with `.thread == name` is exactly `{target}` (or empty),
+    /// so [`find_by_thread`](Self::find_by_thread) returns `target` REGARDLESS of
+    /// what (possibly unknown-id, newer-timestamped) record a rolled-back forward
+    /// left behind. Correct-by-construction: the leaked record's id never has to
+    /// be known, because every non-target record under the name is dropped.
+    pub fn restore_to_snapshot(&self, name: &str, target: Option<&Thread>) -> Result<()> {
+        let keep = target.map(|t| t.id.as_str());
+        for record in self.list()? {
+            if record.thread == name && Some(record.id.as_str()) != keep {
+                self.delete(&record.id)?;
+            }
+        }
+        if let Some(target) = target {
+            self.save(target)?;
+        }
+        Ok(())
+    }
+
     pub fn load_record(&self, record_id: &str) -> Result<Option<ThreadRecord>> {
         self.load_record_file(record_id)
     }
@@ -594,6 +615,121 @@ mod tests {
         assert!(
             hydrated.auto,
             "auto flag must round-trip back into the hydrated Thread"
+        );
+    }
+
+    /// `restore_to_snapshot` is the converge primitive every thread-record undo
+    /// restore routes through (heddle#355 r6, close-the-class). A non-atomic
+    /// forward can write a record under a DIFFERENT id with a NEWER `updated_at`,
+    /// which `find_by_thread`'s `max_by_key(updated_at)` would then return. The
+    /// converge must delete that leaked record so the post-condition holds: the
+    /// records filed under `name` are exactly `{target}`.
+    #[test]
+    fn restore_to_snapshot_drops_leaked_newer_id_record() {
+        let temp = TempDir::new().unwrap();
+        let manager = ThreadManager::new(temp.path());
+        let name = "feature/converge";
+
+        let mut prev = sample_thread();
+        prev.id = "rec-prev".to_string();
+        prev.thread = name.to_string();
+        prev.updated_at = Utc::now();
+        manager.save(&prev).unwrap();
+
+        // A forward wrote a SECOND record under the same name — different id,
+        // NEWER timestamp — so `find_by_thread` returns the leaked record.
+        let mut leaked = sample_thread();
+        leaked.id = "rec-leaked".to_string();
+        leaked.thread = name.to_string();
+        leaked.updated_at = prev.updated_at + chrono::Duration::seconds(10);
+        manager.save(&leaked).unwrap();
+        assert_eq!(
+            manager.find_by_thread(name).unwrap().unwrap().id,
+            "rec-leaked",
+            "precondition: newer leaked record shadows prev"
+        );
+
+        manager.restore_to_snapshot(name, Some(&prev)).unwrap();
+
+        assert_eq!(
+            manager.find_by_thread(name).unwrap().unwrap().id,
+            "rec-prev",
+            "converge returns find_by_thread to the target, not the leak"
+        );
+        let under_name: Vec<_> = manager
+            .list()
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.thread == name)
+            .collect();
+        assert_eq!(
+            under_name.len(),
+            1,
+            "exactly the target remains filed under the name"
+        );
+    }
+
+    /// `target = None` empties the name: every record filed under it is dropped,
+    /// and records for OTHER names are untouched.
+    #[test]
+    fn restore_to_snapshot_none_empties_only_the_named_thread() {
+        let temp = TempDir::new().unwrap();
+        let manager = ThreadManager::new(temp.path());
+
+        let mut a1 = sample_thread();
+        a1.id = "a1".to_string();
+        a1.thread = "feature/a".to_string();
+        manager.save(&a1).unwrap();
+        let mut a2 = sample_thread();
+        a2.id = "a2".to_string();
+        a2.thread = "feature/a".to_string();
+        a2.updated_at = a1.updated_at + chrono::Duration::seconds(5);
+        manager.save(&a2).unwrap();
+        let mut other = sample_thread();
+        other.id = "b1".to_string();
+        other.thread = "feature/b".to_string();
+        manager.save(&other).unwrap();
+
+        manager.restore_to_snapshot("feature/a", None).unwrap();
+
+        assert!(
+            manager.find_by_thread("feature/a").unwrap().is_none(),
+            "all records for the named thread are deleted"
+        );
+        assert_eq!(
+            manager.find_by_thread("feature/b").unwrap().unwrap().id,
+            "b1",
+            "records for other threads are untouched"
+        );
+    }
+
+    /// When `target` is already the sole record under the name, the converge is a
+    /// no-op that leaves it intact.
+    #[test]
+    fn restore_to_snapshot_target_already_sole_is_noop() {
+        let temp = TempDir::new().unwrap();
+        let manager = ThreadManager::new(temp.path());
+        let name = "feature/sole";
+
+        let mut rec = sample_thread();
+        rec.id = "rec-sole".to_string();
+        rec.thread = name.to_string();
+        manager.save(&rec).unwrap();
+
+        manager.restore_to_snapshot(name, Some(&rec)).unwrap();
+
+        assert_eq!(
+            manager.find_by_thread(name).unwrap().unwrap().id,
+            "rec-sole"
+        );
+        assert_eq!(
+            manager
+                .list()
+                .unwrap()
+                .into_iter()
+                .filter(|t| t.thread == name)
+                .count(),
+            1
         );
     }
 

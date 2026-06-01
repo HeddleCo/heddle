@@ -380,32 +380,23 @@ impl<'a> EntrySteps<'_, 'a> {
         )
     }
 
-    /// Persist a mutated ThreadManager record; inverse restores the record's
-    /// prior persisted form (or removes it if there was none). NON-atomic:
-    /// `ThreadManager::save` writes the record file AND the workspace file, so a
-    /// failure on the second write leaves the first applied — the capture
-    /// snapshots both prior forms and the restore rewrites/removes them.
+    /// Persist a mutated ThreadManager record; inverse converges the persisted
+    /// state for the thread back to its prior form (or removes it if there was
+    /// none). NON-atomic: `ThreadManager::save` writes the record file AND the
+    /// workspace file, so a failure on the second write leaves the first applied.
+    /// The restore routes through [`ThreadManager::restore_to_snapshot`], which
+    /// drops EVERY record under the thread name except `prev` — so a replacement
+    /// save that wrote a NEW-id, newer-timestamped record cannot leak past
+    /// rollback regardless of whether its id is known here.
     fn save_thread_record(&mut self, record: Thread) -> HeddleResult<()> {
         let repo = self.repo();
         let manager = ThreadManager::new(repo.heddle_dir());
-        let prev = manager.find_by_thread(&record.thread)?;
-        let new_id = record.id.clone();
+        let name = record.thread.clone();
+        let prev = manager.find_by_thread(&name)?;
         self.step_nonatomic(
             || Ok(prev),
             move |prev| {
-                let manager = ThreadManager::new(repo.heddle_dir());
-                match prev {
-                    Some(prev) => {
-                        // A replacement save wrote the record under a new id; the
-                        // newer record + its workspace file must be removed so
-                        // `find_by_thread` sees only `prev` after rollback.
-                        if prev.id != new_id {
-                            manager.delete(&new_id)?;
-                        }
-                        manager.save(&prev)
-                    }
-                    None => manager.delete(&new_id),
-                }
+                ThreadManager::new(repo.heddle_dir()).restore_to_snapshot(&name, prev.as_ref())
             },
             move || ThreadManager::new(repo.heddle_dir()).save(&record),
         )
@@ -424,11 +415,16 @@ impl<'a> EntrySteps<'_, 'a> {
         )
     }
 
-    /// Restore a ThreadManager record from a redo snapshot; inverse restores the
-    /// prior persisted form (or removes the restored record if there was none).
-    /// A snapshot that fails to decode is a non-fatal warning (pre-migration
-    /// parity). NON-atomic for the same record-file + workspace-file reason as
-    /// [`save_thread_record`](Self::save_thread_record).
+    /// Restore a ThreadManager record from a redo snapshot; inverse converges the
+    /// persisted state for the thread back to its prior form (or empties it if
+    /// there was none). A snapshot that fails to decode is a non-fatal warning
+    /// (pre-migration parity). NON-atomic for the same record-file +
+    /// workspace-file reason as [`save_thread_record`](Self::save_thread_record).
+    /// The forward (`restore_thread_record_from_snapshot`) writes a record under
+    /// an id buried in the opaque snapshot bytes — possibly different from
+    /// `prev`'s and with a fresher timestamp. Routing the restore through
+    /// [`ThreadManager::restore_to_snapshot`] drops that snapshot-id record on
+    /// rollback without ever needing to know its id.
     fn restore_thread_record(&mut self, name: &str, bytes: &[u8]) -> HeddleResult<()> {
         let repo = self.repo();
         let manager = ThreadManager::new(repo.heddle_dir());
@@ -439,14 +435,8 @@ impl<'a> EntrySteps<'_, 'a> {
         self.step_nonatomic(
             || Ok(prev),
             move |prev| {
-                let manager = ThreadManager::new(repo.heddle_dir());
-                match prev {
-                    Some(prev) => manager.save(&prev),
-                    None => match manager.find_by_thread(&restore_name)? {
-                        Some(record) => manager.delete(&record.id),
-                        None => Ok(()),
-                    },
-                }
+                ThreadManager::new(repo.heddle_dir())
+                    .restore_to_snapshot(&restore_name, prev.as_ref())
             },
             move || {
                 let manager = ThreadManager::new(repo.heddle_dir());
@@ -2786,6 +2776,98 @@ mod atomic_tests {
             manager.find_by_thread("main").unwrap().is_none(),
             "no record survives for a rolled-back create save"
         );
+    }
+
+    /// Test-only deferred mutation that restores ONE thread record from a redo
+    /// snapshot through the `EntrySteps` applier — exercises the real
+    /// `restore_thread_record` (`step_nonatomic`) capture-restore path, the redo
+    /// arm whose forward writes a record under a snapshot-buried id.
+    struct RestoreSnapshotOnly {
+        name: String,
+        bytes: Vec<u8>,
+    }
+
+    impl AtomicMutation for RestoreSnapshotOnly {
+        type Output = ();
+
+        fn transaction_id(&self) -> String {
+            "test-restore-snapshot-only".to_string()
+        }
+
+        fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<()>> {
+            let mut steps = EntrySteps::new(tx);
+            steps.restore_thread_record(&self.name, &self.bytes)?;
+            Ok(StagedCommit::pure(()))
+        }
+    }
+
+    impl DeferredMutation for RestoreSnapshotOnly {}
+
+    /// The redo-snapshot sibling of `..._restores_replacement_save_...`: the redo
+    /// of a `ThreadCreateV2` restores the record from an opaque snapshot whose
+    /// record id is NOT known to the applier. The forward writes that snapshot-id
+    /// record (newer timestamp); on rollback the converge must drop it so
+    /// `find_by_thread` returns ONLY the prior record. A re-save-only restore
+    /// (the pre-r6 redo arm) left the snapshot-id record and `find_by_thread`
+    /// returned the leak — this test fails against that arm and passes against the
+    /// `restore_to_snapshot` converge.
+    #[test]
+    fn step_nonatomic_restores_redo_snapshot_deleting_leaked_record() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let manager = ThreadManager::new(repo.heddle_dir());
+
+        // R0: the prior persisted record for thread "main".
+        let mut r0 = sample_main_thread("current-A", "/work/A");
+        r0.id = "thread-main-v1".to_string();
+        r0.updated_at = chrono::Utc::now();
+        manager.save(&r0).unwrap();
+
+        // Build a redo snapshot of a DIFFERENT-id, NEWER record (what the redo
+        // forward writes). Save it, snapshot it, then remove it so only the prior
+        // record remains at capture time.
+        let mut snap_rec = r0.clone();
+        snap_rec.id = "thread-main-v2".to_string();
+        snap_rec.current_state = Some("current-B".to_string());
+        snap_rec.updated_at = r0.updated_at + chrono::Duration::seconds(60);
+        manager.save(&snap_rec).unwrap();
+        let snapshot = manager.snapshot_thread_record("main").unwrap().unwrap();
+        manager.delete("thread-main-v2").unwrap();
+        assert_eq!(
+            manager.list().unwrap().len(),
+            1,
+            "precondition: only the prior record exists at capture time"
+        );
+
+        let result = with_nonatomic_forward_fault(0, || {
+            repo::atomic::execute(
+                &repo,
+                RestoreSnapshotOnly {
+                    name: "main".to_string(),
+                    bytes: snapshot,
+                },
+            )
+        });
+        assert!(
+            result.is_err(),
+            "the injected restore fault must fail the op"
+        );
+
+        assert!(
+            manager.load("thread-main-v2").unwrap().is_none(),
+            "the leaked snapshot-id record must be deleted on rollback"
+        );
+        assert_eq!(
+            manager.list().unwrap().len(),
+            1,
+            "only the prior record survives, no leaked newer record"
+        );
+        let restored = manager.find_by_thread("main").unwrap().unwrap();
+        assert_eq!(
+            restored.id, "thread-main-v1",
+            "find_by_thread returns ONLY prev"
+        );
+        assert_eq!(restored.current_state.as_deref(), Some("current-A"));
     }
 
     /// Undoing a `Redact` removes the per-blob sidecar (re-exposing the blob). If
