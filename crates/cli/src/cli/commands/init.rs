@@ -638,6 +638,21 @@ fn quickstart_preflight(
         ));
     }
 
+    // A Git-overlay quickstart attaches the requested thread to the CURRENT
+    // state and write-through-points `refs/heads/<thread>` at it. If a `<thread>`
+    // Git branch already exists at a DIVERGENT tip (the checkout is on another
+    // branch), that write would silently move the user's branch onto the current
+    // branch's commit — data loss. Refuse here, before any write, when it would
+    // actually move the branch; the idempotent case (already on `<thread>`) and
+    // a quickstart-owned rerun where the tip already matches are not clobbers
+    // (cid 3335757978).
+    if is_git_overlay
+        && git_has_commits(root)
+        && git_quickstart_branch_would_be_clobbered(root, thread)
+    {
+        bail!(quickstart_thread_branch_collision_advice(thread));
+    }
+
     // Confirmation gate before touching a directory that already holds
     // work. Truly fresh directories skip straight through.
     let heddle_exists = root.join(".heddle").exists();
@@ -907,6 +922,39 @@ fn git_has_commits(path: &Path) -> bool {
     false
 }
 
+/// Whether running quickstart would CLOBBER a pre-existing Git branch named
+/// `thread` by silently moving it. After `import_all`, `ensure_quickstart_thread`
+/// repoints the `thread` Heddle thread to the CURRENT state and
+/// `write_through_thread_checkout` writes that back to `refs/heads/<thread>`. If
+/// the checkout is on a DIFFERENT branch and a `<thread>` branch already exists
+/// at a divergent tip, that write would move the user's branch to the current
+/// branch's commit — silent data loss (cid 3335757978).
+///
+/// Read-only: probes refs via `gix` without opening the Heddle repo. Returns
+/// `true` only when the branch exists AND its tip is NOT the commit quickstart
+/// would repoint it to (the current HEAD commit) — so the idempotent case
+/// (already on `<thread>`, tip == HEAD) and the absent-branch case do not refuse.
+fn git_quickstart_branch_would_be_clobbered(path: &Path, thread: &str) -> bool {
+    let Ok(repo) = gix::discover(path) else {
+        return false;
+    };
+    let Ok(Some(mut reference)) = repo.try_find_reference(&format!("refs/heads/{thread}")) else {
+        return false;
+    };
+    let Ok(branch_tip) = reference.peel_to_id() else {
+        return false;
+    };
+    // The commit quickstart would repoint `<thread>` to is the current branch's
+    // HEAD commit. If HEAD resolves to that exact commit (we are ON `<thread>`,
+    // or it already points there), no move happens — not a clobber. Anything
+    // else (a different branch, or an unborn HEAD with the branch carrying
+    // history) would move the user's branch to unrelated state — refuse.
+    match repo.head_id() {
+        Ok(head) => head.detach() != branch_tip.detach(),
+        Err(_) => true,
+    }
+}
+
 /// Whether `name` is valid as a Git BRANCH — the shorthand written under
 /// `refs/heads/` — matching `git check-ref-format --branch`. This is stricter
 /// than validating the assembled `refs/heads/<name>` full ref: a syntactically
@@ -1139,6 +1187,22 @@ fn quickstart_needs_confirmation_advice() -> RecoveryAdvice {
         "no repository objects, refs, metadata, or worktree files were changed",
         "heddle init --quickstart --yes",
         vec!["heddle init --quickstart --yes".to_string()],
+    )
+}
+
+fn quickstart_thread_branch_collision_advice(thread: &str) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "quickstart_thread_branch_collision",
+        format!("Refusing to run --quickstart: a Git branch named '{thread}' already exists at a different commit than the current checkout"),
+        format!("Pass `--quickstart-thread <name>` to use a different thread name, or switch to '{thread}' (`git switch {thread}`) and run the normal capture flow."),
+        format!("a Git branch '{thread}' already exists and points at history unrelated to the current branch"),
+        format!("quickstart would attach the '{thread}' thread to the current branch's state and move refs/heads/{thread} onto it, silently discarding the existing branch's history"),
+        "no repository objects, refs, metadata, or worktree files were changed",
+        "heddle init --quickstart --quickstart-thread <name>",
+        vec![
+            "heddle init --quickstart --quickstart-thread <name>".to_string(),
+            format!("git switch {thread}"),
+        ],
     )
 }
 

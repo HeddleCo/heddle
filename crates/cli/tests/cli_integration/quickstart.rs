@@ -1998,3 +1998,90 @@ fn quickstart_git_overlay_capture_and_checkpoint_land_on_quickstart_thread() {
         "quickstart advanced: imported tip + the checkpoint commit"
     );
 }
+
+/// Codex r9 regression (cid 3335757978): a Git overlay where a `quickstart`
+/// branch ALREADY exists with divergent history, while the checkout is on
+/// another branch. The r9 thread-attachment would `import_all` that branch as a
+/// thread, repoint it to the current branch's state, and write-through-move
+/// `refs/heads/quickstart` onto the current branch — silently destroying the
+/// user's branch. Quickstart must REFUSE before any write, leaving the existing
+/// branch untouched and no `.heddle/` behind.
+#[test]
+fn quickstart_refuses_clobbering_existing_divergent_quickstart_branch() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+    git_hermetic(&["init", "-b", "main"], dir);
+    std::fs::write(dir.join("a.txt"), "hi\n").unwrap();
+    git_hermetic(&["add", "."], dir);
+    git_hermetic(&["commit", "-m", "initial"], dir);
+
+    // A pre-existing `quickstart` branch with its OWN distinct commit.
+    git_hermetic(&["checkout", "-b", "quickstart"], dir);
+    std::fs::write(dir.join("their-work.txt"), "precious\n").unwrap();
+    git_hermetic(&["add", "."], dir);
+    git_hermetic(&["commit", "-m", "their quickstart work"], dir);
+    git_hermetic(&["checkout", "main"], dir);
+
+    let tip_before = {
+        let grepo = gix::open(dir).expect("open git repo");
+        grepo
+            .find_reference("quickstart")
+            .expect("quickstart branch exists")
+            .peel_to_id()
+            .expect("peels")
+            .detach()
+    };
+
+    let out = heddle_output(
+        &[
+            "init",
+            "--quickstart",
+            "--principal-name",
+            "CI Sentinel",
+            "--principal-email",
+            "ci@example.invalid",
+            "--no-harness-install",
+            "--yes",
+            "--output",
+            "json",
+        ],
+        Some(dir),
+    )
+    .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a pre-existing divergent quickstart branch must be refused: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&out.stdout),
+    );
+    assert!(
+        stderr.contains("quickstart_thread_branch_collision"),
+        "must fail with the collision advice pointing at --quickstart-thread: {stderr}"
+    );
+
+    // The user's branch is UNCHANGED.
+    let tip_after = {
+        let grepo = gix::open(dir).expect("open git repo");
+        grepo
+            .find_reference("quickstart")
+            .expect("quickstart branch still exists")
+            .peel_to_id()
+            .expect("peels")
+            .detach()
+    };
+    assert_eq!(
+        tip_before, tip_after,
+        "the user's pre-existing quickstart branch must not be moved"
+    );
+
+    // Fail-before-writes: nothing landed.
+    assert!(
+        !dir.join(".heddle").exists(),
+        "fail-before-writes: a collision must leave NO partial .heddle/"
+    );
+    assert!(
+        !dir.join("QUICKSTART.md").exists(),
+        "fail-before-writes: no QUICKSTART.md placeholder may be written"
+    );
+}
