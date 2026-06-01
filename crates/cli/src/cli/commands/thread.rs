@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use gix::bstr::ByteSlice;
 use objects::{
     object::{ChangeId, State, ThreadName, Tree},
@@ -1592,17 +1592,54 @@ fn render_thread_entry(entry: &ThreadSummary, verbose: bool) {
 
 /// Retry-stable idempotency key for `thread start`.
 ///
-/// Derived only from the op scope, the thread name, and the resolved base
-/// state — values fixed before the transaction and identical across a retry of
-/// the same logical start. It deliberately does NOT fold in the live oplog
-/// head: that advances when the `TransactionCommit` marker appends, so a
-/// post-commit crash-retry would read the advanced head, derive a *fresh* key,
-/// miss the executor's `transaction_id` dedup, and re-apply an already-committed
-/// start (heddle#356 cid 3333881568). After the commit the thread ref points at
-/// `base_state`, so a re-run of "start <name> from <base>" re-derives the same
-/// key and dedups exactly-once.
-pub(crate) fn start_transaction_id(scope: &str, name: &str, base_state: &ChangeId) -> String {
-    format!("thread-start:{scope}:{name}:{}", base_state.to_string_full())
+/// Folds the op scope, the thread name, the resolved base state, AND a per-start
+/// epoch ([`resolve_start_epoch`] — the in-flight thread record's creation
+/// instant). Two properties have to hold at once:
+///
+///   * **Stable across a crash-retry of the *same* start.** It deliberately does
+///     NOT fold in the live oplog head: that advances when the
+///     `TransactionCommit` marker appends, so a post-commit crash-retry would
+///     read the advanced head, derive a *fresh* key, miss the executor's
+///     `transaction_id` dedup, and re-apply an already-committed start
+///     (heddle#356 cid 3333881568). A crash-retry finds the still-Active thread
+///     record and reuses its creation instant, so it re-derives this exact key
+///     and dedups exactly-once.
+///   * **Fresh for a genuinely-new start after a prior one was dropped.** A
+///     silent drop (no `--delete-thread`) leaves the ref at `base_state`, so a
+///     key folding only scope+name+base would collide with the dropped start's
+///     committed marker and the new start would be wrongly deduped into a no-op
+///     (heddle#356 cid 3335052848). The epoch breaks the collision: a post-drop
+///     restart finds an Abandoned (non-Active) record and mints a fresh epoch,
+///     so it derives a DISTINCT key and actually starts.
+pub(crate) fn start_transaction_id(
+    scope: &str,
+    name: &str,
+    base_state: &ChangeId,
+    start_epoch: DateTime<Utc>,
+) -> String {
+    format!(
+        "thread-start:{scope}:{name}:{}:{}",
+        base_state.to_string_full(),
+        start_epoch.timestamp_nanos_opt().unwrap_or_default(),
+    )
+}
+
+/// The per-start epoch folded into the idempotency key ([`start_transaction_id`]).
+///
+/// The thread record is the durable "start reservation": it is written inside
+/// the transaction (before the commit point) and survives a crash, so it is the
+/// one artifact a crash-retry can read back. A crash-retry of an in-flight start
+/// finds the still-[`ThreadState::Active`] record and reuses its creation
+/// instant → identical key → the executor dedups it exactly-once. A
+/// genuinely-new start — no record, or a record a prior silent drop left
+/// [`ThreadState::Abandoned`] (the drop keeps the ref at the same base, so a
+/// base-only key would otherwise collide — cid 3335052848) — mints a FRESH
+/// instant → distinct key → it actually starts.
+pub(crate) fn resolve_start_epoch(repo: &Repository, name: &str) -> Result<DateTime<Utc>> {
+    let prior_active = ThreadManager::new(repo.heddle_dir())
+        .load(name)?
+        .filter(|thread| thread.state == ThreadState::Active);
+    Ok(prior_active.map_or_else(Utc::now, |thread| thread.created_at))
 }
 
 pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<ThreadOpOutput> {
@@ -1775,6 +1812,12 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             ))
         })?;
     let (base_root, verification_summary, confidence_summary) = base_state_summary;
+    // The per-start epoch anchors the retry-stable idempotency key. Resolved
+    // BEFORE the record is built so the record persists the same instant the key
+    // folds in: a crash-retry reuses the Active record's instant (→ dedup), a
+    // post-drop restart mints a fresh one (→ actually starts). See
+    // `resolve_start_epoch` / `start_transaction_id` (heddle#356 cid 3335052848).
+    let start_epoch = resolve_start_epoch(repo, &args.name)?;
     let thread_state = Thread {
         id: args.name.clone(),
         thread: args.name.clone(),
@@ -1803,7 +1846,9 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
         verification_summary,
         confidence_summary,
         integration_policy_result: ThreadIntegrationPolicy::default(),
-        created_at: Utc::now(),
+        // The start epoch IS the record's creation instant: the idempotency key
+        // folds it, and a crash-retry reuses it from this still-Active record.
+        created_at: start_epoch,
         updated_at: Utc::now(),
         ephemeral: None,
         auto: false,
@@ -1823,7 +1868,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     let mount_ownership =
         mount_lifecycle::MountOwnership::from_flags(args.daemon, args.no_daemon);
     let scope = repo.op_scope();
-    let transaction_id = start_transaction_id(&scope, &args.name, &base_state);
+    let transaction_id = start_transaction_id(&scope, &args.name, &base_state, start_epoch);
     let hydrate_requested =
         args.hydrate && matches!(thread_mode, ThreadMode::Solid | ThreadMode::Materialized);
     let linked = repo::atomic::execute(
