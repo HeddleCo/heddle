@@ -73,22 +73,21 @@ const INTENT_DISPLAY_WIDTH: usize = 50;
 /// concern (use `heddle log` for full history).
 const MAX_TAIL_WINDOW: usize = 100_000;
 
-/// Entry kinds the user can pass to `--filter`. Names match the
-/// `kind` field emitted in JSON mode so a `--filter snapshot` pipes
-/// cleanly into `--output json` for downstream tooling.
-const FILTER_KINDS: &[&str] = &[
-    "snapshot",
-    "goto",
-    "thread_create",
-    "thread_delete",
-    "thread_update",
-    "fork",
-    "collapse",
-    "marker_create",
-    "marker_delete",
-    "merge", // alias for thread_update on a merge target — see kind_for
-    "fast_forward",
-];
+/// Entry kinds the user can pass to `--filter`. Names match the `kind` field
+/// emitted in JSON mode (which is `OpRecord::verb()`) so a `--filter snapshot`
+/// pipes cleanly into `--output json` for downstream tooling.
+///
+/// Derived from the oplog verb catalog (the single source of truth) plus the
+/// `merge` UX alias — never a hand-maintained list, so every emitted kind
+/// (including any future `OpRecord` variant) is a valid filter the moment it
+/// joins the catalog, instead of being rejected as "unknown" (heddle#354 r9,
+/// cid 3330304668). `merge` is the only entry that is not a literal verb: it
+/// aliases `thread_update` on a merge target (see [`Renderer::passes_filter`]).
+fn valid_filter_kinds() -> Vec<&'static str> {
+    let mut kinds = OpRecord::verbs(true);
+    kinds.push("merge");
+    kinds
+}
 
 /// Top-level entry point. Threading-wise:
 ///
@@ -206,13 +205,14 @@ fn parse_filter(spec: Option<&str>) -> Result<Option<Vec<String>>> {
     if kinds.is_empty() {
         return Ok(None);
     }
+    let valid = valid_filter_kinds();
     for kind in &kinds {
-        if !FILTER_KINDS.contains(&kind.as_str()) {
+        if !valid.contains(&kind.as_str()) {
             return Err(anyhow!(RecoveryAdvice::invalid_usage(
                 "watch_filter_invalid",
                 format!(
                     "unknown event kind in --filter: {kind:?} (valid: {})",
-                    FILTER_KINDS.join(", ")
+                    valid.join(", ")
                 ),
                 "Use one of the valid watch event kinds, or omit `--filter`.",
                 "heddle watch --filter snapshot",
@@ -439,30 +439,12 @@ fn state_lookup(
     (state.intent.clone(), state.confidence, actor)
 }
 
-/// Resolve an `OpRecord` to the user-facing kind label. The labels
-/// match `--filter` keywords and the JSON `kind` field; keep them in
-/// sync with `FILTER_KINDS`.
+/// Resolve an `OpRecord` to the user-facing kind label — the snake-case
+/// `OpRecord::verb()` from the oplog catalog, which is also the JSON `kind`
+/// field and the `--filter` keyword. Single source of truth: a new variant
+/// gets its label from the catalog automatically (heddle#354 r9).
 fn kind_for(op: &OpRecord) -> String {
-    match op {
-        OpRecord::Snapshot { .. } => "snapshot".into(),
-        OpRecord::Goto { .. } => "goto".into(),
-        OpRecord::ThreadCreate { .. } | OpRecord::ThreadCreateV2 { .. } => "thread_create".into(),
-        OpRecord::ThreadDelete { .. } => "thread_delete".into(),
-        OpRecord::ThreadUpdate { .. } => "thread_update".into(),
-        OpRecord::Fork { .. } => "fork".into(),
-        OpRecord::Collapse { .. } => "collapse".into(),
-        OpRecord::MarkerCreate { .. } => "marker_create".into(),
-        OpRecord::MarkerDelete { .. } => "marker_delete".into(),
-        OpRecord::Checkpoint { .. } => "checkpoint".into(),
-        OpRecord::TransactionAbort { .. } => "transaction_abort".into(),
-        OpRecord::TransactionCommit { .. } => "transaction_commit".into(),
-        OpRecord::EphemeralThreadCollapse { .. } => "ephemeral_thread_collapse".into(),
-        OpRecord::ConflictResolved { .. } => "conflict_resolved".into(),
-        OpRecord::Redact { .. } => "redact".into(),
-        OpRecord::Purge { .. } => "purge".into(),
-        OpRecord::FastForward { .. } | OpRecord::FastForwardV2 { .. } => "fast_forward".into(),
-        OpRecord::GitCheckpoint { .. } => "git_checkpoint".into(),
-    }
+    op.verb().to_string()
 }
 
 /// Best-effort thread/lane identifier for the columnar layout. Falls
@@ -483,6 +465,8 @@ fn thread_for(op: &OpRecord, _kind: &str) -> Option<String> {
         OpRecord::FastForward { target_thread, .. }
         | OpRecord::FastForwardV2 { target_thread, .. } => Some(target_thread.clone()),
         OpRecord::GitCheckpoint { branch, .. } => Some(branch.clone()),
+        OpRecord::RemoteThreadUpdate { thread, .. }
+        | OpRecord::RemoteThreadDelete { thread, .. } => Some(thread.clone()),
         OpRecord::Goto { .. }
         | OpRecord::Fork { .. }
         | OpRecord::Collapse { .. }
@@ -490,6 +474,7 @@ fn thread_for(op: &OpRecord, _kind: &str) -> Option<String> {
         | OpRecord::TransactionCommit { .. }
         | OpRecord::ConflictResolved { .. }
         | OpRecord::Redact { .. }
+        | OpRecord::UndoRecoveryUpdate { .. }
         | OpRecord::Purge { .. } => None,
     }
 }
@@ -514,6 +499,9 @@ fn primary_change_id(op: &OpRecord) -> Option<ChangeId> {
         OpRecord::GitCheckpoint { state, .. } => Some(*state),
         OpRecord::EphemeralThreadCollapse { final_state, .. } => Some(*final_state),
         OpRecord::Redact { state, .. } => Some(*state),
+        OpRecord::RemoteThreadUpdate { state, .. }
+        | OpRecord::RemoteThreadDelete { state, .. } => Some(*state),
+        OpRecord::UndoRecoveryUpdate { state } => Some(*state),
         OpRecord::TransactionAbort { .. }
         | OpRecord::TransactionCommit { .. }
         | OpRecord::ConflictResolved { .. }
@@ -789,6 +777,28 @@ mod tests {
     }
 
     #[test]
+    fn filter_accepts_newer_emitted_kinds() {
+        // Non-vacuous for cid 3330304668: these kinds are emitted by
+        // `OpRecord::verb()` but were absent from the old hand-maintained
+        // FILTER_KINDS list, so `--filter remote_thread_update` was wrongly
+        // rejected as "unknown". The derived list now accepts every real kind.
+        for kind in [
+            "remote_thread_update",
+            "remote_thread_delete",
+            "transaction_commit",
+            "redact",
+            "purge",
+            "git_checkpoint",
+            "undo_recovery_update",
+        ] {
+            assert!(
+                parse_filter(Some(kind)).is_ok(),
+                "filter kind {kind:?} must be accepted (it is a real emitted kind)"
+            );
+        }
+    }
+
+    #[test]
     fn drain_pending_emits_only_above_watermark() {
         let (_tmp, heddle_dir) = synthetic_repo();
         let cid_a = ChangeId::generate();
@@ -975,10 +985,13 @@ mod tests {
             OpRecord::Fork {
                 from: cid,
                 new_state: cid,
+                thread: None,
+                head: None,
             },
             OpRecord::Collapse {
                 sources: vec![cid],
                 result: cid,
+                thread: None,
             },
             OpRecord::MarkerCreate {
                 name: "m".into(),

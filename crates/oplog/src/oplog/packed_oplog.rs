@@ -41,6 +41,38 @@ impl PackedOpLog {
         Self::parse(&bytes, path.to_path_buf())
     }
 
+    /// Read only the `head_id` from the fixed-size header — the cheap O(1)
+    /// generation gate (heddle#330). Layout: MAGIC(8) + VERSION(4) +
+    /// entry_count(8) + head_id(8); `head_id` is at byte offset 20.
+    ///
+    /// Validates BOTH the magic AND the version: the fast path must reject the
+    /// same headers the full [`parse`](Self::parse) would (heddle#354 r6, cid
+    /// 3329711891). Otherwise a right-magic / unsupported-version file yields a
+    /// generation and lets a reconciled read take the `tip == watermark`
+    /// shortcut, silently trusting a format the parser would refuse.
+    pub(crate) fn read_head_id(path: &Path) -> Result<u64> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path)?;
+        let mut header = [0u8; 28];
+        file.read_exact(&mut header)?;
+        if &header[0..8] != MAGIC {
+            return Err(HeddleError::InvalidObject(
+                "invalid oplog magic".to_string(),
+            ));
+        }
+        let mut version_bytes = [0u8; 4];
+        version_bytes.copy_from_slice(&header[8..12]);
+        let version = u32::from_le_bytes(version_bytes);
+        if version != VERSION {
+            return Err(HeddleError::InvalidObject(format!(
+                "unsupported oplog version {version}"
+            )));
+        }
+        let mut head_id_bytes = [0u8; 8];
+        head_id_bytes.copy_from_slice(&header[20..28]);
+        Ok(u64::from_le_bytes(head_id_bytes))
+    }
+
     pub(crate) fn save(&self) -> Result<()> {
         let bytes = self.serialize()?;
         write_file_atomic(&self.path, &bytes)?;
@@ -395,6 +427,37 @@ mod tests {
         assert_eq!(loaded.entries[0].id, 1);
         assert_eq!(loaded.entries[1].id, 2);
         assert_eq!(loaded.entries[0].scope.as_deref(), Some("lane-a"));
+    }
+
+    /// Finding 2 (heddle#354 r6, cid 3329711891) — the fast-path header read
+    /// rejects an unsupported version just as the full parser does, so a
+    /// right-magic / wrong-version file can never yield a silently-trusted
+    /// generation.
+    #[test]
+    fn read_head_id_rejects_unsupported_version() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("oplog.bin");
+        let mut log = PackedOpLog::new(path.clone());
+        log.append(vec![make_entry(1, Some("lane"))]);
+        log.head_id = 1;
+        log.save().unwrap();
+
+        // A valid file's fast-path read succeeds.
+        assert_eq!(PackedOpLog::read_head_id(&path).unwrap(), 1);
+
+        // Bump the version field (bytes 8..12) to a forward-incompatible value,
+        // leaving the magic intact.
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[8..12].copy_from_slice(&(VERSION + 1).to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+
+        let err = PackedOpLog::read_head_id(&path).unwrap_err();
+        assert!(
+            matches!(&err, HeddleError::InvalidObject(message) if message.contains("unsupported oplog version")),
+            "fast path must reject an unsupported version, got: {err:?}"
+        );
+        // And the full parser agrees — the two paths stay in lockstep.
+        assert!(PackedOpLog::load(&path).is_err());
     }
 
     #[test]

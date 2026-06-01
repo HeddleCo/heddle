@@ -309,19 +309,6 @@ fn is_public_api_path(path: &str) -> bool {
         || path.ends_with("/public.rs")
 }
 
-/// Record this snapshot in the oplog, mirroring the worktree-snapshot
-/// path. The mount-side `capture()` calls this after planting the
-/// new state and updating the thread ref.
-pub fn record_snapshot_in_oplog(
-    repo: &Repository,
-    new_state: &ChangeId,
-    prev_head: Option<&ChangeId>,
-    thread: Option<&str>,
-) -> Result<u64, HeddleError> {
-    repo.oplog()
-        .record_snapshot(new_state, prev_head, thread, Some(&repo.op_scope()))
-}
-
 /// Translate `ChangeId` short-strings into `ChangeId`s if the thread
 /// references one. `Repository::resolve_state` already handles the
 /// alias forms; this just flattens the option for callers.
