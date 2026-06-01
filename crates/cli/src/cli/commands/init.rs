@@ -22,7 +22,8 @@ use super::{
 };
 use crate::{
     bridge::{
-        GitBridge, git_core::git_config_identity_with_global_fallback, git_import::import_all,
+        GitBridge, WriteThroughOutcome, git_core::git_config_identity_with_global_fallback,
+        git_import::import_all,
     },
     cli::{Cli, InitArgs, is_tty, should_output_json, style, worktree_status_options},
     config::UserConfig,
@@ -169,18 +170,35 @@ impl QuickstartTarget {
 /// mutating anything — every write is deferred to the post-gate write path,
 /// which consumes this SAME root. See [`QuickstartTarget`] for the invariant.
 fn resolve_quickstart_target(path: &Path) -> Result<QuickstartTarget> {
-    // Walk ancestors for an existing Heddle repo — a `.heddle/` holding either
-    // an `objects/` main store or an `objectstore` worktree pointer. The first
-    // such ancestor is the root the write path will `Repository::open`. This
-    // mirrors `Repository::open`'s ancestor walk; running it here (rather than
-    // checking only `path/.heddle`) is what makes a subdirectory invocation
-    // target the discovered repo instead of creating a nested one.
+    // Mirror `Repository::open`'s ancestor walk EXACTLY (same loop, same
+    // predicates, minus the writes) so the read-only probe and the eventual
+    // `open` never disagree on which root they target. Track the nearest
+    // enclosing Git checkout going up — `has_git_metadata`'s mirror,
+    // `dir_is_git_root` — so the nested-Git special case below can fire.
+    let mut discovered_git_root: Option<PathBuf> = None;
     let mut current: Option<&Path> = Some(path);
     while let Some(dir) = current {
+        if discovered_git_root.is_none() && dir_is_git_root(dir) {
+            discovered_git_root = Some(dir.to_path_buf());
+        }
         let heddle = dir.join(".heddle");
         if heddle.is_dir()
             && (heddle.join("objects").is_dir() || heddle.join("objectstore").is_file())
         {
+            // `Repository::open`'s nested-Git special case: a Git checkout
+            // BELOW this ancestor `.heddle` (and without its own `.heddle`)
+            // bootstraps the NESTED Git root, not the ancestor — so quickstart
+            // imports the nested Git history rather than writing the thread
+            // into the parent and ignoring the nested repo (cid 3329409822).
+            if let Some(git_root) = discovered_git_root.as_ref()
+                && git_root != dir
+                && git_root.starts_with(dir)
+                && !git_root.join(".heddle").exists()
+            {
+                return Ok(QuickstartTarget::FreshGitOverlay {
+                    root: git_root.clone(),
+                });
+            }
             return Ok(QuickstartTarget::Existing {
                 root: dir.to_path_buf(),
                 git_overlay: dir_is_git_root(dir),
@@ -190,21 +208,15 @@ fn resolve_quickstart_target(path: &Path) -> Result<QuickstartTarget> {
     }
 
     // No Heddle anywhere above: inside a Git checkout, the fresh bootstrap
-    // targets the Git ROOT, not the cwd subdirectory.
-    match discover_git_root(path) {
+    // targets the Git ROOT (the nearest enclosing checkout discovered by the
+    // walk above), not the cwd subdirectory — the same root `Repository::open`'s
+    // final fallback bootstraps.
+    match discovered_git_root {
         Some(root) => Ok(QuickstartTarget::FreshGitOverlay { root }),
         None => Ok(QuickstartTarget::FreshNative {
             root: path.to_path_buf(),
         }),
     }
-}
-
-/// The working-tree root of the Git checkout containing `path`, if any.
-/// Canonicalized to match the cwd canonicalization in `cmd_init`.
-fn discover_git_root(path: &Path) -> Option<PathBuf> {
-    let repo = gix::discover(path).ok()?;
-    let workdir = repo.workdir()?;
-    Some(workdir.canonicalize().unwrap_or_else(|_| workdir.to_path_buf()))
 }
 
 /// Whether `dir` is itself a Git checkout root — Git metadata AT `dir`, mirroring
@@ -583,6 +595,18 @@ fn quickstart_preflight(
         bail!(quickstart_detached_head_advice());
     }
 
+    // A shallow Git checkout (`.git/shallow`) can't be imported until full
+    // ancestry is available — `import_all` refuses it, but only AFTER
+    // `bootstrap_git_overlay` has created `.heddle/` and edited the Git
+    // excludes, leaving a half-initialized sidecar. Detect it here, read-only,
+    // and refuse before any write — but only when the repo will run as a Git
+    // overlay AND has history to import (the exact condition under which
+    // `run_quickstart_actions` calls `import_all`). Mirrors `import_all`'s own
+    // `git_dir()/shallow` probe (cid 3329409826).
+    if is_git_overlay && git_has_commits(root) && git_is_shallow(root) {
+        bail!(quickstart_shallow_clone_advice());
+    }
+
     // Validate the requested thread name BEFORE any write, using the same
     // ref-name rules the thread machinery enforces when the ref is actually
     // created. A bad name (`.bad`, `a..b`, …) must fail here rather than
@@ -900,6 +924,18 @@ fn git_branch_name_is_valid(name: &str) -> bool {
     !(name == "HEAD" || name == "@" || name.starts_with('-'))
 }
 
+/// Whether the discovered Git repository at `path` is a shallow checkout — its
+/// `git_dir` holds a `shallow` file. Mirrors the exact probe `import_all` uses
+/// (`repo.git_dir().join("shallow").is_file()`) so the preflight refuses a
+/// shallow clone before any write rather than after `bootstrap_git_overlay`
+/// already created `.heddle/`.
+fn git_is_shallow(path: &Path) -> bool {
+    gix::discover(path)
+        .ok()
+        .map(|repo| repo.git_dir().join("shallow").is_file())
+        .unwrap_or(false)
+}
+
 /// Whether the discovered Git repository at `path` has a detached HEAD
 /// (HEAD points directly at a commit instead of an attached branch). An
 /// unborn HEAD reads as not-detached.
@@ -961,6 +997,38 @@ fn run_quickstart_actions(repo: &Repository, args: &InitArgs) -> Result<Quicksta
         .clone()
         .unwrap_or_else(|| "quickstart".to_string());
     ensure_quickstart_thread(repo, &thread)?;
+
+    // On a Git overlay with imported history, `head_ref()` deliberately
+    // resolves back to the live Git branch (e.g. `main`) — so merely writing
+    // `.heddle/HEAD = Attached{thread}` above is NOT enough: the capture and
+    // checkpoint below both target `head_ref()`, and would advance the Git
+    // branch while the quickstart thread stays at the imported tip, even though
+    // the output says `Thread: <thread>` (cid 3329409824). Attach the Git
+    // checkout to the thread's branch via the SAME write-through `heddle thread
+    // switch` uses, so `head_ref()` resolves to `<thread>` and the
+    // capture+checkpoint land on it. Gated on `git_has_commits` to match the
+    // import above: the write-through needs the thread's state mapped to a Git
+    // commit, which only exists once history has been imported. (The unborn
+    // case has no mapped commit yet and the capture creates the thread's root.)
+    if repo.capability() == RepositoryCapability::GitOverlay
+        && repo.root().join(".git").exists()
+        && git_has_commits(repo.root())
+    {
+        let mut bridge = GitBridge::new(repo);
+        if let WriteThroughOutcome::Skipped(reason) = bridge.write_through_thread_checkout(&thread)?
+        {
+            bail!(RecoveryAdvice::safety_refusal(
+                "quickstart_thread_checkout_skipped",
+                format!("Could not attach the Git checkout to thread '{thread}': {reason}"),
+                "Resolve the Git checkout issue and re-run `heddle init --quickstart`.",
+                reason.to_string(),
+                "quickstart would capture and checkpoint on the requested thread, but the Git checkout could not be attached to its branch",
+                "the current Heddle state was preserved",
+                "heddle init --quickstart",
+                vec!["heddle init --quickstart".to_string()],
+            ));
+        }
+    }
 
     let user_config = UserConfig::load_default().unwrap_or_default();
     let wrote_placeholder = ensure_capturable_content(repo)?;
@@ -1085,6 +1153,22 @@ fn quickstart_detached_head_advice() -> RecoveryAdvice {
         "git switch -c <branch>",
         vec![
             "git switch -c <branch>".to_string(),
+            "heddle init --quickstart".to_string(),
+        ],
+    )
+}
+
+fn quickstart_shallow_clone_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "quickstart_shallow_clone",
+        "Refusing to run --quickstart on a shallow Git clone",
+        "Fetch full history first with `git fetch --unshallow`, then re-run `heddle init --quickstart`.",
+        "the Git checkout is shallow (.git/shallow is present)",
+        "quickstart would import Git history, but Heddle cannot import a shallow clone until its full ancestry is available",
+        "no repository objects, refs, metadata, or worktree files were changed",
+        "git fetch --unshallow",
+        vec![
+            "git fetch --unshallow".to_string(),
             "heddle init --quickstart".to_string(),
         ],
     )

@@ -1736,3 +1736,265 @@ fn quickstart_rejects_invalid_harness_scope_before_writes() {
         "no harness integration may be installed on a scope error"
     );
 }
+
+/// Codex r9 (cid 3329409818): `--install-harnesses codex` with the default
+/// `--harness-install-scope repo` passed the generic-scope preflight (the enum
+/// parses), but `install_codex` rejects any non-`user` scope — AFTER `.heddle/`,
+/// `QUICKSTART.md`, and the capture/checkpoint were already written. The
+/// preflight now mirrors each harness's OWN scope rule, so a scope a harness
+/// will reject fails before any write.
+#[test]
+fn quickstart_rejects_codex_repo_scope_before_writes() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+
+    let out = heddle_output(
+        &[
+            "init",
+            "--quickstart",
+            "--principal-name",
+            "CI Sentinel",
+            "--principal-email",
+            "ci@example.invalid",
+            "--install-harnesses",
+            "codex",
+            "--harness-install-scope",
+            "repo",
+            "--yes",
+            "--output",
+            "json",
+        ],
+        Some(dir),
+    )
+    .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "codex + repo scope must be rejected before writes: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&out.stdout),
+    );
+    assert!(
+        stderr.contains("integration_codex_scope_invalid"),
+        "must fail with the harness-specific scope advice: {stderr}"
+    );
+    assert!(
+        !dir.join(".heddle").exists(),
+        "fail-before-writes: a harness/scope mismatch must leave NO partial .heddle/"
+    );
+    assert!(
+        !dir.join("QUICKSTART.md").exists(),
+        "fail-before-writes: no QUICKSTART.md placeholder may be written"
+    );
+}
+
+/// Codex r9 (cid 3329409826): a shallow Git checkout (`.git/shallow`) is
+/// rejected by `import_all` — but only AFTER `bootstrap_git_overlay` created
+/// `.heddle/` and edited the Git excludes, leaving a half-initialized sidecar.
+/// The preflight must detect the shallow clone and refuse before any write.
+#[test]
+fn quickstart_rejects_shallow_git_clone_before_writes() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+    git_hermetic(&["init"], dir);
+    std::fs::write(dir.join("a.txt"), "hi\n").unwrap();
+    git_hermetic(&["add", "."], dir);
+    git_hermetic(&["commit", "-m", "initial"], dir);
+    // Mark the checkout shallow the way a `--depth` clone would: a `.git/shallow`
+    // file listing the shallow boundary. `import_all` keys on its presence
+    // (`git_dir()/shallow`), and so does the preflight's `git_is_shallow`.
+    let grepo = gix::open(dir).unwrap();
+    let head = grepo.head_id().unwrap().to_string();
+    std::fs::write(dir.join(".git").join("shallow"), format!("{head}\n")).unwrap();
+
+    let out = heddle_output(
+        &[
+            "init",
+            "--quickstart",
+            "--principal-name",
+            "CI Sentinel",
+            "--principal-email",
+            "ci@example.invalid",
+            "--no-harness-install",
+            "--yes",
+            "--output",
+            "json",
+        ],
+        Some(dir),
+    )
+    .unwrap();
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a shallow clone must be rejected before writes: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&out.stdout),
+    );
+    assert!(
+        stderr.contains("quickstart_shallow_clone"),
+        "must fail with the quickstart_shallow_clone advice: {stderr}"
+    );
+    assert!(
+        !dir.join(".heddle").exists(),
+        "fail-before-writes: a shallow clone must leave NO partial .heddle/"
+    );
+    assert!(
+        !dir.join("QUICKSTART.md").exists(),
+        "fail-before-writes: no QUICKSTART.md placeholder may be written"
+    );
+}
+
+/// Codex r9 (cid 3329409822): run inside a nested Git checkout below an ancestor
+/// Heddle repo, quickstart used to return the ancestor `.heddle` root — but
+/// `Repository::open` has a special case that bootstraps the NESTED Git root
+/// instead. Quickstart would then write the thread into the parent and never
+/// import the nested Git history. Target resolution now mirrors
+/// `Repository::open`'s nested-Git-first walk, so the nested Git root is
+/// bootstrapped and imported.
+#[test]
+fn quickstart_nested_git_below_ancestor_heddle_targets_nested_git() {
+    let outer = TempDir::new().unwrap();
+    let ancestor = outer.path();
+    // Ancestor native Heddle repo (no Git at its own root).
+    heddle(&["init", "--no-harness-install"], Some(ancestor)).unwrap();
+    assert!(ancestor.join(".heddle").is_dir());
+
+    // A nested Git checkout below it, with history and NO `.heddle` of its own.
+    let nested = ancestor.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    git_hermetic(&["init"], &nested);
+    std::fs::write(nested.join("n.txt"), "nested\n").unwrap();
+    git_hermetic(&["add", "."], &nested);
+    git_hermetic(&["commit", "-m", "nested initial"], &nested);
+
+    let out = heddle_output(
+        &[
+            "init",
+            "--quickstart",
+            "--principal-name",
+            "CI Sentinel",
+            "--principal-email",
+            "ci@example.invalid",
+            "--no-harness-install",
+            "--yes",
+            "--output",
+            "json",
+        ],
+        Some(&nested),
+    )
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "quickstart in a nested Git checkout must bootstrap the nested root: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // The nested Git root is the target: it gets its OWN `.heddle/`, as a Git
+    // overlay — NOT a write into the ancestor.
+    assert!(
+        nested.join(".heddle").is_dir(),
+        "the nested Git root was bootstrapped with its own .heddle/"
+    );
+    let init: Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert_eq!(
+        init["repository_mode"].as_str(),
+        Some("git-overlay"),
+        "the nested Git root runs as a Git overlay: {init}"
+    );
+    // The nested quickstart carries the thread; the ancestor is untouched.
+    let nested_status = status_json(&nested);
+    assert_eq!(
+        nested_status.get("thread").and_then(Value::as_str),
+        Some("quickstart"),
+        "the nested repo carries the quickstart thread: {nested_status}"
+    );
+    let ancestor_status = status_json(ancestor);
+    assert_ne!(
+        ancestor_status.get("thread").and_then(Value::as_str),
+        Some("quickstart"),
+        "the ancestor Heddle repo must NOT have been written into: {ancestor_status}"
+    );
+    // The nested Git history was imported AND checkpointed: the nested Git root
+    // now has the original commit plus the checkpoint commit.
+    let grepo = gix::open(&nested).expect("open nested git repo");
+    let tip = grepo.head_id().expect("nested HEAD resolves");
+    let commit_count = grepo
+        .rev_walk([tip.detach()])
+        .all()
+        .expect("rev-walk nested history")
+        .count();
+    assert!(
+        commit_count >= 2,
+        "the nested Git history was imported and a checkpoint added: count={commit_count}"
+    );
+}
+
+/// Codex r9 (cid 3329409824): in an existing Git-overlay repo, writing only
+/// `.heddle/HEAD = quickstart` is not enough — `head_ref()` deliberately
+/// resolves back to the live Git branch (`main`), so the capture/checkpoint
+/// advanced `main` while the `quickstart` thread stayed at the imported tip,
+/// even though the output said `Thread: quickstart`. Quickstart now attaches the
+/// Git checkout to the thread's branch (the same write-through `thread switch`
+/// uses), so the capture AND checkpoint land on `quickstart` — `main` does not
+/// move.
+#[test]
+fn quickstart_git_overlay_capture_and_checkpoint_land_on_quickstart_thread() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+    git_hermetic(&["init", "-b", "main"], dir);
+    std::fs::write(dir.join("a.txt"), "hi\n").unwrap();
+    git_hermetic(&["add", "."], dir);
+    git_hermetic(&["commit", "-m", "initial"], dir);
+
+    let out = heddle_output(
+        &[
+            "init",
+            "--quickstart",
+            "--principal-name",
+            "CI Sentinel",
+            "--principal-email",
+            "ci@example.invalid",
+            "--no-harness-install",
+            "--yes",
+        ],
+        Some(dir),
+    )
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "quickstart on a Git overlay must succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // The active thread is `quickstart`, matching the reported output.
+    let status = status_json(dir);
+    assert_eq!(
+        status.get("thread").and_then(Value::as_str),
+        Some("quickstart"),
+        "the active thread is quickstart: {status}"
+    );
+
+    let grepo = gix::open(dir).expect("open git repo");
+    // `quickstart` advanced past the imported tip (initial + checkpoint = 2),
+    // while `main` stayed at the imported tip (1 commit) — proof the capture and
+    // checkpoint landed on the requested thread, not on main.
+    let count_on = |branch: &str| -> usize {
+        let mut reference = grepo
+            .find_reference(branch)
+            .unwrap_or_else(|_| panic!("ref {branch} exists"));
+        let tip = reference.peel_to_id_in_place().expect("ref peels");
+        grepo
+            .rev_walk([tip.detach()])
+            .all()
+            .expect("rev-walk")
+            .count()
+    };
+    assert_eq!(count_on("main"), 1, "main stayed at the imported tip");
+    assert_eq!(
+        count_on("quickstart"),
+        2,
+        "quickstart advanced: imported tip + the checkpoint commit"
+    );
+}
