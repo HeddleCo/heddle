@@ -66,8 +66,10 @@ pub trait AtomicMutation {
 
     /// Forward, staged, fallible side effects. Every effect performed here
     /// MUST be paired with an inverse registered via [`Tx::step`] (the
-    /// forward-first granular ledger), OR be undone wholesale by
-    /// [`AtomicMutation::rewind`]. Use one mechanism per mutation, not both.
+    /// forward-first granular ledger, for a single all-or-nothing write) or
+    /// [`Tx::step_nonatomic`] (capture-restore, for a composite/partial-failure
+    /// forward), OR be undone wholesale by [`AtomicMutation::rewind`]. Use one
+    /// mechanism per mutation, not both.
     fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<Self::Output>>;
 
     /// Undo whatever THIS mutation's `apply` staged. Called in reverse order
@@ -102,16 +104,22 @@ pub trait AtomicMutation {
     }
 }
 
-/// Opt-in marker for a **savepoint-enrollable** mutation: its staged effects
-/// are invisible to other readers until the outer commit publishes them, so it
-/// may defer to the outermost commit (heddle#330 §3.1).
+/// Opt-in marker for a **deferred-commit** mutation: when enrolled it may
+/// *defer its commit marker* to the outermost transaction and is unwound by the
+/// shared rewind ledger if that outer transaction fails (heddle#330 §3.1). It
+/// makes no claim that the staged effects are invisible to other readers —
+/// real consumers (e.g. undo/redo) perform **immediately-visible** canonical
+/// writes and rely on the shared ledger purely for failure-atomicity, not for
+/// concurrent-reader isolation. The invariant is "defer the commit marker to
+/// the outer transaction; be unwound by the shared ledger on failure", not
+/// invisibility.
 ///
 /// There is deliberately **no** blanket `impl<M: AtomicMutation>
-/// SavepointMutation for M` — a mutation opts in explicitly, so a mutation that
+/// DeferredMutation for M` — a mutation opts in explicitly, so a mutation that
 /// is *only* an [`EagerMutation`] does NOT satisfy the [`Tx::enroll`] bound and
-/// cannot be enrolled as a savepoint. This is the type-level half of the
+/// cannot be enrolled as a deferred child. This is the type-level half of the
 /// compile-error guarantee (§3.3).
-pub trait SavepointMutation: AtomicMutation {}
+pub trait DeferredMutation: AtomicMutation {}
 
 /// An **eager** mutation: its forward effect is cross-process-visible the
 /// instant it runs (the #251 op-id reserve exemplar, §3.2), so it must commit

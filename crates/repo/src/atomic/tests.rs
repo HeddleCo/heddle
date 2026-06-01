@@ -12,7 +12,7 @@ use refs::{Head, RefExpectation, RefManager, RefUpdate};
 use tempfile::TempDir;
 
 use super::{
-    AtomicMutation, Compensator, EagerMutation, RewindLedger, SavepointMutation, StagedCommit, Tx,
+    AtomicMutation, Compensator, DeferredMutation, EagerMutation, RewindLedger, StagedCommit, Tx,
     execute,
 };
 use crate::Repository;
@@ -41,7 +41,7 @@ impl AtomicMutation for Leg {
     fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         let id = self.id;
         let log = Rc::clone(&self.log);
-        tx.on_rewind(move || {
+        tx.on_rewind("test-leg", move || {
             log.borrow_mut().push(id);
             Ok(())
         });
@@ -52,7 +52,7 @@ impl AtomicMutation for Leg {
     }
 }
 
-impl SavepointMutation for Leg {}
+impl DeferredMutation for Leg {}
 
 /// A composite that enrolls three legs; the third fails.
 struct FailingComposite {
@@ -197,7 +197,7 @@ impl AtomicMutation for Panicker {
 
     fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         let log = Rc::clone(&self.log);
-        tx.on_rewind(move || {
+        tx.on_rewind("test-panicker", move || {
             log.borrow_mut().push(99);
             Ok(())
         });
@@ -448,9 +448,9 @@ impl AtomicMutation for EagerThenFail {
 
 /// The eager-commit exception (heddle#330 §3.2): an eagerly-committed sub-op's
 /// compensator runs when the outer transaction later fails, so a leaked
-/// reservation is unrepresentable. The savepoint/eager split is enforced at the
+/// reservation is unrepresentable. The deferred/eager split is enforced at the
 /// type level — `tx.enroll(Reserve { .. })` would not compile (`Reserve` is not
-/// a `SavepointMutation`), so `enroll_eager` is the only path.
+/// a `DeferredMutation`), so `enroll_eager` is the only path.
 #[test]
 fn eager_compensator_runs_on_outer_rollback() {
     let (_t, repo) = test_repo();
@@ -683,8 +683,8 @@ fn tx_accessors_and_rewind_error_paths() {
 
     // Two failing inverses: LIFO order ⇒ the last-pushed runs first and its
     // error is surfaced; the earlier one's error is attempted then suppressed.
-    tx.on_rewind(|| Err(HeddleError::Config("second".to_string())));
-    tx.on_rewind(|| Err(HeddleError::Config("first".to_string())));
+    tx.on_rewind("second", || Err(HeddleError::Config("second".to_string())));
+    tx.on_rewind("first", || Err(HeddleError::Config("first".to_string())));
     let err = tx.rewind_all().unwrap_err();
     assert!(
         matches!(err, HeddleError::Config(m) if m == "first"),
@@ -721,7 +721,7 @@ fn tx_accessors_and_rewind_error_paths() {
     // Drop backstop: an uncommitted Tx whose inverse fails logs (never panics).
     {
         let mut tx3 = Tx::root(&repo, "drop-backstop-tx".to_string());
-        tx3.on_rewind(|| Err(HeddleError::Config("drop-time".to_string())));
+        tx3.on_rewind("drop-time", || Err(HeddleError::Config("drop-time".to_string())));
         // tx3 dropped here without commit ⇒ Drop runs rewind_all, gets Err, logs.
     }
 }
@@ -896,7 +896,7 @@ impl AtomicMutation for StageThenFail {
     }
 }
 
-impl SavepointMutation for StageThenFail {}
+impl DeferredMutation for StageThenFail {}
 
 /// The whole-op rewind must run on the `apply`-returns-`Err` path, not only
 /// after a successful `apply` (cid 3329490979). Otherwise a mutation that stages

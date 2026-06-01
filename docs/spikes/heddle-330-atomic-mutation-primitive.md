@@ -226,7 +226,7 @@ sketch.
 - **Nesting = enroll-into-outermost (savepoint) by default; eager-commit only
   when an effect must be visible to another process before the outer commit**
   (the #251 reserve). This is a **type-level split**, not a runtime const:
-  savepoint ops implement `SavepointMutation` (opt-in, no blanket impl), eager
+  savepoint ops implement `DeferredMutation` (opt-in, no blanket impl), eager
   ops implement `EagerMutation` whose only method *returns* the compensator;
   `Tx::enroll` is bounded to the former and `Tx::enroll_eager` to the latter, so
   enrolling an eager op without a compensator is a **compile error** — no
@@ -390,7 +390,7 @@ pub trait AtomicMutation {
 }
 
 // NOTE: there is deliberately no `COMMIT_KIND` associated const. Savepoint
-// vs. eager is a *type-level* split (`SavepointMutation` vs `EagerMutation`,
+// vs. eager is a *type-level* split (`DeferredMutation` vs `EagerMutation`,
 // §3.3), not a runtime value the executor branches on — a runtime const that
 // only a `debug_assert!` guards would vanish in release builds and let an
 // eager op be enrolled through the savepoint path with no compensator.
@@ -1812,7 +1812,7 @@ execute — defeating the purpose.
 > A sub-op must be an **`EagerMutation`** (§3.3) **iff its forward effect is
 > durable state that a different process or a different repo handle can read, and
 > the correctness of *that other reader* depends on seeing the effect before the
-> outer transaction commits.** Everything else is a `SavepointMutation`.
+> outer transaction commits.** Everything else is a `DeferredMutation`.
 
 Operationally, a sub-op is eager (implements `EagerMutation`) iff **both**:
 1. its effect lands in a **cross-process-visible** store (a file other processes
@@ -1856,13 +1856,15 @@ Make the wrong combination unrepresentable by splitting the commit discipline at
 the **type** level — two distinct sub-traits, each gating its own enroll path:
 
 ```rust
-/// Opt-in marker for a savepoint-enrollable op: its staged effects are
-/// invisible to other readers until the outer commit publishes them, so it
-/// may defer to the outermost commit (§3.1). There is deliberately NO
-/// blanket `impl<M: AtomicMutation> SavepointMutation for M` — an op opts in
-/// by implementing this explicitly, so an op that is ONLY `EagerMutation`
-/// does NOT satisfy the `enroll` bound and cannot be enrolled as a savepoint.
-pub trait SavepointMutation: AtomicMutation {}
+/// Opt-in marker for a deferred-commit op: when enrolled it defers its commit
+/// marker to the outermost transaction and is unwound by the shared rewind
+/// ledger if that transaction fails (§3.1). It makes NO invisibility claim —
+/// real consumers (undo/redo) do immediately-visible writes and rely on the
+/// ledger only for failure-atomicity. There is deliberately NO blanket
+/// `impl<M: AtomicMutation> DeferredMutation for M` — an op opts in by
+/// implementing this explicitly, so an op that is ONLY `EagerMutation` does
+/// NOT satisfy the `enroll` bound and cannot be enrolled as a deferred child.
+pub trait DeferredMutation: AtomicMutation {}
 
 /// An eager op: its forward effect is cross-process-visible the instant it
 /// runs (§3.2), so it must commit eagerly AND hand back a compensator. The
@@ -1879,9 +1881,9 @@ pub trait EagerMutation: AtomicMutation {
 }
 
 impl<'a> Tx<'a> {
-    /// Savepoint enroll — bounded to `SavepointMutation`. Runs only `apply`
+    /// Savepoint enroll — bounded to `DeferredMutation`. Runs only `apply`
     /// (staged, reversible). An `EagerMutation`-only op fails this bound.
-    pub fn enroll<M: SavepointMutation>(&mut self, m: M) -> Result<StagedCommit<M::Output>> { … }
+    pub fn enroll<M: DeferredMutation>(&mut self, m: M) -> Result<StagedCommit<M::Output>> { … }
 
     /// Eager enroll — bounded to `EagerMutation`. Stages via `apply`, then runs
     /// `commit_eager` and registers the returned `Compensator` into the ledger
@@ -1893,10 +1895,10 @@ impl<'a> Tx<'a> {
 
 Why this closes the hole the `COMMIT_KIND` sketch left open:
 
-- **`enroll` is bounded to `SavepointMutation`.** Passing an op that implements
+- **`enroll` is bounded to `DeferredMutation`.** Passing an op that implements
   only `EagerMutation` is a hard **compile error** (`the trait bound
-  ReserveOpId: SavepointMutation is not satisfied`) — not a release-eliding
-  assert. There is no blanket `SavepointMutation` impl, so eager ops do not
+  ReserveOpId: DeferredMutation is not satisfied`) — not a release-eliding
+  assert. There is no blanket `DeferredMutation` impl, so eager ops do not
   silently acquire savepoint-enrollability.
 - **`enroll_eager` is bounded to `EagerMutation`, whose sole method *returns*
   the `Compensator`.** An op that declares itself eager but supplies no
@@ -1915,7 +1917,7 @@ would have skipped — it simply does not compile.** No `COMMIT_KIND` const, no
 runtime kind-check.
 
 > Note on mutual exclusivity. Stable Rust has no negative bounds, so the type
-> system cannot *forbid* an op from implementing both `SavepointMutation` and
+> system cannot *forbid* an op from implementing both `DeferredMutation` and
 > `EagerMutation`. The structural rule above ("eager effect only in
 > `commit_eager`") makes a double-impl harmless rather than dangerous; sealing
 > the two traits behind a single `CommitDiscipline` associated type to make them
@@ -2288,7 +2290,7 @@ preceding ref-carrying record" holds for the Postgres backend too, by its own me
   sync; the CLI mutation paths are sync today, but the trait may need an
   `async fn apply` variant if a migrated op touches an async backend. Decide per
   migrated op; start with the sync paths (undo/thread/capture are sync).
-- **O6 — Sealing `SavepointMutation` ⊻ `EagerMutation` (belt-and-suspenders).**
+- **O6 — Sealing `DeferredMutation` ⊻ `EagerMutation` (belt-and-suspenders).**
   §3.3's compile-error guarantee does not require the two markers to be mutually
   exclusive — the "eager effect only in `commit_eager`" structural rule makes a
   double-impl harmless. If the impl wants the type system to also *forbid* a
@@ -2868,7 +2870,7 @@ revision, only one migration is in flight, not five.
   Format-stability-sensitive (§6 O9, O10).
 - [x] **(3) Nesting** — §3: enroll-into-outermost (savepoint) default, eager-
   commit exception **rule pinned** (§3.2), **type-level** compensator
-  enforcement (§3.3: `SavepointMutation`/`EagerMutation` bound split on
+  enforcement (§3.3: `DeferredMutation`/`EagerMutation` bound split on
   `enroll`/`enroll_eager` — a compile error, no `COMMIT_KIND` const or
   `debug_assert!`), `Tx` context + depth/reverse-order tracking (§3.1), op_scope
   tie-in + sentinel bridge (§3.4).

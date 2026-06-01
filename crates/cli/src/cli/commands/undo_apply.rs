@@ -17,13 +17,13 @@ use gix::{
 };
 use objects::error::{HeddleError, Result as HeddleResult};
 use objects::lock::{RepoLock, WriteLockGuard};
-use objects::object::{ChangeId, MarkerName, ThreadName};
+use objects::object::{ChangeId, ContentHash, MarkerName, ThreadName};
 use oplog::{OpBatch, OpEntry, OpRecord};
 use refs::Head;
 use repo::{
     CommitGraphIndex, Repository, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
     ThreadState, refresh_thread_freshness,
-    atomic::{AtomicMutation, SavepointMutation, StagedCommit, Tx},
+    atomic::{AtomicMutation, DeferredMutation, StagedCommit, Tx},
 };
 
 use super::{advice::RecoveryAdvice, thread_cmd::thread_not_found_advice};
@@ -122,35 +122,59 @@ fn ensure_simulated_git_head_is(
     )))
 }
 
-// ---- Per-effect step toolkit (heddle#355 r3, cid 3330966930 / 3330966931) ----
+// ---- The per-effect undo/redo applier (heddle#355 r3/r4) ----
 //
-// Every externally-visible write inside an undo/redo entry runs through its OWN
-// `Tx::step`, so a failure on the Nth write leaves the prior N-1 inverses on the
-// rewind ledger and the rollback restores the EXACT pre-entry state. No `step`
-// forward performs more than one independently-failable write — the granularity
-// bug a per-ENTRY `step` had: a forward that did write-A (ok) then write-B (err)
-// returned `Err` with no compensator for A, leaving the repo half-rewound.
+// `EntrySteps` owns the `&mut Tx` for the lifetime of one undo/redo apply and
+// exposes the domain's reversible writes as NAMED per-effect operations
+// (`goto`, `set_thread`, `save_thread_record`, `remove_redaction_sidecar`, …).
+// Each wraps the correct ledger combinator ONCE, so the entry appliers read as
+// `steps.set_thread(name, state)?` instead of inlining a forward/inverse closure
+// pair at every call site. The domain knowledge (refs, git, thread records,
+// redaction sidecars) lives HERE in the CLI/undo layer, never in the atomic
+// primitive (`crates/repo/src/atomic/`).
 //
-// Inverses capture the value the write is about to overwrite (capture-before),
-// so a step restores its own pre-state regardless of how far it got, and the
-// composition restores the whole entry. `goto_without_record` always re-detaches
-// HEAD, so `step_goto`'s inverse restores the full captured `Head` (worktree
-// state AND ref attachment) — otherwise a later re-attach effect would not be
-// undone in LIFO order. Inverses (rollback, best-effort) MAY touch more than one
-// ref; only forwards are held to the one-write rule.
+// GRANULARITY. Every externally-visible write runs through its OWN combinator
+// call, so a failure on the Nth write leaves the prior N-1 inverses on the
+// rewind ledger and the rollback restores the EXACT pre-entry state. The two
+// combinators guard opposite hazards:
+//
+//   * `step` (forward-first) — for a single all-or-nothing write. Registers its
+//     capture-before inverse only AFTER the forward returns `Ok`, so a forward
+//     that fails registers no inverse for an effect that did not happen (the
+//     register-then-forward footgun, cid 3330867774 / 3330867775).
+//   * `step_nonatomic` (capture-restore) — for a NON-atomic forward (several
+//     internal writes, or a materialization that can fail partway): a `goto`
+//     (worktree materialize + HEAD write), `ThreadManager::save` (record file +
+//     workspace file), or the redaction-sidecar removal (rewrite/delete). It
+//     captures the prior state and registers a restore-to-snapshot inverse
+//     BEFORE running the forward, so a partially-applied (or applied-then-later-
+//     failed) forward is still fully unwound. A plain `step` here would leak the
+//     partial effect, because it registers nothing when the forward returns
+//     `Err`.
+//
+// Inverses (rollback, best-effort) MAY touch more than one ref; only `step`
+// forwards are held to the one-write rule. `step_nonatomic` forwards may be
+// non-atomic by definition — that is the whole point of the second combinator.
 
 #[cfg(test)]
 thread_local! {
     /// Test seam: when armed with `Some(n)`, the (n+1)-th per-effect step within
     /// an entry application returns an injected error WITHOUT running its forward
-    /// — modeling "the (n+1)-th visible write fails after the first n succeeded",
-    /// so the mid-ENTRY rollback path can be asserted. Counts across every
-    /// `entry_step` of the current entry; disarms on trip.
+    /// — modeling "the (n+1)-th visible write fails before it does anything", so
+    /// the mid-ENTRY rollback path can be asserted. Counts across every `step` /
+    /// `step_nonatomic` of the current entry; disarms on trip.
     static ENTRY_WRITE_FAULT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    /// Test seam for the NON-atomic forwards: when armed with `Some(n)`, the
+    /// (n+1)-th `step_nonatomic` RUNS its forward (applying its possibly-partial
+    /// effect) and THEN returns an injected error — modeling a composite forward
+    /// that mutated state and then failed. The restore registered BEFORE the
+    /// forward must unwind it. Counts only `step_nonatomic` calls; disarms on
+    /// trip.
+    static NONATOMIC_FORWARD_FAULT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
-/// Arm the mid-entry write-fault seam for the duration of `body`, clearing it
-/// afterwards so it never leaks into another test on the same thread.
+/// Arm the trip-before mid-entry write-fault seam for the duration of `body`,
+/// clearing it afterwards so it never leaks into another test on the same thread.
 #[cfg(test)]
 fn with_entry_write_fault<T>(skip_then_fail_at: usize, body: impl FnOnce() -> T) -> T {
     ENTRY_WRITE_FAULT.with(|f| f.set(Some(skip_then_fail_at)));
@@ -159,47 +183,33 @@ fn with_entry_write_fault<T>(skip_then_fail_at: usize, body: impl FnOnce() -> T)
     out
 }
 
-/// Run one reversible leaf write of an undo/redo entry as a `Tx::step`. `forward`
-/// performs exactly one externally-visible write; `inverse` restores the state
-/// captured immediately before it. Honors the [`ENTRY_WRITE_FAULT`] test seam.
-fn entry_step<'a, T>(
-    tx: &mut Tx<'a>,
-    forward: impl FnOnce() -> HeddleResult<T>,
-    inverse: impl FnOnce() -> HeddleResult<()> + 'a,
-) -> HeddleResult<T> {
-    #[cfg(test)]
-    {
-        let trip = ENTRY_WRITE_FAULT.with(|f| match f.get() {
-            Some(0) => {
-                f.set(None);
-                true
-            }
-            Some(n) => {
-                f.set(Some(n - 1));
-                false
-            }
-            None => false,
-        });
-        if trip {
-            return Err(HeddleError::Conflict(
-                "injected mid-entry write fault".to_string(),
-            ));
-        }
-    }
-    tx.step(forward, inverse)
+/// Arm the non-atomic forward-partial-failure seam for the duration of `body`:
+/// the `skip_then_fail_at`-th-after `step_nonatomic` forward runs (applying its
+/// effect) then fails, exercising the restore-to-snapshot rollback the second
+/// combinator exists for.
+#[cfg(test)]
+fn with_nonatomic_forward_fault<T>(skip_then_fail_at: usize, body: impl FnOnce() -> T) -> T {
+    NONATOMIC_FORWARD_FAULT.with(|f| f.set(Some(skip_then_fail_at)));
+    let out = body();
+    NONATOMIC_FORWARD_FAULT.with(|f| f.set(None));
+    out
 }
 
-/// Step: navigate HEAD + worktree to `target`. Inverse restores the FULL pre-step
-/// HEAD (worktree state AND ref attachment).
-fn step_goto<'a>(tx: &mut Tx<'a>, target: ChangeId) -> HeddleResult<()> {
-    let repo = tx.repo();
-    let prev_head_ref = repo.head_ref()?;
-    let prev_state = repo.head()?;
-    entry_step(
-        tx,
-        move || repo.goto_without_record(&target),
-        move || restore_head(repo, prev_state, &prev_head_ref),
-    )
+/// Decrement-and-test one of the per-entry fault counters; `true` iff this call
+/// is the armed trip point (the counter disarms on trip).
+#[cfg(test)]
+fn fault_counter_trips(cell: &'static std::thread::LocalKey<std::cell::Cell<Option<usize>>>) -> bool {
+    cell.with(|f| match f.get() {
+        Some(0) => {
+            f.set(None);
+            true
+        }
+        Some(n) => {
+            f.set(Some(n - 1));
+            false
+        }
+        None => false,
+    })
 }
 
 /// Restore HEAD to a captured worktree `state` + ref attachment: re-materialize
@@ -211,164 +221,316 @@ fn restore_head(repo: &Repository, state: Option<ChangeId>, head_ref: &Head) -> 
     repo.refs().write_head(head_ref)
 }
 
-/// Step: write HEAD to `head`; inverse restores the prior HEAD ref.
-fn step_write_head<'a>(tx: &mut Tx<'a>, head: Head) -> HeddleResult<()> {
-    let repo = tx.repo();
-    let prev = repo.head_ref()?;
-    entry_step(
-        tx,
-        move || repo.refs().write_head(&head),
-        move || repo.refs().write_head(&prev),
-    )
+/// Owns the `&mut Tx` for one undo/redo apply and exposes the domain's reversible
+/// writes as named per-effect operations. See the module comment above.
+struct EntrySteps<'tx, 'a> {
+    tx: &'tx mut Tx<'a>,
 }
 
-/// Step: set thread ref `name` to `state`; inverse restores its prior value (or
-/// deletes it if it had none).
-fn step_set_thread<'a>(tx: &mut Tx<'a>, name: &str, state: ChangeId) -> HeddleResult<()> {
-    let repo = tx.repo();
-    let forward_name = ThreadName::new(name);
-    let prev = repo.refs().get_thread(&forward_name)?;
-    let restore_name = name.to_string();
-    entry_step(
-        tx,
-        move || repo.refs().set_thread(&forward_name, &state),
-        move || {
-            let name = ThreadName::new(restore_name);
-            match prev {
-                Some(prev) => repo.refs().set_thread(&name, &prev),
-                None => repo.refs().delete_thread(&name).map(|_| ()),
-            }
-        },
-    )
+impl<'a> EntrySteps<'_, 'a> {
+    fn new<'tx>(tx: &'tx mut Tx<'a>) -> EntrySteps<'tx, 'a> {
+        EntrySteps { tx }
+    }
+
+    fn repo(&self) -> &'a Repository {
+        self.tx.repo()
+    }
+
+    /// One reversible leaf write that is a single all-or-nothing operation:
+    /// forward-first via [`Tx::step`]. Honors the [`ENTRY_WRITE_FAULT`] seam.
+    fn step<T>(
+        &mut self,
+        forward: impl FnOnce() -> HeddleResult<T>,
+        inverse: impl FnOnce() -> HeddleResult<()> + 'a,
+    ) -> HeddleResult<T> {
+        #[cfg(test)]
+        if fault_counter_trips(&ENTRY_WRITE_FAULT) {
+            return Err(HeddleError::Conflict(
+                "injected mid-entry write fault".to_string(),
+            ));
+        }
+        self.tx.step(forward, inverse)
+    }
+
+    /// One reversible write whose `forward` is NOT a single all-or-nothing
+    /// operation: capture-restore via [`Tx::step_nonatomic`], which registers the
+    /// restore-to-snapshot inverse BEFORE running the forward. Honors both the
+    /// trip-before [`ENTRY_WRITE_FAULT`] seam (shared per-entry write counter) and
+    /// the [`NONATOMIC_FORWARD_FAULT`] seam (run-forward-then-fail).
+    fn step_nonatomic<T, S: 'a>(
+        &mut self,
+        capture: impl FnOnce() -> HeddleResult<S>,
+        restore: impl FnOnce(S) -> HeddleResult<()> + 'a,
+        forward: impl FnOnce() -> HeddleResult<T>,
+    ) -> HeddleResult<T> {
+        #[cfg(test)]
+        if fault_counter_trips(&ENTRY_WRITE_FAULT) {
+            return Err(HeddleError::Conflict(
+                "injected mid-entry write fault".to_string(),
+            ));
+        }
+        #[cfg(test)]
+        if fault_counter_trips(&NONATOMIC_FORWARD_FAULT) {
+            // Run the real forward (applying its possibly-partial effect), then
+            // fail — the restore registered BEFORE the forward unwinds it.
+            return self.tx.step_nonatomic(capture, restore, move || {
+                forward()?;
+                Err(HeddleError::Conflict(
+                    "injected non-atomic forward fault".to_string(),
+                ))
+            });
+        }
+        self.tx.step_nonatomic(capture, restore, forward)
+    }
+
+    /// Navigate HEAD + worktree to `target`. NON-atomic: `goto_without_record`
+    /// materializes the worktree and then re-detaches HEAD, so it can fail
+    /// partway. The capture snapshots the FULL pre-step `Head` (worktree state
+    /// AND ref attachment) and the restore re-materializes it, so a partial
+    /// (or later-failed) goto is fully unwound.
+    fn goto(&mut self, target: ChangeId) -> HeddleResult<()> {
+        let repo = self.repo();
+        self.step_nonatomic(
+            move || Ok((repo.head()?, repo.head_ref()?)),
+            move |(prev_state, prev_head_ref)| restore_head(repo, prev_state, &prev_head_ref),
+            move || repo.goto_without_record(&target),
+        )
+    }
+
+    /// Write HEAD to `head`; inverse restores the prior HEAD ref. A single ref
+    /// write — genuinely all-or-nothing.
+    fn write_head(&mut self, head: Head) -> HeddleResult<()> {
+        let repo = self.repo();
+        let prev = repo.head_ref()?;
+        self.step(
+            move || repo.refs().write_head(&head),
+            move || repo.refs().write_head(&prev),
+        )
+    }
+
+    /// Set thread ref `name` to `state`; inverse restores its prior value (or
+    /// deletes it if it had none). A single ref write.
+    fn set_thread(&mut self, name: &str, state: ChangeId) -> HeddleResult<()> {
+        let repo = self.repo();
+        let forward_name = ThreadName::new(name);
+        let prev = repo.refs().get_thread(&forward_name)?;
+        let restore_name = name.to_string();
+        self.step(
+            move || repo.refs().set_thread(&forward_name, &state),
+            move || {
+                let name = ThreadName::new(restore_name);
+                match prev {
+                    Some(prev) => repo.refs().set_thread(&name, &prev),
+                    None => repo.refs().delete_thread(&name).map(|_| ()),
+                }
+            },
+        )
+    }
+
+    /// Delete thread ref `name`; inverse restores its prior value. A single ref
+    /// write.
+    fn delete_thread(&mut self, name: &str) -> HeddleResult<()> {
+        let repo = self.repo();
+        let forward_name = ThreadName::new(name);
+        let prev = repo.refs().get_thread(&forward_name)?;
+        let restore_name = name.to_string();
+        self.step(
+            move || repo.refs().delete_thread(&forward_name).map(|_| ()),
+            move || match prev {
+                Some(prev) => repo.refs().set_thread(&ThreadName::new(restore_name), &prev),
+                None => Ok(()),
+            },
+        )
+    }
+
+    /// Create marker `name` at `state`; inverse restores its prior value (delete
+    /// if it didn't exist). A single ref write — on a name collision the forward
+    /// fails, so no inverse is registered and a pre-existing marker survives the
+    /// rollback.
+    fn create_marker(&mut self, name: &str, state: ChangeId) -> HeddleResult<()> {
+        let repo = self.repo();
+        let forward_name = MarkerName::new(name);
+        let prev = repo.refs().get_marker(&forward_name)?;
+        let restore_name = name.to_string();
+        self.step(
+            move || repo.refs().create_marker(&forward_name, &state),
+            move || {
+                let name = MarkerName::new(restore_name);
+                match prev {
+                    Some(prev) => repo.refs().create_marker(&name, &prev),
+                    None => repo.refs().delete_marker(&name).map(|_| ()),
+                }
+            },
+        )
+    }
+
+    /// Delete marker `name`; inverse recreates it at its prior value. A single
+    /// ref write.
+    fn delete_marker(&mut self, name: &str) -> HeddleResult<()> {
+        let repo = self.repo();
+        let forward_name = MarkerName::new(name);
+        let prev = repo.refs().get_marker(&forward_name)?;
+        let restore_name = name.to_string();
+        self.step(
+            move || repo.refs().delete_marker(&forward_name).map(|_| ()),
+            move || match prev {
+                Some(prev) => repo.refs().create_marker(&MarkerName::new(restore_name), &prev),
+                None => Ok(()),
+            },
+        )
+    }
+
+    /// Persist a mutated ThreadManager record; inverse restores the record's
+    /// prior persisted form (or removes it if there was none). NON-atomic:
+    /// `ThreadManager::save` writes the record file AND the workspace file, so a
+    /// failure on the second write leaves the first applied — the capture
+    /// snapshots both prior forms and the restore rewrites/removes them.
+    fn save_thread_record(&mut self, record: Thread) -> HeddleResult<()> {
+        let repo = self.repo();
+        let manager = ThreadManager::new(repo.heddle_dir());
+        let prev = manager.find_by_thread(&record.thread)?;
+        let new_id = record.id.clone();
+        self.step_nonatomic(
+            || Ok(prev),
+            move |prev| {
+                let manager = ThreadManager::new(repo.heddle_dir());
+                match prev {
+                    Some(prev) => manager.save(&prev),
+                    None => manager.delete(&new_id),
+                }
+            },
+            move || ThreadManager::new(repo.heddle_dir()).save(&record),
+        )
+    }
+
+    /// Delete a ThreadManager record; inverse re-saves it. NON-atomic:
+    /// `ThreadManager::delete` removes the record file AND the workspace file,
+    /// so the inverse re-saves the captured record wholesale.
+    fn delete_thread_record(&mut self, record: Thread) -> HeddleResult<()> {
+        let repo = self.repo();
+        let id = record.id.clone();
+        self.step_nonatomic(
+            || Ok(record),
+            move |record| ThreadManager::new(repo.heddle_dir()).save(&record),
+            move || ThreadManager::new(repo.heddle_dir()).delete(&id),
+        )
+    }
+
+    /// Restore a ThreadManager record from a redo snapshot; inverse restores the
+    /// prior persisted form (or removes the restored record if there was none).
+    /// A snapshot that fails to decode is a non-fatal warning (pre-migration
+    /// parity). NON-atomic for the same record-file + workspace-file reason as
+    /// [`save_thread_record`](Self::save_thread_record).
+    fn restore_thread_record(&mut self, name: &str, bytes: &[u8]) -> HeddleResult<()> {
+        let repo = self.repo();
+        let manager = ThreadManager::new(repo.heddle_dir());
+        let prev = manager.find_by_thread(name)?;
+        let bytes = bytes.to_vec();
+        let forward_name = name.to_string();
+        let restore_name = name.to_string();
+        self.step_nonatomic(
+            || Ok(prev),
+            move |prev| {
+                let manager = ThreadManager::new(repo.heddle_dir());
+                match prev {
+                    Some(prev) => manager.save(&prev),
+                    None => match manager.find_by_thread(&restore_name)? {
+                        Some(record) => manager.delete(&record.id),
+                        None => Ok(()),
+                    },
+                }
+            },
+            move || {
+                let manager = ThreadManager::new(repo.heddle_dir());
+                if let Err(e) = manager.restore_thread_record_from_snapshot(&bytes) {
+                    eprintln!(
+                        "warning: redo of `ThreadCreate` for '{}' restored the ref but failed to \
+                         decode the ThreadManager record snapshot ({}). Record-backed commands \
+                         (`thread cd`, delegate) may degrade on this thread — run `heddle thread \
+                         start {}` to recreate the record.",
+                        forward_name, e, forward_name
+                    );
+                }
+                Ok(())
+            },
+        )
+    }
+
+    /// Remove a redaction record from its per-blob sidecar. NON-atomic and
+    /// re-exposing: `remove_redaction` rewrites or deletes the sidecar file, so
+    /// the capture snapshots the whole sidecar (bytes or absence) and registers a
+    /// restore-to-snapshot BEFORE the removal — a later transaction failure then
+    /// restores the sidecar and the redacted blob is NOT re-exposed.
+    fn remove_redaction_sidecar(
+        &mut self,
+        blob: ContentHash,
+        state: ChangeId,
+        path: String,
+        redaction_id: ContentHash,
+    ) -> HeddleResult<()> {
+        let repo = self.repo();
+        self.step_nonatomic(
+            move || repo.capture_redaction_sidecar(&blob).map_err(apply_error),
+            move |snapshot| {
+                repo.restore_redaction_sidecar(&blob, snapshot)
+                    .map_err(apply_error)
+            },
+            move || {
+                repo.remove_redaction(&blob, &state, &path, &redaction_id)
+                    .map(|_| ())
+                    .map_err(apply_error)
+            },
+        )
+    }
+
+    /// Run one checkout-repo Git write as a capture-restore step against the
+    /// pre-entry [`GitState`] `snapshot`. Git checkpoint entries make several
+    /// internal writes; restoring to the absolute pre-entry snapshot is
+    /// idempotent across the entry's steps, and registering the restore BEFORE
+    /// each write covers a write that fails partway. A fresh checkout handle is
+    /// opened per step (cold path).
+    fn git_restore_snapshot(
+        &mut self,
+        repo: &'a Repository,
+        branch: &str,
+        snapshot: &GitState,
+        forward: impl FnOnce() -> Result<()>,
+    ) -> HeddleResult<()> {
+        let snapshot = snapshot.clone();
+        let branch = branch.to_string();
+        self.step_nonatomic(
+            move || Ok(snapshot),
+            move |snapshot| restore_git_state(repo, &branch, &snapshot),
+            move || forward().map_err(apply_error),
+        )
+    }
+
+    /// Flip the batch's persisted undone flag; inverse re-marks it redone. A
+    /// single oplog write. Returns the updated batch for the command output.
+    fn mark_batch_undone(&mut self, batch: &OpBatch) -> HeddleResult<OpBatch> {
+        let repo = self.repo();
+        let forward_batch = batch.clone();
+        let inverse_batch = batch.clone();
+        self.step(
+            move || repo.oplog().mark_batch_undone(&forward_batch),
+            move || repo.oplog().mark_batch_redone(&inverse_batch).map(|_| ()),
+        )
+    }
+
+    /// Flip the batch's persisted redone flag; inverse re-marks it undone. The
+    /// mirror of [`mark_batch_undone`](Self::mark_batch_undone).
+    fn mark_batch_redone(&mut self, batch: &OpBatch) -> HeddleResult<OpBatch> {
+        let repo = self.repo();
+        let forward_batch = batch.clone();
+        let inverse_batch = batch.clone();
+        self.step(
+            move || repo.oplog().mark_batch_redone(&forward_batch),
+            move || repo.oplog().mark_batch_undone(&inverse_batch).map(|_| ()),
+        )
+    }
 }
 
-/// Step: delete thread ref `name`; inverse restores its prior value.
-fn step_delete_thread<'a>(tx: &mut Tx<'a>, name: &str) -> HeddleResult<()> {
-    let repo = tx.repo();
-    let forward_name = ThreadName::new(name);
-    let prev = repo.refs().get_thread(&forward_name)?;
-    let restore_name = name.to_string();
-    entry_step(
-        tx,
-        move || repo.refs().delete_thread(&forward_name).map(|_| ()),
-        move || match prev {
-            Some(prev) => repo.refs().set_thread(&ThreadName::new(restore_name), &prev),
-            None => Ok(()),
-        },
-    )
-}
-
-/// Step: create marker `name` at `state`; inverse restores its prior value
-/// (delete if it didn't exist). On a name collision the forward fails, so no
-/// inverse is registered and a pre-existing marker survives the rollback.
-fn step_create_marker<'a>(tx: &mut Tx<'a>, name: &str, state: ChangeId) -> HeddleResult<()> {
-    let repo = tx.repo();
-    let forward_name = MarkerName::new(name);
-    let prev = repo.refs().get_marker(&forward_name)?;
-    let restore_name = name.to_string();
-    entry_step(
-        tx,
-        move || repo.refs().create_marker(&forward_name, &state),
-        move || {
-            let name = MarkerName::new(restore_name);
-            match prev {
-                Some(prev) => repo.refs().create_marker(&name, &prev),
-                None => repo.refs().delete_marker(&name).map(|_| ()),
-            }
-        },
-    )
-}
-
-/// Step: delete marker `name`; inverse recreates it at its prior value.
-fn step_delete_marker<'a>(tx: &mut Tx<'a>, name: &str) -> HeddleResult<()> {
-    let repo = tx.repo();
-    let forward_name = MarkerName::new(name);
-    let prev = repo.refs().get_marker(&forward_name)?;
-    let restore_name = name.to_string();
-    entry_step(
-        tx,
-        move || repo.refs().delete_marker(&forward_name).map(|_| ()),
-        move || match prev {
-            Some(prev) => repo.refs().create_marker(&MarkerName::new(restore_name), &prev),
-            None => Ok(()),
-        },
-    )
-}
-
-/// Step: persist a mutated ThreadManager record; inverse restores the record's
-/// prior persisted form (or removes it if there was none).
-fn step_save_thread_record<'a>(tx: &mut Tx<'a>, record: Thread) -> HeddleResult<()> {
-    let repo = tx.repo();
-    let manager = ThreadManager::new(repo.heddle_dir());
-    let prev = manager.find_by_thread(&record.thread)?;
-    let new_id = record.id.clone();
-    entry_step(
-        tx,
-        move || ThreadManager::new(repo.heddle_dir()).save(&record),
-        move || {
-            let manager = ThreadManager::new(repo.heddle_dir());
-            match prev {
-                Some(prev) => manager.save(&prev),
-                None => manager.delete(&new_id),
-            }
-        },
-    )
-}
-
-/// Step: delete a ThreadManager record; inverse re-saves it.
-fn step_delete_thread_record<'a>(tx: &mut Tx<'a>, record: Thread) -> HeddleResult<()> {
-    let repo = tx.repo();
-    let id = record.id.clone();
-    entry_step(
-        tx,
-        move || ThreadManager::new(repo.heddle_dir()).delete(&id),
-        move || ThreadManager::new(repo.heddle_dir()).save(&record),
-    )
-}
-
-/// Step: restore a ThreadManager record from a redo snapshot; inverse restores
-/// the prior persisted form (or removes the restored record if there was none).
-/// A snapshot that fails to decode is a non-fatal warning (pre-migration parity).
-fn step_restore_thread_record<'a>(
-    tx: &mut Tx<'a>,
-    name: &str,
-    bytes: &[u8],
-) -> HeddleResult<()> {
-    let repo = tx.repo();
-    let manager = ThreadManager::new(repo.heddle_dir());
-    let prev = manager.find_by_thread(name)?;
-    let bytes = bytes.to_vec();
-    let forward_name = name.to_string();
-    let restore_name = name.to_string();
-    entry_step(
-        tx,
-        move || {
-            let manager = ThreadManager::new(repo.heddle_dir());
-            if let Err(e) = manager.restore_thread_record_from_snapshot(&bytes) {
-                eprintln!(
-                    "warning: redo of `ThreadCreate` for '{}' restored the ref but failed to \
-                     decode the ThreadManager record snapshot ({}). Record-backed commands \
-                     (`thread cd`, delegate) may degrade on this thread — run `heddle thread \
-                     start {}` to recreate the record.",
-                    forward_name, e, forward_name
-                );
-            }
-            Ok(())
-        },
-        move || {
-            let manager = ThreadManager::new(repo.heddle_dir());
-            match prev {
-                Some(prev) => manager.save(&prev),
-                None => match manager.find_by_thread(&restore_name)? {
-                    Some(record) => manager.delete(&record.id),
-                    None => Ok(()),
-                },
-            }
-        },
-    )
-}
-
-fn apply_undo_entry(tx: &mut Tx<'_>, entry: &OpEntry) -> HeddleResult<()> {
+fn apply_undo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()> {
     match &entry.operation {
         OpRecord::Snapshot {
             prev_head: Some(prev),
@@ -376,24 +538,21 @@ fn apply_undo_entry(tx: &mut Tx<'_>, entry: &OpEntry) -> HeddleResult<()> {
             new_state,
             ..
         } => {
-            step_goto(tx, *prev)?;
+            steps.goto(*prev)?;
             if let Some(thread) = thread {
-                step_set_thread(tx, thread.as_str(), *prev)?;
-                step_write_head(
-                    tx,
-                    Head::Attached {
-                        thread: ThreadName::new(thread.as_str()),
-                    },
-                )?;
-                sync_thread_record_state(tx, thread, *prev)?;
-                mark_merged_threads_unintegrated_for_target(tx, thread, new_state, prev)?;
+                steps.set_thread(thread.as_str(), *prev)?;
+                steps.write_head(Head::Attached {
+                    thread: ThreadName::new(thread.as_str()),
+                })?;
+                sync_thread_record_state(steps, thread, *prev)?;
+                mark_merged_threads_unintegrated_for_target(steps, thread, new_state, prev)?;
             }
         }
         OpRecord::Goto {
             prev_head: Some(prev),
             ..
         } => {
-            step_goto(tx, *prev)?;
+            steps.goto(*prev)?;
         }
         OpRecord::Snapshot {
             prev_head: None, ..
@@ -402,7 +561,7 @@ fn apply_undo_entry(tx: &mut Tx<'_>, entry: &OpEntry) -> HeddleResult<()> {
             prev_head: None, ..
         } => {}
         OpRecord::ThreadCreate { name, .. } | OpRecord::ThreadCreateV2 { name, .. } => {
-            delete_thread_safely(tx, &ThreadName::new(name.as_str()))?;
+            delete_thread_safely(steps, &ThreadName::new(name.as_str()))?;
             // Cross-thread contract rule 4 (docs/design/cross-thread-undo.md):
             // the inverse of `ThreadCreate` must also remove the matching
             // ThreadManager record so `heddle thread show` and the record-
@@ -419,21 +578,21 @@ fn apply_undo_entry(tx: &mut Tx<'_>, entry: &OpEntry) -> HeddleResult<()> {
             // is recorded for redo, so undo can still destroy the live
             // record without losing the data needed to put it back.
             // Matches the FastForward/V2 shared-undo shape.
-            remove_thread_manager_record(tx, name)?;
+            remove_thread_manager_record(steps, name)?;
         }
         OpRecord::ThreadDelete { name, state } => {
-            step_set_thread(tx, name.as_str(), *state)?;
+            steps.set_thread(name.as_str(), *state)?;
         }
         OpRecord::ThreadUpdate {
             name, old_state, ..
         } => {
-            step_set_thread(tx, name.as_str(), *old_state)?;
+            steps.set_thread(name.as_str(), *old_state)?;
         }
         OpRecord::MarkerCreate { name, .. } => {
-            step_delete_marker(tx, name.as_str())?;
+            steps.delete_marker(name.as_str())?;
         }
         OpRecord::MarkerDelete { name, state } => {
-            step_create_marker(tx, name.as_str(), *state)?;
+            steps.create_marker(name.as_str(), *state)?;
         }
         // Redaction inverse: drop the specific redaction record so
         // subsequent materialize calls restore the original blob
@@ -456,12 +615,13 @@ fn apply_undo_entry(tx: &mut Tx<'_>, entry: &OpEntry) -> HeddleResult<()> {
             state,
             path,
         } => {
-            // A single write, and redo of a redaction is refused upstream
-            // (`ensure_redaction_redo_supported`), so there is no inverse to
-            // register — matching the pre-migration no-op redo for this record.
-            tx.repo()
-                .remove_redaction(blob, state, path, redaction_id)
-                .map_err(apply_error)?;
+            // NON-atomic, re-exposing forward: `remove_redaction` rewrites or
+            // deletes the per-blob sidecar, so it runs through `step_nonatomic`
+            // with a capture-restore of the whole sidecar. If a LATER batch in
+            // the same undo transaction fails, the rollback restores the sidecar
+            // and the redacted blob is NOT re-exposed — the hazard a plain,
+            // unregistered removal left open.
+            steps.remove_redaction_sidecar(*blob, *state, path.clone(), *redaction_id)?;
         }
         // Fast-forward merge inverse: restore both HEAD and the target
         // thread ref to the pre-FF tip. The source thread never moved
@@ -482,7 +642,7 @@ fn apply_undo_entry(tx: &mut Tx<'_>, entry: &OpEntry) -> HeddleResult<()> {
             pre_target_id,
             ..
         } => {
-            apply_ff_undo(tx, source_thread, target_thread, pre_target_id)?;
+            apply_ff_undo(steps, source_thread, target_thread, pre_target_id)?;
         }
         OpRecord::GitCheckpoint {
             branch,
@@ -490,7 +650,7 @@ fn apply_undo_entry(tx: &mut Tx<'_>, entry: &OpEntry) -> HeddleResult<()> {
             new_git_oid,
             ..
         } => {
-            apply_git_checkpoint_undo(tx, branch, previous_git_oid.as_deref(), new_git_oid)?;
+            apply_git_checkpoint_undo(steps, branch, previous_git_oid.as_deref(), new_git_oid)?;
         }
         // No undo inverse: these records don't move a ref the undo chain
         // restores, or their reversal is irreversible / handled outside the
@@ -525,45 +685,39 @@ fn apply_undo_entry(tx: &mut Tx<'_>, entry: &OpEntry) -> HeddleResult<()> {
 }
 
 fn apply_ff_undo(
-    tx: &mut Tx<'_>,
+    steps: &mut EntrySteps,
     source_thread: &str,
     target_thread: &str,
     pre_target_id: &ChangeId,
 ) -> HeddleResult<()> {
-    step_goto(tx, *pre_target_id)?;
-    step_set_thread(tx, target_thread, *pre_target_id)?;
-    step_write_head(
-        tx,
-        Head::Attached {
-            thread: ThreadName::new(target_thread),
-        },
-    )?;
-    sync_thread_record_state(tx, target_thread, *pre_target_id)?;
-    mark_source_thread_unintegrated(tx, source_thread, pre_target_id)
+    steps.goto(*pre_target_id)?;
+    steps.set_thread(target_thread, *pre_target_id)?;
+    steps.write_head(Head::Attached {
+        thread: ThreadName::new(target_thread),
+    })?;
+    sync_thread_record_state(steps, target_thread, *pre_target_id)?;
+    mark_source_thread_unintegrated(steps, source_thread, pre_target_id)
 }
 
-fn apply_redo_entry(tx: &mut Tx<'_>, entry: &OpEntry) -> HeddleResult<()> {
+fn apply_redo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()> {
     match &entry.operation {
         OpRecord::Snapshot {
             new_state,
             prev_head,
             thread,
         } => {
-            step_goto(tx, *new_state)?;
+            steps.goto(*new_state)?;
             if let Some(thread) = thread {
-                step_set_thread(tx, thread.as_str(), *new_state)?;
-                step_write_head(
-                    tx,
-                    Head::Attached {
-                        thread: ThreadName::new(thread.as_str()),
-                    },
-                )?;
-                sync_thread_record_state(tx, thread, *new_state)?;
-                mark_ready_threads_integrated_for_target(tx, thread, new_state, prev_head)?;
+                steps.set_thread(thread.as_str(), *new_state)?;
+                steps.write_head(Head::Attached {
+                    thread: ThreadName::new(thread.as_str()),
+                })?;
+                sync_thread_record_state(steps, thread, *new_state)?;
+                mark_ready_threads_integrated_for_target(steps, thread, new_state, prev_head)?;
             }
         }
         OpRecord::Goto { target, .. } => {
-            step_goto(tx, *target)?;
+            steps.goto(*target)?;
         }
         // V1 ThreadCreate redo: ref-only, with a stderr note that the
         // ThreadManager record is not being restored. V1 records were
@@ -576,7 +730,7 @@ fn apply_redo_entry(tx: &mut Tx<'_>, entry: &OpEntry) -> HeddleResult<()> {
         // <name>` if they want the record back. V1 ages out as the
         // live oplog window slides forward.
         OpRecord::ThreadCreate { name, state } => {
-            step_set_thread(tx, name.as_str(), *state)?;
+            steps.set_thread(name.as_str(), *state)?;
             eprintln!(
                 "warning: redo of legacy V1 `ThreadCreate` for '{}' restores the ref only — \
                  the matching ThreadManager record body was not snapshotted by this oplog entry. \
@@ -599,24 +753,24 @@ fn apply_redo_entry(tx: &mut Tx<'_>, entry: &OpEntry) -> HeddleResult<()> {
             state,
             manager_snapshot,
         } => {
-            step_set_thread(tx, name.as_str(), *state)?;
+            steps.set_thread(name.as_str(), *state)?;
             if let Some(bytes) = manager_snapshot {
-                step_restore_thread_record(tx, name, bytes)?;
+                steps.restore_thread_record(name, bytes)?;
             }
         }
         OpRecord::ThreadDelete { name, .. } => {
-            delete_thread_safely(tx, &ThreadName::new(name.as_str()))?;
+            delete_thread_safely(steps, &ThreadName::new(name.as_str()))?;
         }
         OpRecord::ThreadUpdate {
             name, new_state, ..
         } => {
-            step_set_thread(tx, name.as_str(), *new_state)?;
+            steps.set_thread(name.as_str(), *new_state)?;
         }
         OpRecord::MarkerCreate { name, state } => {
-            step_create_marker(tx, name.as_str(), *state)?;
+            steps.create_marker(name.as_str(), *state)?;
         }
         OpRecord::MarkerDelete { name, .. } => {
-            step_delete_marker(tx, name.as_str())?;
+            steps.delete_marker(name.as_str())?;
         }
         // FF merge redo (V2): replay the *recorded* FF target. We do
         // not re-read `source_thread` — the recorded `post_target_id`
@@ -631,7 +785,7 @@ fn apply_redo_entry(tx: &mut Tx<'_>, entry: &OpEntry) -> HeddleResult<()> {
             post_target_id,
             ..
         } => {
-            apply_ff_redo(tx, source_thread, target_thread, post_target_id)?;
+            apply_ff_redo(steps, source_thread, target_thread, post_target_id)?;
         }
         OpRecord::GitCheckpoint {
             branch,
@@ -639,7 +793,7 @@ fn apply_redo_entry(tx: &mut Tx<'_>, entry: &OpEntry) -> HeddleResult<()> {
             new_git_oid,
             ..
         } => {
-            apply_git_checkpoint_redo(tx, branch, previous_git_oid.as_deref(), new_git_oid)?;
+            apply_git_checkpoint_redo(steps, branch, previous_git_oid.as_deref(), new_git_oid)?;
         }
         // FF merge redo (V1, legacy): the r1 implementation didn't
         // record `post_target_id`, so we have to re-resolve
@@ -653,7 +807,7 @@ fn apply_redo_entry(tx: &mut Tx<'_>, entry: &OpEntry) -> HeddleResult<()> {
             target_thread,
             ..
         } => {
-            let source_tip = tx
+            let source_tip = steps
                 .repo()
                 .refs()
                 .get_thread(&ThreadName::new(source_thread.as_str()))?
@@ -664,7 +818,7 @@ fn apply_redo_entry(tx: &mut Tx<'_>, entry: &OpEntry) -> HeddleResult<()> {
                         source_thread
                     ))
                 })?;
-            apply_ff_redo(tx, source_thread, target_thread, &source_tip)?;
+            apply_ff_redo(steps, source_thread, target_thread, &source_tip)?;
         }
         // No redo replay: these records don't re-advance a ref redo touches, or
         // they are refused upstream. Enumerated explicitly (no wildcard) so a
@@ -699,21 +853,18 @@ fn apply_redo_entry(tx: &mut Tx<'_>, entry: &OpEntry) -> HeddleResult<()> {
 }
 
 fn apply_ff_redo(
-    tx: &mut Tx<'_>,
+    steps: &mut EntrySteps,
     source_thread: &str,
     target_thread: &str,
     post_target_id: &ChangeId,
 ) -> HeddleResult<()> {
-    step_goto(tx, *post_target_id)?;
-    step_set_thread(tx, target_thread, *post_target_id)?;
-    step_write_head(
-        tx,
-        Head::Attached {
-            thread: ThreadName::new(target_thread),
-        },
-    )?;
-    sync_thread_record_state(tx, target_thread, *post_target_id)?;
-    mark_source_thread_integrated(tx, source_thread, post_target_id)
+    steps.goto(*post_target_id)?;
+    steps.set_thread(target_thread, *post_target_id)?;
+    steps.write_head(Head::Attached {
+        thread: ThreadName::new(target_thread),
+    })?;
+    sync_thread_record_state(steps, target_thread, *post_target_id)?;
+    mark_source_thread_integrated(steps, source_thread, post_target_id)
 }
 
 /// The pre-entry Git state a checkpoint undo/redo entry overwrites, captured
@@ -824,32 +975,13 @@ fn delete_ref_if_present(git: &gix::Repository, ref_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run one checkout-repo Git write as a per-effect step. `forward` performs
-/// exactly one externally-visible write; on a later failure the rollback restores
-/// the captured `snapshot`. A fresh checkout handle is opened per step (cold path).
-fn git_step<'a>(
-    tx: &mut Tx<'a>,
-    repo: &'a Repository,
-    branch: &str,
-    snapshot: &GitState,
-    forward: impl FnOnce() -> Result<()>,
-) -> HeddleResult<()> {
-    let snapshot = snapshot.clone();
-    let branch = branch.to_string();
-    entry_step(
-        tx,
-        move || forward().map_err(apply_error),
-        move || restore_git_state(repo, &branch, &snapshot),
-    )
-}
-
 fn apply_git_checkpoint_undo(
-    tx: &mut Tx<'_>,
+    steps: &mut EntrySteps,
     branch: &str,
     previous_git_oid: Option<&str>,
     new_git_oid: &str,
 ) -> HeddleResult<()> {
-    let repo = tx.repo();
+    let repo = steps.repo();
     ensure_git_head_is(repo, new_git_oid, "undo git checkpoint").map_err(apply_error)?;
     ensure_git_worktree_clean(repo, "undo git checkpoint").map_err(apply_error)?;
     let snapshot = capture_git_state(repo, branch)?;
@@ -862,10 +994,10 @@ fn apply_git_checkpoint_undo(
                 if ref_target_oid(&git, &format!("refs/heads/{branch}")).map_err(apply_error)?
                     != Some(previous_oid)
                 {
-                    git_step(tx, repo, branch, &snapshot, || {
+                    steps.git_restore_snapshot(repo, branch, &snapshot, || {
                         attach_git_head_to_branch(&git_checkout_repo(repo)?, branch)
                     })?;
-                    git_step(tx, repo, branch, &snapshot, || {
+                    steps.git_restore_snapshot(repo, branch, &snapshot, || {
                         set_attached_git_head(
                             &git_checkout_repo(repo)?,
                             branch,
@@ -875,22 +1007,22 @@ fn apply_git_checkpoint_undo(
                         )
                     })?;
                 }
-                git_step(tx, repo, branch, &snapshot, || {
+                steps.git_restore_snapshot(repo, branch, &snapshot, || {
                     attach_git_head_to_branch(&git_checkout_repo(repo)?, branch)
                 })?;
             }
-            git_step(tx, repo, branch, &snapshot, || {
+            steps.git_restore_snapshot(repo, branch, &snapshot, || {
                 reset_git_index_to_commit(&git_checkout_repo(repo)?, previous_oid)
             })?;
             let previous = previous.to_string();
             let new_git_oid = new_git_oid.to_string();
-            git_step(tx, repo, branch, &snapshot, || {
+            steps.git_restore_snapshot(repo, branch, &snapshot, || {
                 update_mirror_branch_ref(repo, branch, Some(&previous), Some(&new_git_oid))
             })?;
         }
         None => {
             if branch != "HEAD" {
-                git_step(tx, repo, branch, &snapshot, || {
+                steps.git_restore_snapshot(repo, branch, &snapshot, || {
                     delete_reference_matching(
                         &git_checkout_repo(repo)?,
                         &format!("refs/heads/{branch}"),
@@ -899,7 +1031,7 @@ fn apply_git_checkpoint_undo(
                 })?;
             }
             let new_git_oid = new_git_oid.to_string();
-            git_step(tx, repo, branch, &snapshot, || {
+            steps.git_restore_snapshot(repo, branch, &snapshot, || {
                 update_mirror_branch_ref(repo, branch, None, Some(&new_git_oid))
             })?;
         }
@@ -908,12 +1040,12 @@ fn apply_git_checkpoint_undo(
 }
 
 fn apply_git_checkpoint_redo(
-    tx: &mut Tx<'_>,
+    steps: &mut EntrySteps,
     branch: &str,
     previous_git_oid: Option<&str>,
     new_git_oid: &str,
 ) -> HeddleResult<()> {
-    let repo = tx.repo();
+    let repo = steps.repo();
     if let Some(previous) = previous_git_oid {
         ensure_git_head_is(repo, previous, "redo git checkpoint").map_err(apply_error)?;
     }
@@ -923,10 +1055,10 @@ fn apply_git_checkpoint_redo(
         match previous_git_oid {
             Some(previous) => {
                 let previous_oid = parse_git_oid(previous).map_err(apply_error)?;
-                git_step(tx, repo, branch, &snapshot, || {
+                steps.git_restore_snapshot(repo, branch, &snapshot, || {
                     attach_git_head_to_branch(&git_checkout_repo(repo)?, branch)
                 })?;
-                git_step(tx, repo, branch, &snapshot, || {
+                steps.git_restore_snapshot(repo, branch, &snapshot, || {
                     set_attached_git_head(
                         &git_checkout_repo(repo)?,
                         branch,
@@ -937,7 +1069,7 @@ fn apply_git_checkpoint_redo(
                 })?;
             }
             None => {
-                git_step(tx, repo, branch, &snapshot, || {
+                steps.git_restore_snapshot(repo, branch, &snapshot, || {
                     set_reference(
                         &git_checkout_repo(repo)?,
                         &format!("refs/heads/{branch}"),
@@ -947,18 +1079,18 @@ fn apply_git_checkpoint_redo(
                     )
                     .map_err(|error| anyhow!(error))
                 })?;
-                git_step(tx, repo, branch, &snapshot, || {
+                steps.git_restore_snapshot(repo, branch, &snapshot, || {
                     attach_git_head_to_branch(&git_checkout_repo(repo)?, branch)
                 })?;
             }
         }
     }
-    git_step(tx, repo, branch, &snapshot, || {
+    steps.git_restore_snapshot(repo, branch, &snapshot, || {
         reset_git_index_to_commit(&git_checkout_repo(repo)?, new_oid)
     })?;
     let previous_git_oid = previous_git_oid.map(|previous| previous.to_string());
     let new_git_oid = new_git_oid.to_string();
-    git_step(tx, repo, branch, &snapshot, || {
+    steps.git_restore_snapshot(repo, branch, &snapshot, || {
         update_mirror_branch_ref(
             repo,
             branch,
@@ -1192,8 +1324,8 @@ fn fsync_file_and_parent(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn delete_thread_safely(tx: &mut Tx<'_>, name: &ThreadName) -> HeddleResult<()> {
-    let repo = tx.repo();
+fn delete_thread_safely(steps: &mut EntrySteps, name: &ThreadName) -> HeddleResult<()> {
+    let repo = steps.repo();
     if let Head::Attached { thread } = repo.head_ref()?
         && thread == *name
     {
@@ -1204,33 +1336,33 @@ fn delete_thread_safely(tx: &mut Tx<'_>, name: &ThreadName) -> HeddleResult<()> 
         })?;
         // Detaching HEAD is its own effect (inverse restores the prior attached
         // HEAD), separate from the ref deletion below.
-        step_write_head(tx, Head::Detached { state })?;
+        steps.write_head(Head::Detached { state })?;
     }
 
-    step_delete_thread(tx, name.as_str())?;
+    steps.delete_thread(name.as_str())?;
     Ok(())
 }
 
 fn sync_thread_record_state(
-    tx: &mut Tx<'_>,
+    steps: &mut EntrySteps,
     thread_name: &str,
     state: objects::object::ChangeId,
 ) -> HeddleResult<()> {
-    let manager = ThreadManager::new(tx.repo().heddle_dir());
+    let manager = ThreadManager::new(steps.repo().heddle_dir());
     if let Some(mut thread) = manager.find_by_thread(thread_name)? {
         thread.current_state = Some(state.short());
         thread.updated_at = chrono::Utc::now();
-        step_save_thread_record(tx, thread)?;
+        steps.save_thread_record(thread)?;
     }
     Ok(())
 }
 
 fn mark_source_thread_unintegrated(
-    tx: &mut Tx<'_>,
+    steps: &mut EntrySteps,
     source_thread: &str,
     target_after_undo: &ChangeId,
 ) -> HeddleResult<()> {
-    let repo = tx.repo();
+    let repo = steps.repo();
     let manager = ThreadManager::new(repo.heddle_dir());
     let Some(mut thread) = manager.find_by_thread(source_thread)? else {
         return Ok(());
@@ -1261,17 +1393,17 @@ fn mark_source_thread_unintegrated(
         thread.freshness = ThreadFreshness::Current;
     }
     thread.updated_at = chrono::Utc::now();
-    step_save_thread_record(tx, thread)?;
+    steps.save_thread_record(thread)?;
     Ok(())
 }
 
 fn mark_merged_threads_unintegrated_for_target(
-    tx: &mut Tx<'_>,
+    steps: &mut EntrySteps,
     target_thread: &str,
     integrated_state: &ChangeId,
     target_after_undo: &ChangeId,
 ) -> HeddleResult<()> {
-    let repo = tx.repo();
+    let repo = steps.repo();
     let manager = ThreadManager::new(repo.heddle_dir());
     for thread in manager.list()? {
         if thread.thread == target_thread
@@ -1289,18 +1421,18 @@ fn mark_merged_threads_unintegrated_for_target(
         if points_at_integrated_state {
             // Each affected record is saved through its own per-effect step, so a
             // mid-loop failure rolls each one back independently.
-            mark_source_thread_unintegrated(tx, &thread.thread, target_after_undo)?;
+            mark_source_thread_unintegrated(steps, &thread.thread, target_after_undo)?;
         }
     }
     Ok(())
 }
 
 fn mark_source_thread_integrated(
-    tx: &mut Tx<'_>,
+    steps: &mut EntrySteps,
     source_thread: &str,
     target_after_redo: &ChangeId,
 ) -> HeddleResult<()> {
-    let repo = tx.repo();
+    let repo = steps.repo();
     let manager = ThreadManager::new(repo.heddle_dir());
     let Some(mut thread) = manager.find_by_thread(source_thread)? else {
         return Ok(());
@@ -1325,17 +1457,17 @@ fn mark_source_thread_integrated(
     };
     thread.freshness = ThreadFreshness::Current;
     thread.updated_at = chrono::Utc::now();
-    step_save_thread_record(tx, thread)?;
+    steps.save_thread_record(thread)?;
     Ok(())
 }
 
 fn mark_ready_threads_integrated_for_target(
-    tx: &mut Tx<'_>,
+    steps: &mut EntrySteps,
     target_thread: &str,
     integrated_state: &ChangeId,
     target_before_redo: &Option<ChangeId>,
 ) -> HeddleResult<()> {
-    let repo = tx.repo();
+    let repo = steps.repo();
     let manager = ThreadManager::new(repo.heddle_dir());
     for thread in manager.list()? {
         if thread.thread == target_thread
@@ -1352,7 +1484,7 @@ fn mark_ready_threads_integrated_for_target(
                 .as_ref()
                 .is_some_and(|before| change_contains(repo, &source_tip, before));
         if newly_integrated {
-            mark_source_thread_integrated(tx, &thread.thread, integrated_state)?;
+            mark_source_thread_integrated(steps, &thread.thread, integrated_state)?;
         }
     }
     Ok(())
@@ -1366,10 +1498,10 @@ fn change_contains(repo: &Repository, ancestor: &ChangeId, descendant: &ChangeId
 /// Remove the ThreadManager record matching `thread_name`. No-op when no
 /// record exists. Used by the `ThreadCreate` inverse to keep refs and
 /// record-store state in lockstep (cross-thread undo contract rule 4).
-fn remove_thread_manager_record(tx: &mut Tx<'_>, thread_name: &str) -> HeddleResult<()> {
-    let manager = ThreadManager::new(tx.repo().heddle_dir());
+fn remove_thread_manager_record(steps: &mut EntrySteps, thread_name: &str) -> HeddleResult<()> {
+    let manager = ThreadManager::new(steps.repo().heddle_dir());
     if let Some(thread) = manager.find_by_thread(thread_name)? {
-        step_delete_thread_record(tx, thread)?;
+        steps.delete_thread_record(thread)?;
     }
     Ok(())
 }
@@ -1389,15 +1521,20 @@ fn remove_thread_manager_record(tx: &mut Tx<'_>, thread_name: &str) -> HeddleRes
 //   * Each sub-op stages its effect through the forward-first `Tx::step`
 //     combinator, which registers the inverse on the granular ledger ONLY after
 //     the forward succeeds (a forward that fails registers no inverse at all).
-//     Crucially this is done PER EFFECT: `apply_undo_entry` / `apply_redo_entry`
-//     wrap EACH individual write (`goto`, each ref/marker/thread-record write,
-//     each git write) in its own `step` with that write's capture-before inverse,
-//     so a failure on the Nth write of an entry leaves the prior N-1 inverses on
-//     the ledger and the rollback restores the exact pre-entry state. A whole-
-//     entry `step` (one forward = many writes) would leave a write half-applied
-//     when a LATER write in the same entry failed (heddle#355 cid 3330966930 /
-//     3330966931) — the granularity bug this migration must NOT reintroduce.
-//   * The parent NESTS the sub-ops via `Tx::enroll` (savepoint enrollment) —
+//     Crucially this is done PER EFFECT through the `EntrySteps` applier:
+//     `apply_undo_entry` / `apply_redo_entry` wrap EACH individual write
+//     (`goto`, each ref/marker/thread-record write, each git write) in its own
+//     `step` (single all-or-nothing write, capture-before inverse) or
+//     `step_nonatomic` (composite/partial-failure forward, capture-restore
+//     inverse registered BEFORE the forward). A failure on the Nth write of an
+//     entry leaves the prior N-1 inverses on the ledger and the rollback
+//     restores the exact pre-entry state. A whole-entry `step` (one forward =
+//     many writes) would leave a write half-applied when a LATER write in the
+//     same entry failed (heddle#355 cid 3330966930 / 3330966931) — the
+//     granularity bug this migration must NOT reintroduce. A plain `step` on a
+//     NON-atomic forward (goto, `ThreadManager::save`, redaction-sidecar
+//     removal) would leak a partially-applied effect — those use `step_nonatomic`.
+//   * The parent NESTS the sub-ops via `Tx::enroll` (deferred enrollment) —
 //     the recovery-ref child then one child per batch — so a child that stages
 //     then fails rewinds the child AND unwinds the parent through the shared
 //     ledger. This is the nesting path the migration exists to validate.
@@ -1420,13 +1557,15 @@ fn remove_thread_manager_record(tx: &mut Tx<'_>, thread_name: &str) -> HeddleRes
 //      the trait optimizes for is both unreachable (a committed undo marks its
 //      batches undone, so a retry re-derives a different batch set) and
 //      unnecessary (re-applying an undo is idempotent) for this op.
-//   2. SAVEPOINT SEMANTICS. The children use the savepoint ENROLLMENT mechanism
-//      (`enroll` + `step`) for its apply+ledger-rewind shape, but their
-//      effects are direct canonical writes (visible immediately), not the
-//      invisible-until-commit staging `SavepointMutation` describes. This adds
-//      FAILURE atomicity (rewind), not concurrent-reader isolation — matching
-//      the pre-migration concurrency semantics, where undo already published
-//      refs batch-by-batch.
+//   2. DEFERRED-COMMIT SEMANTICS. The children use the deferred ENROLLMENT
+//      mechanism (`enroll` + `step`) for its apply+ledger-rewind shape: each
+//      defers its commit marker to the outer transaction and is unwound by the
+//      shared ledger on failure. Their effects are direct canonical writes
+//      (visible immediately) — `DeferredMutation` makes NO invisibility claim;
+//      it names exactly this "defer the commit, be ledger-unwound" contract. So
+//      this adds FAILURE atomicity (rewind), not concurrent-reader isolation —
+//      matching the pre-migration concurrency semantics, where undo already
+//      published refs batch-by-batch.
 //
 // EXACTNESS SCOPE. The rewind restores the exact pre-operation state for `undo`
 // of any batch count and for single-batch `redo` (the `-n 1` default). A
@@ -1485,7 +1624,7 @@ pub(super) fn undo_redo_transaction_id(
     format!("{action}:{scope}:gen{generation}:[{}]", ids.join(","))
 }
 
-/// Savepoint child: preserve the pre-undo HEAD into the heddle-internal
+/// Deferred child: preserve the pre-undo HEAD into the heddle-internal
 /// recovery pointer (the heddle#305 `ORIG_HEAD`-style ref), registering its
 /// restore as the inverse so an outer failure puts the prior pointer back
 /// (or clears it, on the first-ever undo).
@@ -1524,9 +1663,9 @@ impl AtomicMutation for StageUndoRecovery {
     }
 }
 
-impl SavepointMutation for StageUndoRecovery {}
+impl DeferredMutation for StageUndoRecovery {}
 
-/// Savepoint child: undo one batch. `apply_undo_entry` registers a per-EFFECT
+/// Deferred child: undo one batch. `apply_undo_entry` registers a per-EFFECT
 /// inverse for every individual write it performs, so a mid-ENTRY failure rewinds
 /// exactly the writes already applied (not just whole entries); the
 /// `mark_batch_undone` flip is paired with its `mark_batch_redone` inverse.
@@ -1564,15 +1703,16 @@ impl AtomicMutation for ApplyUndoBatch {
     }
 
     fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<OpBatch>> {
-        let repo = tx.repo();
+        let mut steps = EntrySteps::new(tx);
         for (applied, entry) in self.batch.entries.iter().rev().enumerate() {
-            // `apply_undo_entry` wraps EACH of its writes in its own `Tx::step`
-            // with that write's specific inverse, so a failure on the Nth write
-            // of the entry leaves the prior N-1 inverses on the ledger and the
-            // rollback restores the exact pre-entry state (heddle#355 cid
-            // 3330966930). No outer per-entry `step` is needed — and a whole-entry
-            // one would reintroduce the granularity bug it once papered over.
-            apply_undo_entry(tx, entry)?;
+            // `apply_undo_entry` drives the per-effect `EntrySteps` applier, which
+            // wraps EACH write in its own `step` / `step_nonatomic`, so a failure
+            // on the Nth write of the entry leaves the prior N-1 inverses on the
+            // ledger and the rollback restores the exact pre-entry state (heddle#355
+            // cid 3330966930). No outer per-entry `step` is needed — and a
+            // whole-entry one would reintroduce the granularity bug it once
+            // papered over.
+            apply_undo_entry(&mut steps, entry)?;
             #[cfg(test)]
             if self.fail_after_entries == Some(applied + 1) {
                 return Err(HeddleError::Conflict(
@@ -1582,18 +1722,14 @@ impl AtomicMutation for ApplyUndoBatch {
             #[cfg(not(test))]
             let _ = applied;
         }
-        let batch_for_redo = self.batch.clone();
-        let updated = tx.step(
-            || repo.oplog().mark_batch_undone(&self.batch),
-            move || repo.oplog().mark_batch_redone(&batch_for_redo).map(|_| ()),
-        )?;
+        let updated = steps.mark_batch_undone(&self.batch)?;
         Ok(StagedCommit::pure(updated))
     }
 }
 
-impl SavepointMutation for ApplyUndoBatch {}
+impl DeferredMutation for ApplyUndoBatch {}
 
-/// Savepoint child: redo one batch — the mirror of [`ApplyUndoBatch`]. Entries
+/// Deferred child: redo one batch — the mirror of [`ApplyUndoBatch`]. Entries
 /// replay in forward order; `apply_redo_entry` registers a per-effect inverse for
 /// each write, and the `mark_batch_redone` flip pairs with `mark_batch_undone`.
 struct ApplyRedoBatch {
@@ -1628,13 +1764,12 @@ impl AtomicMutation for ApplyRedoBatch {
     }
 
     fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<OpBatch>> {
-        let repo = tx.repo();
+        let mut steps = EntrySteps::new(tx);
         for (applied, entry) in self.batch.entries.iter().enumerate() {
-            // Mirror of `ApplyUndoBatch`: `apply_redo_entry` registers a
-            // per-effect inverse for each of its writes, so a mid-entry redo
-            // failure rolls back per-write to the exact pre-entry state
-            // (heddle#355 cid 3330966931).
-            apply_redo_entry(tx, entry)?;
+            // Mirror of `ApplyUndoBatch`: `apply_redo_entry` drives the per-effect
+            // `EntrySteps` applier, so a mid-entry redo failure rolls back
+            // per-write to the exact pre-entry state (heddle#355 cid 3330966931).
+            apply_redo_entry(&mut steps, entry)?;
             #[cfg(test)]
             if self.fail_after_entries == Some(applied + 1) {
                 return Err(HeddleError::Conflict(
@@ -1644,16 +1779,12 @@ impl AtomicMutation for ApplyRedoBatch {
             #[cfg(not(test))]
             let _ = applied;
         }
-        let batch_for_undo = self.batch.clone();
-        let updated = tx.step(
-            || repo.oplog().mark_batch_redone(&self.batch),
-            move || repo.oplog().mark_batch_undone(&batch_for_undo).map(|_| ()),
-        )?;
+        let updated = steps.mark_batch_redone(&self.batch)?;
         Ok(StagedCommit::pure(updated))
     }
 }
 
-impl SavepointMutation for ApplyRedoBatch {}
+impl DeferredMutation for ApplyRedoBatch {}
 
 /// Root composite for `heddle undo`: stage the recovery pointer, then nest one
 /// [`ApplyUndoBatch`] per batch. Returns the updated (undone) batches for the
@@ -2430,6 +2561,246 @@ mod atomic_tests {
             repo.refs().get_marker(&marker).unwrap(),
             Some(s1),
             "the pre-existing marker survives the rolled-back redo (no delete inverse ran)"
+        );
+    }
+
+    // ---- step_nonatomic: forward-internal partial-failure rollback (r4 §A) ----
+
+    /// `goto` is a NON-atomic forward (worktree materialize + HEAD write). When it
+    /// applies its effect (moves HEAD + worktree) and then fails, the
+    /// restore-to-snapshot inverse `step_nonatomic` registered BEFORE the forward
+    /// must unwind it. A plain `step` would register NOTHING on the `Err` return
+    /// and leak the moved HEAD/worktree (the hazard this combinator closes).
+    #[test]
+    fn step_nonatomic_rolls_back_partially_applied_goto() {
+        let (temp, repo, _s1, s2) = repo_with_two_snapshots();
+        let scope = repo.op_scope();
+
+        let pre_head = repo.head().unwrap();
+        assert_eq!(pre_head, Some(s2));
+        let pre_main = main_thread(&repo);
+        let pre_markers = commit_marker_count(&repo);
+        assert_eq!(repo.refs().get_undo_recovery().unwrap(), None);
+
+        let batches = repo.oplog().undo_batches_scoped(1, Some(&scope)).unwrap();
+        let generation = repo.oplog().head_id().unwrap();
+        let txid = undo_redo_transaction_id("undo", &scope, generation, &batches);
+        // The goto is the entry's FIRST non-atomic step: it runs (materializing
+        // the worktree + moving HEAD) and then fails.
+        let result = with_nonatomic_forward_fault(0, || {
+            repo::atomic::execute(&repo, UndoOp::new(batches, pre_head, txid))
+        });
+        assert!(
+            result.is_err(),
+            "the injected partial-goto fault must fail the undo"
+        );
+
+        assert_eq!(
+            repo.head().unwrap(),
+            Some(s2),
+            "HEAD restored to the pre-undo tip after a partially-applied goto"
+        );
+        assert_eq!(main_thread(&repo), pre_main, "main ref unchanged");
+        assert!(temp.path().join("a.txt").exists(), "s1 file present");
+        assert!(
+            temp.path().join("b.txt").exists(),
+            "s2 worktree material restored by the goto's restore-before inverse"
+        );
+        assert_eq!(
+            repo.refs().get_undo_recovery().unwrap(),
+            None,
+            "recovery pointer cleared by rewind"
+        );
+        assert_eq!(commit_marker_count(&repo), pre_markers, "no marker committed");
+    }
+
+    fn sample_main_thread(current_state: &str, materialized: &str) -> Thread {
+        Thread {
+            id: "thread-main".to_string(),
+            thread: "main".to_string(),
+            target_thread: None,
+            parent_thread: None,
+            mode: repo::ThreadMode::Solid,
+            state: ThreadState::Active,
+            base_state: "base".to_string(),
+            base_root: "root".to_string(),
+            current_state: Some(current_state.to_string()),
+            merged_state: None,
+            task: None,
+            execution_path: PathBuf::from("/work/exec"),
+            materialized_path: Some(PathBuf::from(materialized)),
+            changed_paths: vec![],
+            impact_categories: vec![],
+            heavy_impact_paths: vec![],
+            promotion_suggested: false,
+            freshness: ThreadFreshness::Current,
+            verification_summary: repo::ThreadVerificationSummary::default(),
+            confidence_summary: repo::ThreadConfidenceSummary::default(),
+            integration_policy_result: ThreadIntegrationPolicy::default(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            ephemeral: None,
+            auto: false,
+            shared_target_dir: None,
+        }
+    }
+
+    /// Test-only deferred mutation that saves ONE thread record through the
+    /// `EntrySteps` applier — exercises the real `save_thread_record`
+    /// (`step_nonatomic`) capture-restore path.
+    struct SaveOnly {
+        record: Thread,
+    }
+
+    impl AtomicMutation for SaveOnly {
+        type Output = ();
+
+        fn transaction_id(&self) -> String {
+            "test-save-only".to_string()
+        }
+
+        fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<()>> {
+            let mut steps = EntrySteps::new(tx);
+            steps.save_thread_record(self.record.clone())?;
+            Ok(StagedCommit::pure(()))
+        }
+    }
+
+    impl DeferredMutation for SaveOnly {}
+
+    /// `ThreadManager::save` is a NON-atomic forward — it writes the record file
+    /// AND the workspace file. When the save applies (both halves) and then a
+    /// failure occurs, the `step_nonatomic` capture-restore must rewrite BOTH
+    /// halves back to the prior record. A plain `step` would leak the saved
+    /// record/workspace on the `Err` return.
+    #[test]
+    fn step_nonatomic_restores_record_and_workspace_on_save_failure() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let manager = ThreadManager::new(repo.heddle_dir());
+
+        // R0: the prior persisted record (record half: current_state; workspace
+        // half: materialized_path).
+        let r0 = sample_main_thread("current-A", "/work/A");
+        manager.save(&r0).unwrap();
+
+        // R1: what the (faulted) save writes — different in BOTH halves.
+        let mut r1 = r0.clone();
+        r1.current_state = Some("current-B".to_string());
+        r1.materialized_path = Some(PathBuf::from("/work/B"));
+
+        let result = with_nonatomic_forward_fault(0, || {
+            repo::atomic::execute(&repo, SaveOnly { record: r1 })
+        });
+        assert!(result.is_err(), "the injected save fault must fail the op");
+
+        let restored = manager.find_by_thread("main").unwrap().unwrap();
+        assert_eq!(
+            restored.current_state.as_deref(),
+            Some("current-A"),
+            "the record half (current_state) was restored to R0"
+        );
+        assert_eq!(
+            restored.materialized_path,
+            Some(PathBuf::from("/work/A")),
+            "the workspace half (materialized_path) was restored to R0"
+        );
+    }
+
+    /// Undoing a `Redact` removes the per-blob sidecar (re-exposing the blob). If
+    /// a LATER batch in the same undo transaction fails, the `step_nonatomic`
+    /// capture-restore — registered BEFORE the removal — must restore the sidecar
+    /// so the redacted blob is NOT re-exposed. The pre-migration unregistered
+    /// removal left the blob exposed on a rolled-back undo. (`--allow-redact-undo`
+    /// gates this at the command level; the apply path is exercised directly.)
+    #[test]
+    fn step_nonatomic_restores_redaction_sidecar_when_a_later_batch_fails() {
+        use objects::object::{Principal, Redaction};
+
+        let (_temp, repo, s1, _s2) = repo_with_two_snapshots();
+        let scope = repo.op_scope();
+        let main_state = main_thread(&repo).unwrap();
+
+        // A real redaction on disk.
+        let blob = ContentHash::from_bytes([7u8; 32]);
+        let redaction = Redaction {
+            redacted_blob: blob,
+            state: s1,
+            path: "config/secrets.toml".to_string(),
+            reason: "leaked credential".to_string(),
+            redactor: Principal {
+                name: "Grace Hopper".to_string(),
+                email: "grace@example.com".to_string(),
+            },
+            redacted_at: chrono::Utc::now(),
+            signature: None,
+            purged_at: None,
+            supersedes: None,
+        };
+        let redaction_id = repo.put_redaction(redaction).unwrap();
+        assert_eq!(
+            repo.get_redactions_for_blob(&blob).unwrap().redactions.len(),
+            1,
+            "redaction planted on disk"
+        );
+
+        // Older batch (a no-op thread update) recorded first; newer Redact batch
+        // recorded second, so the Redact is undone FIRST and the older batch —
+        // which the injected fault fails — is undone after it.
+        repo.oplog()
+            .record_batch_scoped(
+                vec![OpRecord::ThreadUpdate {
+                    name: "main".to_string(),
+                    old_state: main_state,
+                    new_state: main_state,
+                }],
+                Some(&scope),
+            )
+            .unwrap();
+        repo.oplog()
+            .record_batch_scoped(
+                vec![OpRecord::Redact {
+                    redaction_id,
+                    blob,
+                    state: s1,
+                    path: "config/secrets.toml".to_string(),
+                }],
+                Some(&scope),
+            )
+            .unwrap();
+
+        let batches = repo.oplog().undo_batches_scoped(2, Some(&scope)).unwrap();
+        assert_eq!(batches.len(), 2);
+        assert!(
+            matches!(batches[0].entries[0].operation, OpRecord::Redact { .. }),
+            "the newest undoable batch is the Redact (undone first)"
+        );
+
+        let recovery_head = repo.head().unwrap();
+        // FaultyUndo fails the LAST enrolled batch (the older ThreadUpdate) after
+        // its first entry — by then the Redact's sidecar removal already ran.
+        let result = repo::atomic::execute(
+            &repo,
+            FaultyUndo {
+                batches,
+                recovery_head,
+                fail_after: 1,
+            },
+        );
+        assert!(
+            result.is_err(),
+            "the injected fault on the later batch must fail the undo"
+        );
+
+        let restored = repo.get_redactions_for_blob(&blob).unwrap();
+        assert_eq!(
+            restored.redactions.len(),
+            1,
+            "redaction sidecar restored by the rollback — the blob is NOT re-exposed"
+        );
+        assert!(
+            repo.get_redaction(&redaction_id).unwrap().is_some(),
+            "the exact redaction record is back on disk"
         );
     }
 }
