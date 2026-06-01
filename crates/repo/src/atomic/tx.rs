@@ -3,9 +3,10 @@
 //! (heddle#330 §3.1, §4).
 //!
 //! `Tx` threads through every `apply` in a nest. Inner mutations enroll into
-//! the *same* `Tx` (savepoint default) rather than committing independently;
-//! only the outermost [`execute`](super::execute) reaches `commit`. The ledger
-//! is a LIFO stack of inverse closures, popped in reverse on any unwind.
+//! the *same* `Tx` (deferring their commit marker to the outermost transaction)
+//! rather than committing independently; only the outermost
+//! [`execute`](super::execute) reaches `commit`. The ledger is a LIFO stack of
+//! inverse closures, popped in reverse on any unwind.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -13,16 +14,25 @@ use std::rc::Rc;
 use objects::error::{HeddleError, Result};
 use oplog::OpRecord;
 
-use super::traits::{EagerMutation, SavepointMutation, StagedCommit};
+use super::traits::{DeferredMutation, EagerMutation, StagedCommit};
 use crate::Repository;
 
-/// One entry in the rewind ledger: a boxed inverse closure. Boxing a *closure*
-/// is an implementation detail of the ledger — it is **not** `dyn
-/// AtomicMutation`. The public composition surface (`enroll::<Inner>`) is fully
+/// The boxed inverse closure half of a [`RewindAction`]. Boxing a *closure* is
+/// an implementation detail of the ledger — it is **not** `dyn AtomicMutation`.
+/// The public composition surface (`enroll::<Inner>`) is fully
 /// static/monomorphized; this is just how the executor stores "the work to undo
 /// entry N" uniformly. The `'a` bound lets a closure borrow the `Repository`
 /// (e.g. to restore a ref) for the lifetime of the transaction.
 type RewindFn<'a> = Box<dyn FnOnce() -> Result<()> + 'a>;
+
+/// One entry in the rewind ledger: a boxed inverse closure plus a `'static`
+/// label naming the action that registered it. The label is pure diagnostics —
+/// it lets [`rewind_all`](Tx::rewind_all)'s logging name the action that ran or
+/// failed during an unwind — and carries no public-API or behavioral weight.
+struct RewindAction<'a> {
+    label: &'static str,
+    run: RewindFn<'a>,
+}
 
 pub(crate) type EnrolledMutation<M> = Rc<RefCell<Option<M>>>;
 
@@ -49,7 +59,7 @@ pub struct Tx<'a> {
     scope: String,
     transaction_id: String,
     depth: u32,
-    ledger: Vec<RewindFn<'a>>,
+    ledger: Vec<RewindAction<'a>>,
     committed: bool,
 }
 
@@ -94,13 +104,95 @@ impl<'a> Tx<'a> {
         self.depth
     }
 
-    /// Register an inverse for an effect just staged. Closures run in reverse
-    /// (LIFO) order on unwind. The closure may borrow the `Repository`.
-    pub fn on_rewind<F>(&mut self, f: F)
+    /// Run a reversible **leaf effect** as one atomic step: execute `forward`
+    /// FIRST, and push `inverse` onto the rewind ledger **only if `forward`
+    /// returned `Ok`**. A `forward` that fails (or panics) leaves the ledger
+    /// untouched, so it is structurally impossible to register an inverse for an
+    /// effect that did not happen — the register-then-forward footgun that
+    /// corrupted pre-existing refs on rollback when a forward failed after its
+    /// compensator was already queued (heddle#355 cid 3330867774 / 3330867775).
+    ///
+    /// This is the ONLY way for code outside `atomic` to add to the rewind
+    /// ledger: the raw `on_rewind` register is `pub(crate)`, so a consumer that
+    /// tried to hand-order a compensator ahead of its forward would not compile.
+    /// `inverse` runs in reverse (LIFO) order with the rest of the ledger on any
+    /// later unwind and may borrow the [`Repository`](crate::Repository) for the
+    /// transaction lifetime. Reach for [`enroll`](Self::enroll) /
+    /// [`enroll_eager`](Self::enroll_eager) instead when the unit of work is a
+    /// whole sub-mutation rather than a single reversible write.
+    pub fn step<T, Fwd, Inv>(&mut self, forward: Fwd, inverse: Inv) -> Result<T>
+    where
+        Fwd: FnOnce() -> Result<T>,
+        Inv: FnOnce() -> Result<()> + 'a,
+    {
+        let value = forward()?;
+        // Reached only on a successful forward: the inverse now compensates an
+        // effect that demonstrably happened.
+        self.on_rewind("step", inverse);
+        Ok(value)
+    }
+
+    /// Run a reversible leaf effect whose `forward` is **NOT** a single
+    /// all-or-nothing write — a composite of several internal writes, or a
+    /// materialization that can fail partway and leave a partial effect behind.
+    ///
+    /// Unlike [`step`](Self::step), which registers its inverse only AFTER an
+    /// atomic `forward` returns `Ok`, this captures the prior state FIRST and
+    /// registers `restore(snapshot)` on the rewind ledger **before** running
+    /// `forward`. So if `forward` applies some of its writes and then fails (or
+    /// applies all of them and a later step in the same transaction fails), the
+    /// restore-to-snapshot inverse is already on the ledger and unwinds the
+    /// partial effect back to exactly the captured state. The two combinators
+    /// guard opposite hazards — `step` must never register before a forward
+    /// could fail (the register-then-forward footgun, cid 3330867774 /
+    /// 3330867775); `step_nonatomic` must register before, because its forward
+    /// can leave state changed even when it returns `Err`. Reach for `step` only
+    /// when the forward is a genuine single all-or-nothing write.
+    ///
+    /// This is NOT the register-then-forward footgun: the inverse here is a
+    /// restore-to-captured-snapshot, which is correct whether the forward fully
+    /// ran, partially failed, or never started — re-applying it from any of
+    /// those states lands on the same captured snapshot. The footgun was a
+    /// *specific-effect* inverse (e.g. "delete the marker I created") registered
+    /// before its forward, which on a failed forward undoes an effect that never
+    /// happened (deleting a pre-existing marker). Capture-restore has no such
+    /// asymmetry.
+    pub fn step_nonatomic<T, S>(
+        &mut self,
+        capture: impl FnOnce() -> Result<S>,
+        restore: impl FnOnce(S) -> Result<()> + 'a,
+        forward: impl FnOnce() -> Result<T>,
+    ) -> Result<T>
+    where
+        S: 'a,
+    {
+        let snapshot = capture()?;
+        self.on_rewind("step_nonatomic", move || restore(snapshot));
+        forward()
+    }
+
+    /// Register an inverse for an effect just staged, under a `'static` `label`
+    /// for rollback diagnostics. Closures run in reverse (LIFO) order on unwind.
+    /// The closure may borrow the `Repository`.
+    ///
+    /// `pub(crate)` on purpose (heddle#355): this primitive has NO ordering
+    /// enforcement, so calling it directly lets a caller register an inverse
+    /// *before* — or *without* — its forward effect, which is the exact
+    /// register-then-forward footgun the validation migration removed. Consumer
+    /// crates compose reversible leaf effects through the forward-first
+    /// [`step`](Self::step) combinator (the capture-restore
+    /// [`step_nonatomic`](Self::step_nonatomic) for non-atomic forwards, or
+    /// [`enroll`](Self::enroll) for whole sub-mutations); inside `atomic`,
+    /// `step` / `step_nonatomic` / `enroll` / `enroll_whole_op` are its only
+    /// callers.
+    pub(crate) fn on_rewind<F>(&mut self, label: &'static str, f: F)
     where
         F: FnOnce() -> Result<()> + 'a,
     {
-        self.ledger.push(Box::new(f));
+        self.ledger.push(RewindAction {
+            label,
+            run: Box::new(f),
+        });
     }
 
     pub(crate) fn enroll_whole_op<M>(&mut self, m: M) -> EnrolledMutation<M>
@@ -110,7 +202,7 @@ impl<'a> Tx<'a> {
         let mutation = Rc::new(RefCell::new(Some(m)));
         let rewind_mutation = Rc::clone(&mutation);
         let ledger = self.ledger_view();
-        self.on_rewind(move || {
+        self.on_rewind("enroll_whole_op", move || {
             let Some(mut mutation) = rewind_mutation.borrow_mut().take() else {
                 return Ok(());
             };
@@ -119,19 +211,16 @@ impl<'a> Tx<'a> {
         mutation
     }
 
-    /// Savepoint enroll — bounded to [`SavepointMutation`] (§3.3). Runs only
-    /// `apply` (staged, reversible) against the *same* ledger, then registers
-    /// the child's `rewind` so an outer failure unwinds it. An
-    /// `EagerMutation`-only mutation fails this bound at compile time.
-    pub fn enroll<M>(&mut self, m: M) -> Result<StagedCommit<M::Output>>
+    /// Shared `enroll`/`enroll_eager` scaffolding: pre-register the child's
+    /// whole-op rewind (so an apply error or panic unwinds it through the shared
+    /// ledger), then run its `apply` against the *same* ledger. Returns the
+    /// enrolled handle (still live, for the eager `commit_eager` follow-up) plus
+    /// the staged result. The caller owns the surrounding `depth` inc/dec.
+    fn enroll_then_apply<M>(&mut self, m: M) -> (EnrolledMutation<M>, Result<StagedCommit<M::Output>>)
     where
-        M: SavepointMutation + 'a,
+        M: super::AtomicMutation + 'a,
     {
-        self.depth += 1;
         let mutation = self.enroll_whole_op(m);
-        // On apply error or panic, the child's whole-op rewind is already on
-        // the shared ledger, so the root unwind compensates both granular and
-        // whole-op savepoint staging uniformly.
         let staged = {
             let mut guard = mutation.borrow_mut();
             guard
@@ -139,6 +228,22 @@ impl<'a> Tx<'a> {
                 .expect("enrolled mutation must be present during apply")
                 .apply(self)
         };
+        (mutation, staged)
+    }
+
+    /// Deferred enroll — bounded to [`DeferredMutation`] (§3.3). Runs only
+    /// `apply` (staged, reversible) against the *same* ledger, then registers
+    /// the child's `rewind` so an outer failure unwinds it. An
+    /// `EagerMutation`-only mutation fails this bound at compile time.
+    pub fn enroll<M>(&mut self, m: M) -> Result<StagedCommit<M::Output>>
+    where
+        M: DeferredMutation + 'a,
+    {
+        self.depth += 1;
+        // On apply error or panic, the child's whole-op rewind is already on
+        // the shared ledger, so the root unwind compensates both granular and
+        // whole-op deferred staging uniformly.
+        let (_mutation, staged) = self.enroll_then_apply(m);
         self.depth -= 1;
         staged
     }
@@ -154,14 +259,7 @@ impl<'a> Tx<'a> {
         M: EagerMutation + 'a,
     {
         self.depth += 1;
-        let mutation = self.enroll_whole_op(m);
-        let staged = {
-            let mut guard = mutation.borrow_mut();
-            guard
-                .as_mut()
-                .expect("enrolled mutation must be present during apply")
-                .apply(self)
-        };
+        let (mutation, staged) = self.enroll_then_apply(m);
         let staged = match staged {
             Ok(staged) => staged,
             Err(err) => {
@@ -183,7 +281,10 @@ impl<'a> Tx<'a> {
                 return Err(err);
             }
         };
-        self.ledger.push(compensator.into_fn());
+        self.ledger.push(RewindAction {
+            label: "compensator",
+            run: compensator.into_fn(),
+        });
         // One-mechanism contract (heddle#354 r4): an eager mutation's undo is its
         // `Compensator` (returned by `commit_eager`), NEVER the whole-op
         // `rewind`. `enroll_whole_op` above registered the whole-op rewind only
@@ -245,12 +346,16 @@ impl<'a> Tx<'a> {
     /// first rewind error after attempting every entry.
     pub(crate) fn rewind_all(&mut self) -> Result<()> {
         let mut first_err: Option<HeddleError> = None;
-        while let Some(f) = self.ledger.pop() {
-            if let Err(e) = f() {
+        while let Some(action) = self.ledger.pop() {
+            if let Err(e) = (action.run)() {
                 if first_err.is_none() {
                     first_err = Some(e);
                 } else {
-                    tracing::error!(error = %e, "additional Tx rewind failure (suppressed)");
+                    tracing::error!(
+                        action = action.label,
+                        error = %e,
+                        "additional Tx rewind failure (suppressed)"
+                    );
                 }
             }
         }

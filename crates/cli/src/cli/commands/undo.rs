@@ -15,7 +15,8 @@ use super::{
     command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     undo_apply::{
-        apply_redo_batch, apply_undo_batch, preflight_redo_batches, preflight_undo_batches,
+        RedoOp, UndoOp, acquire_undo_redo_lock, preflight_redo_batches, preflight_undo_batches,
+        undo_redo_transaction_id,
     },
     worktree_safety::ensure_worktree_clean,
 };
@@ -106,7 +107,14 @@ pub fn cmd_undo(
 
     if list {
         let scope = repo.op_scope();
-        let batches = repo.oplog().recent_batches_scoped(depth, Some(&scope))?;
+        // Count only user-facing batches toward `depth`, dropping the record-less
+        // commit sentinels (an `undo`/`redo`'s marker-only batch) BEFORE the
+        // limit applies. Filtering after a fixed-count fetch made `--depth 1`
+        // return empty whenever the latest op was itself an undo/redo, whose
+        // marker is the newest batch (heddle#355 cid 3330867777).
+        let batches: Vec<OpBatch> = repo
+            .oplog()
+            .recent_user_batches_scoped(depth, Some(&scope))?;
         let output = OpListOutput {
             output_kind: "undo_list",
             batches: batches.iter().map(build_batch_output).collect(),
@@ -127,6 +135,12 @@ pub fn cmd_undo(
 
         return Ok(());
     }
+
+    // Serialize the whole select→apply→commit against concurrent undo/redo so two
+    // invocations can't collide on the generation-derived transaction id (see
+    // `acquire_undo_redo_lock`; heddle#355 cid 3330867776). Held until the
+    // command returns, covering the `--preview` short-circuit and the commit.
+    let _undo_redo_lock = acquire_undo_redo_lock(&repo)?;
 
     let scope = repo.op_scope();
     let batches = repo.oplog().undo_batches_scoped(steps, Some(&scope))?;
@@ -192,17 +206,21 @@ pub fn cmd_undo(
     //
     // heddle#305 r2: this is written to a heddle-INTERNAL ref, not a user
     // marker — see UNDO_RECOVERY_MARKER. Keeping it out of `refs/markers/`
-    // means the `MarkerDelete` undo inverse below can never collide with it.
+    // means the `MarkerDelete` undo inverse can never collide with it.
+    //
+    // heddle#355: the recovery-ref write and every batch's worktree rewrite +
+    // mark-undone now run inside ONE atomic transaction (`UndoOp`), so a
+    // failure mid-undo rewinds every applied step back to the pre-undo state
+    // instead of leaving the repo half-rewound. The preflights above still run
+    // outside the transaction (their structured refusals are unchanged).
     let recovery_state = repo.head()?;
-    if let Some(state) = recovery_state {
-        repo.refs().set_undo_recovery(&state)?;
-    }
-
-    let mut updated_batches = Vec::with_capacity(batches.len());
-    for batch in batches {
-        apply_undo_batch(&repo, &batch)?;
-        updated_batches.push(repo.oplog().mark_batch_undone(&batch)?);
-    }
+    let generation = repo.oplog().head_id()?;
+    let transaction_id = undo_redo_transaction_id("undo", &scope, generation, &batches);
+    let updated_batches = repo::atomic::execute(
+        &repo,
+        UndoOp::new(batches, recovery_state, transaction_id),
+    )
+    .map_err(|e| anyhow!(e))?;
 
     let post_undo_repo = Repository::open(repo.root())?;
     let post_undo_trust = build_repository_verification_state(&post_undo_repo);
@@ -258,6 +276,10 @@ pub fn cmd_undo(
 pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
 
+    // Serialize against concurrent undo/redo (mirror of `cmd_undo`; heddle#355
+    // cid 3330867776).
+    let _undo_redo_lock = acquire_undo_redo_lock(&repo)?;
+
     let scope = repo.op_scope();
     let batches = repo.oplog().redo_batches_scoped(steps, Some(&scope))?;
 
@@ -312,11 +334,12 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
     ensure_worktree_clean(&repo, "redo")?;
     preflight_redo_batches(&repo, &batches)?;
 
-    let mut updated_batches = Vec::with_capacity(batches.len());
-    for batch in batches {
-        apply_redo_batch(&repo, &batch)?;
-        updated_batches.push(repo.oplog().mark_batch_redone(&batch)?);
-    }
+    // heddle#355: replay + mark-redone run as ONE atomic transaction so a
+    // failure mid-redo rewinds every applied step (mirror of `cmd_undo`).
+    let generation = repo.oplog().head_id()?;
+    let transaction_id = undo_redo_transaction_id("redo", &scope, generation, &batches);
+    let updated_batches =
+        repo::atomic::execute(&repo, RedoOp::new(batches, transaction_id)).map_err(|e| anyhow!(e))?;
 
     let post_redo_trust = build_repository_verification_state(&repo);
     let recommended_action = ActionFields::from_action(&post_redo_trust.recommended_action);
@@ -1016,14 +1039,18 @@ fn ensure_thread_worktree_undo_safe(repo: &Repository, batches: &[OpBatch]) -> R
                 | OpRecord::RemoteThreadDelete { .. }
                 | OpRecord::UndoRecoveryUpdate { .. } => continue,
             };
-            let Some(record) = manager.find_by_thread(name)? else {
-                continue;
-            };
-            let Some(path) = record.materialized_path.as_ref() else {
-                continue;
-            };
-            if path.exists() {
-                blocking.push((entry.id, name.clone(), path.clone()));
+            // The `ThreadCreate` inverse converges the name to EMPTY — it removes
+            // EVERY record filed under the name, not just the `find_by_thread`
+            // winner. So the preflight must check the FULL same-name set: a
+            // non-winner duplicate with a live `materialized_path` would otherwise
+            // pass this gate and have its worktree orphaned by the converge.
+            for record in manager.snapshot_records(name)? {
+                let Some(path) = record.materialized_path.as_ref() else {
+                    continue;
+                };
+                if path.exists() {
+                    blocking.push((entry.id, name.clone(), path.clone()));
+                }
             }
         }
     }
@@ -1062,4 +1089,124 @@ fn ensure_thread_worktree_undo_safe(repo: &Repository, batches: &[OpBatch]) -> R
         first_drop_command.clone(),
         vec![first_drop_command, "heddle undo --list".to_string()],
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn record(
+        id: &str,
+        thread: &str,
+        materialized: Option<std::path::PathBuf>,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> repo::Thread {
+        repo::Thread {
+            id: id.to_string(),
+            thread: thread.to_string(),
+            target_thread: None,
+            parent_thread: None,
+            mode: repo::ThreadMode::Solid,
+            state: repo::ThreadState::Active,
+            base_state: "base".to_string(),
+            base_root: "root".to_string(),
+            current_state: Some("base".to_string()),
+            merged_state: None,
+            task: None,
+            execution_path: std::path::PathBuf::from("/work/exec"),
+            materialized_path: materialized,
+            changed_paths: vec![],
+            impact_categories: vec![],
+            heavy_impact_paths: vec![],
+            promotion_suggested: false,
+            freshness: repo::ThreadFreshness::Current,
+            verification_summary: repo::ThreadVerificationSummary::default(),
+            confidence_summary: repo::ThreadConfidenceSummary::default(),
+            integration_policy_result: repo::ThreadIntegrationPolicy::default(),
+            created_at: chrono::Utc::now(),
+            updated_at,
+            ephemeral: None,
+            auto: false,
+            shared_target_dir: None,
+        }
+    }
+
+    /// The worktree-safety preflight must check EVERY record the `ThreadCreate`
+    /// inverse will remove — the converge empties the WHOLE same-name set — not
+    /// just the `find_by_thread` winner (cid 3331603138). A non-winner duplicate
+    /// with a LIVE materialized worktree, sitting behind a winner whose path no
+    /// longer exists, must still trip the refusal; otherwise the converge orphans
+    /// that live worktree. Fails against the winner-only check (the winner's path
+    /// is gone, so it passed) and passes against the set-aware check.
+    #[test]
+    fn worktree_undo_safe_checks_full_same_name_set_not_just_winner() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let manager = ThreadManager::new(repo.heddle_dir());
+
+        // A live worktree directory for the NON-winner duplicate.
+        let live_worktree = temp.path().join("live-worktree");
+        std::fs::create_dir_all(&live_worktree).unwrap();
+
+        let now = chrono::Utc::now();
+        // Winner (newer `updated_at`) — its materialized path does NOT exist, so a
+        // winner-only check would not block.
+        let winner = record(
+            "rec-winner",
+            "feature/x",
+            Some(temp.path().join("gone-worktree")),
+            now,
+        );
+        manager.save(&winner).unwrap();
+        // Non-winner duplicate (older) — its materialized path EXISTS on disk.
+        let dup = record(
+            "rec-dup",
+            "feature/x",
+            Some(live_worktree.clone()),
+            now - chrono::Duration::seconds(60),
+        );
+        manager.save(&dup).unwrap();
+
+        // Sanity: the winner-only view would NOT block — the winner is selected and
+        // its path is gone.
+        let winner_seen = manager.find_by_thread("feature/x").unwrap().unwrap();
+        assert_eq!(winner_seen.id, "rec-winner");
+        assert!(!winner_seen.materialized_path.unwrap().exists());
+
+        // Record a `ThreadCreateV2` for the name; its undo converges the name to
+        // empty, removing BOTH same-name records.
+        std::fs::write(temp.path().join("f.txt"), "x").unwrap();
+        let state = repo.snapshot(Some("s".to_string()), None).unwrap().change_id;
+        let scope = repo.op_scope();
+        repo.oplog()
+            .record_batch_scoped(
+                vec![OpRecord::ThreadCreateV2 {
+                    name: "feature/x".to_string(),
+                    state,
+                    manager_snapshot: None,
+                }],
+                Some(&scope),
+            )
+            .unwrap();
+        let batches = repo.oplog().undo_batches_scoped(1, Some(&scope)).unwrap();
+        assert!(
+            batches.iter().any(|b| b.entries.iter().any(|e| matches!(
+                &e.operation,
+                OpRecord::ThreadCreateV2 { name, .. } if name == "feature/x"
+            ))),
+            "the recorded ThreadCreateV2 is the undoable batch"
+        );
+
+        let result = ensure_thread_worktree_undo_safe(&repo, &batches);
+        assert!(
+            result.is_err(),
+            "the live non-winner duplicate worktree must trip the refusal"
+        );
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains(&live_worktree.display().to_string()),
+            "the refusal names the live non-winner worktree path: {msg}"
+        );
+    }
 }

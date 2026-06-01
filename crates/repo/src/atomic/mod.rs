@@ -12,9 +12,9 @@
 //!   post-commit materialized view; a mutation is committed iff its
 //!   `TransactionCommit` marker is durable, deduplicated by the **unbounded
 //!   indexed `transaction_id`** lookup (`OpLog::record_batch_exactly_once`).
-//! - **Nesting = enroll-into-outermost (savepoint) by default**
+//! - **Nesting = enroll-into-outermost (defer the commit marker) by default**
 //!   ([`Tx::enroll`]); eager-commit only for cross-process-visible effects
-//!   ([`Tx::enroll_eager`] + [`EagerMutation`]). The savepoint/eager split is
+//!   ([`Tx::enroll_eager`] + [`EagerMutation`]). The deferred/eager split is
 //!   enforced at the **type** level (a compile error, no runtime const).
 //! - **Panic-safety:** explicit `Result` plumbing is primary; [`Tx`]'s `Drop`
 //!   is an abort-only backstop that never half-commits.
@@ -33,5 +33,5 @@ mod tests;
 pub use committer::OplogRefCommitter;
 pub use execute::execute;
 pub use reconciler::OplogRefReconciler;
-pub use traits::{AtomicMutation, Compensator, EagerMutation, SavepointMutation, StagedCommit};
+pub use traits::{AtomicMutation, Compensator, DeferredMutation, EagerMutation, StagedCommit};
 pub use tx::{RewindLedger, Tx};

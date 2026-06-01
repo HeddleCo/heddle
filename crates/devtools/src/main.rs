@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
+mod check_atomic_ledger_encapsulation;
 mod check_no_silent_default_tree_load;
 mod check_oprecord_exhaustiveness;
 mod check_snapshot_atomicity;
@@ -22,6 +23,9 @@ fn main() -> Result<()> {
             check_no_silent_default_tree_load::run(args.collect())
         }
         Some("check-snapshot-atomicity") => check_snapshot_atomicity::run(args.collect()),
+        Some("check-atomic-ledger-encapsulation") => {
+            check_atomic_ledger_encapsulation::run(args.collect())
+        }
         Some("check-oprecord-exhaustiveness") => {
             check_oprecord_exhaustiveness::run(args.collect())
         }

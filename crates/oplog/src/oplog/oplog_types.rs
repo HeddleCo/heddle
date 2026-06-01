@@ -225,7 +225,7 @@ pub enum OpRecord {
     /// record body. Opaque to keep the `oplog` crate independent of
     /// `repo`-level types; the `repo` crate owns the encoding via
     /// `ThreadManager::snapshot_thread_record` /
-    /// `ThreadManager::restore_thread_record_from_snapshot`. `None` for
+    /// `ThreadManager::decode_thread_record_snapshot`. `None` for
     /// callsites that don't write a ThreadManager record alongside the
     /// op (rename batch's new-name arm, ingest, harness/agent stubs).
     ///
@@ -535,6 +535,24 @@ pub struct OpBatch {
     pub id: u64,
     /// Operations in the batch.
     pub entries: Vec<OpEntry>,
+}
+
+impl OpBatch {
+    /// True iff every entry is a [`OpRecord::TransactionCommit`] marker — the
+    /// commit sentinel of an atomic transaction that staged only direct,
+    /// already-durable effects and so contributed no domain record of its own
+    /// (e.g. `undo`/`redo`, which navigate existing states and append no new
+    /// record). Such a batch carries nothing to undo, redo, or surface in
+    /// operation history; the undo/redo eligibility scans and the `undo --list`
+    /// view filter it out so a record-less transaction's sentinel never
+    /// pollutes the user-facing log.
+    pub fn is_transaction_marker_only(&self) -> bool {
+        !self.entries.is_empty()
+            && self
+                .entries
+                .iter()
+                .all(|entry| matches!(entry.operation, OpRecord::TransactionCommit { .. }))
+    }
 }
 
 #[cfg(test)]

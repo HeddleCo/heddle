@@ -3100,6 +3100,58 @@ fn test_rebase_abort_tolerates_corrupted_pending_advance_line() {
     );
 }
 
+/// heddle#355: the atomic `undo`/`redo` migration commits a record-less
+/// `TransactionCommit` marker batch as its commit point. That marker carries no
+/// user-facing operation, so `undo --list` must filter it out — otherwise every
+/// undo would leave a phantom "transaction commit" batch in the history view
+/// (and the next `undo` would try to undo it). The raw oplog keeps the marker
+/// (it is the dedup/commit sentinel); only the history view hides it.
+#[test]
+fn test_undo_list_hides_atomic_commit_marker_batches() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(temp.path().join("a.txt"), "a").unwrap();
+    heddle_must_succeed(&["capture", "-m", "a"], temp.path());
+    std::fs::write(temp.path().join("b.txt"), "b").unwrap();
+    heddle_must_succeed(&["capture", "-m", "b"], temp.path());
+
+    // Undo appends a record-less atomic commit-marker batch to the oplog.
+    heddle_must_succeed(&["undo"], temp.path());
+
+    // The RAW oplog does contain the marker-only commit batch (the sentinel)...
+    let repo = Repository::open(temp.path()).unwrap();
+    let scope = repo.op_scope();
+    let raw = repo
+        .oplog()
+        .recent_batches_scoped(50, Some(&scope))
+        .unwrap();
+    assert!(
+        raw.iter().any(|batch| batch.is_transaction_marker_only()),
+        "the atomic undo must have committed a marker-only sentinel batch"
+    );
+
+    // ...but `undo --list` filters it, so no listed batch is marker-only.
+    let list = heddle_must_succeed(
+        &["--output", "json", "undo", "--list", "--depth", "20"],
+        temp.path(),
+    );
+    let parsed: Value = serde_json::from_str(&list).unwrap();
+    let batches = parsed["batches"].as_array().unwrap();
+    for batch in batches {
+        let ops = batch["operations"].as_array().unwrap();
+        let only_markers = !ops.is_empty()
+            && ops.iter().all(|op| {
+                op["description"]
+                    .as_str()
+                    .is_some_and(|desc| desc.starts_with("transaction commit"))
+            });
+        assert!(
+            !only_markers,
+            "undo --list must not surface a record-less commit-marker batch: {list}"
+        );
+    }
+}
+
 /// A rebase batch must show up in `heddle undo --list` as a SINGLE
 /// batch with N entries (one per replayed commit), not N separate
 /// batches with one entry each. The JSON contract is the structured

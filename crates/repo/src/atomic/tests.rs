@@ -12,7 +12,7 @@ use refs::{Head, RefExpectation, RefManager, RefUpdate};
 use tempfile::TempDir;
 
 use super::{
-    AtomicMutation, Compensator, EagerMutation, RewindLedger, SavepointMutation, StagedCommit, Tx,
+    AtomicMutation, Compensator, DeferredMutation, EagerMutation, RewindLedger, StagedCommit, Tx,
     execute,
 };
 use crate::Repository;
@@ -41,7 +41,7 @@ impl AtomicMutation for Leg {
     fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         let id = self.id;
         let log = Rc::clone(&self.log);
-        tx.on_rewind(move || {
+        tx.on_rewind("test-leg", move || {
             log.borrow_mut().push(id);
             Ok(())
         });
@@ -52,7 +52,7 @@ impl AtomicMutation for Leg {
     }
 }
 
-impl SavepointMutation for Leg {}
+impl DeferredMutation for Leg {}
 
 /// A composite that enrolls three legs; the third fails.
 struct FailingComposite {
@@ -116,6 +116,73 @@ fn reverse_order_rewind_on_failure() {
     );
 }
 
+/// `Tx::step` ordering — the heddle#355 hardening. A `forward` that returns
+/// `Err` must leave the ledger EMPTY: no inverse is registered for an effect
+/// that never happened, so a later unwind compensates nothing. This is the
+/// invariant that makes the register-then-forward footgun unrepresentable.
+#[test]
+fn step_registers_no_inverse_when_forward_fails() {
+    let (_t, repo) = test_repo();
+    let mut tx = Tx::root(&repo, "step-forward-fails".to_string());
+    let inverse_ran = Rc::new(RefCell::new(false));
+    let flag = Rc::clone(&inverse_ran);
+
+    let result: Result<()> = tx.step(
+        || Err(HeddleError::Config("forward failed".to_string())),
+        move || {
+            *flag.borrow_mut() = true;
+            Ok(())
+        },
+    );
+
+    assert!(result.is_err(), "step surfaces the forward's error");
+    // Unwind: with an empty ledger this is a no-op and the inverse never runs.
+    tx.rewind_all().unwrap();
+    assert!(
+        !*inverse_ran.borrow(),
+        "a forward that failed must register NO inverse"
+    );
+}
+
+/// `Tx::step` happy path: a successful `forward` returns its value and registers
+/// EXACTLY ONE inverse, which runs (once) on a later unwind — not before.
+#[test]
+fn step_registers_one_inverse_after_forward_succeeds() {
+    let (_t, repo) = test_repo();
+    let mut tx = Tx::root(&repo, "step-forward-ok".to_string());
+    let unwound = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&unwound);
+    let forward_ran = Rc::new(RefCell::new(false));
+    let observed = Rc::clone(&forward_ran);
+
+    let value = tx
+        .step(
+            || {
+                *observed.borrow_mut() = true;
+                Ok(7u32)
+            },
+            move || {
+                sink.borrow_mut().push(1u32);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    assert_eq!(value, 7, "step returns the forward's produced value");
+    assert!(*forward_ran.borrow(), "forward ran");
+    assert!(
+        unwound.borrow().is_empty(),
+        "the inverse must NOT run until the transaction unwinds"
+    );
+
+    tx.rewind_all().unwrap();
+    assert_eq!(
+        *unwound.borrow(),
+        vec![1],
+        "exactly one inverse was registered and it runs once on unwind"
+    );
+}
+
 /// A mutation whose `apply` panics after staging an effect.
 struct Panicker {
     log: Rc<RefCell<Vec<u32>>>,
@@ -130,7 +197,7 @@ impl AtomicMutation for Panicker {
 
     fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         let log = Rc::clone(&self.log);
-        tx.on_rewind(move || {
+        tx.on_rewind("test-panicker", move || {
             log.borrow_mut().push(99);
             Ok(())
         });
@@ -381,9 +448,9 @@ impl AtomicMutation for EagerThenFail {
 
 /// The eager-commit exception (heddle#330 §3.2): an eagerly-committed sub-op's
 /// compensator runs when the outer transaction later fails, so a leaked
-/// reservation is unrepresentable. The savepoint/eager split is enforced at the
+/// reservation is unrepresentable. The deferred/eager split is enforced at the
 /// type level — `tx.enroll(Reserve { .. })` would not compile (`Reserve` is not
-/// a `SavepointMutation`), so `enroll_eager` is the only path.
+/// a `DeferredMutation`), so `enroll_eager` is the only path.
 #[test]
 fn eager_compensator_runs_on_outer_rollback() {
     let (_t, repo) = test_repo();
@@ -616,8 +683,8 @@ fn tx_accessors_and_rewind_error_paths() {
 
     // Two failing inverses: LIFO order ⇒ the last-pushed runs first and its
     // error is surfaced; the earlier one's error is attempted then suppressed.
-    tx.on_rewind(|| Err(HeddleError::Config("second".to_string())));
-    tx.on_rewind(|| Err(HeddleError::Config("first".to_string())));
+    tx.on_rewind("second", || Err(HeddleError::Config("second".to_string())));
+    tx.on_rewind("first", || Err(HeddleError::Config("first".to_string())));
     let err = tx.rewind_all().unwrap_err();
     assert!(
         matches!(err, HeddleError::Config(m) if m == "first"),
@@ -654,7 +721,7 @@ fn tx_accessors_and_rewind_error_paths() {
     // Drop backstop: an uncommitted Tx whose inverse fails logs (never panics).
     {
         let mut tx3 = Tx::root(&repo, "drop-backstop-tx".to_string());
-        tx3.on_rewind(|| Err(HeddleError::Config("drop-time".to_string())));
+        tx3.on_rewind("drop-time", || Err(HeddleError::Config("drop-time".to_string())));
         // tx3 dropped here without commit ⇒ Drop runs rewind_all, gets Err, logs.
     }
 }
@@ -829,7 +896,7 @@ impl AtomicMutation for StageThenFail {
     }
 }
 
-impl SavepointMutation for StageThenFail {}
+impl DeferredMutation for StageThenFail {}
 
 /// The whole-op rewind must run on the `apply`-returns-`Err` path, not only
 /// after a successful `apply` (cid 3329490979). Otherwise a mutation that stages

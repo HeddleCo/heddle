@@ -19,6 +19,16 @@ use super::{
     packed_oplog::PackedOpLog,
 };
 
+/// A `TransactionCommit` marker carries no user-facing operation: it is the
+/// atomic commit sentinel, not a forward op. The undo/redo eligibility scans
+/// ignore it so a record-less transaction (e.g. an `undo`/`redo` whose commit
+/// batch holds only the marker) is never itself selected as an undoable or
+/// redoable unit. A batch with at least one *non-marker* entry (the common
+/// `[op, …, TransactionCommit]` shape) still qualifies on that entry.
+fn is_transaction_commit(op: &OpRecord) -> bool {
+    matches!(op, OpRecord::TransactionCommit { .. })
+}
+
 /// Operation log for tracking operations and enabling undo.
 pub struct OpLog {
     pub(crate) root: PathBuf,
@@ -157,6 +167,21 @@ impl OpLog {
         self.collect_batches_scoped(count, |_| true, scope)
     }
 
+    /// Like [`recent_batches_scoped`](Self::recent_batches_scoped) but counts
+    /// only **user-facing** batches: the record-less `TransactionCommit`
+    /// sentinels an `undo`/`redo` appends are dropped by the predicate BEFORE
+    /// the `count` limit applies, so `--depth N` yields N real operations even
+    /// when the newest batch is a commit marker. Filtering *after* a fixed-count
+    /// fetch returned empty for `--depth 1` whenever the latest op was itself an
+    /// undo/redo (heddle#355 cid 3330867777).
+    pub fn recent_user_batches_scoped(
+        &self,
+        count: usize,
+        scope: Option<&str>,
+    ) -> Result<Vec<OpBatch>> {
+        self.collect_batches_scoped(count, |batch| !batch.is_transaction_marker_only(), scope)
+    }
+
     pub fn undo_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
         self.undo_batches_scoped(count, None)
     }
@@ -164,7 +189,12 @@ impl OpLog {
     pub fn undo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
         self.collect_batches_scoped(
             count,
-            |batch| batch.entries.iter().any(|e| !e.undone),
+            |batch| {
+                batch
+                    .entries
+                    .iter()
+                    .any(|e| !e.undone && !is_transaction_commit(&e.operation))
+            },
             scope,
         )
     }
@@ -174,7 +204,16 @@ impl OpLog {
     }
 
     pub fn redo_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
-        self.collect_batches_scoped(count, |batch| batch.entries.iter().any(|e| e.undone), scope)
+        self.collect_batches_scoped(
+            count,
+            |batch| {
+                batch
+                    .entries
+                    .iter()
+                    .any(|e| e.undone && !is_transaction_commit(&e.operation))
+            },
+            scope,
+        )
     }
 
     /// Mark a batch as undone.

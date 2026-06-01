@@ -312,6 +312,55 @@ impl Repository {
         })
     }
 
+    /// Capture the raw bytes of the per-blob redaction sidecar (or `None` when
+    /// the sidecar file does not exist), for a capture-restore rollback step.
+    /// [`remove_redaction`](Self::remove_redaction) is a non-atomic forward —
+    /// it rewrites or deletes the sidecar — so the undo path snapshots the
+    /// whole sidecar before the removal and restores it via
+    /// [`restore_redaction_sidecar`](Self::restore_redaction_sidecar) if the
+    /// surrounding transaction later fails, so a rolled-back undo never
+    /// re-exposes a still-redacted blob.
+    pub fn capture_redaction_sidecar(&self, blob: &ContentHash) -> Result<Option<Vec<u8>>> {
+        let path = self.redaction_path_for_blob(blob);
+        if !path.exists() {
+            return Ok(None);
+        }
+        Ok(Some(
+            fs::read(&path).with_context(|| format!("read '{}'", path.display()))?,
+        ))
+    }
+
+    /// Restore the per-blob redaction sidecar to a snapshot captured by
+    /// [`capture_redaction_sidecar`](Self::capture_redaction_sidecar): rewrite
+    /// the captured bytes, or delete the sidecar if it was absent at capture
+    /// time. Absolute (write-or-delete), so re-running it on the rollback path
+    /// is idempotent.
+    pub fn restore_redaction_sidecar(
+        &self,
+        blob: &ContentHash,
+        snapshot: Option<Vec<u8>>,
+    ) -> Result<()> {
+        let path = self.redaction_path_for_blob(blob);
+        match snapshot {
+            Some(bytes) => {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("create '{}'", parent.display()))?;
+                }
+                write_file_atomic(&path, &bytes)
+                    .with_context(|| format!("write '{}'", path.display()))?;
+            }
+            None => {
+                if path.exists() {
+                    fs::remove_file(&path).with_context(|| {
+                        format!("remove redactions sidecar '{}'", path.display())
+                    })?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Look up the redaction matching `(blob, state, path)` and report
     /// whether its underlying bytes have been purged. Used by the undo
     /// pre-flight to refuse before any mutation when removing the
