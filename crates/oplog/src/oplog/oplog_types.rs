@@ -225,7 +225,7 @@ pub enum OpRecord {
     /// record body. Opaque to keep the `oplog` crate independent of
     /// `repo`-level types; the `repo` crate owns the encoding via
     /// `ThreadManager::snapshot_thread_record` /
-    /// `ThreadManager::restore_thread_record_from_snapshot`. `None` for
+    /// `ThreadManager::decode_thread_record_snapshot`. `None` for
     /// callsites that don't write a ThreadManager record alongside the
     /// op (rename batch's new-name arm, ingest, harness/agent stubs).
     ///

@@ -249,7 +249,8 @@ bytes of the `Thread` record body — kept opaque so the `oplog` crate
 stays independent of `repo`-level types. The `repo` crate owns the
 encoding via two new helpers on `ThreadManager`:
 `snapshot_thread_record(thread_name) -> Option<Vec<u8>>` and
-`restore_thread_record_from_snapshot(bytes) -> Thread`. `manager_snapshot`
+`decode_thread_record_snapshot(bytes) -> Thread` (the redo applier converges
+the decoded record onto the thread's record set). `manager_snapshot`
 is `None` for callsites that don't write a `ThreadManager` record
 alongside the op (rename batch's new-name arm, ingest, harness/agent
 stubs).

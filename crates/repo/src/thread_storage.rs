@@ -2,6 +2,7 @@
 //! Thread storage and lifecycle management.
 
 use objects::store::ObjectStore;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -327,15 +328,21 @@ impl ThreadManager {
         self.workspace_store.delete_value(thread_id)
     }
 
-    /// Converge the persisted state for thread `name` to `target`: delete EVERY
-    /// record currently filed under `name` whose record id differs from the
-    /// target's, then (if `Some`) ensure `target` is saved. Post-condition: the
-    /// set of records with `.thread == name` is exactly `{target}` (or empty),
-    /// so [`find_by_thread`](Self::find_by_thread) returns `target` REGARDLESS of
-    /// what (possibly unknown-id, newer-timestamped) record a rolled-back forward
-    /// left behind. Correct-by-construction: the leaked record's id never has to
-    /// be known, because every non-target record under the name is dropped.
-    pub fn restore_to_snapshot(&self, name: &str, target: Option<&Thread>) -> Result<()> {
+    /// Converge the persisted record set for thread `name` to EXACTLY `desired`
+    /// (by record id), atomically under a single write lock: delete every record
+    /// filed under `name` whose id is not in `desired`, then save every record in
+    /// `desired`. Post-condition: `{ records with .thread == name }` has exactly
+    /// the id-set of `desired`, so [`find_by_thread`](Self::find_by_thread)
+    /// returns one of `desired` REGARDLESS of what (possibly unknown-id,
+    /// newer-timestamped) record a rolled-back or duplicating forward left behind
+    /// — the leaked record's id never has to be known, because every non-`desired`
+    /// record under the name is dropped.
+    ///
+    /// This is the SOLE lock-atomic mutation point for a thread's record set:
+    /// every undo/redo thread-record convergence (save, redo-restore, undo-remove)
+    /// routes through it, so there is one chokepoint, not a per-path collection of
+    /// save/delete sequences each racing a concurrent same-name writer.
+    pub fn converge_records(&self, name: &str, desired: &[Thread]) -> Result<()> {
         // Acquire the write lock ONCE and perform the whole enumerate→delete→save
         // under that single guard, via the PRIVATE file-level helpers. The public
         // `list`/`delete`/`save` each re-acquire `write_lock()`, which is NOT
@@ -344,18 +351,35 @@ impl ThreadManager {
         // unlocked `list()` snapshot and the deletes could leak a record that
         // survives the converge.
         let _lock = self.write_lock()?;
-        let keep = target.map(|t| t.id.as_str());
+        let keep: HashSet<&str> = desired.iter().map(|t| t.id.as_str()).collect();
         for record in self.list_record_files()? {
-            if record.thread == name && Some(record.id.as_str()) != keep {
+            if record.thread == name && !keep.contains(record.id.as_str()) {
                 self.record_store.delete_value(&record.id)?;
                 self.workspace_store.delete_value(&record.id)?;
             }
         }
-        if let Some(target) = target {
-            self.save_record_file(&target.to_record())?;
-            self.save_workspace_file(&target.id, &target.workspace_state())?;
+        for thread in desired {
+            self.save_record_file(&thread.to_record())?;
+            self.save_workspace_file(&thread.id, &thread.workspace_state())?;
         }
         Ok(())
+    }
+
+    /// Snapshot every record currently filed under `name` (lock-atomic), hydrated
+    /// with its workspace half, for registering a converge-back inverse. Pairs
+    /// with [`converge_records`](Self::converge_records): capture the full prior
+    /// same-name set with this, and `converge_records(name, &prior)` restores it
+    /// exactly on rollback.
+    pub fn snapshot_records(&self, name: &str) -> Result<Vec<Thread>> {
+        // Single write lock across the enumerate→hydrate; the file-level helpers
+        // (`list_record_files`, `load_workspace_file` via `hydrate_…`) never
+        // re-acquire it, so the read is consistent and deadlock-free.
+        let _lock = self.write_lock()?;
+        self.list_record_files()?
+            .into_iter()
+            .filter(|record| record.thread == name)
+            .map(|record| self.hydrate_thread_from_record(record))
+            .collect()
     }
 
     pub fn load_record(&self, record_id: &str) -> Result<Option<ThreadRecord>> {
@@ -419,22 +443,23 @@ impl ThreadManager {
         Ok(Some(bytes))
     }
 
-    /// Decode and persist a `Thread` record from rmp-serde bytes
-    /// produced by `snapshot_thread_record`. Used by `heddle redo` of a
-    /// `ThreadCreateV2` to restore the record body that undo destroyed
+    /// Decode a `Thread` record from rmp-serde bytes produced by
+    /// `snapshot_thread_record`. Used by `heddle redo` of a
+    /// `ThreadCreateV2` to reconstruct the record body that undo destroyed
     /// (heddle#23 r2 Codex P1, mirroring the FastForwardV2 pattern from
     /// heddle#99 r2 — record what redo needs).
     ///
-    /// Returns the restored `Thread` for callers that want to inspect
-    /// it (e.g. for stderr summaries). An empty/invalid snapshot
-    /// surfaces as `HeddleError::Other` — the redo arm logs and falls
-    /// back to ref-only restore rather than failing the whole batch.
-    pub fn restore_thread_record_from_snapshot(&self, bytes: &[u8]) -> Result<Thread> {
-        let thread: Thread = rmp_serde::from_slice(bytes).map_err(|e| {
+    /// Decode ONLY — it does NOT persist. The redo applier converges the
+    /// decoded record onto the thread's record set via
+    /// [`converge_records`](Self::converge_records), so the restore writes the
+    /// record as the SOLE record under the name (a raw `save` would leave a
+    /// pre-existing duplicate behind). An invalid snapshot surfaces as
+    /// `HeddleError::Serialization` — the redo arm logs and falls back to
+    /// ref-only restore rather than failing the whole batch.
+    pub fn decode_thread_record_snapshot(&self, bytes: &[u8]) -> Result<Thread> {
+        rmp_serde::from_slice(bytes).map_err(|e| {
             HeddleError::Serialization(format!("decode thread record snapshot: {}", e))
-        })?;
-        self.save(&thread)?;
-        Ok(thread)
+        })
     }
 }
 
@@ -628,14 +653,15 @@ mod tests {
         );
     }
 
-    /// `restore_to_snapshot` is the converge primitive every thread-record undo
-    /// restore routes through (heddle#355 r6, close-the-class). A non-atomic
-    /// forward can write a record under a DIFFERENT id with a NEWER `updated_at`,
-    /// which `find_by_thread`'s `max_by_key(updated_at)` would then return. The
-    /// converge must delete that leaked record so the post-condition holds: the
-    /// records filed under `name` are exactly `{target}`.
+    /// `converge_records` is the SOLE lock-atomic record-set mutation point every
+    /// thread-record undo/redo path routes through (heddle#355 r8, close-the-class).
+    /// A non-atomic / duplicating forward can write a record under a DIFFERENT id
+    /// with a NEWER `updated_at`, which `find_by_thread`'s `max_by_key(updated_at)`
+    /// would then return. Converging to the single target must delete that leaked
+    /// record so the post-condition holds: the records filed under `name` are
+    /// exactly the id-set of `desired`.
     #[test]
-    fn restore_to_snapshot_drops_leaked_newer_id_record() {
+    fn converge_records_drops_leaked_newer_id_record() {
         let temp = TempDir::new().unwrap();
         let manager = ThreadManager::new(temp.path());
         let name = "feature/converge";
@@ -659,7 +685,7 @@ mod tests {
             "precondition: newer leaked record shadows prev"
         );
 
-        manager.restore_to_snapshot(name, Some(&prev)).unwrap();
+        manager.converge_records(name, std::slice::from_ref(&prev)).unwrap();
 
         assert_eq!(
             manager.find_by_thread(name).unwrap().unwrap().id,
@@ -679,16 +705,15 @@ mod tests {
         );
     }
 
-    /// Lock-atomic converge over MULTIPLE same-name records (heddle#355 r7, Codex
-    /// cid 3331420787). With the target PLUS two other same-name records (one
-    /// newer-timestamped, so it would shadow the target via
-    /// `find_by_thread`'s `max_by_key(updated_at)`), the converge enumerates and
-    /// deletes them all under a SINGLE write lock via the private file-level
-    /// helpers — never re-acquiring the (non-re-entrant) lock through the public
-    /// `list`/`delete`/`save`. Both storage halves (record + workspace file) of
-    /// each dropped record must be gone.
+    /// Lock-atomic converge over MULTIPLE same-name records (heddle#355 r7/r8).
+    /// With the target PLUS two other same-name records (one newer-timestamped, so
+    /// it would shadow the target via `find_by_thread`'s `max_by_key(updated_at)`),
+    /// the converge enumerates and deletes them all under a SINGLE write lock via
+    /// the private file-level helpers — never re-acquiring the (non-re-entrant)
+    /// lock through the public `list`/`delete`/`save`. Both storage halves (record
+    /// + workspace file) of each dropped record must be gone.
     #[test]
-    fn restore_to_snapshot_converges_multiple_same_name_records() {
+    fn converge_records_converges_multiple_same_name_records() {
         let temp = TempDir::new().unwrap();
         let manager = ThreadManager::new(temp.path());
         let name = "feature/multi";
@@ -716,7 +741,7 @@ mod tests {
             "precondition: the newer same-name record shadows the target"
         );
 
-        manager.restore_to_snapshot(name, Some(&target)).unwrap();
+        manager.converge_records(name, std::slice::from_ref(&target)).unwrap();
 
         let under_name: Vec<_> = manager
             .list()
@@ -747,10 +772,69 @@ mod tests {
         assert!(manager.load_workspace_file("rec-target").unwrap().is_some());
     }
 
-    /// `target = None` empties the name: every record filed under it is dropped,
+    /// Converging to a 2-record `desired` set keeps EXACTLY those two ids and drops
+    /// every other same-name record — the full-set generalization (heddle#355 r8):
+    /// converge is not limited to one-or-empty. Start with ≥3 records under the
+    /// name and converge to a chosen pair.
+    #[test]
+    fn converge_records_converges_to_a_two_record_set() {
+        let temp = TempDir::new().unwrap();
+        let manager = ThreadManager::new(temp.path());
+        let name = "feature/pair";
+
+        let mut keep_a = sample_thread();
+        keep_a.id = "keep-a".to_string();
+        keep_a.thread = name.to_string();
+        keep_a.updated_at = Utc::now();
+        manager.save(&keep_a).unwrap();
+
+        let mut keep_b = sample_thread();
+        keep_b.id = "keep-b".to_string();
+        keep_b.thread = name.to_string();
+        keep_b.updated_at = keep_a.updated_at - chrono::Duration::seconds(10);
+        manager.save(&keep_b).unwrap();
+
+        let mut drop_c = sample_thread();
+        drop_c.id = "drop-c".to_string();
+        drop_c.thread = name.to_string();
+        drop_c.updated_at = keep_a.updated_at + chrono::Duration::seconds(10);
+        manager.save(&drop_c).unwrap();
+        assert_eq!(
+            manager.list().unwrap().iter().filter(|t| t.thread == name).count(),
+            3,
+            "precondition: three records under the name"
+        );
+
+        manager
+            .converge_records(name, &[keep_a.clone(), keep_b.clone()])
+            .unwrap();
+
+        let ids: HashSet<String> = manager
+            .list()
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.thread == name)
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(
+            ids,
+            HashSet::from(["keep-a".to_string(), "keep-b".to_string()]),
+            "exactly the desired pair remains under the name"
+        );
+        assert!(
+            manager.load_record_file("drop-c").unwrap().is_none(),
+            "the non-desired record is dropped"
+        );
+        assert!(
+            manager.load_workspace_file("drop-c").unwrap().is_none(),
+            "the non-desired record's workspace half is dropped"
+        );
+    }
+
+    /// An empty `desired` empties the name: every record filed under it is dropped,
     /// and records for OTHER names are untouched.
     #[test]
-    fn restore_to_snapshot_none_empties_only_the_named_thread() {
+    fn converge_records_empty_empties_only_the_named_thread() {
         let temp = TempDir::new().unwrap();
         let manager = ThreadManager::new(temp.path());
 
@@ -768,7 +852,7 @@ mod tests {
         other.thread = "feature/b".to_string();
         manager.save(&other).unwrap();
 
-        manager.restore_to_snapshot("feature/a", None).unwrap();
+        manager.converge_records("feature/a", &[]).unwrap();
 
         assert!(
             manager.find_by_thread("feature/a").unwrap().is_none(),
@@ -781,10 +865,10 @@ mod tests {
         );
     }
 
-    /// When `target` is already the sole record under the name, the converge is a
-    /// no-op that leaves it intact.
+    /// When the desired single record is already the sole record under the name,
+    /// the converge is a no-op that leaves it intact.
     #[test]
-    fn restore_to_snapshot_target_already_sole_is_noop() {
+    fn converge_records_target_already_sole_is_noop() {
         let temp = TempDir::new().unwrap();
         let manager = ThreadManager::new(temp.path());
         let name = "feature/sole";
@@ -794,7 +878,7 @@ mod tests {
         rec.thread = name.to_string();
         manager.save(&rec).unwrap();
 
-        manager.restore_to_snapshot(name, Some(&rec)).unwrap();
+        manager.converge_records(name, std::slice::from_ref(&rec)).unwrap();
 
         assert_eq!(
             manager.find_by_thread(name).unwrap().unwrap().id,
@@ -808,6 +892,45 @@ mod tests {
                 .filter(|t| t.thread == name)
                 .count(),
             1
+        );
+    }
+
+    /// `snapshot_records` returns the full hydrated same-name set (record + the
+    /// workspace half), and only that set — the read paired with
+    /// `converge_records` for capturing a converge-back inverse.
+    #[test]
+    fn snapshot_records_returns_full_hydrated_same_name_set() {
+        let temp = TempDir::new().unwrap();
+        let manager = ThreadManager::new(temp.path());
+        let name = "feature/snap";
+
+        let mut a = sample_thread();
+        a.id = "snap-a".to_string();
+        a.thread = name.to_string();
+        a.materialized_path = Some(PathBuf::from("/work/snap-a"));
+        manager.save(&a).unwrap();
+        let mut b = sample_thread();
+        b.id = "snap-b".to_string();
+        b.thread = name.to_string();
+        manager.save(&b).unwrap();
+        // A record under a DIFFERENT name must not appear in the snapshot.
+        let mut other = sample_thread();
+        other.id = "snap-other".to_string();
+        other.thread = "feature/other".to_string();
+        manager.save(&other).unwrap();
+
+        let snap = manager.snapshot_records(name).unwrap();
+        let ids: HashSet<String> = snap.iter().map(|t| t.id.clone()).collect();
+        assert_eq!(
+            ids,
+            HashSet::from(["snap-a".to_string(), "snap-b".to_string()]),
+            "exactly the same-name set is snapshotted, other names excluded"
+        );
+        let snap_a = snap.iter().find(|t| t.id == "snap-a").unwrap();
+        assert_eq!(
+            snap_a.materialized_path,
+            Some(PathBuf::from("/work/snap-a")),
+            "the workspace half is hydrated into the snapshot"
         );
     }
 

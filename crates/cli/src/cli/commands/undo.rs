@@ -1039,14 +1039,18 @@ fn ensure_thread_worktree_undo_safe(repo: &Repository, batches: &[OpBatch]) -> R
                 | OpRecord::RemoteThreadDelete { .. }
                 | OpRecord::UndoRecoveryUpdate { .. } => continue,
             };
-            let Some(record) = manager.find_by_thread(name)? else {
-                continue;
-            };
-            let Some(path) = record.materialized_path.as_ref() else {
-                continue;
-            };
-            if path.exists() {
-                blocking.push((entry.id, name.clone(), path.clone()));
+            // The `ThreadCreate` inverse converges the name to EMPTY — it removes
+            // EVERY record filed under the name, not just the `find_by_thread`
+            // winner. So the preflight must check the FULL same-name set: a
+            // non-winner duplicate with a live `materialized_path` would otherwise
+            // pass this gate and have its worktree orphaned by the converge.
+            for record in manager.snapshot_records(name)? {
+                let Some(path) = record.materialized_path.as_ref() else {
+                    continue;
+                };
+                if path.exists() {
+                    blocking.push((entry.id, name.clone(), path.clone()));
+                }
             }
         }
     }
@@ -1085,4 +1089,124 @@ fn ensure_thread_worktree_undo_safe(repo: &Repository, batches: &[OpBatch]) -> R
         first_drop_command.clone(),
         vec![first_drop_command, "heddle undo --list".to_string()],
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn record(
+        id: &str,
+        thread: &str,
+        materialized: Option<std::path::PathBuf>,
+        updated_at: chrono::DateTime<chrono::Utc>,
+    ) -> repo::Thread {
+        repo::Thread {
+            id: id.to_string(),
+            thread: thread.to_string(),
+            target_thread: None,
+            parent_thread: None,
+            mode: repo::ThreadMode::Solid,
+            state: repo::ThreadState::Active,
+            base_state: "base".to_string(),
+            base_root: "root".to_string(),
+            current_state: Some("base".to_string()),
+            merged_state: None,
+            task: None,
+            execution_path: std::path::PathBuf::from("/work/exec"),
+            materialized_path: materialized,
+            changed_paths: vec![],
+            impact_categories: vec![],
+            heavy_impact_paths: vec![],
+            promotion_suggested: false,
+            freshness: repo::ThreadFreshness::Current,
+            verification_summary: repo::ThreadVerificationSummary::default(),
+            confidence_summary: repo::ThreadConfidenceSummary::default(),
+            integration_policy_result: repo::ThreadIntegrationPolicy::default(),
+            created_at: chrono::Utc::now(),
+            updated_at,
+            ephemeral: None,
+            auto: false,
+            shared_target_dir: None,
+        }
+    }
+
+    /// The worktree-safety preflight must check EVERY record the `ThreadCreate`
+    /// inverse will remove — the converge empties the WHOLE same-name set — not
+    /// just the `find_by_thread` winner (cid 3331603138). A non-winner duplicate
+    /// with a LIVE materialized worktree, sitting behind a winner whose path no
+    /// longer exists, must still trip the refusal; otherwise the converge orphans
+    /// that live worktree. Fails against the winner-only check (the winner's path
+    /// is gone, so it passed) and passes against the set-aware check.
+    #[test]
+    fn worktree_undo_safe_checks_full_same_name_set_not_just_winner() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let manager = ThreadManager::new(repo.heddle_dir());
+
+        // A live worktree directory for the NON-winner duplicate.
+        let live_worktree = temp.path().join("live-worktree");
+        std::fs::create_dir_all(&live_worktree).unwrap();
+
+        let now = chrono::Utc::now();
+        // Winner (newer `updated_at`) — its materialized path does NOT exist, so a
+        // winner-only check would not block.
+        let winner = record(
+            "rec-winner",
+            "feature/x",
+            Some(temp.path().join("gone-worktree")),
+            now,
+        );
+        manager.save(&winner).unwrap();
+        // Non-winner duplicate (older) — its materialized path EXISTS on disk.
+        let dup = record(
+            "rec-dup",
+            "feature/x",
+            Some(live_worktree.clone()),
+            now - chrono::Duration::seconds(60),
+        );
+        manager.save(&dup).unwrap();
+
+        // Sanity: the winner-only view would NOT block — the winner is selected and
+        // its path is gone.
+        let winner_seen = manager.find_by_thread("feature/x").unwrap().unwrap();
+        assert_eq!(winner_seen.id, "rec-winner");
+        assert!(!winner_seen.materialized_path.unwrap().exists());
+
+        // Record a `ThreadCreateV2` for the name; its undo converges the name to
+        // empty, removing BOTH same-name records.
+        std::fs::write(temp.path().join("f.txt"), "x").unwrap();
+        let state = repo.snapshot(Some("s".to_string()), None).unwrap().change_id;
+        let scope = repo.op_scope();
+        repo.oplog()
+            .record_batch_scoped(
+                vec![OpRecord::ThreadCreateV2 {
+                    name: "feature/x".to_string(),
+                    state,
+                    manager_snapshot: None,
+                }],
+                Some(&scope),
+            )
+            .unwrap();
+        let batches = repo.oplog().undo_batches_scoped(1, Some(&scope)).unwrap();
+        assert!(
+            batches.iter().any(|b| b.entries.iter().any(|e| matches!(
+                &e.operation,
+                OpRecord::ThreadCreateV2 { name, .. } if name == "feature/x"
+            ))),
+            "the recorded ThreadCreateV2 is the undoable batch"
+        );
+
+        let result = ensure_thread_worktree_undo_safe(&repo, &batches);
+        assert!(
+            result.is_err(),
+            "the live non-winner duplicate worktree must trip the refusal"
+        );
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains(&live_worktree.display().to_string()),
+            "the refusal names the live non-winner worktree path: {msg}"
+        );
+    }
 }

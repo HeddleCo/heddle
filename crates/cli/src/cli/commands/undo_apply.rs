@@ -380,76 +380,88 @@ impl<'a> EntrySteps<'_, 'a> {
         )
     }
 
-    /// Persist a mutated ThreadManager record; inverse converges the persisted
-    /// state for the thread back to its prior form (or removes it if there was
-    /// none). NON-atomic: `ThreadManager::save` writes the record file AND the
-    /// workspace file, so a failure on the second write leaves the first applied.
-    /// The restore routes through [`ThreadManager::restore_to_snapshot`], which
-    /// drops EVERY record under the thread name except `prev` — so a replacement
-    /// save that wrote a NEW-id, newer-timestamped record cannot leak past
-    /// rollback regardless of whether its id is known here.
-    fn save_thread_record(&mut self, record: Thread) -> HeddleResult<()> {
+    /// The SOLE way the undo/redo applier mutates a thread's persisted record
+    /// set: converge the records filed under `name` to exactly `desired`, as ONE
+    /// `step_nonatomic`. Capture snapshots the FULL prior same-name set
+    /// ([`ThreadManager::snapshot_records`]); the inverse converges back to it;
+    /// the forward converges to `desired`. Both directions run through
+    /// [`ThreadManager::converge_records`] — the lone lock-atomic record-set
+    /// mutation point — so no entry-apply path can mutate a thread's record set
+    /// except through it.
+    ///
+    /// GRANULARITY. One whole-set capture→converge inverse REPLACES the prior
+    /// per-record `step_nonatomic` inverses. Correct, not a regression: per-record
+    /// granularity existed to unwind a NON-atomic forward that could fail partway
+    /// (the r3/r4 `save`/`delete` loop). `converge_records` is lock-atomic /
+    /// all-or-nothing, so a single converge-back-to-prior fully reverses it.
+    fn converge_thread_records(&mut self, name: &str, desired: Vec<Thread>) -> HeddleResult<()> {
         let repo = self.repo();
-        let manager = ThreadManager::new(repo.heddle_dir());
-        let name = record.thread.clone();
-        let prev = manager.find_by_thread(&name)?;
-        self.step_nonatomic(
-            || Ok(prev),
-            move |prev| {
-                ThreadManager::new(repo.heddle_dir()).restore_to_snapshot(&name, prev.as_ref())
-            },
-            move || ThreadManager::new(repo.heddle_dir()).save(&record),
-        )
-    }
-
-    /// Delete a ThreadManager record; inverse re-saves it. NON-atomic:
-    /// `ThreadManager::delete` removes the record file AND the workspace file,
-    /// so the inverse re-saves the captured record wholesale.
-    fn delete_thread_record(&mut self, record: Thread) -> HeddleResult<()> {
-        let repo = self.repo();
-        let id = record.id.clone();
-        self.step_nonatomic(
-            || Ok(record),
-            move |record| ThreadManager::new(repo.heddle_dir()).save(&record),
-            move || ThreadManager::new(repo.heddle_dir()).delete(&id),
-        )
-    }
-
-    /// Restore a ThreadManager record from a redo snapshot; inverse converges the
-    /// persisted state for the thread back to its prior form (or empties it if
-    /// there was none). A snapshot that fails to decode is a non-fatal warning
-    /// (pre-migration parity). NON-atomic for the same record-file +
-    /// workspace-file reason as [`save_thread_record`](Self::save_thread_record).
-    /// The forward (`restore_thread_record_from_snapshot`) writes a record under
-    /// an id buried in the opaque snapshot bytes — possibly different from
-    /// `prev`'s and with a fresher timestamp. Routing the restore through
-    /// [`ThreadManager::restore_to_snapshot`] drops that snapshot-id record on
-    /// rollback without ever needing to know its id.
-    fn restore_thread_record(&mut self, name: &str, bytes: &[u8]) -> HeddleResult<()> {
-        let repo = self.repo();
-        let manager = ThreadManager::new(repo.heddle_dir());
-        let prev = manager.find_by_thread(name)?;
-        let bytes = bytes.to_vec();
         let forward_name = name.to_string();
         let restore_name = name.to_string();
+        let prior = ThreadManager::new(repo.heddle_dir()).snapshot_records(name)?;
         self.step_nonatomic(
-            || Ok(prev),
-            move |prev| {
-                ThreadManager::new(repo.heddle_dir())
-                    .restore_to_snapshot(&restore_name, prev.as_ref())
+            || Ok(prior),
+            move |prior| {
+                ThreadManager::new(repo.heddle_dir()).converge_records(&restore_name, &prior)
+            },
+            move || {
+                ThreadManager::new(repo.heddle_dir()).converge_records(&forward_name, &desired)
+            },
+        )
+    }
+
+    /// Persist a mutated ThreadManager record as the SOLE record under its thread
+    /// name (single-record postcondition). Routes through
+    /// [`converge_thread_records`](Self::converge_thread_records) with
+    /// `desired = [record]`, so a replacement save that would write a NEW-id,
+    /// newer-timestamped record cannot leave a duplicate behind, and rollback
+    /// converges back to the captured prior set regardless of any leaked id.
+    fn save_thread_record(&mut self, record: Thread) -> HeddleResult<()> {
+        let name = record.thread.clone();
+        self.converge_thread_records(&name, vec![record])
+    }
+
+    /// Restore a ThreadManager record from a redo snapshot as the SOLE record
+    /// under its thread name. Capture = the full prior same-name set; inverse =
+    /// converge back to it; forward = DECODE the opaque snapshot bytes and
+    /// [`converge_records`](ThreadManager::converge_records) the name to the single
+    /// restored record — NOT a raw save, so a pre-existing duplicate cannot
+    /// survive (cid 3331603135) and the success path has the same single-record
+    /// postcondition as the rollback converge. A snapshot that fails to decode is
+    /// a non-fatal warning that writes nothing — the on-disk set stays the
+    /// captured prior set (a no-op converge), preserving the pre-migration
+    /// ref-only fallback.
+    fn restore_thread_record(&mut self, name: &str, bytes: &[u8]) -> HeddleResult<()> {
+        let repo = self.repo();
+        let forward_name = name.to_string();
+        let restore_name = name.to_string();
+        let warn_name = name.to_string();
+        let bytes = bytes.to_vec();
+        let prior = ThreadManager::new(repo.heddle_dir()).snapshot_records(name)?;
+        self.step_nonatomic(
+            || Ok(prior),
+            move |prior| {
+                ThreadManager::new(repo.heddle_dir()).converge_records(&restore_name, &prior)
             },
             move || {
                 let manager = ThreadManager::new(repo.heddle_dir());
-                if let Err(e) = manager.restore_thread_record_from_snapshot(&bytes) {
-                    eprintln!(
-                        "warning: redo of `ThreadCreate` for '{}' restored the ref but failed to \
-                         decode the ThreadManager record snapshot ({}). Record-backed commands \
-                         (`thread cd`, delegate) may degrade on this thread — run `heddle thread \
-                         start {}` to recreate the record.",
-                        forward_name, e, forward_name
-                    );
+                match manager.decode_thread_record_snapshot(&bytes) {
+                    Ok(restored) => {
+                        manager.converge_records(&forward_name, std::slice::from_ref(&restored))
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "warning: redo of `ThreadCreate` for '{}' restored the ref but failed \
+                             to decode the ThreadManager record snapshot ({}). Record-backed \
+                             commands (`thread cd`, delegate) may degrade on this thread — run \
+                             `heddle thread start {}` to recreate the record.",
+                            warn_name, e, warn_name
+                        );
+                        // Write nothing: the on-disk set is unchanged (== the
+                        // captured prior set), i.e. a no-op converge.
+                        Ok(())
+                    }
                 }
-                Ok(())
             },
         )
     }
@@ -1494,34 +1506,22 @@ fn change_contains(repo: &Repository, ancestor: &ChangeId, descendant: &ChangeId
 }
 
 /// Remove EVERY ThreadManager record filed under `thread_name`, converging the
-/// name to empty. No-op when none exist. Used by the `ThreadCreate` inverse to
-/// keep refs and record-store state in lockstep (cross-thread undo contract
-/// rule 4). Converging to empty — rather than deleting only the
-/// `find_by_thread` winner — is what closes the duplicate class the converge
-/// primitive tolerates: if multiple records are filed under the name, deleting
-/// just the `max_by_key(updated_at)` winner leaves the older same-name records
-/// as phantoms after the thread ref is gone, and `find_by_thread` would then
-/// surface a thread whose ref no longer exists. Each record is deleted via its
-/// own `delete_thread_record` (a `step_nonatomic` whose inverse re-saves that
-/// exact record), so a later transaction failure rolls back ALL of them, not
-/// just the winner — preserving the per-record rollback granularity invariant.
+/// name to EMPTY as ONE lock-atomic `step_nonatomic` (cid 3331603131). Used by
+/// the `ThreadCreate`/`ThreadCreateV2` inverse to keep refs and record-store
+/// state in lockstep (cross-thread undo contract rule 4).
 ///
-/// RESIDUAL: the `list()` snapshot → per-record-delete sequence has a narrow
-/// window vs a concurrent NON-undo writer (a `thread start` racing an in-flight
-/// undo). That window is a pre-existing property of the thread store (plain
-/// thread commands already race each other identically) and is not introduced
-/// by this migration; the per-effect `step_nonatomic` ledger model cannot hold
-/// a file lock across a whole multi-step entry.
+/// Converging to empty under a SINGLE write lock via
+/// [`ThreadManager::converge_records`] — rather than taking an unlocked `list()`
+/// snapshot and deleting each record separately — is what closes the duplicate
+/// class: a same-name writer that lands between the snapshot and the deletes can
+/// no longer survive the converge (the old per-record loop had exactly that
+/// window). Deleting the FULL same-name set (not just the `find_by_thread`
+/// winner) also stops an older duplicate from being left as a phantom after the
+/// thread ref is gone. The inverse re-converges to the full captured prior set,
+/// so a later transaction failure restores ALL same-name records, not just the
+/// winner.
 fn remove_thread_manager_record(steps: &mut EntrySteps, thread_name: &str) -> HeddleResult<()> {
-    let manager = ThreadManager::new(steps.repo().heddle_dir());
-    for record in manager
-        .list()?
-        .into_iter()
-        .filter(|t| t.thread == thread_name)
-    {
-        steps.delete_thread_record(record)?;
-    }
-    Ok(())
+    steps.converge_thread_records(thread_name, Vec::new())
 }
 
 // ---- Atomic undo/redo (heddle#355 impl-b) ----
@@ -2830,7 +2830,7 @@ mod atomic_tests {
     /// `find_by_thread` returns ONLY the prior record. A re-save-only restore
     /// (the pre-r6 redo arm) left the snapshot-id record and `find_by_thread`
     /// returned the leak — this test fails against that arm and passes against the
-    /// `restore_to_snapshot` converge.
+    /// `converge_records` restore.
     #[test]
     fn step_nonatomic_restores_redo_snapshot_deleting_leaked_record() {
         let temp = TempDir::new().unwrap();
@@ -2890,10 +2890,77 @@ mod atomic_tests {
         assert_eq!(restored.current_state.as_deref(), Some("current-A"));
     }
 
+    /// SUCCESS-path postcondition of the redo `ThreadCreateV2` restore (cid
+    /// 3331603135): when a pre-existing DUPLICATE is already filed under the name,
+    /// redoing the create restores the snapshot AND leaves ONLY the restored
+    /// record — the success path has the same single-record postcondition as the
+    /// rollback converge. The pre-r8 arm `save`d the decoded record without
+    /// removing the duplicate, so two records survived and `find_by_thread`
+    /// (max-by-updated) returned the newer duplicate, not the restored record —
+    /// this test fails against that arm and passes against decode→converge.
+    #[test]
+    fn redo_restore_thread_record_converges_away_preexisting_duplicate() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let manager = ThreadManager::new(repo.heddle_dir());
+
+        // The record the redo snapshot will restore (older timestamp).
+        let mut to_restore = sample_main_thread("current-restored", "/work/R");
+        to_restore.id = "rec-restored".to_string();
+        to_restore.updated_at = chrono::Utc::now();
+        manager.save(&to_restore).unwrap();
+        let snapshot = manager.snapshot_thread_record("main").unwrap().unwrap();
+        manager.delete("rec-restored").unwrap();
+
+        // A pre-existing DUPLICATE under the same name with a NEWER timestamp, so
+        // a raw-save redo would leave it winning `find_by_thread`.
+        let mut dup = sample_main_thread("current-dup", "/work/D");
+        dup.id = "rec-dup".to_string();
+        dup.updated_at = to_restore.updated_at + chrono::Duration::seconds(60);
+        manager.save(&dup).unwrap();
+        assert_eq!(
+            manager.list().unwrap().iter().filter(|t| t.thread == "main").count(),
+            1,
+            "precondition: only the duplicate is filed at redo time"
+        );
+
+        // Redo restores the snapshot — SUCCESS path (no fault).
+        repo::atomic::execute(
+            &repo,
+            RestoreSnapshotOnly {
+                name: "main".to_string(),
+                bytes: snapshot,
+            },
+        )
+        .unwrap();
+
+        let under_name: Vec<_> = manager
+            .list()
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.thread == "main")
+            .collect();
+        assert_eq!(
+            under_name.len(),
+            1,
+            "ONLY the restored record remains — the duplicate is converged away"
+        );
+        assert_eq!(under_name[0].id, "rec-restored");
+        assert_eq!(
+            manager.find_by_thread("main").unwrap().unwrap().id,
+            "rec-restored",
+            "find_by_thread returns the restored record, not the leaked duplicate"
+        );
+        assert!(
+            manager.load("rec-dup").unwrap().is_none(),
+            "the pre-existing duplicate record file is gone"
+        );
+    }
+
     /// Test-only deferred mutation that runs `remove_thread_manager_record` — the
     /// `ThreadCreate`/`ThreadCreateV2` inverse — through the `EntrySteps` applier,
-    /// so its per-record `delete_thread_record` (`step_nonatomic`) granularity and
-    /// rollback can be exercised in isolation.
+    /// so its single lock-atomic `converge_records`-to-empty step and the
+    /// converge-back-to-prior rollback can be exercised in isolation.
     struct RemoveRecordOnly {
         name: String,
     }
@@ -2950,13 +3017,13 @@ mod atomic_tests {
         );
     }
 
-    /// Per-record rollback granularity for the converge-to-empty inverse: when a
-    /// LATER step in the same transaction fails after BOTH same-name records were
-    /// deleted, the rollback must re-save ALL of them (each `delete_thread_record`
-    /// is its own `step_nonatomic` with its own re-save inverse), not just the
-    /// winner. Arming the fault at the 2nd `step_nonatomic` also proves the inverse
-    /// issues a delete PER record: pre-fix there is only ONE delete (winner only),
-    /// so the index-1 fault never trips and the op wrongly succeeds.
+    /// Rollback of the converge-to-empty inverse: the single `step_nonatomic`
+    /// converge runs its forward (deleting BOTH same-name records under one write
+    /// lock) and then fails — the converge-back-to-prior inverse, registered
+    /// BEFORE the forward, must restore the FULL captured prior set (both
+    /// records), not just the `find_by_thread` winner. Arming the fault at the
+    /// converge step (index 0) proves the whole-set capture-restore reverses a
+    /// lock-atomic all-or-nothing forward in one inverse.
     #[test]
     fn remove_thread_manager_record_rollback_resaves_all_records() {
         let temp = TempDir::new().unwrap();
@@ -2972,11 +3039,10 @@ mod atomic_tests {
         older.updated_at = winner.updated_at - chrono::Duration::seconds(60);
         manager.save(&older).unwrap();
 
-        // Fault the 2nd per-record delete's forward: both records get deleted, then
-        // the op fails — the rollback must re-save BOTH via their per-record
-        // inverses. (Two records ⇒ two `step_nonatomic` deletes; index 1 is the
-        // last one.)
-        let result = with_nonatomic_forward_fault(1, || {
+        // Fault the converge forward: it empties the name (both records deleted
+        // under one lock), then the op fails — the inverse must re-converge to the
+        // full captured prior set, restoring BOTH records.
+        let result = with_nonatomic_forward_fault(0, || {
             repo::atomic::execute(&repo, RemoveRecordOnly { name: "main".to_string() })
         });
         assert!(result.is_err(), "the injected forward fault must fail the op");
@@ -2985,7 +3051,7 @@ mod atomic_tests {
         assert_eq!(
             remaining.len(),
             2,
-            "rollback re-saved ALL same-name records, not just the winner"
+            "rollback re-converged to ALL same-name records, not just the winner"
         );
         let ids: std::collections::HashSet<_> =
             remaining.iter().map(|t| t.id.clone()).collect();
