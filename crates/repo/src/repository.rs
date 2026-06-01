@@ -1787,6 +1787,17 @@ impl Repository {
             patterns.push(".git".to_string());
             append_ignore_file_patterns(&mut patterns, &self.root.join(".gitignore"))?;
         }
+        // Worktree-local, never-captured excludes (heddle's analogue of
+        // `.git/info/exclude`). Lives under THIS worktree's own `.heddle/`
+        // (`root/.heddle`, which is local even for a shared-store checkout), so
+        // it is never captured. Lets `start --hydrate` ignore symlinked deps
+        // without dirtying a tracked `.heddleignore` (heddle#356 cid 3333881577).
+        // `append_ignore_file_patterns` no-ops when the file is absent — the
+        // common case for a plain repo.
+        append_ignore_file_patterns(
+            &mut patterns,
+            &self.root.join(".heddle").join("info").join("exclude"),
+        )?;
         let path = self.root.join(".heddleignore");
 
         if path.exists() {

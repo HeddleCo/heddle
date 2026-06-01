@@ -285,6 +285,7 @@ pub fn cmd_attempt(cli: &Cli, args: AttemptArgs) -> Result<()> {
             daemon: true,
             no_daemon: false,
             shared_target,
+            hydrate: false,
         };
         match start_thread(&repo, start_args) {
             Ok(out) => {

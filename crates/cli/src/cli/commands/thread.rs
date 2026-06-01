@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use gix::bstr::ByteSlice;
 use objects::{
     object::{ChangeId, State, ThreadName, Tree},
@@ -41,9 +41,10 @@ use super::{
     },
     operator_loop::{primary_next_action, primary_next_action_with_verification},
     snapshot::{ensure_current_state, summarize_confidence, summarize_verification},
+    start_atomic,
     thread_cmd::{refresh_thread_freshness, thread_not_found_advice},
     worktree_cmd::{
-        helpers::{prepare_worktree_target, write_isolated_checkout},
+        helpers::{plan_worktree_target, write_isolated_checkout},
         shared_target,
     },
     worktree_safety::ensure_worktree_clean,
@@ -1589,6 +1590,58 @@ fn render_thread_entry(entry: &ThreadSummary, verbose: bool) {
     }
 }
 
+/// Retry-stable idempotency key for `thread start`.
+///
+/// Folds the op scope, the thread name, the resolved base state, AND a per-start
+/// epoch ([`resolve_start_epoch`] — the in-flight thread record's creation
+/// instant). Two properties have to hold at once:
+///
+///   * **Stable across a crash-retry of the *same* start.** It deliberately does
+///     NOT fold in the live oplog head: that advances when the
+///     `TransactionCommit` marker appends, so a post-commit crash-retry would
+///     read the advanced head, derive a *fresh* key, miss the executor's
+///     `transaction_id` dedup, and re-apply an already-committed start
+///     (heddle#356 cid 3333881568). A crash-retry finds the still-Active thread
+///     record and reuses its creation instant, so it re-derives this exact key
+///     and dedups exactly-once.
+///   * **Fresh for a genuinely-new start after a prior one was dropped.** A
+///     silent drop (no `--delete-thread`) leaves the ref at `base_state`, so a
+///     key folding only scope+name+base would collide with the dropped start's
+///     committed marker and the new start would be wrongly deduped into a no-op
+///     (heddle#356 cid 3335052848). The epoch breaks the collision: a post-drop
+///     restart finds an Abandoned (non-Active) record and mints a fresh epoch,
+///     so it derives a DISTINCT key and actually starts.
+pub(crate) fn start_transaction_id(
+    scope: &str,
+    name: &str,
+    base_state: &ChangeId,
+    start_epoch: DateTime<Utc>,
+) -> String {
+    format!(
+        "thread-start:{scope}:{name}:{}:{}",
+        base_state.to_string_full(),
+        start_epoch.timestamp_nanos_opt().unwrap_or_default(),
+    )
+}
+
+/// The per-start epoch folded into the idempotency key ([`start_transaction_id`]).
+///
+/// The thread record is the durable "start reservation": it is written inside
+/// the transaction (before the commit point) and survives a crash, so it is the
+/// one artifact a crash-retry can read back. A crash-retry of an in-flight start
+/// finds the still-[`ThreadState::Active`] record and reuses its creation
+/// instant → identical key → the executor dedups it exactly-once. A
+/// genuinely-new start — no record, or a record a prior silent drop left
+/// [`ThreadState::Abandoned`] (the drop keeps the ref at the same base, so a
+/// base-only key would otherwise collide — cid 3335052848) — mints a FRESH
+/// instant → distinct key → it actually starts.
+pub(crate) fn resolve_start_epoch(repo: &Repository, name: &str) -> Result<DateTime<Utc>> {
+    let prior_active = ThreadManager::new(repo.heddle_dir())
+        .load(name)?
+        .filter(|thread| thread.state == ThreadState::Active);
+    Ok(prior_active.map_or_else(Utc::now, |thread| thread.created_at))
+}
+
 pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<ThreadOpOutput> {
     let existing = find_active_thread_entry(repo, &args.name)?;
     if let Some(entry) = existing {
@@ -1641,27 +1694,6 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
 
     let actor_identity = resolve_start_actor_identity(repo, &args)?;
 
-    let thread_name = ThreadName::new(&args.name);
-    if let Some(existing) = existing_thread_state {
-        repo.refs()
-            .set_thread_cas(&thread_name, RefExpectation::Value(existing), &base_state)?;
-    } else {
-        repo.refs()
-            .set_thread_cas(&thread_name, RefExpectation::Missing, &base_state)?;
-        // `cmd_start` writes the ThreadManager record only after
-        // materializing the worktree below — there's no record yet to
-        // snapshot, so pass `None`. The `ensure_thread_worktree_undo_safe`
-        // gate (undo.rs) refuses undo whenever this create has a live
-        // materialized worktree on disk, so the only path where redo
-        // would actually run for a `start` op is one where the user has
-        // manually torn the worktree down. Redo then restores the ref
-        // only (no record body to put back); a subsequent `heddle
-        // thread start` re-establishes the record if the user wants
-        // one. heddle#23 r2.
-        repo.oplog()
-            .record_thread_create(&thread_name, &base_state, None, Some(&repo.op_scope()))?;
-    }
-
     let thread_mode = resolve_thread_mode(repo, &args);
     // Honesty pass for explicit `--workspace materialized` on a
     // filesystem that doesn't support reflinks. `resolve_thread_mode`
@@ -1706,7 +1738,43 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     if args.path.is_some() {
         ensure_explicit_start_path_outside_repo(repo, &args.name, &path)?;
     }
-    let abs_path = normalize_path_for_containment(&prepare_worktree_target(repo, &path)?)?;
+    // The retry-stable idempotency key, resolved BEFORE the fresh-start preflight
+    // so a committed retry is recognized before any precondition can reject it
+    // (heddle#356 cid 3335586969). The per-start epoch comes from the durable
+    // committed thread record (`resolve_start_epoch` reads its `created_at`), so a
+    // start that committed its write-path but crashed before the post-commit
+    // bookkeeping re-derives the SAME key here — not a fresh one.
+    let scope = repo.op_scope();
+    let start_epoch = resolve_start_epoch(repo, &args.name)?;
+    let transaction_id = start_transaction_id(&scope, &args.name, &base_state, start_epoch);
+
+    // Commit-detection GATES the fresh-start preflight — ONE decision point, not
+    // two disconnected guards. If this start's transaction already committed
+    // (checkout + ref + record + `TransactionCommit` marker landed, then a crash
+    // interrupted the post-commit bookkeeping), recognize it as a committed retry
+    // and complete the interrupted bookkeeping from the durable record. Do NOT run
+    // `plan_worktree_target` (which would reject the now-non-empty checkout with
+    // `worktree_target_not_empty`) or re-run `execute` (whose `apply` would fail on
+    // the existing `.heddle`, never reaching the commit-point dedup). A
+    // genuinely-new start — including a post-silent-drop restart at the same base,
+    // whose Abandoned record yields a FRESH epoch — derives a distinct key that is
+    // absent here and runs the preflight + execute below (cid 3335586969 /
+    // 3335052848).
+    if !repo
+        .oplog()
+        .committed_batch_records(&transaction_id)?
+        .is_empty()
+    {
+        return finalize_committed_start(repo, &args, base_state, &actor_identity);
+    }
+
+    // Resolve + validate the target but DO NOT create it here: the directory
+    // creation is the transaction's first step, so a failure in the remaining
+    // pre-transaction work below can't orphan a dir we made before `execute`
+    // had a rewind ledger (heddle#356 cid 3333881552).
+    let prepared_target = plan_worktree_target(repo, &path)?;
+    let target_dir_created = prepared_target.target_dir_created;
+    let abs_path = normalize_path_for_containment(&prepared_target.path)?;
 
     // Item 2.1 of the heddle 6→8 plan: when starting a heavy
     // (materialized/lightweight) thread in a Rust workspace, redirect
@@ -1750,61 +1818,8 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
         shared_target::print_advisory(&args.name);
     }
 
-    // Track whether `write_cargo_config` actually applied the
-    // redirect. When the user has pre-staged `.cargo/config.toml`
-    // the writer is a no-op and we must NOT advertise a
-    // `shared_target_dir` on the thread record — `thread show`
-    // would otherwise lie about a redirect that isn't in effect.
-    let mut shared_target_dir_path = shared_target_dir_path;
-    match thread_mode {
-        ThreadMode::Solid | ThreadMode::Materialized => {
-            write_isolated_checkout(repo, &abs_path, &base_state, Some(&args.name))?;
-            // Materialized threads ship with a manifest sidecar that
-            // ties the on-disk worktree to the captured state via a
-            // per-file stat-cache. Solid threads are full file copies
-            // with no shared extents and stat-cache reuse wouldn't be
-            // semantically right (the bytes can drift without us
-            // noticing the way clonefile shares would expose).
-            if matches!(thread_mode, ThreadMode::Materialized) {
-                repo.record_thread_manifest(&args.name, &base_state, &abs_path)?;
-            }
-            if let Some(dir) = shared_target_dir_path.as_ref() {
-                let applied = shared_target::write_cargo_config(&abs_path, dir)?;
-                if !applied {
-                    tracing::info!(
-                        thread = %args.name,
-                        config = %abs_path.join(".cargo").join("config.toml").display(),
-                        "existing .cargo/config.toml preserved; --shared-target redirect not applied"
-                    );
-                    shared_target_dir_path = None;
-                }
-            }
-        }
-        ThreadMode::Virtualized => {
-            // Light workspaces use the daemon-owned mount by default:
-            // `heddled` keeps the FUSE
-            // session alive after this CLI exits and across subsequent
-            // invocations. `--no-daemon` opts out and pins the mount to
-            // this process (the legacy behaviour). When the daemon is
-            // unavailable on this host (no `fusermount`, exec failed,
-            // etc.) we silently fall back to the in-process path with
-            // a warning so the user still gets a working mount. See
-            // `docs/design/mount-daemon.md` § History.
-            let ownership =
-                mount_lifecycle::MountOwnership::from_flags(args.daemon, args.no_daemon);
-            mount_lifecycle::establish_virtualized_mount(
-                repo.root(),
-                &args.name,
-                &abs_path,
-                ownership,
-            )?;
-        }
-    }
-
-    let registry = AgentRegistry::new(repo.heddle_dir());
-    let task = args.task.clone();
-    let path_for_entry = abs_path.clone();
-    let thread_name = args.name.clone();
+    // Reads the thread record + the post-commit agent entry both need;
+    // computed before the transaction (the record carries them in).
     let current_target_thread = match repo.head_ref()? {
         Head::Attached { thread } => Some(thread.to_string()),
         Head::Detached { .. } => None,
@@ -1827,7 +1842,10 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             ))
         })?;
     let (base_root, verification_summary, confidence_summary) = base_state_summary;
-    let thread_manager = ThreadManager::new(repo.heddle_dir());
+    // `start_epoch` was resolved above (before the commit-detection gate) and is
+    // the record's creation instant: the idempotency key folds it, and a
+    // crash-retry reuses it from this still-Active record (heddle#356 cid
+    // 3335052848 / 3335586969).
     let thread_state = Thread {
         id: args.name.clone(),
         thread: args.name.clone(),
@@ -1839,7 +1857,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
         base_root: base_root.clone(),
         current_state: Some(base_short.clone()),
         merged_state: None,
-        task: task.clone(),
+        task: args.task.clone(),
         execution_path: abs_path.clone(),
         materialized_path: match thread_mode {
             ThreadMode::Solid | ThreadMode::Materialized => Some(abs_path.clone()),
@@ -1856,13 +1874,148 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
         verification_summary,
         confidence_summary,
         integration_policy_result: ThreadIntegrationPolicy::default(),
-        created_at: Utc::now(),
+        // The start epoch IS the record's creation instant: the idempotency key
+        // folds it, and a crash-retry reuses it from this still-Active record.
+        created_at: start_epoch,
         updated_at: Utc::now(),
         ephemeral: None,
         auto: false,
+        // The candidate redirect; the transaction clears it if the cargo
+        // config writer no-ops on a pre-staged `.cargo/config.toml` (so
+        // `thread show` never advertises a redirect that isn't in effect).
         shared_target_dir: shared_target_dir_path.clone(),
     };
-    thread_manager.save(&thread_state)?;
+
+    // The ENTIRE start write-path — thread ref, checkout materialize, manifest,
+    // cargo-config redirect, `--hydrate` symlinks, and the ThreadManager record
+    // — runs as ONE atomic transaction on the heddle#330 primitive (impl-c). A
+    // failure anywhere mid-materialize rewinds every applied effect, with
+    // precise directory + symlink rewind, back to the exact pre-start state;
+    // the oplog `ThreadCreateV2` is the staged commit record appended once at
+    // the single commit point. See `start_atomic::StartThread`.
+    let mount_ownership =
+        mount_lifecycle::MountOwnership::from_flags(args.daemon, args.no_daemon);
+    // `scope` + `transaction_id` were resolved above the commit-detection gate.
+    let hydrate_requested =
+        args.hydrate && matches!(thread_mode, ThreadMode::Solid | ThreadMode::Materialized);
+    let linked = repo::atomic::execute(
+        repo,
+        start_atomic::StartThread {
+            transaction_id,
+            name: args.name.clone(),
+            base_state,
+            existing_thread_state,
+            thread_mode: thread_mode.clone(),
+            abs_path: abs_path.clone(),
+            target_dir_created,
+            shared_target_dir: shared_target_dir_path,
+            hydrate: hydrate_requested,
+            mount_ownership,
+            record: thread_state,
+        },
+    )
+    .map_err(|e| anyhow!(e))?;
+
+    finalize_thread_start(
+        repo,
+        &args,
+        &thread_mode,
+        &abs_path,
+        base_state,
+        &base_short,
+        &base_root,
+        &actor_identity,
+        hydrate_requested,
+        linked,
+    )
+}
+
+/// Complete a `thread start` that was found ALREADY committed at the
+/// commit-detection gate (heddle#356 cid 3335586969): the write-path landed
+/// exactly-once, then a crash interrupted the post-commit bookkeeping. The
+/// durable thread record is the source of truth for where the checkout lives and
+/// what it anchors on, so reconstruct the finalize inputs from it rather than
+/// re-running the fresh-start preflight (which would reject the now-non-empty
+/// checkout) or `execute` (whose `apply` would fail on the existing `.heddle`).
+/// `base_state` is the full `ChangeId` already resolved by `start_thread` (the
+/// record only persists the short form). No hydrate is re-run, so no hydrate
+/// note is emitted (the original start already linked the deps).
+fn finalize_committed_start(
+    repo: &Repository,
+    args: &ThreadStartArgs,
+    base_state: ChangeId,
+    actor_identity: &StartActorIdentity,
+) -> Result<ThreadOpOutput> {
+    let committed = ThreadManager::new(repo.heddle_dir())
+        .load(&args.name)?
+        .ok_or_else(|| {
+            anyhow!(
+                "thread '{}' has a committed start transaction but no durable record to \
+                 complete the interrupted start from",
+                args.name
+            )
+        })?;
+    let abs_path = committed.execution_path.clone();
+    let base_short = base_state.short();
+    finalize_thread_start(
+        repo,
+        args,
+        &committed.mode,
+        &abs_path,
+        base_state,
+        &base_short,
+        &committed.base_root,
+        actor_identity,
+        // The original start owns the hydrate note; the retry only completes the
+        // post-commit bookkeeping.
+        false,
+        Vec::new(),
+    )
+}
+
+/// The post-commit bookkeeping shared by a fresh `thread start` and a committed
+/// retry ([`finalize_committed_start`]): emit the hydrate note, create the
+/// `AgentRegistry` reservation entry (the "active reservation" a crash before
+/// this step leaves missing), and build the command output. Idempotent w.r.t. the
+/// reservation: it is only reached when no live owner exists (a live owner is
+/// caught earlier by `find_active_thread_entry`), so the retry completes the
+/// interrupted reservation exactly-once.
+#[allow(clippy::too_many_arguments)]
+fn finalize_thread_start(
+    repo: &Repository,
+    args: &ThreadStartArgs,
+    thread_mode: &ThreadMode,
+    abs_path: &Path,
+    base_state: ChangeId,
+    base_short: &str,
+    base_root: &str,
+    actor_identity: &StartActorIdentity,
+    hydrate_requested: bool,
+    linked: Vec<String>,
+) -> Result<ThreadOpOutput> {
+    // Post-commit hydrate note (stderr; JSON consumers on stdout unaffected).
+    if hydrate_requested {
+        if linked.is_empty() {
+            eprintln!(
+                "{}: --hydrate found no ignored dependency directories at the origin \
+                 checkout root to link.",
+                style::warn("note"),
+            );
+        } else {
+            eprintln!(
+                "{}: hydrated {} ignored dependency dir(s) into '{}' via symlink: {} \
+                 (shared with the origin checkout; they stay ignored and are not captured).",
+                style::warn("note"),
+                linked.len(),
+                args.name,
+                linked.join(", "),
+            );
+        }
+    }
+
+    let registry = AgentRegistry::new(repo.heddle_dir());
+    let path_for_entry = abs_path.to_path_buf();
+    let thread_name = args.name.clone();
     let entry = registry.create_generated_entry_for_thread(&thread_name, |session_id| {
         Ok(AgentEntry {
             session_id: session_id.to_string(),
@@ -1882,14 +2035,14 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             ),
             heartbeat_at: Some(Utc::now()),
             anchor_state: Some(base_state.to_string_full()),
-            anchor_root: Some(base_root.clone()),
+            anchor_root: Some(base_root.to_string()),
             reservation_token: Some(objects::store::generate_agent_id()),
             path: match thread_mode {
                 ThreadMode::Solid | ThreadMode::Materialized | ThreadMode::Virtualized => {
                     Some(path_for_entry.clone())
                 }
             },
-            base_state: base_short.clone(),
+            base_state: base_short.to_string(),
             started_at: Utc::now(),
             provider: actor_identity.provider.clone(),
             model: actor_identity.model.clone(),
@@ -1936,7 +2089,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     Ok(thread_op_output(
         "thread_start",
         "start",
-        args.name,
+        args.name.clone(),
         message,
         summary.as_ref().and_then(|thread| thread.path.clone()),
         Some(abs_path.display().to_string()),

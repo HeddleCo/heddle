@@ -670,6 +670,19 @@ pub struct ThreadStartArgs {
     /// and a no-op for repositories without a top-level `Cargo.toml`.
     #[arg(long, hide = true)]
     pub shared_target: bool,
+
+    /// Symlink the origin checkout's top-level ignored dependency
+    /// directories (`node_modules`, `.venv`, `target`, …) into this
+    /// isolated checkout so it's immediately buildable — run
+    /// `tsc`/`eslint`/tests without reinstalling deps from scratch.
+    ///
+    /// The links point back at the origin's directories and stay
+    /// ignored, so the deps are never captured into heddle. Admin dirs
+    /// (`.git`, `.heddle`) are excluded; only top-level ignored
+    /// directories are linked. Has no effect on virtualized (mounted)
+    /// threads.
+    #[arg(long)]
+    pub hydrate: bool,
 }
 
 /// Arguments for the `merge` command.
