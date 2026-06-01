@@ -1077,6 +1077,61 @@ fn quickstart_treats_orphan_branch_repo_as_existing_history() {
     );
 }
 
+/// Codex r11 (cid 3336080241): when the current Git branch is unborn but
+/// another branch has commits, quickstart must not try the pre-capture
+/// write-through attachment. There is no current exportable state yet, so the
+/// first capture should establish the requested thread instead of crashing with
+/// "thread 'quickstart' has no state to export" after `.heddle/` was written.
+#[test]
+fn quickstart_orphan_unborn_head_with_history_defers_attachment_and_succeeds() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+    git_hermetic(&["init"], dir);
+    std::fs::write(dir.join("a.txt"), "hi\n").unwrap();
+    git_hermetic(&["add", "."], dir);
+    git_hermetic(&["commit", "-m", "initial"], dir);
+    git_hermetic(&["switch", "--orphan", "scratch"], dir);
+
+    let out = heddle_output(
+        &[
+            "init",
+            "--quickstart",
+            "--principal-name",
+            "CI Sentinel",
+            "--principal-email",
+            "ci@example.invalid",
+            "--no-harness-install",
+            "--yes",
+            "--output",
+            "json",
+        ],
+        Some(dir),
+    )
+    .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "quickstart should succeed by deferring attachment on an unborn current branch: stdout={} stderr={stderr}",
+        String::from_utf8_lossy(&out.stdout),
+    );
+    assert!(
+        !stderr.contains("no state to export"),
+        "the write-through attachment path must not run on an unborn current branch: {stderr}"
+    );
+
+    let status = status_json(dir);
+    assert_eq!(
+        status.get("thread").and_then(Value::as_str),
+        Some("quickstart"),
+        "quickstart remains the active thread after the first capture: {status}"
+    );
+    assert_eq!(
+        state_chain_ids(dir, 1).len(),
+        1,
+        "the first capture established a state for the quickstart thread"
+    );
+}
+
 /// Codex r6 (cid 3329175133): `resolve_principal` lets env win OUTRIGHT, so a
 /// sentinel env identity shadows even valid `--principal-*` flags — the capture
 /// would still be attributed to the env sentinel and rejected by

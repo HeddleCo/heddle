@@ -96,6 +96,7 @@ struct QuickstartSummary {
 struct QuickstartPreflight {
     proceed: bool,
     persist_principal: Option<(String, String)>,
+    attachment: QuickstartAttachmentPlan,
     /// Harnesses the user agreed to connect, decided at the prompt before
     /// any write. Installed only after the repo is created so a Ctrl-C at
     /// the harness prompt leaves the directory untouched.
@@ -107,9 +108,32 @@ impl Default for QuickstartPreflight {
         Self {
             proceed: true,
             persist_principal: None,
+            attachment: QuickstartAttachmentPlan::SkipUnborn,
             harness_install: Vec::new(),
         }
     }
+}
+
+/// Pre-capture Git checkout attachment plan, computed read-only in preflight.
+///
+/// The write path must not re-discover these preconditions after bootstrap or
+/// import has already written `.heddle/`: every edge that decides whether it is
+/// safe and meaningful to call `write_through_thread_checkout` belongs here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuickstartAttachmentPlan {
+    /// Current Git HEAD has an exportable commit state and the requested branch
+    /// is absent or already points at that commit.
+    Attach,
+    /// Current Git HEAD has no exportable state yet (fresh/unborn/orphan), so
+    /// the first capture should establish the requested thread state.
+    SkipUnborn,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuickstartAttachmentDecision {
+    Attach,
+    SkipUnborn,
+    RefuseCollision,
 }
 
 /// The single directory a `--quickstart` operates on, resolved ONCE by
@@ -342,7 +366,7 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
         // content — skipping the `QUICKSTART.md` placeholder and recording
         // integration files as the first state. The install decision was made
         // up front in the preflight; only the write runs here, post-capture.
-        let summary = run_quickstart_actions(&repo, &args)?;
+        let summary = run_quickstart_actions(&repo, &args, preflight.attachment)?;
         super::perform_init_install(cli, &repo, &args, &preflight.harness_install)?;
         Some(summary)
     } else {
@@ -638,20 +662,19 @@ fn quickstart_preflight(
         ));
     }
 
-    // A Git-overlay quickstart attaches the requested thread to the CURRENT
-    // state and write-through-points `refs/heads/<thread>` at it. If a `<thread>`
-    // Git branch already exists at a DIVERGENT tip (the checkout is on another
-    // branch), that write would silently move the user's branch onto the current
-    // branch's commit — data loss. Refuse here, before any write, when it would
-    // actually move the branch; the idempotent case (already on `<thread>`) and
-    // a quickstart-owned rerun where the tip already matches are not clobbers
-    // (cid 3335757978).
-    if is_git_overlay
-        && git_has_commits(root)
-        && git_quickstart_branch_would_be_clobbered(root, thread)
-    {
-        bail!(quickstart_thread_branch_collision_advice(thread));
-    }
+    // Decide the whole pre-capture Git checkout attachment path up front,
+    // read-only. This is the single gate for the attachment class: attach only
+    // when current HEAD has an exportable commit and the target branch is
+    // absent or already at that commit; skip for unborn/no-state HEADs so the
+    // first capture establishes the thread; refuse divergent target branches
+    // before any `.heddle/` writes.
+    let attachment = match quickstart_attachment_decision(root, is_git_overlay, thread) {
+        QuickstartAttachmentDecision::Attach => QuickstartAttachmentPlan::Attach,
+        QuickstartAttachmentDecision::SkipUnborn => QuickstartAttachmentPlan::SkipUnborn,
+        QuickstartAttachmentDecision::RefuseCollision => {
+            bail!(quickstart_thread_branch_collision_advice(thread));
+        }
+    };
 
     // Confirmation gate before touching a directory that already holds
     // work. Truly fresh directories skip straight through.
@@ -704,6 +727,7 @@ fn quickstart_preflight(
     Ok(QuickstartPreflight {
         proceed: true,
         persist_principal,
+        attachment,
         harness_install,
     })
 }
@@ -922,36 +946,42 @@ fn git_has_commits(path: &Path) -> bool {
     false
 }
 
-/// Whether running quickstart would CLOBBER a pre-existing Git branch named
-/// `thread` by silently moving it. After `import_all`, `ensure_quickstart_thread`
-/// repoints the `thread` Heddle thread to the CURRENT state and
-/// `write_through_thread_checkout` writes that back to `refs/heads/<thread>`. If
-/// the checkout is on a DIFFERENT branch and a `<thread>` branch already exists
-/// at a divergent tip, that write would move the user's branch to the current
-/// branch's commit — silent data loss (cid 3335757978).
+/// Read-only decision for the Git-overlay quickstart's pre-capture checkout
+/// attachment.
 ///
-/// Read-only: probes refs via `gix` without opening the Heddle repo. Returns
-/// `true` only when the branch exists AND its tip is NOT the commit quickstart
-/// would repoint it to (the current HEAD commit) — so the idempotent case
-/// (already on `<thread>`, tip == HEAD) and the absent-branch case do not refuse.
-fn git_quickstart_branch_would_be_clobbered(path: &Path, thread: &str) -> bool {
+/// After `import_all`, `ensure_quickstart_thread` may point the requested
+/// Heddle thread at the CURRENT state and `write_through_thread_checkout` would
+/// then write that state to `refs/heads/<thread>`. That is valid only when the
+/// current Git HEAD resolves to a real commit and an existing target branch is
+/// already at that same commit. An unborn/orphan current HEAD has no exportable
+/// state yet, so attachment must be deferred to the first capture. A divergent
+/// target branch must refuse before any write, because attachment would move
+/// the user's branch onto unrelated history (cid 3335757978, cid 3336080241).
+fn quickstart_attachment_decision(
+    path: &Path,
+    is_git_overlay: bool,
+    thread: &str,
+) -> QuickstartAttachmentDecision {
+    if !is_git_overlay || !path.join(".git").exists() || !git_has_commits(path) {
+        return QuickstartAttachmentDecision::SkipUnborn;
+    }
+
     let Ok(repo) = gix::discover(path) else {
-        return false;
+        return QuickstartAttachmentDecision::SkipUnborn;
+    };
+    let Ok(head) = repo.head_id() else {
+        return QuickstartAttachmentDecision::SkipUnborn;
     };
     let Ok(Some(mut reference)) = repo.try_find_reference(&format!("refs/heads/{thread}")) else {
-        return false;
+        return QuickstartAttachmentDecision::Attach;
     };
     let Ok(branch_tip) = reference.peel_to_id() else {
-        return false;
+        return QuickstartAttachmentDecision::Attach;
     };
-    // The commit quickstart would repoint `<thread>` to is the current branch's
-    // HEAD commit. If HEAD resolves to that exact commit (we are ON `<thread>`,
-    // or it already points there), no move happens — not a clobber. Anything
-    // else (a different branch, or an unborn HEAD with the branch carrying
-    // history) would move the user's branch to unrelated state — refuse.
-    match repo.head_id() {
-        Ok(head) => head.detach() != branch_tip.detach(),
-        Err(_) => true,
+    if head.detach() == branch_tip.detach() {
+        QuickstartAttachmentDecision::Attach
+    } else {
+        QuickstartAttachmentDecision::RefuseCollision
     }
 }
 
@@ -1030,7 +1060,11 @@ fn parse_objectstore_pointer(content: &str) -> Option<PathBuf> {
 /// capture, and (Git-overlay only) one checkpoint. Runs only after the
 /// preflight has confirmed and resolved identity, so every fallible
 /// prompt is already behind us.
-fn run_quickstart_actions(repo: &Repository, args: &InitArgs) -> Result<QuickstartSummary> {
+fn run_quickstart_actions(
+    repo: &Repository,
+    args: &InitArgs,
+    attachment: QuickstartAttachmentPlan,
+) -> Result<QuickstartSummary> {
     // A Git-overlay repo that already has commits must have that history
     // imported into Heddle before a capture/checkpoint has a base to
     // build on — the same import `heddle adopt` performs. Fresh/empty
@@ -1051,31 +1085,28 @@ fn run_quickstart_actions(repo: &Repository, args: &InitArgs) -> Result<Quicksta
     // `.heddle/HEAD = Attached{thread}` above is NOT enough: the capture and
     // checkpoint below both target `head_ref()`, and would advance the Git
     // branch while the quickstart thread stays at the imported tip, even though
-    // the output says `Thread: <thread>` (cid 3329409824). Attach the Git
-    // checkout to the thread's branch via the SAME write-through `heddle thread
-    // switch` uses, so `head_ref()` resolves to `<thread>` and the
-    // capture+checkpoint land on it. Gated on `git_has_commits` to match the
-    // import above: the write-through needs the thread's state mapped to a Git
-    // commit, which only exists once history has been imported. (The unborn
-    // case has no mapped commit yet and the capture creates the thread's root.)
-    if repo.capability() == RepositoryCapability::GitOverlay
-        && repo.root().join(".git").exists()
-        && git_has_commits(repo.root())
-    {
-        let mut bridge = GitBridge::new(repo);
-        if let WriteThroughOutcome::Skipped(reason) = bridge.write_through_thread_checkout(&thread)?
-        {
-            bail!(RecoveryAdvice::safety_refusal(
-                "quickstart_thread_checkout_skipped",
-                format!("Could not attach the Git checkout to thread '{thread}': {reason}"),
-                "Resolve the Git checkout issue and re-run `heddle init --quickstart`.",
-                reason.to_string(),
-                "quickstart would capture and checkpoint on the requested thread, but the Git checkout could not be attached to its branch",
-                "the current Heddle state was preserved",
-                "heddle init --quickstart",
-                vec!["heddle init --quickstart".to_string()],
-            ));
+    // the output says `Thread: <thread>` (cid 3329409824). The preflight has
+    // already decided whether all attachment preconditions hold; execute that
+    // plan here without re-discovering partial after-the-fact guards.
+    match attachment {
+        QuickstartAttachmentPlan::Attach => {
+            let mut bridge = GitBridge::new(repo);
+            if let WriteThroughOutcome::Skipped(reason) =
+                bridge.write_through_thread_checkout(&thread)?
+            {
+                bail!(RecoveryAdvice::safety_refusal(
+                    "quickstart_thread_checkout_skipped",
+                    format!("Could not attach the Git checkout to thread '{thread}': {reason}"),
+                    "Resolve the Git checkout issue and re-run `heddle init --quickstart`.",
+                    reason.to_string(),
+                    "quickstart would capture and checkpoint on the requested thread, but the Git checkout could not be attached to its branch",
+                    "the current Heddle state was preserved",
+                    "heddle init --quickstart",
+                    vec!["heddle init --quickstart".to_string()],
+                ));
+            }
         }
+        QuickstartAttachmentPlan::SkipUnborn => {}
     }
 
     let user_config = UserConfig::load_default().unwrap_or_default();
