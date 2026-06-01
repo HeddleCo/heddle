@@ -1984,7 +1984,7 @@ fn quickstart_git_overlay_capture_and_checkpoint_land_on_quickstart_thread() {
         let mut reference = grepo
             .find_reference(branch)
             .unwrap_or_else(|_| panic!("ref {branch} exists"));
-        let tip = reference.peel_to_id_in_place().expect("ref peels");
+        let tip = reference.peel_to_id().expect("ref peels");
         grepo
             .rev_walk([tip.detach()])
             .all()
