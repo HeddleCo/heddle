@@ -1738,6 +1738,36 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     if args.path.is_some() {
         ensure_explicit_start_path_outside_repo(repo, &args.name, &path)?;
     }
+    // The retry-stable idempotency key, resolved BEFORE the fresh-start preflight
+    // so a committed retry is recognized before any precondition can reject it
+    // (heddle#356 cid 3335586969). The per-start epoch comes from the durable
+    // committed thread record (`resolve_start_epoch` reads its `created_at`), so a
+    // start that committed its write-path but crashed before the post-commit
+    // bookkeeping re-derives the SAME key here — not a fresh one.
+    let scope = repo.op_scope();
+    let start_epoch = resolve_start_epoch(repo, &args.name)?;
+    let transaction_id = start_transaction_id(&scope, &args.name, &base_state, start_epoch);
+
+    // Commit-detection GATES the fresh-start preflight — ONE decision point, not
+    // two disconnected guards. If this start's transaction already committed
+    // (checkout + ref + record + `TransactionCommit` marker landed, then a crash
+    // interrupted the post-commit bookkeeping), recognize it as a committed retry
+    // and complete the interrupted bookkeeping from the durable record. Do NOT run
+    // `plan_worktree_target` (which would reject the now-non-empty checkout with
+    // `worktree_target_not_empty`) or re-run `execute` (whose `apply` would fail on
+    // the existing `.heddle`, never reaching the commit-point dedup). A
+    // genuinely-new start — including a post-silent-drop restart at the same base,
+    // whose Abandoned record yields a FRESH epoch — derives a distinct key that is
+    // absent here and runs the preflight + execute below (cid 3335586969 /
+    // 3335052848).
+    if !repo
+        .oplog()
+        .committed_batch_records(&transaction_id)?
+        .is_empty()
+    {
+        return finalize_committed_start(repo, &args, base_state, &actor_identity);
+    }
+
     // Resolve + validate the target but DO NOT create it here: the directory
     // creation is the transaction's first step, so a failure in the remaining
     // pre-transaction work below can't orphan a dir we made before `execute`
@@ -1812,12 +1842,10 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             ))
         })?;
     let (base_root, verification_summary, confidence_summary) = base_state_summary;
-    // The per-start epoch anchors the retry-stable idempotency key. Resolved
-    // BEFORE the record is built so the record persists the same instant the key
-    // folds in: a crash-retry reuses the Active record's instant (→ dedup), a
-    // post-drop restart mints a fresh one (→ actually starts). See
-    // `resolve_start_epoch` / `start_transaction_id` (heddle#356 cid 3335052848).
-    let start_epoch = resolve_start_epoch(repo, &args.name)?;
+    // `start_epoch` was resolved above (before the commit-detection gate) and is
+    // the record's creation instant: the idempotency key folds it, and a
+    // crash-retry reuses it from this still-Active record (heddle#356 cid
+    // 3335052848 / 3335586969).
     let thread_state = Thread {
         id: args.name.clone(),
         thread: args.name.clone(),
@@ -1867,8 +1895,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // the single commit point. See `start_atomic::StartThread`.
     let mount_ownership =
         mount_lifecycle::MountOwnership::from_flags(args.daemon, args.no_daemon);
-    let scope = repo.op_scope();
-    let transaction_id = start_transaction_id(&scope, &args.name, &base_state, start_epoch);
+    // `scope` + `transaction_id` were resolved above the commit-detection gate.
     let hydrate_requested =
         args.hydrate && matches!(thread_mode, ThreadMode::Solid | ThreadMode::Materialized);
     let linked = repo::atomic::execute(
@@ -1889,6 +1916,83 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     )
     .map_err(|e| anyhow!(e))?;
 
+    finalize_thread_start(
+        repo,
+        &args,
+        &thread_mode,
+        &abs_path,
+        base_state,
+        &base_short,
+        &base_root,
+        &actor_identity,
+        hydrate_requested,
+        linked,
+    )
+}
+
+/// Complete a `thread start` that was found ALREADY committed at the
+/// commit-detection gate (heddle#356 cid 3335586969): the write-path landed
+/// exactly-once, then a crash interrupted the post-commit bookkeeping. The
+/// durable thread record is the source of truth for where the checkout lives and
+/// what it anchors on, so reconstruct the finalize inputs from it rather than
+/// re-running the fresh-start preflight (which would reject the now-non-empty
+/// checkout) or `execute` (whose `apply` would fail on the existing `.heddle`).
+/// `base_state` is the full `ChangeId` already resolved by `start_thread` (the
+/// record only persists the short form). No hydrate is re-run, so no hydrate
+/// note is emitted (the original start already linked the deps).
+fn finalize_committed_start(
+    repo: &Repository,
+    args: &ThreadStartArgs,
+    base_state: ChangeId,
+    actor_identity: &StartActorIdentity,
+) -> Result<ThreadOpOutput> {
+    let committed = ThreadManager::new(repo.heddle_dir())
+        .load(&args.name)?
+        .ok_or_else(|| {
+            anyhow!(
+                "thread '{}' has a committed start transaction but no durable record to \
+                 complete the interrupted start from",
+                args.name
+            )
+        })?;
+    let abs_path = committed.execution_path.clone();
+    let base_short = base_state.short();
+    finalize_thread_start(
+        repo,
+        args,
+        &committed.mode,
+        &abs_path,
+        base_state,
+        &base_short,
+        &committed.base_root,
+        actor_identity,
+        // The original start owns the hydrate note; the retry only completes the
+        // post-commit bookkeeping.
+        false,
+        Vec::new(),
+    )
+}
+
+/// The post-commit bookkeeping shared by a fresh `thread start` and a committed
+/// retry ([`finalize_committed_start`]): emit the hydrate note, create the
+/// `AgentRegistry` reservation entry (the "active reservation" a crash before
+/// this step leaves missing), and build the command output. Idempotent w.r.t. the
+/// reservation: it is only reached when no live owner exists (a live owner is
+/// caught earlier by `find_active_thread_entry`), so the retry completes the
+/// interrupted reservation exactly-once.
+#[allow(clippy::too_many_arguments)]
+fn finalize_thread_start(
+    repo: &Repository,
+    args: &ThreadStartArgs,
+    thread_mode: &ThreadMode,
+    abs_path: &Path,
+    base_state: ChangeId,
+    base_short: &str,
+    base_root: &str,
+    actor_identity: &StartActorIdentity,
+    hydrate_requested: bool,
+    linked: Vec<String>,
+) -> Result<ThreadOpOutput> {
     // Post-commit hydrate note (stderr; JSON consumers on stdout unaffected).
     if hydrate_requested {
         if linked.is_empty() {
@@ -1910,7 +2014,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     }
 
     let registry = AgentRegistry::new(repo.heddle_dir());
-    let path_for_entry = abs_path.clone();
+    let path_for_entry = abs_path.to_path_buf();
     let thread_name = args.name.clone();
     let entry = registry.create_generated_entry_for_thread(&thread_name, |session_id| {
         Ok(AgentEntry {
@@ -1931,14 +2035,14 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             ),
             heartbeat_at: Some(Utc::now()),
             anchor_state: Some(base_state.to_string_full()),
-            anchor_root: Some(base_root.clone()),
+            anchor_root: Some(base_root.to_string()),
             reservation_token: Some(objects::store::generate_agent_id()),
             path: match thread_mode {
                 ThreadMode::Solid | ThreadMode::Materialized | ThreadMode::Virtualized => {
                     Some(path_for_entry.clone())
                 }
             },
-            base_state: base_short.clone(),
+            base_state: base_short.to_string(),
             started_at: Utc::now(),
             provider: actor_identity.provider.clone(),
             model: actor_identity.model.clone(),
@@ -1985,7 +2089,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     Ok(thread_op_output(
         "thread_start",
         "start",
-        args.name,
+        args.name.clone(),
         message,
         summary.as_ref().and_then(|thread| thread.path.clone()),
         Some(abs_path.display().to_string()),

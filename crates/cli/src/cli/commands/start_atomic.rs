@@ -125,6 +125,73 @@ fn hydrate_fault_trips() -> bool {
     })
 }
 
+/// What the target-dir claim ([`create_target_dir`]) established about the
+/// worktree leaf, and how the two directory rewinds may treat it. This is the
+/// SINGLE determination both the checkout writer (implicitly — a refusal aborts
+/// the transaction before the writer's step runs) and BOTH rewinds key on, so
+/// nothing writes through, clears, or deletes a path that was not established as
+/// a real, empty directory we own (heddle#356 cid 3335586962 / 3335052857).
+///
+/// A leaf that is anything else — a symlink, a non-directory file, or a
+/// non-empty directory — is NOT representable here: `create_target_dir` refuses
+/// the start with an `Err` instead, so there is no "owned" value that can stand
+/// for a foreign object.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TargetDir {
+    /// THIS invocation created the leaf as a fresh, real, empty directory →
+    /// rollback removes it wholesale (restoring "didn't exist"). Its dep symlinks
+    /// go with it: `remove_dir_all` unlinks symlinks without following them.
+    Created,
+    /// A real, EMPTY directory already existed at the leaf that we may safely
+    /// write into — a user-supplied `--path`, or a concurrent process that
+    /// created a *real empty dir* between plan time and the transaction. The
+    /// checkout writes into it; rollback clears ONLY the contents we wrote and
+    /// never removes the directory itself (it is not ours to delete).
+    AdoptedEmpty,
+}
+
+/// Validate that `abs_path` is, on disk RIGHT NOW, a real (non-symlink) EMPTY
+/// directory we may write the isolated checkout into and clear-on-rollback —
+/// refuse the start otherwise. Uses `symlink_metadata` so a symlink leaf is
+/// detected AS a symlink and never followed: writing the checkout through it (or
+/// `clear_dir_contents`-ing it on rollback) would mutate/delete data in the
+/// symlink's target (heddle#356 cid 3335586962, data loss).
+fn adopt_existing_empty_dir(abs_path: &Path) -> HeddleResult<TargetDir> {
+    let meta = std::fs::symlink_metadata(abs_path).map_err(HeddleError::from)?;
+    if meta.file_type().is_symlink() {
+        return Err(target_dir_shape_refusal(abs_path, "is a symlink"));
+    }
+    if !meta.is_dir() {
+        return Err(target_dir_shape_refusal(abs_path, "is not a directory"));
+    }
+    if std::fs::read_dir(abs_path)
+        .map_err(HeddleError::from)?
+        .next()
+        .transpose()
+        .map_err(HeddleError::from)?
+        .is_some()
+    {
+        return Err(target_dir_shape_refusal(abs_path, "is not empty"));
+    }
+    Ok(TargetDir::AdoptedEmpty)
+}
+
+/// The refusal raised when the target leaf is not a real, empty, ownable
+/// directory at claim time — a symlink, a non-directory file, or a non-empty
+/// directory a concurrent process dropped in after `plan_worktree_target` saw
+/// the leaf absent. Refusing here (rather than returning a "not ours" signal the
+/// writer proceeds on) is what closes the data-loss class.
+fn target_dir_shape_refusal(abs_path: &Path, reason: &str) -> HeddleError {
+    HeddleError::Conflict(format!(
+        "refusing to start: worktree target '{}' {} — not a real empty directory heddle can \
+         own. A concurrent process or a pre-existing filesystem object occupies the target, and \
+         heddle will not write the isolated checkout through it. Choose an empty real directory \
+         for `--path`, or let heddle create a managed materialized checkout.",
+        abs_path.display(),
+        reason,
+    ))
+}
+
 /// Remove every entry inside `dir` without removing `dir` itself, so a
 /// pre-existing user-provided directory survives a rollback while the contents
 /// this invocation materialized are cleared. Symlinks are unlinked directly
@@ -143,22 +210,26 @@ fn clear_dir_contents(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The precise checkout-rewind inverse. `created` is the runtime ownership
-/// signal from [`create_target_dir`] (NOT the stale plan-time bool — cid
-/// 3335052857). `true` → this invocation made the worktree directory, so remove
-/// it entirely (restoring "didn't exist"); its dep symlinks go with it, since
-/// `remove_dir_all` unlinks symlinks without following them, so the origin's
-/// deps are never touched. `false` → the user supplied an already-existing empty
-/// `--path` dir, OR a concurrent process created the target between plan time
-/// and the transaction; either way it is not ours to delete — preserve the
-/// directory and clear only the contents we materialized inside it
-/// (`prepare_worktree_target` only accepts a pre-existing dir when it is empty).
+/// The precise checkout-rewind inverse, keyed on the runtime [`TargetDir`] claim
+/// from [`create_target_dir`] (NOT a stale plan-time bool — cid 3335052857 /
+/// 3335586962):
+///   * [`TargetDir::Created`] → this invocation made the worktree directory, so
+///     remove it entirely (restoring "didn't exist"); its dep symlinks go with
+///     it, since `remove_dir_all` unlinks symlinks without following them, so the
+///     origin's deps are never touched.
+///   * [`TargetDir::AdoptedEmpty`] → we adopted a real, empty pre-existing dir
+///     (user `--path`, or a concurrent real-empty-dir) — not ours to delete, so
+///     preserve the directory and clear only the contents we materialized inside.
+///   * `None` → the claim never established an owned empty dir here (the forward
+///     refused on a symlink/foreign object, or never ran). Touch NOTHING — the
+///     whole point of the close-the-class fix is that rollback never clears or
+///     deletes through a path it did not itself establish as a real empty dir.
 /// Tolerant of an already-absent target so it composes with other rewind steps.
-fn rewind_checkout(abs_path: &Path, created: bool) -> HeddleResult<()> {
-    let result = if created {
-        std::fs::remove_dir_all(abs_path)
-    } else {
-        clear_dir_contents(abs_path)
+fn rewind_checkout(abs_path: &Path, claim: Option<TargetDir>) -> HeddleResult<()> {
+    let result = match claim {
+        Some(TargetDir::Created) => std::fs::remove_dir_all(abs_path),
+        Some(TargetDir::AdoptedEmpty) => clear_dir_contents(abs_path),
+        None => return Ok(()),
     };
     match result {
         Ok(()) => Ok(()),
@@ -167,50 +238,57 @@ fn rewind_checkout(abs_path: &Path, created: bool) -> HeddleResult<()> {
     }
 }
 
-/// Create the materialization target directory and report whether THIS
-/// invocation actually created it — the ownership signal both directory rewinds
-/// (the target-dir inverse and the checkout rewind) key their destructive
-/// branch on.
+/// Atomically establish that the materialization target is a real, empty, owned
+/// directory, returning the [`TargetDir`] claim both directory rewinds key on —
+/// or REFUSING the start (`Err`) when the leaf is anything else. This single
+/// determination drives both whether the checkout writer may proceed (a refusal
+/// aborts the transaction before its step runs) and how rollback treats the leaf
+/// (heddle#356 cid 3335586962 / 3335052857).
 ///
 /// `plan_created` is the plan-time observation from `plan_worktree_target` (the
-/// dir was absent then). It is NOT trusted for the remove decision: a concurrent
-/// process can create the target between plan time and now, after which a stale
-/// `plan_created == true` would make rollback delete a directory this start
-/// never made (heddle#356 cid 3335052857). So ownership is re-established
-/// atomically HERE:
-///   * `plan_created == false` → `plan_worktree_target` accepted a pre-existing
-///     (empty) user `--path` dir; never ours to create or remove → `Ok(false)`.
-///   * `plan_created == true` → `create_dir` (NOT `create_dir_all`) on the leaf
-///     fails with `AlreadyExists` exactly when a concurrent process won the
-///     creation race; that branch returns `Ok(false)` so neither rewind removes
-///     their dir. Only the branch where `create_dir` itself created the leaf
-///     returns `Ok(true)`.
+/// dir was absent then). It is NOT trusted: a concurrent process can create — or
+/// drop a symlink/file at — the target between plan time and now, so the shape is
+/// re-established atomically HERE:
+///   * `plan_created == false` → `plan_worktree_target` accepted a pre-existing,
+///     validated-empty, non-symlink user `--path` dir. Re-validate the shape now
+///     (TOCTOU) and adopt it ([`TargetDir::AdoptedEmpty`]) — never created, never
+///     removed by us — or refuse if it is no longer a real empty dir.
+///   * `plan_created == true` → `create_dir` (NOT `create_dir_all`) on the leaf:
+///     - `Ok` → this start created the leaf → [`TargetDir::Created`].
+///     - `AlreadyExists` → a concurrent process won the race. It may have created
+///       a real empty dir (safe to adopt) OR dropped a symlink / file / non-empty
+///       dir — `adopt_existing_empty_dir` adopts the former and REFUSES the
+///       latter, so the checkout is never written through a foreign object and
+///       rollback never clears/deletes through it (cid 3335586962, data loss).
 ///
 /// Parents are created with `create_dir_all` (shared infrastructure, left in
 /// place on rollback — `remove_self_created_dir` only targets the leaf).
-fn create_target_dir(abs_path: &Path, plan_created: bool) -> HeddleResult<bool> {
+fn create_target_dir(abs_path: &Path, plan_created: bool) -> HeddleResult<TargetDir> {
     if !plan_created {
-        return Ok(false);
+        return adopt_existing_empty_dir(abs_path);
     }
     if let Some(parent) = abs_path.parent() {
         std::fs::create_dir_all(parent).map_err(HeddleError::from)?;
     }
     match std::fs::create_dir(abs_path) {
-        Ok(()) => Ok(true),
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Ok(()) => Ok(TargetDir::Created),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            adopt_existing_empty_dir(abs_path)
+        }
         Err(err) => Err(HeddleError::from(err)),
     }
 }
 
 /// Inverse of the target-dir creation step: remove the worktree directory ONLY
-/// when this invocation created it (restoring "didn't exist"). `created` is the
-/// runtime ownership signal from [`create_target_dir`], NOT the stale plan-time
-/// bool — a concurrently-created or pre-existing user-supplied `--path` dir is
-/// never removed here. Tolerant of an already-absent dir so it composes after
-/// the checkout rewind (which removes a self-created dir first; this then
-/// no-ops on `NotFound`).
-fn remove_self_created_dir(abs_path: &Path, created: bool) -> HeddleResult<()> {
-    if !created {
+/// when this invocation created it ([`TargetDir::Created`], restoring "didn't
+/// exist"). `claim` is the runtime [`TargetDir`] signal from
+/// [`create_target_dir`], NOT a stale plan-time bool — an adopted (concurrent or
+/// user-supplied) dir, or a leaf this step never established (`None`), is never
+/// removed here. Tolerant of an already-absent dir so it composes after the
+/// checkout rewind (which removes a self-created dir first; this then no-ops on
+/// `NotFound`).
+fn remove_self_created_dir(abs_path: &Path, claim: Option<TargetDir>) -> HeddleResult<()> {
+    if claim != Some(TargetDir::Created) {
         return Ok(());
     }
     match std::fs::remove_dir_all(abs_path) {
@@ -330,30 +408,31 @@ impl StartThread {
     /// failure in the remaining pre-transaction work would orphan a dir created
     /// before the executor had a ledger (heddle#356 cid 3333881552).
     ///
-    /// The inverse removes the directory ONLY when this invocation created it; a
-    /// user-supplied pre-existing `--path` dir — or one a concurrent process
-    /// created between plan time and now (cid 3335052857) — is preserved.
-    /// Ownership is decided at the moment of creation by [`create_target_dir`]
-    /// and stored in `created_by_us`, a cell BOTH this inverse and the checkout
-    /// rewind read so neither trusts the stale plan-time bool. Forward-first
-    /// (`Tx::step`): the inverse is registered only after the create succeeds,
-    /// and a forward that fails created nothing of ours to remove.
+    /// The inverse removes the directory ONLY when this invocation created it
+    /// ([`TargetDir::Created`]); an adopted pre-existing/concurrent dir, or a leaf
+    /// the forward refused (a symlink/foreign object — the cell stays `None`), is
+    /// never removed (cid 3335052857 / 3335586962). The [`TargetDir`] claim is
+    /// decided at the moment of creation by [`create_target_dir`] and stored in
+    /// `target_claim`, a cell BOTH this inverse and the checkout rewind read so
+    /// neither trusts the stale plan-time bool. Forward-first (`Tx::step`): the
+    /// inverse is registered only after the create succeeds, and a forward that
+    /// refused (or never ran) leaves the cell `None`, so rollback touches nothing.
     fn stage_target_dir(
         &self,
         tx: &mut Tx<'_>,
-        created_by_us: Rc<Cell<bool>>,
+        target_claim: Rc<Cell<Option<TargetDir>>>,
     ) -> HeddleResult<()> {
         let abs = self.abs_path.clone();
         let rewind_abs = self.abs_path.clone();
         let plan_created = self.target_dir_created;
-        let fwd_flag = Rc::clone(&created_by_us);
+        let fwd_claim = Rc::clone(&target_claim);
         tx.step(
             move || {
-                let made = create_target_dir(&abs, plan_created)?;
-                fwd_flag.set(made);
+                let established = create_target_dir(&abs, plan_created)?;
+                fwd_claim.set(Some(established));
                 Ok(())
             },
-            move || remove_self_created_dir(&rewind_abs, created_by_us.get()),
+            move || remove_self_created_dir(&rewind_abs, target_claim.get()),
         )
     }
 
@@ -397,20 +476,21 @@ impl StartThread {
     fn stage_checkout(
         &self,
         tx: &mut Tx<'_>,
-        created_by_us: Rc<Cell<bool>>,
+        target_claim: Rc<Cell<Option<TargetDir>>>,
     ) -> HeddleResult<()> {
         let repo = tx.repo();
         let abs = self.abs_path.clone();
         let rewind_abs = self.abs_path.clone();
         let base_state = self.base_state;
         let name = self.name.clone();
-        // Ownership is the runtime signal set by `stage_target_dir`'s forward
-        // (which ran first), read at rewind time when it is settled — never the
-        // stale plan-time bool, so a concurrently-created dir is cleared, not
-        // deleted wholesale (cid 3335052857).
+        // The [`TargetDir`] claim set by `stage_target_dir`'s forward (which ran
+        // first), read at rewind time when it is settled — never the stale
+        // plan-time bool. An adopted dir is cleared (not deleted), a self-created
+        // dir is removed wholesale, and a refused/unestablished leaf (`None`) is
+        // left untouched (cid 3335052857 / 3335586962).
         tx.step_nonatomic(
             move || Ok(()),
-            move |()| rewind_checkout(&rewind_abs, created_by_us.get()),
+            move |()| rewind_checkout(&rewind_abs, target_claim.get()),
             move || {
                 #[cfg(test)]
                 if materialize_fault_trips() {
@@ -579,16 +659,17 @@ impl AtomicMutation for StartThread {
     fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<Vec<String>>> {
         let mut oplog: Vec<OpRecord> = Vec::new();
 
-        // Runtime ownership of the target dir, decided atomically by
+        // The single [`TargetDir`] claim, decided atomically by
         // `stage_target_dir`'s forward and consumed by BOTH directory rewinds
-        // (the target-dir inverse and the checkout rewind) so neither trusts the
-        // stale plan-time bool and deletes a dir a concurrent process created
-        // (heddle#356 cid 3335052857).
-        let created_by_us = Rc::new(Cell::new(false));
+        // (the target-dir inverse and the checkout rewind). It starts `None` — an
+        // unestablished claim — so if the forward refuses on a symlink/foreign
+        // object (or never runs), neither rewind clears or deletes through the
+        // leaf (heddle#356 cid 3335052857 / 3335586962).
+        let target_claim = Rc::new(Cell::new(None));
 
         // 0. Create the target dir inside the transaction (first, so its removal
         //    inverse runs last and a self-created dir never leaks).
-        self.stage_target_dir(tx, Rc::clone(&created_by_us))?;
+        self.stage_target_dir(tx, Rc::clone(&target_claim))?;
 
         // 1. Thread ref (+ staged ThreadCreateV2 for a brand-new thread).
         self.stage_ref(tx, &mut oplog)?;
@@ -596,7 +677,7 @@ impl AtomicMutation for StartThread {
         // 2. Mode-specific materialization.
         let linked = match self.thread_mode {
             ThreadMode::Solid | ThreadMode::Materialized => {
-                self.stage_checkout(tx, Rc::clone(&created_by_us))?;
+                self.stage_checkout(tx, Rc::clone(&target_claim))?;
                 if matches!(self.thread_mode, ThreadMode::Materialized) {
                     self.stage_manifest(tx)?;
                 }
@@ -661,7 +742,9 @@ fn symlink_unsupported_error(link: &str) -> HeddleError {
 
 #[cfg(test)]
 mod tests {
-    use super::super::thread::{resolve_start_epoch, start_thread, start_transaction_id};
+    use super::super::thread::{
+        find_active_thread_entry, resolve_start_epoch, start_thread, start_transaction_id,
+    };
     use super::super::thread_cmd::drop_thread_silent;
     use super::super::worktree_cmd::helpers::plan_worktree_target;
     use super::*;
@@ -910,6 +993,68 @@ mod tests {
         );
     }
 
+    // ---- heddle#356 r4 close-the-class: Class A commit-detection gate ----
+
+    /// cid 3335586969 (the new sibling): a committed-before-bookkeeping retry.
+    /// The start transaction committed (checkout + ref + record + commit marker),
+    /// then a crash interrupted the post-commit `AgentRegistry` reservation — so
+    /// there is NO live reservation, yet the checkout is now NON-EMPTY. The retry
+    /// must be RECOGNIZED as a committed retry (the epoch re-derived from the
+    /// durable Active record yields the SAME key) and short-circuit exactly-once,
+    /// NOT rejected by `plan_worktree_target`'s `worktree_target_not_empty` (which
+    /// fires before `execute` could ever see the matching `TransactionCommit`).
+    #[test]
+    fn committed_before_bookkeeping_retry_short_circuits() {
+        let (temp, repo, state) = repo_with_state(&[]);
+        let checkout = temp.path().join("iso");
+
+        // A first start fully succeeds: checkout + ref + Active record + commit
+        // marker + the post-commit AgentRegistry reservation.
+        start_thread(&repo, solid_args("iso", &checkout, &state, false))
+            .expect("first start should succeed");
+        assert!(checkout.join(".heddle").is_dir(), "the first start materialized the checkout");
+
+        // Recreate the crash window: the write-path committed, but the post-commit
+        // bookkeeping never landed — delete the reservation so no live owner
+        // exists (find_active_thread_entry → None, the committed-before-bookkeeping
+        // state). The checkout, ref, record, and commit marker all remain.
+        let entry = find_active_thread_entry(&repo, "iso")
+            .unwrap()
+            .expect("the first start created a reservation");
+        objects::store::AgentRegistry::new(repo.heddle_dir())
+            .delete(&entry.session_id)
+            .unwrap();
+        assert!(
+            find_active_thread_entry(&repo, "iso").unwrap().is_none(),
+            "the reservation is gone — exactly the committed-before-bookkeeping window"
+        );
+
+        // The retry must NOT fail with worktree_target_not_empty: commit-detection
+        // gates the preflight, so the committed marker short-circuits the start and
+        // completes the interrupted bookkeeping instead.
+        start_thread(&repo, solid_args("iso", &checkout, &state, false)).expect(
+            "a committed-before-bookkeeping retry must short-circuit, not be rejected by \
+             worktree_target_not_empty",
+        );
+
+        // The committed checkout is left exactly as it was — neither re-created nor
+        // cleared (the short-circuit never ran the write-path or its rewind).
+        assert!(checkout.join(".heddle").is_dir(), "the committed checkout survives the retry");
+        assert!(checkout.join("a.txt").is_file(), "the committed tree survives the retry");
+
+        // The record stays the single committed Active record (no duplicate, no
+        // Abandoned). And the interrupted reservation is now completed.
+        let record = ThreadManager::new(repo.heddle_dir())
+            .load("iso")
+            .unwrap()
+            .expect("the committed record persists");
+        assert_eq!(record.state, repo::ThreadState::Active);
+        assert!(
+            find_active_thread_entry(&repo, "iso").unwrap().is_some(),
+            "the retry completes the interrupted reservation exactly-once"
+        );
+    }
+
     /// cid 3333881561: the manifest rollback must restore the prior manifest
     /// snapshot (a stale manifest from a reused thread ref), not blind-delete.
     #[test]
@@ -991,30 +1136,31 @@ mod tests {
         );
     }
 
-    // ---- heddle#356 r3 fixes ----
+    // ---- heddle#356 r3 fixes (updated to the TargetDir claim — r4) ----
 
     /// cid 3335052857: target-dir ownership is re-established atomically at
     /// creation, so rollback never deletes a directory a concurrent process
     /// created between `plan_worktree_target` time and the transaction. Here the
     /// plan saw the target absent (`plan_created = true`) but a concurrent
-    /// process created it first — `create_target_dir` must NOT claim it, and the
-    /// runtime-keyed rewind must leave it intact.
+    /// process created a REAL EMPTY dir first — `create_target_dir` adopts it
+    /// (does NOT claim it as created), and the claim-keyed rewind leaves it intact.
     #[test]
     fn target_dir_rollback_leaves_concurrently_created_dir_intact() {
         let temp = TempDir::new().unwrap();
         let target = temp.path().join("iso");
 
-        // The concurrent creation that races our forward.
+        // The concurrent creation that races our forward (a real empty dir).
         std::fs::create_dir(&target).unwrap();
-        let created_by_us = create_target_dir(&target, true).unwrap();
-        assert!(
-            !created_by_us,
-            "a target a concurrent process created must NOT be claimed as ours \
-             (stale plan-time bool would have)"
+        let claim = create_target_dir(&target, true).unwrap();
+        assert_eq!(
+            claim,
+            TargetDir::AdoptedEmpty,
+            "a real empty dir a concurrent process created is ADOPTED, not claimed as created \
+             (a stale plan-time bool would have claimed it)"
         );
-        // The rewind keys on the runtime signal, so it must spare their dir.
-        remove_self_created_dir(&target, created_by_us).unwrap();
-        rewind_checkout(&target, created_by_us).unwrap();
+        // The rewind keys on the runtime claim, so it must spare their dir.
+        remove_self_created_dir(&target, Some(claim)).unwrap();
+        rewind_checkout(&target, Some(claim)).unwrap();
         assert!(
             target.is_dir(),
             "rollback must not delete a directory this start did not create"
@@ -1028,10 +1174,10 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let target = temp.path().join("nested").join("iso");
 
-        let created_by_us = create_target_dir(&target, true).unwrap();
-        assert!(created_by_us, "an absent target this start creates is owned by us");
+        let claim = create_target_dir(&target, true).unwrap();
+        assert_eq!(claim, TargetDir::Created, "an absent target this start creates is owned by us");
         assert!(target.is_dir(), "the forward must create the leaf (and its parents)");
-        remove_self_created_dir(&target, created_by_us).unwrap();
+        remove_self_created_dir(&target, Some(claim)).unwrap();
         assert!(
             std::fs::symlink_metadata(&target).is_err(),
             "rollback must remove a directory this start genuinely created"
@@ -1039,16 +1185,96 @@ mod tests {
     }
 
     /// cid 3335052857: a pre-existing user `--path` dir (`plan_created = false`)
-    /// is never created or removed by us — the runtime signal stays `false`.
+    /// is adopted (never created or removed by us); the claim is `AdoptedEmpty`.
     #[test]
     fn target_dir_user_supplied_dir_is_never_removed() {
         let temp = TempDir::new().unwrap();
         let target = temp.path().join("iso");
         std::fs::create_dir(&target).unwrap();
 
-        let created_by_us = create_target_dir(&target, false).unwrap();
-        assert!(!created_by_us, "a user-supplied pre-existing dir is not ours to own");
-        remove_self_created_dir(&target, created_by_us).unwrap();
+        let claim = create_target_dir(&target, false).unwrap();
+        assert_eq!(
+            claim,
+            TargetDir::AdoptedEmpty,
+            "a user-supplied pre-existing empty dir is adopted, not ours to own/remove"
+        );
+        remove_self_created_dir(&target, Some(claim)).unwrap();
         assert!(target.is_dir(), "a user-supplied dir must survive rollback");
+    }
+
+    // ---- heddle#356 r4 close-the-class: target-dir SHAPE validation (cid 3335586962) ----
+
+    /// cid 3335586962 (P1, the new sibling): `plan_created = true` but a
+    /// concurrent process dropped a SYMLINK-to-a-dir at the leaf between plan time
+    /// and the transaction. `create_target_dir` must REFUSE (not return a
+    /// "not-ours" value the checkout writer proceeds on), and because the forward
+    /// refuses, the claim is never established (`None`) so rollback NEVER clears
+    /// or deletes through the symlink — the symlink target's contents survive.
+    #[test]
+    fn create_target_dir_refuses_symlink_leaf_and_spares_target_contents() {
+        let temp = TempDir::new().unwrap();
+        // The symlink target with precious contents that MUST survive.
+        let victim = temp.path().join("victim");
+        std::fs::create_dir(&victim).unwrap();
+        std::fs::write(victim.join("precious.txt"), b"precious").unwrap();
+        // A concurrent process dropped a symlink-to-dir at the leaf.
+        let leaf = temp.path().join("iso");
+        std::os::unix::fs::symlink(&victim, &leaf).unwrap();
+
+        // The plan saw the leaf absent (`plan_created = true`); the claim must refuse.
+        let claim = create_target_dir(&leaf, true);
+        assert!(
+            claim.is_err(),
+            "a symlink at the leaf must REFUSE the start, never be adopted/written through"
+        );
+
+        // The forward refused, so no claim was established → rollback (driven by a
+        // `None` cell) must touch nothing.
+        rewind_checkout(&leaf, None).unwrap();
+        remove_self_created_dir(&leaf, None).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&leaf).unwrap().file_type().is_symlink(),
+            "the symlink itself must be left untouched"
+        );
+        assert!(
+            victim.join("precious.txt").is_file(),
+            "rollback must NOT delete through the symlink into its target's contents"
+        );
+        assert_eq!(
+            std::fs::read(victim.join("precious.txt")).unwrap(),
+            b"precious",
+            "the symlink target's data must survive intact"
+        );
+    }
+
+    /// cid 3335586962: a plain FILE (not a dir) occupying the leaf is likewise
+    /// refused — the checkout is never written over a non-directory object.
+    #[test]
+    fn create_target_dir_refuses_non_directory_leaf() {
+        let temp = TempDir::new().unwrap();
+        let leaf = temp.path().join("iso");
+        std::fs::write(&leaf, b"i am a file, not a dir").unwrap();
+
+        let claim = create_target_dir(&leaf, true);
+        assert!(claim.is_err(), "a non-directory leaf must refuse the start");
+        assert!(leaf.is_file(), "the pre-existing file must be left untouched");
+        assert_eq!(std::fs::read(&leaf).unwrap(), b"i am a file, not a dir");
+    }
+
+    /// cid 3335586962: a NON-EMPTY directory at the leaf is refused — adopting it
+    /// would let rollback `clear_dir_contents` someone else's populated dir.
+    #[test]
+    fn create_target_dir_refuses_non_empty_dir_leaf() {
+        let temp = TempDir::new().unwrap();
+        let leaf = temp.path().join("iso");
+        std::fs::create_dir(&leaf).unwrap();
+        std::fs::write(leaf.join("someone-elses-work.txt"), b"keep me").unwrap();
+
+        let claim = create_target_dir(&leaf, true);
+        assert!(claim.is_err(), "a non-empty dir at the leaf must refuse the start");
+        assert!(
+            leaf.join("someone-elses-work.txt").is_file(),
+            "the pre-existing contents must be left untouched"
+        );
     }
 }
