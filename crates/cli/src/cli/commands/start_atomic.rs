@@ -224,6 +224,7 @@ fn clear_dir_contents(dir: &Path) -> std::io::Result<()> {
 ///     refused on a symlink/foreign object, or never ran). Touch NOTHING — the
 ///     whole point of the close-the-class fix is that rollback never clears or
 ///     deletes through a path it did not itself establish as a real empty dir.
+///
 /// Tolerant of an already-absent target so it composes with other rewind steps.
 fn rewind_checkout(abs_path: &Path, claim: Option<TargetDir>) -> HeddleResult<()> {
     let result = match claim {
