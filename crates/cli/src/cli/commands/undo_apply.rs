@@ -395,7 +395,15 @@ impl<'a> EntrySteps<'_, 'a> {
             move |prev| {
                 let manager = ThreadManager::new(repo.heddle_dir());
                 match prev {
-                    Some(prev) => manager.save(&prev),
+                    Some(prev) => {
+                        // A replacement save wrote the record under a new id; the
+                        // newer record + its workspace file must be removed so
+                        // `find_by_thread` sees only `prev` after rollback.
+                        if prev.id != new_id {
+                            manager.delete(&new_id)?;
+                        }
+                        manager.save(&prev)
+                    }
                     None => manager.delete(&new_id),
                 }
             },
@@ -2704,6 +2712,79 @@ mod atomic_tests {
             restored.materialized_path,
             Some(PathBuf::from("/work/A")),
             "the workspace half (materialized_path) was restored to R0"
+        );
+    }
+
+    /// A "replacement save" persists the thread under a NEW record id (the prior
+    /// record had a different id). `find_by_thread` selects among ALL records with
+    /// that thread name, so if a later failure rolls the save back, the restore
+    /// must delete the newly-written `new_id` record + its workspace file — not
+    /// just re-save `prev`. Otherwise the leaked newer record stays visible and
+    /// record-backed commands observe the rolled-back-away state. A re-save-only
+    /// restore leaves two records for "main" and `find_by_thread` returns the leak.
+    #[test]
+    fn step_nonatomic_restores_replacement_save_deleting_leaked_new_record() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let manager = ThreadManager::new(repo.heddle_dir());
+
+        // R0: the prior persisted record for thread "main".
+        let mut r0 = sample_main_thread("current-A", "/work/A");
+        r0.id = "thread-main-v1".to_string();
+        r0.updated_at = chrono::Utc::now();
+        manager.save(&r0).unwrap();
+
+        // R1: the replacement save — SAME thread, DIFFERENT record id, and a later
+        // `updated_at` so a leaked R1 would win `find_by_thread`'s max-by-updated.
+        let mut r1 = r0.clone();
+        r1.id = "thread-main-v2".to_string();
+        r1.current_state = Some("current-B".to_string());
+        r1.updated_at = r0.updated_at + chrono::Duration::seconds(60);
+
+        let result = with_nonatomic_forward_fault(0, || {
+            repo::atomic::execute(&repo, SaveOnly { record: r1 })
+        });
+        assert!(result.is_err(), "the injected save fault must fail the op");
+
+        assert!(
+            manager.load("thread-main-v2").unwrap().is_none(),
+            "the leaked new_id record must be deleted on rollback"
+        );
+        let remaining = manager.list().unwrap();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "only the prior record survives for the thread, no leaked newer record"
+        );
+        let restored = manager.find_by_thread("main").unwrap().unwrap();
+        assert_eq!(restored.id, "thread-main-v1", "find_by_thread returns ONLY prev");
+        assert_eq!(restored.current_state.as_deref(), Some("current-A"));
+    }
+
+    /// A "create save" persists a thread with NO prior record. On rollback the
+    /// restore must delete the created record + its workspace file so nothing is
+    /// left for the thread.
+    #[test]
+    fn step_nonatomic_create_save_rollback_removes_created_record() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let manager = ThreadManager::new(repo.heddle_dir());
+
+        let mut created = sample_main_thread("current-A", "/work/A");
+        created.id = "thread-main-new".to_string();
+
+        let result = with_nonatomic_forward_fault(0, || {
+            repo::atomic::execute(&repo, SaveOnly { record: created })
+        });
+        assert!(result.is_err(), "the injected save fault must fail the op");
+
+        assert!(
+            manager.load("thread-main-new").unwrap().is_none(),
+            "the created record must be removed on rollback"
+        );
+        assert!(
+            manager.find_by_thread("main").unwrap().is_none(),
+            "no record survives for a rolled-back create save"
         );
     }
 
