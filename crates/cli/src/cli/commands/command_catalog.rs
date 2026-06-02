@@ -2608,8 +2608,7 @@ fn apply_command_catalog_filters(output: &mut CommandCatalogOutput, args: &Comma
             || command_filters
                 .iter()
                 .any(|filter| command_matches_filter(command, filter)))
-            && (tier_filters.is_empty()
-                || tier_filters.contains(&command.tier.as_str()))
+            && (tier_filters.is_empty() || tier_filters.contains(&command.tier.as_str()))
             && (!args.mutating || command.mutates)
             && (!args.supports_op_id || command.supports_op_id)
     });
@@ -2734,9 +2733,10 @@ fn catalog_entry(
 
     let contract = command_contract(path);
     if contract.supports_op_id
-        && let Some(op_id_option) = op_id_option {
-            options.push(op_id_option.clone());
-        }
+        && let Some(op_id_option) = op_id_option
+    {
+        options.push(op_id_option.clone());
+    }
     CommandCatalogEntry {
         path: path.to_vec(),
         display: path.join(" "),

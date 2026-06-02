@@ -78,20 +78,16 @@ pub use repository_redaction::{PurgeOutcome, RemoveRedactionOutcome};
 pub use session_storage::SessionManager;
 pub use snapshot_metadata::{
     ABSENT_CONFIDENCE_DISPLAY, ThreadMetadataRefresh, classify_impact_categories,
-    compute_heavy_impact_paths, format_confidence,
-    refresh_active_thread_metadata, refresh_thread_freshness, summarize_confidence,
-    summarize_verification, update_thread_state_from_state,
+    compute_heavy_impact_paths, format_confidence, refresh_active_thread_metadata,
+    refresh_thread_freshness, summarize_confidence, summarize_verification,
+    update_thread_state_from_state,
 };
-pub use stash::{StashEntry, StashManager};
 pub use stack_snapshot::{
     REPOSITORY_SNAPSHOT_SCHEMA_VERSION, RepositorySnapshot, StackNextAction, ThreadSnapshot,
 };
+pub use stash::{StashEntry, StashManager};
 pub use thread_advice::{
     RecommendedAction, ThreadAdvice, describe_thread_advice, describe_thread_advice_with_initial,
-};
-pub use thread_stack::{
-    PlanRebaseError, StackNode, StackRebasePlan, StackRebaseStep, ThreadStack, compute_stacks,
-    plan_stack_rebase, stack_for,
 };
 pub use thread_model::{
     ConfidenceBand, EphemeralMarker, ThreadConfidenceSummary, ThreadFreshness, ThreadId,
@@ -99,6 +95,10 @@ pub use thread_model::{
     ThreadRuntimeOverlay, ThreadState, ThreadVerificationSummary, ThreadView,
 };
 pub use thread_record_store::{FilesystemThreadRecordStore, ThreadRecordStore};
+pub use thread_stack::{
+    PlanRebaseError, StackNode, StackRebasePlan, StackRebaseStep, ThreadStack, compute_stacks,
+    plan_stack_rebase, stack_for,
+};
 pub use thread_storage::{SyncedThreadMetadata, SyncedThreadMetadataStore, Thread, ThreadManager};
 pub use worktree_index::{DirectoryCacheEntry, IndexEntry, WorktreeIndex};
 pub use worktree_state::WorktreeState;

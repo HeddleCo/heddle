@@ -942,7 +942,11 @@ fn quickstart_resolves_principal_from_shared_dir_in_materialized_checkout() {
     )
     .unwrap();
     assert!(
-        checkout.path().join(".heddle").join("objectstore").is_file(),
+        checkout
+            .path()
+            .join(".heddle")
+            .join("objectstore")
+            .is_file(),
         "checkout must be a materialized (objectstore-pointer) checkout"
     );
 
@@ -1311,7 +1315,10 @@ fn quickstart_native_repo_nested_in_git_checkout_is_not_overlay_refused() {
         Some("native-heddle"),
         "the nested repo stays native, not a Git overlay: {init}"
     );
-    assert!(inner.join(".heddle").is_dir(), "native .heddle/ was created");
+    assert!(
+        inner.join(".heddle").is_dir(),
+        "native .heddle/ was created"
+    );
 }
 
 /// Codex r7 (cid 3329270259): in a materialized checkout whose `.heddle/`
@@ -1349,7 +1356,11 @@ fn quickstart_resolves_shared_checkout_parent_git_identity() {
     )
     .unwrap();
     assert!(
-        checkout.path().join(".heddle").join("objectstore").is_file(),
+        checkout
+            .path()
+            .join(".heddle")
+            .join("objectstore")
+            .is_file(),
         "checkout must be a materialized (objectstore-pointer) checkout"
     );
 
@@ -1482,7 +1493,10 @@ fn quickstart_from_subdir_targets_discovered_native_repo() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     heddle(&["init", "--no-harness-install"], Some(root)).unwrap();
-    assert!(root.join(".heddle").is_dir(), "native repo created at the root");
+    assert!(
+        root.join(".heddle").is_dir(),
+        "native repo created at the root"
+    );
 
     let sub = root.join("nested").join("deeper");
     std::fs::create_dir_all(&sub).unwrap();

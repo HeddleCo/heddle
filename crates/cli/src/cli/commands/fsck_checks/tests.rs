@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use crypto::{Ed25519Signer, StateSigningExt};
-use objects::object::{
-    Attribution, Blob, FileProvenance, LineSpan, Origin, OriginSet, Principal, State, Tree,
+use objects::{
+    object::{
+        Attribution, Blob, FileProvenance, LineSpan, Origin, OriginSet, Principal, State, Tree,
+    },
+    store::ObjectStore,
 };
 use repo::Repository;
 use tempfile::TempDir;

@@ -27,13 +27,12 @@
 
 use std::collections::BTreeSet;
 
-use serde_json::Value;
-use tempfile::TempDir;
-
 use cli::cli::commands::{
     CLONE_CONNECTION_OUTPUT_KIND, CLONE_OUTPUT_KIND, build_command_catalog,
     documented_samples_with_bound_verbs, schema_for_verb,
 };
+use serde_json::Value;
+use tempfile::TempDir;
 
 use super::{heddle, heddle_output};
 
@@ -389,11 +388,10 @@ fn kind_field_exceptions_use_kind_intentionally() {
             .commands
             .iter()
             .find(|c| c.display == display)
-            .unwrap_or_else(|| panic!("`{display}` listed in KIND_FIELD_EXCEPTIONS is not in the catalog"));
-        let has_kind = entry
-            .json_discriminators
-            .iter()
-            .any(|d| d.field == "kind");
+            .unwrap_or_else(|| {
+                panic!("`{display}` listed in KIND_FIELD_EXCEPTIONS is not in the catalog")
+            });
+        let has_kind = entry.json_discriminators.iter().any(|d| d.field == "kind");
         assert!(
             has_kind,
             "`{display}` is documented as a `kind`-rather-than-output_kind exception but the catalog declares no `kind` discriminator. Update the catalog or drop the exception."
@@ -625,7 +623,9 @@ fn init_fixture() -> TempDir {
 /// whether the verb is expected to exit zero. Some named verbs need a
 /// non-trivial fixture (e.g. `revert` requires a state to revert); we
 /// skip those here and rely on dedicated tests elsewhere.
-fn runtime_invocation_args(display: &str) -> Option<(&'static [&'static str], bool /* expect_ok */)> {
+fn runtime_invocation_args(
+    display: &str,
+) -> Option<(&'static [&'static str], bool /* expect_ok */)> {
     match display {
         "stack" => Some((&["stack"], true)),
         "stack ready" => Some((&["stack", "ready"], true)),
@@ -678,8 +678,7 @@ fn runtime_init_emits_output_kind() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let first_line = stdout.lines().next().unwrap_or("").trim();
-    let parsed: Value =
-        serde_json::from_str(first_line).expect("init stdout is parseable JSON");
+    let parsed: Value = serde_json::from_str(first_line).expect("init stdout is parseable JSON");
     assert_eq!(
         parsed.get("output_kind").and_then(|v| v.as_str()),
         Some("init"),
@@ -691,8 +690,8 @@ fn runtime_init_emits_output_kind() {
 /// `dir`. Panics with the captured output on failure so doc-vs-runtime
 /// mismatches surface a readable diff.
 fn runtime_top_level_keys(argv: &[&str], dir: &std::path::Path) -> BTreeSet<String> {
-    let output = heddle_output(argv, Some(dir))
-        .unwrap_or_else(|err| panic!("spawn {argv:?}: {err}"));
+    let output =
+        heddle_output(argv, Some(dir)).unwrap_or_else(|err| panic!("spawn {argv:?}: {err}"));
     assert!(
         output.status.success(),
         "{argv:?} exited non-zero: stdout={} stderr={}",
@@ -793,8 +792,11 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
         "stack_ready" => (init_fixture(), sv(&["stack", "ready"])),
         "stack_snapshot" => {
             let t = init_fixture();
-            heddle(&["start", "feature-x", "--workspace", "solid"], Some(t.path()))
-                .expect("start feature-x");
+            heddle(
+                &["start", "feature-x", "--workspace", "solid"],
+                Some(t.path()),
+            )
+            .expect("start feature-x");
             (t, sv(&["stack", "snapshot", "--thread", "feature-x"]))
         }
         "stash_list" => (init_fixture(), sv(&["stash", "list"])),
@@ -824,7 +826,15 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
             (
                 t,
-                sv(&["redact", "apply", "HEAD", "--path", "secrets.env", "--reason", "credential"]),
+                sv(&[
+                    "redact",
+                    "apply",
+                    "HEAD",
+                    "--path",
+                    "secrets.env",
+                    "--reason",
+                    "credential",
+                ]),
             )
         }
         "purge_apply" => {
@@ -832,7 +842,15 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             std::fs::write(t.path().join("secrets.env"), "TOKEN=abc").unwrap();
             heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
             heddle(
-                &["redact", "apply", "HEAD", "--path", "secrets.env", "--reason", "credential"],
+                &[
+                    "redact",
+                    "apply",
+                    "HEAD",
+                    "--path",
+                    "secrets.env",
+                    "--reason",
+                    "credential",
+                ],
                 Some(t.path()),
             )
             .expect("redact apply");
@@ -844,15 +862,25 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
         "redact_trust_add" => (
             init_fixture(),
             sv(&[
-                "redact", "trust", "add", "--public-key", "abc123def456", "--algorithm", "ed25519",
-                "--label", "security",
+                "redact",
+                "trust",
+                "add",
+                "--public-key",
+                "abc123def456",
+                "--algorithm",
+                "ed25519",
+                "--label",
+                "security",
             ]),
         ),
         "discuss_open" => {
             let t = init_fixture();
             std::fs::write(t.path().join("a.txt"), "fn verify(){}").unwrap();
             heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
-            (t, sv(&["discuss", "open", "a.txt", "verify", "check edge case"]))
+            (
+                t,
+                sv(&["discuss", "open", "a.txt", "verify", "check edge case"]),
+            )
         }
         "discuss_list" => (init_fixture(), sv(&["discuss", "list"])),
         "context_set" => {
@@ -861,7 +889,16 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
             (
                 t,
-                sv(&["context", "set", "--path", "a.txt", "--scope", "file", "-m", "owner note"]),
+                sv(&[
+                    "context",
+                    "set",
+                    "--path",
+                    "a.txt",
+                    "--scope",
+                    "file",
+                    "-m",
+                    "owner note",
+                ]),
             )
         }
         "context_list" => (init_fixture(), sv(&["context", "list"])),

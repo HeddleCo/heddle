@@ -118,9 +118,10 @@ fn default_next_action(input: NextActionInput<'_>) -> String {
         return operation.next_action.clone();
     }
     if let Some(remote_tracking) = input.remote_tracking
-        && let Some(action) = remote_tracking_next_action(remote_tracking) {
-            return action;
-        }
+        && let Some(action) = remote_tracking_next_action(remote_tracking)
+    {
+        return action;
+    }
     if let Some(action) = non_empty_action(input.fallback) {
         return action.to_string();
     }

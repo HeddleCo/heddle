@@ -1490,8 +1490,7 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
                 script.display()
             );
             assert!(
-                source.contains("recommended_action_template")
-                    && source.contains("argv_template"),
+                source.contains("recommended_action_template") && source.contains("argv_template"),
                 "{} should execute structured verify actions and fill display-only templates",
                 script.display()
             );
@@ -2456,7 +2455,10 @@ fn git_overlay_commit_empty_index_sweeps_whole_worktree() {
     std::fs::write(temp.path().join("file.txt"), "base\nswept\n").unwrap();
     std::fs::write(temp.path().join("scratch.txt"), "untracked\n").unwrap();
 
-    let commit = json_value(temp.path(), &["commit", "-m", "sweep all", "--output", "json"]);
+    let commit = json_value(
+        temp.path(),
+        &["commit", "-m", "sweep all", "--output", "json"],
+    );
     assert_eq!(
         commit["git_index"]["commit_mode"], "worktree_all",
         "an empty index should commit all worktree paths: {commit}"
@@ -3942,7 +3944,8 @@ fn core_mutations_emit_post_verification_in_json() {
         "capture's post-verify checkpoint template must be display-only: {capture}"
     );
     assert_eq!(
-        capture["recommended_action_template"]["argv_template"], capture["verification"]["recommended_action_template"]["argv_template"],
+        capture["recommended_action_template"]["argv_template"],
+        capture["verification"]["recommended_action_template"]["argv_template"],
         "capture top-level argv should match the promoted verify action: {capture}"
     );
     assert_eq!(
@@ -3951,7 +3954,8 @@ fn core_mutations_emit_post_verification_in_json() {
         "display-only capture recommendation should carry matching top-level template metadata: {capture}"
     );
     assert_eq!(
-        capture["next_action_template"]["argv_template"], capture["recommended_action_template"]["argv_template"],
+        capture["next_action_template"]["argv_template"],
+        capture["recommended_action_template"]["argv_template"],
         "capture next_action should carry matching argv metadata: {capture}"
     );
     assert_eq!(
@@ -4100,7 +4104,8 @@ fn dirty_git_repo_after_init_requires_import_before_commit() {
             check["name"] == "Mapping"
                 && check["status"] == "needs_import"
                 && check["recommended_action"] == "heddle adopt --ref main"
-                && check["recommended_action_template"]["argv_template"] == heddle_argv_json(["adopt", "--ref", "main"])
+                && check["recommended_action_template"]["argv_template"]
+                    == heddle_argv_json(["adopt", "--ref", "main"])
         }),
         "dirty first-run verify should block on import before worktree advice: {verify}"
     );
@@ -4265,11 +4270,7 @@ fn json_value(cwd: &std::path::Path, args: &[&str]) -> Value {
 /// the returned value for test ergonomics by invoking
 /// `heddle verify --output json` after the original call. Real
 /// consumers see the field omitted.
-fn inject_post_verification_at(
-    cwd: &std::path::Path,
-    args: &[&str],
-    mut value: Value,
-) -> Value {
+fn inject_post_verification_at(cwd: &std::path::Path, args: &[&str], mut value: Value) -> Value {
     let obj = match value.as_object_mut() {
         Some(obj) => obj,
         None => return value,
@@ -4897,8 +4898,7 @@ fn branch_delete_current_refuses_with_typed_advice() {
     let create = templates
         .iter()
         .find(|template| {
-            template["argv_template"]
-                == heddle_argv_json(["thread", "create", "<other>"])
+            template["argv_template"] == heddle_argv_json(["thread", "create", "<other>"])
         })
         .unwrap_or_else(|| panic!("create recovery template should be present: {envelope}"));
     assert_eq!(create["agent_may_fill"], Value::Bool(true));
@@ -5687,11 +5687,8 @@ fn revert_refuses_dirty_worktree_with_shared_advice() {
         .to_string();
 
     std::fs::write(temp.path().join("tracked.txt"), "dirty\n").unwrap();
-    let output = heddle_output(
-        &["--output", "json", "revert", &target],
-        Some(temp.path()),
-    )
-    .expect("invoke revert");
+    let output = heddle_output(&["--output", "json", "revert", &target], Some(temp.path()))
+        .expect("invoke revert");
     assert!(!output.status.success(), "dirty revert should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     let envelope: Value =
@@ -6122,8 +6119,7 @@ fn thread_drop_current_recovery_points_to_create_when_no_sibling() {
     let create = templates
         .iter()
         .find(|template| {
-            template["argv_template"]
-                == heddle_argv_json(["thread", "create", "<other>"])
+            template["argv_template"] == heddle_argv_json(["thread", "create", "<other>"])
         })
         .unwrap_or_else(|| panic!("create recovery template should be present: {stderr}"));
     assert_eq!(create["agent_may_fill"], Value::Bool(true));
@@ -6147,7 +6143,14 @@ fn thread_drop_delete_thread_current_recovery_preserves_delete_flag() {
     heddle(&["init"], Some(temp.path())).unwrap();
 
     let output = heddle_output(
-        &["--output", "json", "thread", "drop", "main", "--delete-thread"],
+        &[
+            "--output",
+            "json",
+            "thread",
+            "drop",
+            "main",
+            "--delete-thread",
+        ],
         Some(temp.path()),
     )
     .expect("invoke destructive current thread drop");
@@ -6184,7 +6187,10 @@ fn branch_delete_current_recovery_preserves_delete_mode() {
         Some(temp.path()),
     )
     .expect("invoke current branch delete");
-    assert!(!output.status.success(), "current branch delete should refuse");
+    assert!(
+        !output.status.success(),
+        "current branch delete should refuse"
+    );
     let stderr = std::str::from_utf8(&output.stderr).unwrap();
     let envelope: Value =
         serde_json::from_str(stderr).expect("branch delete should emit JSON envelope");
@@ -6207,15 +6213,21 @@ fn thread_drop_delete_thread_recovery_retry_actually_deletes_ref() {
 
     // Refused while `main` is the current checkout.
     let refused = heddle_output(
-        &["--output", "json", "thread", "drop", "main", "--delete-thread"],
+        &[
+            "--output",
+            "json",
+            "thread",
+            "drop",
+            "main",
+            "--delete-thread",
+        ],
         Some(temp.path()),
     )
     .expect("invoke destructive current thread drop");
     assert!(!refused.status.success());
 
     // Follow the advice: create a sibling and switch to it.
-    heddle(&["thread", "create", "feature"], Some(temp.path()))
-        .expect("create a sibling thread");
+    heddle(&["thread", "create", "feature"], Some(temp.path())).expect("create a sibling thread");
     heddle(&["thread", "switch", "feature"], Some(temp.path()))
         .expect("switch to the sibling thread");
 
@@ -6239,8 +6251,7 @@ fn thread_drop_delete_thread_recovery_retry_actually_deletes_ref() {
 fn thread_drop_current_recovery_points_to_switch_when_sibling_exists() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["thread", "create", "feature"], Some(temp.path()))
-        .expect("create a sibling thread");
+    heddle(&["thread", "create", "feature"], Some(temp.path())).expect("create a sibling thread");
 
     let output = heddle_output(
         &["--output", "json", "thread", "drop", "main"],
@@ -6272,16 +6283,14 @@ fn thread_drop_current_recovery_points_to_switch_when_sibling_exists() {
     let switch = templates
         .iter()
         .find(|template| {
-            template["argv_template"]
-                == heddle_argv_json(["thread", "switch", "<other>"])
+            template["argv_template"] == heddle_argv_json(["thread", "switch", "<other>"])
         })
         .unwrap_or_else(|| panic!("switch recovery template should be present: {stderr}"));
     assert_eq!(switch["agent_may_fill"], Value::Bool(true));
     // Both recovery paths are exposed so machine callers can choose.
     assert!(
         templates.iter().any(|template| {
-            template["argv_template"]
-                == heddle_argv_json(["thread", "create", "<other>"])
+            template["argv_template"] == heddle_argv_json(["thread", "create", "<other>"])
         }),
         "create recovery template should also be present: {stderr}"
     );
@@ -10329,8 +10338,7 @@ fn actor_explain_detached_head_recommends_minting_spawn_not_no_thread() {
     // Detached HEAD: recommend the minting form (mints a dedicated thread),
     // NOT `--no-thread`, which cannot succeed without a current thread.
     assert_eq!(
-        parsed["recommended_action"],
-        "heddle actor spawn --provider openai --model gpt-5.3-codex",
+        parsed["recommended_action"], "heddle actor spawn --provider openai --model gpt-5.3-codex",
         "detached HEAD should recommend the thread-minting spawn form: {parsed}"
     );
     assert!(
@@ -11016,7 +11024,10 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
         "doctor schemas should summarize the machine-contract result at the top level: {output}"
     );
     assert_eq!(parsed["recommended_action"], serde_json::Value::Null);
-    assert_eq!(parsed["recommended_action_template"], serde_json::Value::Null);
+    assert_eq!(
+        parsed["recommended_action_template"],
+        serde_json::Value::Null
+    );
     assert_eq!(parsed["recovery_commands"], serde_json::json!([]));
     assert_eq!(
         parsed["unmatched_verbs"].as_array().map(Vec::len),
@@ -12217,8 +12228,8 @@ fn read_commands_gate_repository_preamble_on_verbose() {
             Some(temp.path()),
         )
         .unwrap_or_else(|e| panic!("{label} json should render: {e}"));
-        let parsed: Value =
-            serde_json::from_str(&json).unwrap_or_else(|e| panic!("{label} json should parse: {e}"));
+        let parsed: Value = serde_json::from_str(&json)
+            .unwrap_or_else(|e| panic!("{label} json should parse: {e}"));
         assert!(
             parsed["repository_capability"].is_string(),
             "{label} json must keep repository_capability: {json}"

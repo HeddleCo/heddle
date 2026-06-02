@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use objects::object::ChangeId;
+use objects::{object::ChangeId, store::ObjectStore};
 use repo::Repository;
 
 use super::super::advice::RecoveryAdvice;

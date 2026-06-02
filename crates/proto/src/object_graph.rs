@@ -462,8 +462,10 @@ pub fn is_ancestor(
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use objects::object::{Principal, Redaction};
-    use objects::store::ObjectStore;
+    use objects::{
+        object::{Principal, Redaction},
+        store::ObjectStore,
+    };
     use repo::Repository;
     use tempfile::TempDir;
 

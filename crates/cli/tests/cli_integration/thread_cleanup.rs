@@ -18,11 +18,10 @@
 //! storage and visibility halves are what `thread list` and
 //! `thread cleanup` actually read.
 
-use objects::store::ObjectStore;
 use std::fs;
 
 use chrono::{Duration, Utc};
-use objects::object::ThreadName;
+use objects::{object::ThreadName, store::ObjectStore};
 use repo::{
     Repository, Thread, ThreadConfidenceSummary, ThreadFreshness, ThreadIntegrationPolicy,
     ThreadManager, ThreadMode, ThreadState, ThreadVerificationSummary,
@@ -317,7 +316,10 @@ fn thread_cleanup_merged_drops_matching_threads() {
         dropped.state
     );
     assert!(
-        repo.refs().get_thread(&ThreadName::new("feat/done")).unwrap().is_none(),
+        repo.refs()
+            .get_thread(&ThreadName::new("feat/done"))
+            .unwrap()
+            .is_none(),
         "merged cleanup should remove the live thread ref so default surfaces stop treating it as active"
     );
     let default_view = list_thread_names(temp.path(), &[]);

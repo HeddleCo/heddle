@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Unit tests for the atomic-mutation primitive (heddle#330 §7 item 1).
 
-use std::cell::RefCell;
-use std::collections::BTreeSet;
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::rc::Rc;
+use std::{
+    cell::RefCell,
+    collections::BTreeSet,
+    panic::{AssertUnwindSafe, catch_unwind},
+    rc::Rc,
+};
 
-use objects::error::{HeddleError, Result};
-use objects::object::{ChangeId, MarkerName, ThreadName};
+use objects::{
+    error::{HeddleError, Result},
+    object::{ChangeId, MarkerName, ThreadName},
+};
 use oplog::{
     ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpLogBackend, OpRecord,
     isolation_keys_for_record,

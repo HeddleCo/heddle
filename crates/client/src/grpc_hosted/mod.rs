@@ -6,7 +6,6 @@ mod hydration;
 mod sync;
 mod user;
 
-use objects::store::ObjectStore;
 use cli_shared::ClientConfig;
 use crypto::{Ed25519Signer, Signer};
 use grpc::heddle::v1::{
@@ -15,7 +14,7 @@ use grpc::heddle::v1::{
     hosted_user_service_client::HostedUserServiceClient, mint_biscuit_request::Proof,
     repo_sync_service_client::RepoSyncServiceClient,
 };
-use objects::object::MarkerName;
+use objects::{object::MarkerName, store::ObjectStore};
 use proto::ProtocolError;
 use repo::Repository;
 use tonic::{

@@ -152,11 +152,7 @@ fn test_corerefbackend_trait_methods_dispatch() {
 
     CoreRefBackend::set_thread(&refs, &ThreadName::new("main"), &thread_id).unwrap();
     assert_eq!(
-        pollster::block_on(CoreRefBackend::get_thread(
-            &refs,
-            &ThreadName::new("main")
-        ))
-        .unwrap(),
+        pollster::block_on(CoreRefBackend::get_thread(&refs, &ThreadName::new("main"))).unwrap(),
         Some(thread_id)
     );
 
@@ -538,16 +534,20 @@ fn undo_recovery_is_scoped_per_checkout_on_shared_ref_root() {
 // record-before-publish ordering — without the `repo`/`oplog` layer.
 
 mod chokepoint {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    };
 
-    use objects::error::Result;
-    use objects::object::{ChangeId, MarkerName, ThreadName};
+    use objects::{
+        error::Result,
+        object::{ChangeId, MarkerName, ThreadName},
+    };
     use tempfile::TempDir;
 
     use super::super::{
-        Loaded, LoadRequest, RefCommitter, RefManager, RefReconciler, ReconcileOutcome,
-        RefExpectation, RefUpdate,
+        LoadRequest, Loaded, ReconcileOutcome, RefCommitter, RefExpectation, RefManager,
+        RefReconciler, RefUpdate,
     };
 
     fn manager() -> (TempDir, std::path::PathBuf) {
@@ -574,7 +574,12 @@ mod chokepoint {
         fn generation(&self) -> Result<u64> {
             Ok(self.generation.load(Ordering::Acquire))
         }
-        fn reconcile(&self, req: &LoadRequest, raw: Loaded, _since: u64) -> Result<ReconcileOutcome> {
+        fn reconcile(
+            &self,
+            req: &LoadRequest,
+            raw: Loaded,
+            _since: u64,
+        ) -> Result<ReconcileOutcome> {
             self.calls.fetch_add(1, Ordering::AcqRel);
             // Project the request's authoritative value out of the configured
             // materialization set (mirrors the real reconciler's per-request fold).
@@ -583,7 +588,9 @@ mod chokepoint {
                     .republish
                     .iter()
                     .find_map(|u| match u {
-                        RefUpdate::Thread { name: n, new, .. } if n == name => Some(Loaded::Point(*new)),
+                        RefUpdate::Thread { name: n, new, .. } if n == name => {
+                            Some(Loaded::Point(*new))
+                        }
                         _ => None,
                     })
                     .unwrap_or(raw),
@@ -591,7 +598,9 @@ mod chokepoint {
                     .republish
                     .iter()
                     .find_map(|u| match u {
-                        RefUpdate::Marker { name: n, new, .. } if n == name => Some(Loaded::Point(*new)),
+                        RefUpdate::Marker { name: n, new, .. } if n == name => {
+                            Some(Loaded::Point(*new))
+                        }
                         _ => None,
                     })
                     .unwrap_or(raw),
@@ -648,7 +657,11 @@ mod chokepoint {
         // Generation still 7 ⇒ tip == cached ⇒ reconcile is never invoked.
         let got = refs.get_thread(&ThreadName::new("absent")).unwrap();
         assert_eq!(got, None);
-        assert_eq!(calls.load(Ordering::Acquire), 0, "hot path must not reconcile");
+        assert_eq!(
+            calls.load(Ordering::Acquire),
+            0,
+            "hot path must not reconcile"
+        );
     }
 
     /// The lag path drives `materialize`'s authoritative-apply branches: an
@@ -711,24 +724,37 @@ mod chokepoint {
                 },
             ],
             remote_updates: vec![
-                ("origin".to_string(), ThreadName::new("rt"), Some(remote_state)),
+                (
+                    "origin".to_string(),
+                    ThreadName::new("rt"),
+                    Some(remote_state),
+                ),
                 // `None` value, canonical absent — skipped.
                 ("origin".to_string(), ThreadName::new("gone"), None),
                 // Present-but-stale remote thread ⇒ overwritten with committed value.
-                ("origin".to_string(), ThreadName::new("rt_stale"), Some(remote_stale_new)),
+                (
+                    "origin".to_string(),
+                    ThreadName::new("rt_stale"),
+                    Some(remote_stale_new),
+                ),
                 // Present remote thread the fold deleted ⇒ removed.
                 ("origin".to_string(), ThreadName::new("rt_doomed"), None),
             ],
             undo_recovery: Some(undo_state),
             calls: Arc::clone(&calls),
         });
-        let refs = RefManager::new(&dir).with_reconciler(Arc::clone(&reconciler) as Arc<dyn RefReconciler>);
+        let refs = RefManager::new(&dir)
+            .with_reconciler(Arc::clone(&reconciler) as Arc<dyn RefReconciler>);
         refs.init().unwrap();
         // Publish present + stale AFTER injection (raw writes, bypass chokepoint).
-        refs.set_thread(&ThreadName::new("present"), &present_state).unwrap();
-        refs.set_thread(&ThreadName::new("stale"), &stale_old).unwrap();
-        refs.set_remote_thread("origin", &ThreadName::new("rt_stale"), &remote_stale_old).unwrap();
-        refs.set_remote_thread("origin", &ThreadName::new("rt_doomed"), &remote_doomed).unwrap();
+        refs.set_thread(&ThreadName::new("present"), &present_state)
+            .unwrap();
+        refs.set_thread(&ThreadName::new("stale"), &stale_old)
+            .unwrap();
+        refs.set_remote_thread("origin", &ThreadName::new("rt_stale"), &remote_stale_old)
+            .unwrap();
+        refs.set_remote_thread("origin", &ThreadName::new("rt_doomed"), &remote_doomed)
+            .unwrap();
         refs.set_undo_recovery(&undo_old).unwrap();
 
         // Bump generation so the next read lags ⇒ reconcile + materialize run.
@@ -749,19 +775,25 @@ mod chokepoint {
             Some(stale_new),
             "a stale present ref must be overwritten with the committed value"
         );
-        assert_eq!(refs.get_marker(&MarkerName::new("mk")).unwrap(), Some(marker_state));
         assert_eq!(
-            refs.get_remote_thread("origin", &ThreadName::new("rt")).unwrap(),
+            refs.get_marker(&MarkerName::new("mk")).unwrap(),
+            Some(marker_state)
+        );
+        assert_eq!(
+            refs.get_remote_thread("origin", &ThreadName::new("rt"))
+                .unwrap(),
             Some(remote_state)
         );
         // The stale remote thread is overwritten; the doomed one is removed.
         assert_eq!(
-            refs.get_remote_thread("origin", &ThreadName::new("rt_stale")).unwrap(),
+            refs.get_remote_thread("origin", &ThreadName::new("rt_stale"))
+                .unwrap(),
             Some(remote_stale_new),
             "a stale present remote thread must be overwritten with the committed value"
         );
         assert_eq!(
-            refs.get_remote_thread("origin", &ThreadName::new("rt_doomed")).unwrap(),
+            refs.get_remote_thread("origin", &ThreadName::new("rt_doomed"))
+                .unwrap(),
             None,
             "a committed delete must remove a present remote thread"
         );
@@ -771,7 +803,11 @@ mod chokepoint {
         // Second read: watermark now == generation (2) ⇒ hot path, no new reconcile.
         let before = calls.load(Ordering::Acquire);
         let _ = refs.get_thread(&ThreadName::new("absent")).unwrap();
-        assert_eq!(calls.load(Ordering::Acquire), before, "watermark caught up ⇒ hot path");
+        assert_eq!(
+            calls.load(Ordering::Acquire),
+            before,
+            "watermark caught up ⇒ hot path"
+        );
     }
 
     /// `commit_and_publish` appends the ref-carrying records (phase 4) before
@@ -783,7 +819,8 @@ mod chokepoint {
         let committer = Arc::new(FakeCommitter {
             seen: Mutex::new(Vec::new()),
         });
-        let refs = RefManager::new(&dir).with_committer(Arc::clone(&committer) as Arc<dyn RefCommitter>);
+        let refs =
+            RefManager::new(&dir).with_committer(Arc::clone(&committer) as Arc<dyn RefCommitter>);
         refs.init().unwrap();
 
         let state = ChangeId::generate();
@@ -793,7 +830,8 @@ mod chokepoint {
             expected: RefExpectation::Missing,
             new: Some(state),
         }];
-        refs.commit_and_publish(&records, &updates, Some("lane")).unwrap();
+        refs.commit_and_publish(&records, &updates, Some("lane"))
+            .unwrap();
 
         // The committer saw the records (phase 4) and the ref published (phase 5).
         let seen = committer.seen.lock().unwrap();
@@ -824,7 +862,10 @@ mod chokepoint {
                 None,
             )
             .unwrap();
-        assert_eq!(plain.get_marker(&MarkerName::new("v2")).unwrap(), Some(other));
+        assert_eq!(
+            plain.get_marker(&MarkerName::new("v2")).unwrap(),
+            Some(other)
+        );
     }
 
     /// Fail closed (heddle#354 r9, cid 3330304656): a `commit_and_publish` with
@@ -874,7 +915,10 @@ mod chokepoint {
         // phase-3 read of the still-missing ref (which needs no write perm)
         // succeeds — isolating a publish-after-commit failure.
         let threads_dir = refs.threads_dir();
-        let original = std::fs::metadata(&threads_dir).unwrap().permissions().mode();
+        let original = std::fs::metadata(&threads_dir)
+            .unwrap()
+            .permissions()
+            .mode();
         std::fs::set_permissions(&threads_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
 
         let lock = refs.lock_refs().unwrap();
@@ -913,20 +957,27 @@ mod chokepoint {
         let s2 = ChangeId::generate();
         // RefBackend trait surface for remotes.
         RefBackend::set_remote_thread(&refs, "origin", &ThreadName::new("rt1"), &s1).unwrap();
-        refs.set_remote_thread("origin", &ThreadName::new("rt2"), &s2).unwrap();
+        refs.set_remote_thread("origin", &ThreadName::new("rt2"), &s2)
+            .unwrap();
         assert_eq!(
             RefBackend::get_remote_thread(&refs, "origin", &ThreadName::new("rt1")).unwrap(),
             Some(s1)
         );
-        assert!(RefBackend::list_remotes(&refs).unwrap().contains(&"origin".to_string()));
+        assert!(
+            RefBackend::list_remotes(&refs)
+                .unwrap()
+                .contains(&"origin".to_string())
+        );
         let mut rts = RefBackend::list_remote_threads(&refs, "origin").unwrap();
         rts.sort();
         assert_eq!(rts.len(), 2);
-        let removed = RefBackend::delete_remote_thread(&refs, "origin", &ThreadName::new("rt1")).unwrap();
+        let removed =
+            RefBackend::delete_remote_thread(&refs, "origin", &ThreadName::new("rt1")).unwrap();
         assert_eq!(removed, Some(s1));
         // Deleting an absent remote thread returns None.
         assert_eq!(
-            refs.delete_remote_thread("origin", &ThreadName::new("nope")).unwrap(),
+            refs.delete_remote_thread("origin", &ThreadName::new("nope"))
+                .unwrap(),
             None
         );
 
@@ -944,12 +995,22 @@ mod chokepoint {
         assert_eq!(refs.resolve("rel").unwrap(), Some(m));
 
         // CoreRefBackend async + sync delegations.
-        let got = pollster::block_on(CoreRefBackend::get_thread(&refs, &ThreadName::new("main2"))).unwrap();
+        let got = pollster::block_on(CoreRefBackend::get_thread(&refs, &ThreadName::new("main2")))
+            .unwrap();
         assert_eq!(got, Some(t));
-        let gm = pollster::block_on(CoreRefBackend::get_marker(&refs, &MarkerName::new("rel"))).unwrap();
+        let gm =
+            pollster::block_on(CoreRefBackend::get_marker(&refs, &MarkerName::new("rel"))).unwrap();
         assert_eq!(gm, Some(m));
-        assert!(CoreRefBackend::list_threads(&refs).unwrap().contains(&ThreadName::new("main2")));
-        assert!(CoreRefBackend::list_markers(&refs).unwrap().contains(&MarkerName::new("rel")));
+        assert!(
+            CoreRefBackend::list_threads(&refs)
+                .unwrap()
+                .contains(&ThreadName::new("main2"))
+        );
+        assert!(
+            CoreRefBackend::list_markers(&refs)
+                .unwrap()
+                .contains(&MarkerName::new("rel"))
+        );
         let r = pollster::block_on(CoreRefBackend::resolve(&refs, "main2")).unwrap();
         assert_eq!(r, Some(t));
 
@@ -1231,8 +1292,7 @@ mod write_read_conformance {
     #[test]
     fn read_chokepoint_refreshes_watermark_fresh() {
         assert!(
-            first_body(&[MANAGER_SRC], "reconciled_load")
-                .contains("refresh_persisted_watermark("),
+            first_body(&[MANAGER_SRC], "reconciled_load").contains("refresh_persisted_watermark("),
             "the read chokepoint must re-read the persisted watermark each reconcile"
         );
     }

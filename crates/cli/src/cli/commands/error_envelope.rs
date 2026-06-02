@@ -344,10 +344,7 @@ fn classify_error(err: &anyhow::Error) -> ErrorClassification {
     classify_error_with_verb(err, None)
 }
 
-fn classify_error_with_verb(
-    err: &anyhow::Error,
-    verb_help: Option<&str>,
-) -> ErrorClassification {
+fn classify_error_with_verb(err: &anyhow::Error, verb_help: Option<&str>) -> ErrorClassification {
     let mut classification = classify_error_inner(err);
     if classification.kind == "runtime_error"
         && let Some(help) = verb_help
@@ -378,9 +375,10 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
             };
         }
         if let Some(git_error) = cause.downcast_ref::<crate::bridge::git_core::GitBridgeError>()
-            && let Some(advice) = RecoveryAdvice::from_git_bridge_error(git_error) {
-                return ErrorClassification::from_advice(&advice);
-            }
+            && let Some(advice) = RecoveryAdvice::from_git_bridge_error(git_error)
+        {
+            return ErrorClassification::from_advice(&advice);
+        }
         if let Some(heddle_err) = cause.downcast_ref::<HeddleError>() {
             // `output.format = "auto"` is rejected at config-parse time by
             // the hand-rolled `OutputFormat` deserializer (see

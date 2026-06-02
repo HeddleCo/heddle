@@ -7,8 +7,10 @@
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use objects::object::ThreadName;
-use objects::store::{ActorChainNode, AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary};
+use objects::{
+    object::ThreadName,
+    store::{ActorChainNode, AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary},
+};
 use repo::Repository;
 use serde::Serialize;
 

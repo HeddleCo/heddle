@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
@@ -13,7 +12,7 @@ use chrono::Utc;
 use objects::{
     fs_atomic::write_file_atomic,
     object::{DiffKind, Session, ThreadName, Tree},
-    store::{AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary},
+    store::{AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ObjectStore},
 };
 use proto::{
     HarnessIdentity, ProgressCheckpoint, SessionDiffSummary, SessionReportEnvelope,
@@ -2142,7 +2141,10 @@ fn allocate_thread_name(repo: &Repository, base: &str) -> Result<String> {
         if ThreadManager::new(repo.heddle_dir())
             .load(&candidate)?
             .is_none()
-            && repo.refs().get_thread(&ThreadName::new(&candidate))?.is_none()
+            && repo
+                .refs()
+                .get_thread(&ThreadName::new(&candidate))?
+                .is_none()
         {
             return Ok(candidate);
         }

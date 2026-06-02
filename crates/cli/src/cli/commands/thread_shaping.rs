@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Heddle-native thread shaping helpers.
 
-use objects::store::ObjectStore;
 use std::{fs, path::Path};
 
 use anyhow::{Result, anyhow};
-use objects::{fs_ops::remove_path_recursively, object::{ChangeId, ThreadName}};
+use objects::{
+    fs_ops::remove_path_recursively,
+    object::{ChangeId, ThreadName},
+    store::ObjectStore,
+};
 use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus};
 use serde::Serialize;
 
@@ -390,8 +393,10 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
         thread.integration_policy_result.status = Some("manual_resolved".to_string());
         thread.integration_policy_result.reason =
             Some("manual integration resolution captured".to_string());
-        thread.integration_policy_result.manual_resolution_state =
-            repo.refs().get_thread(&ThreadName::new(&thread.thread))?.map(|id| id.short());
+        thread.integration_policy_result.manual_resolution_state = repo
+            .refs()
+            .get_thread(&ThreadName::new(&thread.thread))?
+            .map(|id| id.short());
         manager.save(&thread)?;
     }
     let recommended_action = if blockers.is_empty() {
@@ -475,7 +480,8 @@ fn thread_resolve_rebase_followup_operator(
     let next_action = "heddle continue".to_string();
     let mut blockers = Vec::new();
     if rebase_state
-        .pre_conflict_head.is_none_or(|head| head == current_state.change_id)
+        .pre_conflict_head
+        .is_none_or(|head| head == current_state.change_id)
     {
         blockers.push(
             "refresh has a rebase in progress; capture a manual resolution in the thread checkout, then run `heddle rebase --continue`".to_string(),

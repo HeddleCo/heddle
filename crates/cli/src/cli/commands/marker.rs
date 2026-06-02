@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Marker commands.
 
-use objects::store::ObjectStore;
-use anyhow::{anyhow, Result};
-use objects::object::MarkerName;
+use anyhow::{Result, anyhow};
+use objects::{object::MarkerName, store::ObjectStore};
 use repo::Repository;
 use serde::Serialize;
 
 use super::{advice::RecoveryAdvice, snapshot::ensure_current_state};
 use crate::{
-    cli::{should_output_json, Cli, MarkerCommands},
+    cli::{Cli, MarkerCommands, should_output_json},
     config::UserConfig,
 };
 

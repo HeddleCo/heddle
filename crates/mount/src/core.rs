@@ -2989,9 +2989,7 @@ impl<S: ObjectStore> MountInner<S> {
 /// weak handle and drains any hot buffer that's been idle longer
 /// than `idle_after`. A `None` `sweep_interval` returns `None`,
 /// meaning event-driven promotion only.
-fn spawn_sweep_worker<S: ObjectStore + 'static>(
-    inner: &Arc<MountInner<S>>,
-) -> Option<SweepHandle> {
+fn spawn_sweep_worker<S: ObjectStore + 'static>(inner: &Arc<MountInner<S>>) -> Option<SweepHandle> {
     let interval = inner
         .promotion
         .read()

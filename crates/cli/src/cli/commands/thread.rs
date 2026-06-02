@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Thread commands.
 
-use objects::store::ObjectStore;
 use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
@@ -13,7 +12,7 @@ use chrono::{DateTime, Utc};
 use gix::bstr::ByteSlice;
 use objects::{
     object::{ChangeId, State, ThreadName, Tree},
-    store::{AgentEntry, AgentRegistry, AgentStatus, current_boot_id},
+    store::{AgentEntry, AgentRegistry, AgentStatus, ObjectStore, current_boot_id},
 };
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
@@ -528,7 +527,10 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
     }
     for mut thread in thread_manager.list()? {
         if thread.state == ThreadState::Abandoned
-            && repo.refs().get_thread(&ThreadName::new(&thread.thread))?.is_none()
+            && repo
+                .refs()
+                .get_thread(&ThreadName::new(&thread.thread))?
+                .is_none()
         {
             continue;
         }
@@ -1669,7 +1671,9 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     let base_state = match (&args.from, existing_thread_state) {
         (Some(spec), Some(existing)) => {
             let requested = repo.resolve_state(spec)?.ok_or_else(|| {
-                anyhow!(RecoveryAdvice::thread_referenced_state_missing(spec, "State"))
+                anyhow!(RecoveryAdvice::thread_referenced_state_missing(
+                    spec, "State"
+                ))
             })?;
             if requested != existing {
                 return Err(anyhow!(thread_anchor_mismatch_advice(
@@ -1680,7 +1684,9 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
         }
         (None, Some(existing)) => existing,
         (Some(spec), None) => repo.resolve_state(spec)?.ok_or_else(|| {
-            anyhow!(RecoveryAdvice::thread_referenced_state_missing(spec, "State"))
+            anyhow!(RecoveryAdvice::thread_referenced_state_missing(
+                spec, "State"
+            ))
         })?,
         (None, None) => ensure_current_state(
             repo,
@@ -1893,8 +1899,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // precise directory + symlink rewind, back to the exact pre-start state;
     // the oplog `ThreadCreateV2` is the staged commit record appended once at
     // the single commit point. See `start_atomic::StartThread`.
-    let mount_ownership =
-        mount_lifecycle::MountOwnership::from_flags(args.daemon, args.no_daemon);
+    let mount_ownership = mount_lifecycle::MountOwnership::from_flags(args.daemon, args.no_daemon);
     // `scope` + `transaction_id` were resolved above the commit-detection gate.
     let hydrate_requested =
         args.hydrate && matches!(thread_mode, ThreadMode::Solid | ThreadMode::Materialized);
@@ -2406,8 +2411,12 @@ pub(crate) fn cmd_thread_create(
     // round-trip-encode that can't read its own write is a serde
     // contract bug, not a runtime condition.
     let manager_snapshot = thread_manager.snapshot_thread_record(&name)?;
-    repo.oplog()
-        .record_thread_create(&ThreadName::new(&name), &current, manager_snapshot, Some(&repo.op_scope()))?;
+    repo.oplog().record_thread_create(
+        &ThreadName::new(&name),
+        &current,
+        manager_snapshot,
+        Some(&repo.op_scope()),
+    )?;
 
     let output = thread_op_output(
         "thread_create",

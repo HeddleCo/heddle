@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::DeserializeOwned};
 
 use crate::{
     Result,
@@ -508,13 +507,15 @@ fn parse_name_email(raw: &str) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use serde_json::json;
     use std::collections::VecDeque;
+
+    use serde_json::json;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
     };
+
+    use super::*;
 
     struct MockResponse {
         status: u16,

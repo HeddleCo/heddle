@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Collapse command: squash multiple states into one.
 
-use objects::store::ObjectStore;
 use std::time::Instant;
 
 use anyhow::Result;
-use objects::object::State;
+use objects::{object::State, store::ObjectStore};
 use oplog::OpRecord;
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::Repository;

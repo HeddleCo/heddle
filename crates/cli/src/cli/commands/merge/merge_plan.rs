@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared merge planning seam for preview and apply flows.
 
-use objects::store::ObjectStore;
 use anyhow::{Result, anyhow};
-use objects::object::ChangeId;
+use objects::{object::ChangeId, store::ObjectStore};
 use repo::{CommitGraphIndex, Repository};
 
 use super::{

@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
-use super::*;
 use objects::object::ThreadName;
+
+use super::*;
 
 /// Initialize a colocated (drop-in) Git repo on `main` with one
 /// committed file, mirroring the bootstrap the overlay tests use.
 fn init_colocated_git_repo(path: &std::path::Path) {
-    assert!(Command::new("git")
-        .arg("init")
-        .current_dir(path)
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("git")
+            .arg("init")
+            .current_dir(path)
+            .status()
+            .unwrap()
+            .success()
+    );
     for (k, v) in [
         ("user.name", "Heddle Test"),
         ("user.email", "heddle@example.com"),
@@ -30,18 +33,22 @@ fn init_colocated_git_repo(path: &std::path::Path) {
 }
 
 fn git_commit_all_in(path: &std::path::Path, message: &str) {
-    assert!(Command::new("git")
-        .args(["add", "."])
-        .current_dir(path)
-        .status()
-        .unwrap()
-        .success());
-    assert!(Command::new("git")
-        .args(["commit", "-m", message])
-        .current_dir(path)
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["commit", "-m", message])
+            .current_dir(path)
+            .status()
+            .unwrap()
+            .success()
+    );
 }
 
 fn git_status_porcelain(path: &std::path::Path) -> String {
@@ -201,7 +208,9 @@ fn recapture_to_empty_tree_prunes_stale_intent_to_add() {
         .output()
         .unwrap();
     assert!(
-        String::from_utf8(staged.stdout).unwrap().contains(EMPTY_BLOB_OID),
+        String::from_utf8(staged.stdout)
+            .unwrap()
+            .contains(EMPTY_BLOB_OID),
         "precondition: new_file.txt must be intent-to-add after first capture"
     );
 
@@ -261,8 +270,11 @@ fn recapture_skips_intent_to_add_that_conflicts_with_tracked_file() {
     std::fs::remove_file(source.path().join("foo")).unwrap();
     std::fs::create_dir(source.path().join("foo")).unwrap();
     std::fs::write(source.path().join("foo").join("bar"), "now a dir\n").unwrap();
-    heddle(&["capture", "-m", "file becomes directory"], Some(source.path()))
-        .expect("recapture should record the file→dir change");
+    heddle(
+        &["capture", "-m", "file becomes directory"],
+        Some(source.path()),
+    )
+    .expect("recapture should record the file→dir change");
 
     // The index must stay valid: never both `foo` and `foo/bar`.
     let staged = Command::new("git")
@@ -366,11 +378,13 @@ fn test_cli_bridge_git_export_and_pull_roundtrip() {
     assert!(pull.is_ok(), "Bridge pull failed: {:?}", pull.err());
 
     let target_repo = Repository::open(target.path()).unwrap();
-    assert!(target_repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .is_some());
+    assert!(
+        target_repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -400,11 +414,12 @@ fn test_cli_bridge_git_import_from_external_repo() {
     assert!(result.is_ok(), "Bridge import failed: {:?}", result.err());
 
     let repo = Repository::open(heddle_repo_dir.path()).unwrap();
-    assert!(repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .is_some());
+    assert!(
+        repo.refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -686,12 +701,14 @@ fn test_cli_push_mirror_in_git_overlay_pushes_to_both_remotes() {
     // Plain `git init` → RepositoryCapability::GitOverlay,
     // hosted_enabled() == false. This is the drop-in case the
     // early-return in cmd_push handles.
-    assert!(Command::new("git")
-        .arg("init")
-        .current_dir(source.path())
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("git")
+            .arg("init")
+            .current_dir(source.path())
+            .status()
+            .unwrap()
+            .success()
+    );
     for (k, v) in [
         ("user.name", "Heddle Test"),
         ("user.email", "heddle@example.com"),

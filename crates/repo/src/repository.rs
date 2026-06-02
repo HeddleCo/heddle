@@ -79,8 +79,6 @@ use objects::{
 use oplog::{OpLog, OpLogBackend, OpRecord};
 pub use refs::RefSummaryIndexInspection;
 use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
-
-use crate::git_worktree_status::GitWorktreeEntryState;
 pub use repo_config::{HostedConfig, OutputFormat, RedactConfig, RepoConfig, TrustedKey};
 // Review-epic config types — re-exported here so the new
 // `repository_signals.rs` (and external crates wanting to construct a
@@ -103,6 +101,8 @@ pub use repository_thread_materialize::ThreadCaptureOutcome;
 pub use repository_tree::{TreeBuildProfile, WorktreeCompareProfile};
 pub use repository_worktree_status::{UntrackedSet, UntrackedSubtree, WorktreeStatusDetailed};
 use serde::{Deserialize, Serialize};
+
+use crate::git_worktree_status::GitWorktreeEntryState;
 
 const GIT_CHECKPOINTS_FILE: &str = "git-checkpoints.json";
 const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[".heddle/"];
@@ -1354,10 +1354,7 @@ impl Repository {
                 continue;
             }
             match crate::git_worktree_status::git_worktree_entry_state(
-                &self.root,
-                path,
-                *oid,
-                *mode,
+                &self.root, path, *oid, *mode,
             )? {
                 GitWorktreeEntryState::Clean => {}
                 GitWorktreeEntryState::Deleted => {
@@ -1712,7 +1709,9 @@ impl Repository {
             })
             .collect::<Result<Vec<_>>>()?;
         let scope = self.op_scope();
-        let result = self.refs.commit_and_publish(&encoded, ref_updates, Some(&scope));
+        let result = self
+            .refs
+            .commit_and_publish(&encoded, ref_updates, Some(&scope));
         // The committer appended through a fresh `OpLog` handle (the `refs`→`repo`
         // seam), so this repository's own cached oplog handle is now stale.
         // Refresh it so a same-process read via `self.oplog()` observes the
@@ -1896,7 +1895,9 @@ impl Repository {
                 .git_overlay_mapped_change_for_branch(&branch)?
                 .is_some()
         {
-            return Ok(Head::Attached { thread: branch_thread });
+            return Ok(Head::Attached {
+                thread: branch_thread,
+            });
         }
         Ok(raw)
     }
@@ -2525,7 +2526,9 @@ fn detect_git_head_state(path: &Path) -> Result<Option<GitHeadState>> {
 /// than guess).
 fn detect_git_head(path: &Path) -> Result<Option<Head>> {
     if let Some(GitHeadState::Attached(thread)) = detect_git_head_state(path)? {
-        return Ok(Some(Head::Attached { thread: ThreadName::from(thread) }));
+        return Ok(Some(Head::Attached {
+            thread: ThreadName::from(thread),
+        }));
     }
     Ok(None)
 }

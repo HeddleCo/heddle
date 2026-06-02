@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use anyhow::{Context, Result, anyhow};
-use objects::object::{ChangeId, ThreadName};
+use objects::{
+    object::{ChangeId, ThreadName},
+    store::ObjectStore,
+};
 use oplog::{OpBatch, OpRecord};
 use repo::{Repository, Thread, ThreadIntegrationPolicy};
 use serde::Serialize;
@@ -685,7 +687,8 @@ fn ship_performed_steps(
         (pushed, "push"),
     ]
     .into_iter()
-    .filter(|&(done, _step)| done).map(|(_done, step)| step.to_string())
+    .filter(|&(done, _step)| done)
+    .map(|(_done, step)| step.to_string())
     .collect()
 }
 
@@ -706,7 +709,8 @@ fn ship_skipped_steps(
         (!pushed && !integrated, "push(not reached)"),
     ]
     .into_iter()
-    .filter(|&(skipped, _step)| skipped).map(|(_skipped, step)| step.to_string())
+    .filter(|&(skipped, _step)| skipped)
+    .map(|(_skipped, step)| step.to_string())
     .collect()
 }
 
@@ -1173,12 +1177,15 @@ fn adopt_manual_resolution(repo: &Repository, thread_id: &str) -> Result<String>
             "adopt manual resolution"
         ))
     })?;
-    let target = repo.refs().get_thread(&ThreadName::new(&thread.thread))?.ok_or_else(|| {
-        anyhow!(
-            "Thread '{}' has no current state to integrate",
-            thread.thread
-        )
-    })?;
+    let target = repo
+        .refs()
+        .get_thread(&ThreadName::new(&thread.thread))?
+        .ok_or_else(|| {
+            anyhow!(
+                "Thread '{}' has no current state to integrate",
+                thread.thread
+            )
+        })?;
     super::ff_record::record_ff_advance(repo, &thread.thread, &target)?;
     thread.state = repo::ThreadState::Merged;
     thread.merged_state = Some(target.short());
@@ -1213,13 +1220,13 @@ pub(crate) fn auto_ship_policy_blockers(repo: &Repository, thread: &Thread) -> V
     let agent_authored = thread_is_agent_authored(repo, thread);
     if agent_authored
         && let Some(confidence) = thread.confidence_summary.value
-            && confidence < AUTO_SHIP_CONFIDENCE_THRESHOLD
-        {
-            blockers.push(format!(
-                "confidence {:.2} is below the auto-ship threshold of 0.75",
-                confidence
-            ));
-        }
+        && confidence < AUTO_SHIP_CONFIDENCE_THRESHOLD
+    {
+        blockers.push(format!(
+            "confidence {:.2} is below the auto-ship threshold of 0.75",
+            confidence
+        ));
+    }
     if matches!(thread.verification_summary.tests_passed, Some(false)) {
         blockers.push("verification summary reports failing tests".to_string());
     }
@@ -1279,7 +1286,12 @@ fn thread_is_agent_authored(repo: &Repository, thread: &Thread) -> bool {
         .current_state
         .as_deref()
         .and_then(|state| repo.resolve_state(state).ok().flatten())
-        .or_else(|| repo.refs().get_thread(&ThreadName::new(&thread.thread)).ok().flatten());
+        .or_else(|| {
+            repo.refs()
+                .get_thread(&ThreadName::new(&thread.thread))
+                .ok()
+                .flatten()
+        });
     current_state
         .and_then(|id| repo.store().get_state(&id).ok().flatten())
         .map(|state| state.attribution.agent.is_some())

@@ -2,16 +2,16 @@
 //! Fetch command - download objects and refs from remote.
 
 #[cfg(feature = "client")]
-use objects::store::ObjectStore;
-#[cfg(feature = "client")]
 use std::collections::HashSet;
 
 #[cfg(feature = "client")]
 use anyhow::Context;
 use anyhow::Result;
-use objects::object::{MarkerName, ThreadName};
 #[cfg(feature = "client")]
 use objects::object::ChangeId;
+use objects::object::{MarkerName, ThreadName};
+#[cfg(feature = "client")]
+use objects::store::ObjectStore;
 #[cfg(feature = "client")]
 use proto::AuthToken;
 use repo::{Repository, RepositoryCapability};
@@ -317,8 +317,11 @@ async fn fetch_network(
     // Update remote refs
     let refs_fetched = refs_to_update.len();
     for (track_name, change_id) in refs_to_update {
-        repo.refs()
-            .set_remote_thread(options.remote_name, &ThreadName::new(&track_name), &change_id)?;
+        repo.refs().set_remote_thread(
+            options.remote_name,
+            &ThreadName::new(&track_name),
+            &change_id,
+        )?;
     }
 
     for (marker_name, change_id) in markers_to_create {

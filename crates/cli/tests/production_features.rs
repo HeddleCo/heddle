@@ -3,10 +3,10 @@
 //!
 //! Tests for resolve, fetch, fsck, clone, cherry-pick, rebase, bisect, blame, gc.
 
-use objects::store::ObjectStore;
 use std::{fs, process::Command, str};
 
 use ntest::timeout;
+use objects::store::ObjectStore;
 use serde_json::Value;
 use serial_test::serial;
 use tempfile::TempDir;

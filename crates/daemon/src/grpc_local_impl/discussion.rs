@@ -11,7 +11,6 @@
 //! state's blob only. A cross-state index is W2 follow-up work and is
 //! flagged with `// TODO(W2-followup):` comments.
 
-use objects::store::ObjectStore;
 use grpc::heddle::v1::{
     AppendTurnRequest, Discussion as ProtoDiscussion,
     DiscussionResolution as ProtoDiscussionResolution, DiscussionTurn as ProtoDiscussionTurn,
@@ -19,9 +18,12 @@ use grpc::heddle::v1::{
     ListDiscussionsResponse, OpenDiscussionRequest, PathSymbolRef, ResolveDiscussionRequest,
     discussion_service_server::DiscussionService,
 };
-use objects::object::{
-    AnnotationVisibility, Blob, ChangeId, Discussion, DiscussionResolution, DiscussionTurn,
-    DiscussionsBlob, Principal, State, SymbolAnchor,
+use objects::{
+    object::{
+        AnnotationVisibility, Blob, ChangeId, Discussion, DiscussionResolution, DiscussionTurn,
+        DiscussionsBlob, Principal, State, SymbolAnchor,
+    },
+    store::ObjectStore,
 };
 use prost::Message;
 use repo::Repository;

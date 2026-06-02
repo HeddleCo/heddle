@@ -40,9 +40,7 @@ use crate::{
 mod remote_ops;
 
 pub use remote_ops::{cmd_pull, cmd_remote};
-pub(crate) use remote_ops::{
-    resolve_default_remote_name, resolved_default_remote_name,
-};
+pub(crate) use remote_ops::{resolve_default_remote_name, resolved_default_remote_name};
 
 #[allow(clippy::type_complexity)]
 pub(crate) fn push_git_overlay_refs(
@@ -237,9 +235,7 @@ pub async fn cmd_push(
         // thread explicitly (positional or `--thread`) we must NOT
         // silently push the wrong branch — refuse and tell them to
         // switch first or use `--all-threads`.
-        if !all_threads
-            && let Some(requested) = thread.as_deref()
-        {
+        if !all_threads && let Some(requested) = thread.as_deref() {
             let attached = match repo.head_ref()? {
                 Head::Attached { thread } => Some(thread.to_string()),
                 Head::Detached { .. } => None,
@@ -1132,7 +1128,9 @@ async fn push_local(
     let sync = LocalSync::open(repo.root())?;
     let objects_copied = sync.fetch_state(&target_repo, state_id)?;
 
-    target_repo.refs().set_thread(&ThreadName::new(track_name), state_id)?;
+    target_repo
+        .refs()
+        .set_thread(&ThreadName::new(track_name), state_id)?;
 
     if should_output_json(cli, Some(repo.config())) {
         let trust = build_repository_verification_state(repo);
@@ -1228,8 +1226,9 @@ mod git_overlay_config_atomic_tests {
     //! after the helper returns, the file is the full new content; a
     //! prior interrupted write that left the file partially-written
     //! must not leak back into the result.
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     fn init_dot_git(root: &Path) {
         fs::create_dir_all(root.join(".git")).unwrap();
@@ -1303,10 +1302,7 @@ mod git_overlay_config_atomic_tests {
         let recovered = fs::read_to_string(&config).unwrap();
         assert!(recovered.contains("[branch \"main\"]"), "{recovered}");
         assert!(recovered.contains("upstream"), "{recovered}");
-        assert!(
-            recovered.contains("merge = refs/heads/main"),
-            "{recovered}"
-        );
+        assert!(recovered.contains("merge = refs/heads/main"), "{recovered}");
         assert!(
             !recovered.trim_end().ends_with("rem"),
             "partial bytes from prior crash leaked into result: {recovered}"

@@ -32,9 +32,9 @@ use refs::refs::{RefBackend, RefExpectation};
 use tracing::warn;
 
 use crate::{
+    IngestError,
     git_walk::{RefHead, RefNamespace},
     sha_map::ShaMap,
-    IngestError,
 };
 
 /// Rolling tally returned by [`RefEmitter::emit`].

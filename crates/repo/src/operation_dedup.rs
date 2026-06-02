@@ -35,8 +35,10 @@ use objects::{
 use oplog::IsolationKey;
 use serde::{Deserialize, Serialize};
 
-use crate::Repository;
-use crate::atomic::{AtomicMutation, Compensator, EagerMutation, StagedCommit, Tx, execute};
+use crate::{
+    Repository,
+    atomic::{AtomicMutation, Compensator, EagerMutation, StagedCommit, Tx, execute},
+};
 
 const DEDUP_FORMAT_VERSION: u8 = 1;
 const DEDUP_FILE_NAME: &str = "operation_dedup.bin";
@@ -551,13 +553,15 @@ pub fn hash_request_body(bytes: &[u8]) -> [u8; 32] {
 mod tests {
     use std::sync::Arc;
 
-    use crate::Repository;
-    use crate::atomic::{AtomicMutation, StagedCommit, Tx, execute};
-    use crate::operation_dedup::{ReserveOpId, reserve_operation_id_eager};
     use objects::error::{HeddleError, Result};
     use tempfile::TempDir;
 
     use super::*;
+    use crate::{
+        Repository,
+        atomic::{AtomicMutation, StagedCommit, Tx, execute},
+        operation_dedup::{ReserveOpId, reserve_operation_id_eager},
+    };
 
     fn make_store() -> (TempDir, OperationDedupStore) {
         let temp = TempDir::new().unwrap();

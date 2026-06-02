@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Fsck command - verify repository integrity.
 
-use objects::store::ObjectStore;
 use anyhow::{Result, anyhow};
+use objects::store::ObjectStore;
 use repo::Repository;
 use serde::Serialize;
 

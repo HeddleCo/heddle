@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use std::{
     collections::HashSet,
     fs, io,
@@ -7,7 +6,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use objects::{fs_atomic::write_file_atomic, object::ChangeId};
+use objects::{fs_atomic::write_file_atomic, object::ChangeId, store::ObjectStore};
 use proto::{PlannedObject, StateClosureOptions, enumerate_state_closure_plan_with_options};
 use refs::{Head, RefSummaryIndexInspection};
 use serde::{Deserialize, Serialize};
@@ -734,13 +733,15 @@ fn load_ref_snapshots(repo: &Repository, threads: bool) -> Result<Vec<RefSnapsho
         let names = repo.refs().list_threads()?;
         let mut out = Vec::with_capacity(names.len());
         for name in names {
-            let state = repo.refs().get_thread(&name)?
-                .ok_or_else(|| {
-                    HeddleError::Io(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("thread '{}' disappeared while rebuilding pull planner manifest", name),
-                    ))
-                })?;
+            let state = repo.refs().get_thread(&name)?.ok_or_else(|| {
+                HeddleError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "thread '{}' disappeared while rebuilding pull planner manifest",
+                        name
+                    ),
+                ))
+            })?;
             out.push(RefSnapshotMirror {
                 name: name.to_string(),
                 state_id: state.to_string_full(),
@@ -751,13 +752,15 @@ fn load_ref_snapshots(repo: &Repository, threads: bool) -> Result<Vec<RefSnapsho
         let names = repo.refs().list_markers()?;
         let mut out = Vec::with_capacity(names.len());
         for name in names {
-            let state = repo.refs().get_marker(&name)?
-                .ok_or_else(|| {
-                    HeddleError::Io(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("marker '{}' disappeared while rebuilding pull planner manifest", name),
-                    ))
-                })?;
+            let state = repo.refs().get_marker(&name)?.ok_or_else(|| {
+                HeddleError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "marker '{}' disappeared while rebuilding pull planner manifest",
+                        name
+                    ),
+                ))
+            })?;
             out.push(RefSnapshotMirror {
                 name: name.to_string(),
                 state_id: state.to_string_full(),

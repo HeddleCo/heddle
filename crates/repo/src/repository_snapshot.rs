@@ -3,21 +3,23 @@
 
 use std::collections::BTreeSet;
 
-use objects::store::ObjectStore;
 use objects::{
     lock::RepositoryLockExt,
     object::{Attribution, Blob, ChangeId, ContentHash, State, Tree, TreeEntry},
+    store::ObjectStore,
 };
 use oplog::{IsolationKey, OpRecord};
 use refs::Head;
 use tracing::{debug, instrument};
 
 use super::{HeddleError, Repository, Result, repository_tree::TreeBuildProfile};
-use crate::atomic::{AtomicMutation, RewindLedger, StagedCommit, Tx, execute};
-use crate::worktree_ignore::WorktreeIgnoreMatcher;
-use crate::worktree_walk::{
-    WalkDirectory, WalkEntry, WorktreeWalkPolicy, read_file_hash, validate_symlink_target,
-    walk_worktree,
+use crate::{
+    atomic::{AtomicMutation, RewindLedger, StagedCommit, Tx, execute},
+    worktree_ignore::WorktreeIgnoreMatcher,
+    worktree_walk::{
+        WalkDirectory, WalkEntry, WorktreeWalkPolicy, read_file_hash, validate_symlink_target,
+        walk_worktree,
+    },
 };
 
 #[derive(Debug, Clone, Default)]

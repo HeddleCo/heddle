@@ -13,18 +13,18 @@
 //! logic in one place and lets `crates/mount` avoid pulling in
 //! `crates/cli` deps.
 
-use objects::store::ObjectStore;
 use std::path::Path;
 
 use chrono::Utc;
 use objects::{
     error::HeddleError,
     object::{ChangeId, State, ThreadName, Tree, Verification},
+    store::ObjectStore,
 };
 
 use crate::{
-    repository::Repository, ConfidenceBand, Thread, ThreadConfidenceSummary, ThreadFreshness,
-    ThreadImpactCategory, ThreadManager, ThreadState, ThreadVerificationSummary,
+    ConfidenceBand, Thread, ThreadConfidenceSummary, ThreadFreshness, ThreadImpactCategory,
+    ThreadManager, ThreadState, ThreadVerificationSummary, repository::Repository,
 };
 
 /// Result of a metadata refresh: derived signal the caller may want

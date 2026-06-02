@@ -128,9 +128,7 @@ pub fn git_worktree_entry_state(
 
 fn hash_and_compare(expected_oid: gix::ObjectId, bytes: &[u8]) -> Result<GitWorktreeEntryState> {
     let actual_oid = gix::objs::compute_hash(expected_oid.kind(), gix::objs::Kind::Blob, bytes)
-        .map_err(|error| {
-            HeddleError::Config(format!("failed to hash worktree path: {error}"))
-        })?;
+        .map_err(|error| HeddleError::Config(format!("failed to hash worktree path: {error}")))?;
     Ok(if actual_oid == expected_oid {
         GitWorktreeEntryState::Clean
     } else {
@@ -153,8 +151,8 @@ mod tests {
     fn missing_path_is_deleted() {
         let temp = tempfile::TempDir::new().unwrap();
         let oid = write_blob_hash(b"anything");
-        let state = git_worktree_entry_state(temp.path(), "nope.txt", oid, GIT_MODE_REGULAR)
-            .expect("call");
+        let state =
+            git_worktree_entry_state(temp.path(), "nope.txt", oid, GIT_MODE_REGULAR).expect("call");
         assert_eq!(state, GitWorktreeEntryState::Deleted);
     }
 
@@ -258,15 +256,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn symlink_with_non_utf8_target_compares_via_raw_bytes() {
-        use std::{ffi::OsStr, os::unix::ffi::OsStrExt, os::unix::fs::symlink};
+        use std::{
+            ffi::OsStr,
+            os::unix::{ffi::OsStrExt, fs::symlink},
+        };
         let temp = tempfile::TempDir::new().unwrap();
         let raw_target = b"target-\xff-bytes";
         let target_os = OsStr::from_bytes(raw_target);
         let link = temp.path().join("link");
         symlink(target_os, &link).unwrap();
         let oid = write_blob_hash(raw_target);
-        let state = git_worktree_entry_state(temp.path(), "link", oid, GIT_MODE_SYMLINK)
-            .expect("call");
+        let state =
+            git_worktree_entry_state(temp.path(), "link", oid, GIT_MODE_SYMLINK).expect("call");
         assert_eq!(state, GitWorktreeEntryState::Clean);
     }
 }

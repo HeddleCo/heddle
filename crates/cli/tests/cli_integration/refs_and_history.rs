@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-use super::*;
 use objects::object::ThreadName;
+
+use super::*;
 
 #[test]
 fn test_cli_track_operations() {

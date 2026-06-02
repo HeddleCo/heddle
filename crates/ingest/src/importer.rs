@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use objects::{
     object::{Blob, ChangeId, ContentHash, Tree, TreeEntry},
     store::{
-        pack::{ObjectType as PackObjectType, PackObjectId, StreamingPackBuilder},
         CompressionConfig, ObjectStore,
+        pack::{ObjectType as PackObjectType, PackObjectId, StreamingPackBuilder},
     },
 };
 use oplog::oplog::{OpLog, OpLogBackend};
@@ -29,12 +29,12 @@ use refs::refs::RefBackend;
 use tracing::info;
 
 use crate::{
+    IngestError,
     git_walk::{CommitEntry, GitSource, RefDiscoveryStats, TreeChild, TreeChildKind},
     oplog_emit::{OplogEmitStats, OplogEmitter},
     ref_emit::{RefEmitStats, RefEmitter},
     sha_map::ShaMap,
     state_writer::state_from_commit,
-    IngestError,
 };
 
 /// Counters reported back from [`Importer::run`] — the post-import
@@ -89,12 +89,7 @@ pub struct Importer<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend = OpLog> 
 }
 
 impl<'a, R: RefBackend, S: ObjectStore> Importer<'a, R, S, OpLog> {
-    pub fn new(
-        git: &'a GitSource,
-        store: &'a S,
-        refs: &'a R,
-        map: &'a mut ShaMap,
-    ) -> Self {
+    pub fn new(git: &'a GitSource, store: &'a S, refs: &'a R, map: &'a mut ShaMap) -> Self {
         Self {
             git,
             store,
@@ -610,10 +605,11 @@ mod tests {
         assert_eq!(stats.refs.markers_written, 1); // v0.1
         assert_eq!(stats.refs.skipped_unmapped, 0);
         assert!(refs.get_thread(&ThreadName::new("main")).unwrap().is_some());
-        assert!(refs
-            .get_thread(&ThreadName::new("feature/x"))
-            .unwrap()
-            .is_some());
+        assert!(
+            refs.get_thread(&ThreadName::new("feature/x"))
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -632,7 +628,8 @@ mod tests {
 
         let first = pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run()).unwrap();
         let states_after_first = store.list_states().unwrap().len();
-        let second = pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run()).unwrap();
+        let second =
+            pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run()).unwrap();
         let states_after_second = store.list_states().unwrap().len();
 
         assert_eq!(first.commits_imported, second.commits_imported);

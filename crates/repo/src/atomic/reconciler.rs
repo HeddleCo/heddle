@@ -7,11 +7,15 @@
 //! class) to re-derive the authoritative ref value when the canonical cache
 //! lags a committed-but-unpublished write.
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
-use objects::error::Result;
-use objects::object::{ChangeId, MarkerName, ThreadName};
+use objects::{
+    error::Result,
+    object::{ChangeId, MarkerName, ThreadName},
+};
 use oplog::{OpLog, OpRecord};
 use refs::{
     Head, LoadRequest, Loaded, ReconcileOutcome, RefClass, RefExpectation, RefManager,

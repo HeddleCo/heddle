@@ -5,8 +5,10 @@
 //! the lifecycle a stack-aware rebase produces — start → resolve →
 //! finish / abort / carry_forward.
 
-use objects::store::ObjectStore;
-use objects::object::{ChangeId, ThreadName};
+use objects::{
+    object::{ChangeId, ThreadName},
+    store::ObjectStore,
+};
 use repo::{MergeState, MergeStateManager, Repository};
 use tempfile::TempDir;
 
@@ -136,16 +138,18 @@ fn test_non_conflicting_changes() {
 
     // These changes don't conflict - different files
     // A merge would succeed
-    assert!(repo
-        .store()
-        .get_state(&branch1.change_id)
-        .unwrap()
-        .is_some());
-    assert!(repo
-        .store()
-        .get_state(&branch2.change_id)
-        .unwrap()
-        .is_some());
+    assert!(
+        repo.store()
+            .get_state(&branch1.change_id)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        repo.store()
+            .get_state(&branch2.change_id)
+            .unwrap()
+            .is_some()
+    );
 }
 
 /// Test fast-forward merge detection.

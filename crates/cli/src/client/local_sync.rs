@@ -3,11 +3,13 @@
 //!
 //! Direct access to local repositories without network protocol overhead.
 
-use objects::store::ObjectStore;
 use std::{collections::HashSet, path::Path};
 
-use anyhow::{anyhow, Result};
-use objects::object::{ChangeId, ContentHash};
+use anyhow::{Result, anyhow};
+use objects::{
+    object::{ChangeId, ContentHash},
+    store::ObjectStore,
+};
 use repo::Repository;
 
 /// Synchronize objects from a local source repository to a target repository.

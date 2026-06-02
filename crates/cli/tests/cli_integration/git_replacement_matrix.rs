@@ -899,17 +899,18 @@ fn git_replacement_matrix_undo_preserves_recovery_marker_for_absorbed_edit() {
 
     // An edit that lived only in the worktree, then absorbed by `commit`.
     std::fs::write(work.join("story.txt"), "FRICTION ONE\nFRICTION TWO\n").unwrap();
-    let commit = assert_clean_json_without_git(
-        &["--output", "json", "commit", "-m", "friction"],
-        &work,
-    );
+    let commit =
+        assert_clean_json_without_git(&["--output", "json", "commit", "-m", "friction"], &work);
     assert_eq!(commit["output_kind"], "commit");
     let friction_state = commit["change_id"]
         .as_str()
         .expect("commit emits the absorbed heddle change-id")
         .to_string();
     let friction_commit = git_head_oid(&work);
-    assert_ne!(friction_commit, base, "commit advances the checkout Git ref");
+    assert_ne!(
+        friction_commit, base,
+        "commit advances the checkout Git ref"
+    );
 
     let undo = assert_clean_json_without_git(&["--output", "json", "undo"], &work);
     assert_eq!(undo["action"], "undo");

@@ -902,8 +902,9 @@ mod tests {
         let patterns = vec!["node_modules".to_string(), "target".to_string()];
         let matcher = build_worktree_ignore(&patterns);
 
-        let ignored: Vec<String> =
-            (0..5_000).map(|i| format!("node_modules/pkg-{i}/index.js")).collect();
+        let ignored: Vec<String> = (0..5_000)
+            .map(|i| format!("node_modules/pkg-{i}/index.js"))
+            .collect();
         let sources: Vec<String> = (0..7).map(|i| format!("src/mod-{i}.rs")).collect();
         let all: Vec<&str> = ignored
             .iter()
@@ -929,7 +930,9 @@ mod tests {
         // path could later drop it.
         let (_temp, repo) = init_repo();
         let id = ChangeId::generate();
-        repo.refs().set_thread(&ThreadName::new("attempt-fixed-1"), &id).unwrap();
+        repo.refs()
+            .set_thread(&ThreadName::new("attempt-fixed-1"), &id)
+            .unwrap();
 
         let make_args = || AttemptArgs {
             n: 3,
@@ -970,15 +973,24 @@ mod tests {
         // created. attempt-fixed-1 still exists (the one we planted),
         // attempt-fixed-2 and attempt-fixed-3 must not.
         assert!(
-            repo.refs().get_thread(&ThreadName::new("attempt-fixed-1")).unwrap().is_some(),
+            repo.refs()
+                .get_thread(&ThreadName::new("attempt-fixed-1"))
+                .unwrap()
+                .is_some(),
             "the planted ref must still be there"
         );
         assert!(
-            repo.refs().get_thread(&ThreadName::new("attempt-fixed-2")).unwrap().is_none(),
+            repo.refs()
+                .get_thread(&ThreadName::new("attempt-fixed-2"))
+                .unwrap()
+                .is_none(),
             "preflight must refuse before any new threads are spawned"
         );
         assert!(
-            repo.refs().get_thread(&ThreadName::new("attempt-fixed-3")).unwrap().is_none(),
+            repo.refs()
+                .get_thread(&ThreadName::new("attempt-fixed-3"))
+                .unwrap()
+                .is_none(),
             "preflight must refuse before any new threads are spawned"
         );
     }
@@ -990,7 +1002,9 @@ mod tests {
         // `<prefix>-1`.
         let (_temp, repo) = init_repo();
         let id = ChangeId::generate();
-        repo.refs().set_thread(&ThreadName::new("attempt-mid-2"), &id).unwrap();
+        repo.refs()
+            .set_thread(&ThreadName::new("attempt-mid-2"), &id)
+            .unwrap();
 
         let make_args = || AttemptArgs {
             n: 3,
@@ -1024,7 +1038,10 @@ mod tests {
         // Crucially attempt-mid-1 was NOT created — preflight ran
         // before any spawn.
         assert!(
-            repo.refs().get_thread(&ThreadName::new("attempt-mid-1")).unwrap().is_none(),
+            repo.refs()
+                .get_thread(&ThreadName::new("attempt-mid-1"))
+                .unwrap()
+                .is_none(),
             "all-or-nothing: no new threads spawn on preflight failure"
         );
     }

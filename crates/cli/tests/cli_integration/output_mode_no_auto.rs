@@ -61,8 +61,8 @@ fn piped_status_with_explicit_json_flag_emits_json() {
 
     let stdout = heddle(&["status", "--output", "json"], Some(temp.path()))
         .expect("status --output json should succeed under a pipe");
-    let parsed: Value =
-        serde_json::from_str(&stdout).unwrap_or_else(|err| panic!("JSON parse failed: {err}: {stdout}"));
+    let parsed: Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("JSON parse failed: {err}: {stdout}"));
     assert!(
         parsed.is_object(),
         "status --output json should emit a JSON object: {stdout}"
@@ -152,9 +152,8 @@ fn repo_config_with_output_format_auto_errors_with_typed_envelope() {
         .lines()
         .rfind(|line| line.trim_start().starts_with('{'))
         .unwrap_or_else(|| panic!("expected a JSON envelope on stderr; got: {stderr_json_text}"));
-    let envelope: Value = serde_json::from_str(last_line.trim()).unwrap_or_else(|err| {
-        panic!("stderr JSON envelope should parse: {err}: {last_line}")
-    });
+    let envelope: Value = serde_json::from_str(last_line.trim())
+        .unwrap_or_else(|err| panic!("stderr JSON envelope should parse: {err}: {last_line}"));
     assert_eq!(
         envelope["kind"], "invalid_repo_config_output_format",
         "JSON envelope kind should classify the field-specific failure: {envelope}"
@@ -281,8 +280,7 @@ fn user_config_with_output_format_auto_via_home_path_errors_with_typed_envelope(
     let fake_home = temp.path();
     let config_path = fake_home.join(".config").join("heddle").join("config.toml");
     std::fs::create_dir_all(config_path.parent().unwrap()).expect("mkdir config parent");
-    std::fs::write(&config_path, "[output]\nformat = \"auto\"\n")
-        .expect("write bad home config");
+    std::fs::write(&config_path, "[output]\nformat = \"auto\"\n").expect("write bad home config");
 
     let text_out = run_with_home_user_config(fake_home, None, &["status"]);
     assert!(

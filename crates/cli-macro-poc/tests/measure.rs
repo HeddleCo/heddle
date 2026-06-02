@@ -48,8 +48,9 @@ fn serialized_example_keys() -> BTreeSet<String> {
 fn both_emitters_cover_the_documented_sample_keys() {
     let documented: BTreeSet<&str> = documented_sample_keys().into_iter().collect();
 
-    let schemars_keys: BTreeSet<String> =
-        property_keys(&schemars_path::schema()).into_iter().collect();
+    let schemars_keys: BTreeSet<String> = property_keys(&schemars_path::schema())
+        .into_iter()
+        .collect();
     let custom_keys: BTreeSet<String> = property_keys(&custom_path::schema()).into_iter().collect();
 
     for key in &documented {
@@ -150,8 +151,7 @@ fn discriminator_gap_is_real_schemars_unpinned_custom_pinned() {
 #[test]
 fn schemars_re_exposes_skip_serialized_verification_field() {
     let schemars_schema = schemars_path::schema();
-    let schemars_props: BTreeSet<String> =
-        property_keys(&schemars_schema).into_iter().collect();
+    let schemars_props: BTreeSet<String> = property_keys(&schemars_schema).into_iter().collect();
     let custom_props: BTreeSet<String> =
         property_keys(&custom_path::schema()).into_iter().collect();
     let wire_keys = serialized_example_keys();
@@ -164,7 +164,11 @@ fn schemars_re_exposes_skip_serialized_verification_field() {
     let required: BTreeSet<String> = schemars_schema
         .get("required")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
         .unwrap_or_default();
     assert!(
         required.contains("verification"),
@@ -274,7 +278,10 @@ fn print_measurement_table() {
         "phantom `verification` property", s_has_verification, false
     );
     println!("{:<36} | {:>10} | {:>10}", "carries example", true, true);
-    println!("{:<36} | {:>10} | {:>10}", "needs schemars dep", true, false);
+    println!(
+        "{:<36} | {:>10} | {:>10}",
+        "needs schemars dep", true, false
+    );
     println!("===========================================================\n");
 
     println!("--- schemars schema ---\n{s_pretty}\n");

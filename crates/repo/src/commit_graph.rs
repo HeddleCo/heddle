@@ -1,22 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 //! In-memory commit graph index with persistence and Bloom filter support.
 
-use objects::store::ObjectStore;
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
 };
 
 use anyhow::Result;
-use objects::object::{diff_trees, ChangeId, ContentHash, Tree};
+use objects::{
+    object::{ChangeId, ContentHash, Tree, diff_trees},
+    store::ObjectStore,
+};
 use tracing::warn;
 
 use super::{
+    Repository,
     bloom_filter::bloom_insert,
     commit_graph_persistence::{
-        commit_graph_path, load_commit_graph, save_commit_graph, PersistedCommitGraphNode,
+        PersistedCommitGraphNode, commit_graph_path, load_commit_graph, save_commit_graph,
     },
-    Repository,
 };
 
 #[derive(Clone, Debug)]

@@ -266,7 +266,11 @@ impl RefSpec {
 
     /// Render in `git` refspec syntax without the leading `+`, even when forced.
     pub fn to_git_format_not_forced(&self) -> String {
-        format!("{}:{}", self.source.as_deref().unwrap_or(""), self.destination)
+        format!(
+            "{}:{}",
+            self.source.as_deref().unwrap_or(""),
+            self.destination
+        )
     }
 }
 
@@ -981,19 +985,26 @@ impl<'a> GitBridge<'a> {
 
         let mut materialized_attached_thread = false;
         if let Some((thread, old_state)) = attached_before
-            && let Some(new_state) = self.heddle_repo.refs().get_thread(&ThreadName::new(&thread))?
+            && let Some(new_state) = self
+                .heddle_repo
+                .refs()
+                .get_thread(&ThreadName::new(&thread))?
             && new_state != old_state
         {
-            self.heddle_repo.refs().set_thread(&ThreadName::new(&thread), &old_state)?;
+            self.heddle_repo
+                .refs()
+                .set_thread(&ThreadName::new(&thread), &old_state)?;
             self.heddle_repo.refs().write_head(&Head::Attached {
                 thread: ThreadName::new(&thread),
             })?;
             self.heddle_repo
                 .goto_verified_clean_without_record(&new_state)?;
-            self.heddle_repo.refs().set_thread(&ThreadName::new(&thread), &new_state)?;
             self.heddle_repo
                 .refs()
-                .write_head(&Head::Attached { thread: ThreadName::new(&thread) })?;
+                .set_thread(&ThreadName::new(&thread), &new_state)?;
+            self.heddle_repo.refs().write_head(&Head::Attached {
+                thread: ThreadName::new(&thread),
+            })?;
             materialized_attached_thread = true;
         }
 
@@ -1228,7 +1239,10 @@ impl<'a> GitBridge<'a> {
         let mut real_tracked: HashSet<String> = HashSet::new();
         let mut existing_ita: HashSet<String> = HashSet::new();
         for entry in index.entries() {
-            let path = entry.path_in(index.path_backing()).to_str_lossy().into_owned();
+            let path = entry
+                .path_in(index.path_backing())
+                .to_str_lossy()
+                .into_owned();
             if entry.flags.contains(gix_index::entry::Flags::INTENT_TO_ADD) {
                 existing_ita.insert(path);
             } else {
@@ -1345,7 +1359,11 @@ impl<'a> GitBridge<'a> {
         &mut self,
         thread: &str,
     ) -> GitResult<WriteThroughOutcome> {
-        let Some(state_id) = self.heddle_repo.refs().get_thread(&ThreadName::new(thread))? else {
+        let Some(state_id) = self
+            .heddle_repo
+            .refs()
+            .get_thread(&ThreadName::new(thread))?
+        else {
             return Ok(WriteThroughOutcome::Skipped(
                 WriteThroughSkipReason::NoAttachedThread,
             ));
@@ -1771,9 +1789,10 @@ fn parse_configured_remote_url(value: &str, relative_base: &Path) -> GitResult<g
 
 fn configured_remote_local_path(value: &str, relative_base: &Path) -> PathBuf {
     if value == "~"
-        && let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home);
-        }
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home);
+    }
     if let Some(rest) = value.strip_prefix("~/")
         && let Some(home) = std::env::var_os("HOME")
     {
@@ -3068,8 +3087,7 @@ mod tests {
 
     #[test]
     fn parse_git_ref_remote_branch_keeps_nested_name() {
-        let parsed =
-            parse_git_ref("refs/remotes/origin/feature/x").expect("remote branch parses");
+        let parsed = parse_git_ref("refs/remotes/origin/feature/x").expect("remote branch parses");
         assert_eq!(parsed.kind, GitRefKind::Branch);
         assert_eq!(parsed.name, "feature/x");
         assert_eq!(parsed.remote, "origin");

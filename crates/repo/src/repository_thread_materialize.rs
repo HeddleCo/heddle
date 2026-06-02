@@ -12,7 +12,6 @@
 //! userspace FS callbacks in the hot path. Disk usage is the
 //! ~zero-cost clonefile share until the agent diverges blocks.
 
-use objects::store::ObjectStore;
 use std::{
     collections::BTreeMap,
     fs,
@@ -22,6 +21,7 @@ use std::{
 use objects::{
     lock::RepositoryLockExt,
     object::{ChangeId, State, ThreadName, Tree},
+    store::ObjectStore,
 };
 use tracing::{debug, instrument};
 
@@ -811,7 +811,11 @@ mod tests {
         let repo = Repository::init_default(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("hello.txt"), b"hello\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
-        let before = repo.refs().get_thread(&ThreadName::new("main")).unwrap().expect("head");
+        let before = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("head");
 
         let dest_holder = TempDir::new().unwrap();
         let dest = dest_holder.path().join("out");
@@ -829,7 +833,11 @@ mod tests {
         };
 
         // Thread head advanced.
-        let after = repo.refs().get_thread(&ThreadName::new("main")).unwrap().expect("head");
+        let after = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("head");
         assert_ne!(before, after);
         assert_eq!(after, new_state);
 
@@ -850,7 +858,11 @@ mod tests {
         let repo = Repository::init_default(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("steady.txt"), b"unchanged\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
-        let before = repo.refs().get_thread(&ThreadName::new("main")).unwrap().expect("head");
+        let before = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("head");
 
         let dest_holder = TempDir::new().unwrap();
         let dest = dest_holder.path().join("out");
@@ -860,7 +872,11 @@ mod tests {
         assert_eq!(outcome, ThreadCaptureOutcome::NoOp);
 
         // Thread head unchanged.
-        let after = repo.refs().get_thread(&ThreadName::new("main")).unwrap().expect("head");
+        let after = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("head");
         assert_eq!(before, after);
     }
 
@@ -1077,7 +1093,11 @@ mod tests {
         // And `heddle status`'s staleness check should now correctly
         // report the materialized worktree as stale (head moved,
         // manifest didn't).
-        let head_now = repo.refs().get_thread(&ThreadName::new("main")).unwrap().expect("head");
+        let head_now = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("head");
         assert_ne!(
             head_now, after.state_id,
             "post-fix invariant: main head advanced past manifest's recorded state → stale"
@@ -1304,7 +1324,11 @@ mod tests {
         let repo = Arc::new(Repository::init_default(repo_dir.path()).unwrap());
         fs::write(repo_dir.path().join("shared.txt"), b"seed\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
-        let initial_head = repo.refs().get_thread(&ThreadName::new("main")).unwrap().expect("seeded");
+        let initial_head = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("seeded");
 
         // Two sibling materialized worktrees of the same thread.
         let dest_a_holder = TempDir::new().unwrap();
@@ -1352,7 +1376,11 @@ mod tests {
         // the loser's parent would be `initial_head`. With the
         // lock, the loser's parent is the winner's id and the
         // winner's parent is `initial_head`.
-        let final_head = repo.refs().get_thread(&ThreadName::new("main")).unwrap().expect("head");
+        let final_head = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("head");
         let winner_id = final_head;
         let loser_id = if final_head == id_a { id_b } else { id_a };
 

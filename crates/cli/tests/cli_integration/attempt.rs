@@ -108,7 +108,8 @@ fn attempt_n_one_is_degenerate_try() {
         "attempt's concrete preview action template should need no inputs to run: {raw}"
     );
     assert_eq!(
-        value["recommended_action_template"]["argv_template"], value["next_action_template"]["argv_template"],
+        value["recommended_action_template"]["argv_template"],
+        value["next_action_template"]["argv_template"],
         "recommended action argv_template should mirror next_action argv_template: {raw}"
     );
     assert_eq!(

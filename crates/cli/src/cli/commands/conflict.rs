@@ -7,11 +7,13 @@
 //! active merge first so the command users see during recovery is the same
 //! command that can show the conflict they just listed.
 
-use objects::store::ObjectStore;
 use std::fs;
 
 use anyhow::{Context, Result};
-use objects::object::{ConflictSymbol, StructuredConflict};
+use objects::{
+    object::{ConflictSymbol, StructuredConflict},
+    store::ObjectStore,
+};
 use repo::{MergeState, Repository};
 use serde::Serialize;
 

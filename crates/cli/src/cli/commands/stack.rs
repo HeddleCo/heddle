@@ -5,12 +5,12 @@
 //! cover `ready` (next-action verdict) and `snapshot` (JSON projection
 //! for agentic tooling). All commands are read-only.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use refs::Head;
 use repo::{Repository, RepositorySnapshot, StackNextAction, StackNode, ThreadStack};
 use serde::Serialize;
 
-use crate::cli::{should_output_json, Cli, StackArgs, StackCommands};
+use crate::cli::{Cli, StackArgs, StackCommands, should_output_json};
 
 pub fn cmd_stack(cli: &Cli, args: StackArgs) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;

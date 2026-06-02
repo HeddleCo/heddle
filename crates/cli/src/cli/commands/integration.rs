@@ -639,14 +639,12 @@ fn target_harnesses(manifest: &IntegrationManifest, requested: Vec<String>) -> R
 /// must fail in the preflight, not after `.heddle/`/capture/checkpoint exist.
 fn validate_harness_scope(harness: &str, scope: &IntegrationScope) -> Result<()> {
     match harness {
-        "codex" if *scope != IntegrationScope::User => {
-            Err(anyhow!(RecoveryAdvice::invalid_usage(
-                "integration_codex_scope_invalid",
-                "codex integration currently requires --scope user",
-                "Rerun the install with `--scope user`.",
-                "heddle integration install codex --scope user",
-            )))
-        }
+        "codex" if *scope != IntegrationScope::User => Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "integration_codex_scope_invalid",
+            "codex integration currently requires --scope user",
+            "Rerun the install with `--scope user`.",
+            "heddle integration install codex --scope user",
+        ))),
         _ => Ok(()),
     }
 }

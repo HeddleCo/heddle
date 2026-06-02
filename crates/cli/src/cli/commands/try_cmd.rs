@@ -36,7 +36,7 @@ use std::{
     time::Instant,
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use repo::{Repository, ThreadManager};
 use serde::Serialize;
 
@@ -46,12 +46,12 @@ use super::{
     command_catalog::{ActionFields, ActionTemplate},
     git_overlay_health::action_templates,
     merge::merge_thread_into_current,
-    snapshot::{create_snapshot, SnapshotAgentOverrides},
+    snapshot::{SnapshotAgentOverrides, create_snapshot},
     thread::start_thread,
-    thread_cmd::{drop_thread_silent, DropOutcome},
+    thread_cmd::{DropOutcome, drop_thread_silent},
 };
 use crate::{
-    cli::{should_output_json, style, Cli, ThreadStartArgs, TryArgs, WorkspaceModeArg},
+    cli::{Cli, ThreadStartArgs, TryArgs, WorkspaceModeArg, should_output_json, style},
     config::UserConfig,
 };
 

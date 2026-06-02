@@ -87,7 +87,11 @@ fn test_diff_worktree_json_groups_changes_by_category() {
             .map(|entry| entry["path"].as_str().unwrap_or_default().to_string())
             .collect()
     };
-    assert_eq!(paths("modified"), vec!["modified.txt".to_string()], "{json}");
+    assert_eq!(
+        paths("modified"),
+        vec!["modified.txt".to_string()],
+        "{json}"
+    );
     assert_eq!(paths("added"), vec!["added.txt".to_string()], "{json}");
     assert_eq!(paths("deleted"), vec!["delete.txt".to_string()], "{json}");
 }

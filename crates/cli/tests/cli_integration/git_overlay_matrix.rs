@@ -200,10 +200,7 @@ fn inject_post_verification(cwd: &std::path::Path, args: &[&str], mut value: Val
     } else {
         // Clean verify flattens the proof; reconstruct as a nested
         // object by dropping verify's own wrapper keys.
-        let mut obj_map = parsed
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
+        let mut obj_map = parsed.as_object().cloned().unwrap_or_default();
         obj_map.remove("output_kind");
         obj_map.remove("repository_label");
         obj_map.remove("repository_context");
@@ -845,8 +842,7 @@ fn git_overlay_matrix_commit_no_all_nothing_staged_refuses_before_identity_prefl
         String::from_utf8_lossy(&output.stdout)
     );
     let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: Value =
-        serde_json::from_str(stderr).expect("refusal should emit JSON envelope");
+    let envelope: Value = serde_json::from_str(stderr).expect("refusal should emit JSON envelope");
     assert_eq!(
         envelope["kind"], "nothing_to_commit",
         "--no-all with nothing staged must surface nothing-to-commit before the identity preflight, not an identity refusal: {stderr}"
@@ -3446,7 +3442,10 @@ fn git_overlay_matrix_top_level_push_closes_remote_verification_loop() {
     let commit = json(temp.path(), &["--output", "json", "commit", "-m", "change"]);
     assert_eq!(commit["output_kind"], "commit");
     assert_eq!(commit["next_action"], "heddle push");
-    assert_eq!(commit["next_action_template"]["argv_template"], heddle_argv_json(["push"]));
+    assert_eq!(
+        commit["next_action_template"]["argv_template"],
+        heddle_argv_json(["push"])
+    );
     assert_eq!(commit["recommended_action"], "heddle push");
     assert_eq!(
         commit["recommended_action_template"]["argv_template"],
@@ -4066,7 +4065,10 @@ fn git_overlay_matrix_remote_remove_clears_both_sources() {
     git_commit_all(temp.path(), "seed");
     heddle_adopt(temp.path());
 
-    let staging_arg = staging.path().to_str().expect("staging path should be utf8");
+    let staging_arg = staging
+        .path()
+        .to_str()
+        .expect("staging path should be utf8");
     let added = json(
         temp.path(),
         &["--output", "json", "remote", "add", "staging", staging_arg],
@@ -4188,7 +4190,10 @@ fn git_overlay_matrix_remote_set_default_works_for_dual_location_remote() {
     heddle_adopt(temp.path());
 
     let origin_arg = origin.path().to_str().expect("origin path should be utf8");
-    let staging_arg = staging.path().to_str().expect("staging path should be utf8");
+    let staging_arg = staging
+        .path()
+        .to_str()
+        .expect("staging path should be utf8");
     json(
         temp.path(),
         &["--output", "json", "remote", "add", "origin", origin_arg],
@@ -4487,9 +4492,9 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
         "diagnose should show the same current Git dirty set as status under needs_import: {dirty_diagnose}"
     );
     let dirty_diff = json(temp.path(), &["diff", "--output", "json", "--stat"]);
-    let dirty_changes = dirty_diff["changes"]
-        .as_object()
-        .unwrap_or_else(|| panic!("worktree diff changes should be a category object: {dirty_diff}"));
+    let dirty_changes = dirty_diff["changes"].as_object().unwrap_or_else(|| {
+        panic!("worktree diff changes should be a category object: {dirty_diff}")
+    });
     let dirty_total: usize = ["modified", "added", "deleted"]
         .iter()
         .filter_map(|key| dirty_changes[*key].as_array())
@@ -5605,7 +5610,10 @@ fn git_overlay_matrix_diff_status_keeps_cross_type_move_split() {
     // 3321103601 flagged), instead of the heddle-native builder.
     std::fs::write(temp.path().join("filler.txt"), "filler edit\n").unwrap();
     git(&["add", "filler.txt"], temp.path());
-    git(&["commit", "-m", "advance branch outside heddle"], temp.path());
+    git(
+        &["commit", "-m", "advance branch outside heddle"],
+        temp.path(),
+    );
 
     // The cross-type move stays UNCOMMITTED in the worktree: `linked` follows
     // to `anchor.txt`, so the worktree blob read for the added side equals the
@@ -5659,7 +5667,9 @@ fn git_overlay_matrix_diff_added_symlink_renders_link_target() {
         .unwrap()
         .iter()
         .find(|change| change["path"] == "link-to-readme")
-        .unwrap_or_else(|| panic!("diff should include added symlink under the added category: {diff}"));
+        .unwrap_or_else(|| {
+            panic!("diff should include added symlink under the added category: {diff}")
+        });
     assert_eq!(link_change["kind"], "added");
     let added_line = link_change["lines"]
         .as_array()

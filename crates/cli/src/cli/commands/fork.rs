@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Fork command: create exploration branch.
 
-use objects::store::ObjectStore;
 use anyhow::Result;
-use objects::object::{State, ThreadName};
+use objects::{
+    object::{State, ThreadName},
+    store::ObjectStore,
+};
 use oplog::OpRecord;
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::Repository;
@@ -14,7 +16,7 @@ use super::{
     snapshot::{ensure_current_state, resolve_attribution},
 };
 use crate::{
-    cli::{should_output_json, Cli},
+    cli::{Cli, should_output_json},
     config::UserConfig,
 };
 

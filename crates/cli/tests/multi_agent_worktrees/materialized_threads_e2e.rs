@@ -252,9 +252,7 @@ fn short_status_surfaces_stale_materialized_thread_advisory() {
         .as_array()
         .and_then(|arr| arr.iter().find(|m| m["name"] == "feature/short-stale"))
         .unwrap_or_else(|| {
-            panic!(
-                "json status must list feature/short-stale after manifest rewrite:\n{json_out}"
-            )
+            panic!("json status must list feature/short-stale after manifest rewrite:\n{json_out}")
         });
     assert_eq!(
         entry["stale"], true,

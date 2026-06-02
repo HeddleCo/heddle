@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Thread command implementation.
 
-use objects::store::ObjectStore;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -9,7 +8,11 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use objects::{fs_ops::remove_path_recursively, object::ThreadName, store::AgentRegistry};
+use objects::{
+    fs_ops::remove_path_recursively,
+    object::ThreadName,
+    store::{AgentRegistry, ObjectStore},
+};
 use refs::Head;
 use repo::{
     Repository, Thread, ThreadFreshness, ThreadManager, ThreadMode, ThreadState,
@@ -141,9 +144,15 @@ pub(crate) fn current_thread(repo: &Repository) -> Result<Option<Thread>> {
 pub(crate) fn load_thread(repo: &Repository, thread_id: &str) -> Result<Thread> {
     match thread_manager(repo).load(thread_id)? {
         Some(thread) => Ok(thread),
-        None if repo.refs().get_thread(&ThreadName::new(thread_id))?.is_some() => Err(anyhow!(
-            imported_git_ref_not_managed_thread_advice(thread_id)
-        )),
+        None if repo
+            .refs()
+            .get_thread(&ThreadName::new(thread_id))?
+            .is_some() =>
+        {
+            Err(anyhow!(imported_git_ref_not_managed_thread_advice(
+                thread_id
+            )))
+        }
         None => Err(anyhow!(thread_not_found_advice(thread_id, "load thread"))),
     }
 }
@@ -383,10 +392,12 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
     let mut thread = manager
         .load(thread_id)?
         .ok_or_else(|| anyhow!(thread_not_found_advice(thread_id, "refresh thread")))?;
-    let target_thread = thread
-        .target_thread
-        .clone()
-        .ok_or_else(|| anyhow!(RecoveryAdvice::missing_target_thread(thread_id, "refresh thread")))?;
+    let target_thread = thread.target_thread.clone().ok_or_else(|| {
+        anyhow!(RecoveryAdvice::missing_target_thread(
+            thread_id,
+            "refresh thread"
+        ))
+    })?;
 
     refresh_thread_freshness(repo, &mut thread)?;
     if thread.freshness == ThreadFreshness::Current {
@@ -811,11 +822,8 @@ fn imported_git_ref_not_managed_thread_advice(thread_id: &str) -> RecoveryAdvice
 }
 
 fn current_thread_drop_advice(repo: &Repository, thread_id: &str) -> RecoveryAdvice {
-    let (primary, recovery, hint) = super::thread::current_thread_drop_recovery(
-        repo,
-        thread_id,
-        super::thread::DropMode::Drop,
-    );
+    let (primary, recovery, hint) =
+        super::thread::current_thread_drop_recovery(repo, thread_id, super::thread::DropMode::Drop);
     RecoveryAdvice::safety_refusal(
         "current_thread_not_droppable",
         format!("Thread '{thread_id}' is the current checkout thread and cannot be dropped"),
@@ -1029,7 +1037,9 @@ fn try_three_way_merge_refresh(
             // Thread is strictly behind target — fast-forward the
             // thread ref. We do this against the parent repo so the
             // ref move is visible to the caller's bookkeeping.
-            parent_repo.refs().set_thread(&ThreadName::new(&thread.thread), &target)?;
+            parent_repo
+                .refs()
+                .set_thread(&ThreadName::new(&thread.thread), &target)?;
             // Materialize the target tree to the thread's worktree.
             // Without this, HEAD metadata advances while the files on
             // disk stay stale and subsequent operations run against a
@@ -1092,12 +1102,15 @@ fn cmd_thread_promote(
     let mut thread = manager
         .load(thread_id)?
         .ok_or_else(|| anyhow!(thread_not_found_advice(thread_id, "promote thread")))?;
-    let state_id = repo.refs().get_thread(&ThreadName::new(&thread.thread))?.ok_or_else(|| {
-        anyhow!(
-            "managed thread '{}' is missing its ref during promote",
-            thread.thread
-        )
-    })?;
+    let state_id = repo
+        .refs()
+        .get_thread(&ThreadName::new(&thread.thread))?
+        .ok_or_else(|| {
+            anyhow!(
+                "managed thread '{}' is missing its ref during promote",
+                thread.thread
+            )
+        })?;
     if !force {
         if thread.execution_path.exists()
             && thread.execution_path != *repo.root()

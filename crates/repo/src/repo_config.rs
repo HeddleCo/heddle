@@ -522,8 +522,8 @@ version = 1
 [output]
 format = "auto"
 "#;
-        let err = toml::from_str::<RepoConfig>(toml_auto)
-            .expect_err("output.format='auto' must reject");
+        let err =
+            toml::from_str::<RepoConfig>(toml_auto).expect_err("output.format='auto' must reject");
         let message = err.to_string();
         assert!(
             message.contains("output.format"),

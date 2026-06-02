@@ -26,7 +26,7 @@ use std::rc::Rc;
 use tree_sitter::Node;
 
 pub(super) use super::language_rules::ItemKind;
-use super::language_rules::{rules_for, Classified, MetadataBinding};
+use super::language_rules::{Classified, MetadataBinding, rules_for};
 use crate::parser::{Language, ParsedFile};
 
 /// Stable identifier for an item across the three sides. Two items match iff

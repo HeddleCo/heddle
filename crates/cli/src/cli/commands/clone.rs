@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Clone command - clone from remote.
 
-use objects::store::ObjectStore;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -16,6 +15,7 @@ use heddle_client::grpc_hosted::PullMaterialization;
 use objects::{
     error::{HeddleError, Result as HeddleResult},
     object::{Blob, ContentHash, ThreadName},
+    store::ObjectStore,
 };
 use refs::Head;
 use repo::{BlobHydrator, Repository};

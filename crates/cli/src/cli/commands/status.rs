@@ -508,9 +508,8 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         } else {
             trust.recommended_action.clone()
         };
-        let worktree_clean = changes.modified.is_empty()
-            && changes.added.is_empty()
-            && changes.deleted.is_empty();
+        let worktree_clean =
+            changes.modified.is_empty() && changes.added.is_empty() && changes.deleted.is_empty();
         let recommended_action =
             quickstart_init_recommendation(&repo, current_state.as_ref(), worktree_clean)
                 .unwrap_or(recommended_action);
@@ -1335,15 +1334,15 @@ fn render_status_operation(output: &StatusOutput) {
             .missing_branches
             .iter()
             .any(|branch| branch == &hint.current_branch)
-        {
-            println!(
-                "{}",
-                crate::cli::render::git_only_branch_summary(
-                    &hint.missing_branches,
-                    hint.missing_branch_count,
-                )
-            );
-        }
+    {
+        println!(
+            "{}",
+            crate::cli::render::git_only_branch_summary(
+                &hint.missing_branches,
+                hint.missing_branch_count,
+            )
+        );
+    }
     if !output.git_overlay_health.clean {
         let label = if matches!(
             output.git_overlay_health.status.as_str(),
@@ -1872,7 +1871,10 @@ fn assess_materialized_threads(repo: &Repository) -> Vec<MaterializedThreadInfo>
     summaries
         .into_iter()
         .map(|summary| {
-            let stale = match repo.refs().get_thread(&objects::object::ThreadName::new(&summary.thread)) {
+            let stale = match repo
+                .refs()
+                .get_thread(&objects::object::ThreadName::new(&summary.thread))
+            {
                 Ok(Some(head)) => head != summary.state_id,
                 _ => false,
             };
@@ -2656,24 +2658,31 @@ mod tests {
                 // `blocked_by_trust = !trust.verified`; a dirty/unverified
                 // worktree (trust_verified == false) drives the override.
                 let blocked_by_trust = !trust_verified;
-                let (coordination, blocked_by_trust_only) = resolve_coordination_with_trust(
-                    pre_override.clone(),
-                    blocked_by_trust,
-                    false,
-                );
-                let health = if trust_verified { "clean" } else { "dirty_worktree" };
+                let (coordination, blocked_by_trust_only) =
+                    resolve_coordination_with_trust(pre_override.clone(), blocked_by_trust, false);
+                let health = if trust_verified {
+                    "clean"
+                } else {
+                    "dirty_worktree"
+                };
                 let (health_clean, coordination_clean, reason) =
                     combined_verdict_axes(health, &coordination, blocked_by_trust_only);
                 let label = coordination_label(&coordination, blocked_by_trust_only);
                 let ctx = format!("{pre_override:?} / trust_verified={trust_verified}");
 
-                assert_eq!(health_clean, trust_verified, "{ctx}: health axis cleanliness");
+                assert_eq!(
+                    health_clean, trust_verified,
+                    "{ctx}: health axis cleanliness"
+                );
 
                 if genuinely_clean {
                     // Genuinely-clean axis: any override is its SOLE source, so
                     // the axis masks as work-in-progress (the health axis owns
                     // the blocker) — this cell must STAY masked.
-                    assert!(coordination_clean, "{ctx}: a genuinely-clean axis stays effectively clean");
+                    assert!(
+                        coordination_clean,
+                        "{ctx}: a genuinely-clean axis stays effectively clean"
+                    );
                     if trust_verified {
                         assert_eq!(reason, None, "{ctx}: all-clean → no reason");
                         assert_eq!(label, "clean", "{ctx}: clean axis renders as clean");
@@ -2735,11 +2744,17 @@ mod tests {
         let (coordination, blocked_by_trust_only) =
             resolve_coordination_with_trust(CoordinationStatus::Blocked, true, true);
         assert!(matches!(coordination, CoordinationStatus::Blocked));
-        assert!(!blocked_by_trust_only, "needs_checkpoint suppresses the override; genuine block wins");
+        assert!(
+            !blocked_by_trust_only,
+            "needs_checkpoint suppresses the override; genuine block wins"
+        );
 
         let (coordination, blocked_by_trust_only) =
             resolve_coordination_with_trust(CoordinationStatus::Clean, true, true);
-        assert!(matches!(coordination, CoordinationStatus::Clean), "no override → axis stays clean");
+        assert!(
+            matches!(coordination, CoordinationStatus::Clean),
+            "no override → axis stays clean"
+        );
         assert!(!blocked_by_trust_only);
     }
 }

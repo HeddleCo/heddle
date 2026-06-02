@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Rebase operation execution — applying commits onto a new base.
 
-use objects::store::ObjectStore;
 use std::fs;
 
 use anyhow::{Result, anyhow};
-use objects::object::{Blob, ChangeId, ContentHash, EntryType, State};
+use objects::{
+    object::{Blob, ChangeId, ContentHash, EntryType, State},
+    store::ObjectStore,
+};
 use oplog::OpRecord;
 use refs::Head;
 use repo::Repository;
@@ -71,15 +73,12 @@ fn replay_commits_internal(
 
     while state.current_index < state.commits_to_replay.len() {
         let commit_id = state.commits_to_replay[state.current_index];
-        let commit_state = repo
-            .store()
-            .get_state(&commit_id)?
-            .ok_or_else(|| {
-                anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
-                    &commit_id.to_string(),
-                    "commit",
-                ))
-            })?;
+        let commit_state = repo.store().get_state(&commit_id)?.ok_or_else(|| {
+            anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
+                &commit_id.to_string(),
+                "commit",
+            ))
+        })?;
 
         if let Some(cli) = cli
             && should_output_json(cli, Some(repo.config()))
@@ -92,12 +91,7 @@ fn replay_commits_internal(
             println!("Applying {}...", commit_id.short());
         }
 
-        let result = apply_commit(
-            repo,
-            &commit_state,
-            &current_head,
-            discard_local_changes,
-        )?;
+        let result = apply_commit(repo, &commit_state, &current_head, discard_local_changes)?;
 
         match result {
             ApplyResult::Success { new_head, advance } => {
@@ -227,14 +221,12 @@ fn resume_manual_resolution_if_present(
         return Ok(());
     };
 
-    let current_state = repo
-        .current_state()?
-        .ok_or_else(|| {
-            anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
-                "<current>",
-                "current state",
-            ))
-        })?;
+    let current_state = repo.current_state()?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
+            "<current>",
+            "current state",
+        ))
+    })?;
 
     if current_state.change_id == pre_conflict_head || current_state.change_id == pending_commit {
         if let Some(cli) = cli
@@ -324,25 +316,19 @@ fn apply_commit(
     let current_tree_hash = get_tree_for_state(repo, current_head)?;
     let commit_tree_hash = commit_state.tree;
 
-    let current_tree = repo
-        .store()
-        .get_tree(&current_tree_hash)?
-        .ok_or_else(|| {
-            anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
-                &current_tree_hash.to_string(),
-                "current tree",
-            ))
-        })?;
+    let current_tree = repo.store().get_tree(&current_tree_hash)?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
+            &current_tree_hash.to_string(),
+            "current tree",
+        ))
+    })?;
 
-    let commit_tree = repo
-        .store()
-        .get_tree(&commit_tree_hash)?
-        .ok_or_else(|| {
-            anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
-                &commit_tree_hash.to_string(),
-                "commit tree",
-            ))
-        })?;
+    let commit_tree = repo.store().get_tree(&commit_tree_hash)?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
+            &commit_tree_hash.to_string(),
+            "commit tree",
+        ))
+    })?;
 
     let parent_tree_hash = if let Some(parent_id) = commit_state.parents.first() {
         get_tree_for_state(repo, parent_id)?
@@ -356,15 +342,12 @@ fn apply_commit(
         );
     };
 
-    let parent_tree = repo
-        .store()
-        .get_tree(&parent_tree_hash)?
-        .ok_or_else(|| {
-            anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
-                &parent_tree_hash.to_string(),
-                "parent tree",
-            ))
-        })?;
+    let parent_tree = repo.store().get_tree(&parent_tree_hash)?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
+            &parent_tree_hash.to_string(),
+            "parent tree",
+        ))
+    })?;
 
     let changes = compute_tree_diff(&parent_tree, &commit_tree);
 
@@ -597,15 +580,12 @@ fn copy_state_metadata(
 }
 
 fn get_tree_for_state(repo: &Repository, state_id: &ChangeId) -> Result<ContentHash> {
-    let state = repo
-        .store()
-        .get_state(state_id)?
-        .ok_or_else(|| {
-            anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
-                &state_id.to_string(),
-                "state",
-            ))
-        })?;
+    let state = repo.store().get_state(state_id)?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
+            &state_id.to_string(),
+            "state",
+        ))
+    })?;
     Ok(state.tree)
 }
 
@@ -914,9 +894,11 @@ mod tests {
     /// barrier to maximise the chance of concurrent clock reads.
     #[test]
     fn mint_rebase_transaction_id_is_unique_under_thread_contention() {
-        use std::collections::HashSet;
-        use std::sync::{Arc, Barrier};
-        use std::thread;
+        use std::{
+            collections::HashSet,
+            sync::{Arc, Barrier},
+            thread,
+        };
 
         const N_THREADS: usize = 32;
         const N_PER_THREAD: usize = 64;
@@ -980,8 +962,10 @@ mod tests {
     /// so exactly one batch lands regardless of contention.
     #[test]
     fn flush_rebase_batch_is_atomic_across_concurrent_continues() {
-        use std::sync::{Arc, Barrier};
-        use std::thread;
+        use std::{
+            sync::{Arc, Barrier},
+            thread,
+        };
 
         const N_THREADS: usize = 8;
 

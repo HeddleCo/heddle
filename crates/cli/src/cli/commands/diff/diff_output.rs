@@ -9,9 +9,11 @@ use std::{
 
 use objects::object::FileMode;
 
-use super::diff_compute::trim_added_decorations_for_display;
-use super::diff_types::{
-    DiffOutput, FileChange, LineDiff, SemanticChangeEntry, should_render_modified_pair,
+use super::{
+    diff_compute::trim_added_decorations_for_display,
+    diff_types::{
+        DiffOutput, FileChange, LineDiff, SemanticChangeEntry, should_render_modified_pair,
+    },
 };
 use crate::cli::style;
 
@@ -161,10 +163,12 @@ pub(crate) fn render_diff_patch(output: &DiffOutput) -> String {
 /// cannot populate) or `render_binary_change`.
 fn render_text_change(change: &FileChange, buf: &mut String) {
     let lines_ref = change.lines.as_deref();
-    let has_hunk_body = lines_ref
-        .is_some_and(|lines| lines.iter().any(|line| line.prefix != " "));
+    let has_hunk_body = lines_ref.is_some_and(|lines| lines.iter().any(|line| line.prefix != " "));
     let old_path = change.old_path.as_deref().unwrap_or(&change.path);
-    let is_rename = change.old_path.as_deref().is_some_and(|old| old != change.path);
+    let is_rename = change
+        .old_path
+        .as_deref()
+        .is_some_and(|old| old != change.path);
     let is_added = change.kind == "added";
     let is_deleted = change.kind == "deleted";
     let is_modified = !is_rename && !is_added && !is_deleted;
@@ -236,15 +240,16 @@ fn render_text_change(change: &FileChange, buf: &mut String) {
             buf.push_str(&format!("old mode {}\n", mode_str(change.old_mode)));
             buf.push_str(&format!("new mode {}\n", mode_str(change.mode)));
         }
-        let pct = (change
-            .similarity_score
-            .unwrap_or(1.0)
-            .clamp(0.0, 1.0)
-            * 100.0)
-            .round() as u32;
+        let pct = (change.similarity_score.unwrap_or(1.0).clamp(0.0, 1.0) * 100.0).round() as u32;
         buf.push_str(&format!("similarity index {pct}%\n"));
-        buf.push_str(&format!("rename from {}\n", quote_path_for_patch("", old_path)));
-        buf.push_str(&format!("rename to {}\n", quote_path_for_patch("", &change.path)));
+        buf.push_str(&format!(
+            "rename from {}\n",
+            quote_path_for_patch("", old_path)
+        ));
+        buf.push_str(&format!(
+            "rename to {}\n",
+            quote_path_for_patch("", &change.path)
+        ));
         // Pure rename — extended headers alone suffice; emitting
         // `--- a/old / +++ b/new` without hunks would tell git to
         // apply an empty patch and warn about a stray header.
@@ -317,7 +322,10 @@ fn render_text_change(change: &FileChange, buf: &mut String) {
     if is_deleted {
         buf.push_str("+++ /dev/null\n");
     } else {
-        buf.push_str(&format!("+++ {}\n", quote_path_for_patch("b/", &change.path)));
+        buf.push_str(&format!(
+            "+++ {}\n",
+            quote_path_for_patch("b/", &change.path)
+        ));
     }
     if let Some(lines) = lines_ref {
         render_patch_hunks(change, lines, buf);
@@ -342,7 +350,10 @@ fn render_symlink_change(change: &FileChange, buf: &mut Vec<u8>) {
     };
     let push = |buf: &mut Vec<u8>, text: &str| buf.extend_from_slice(text.as_bytes());
     let old_path = change.old_path.as_deref().unwrap_or(&change.path);
-    let is_rename = change.old_path.as_deref().is_some_and(|old| old != change.path);
+    let is_rename = change
+        .old_path
+        .as_deref()
+        .is_some_and(|old| old != change.path);
     let is_added = change.kind == "added";
     let is_deleted = change.kind == "deleted";
 
@@ -363,15 +374,27 @@ fn render_symlink_change(change: &FileChange, buf: &mut Vec<u8>) {
         }
         let pct = (change.similarity_score.unwrap_or(1.0).clamp(0.0, 1.0) * 100.0).round() as u32;
         push(buf, &format!("similarity index {pct}%\n"));
-        push(buf, &format!("rename from {}\n", quote_path_for_patch("", old_path)));
-        push(buf, &format!("rename to {}\n", quote_path_for_patch("", &change.path)));
+        push(
+            buf,
+            &format!("rename from {}\n", quote_path_for_patch("", old_path)),
+        );
+        push(
+            buf,
+            &format!("rename to {}\n", quote_path_for_patch("", &change.path)),
+        );
         // Pure rename (identical target) — the extended headers alone carry
         // the move, exactly like a text rename with no hunk body.
         if sym.old == sym.new {
             return;
         }
-        push(buf, &format!("--- {}\n", quote_path_for_patch("a/", old_path)));
-        push(buf, &format!("+++ {}\n", quote_path_for_patch("b/", &change.path)));
+        push(
+            buf,
+            &format!("--- {}\n", quote_path_for_patch("a/", old_path)),
+        );
+        push(
+            buf,
+            &format!("+++ {}\n", quote_path_for_patch("b/", &change.path)),
+        );
     } else if is_added {
         push(
             buf,
@@ -383,7 +406,10 @@ fn render_symlink_change(change: &FileChange, buf: &mut Vec<u8>) {
         );
         push(buf, &format!("new file mode {}\n", mode_str(change.mode)));
         push(buf, "--- /dev/null\n");
-        push(buf, &format!("+++ {}\n", quote_path_for_patch("b/", &change.path)));
+        push(
+            buf,
+            &format!("+++ {}\n", quote_path_for_patch("b/", &change.path)),
+        );
     } else if is_deleted {
         push(
             buf,
@@ -393,8 +419,14 @@ fn render_symlink_change(change: &FileChange, buf: &mut Vec<u8>) {
                 quote_path_for_patch("b/", &change.path)
             ),
         );
-        push(buf, &format!("deleted file mode {}\n", mode_str(change.mode)));
-        push(buf, &format!("--- {}\n", quote_path_for_patch("a/", &change.path)));
+        push(
+            buf,
+            &format!("deleted file mode {}\n", mode_str(change.mode)),
+        );
+        push(
+            buf,
+            &format!("--- {}\n", quote_path_for_patch("a/", &change.path)),
+        );
         push(buf, "+++ /dev/null\n");
     } else {
         // A symlink target-edit. The mode is unchanged (`120000` → `120000`),
@@ -412,8 +444,14 @@ fn render_symlink_change(change: &FileChange, buf: &mut Vec<u8>) {
                 quote_path_for_patch("b/", &change.path)
             ),
         );
-        push(buf, &format!("--- {}\n", quote_path_for_patch("a/", &change.path)));
-        push(buf, &format!("+++ {}\n", quote_path_for_patch("b/", &change.path)));
+        push(
+            buf,
+            &format!("--- {}\n", quote_path_for_patch("a/", &change.path)),
+        );
+        push(
+            buf,
+            &format!("+++ {}\n", quote_path_for_patch("b/", &change.path)),
+        );
     }
 
     render_symlink_hunk(sym.old.as_deref(), sym.new.as_deref(), buf);
@@ -517,7 +555,10 @@ fn render_binary_change(
     } else {
         // Plain binary modify: git stamps the mode at the end of the
         // index line (`index <old>..<new> 100644`).
-        buf.push_str(&format!("index 0000000..0000000 {}\n", mode_str(change.mode)));
+        buf.push_str(&format!(
+            "index 0000000..0000000 {}\n",
+            mode_str(change.mode)
+        ));
     }
     let (a, b) = if is_added {
         ("/dev/null".to_string(), quote_path_for_patch("b/", path))
@@ -1411,11 +1452,7 @@ mod tests {
         should_render_modified_pair,
     };
 
-    fn modified_change_with_eol(
-        path: &str,
-        lines: Vec<LineDiff>,
-        eol: FileEolState,
-    ) -> FileChange {
+    fn modified_change_with_eol(path: &str, lines: Vec<LineDiff>, eol: FileEolState) -> FileChange {
         FileChange {
             path: path.to_string(),
             kind: "modified".to_string(),
@@ -1803,9 +1840,15 @@ mod tests {
         // Tab/newline/quote/backslash force quoting; the prefix is escaped
         // inside the quotes, matching git's `quote_two`.
         assert_eq!(quote_path_for_patch("a/", "tab\there"), "\"a/tab\\there\"");
-        assert_eq!(quote_path_for_patch("b/", "line\nbreak"), "\"b/line\\nbreak\"");
+        assert_eq!(
+            quote_path_for_patch("b/", "line\nbreak"),
+            "\"b/line\\nbreak\""
+        );
         assert_eq!(quote_path_for_patch("a/", "quo\"te"), "\"a/quo\\\"te\"");
-        assert_eq!(quote_path_for_patch("a/", "back\\slash"), "\"a/back\\\\slash\"");
+        assert_eq!(
+            quote_path_for_patch("a/", "back\\slash"),
+            "\"a/back\\\\slash\""
+        );
         // Non-ASCII (UTF-8 é = 0xC3 0xA9) → per-byte octal.
         assert_eq!(quote_path_for_patch("a/", "café"), "\"a/caf\\303\\251\"");
         // `rename from`/`rename to` quote the bare path (empty prefix).

@@ -6,7 +6,7 @@ use objects::{
     object::{ChangeId, ThreadName},
 };
 
-use super::{parse_change_id_text, Head, RefManager};
+use super::{Head, RefManager, parse_change_id_text};
 
 pub(super) struct HeadState {
     pub head: Head,

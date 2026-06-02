@@ -255,11 +255,11 @@ impl RefManager {
                 }
                 RefUpdate::Head { expected, new } => {
                     let raw_state = self.read_head_state()?;
-                    let reconciled_head = match self.reconciled_value_under_lock(&LoadRequest::Head)?
-                    {
-                        Loaded::Head(head) => head,
-                        _ => unreachable!("Head request yields Head"),
-                    };
+                    let reconciled_head =
+                        match self.reconciled_value_under_lock(&LoadRequest::Head)? {
+                            Loaded::Head(head) => head,
+                            _ => unreachable!("Head request yields Head"),
+                        };
                     // HEAD "exists" if its file is present OR a committed record
                     // reconstructs a value the stale on-disk HEAD does not reflect.
                     let exists = raw_state.exists || reconciled_head != raw_state.head;
@@ -496,14 +496,18 @@ impl RefManager {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
 
     use objects::object::MarkerName;
     use tempfile::TempDir;
 
-    use super::super::reconcile::{LoadRequest, Loaded, ReconcileOutcome, RefReconciler};
-    use super::*;
+    use super::{
+        super::reconcile::{LoadRequest, Loaded, ReconcileOutcome, RefReconciler},
+        *,
+    };
 
     fn create_ref_manager() -> (TempDir, RefManager) {
         let temp_dir = TempDir::new().unwrap();

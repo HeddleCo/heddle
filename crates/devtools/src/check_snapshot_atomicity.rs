@@ -221,16 +221,18 @@ fn is_cfg_test(attrs: &[Attribute]) -> bool {
     fn meta_mentions_test(meta: &Meta) -> bool {
         match meta {
             Meta::Path(path) => path.is_ident("test"),
-            Meta::List(list) if list.path.is_ident("cfg") => list.tokens.to_string().contains("test"),
+            Meta::List(list) if list.path.is_ident("cfg") => {
+                list.tokens.to_string().contains("test")
+            }
             Meta::List(list) if list.path.is_ident("all") || list.path.is_ident("any") => {
                 list.tokens.to_string().contains("test")
             }
             _ => false,
         }
     }
-    attrs.iter().any(|attr| {
-        attr.path().is_ident("cfg") && meta_mentions_test(&attr.meta)
-    })
+    attrs
+        .iter()
+        .any(|attr| attr.path().is_ident("cfg") && meta_mentions_test(&attr.meta))
 }
 
 struct Finder<'a> {
@@ -445,7 +447,11 @@ mod tests {
                 self.oplog.record_snapshot(&id, p, th, s)?; \
                 Ok(()) }",
         );
-        assert_eq!(hits.len(), 1, "publish via aliased refs handle must be flagged");
+        assert_eq!(
+            hits.len(),
+            1,
+            "publish via aliased refs handle must be flagged"
+        );
         assert_eq!(hits[0].method, "set_thread");
     }
 
@@ -460,7 +466,11 @@ mod tests {
                 self.oplog.record_snapshot(&id, p, th, s)?; \
                 Ok(()) }",
         );
-        assert_eq!(hits.len(), 1, "publish via aliased accessor handle must be flagged");
+        assert_eq!(
+            hits.len(),
+            1,
+            "publish via aliased accessor handle must be flagged"
+        );
         assert_eq!(hits[0].method, "write_head");
     }
 
@@ -562,7 +572,10 @@ mod tests {
                 } \
              }",
         );
-        assert!(hits.is_empty(), "inline #[cfg(test)] module must be skipped");
+        assert!(
+            hits.is_empty(),
+            "inline #[cfg(test)] module must be skipped"
+        );
     }
 
     #[test]
@@ -621,7 +634,10 @@ mod tests {
         let mut hits = Vec::new();
         let mut scanned = 0usize;
         scan_dir(&crates_dir, &mut hits, &mut scanned).expect("scan crates/");
-        assert!(scanned > 0, "expected to scan some files under {crates_dir:?}");
+        assert!(
+            scanned > 0,
+            "expected to scan some files under {crates_dir:?}"
+        );
         assert!(
             hits.is_empty(),
             "cross-crate publish-first snapshot site(s) found: {:?}",

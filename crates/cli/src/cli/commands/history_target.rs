@@ -23,11 +23,11 @@
 //! [`resolve_state_id_bytes`] when you need the wire-form 16-byte
 //! representation (e.g. when handing it to a gRPC service stub).
 
-use objects::store::ObjectStore;
 use anyhow::{Result, anyhow};
 use objects::{
     error::HeddleError,
     object::{ChangeId, State},
+    store::ObjectStore,
 };
 use repo::Repository;
 

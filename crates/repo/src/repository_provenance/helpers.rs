@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use std::{collections::HashMap, path::Path};
 
-use objects::object::{
-    Blob, ContentHash, FileProvenance, LineSpan, Origin, ProvenanceError, State, Tree, TreeEntry,
+use objects::{
+    object::{
+        Blob, ContentHash, FileProvenance, LineSpan, Origin, ProvenanceError, State, Tree,
+        TreeEntry,
+    },
+    store::ObjectStore,
 };
 
 use super::{HeddleError, Repository, Result, builder::ProvenanceBuilder};

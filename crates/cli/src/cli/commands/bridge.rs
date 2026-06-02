@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use objects::object::ThreadName;
 use refs::Head;
 use repo::Repository;
@@ -16,24 +16,24 @@ use super::{
     action_line::{print_next, print_next_step, print_optional},
     advice::RecoveryAdvice,
     git_overlay_health::{
-        action_template, build_git_overlay_health, build_plain_git_verification_probe,
+        GitOverlayHealth, GitOverlayHealthCheck, RepositoryVerificationState, action_template,
+        build_git_overlay_health, build_plain_git_verification_probe,
         build_repository_verification_state, canonical_adopt_ref_command,
         canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_command,
         canonical_bridge_reconcile_ref_preview_command, serialize_empty_action_as_null,
-        GitOverlayHealth, GitOverlayHealthCheck, RepositoryVerificationState,
     },
     import_progress::ImportProgress,
     remote::resolve_default_remote_name,
 };
 use crate::{
     bridge::{
+        GitBridge,
         git_core::clone_url_to_bare,
         git_export::export_all,
         git_import::{import_all, import_selected_refs},
         git_util::ExportedRef,
-        GitBridge,
     },
-    cli::{cli_args::GitSource, should_output_json, style, Cli, GitCommands},
+    cli::{Cli, GitCommands, cli_args::GitSource, should_output_json, style},
 };
 
 /// A `GitSource` resolved to an on-disk path. For URL sources we own a
@@ -1243,8 +1243,8 @@ fn run_reason(
     use std::path::PathBuf;
 
     use ingest::{
-        load_transcripts, pipeline_default_commits, GitSource, ReasoningPipeline,
-        ReasoningPipelineParams, ShaMap, TranscriptRoots,
+        GitSource, ReasoningPipeline, ReasoningPipelineParams, ShaMap, TranscriptRoots,
+        load_transcripts, pipeline_default_commits,
     };
 
     let map_path = repo.heddle_dir().join("ingest").join("sha_map.sqlite");

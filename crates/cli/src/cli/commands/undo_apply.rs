@@ -16,9 +16,11 @@ use gix::{
         transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog},
     },
 };
-use objects::error::{HeddleError, Result as HeddleResult};
-use objects::lock::{RepoLock, WriteLockGuard};
-use objects::object::{ChangeId, ContentHash, MarkerName, ThreadName};
+use objects::{
+    error::{HeddleError, Result as HeddleResult},
+    lock::{RepoLock, WriteLockGuard},
+    object::{ChangeId, ContentHash, MarkerName, ThreadName},
+};
 use oplog::{IsolationKey, OpBatch, OpEntry, OpRecord, isolation_keys_for_record};
 use refs::Head;
 use repo::{
@@ -1933,8 +1935,9 @@ impl AtomicMutation for RedoOp {
 
 #[cfg(test)]
 mod atomic_tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     /// Init a repo and create two snapshots on `main`. The worktree at `s2`
     /// holds both `a.txt` (from `s1`) and `b.txt` (from `s2`); `s1` holds only

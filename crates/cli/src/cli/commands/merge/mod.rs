@@ -24,8 +24,7 @@ use super::{
     diff::{DiffOutput, SemanticChangeEntry, compute_state_diff, compute_tree_diff},
     git_overlay_health::{
         RepositoryVerificationState, action_template, build_repository_verification_state,
-        override_trust_recommended_action,
-        repository_verification_blocked_advice,
+        override_trust_recommended_action, repository_verification_blocked_advice,
     },
     operator_core::{OperatorCommandOutput, blocked_operator_exit_code},
     ready_cmd::{worktree_dirty, worktree_dirty_paths},
@@ -891,9 +890,10 @@ pub(crate) fn merge_thread_into_current(
             && thread
                 .as_ref()
                 .is_some_and(|thread| thread.state == ThreadState::Ready)
-            && let Some(thread) = thread.as_ref() {
-                mark_merge_previewed(repo, &thread.id)?;
-            }
+            && let Some(thread) = thread.as_ref()
+        {
+            mark_merge_previewed(repo, &thread.id)?;
+        }
         return Ok(merge_output_from_report(MergeOutputInput {
             repo,
             thread: &thread,
@@ -1858,7 +1858,10 @@ fn build_thread_preview_report_with_graph(
         advice.thread_health = "clean".to_string();
     }
 
-    let thread_tip = repo.refs().get_thread(&ThreadName::new(&thread.thread))?.map(|id| id.short());
+    let thread_tip = repo
+        .refs()
+        .get_thread(&ThreadName::new(&thread.thread))?
+        .map(|id| id.short());
     let manual_resolution_current = thread
         .integration_policy_result
         .manual_resolution_state

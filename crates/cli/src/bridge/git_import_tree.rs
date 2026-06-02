@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Import Git trees as Heddle trees.
 
-use objects::store::ObjectStore;
 use std::collections::HashMap;
 
-use objects::object::{Blob, ContentHash, FileMode, Tree, TreeEntry};
+use objects::{
+    object::{Blob, ContentHash, FileMode, Tree, TreeEntry},
+    store::ObjectStore,
+};
 use repo::Repository as HeddleRepository;
 
 use crate::bridge::git_core::{GitBridgeError, GitResult};

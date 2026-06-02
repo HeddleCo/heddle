@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Stable JSON-first agent reservation API.
 
-use objects::store::ObjectStore;
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use objects::object::ThreadName;
-use objects::store::{
-    AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ReserveOutcome, current_boot_id,
+use objects::{
+    object::ThreadName,
+    store::{
+        AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ObjectStore, ReserveOutcome,
+        current_boot_id,
+    },
 };
 use refs::{Head, RefExpectation};
 use repo::{
@@ -318,12 +320,8 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
             // manager snapshot. Reservations are an agent-internal API
             // that aren't expected to participate in human undo/redo
             // flows in 0.3. heddle#23 r2.
-            repo.oplog().record_thread_create(
-                &tn,
-                &anchor,
-                None,
-                Some(&repo.op_scope()),
-            )?;
+            repo.oplog()
+                .record_thread_create(&tn, &anchor, None, Some(&repo.op_scope()))?;
         }
 
         // Ensure a Thread record exists so downstream commands

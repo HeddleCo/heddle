@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Import Git commits into Heddle states functionality.
 
-use objects::store::ObjectStore;
 use std::{collections::HashSet, path::Path};
 
 use chrono::{TimeZone, Utc};
-use objects::object::{Agent, Attribution, ChangeId, MarkerName, Principal, State, Status, ThreadName};
+use objects::{
+    object::{Agent, Attribution, ChangeId, MarkerName, Principal, State, Status, ThreadName},
+    store::ObjectStore,
+};
 use refs::{Head, RefExpectation};
 use repo::Repository as HeddleRepository;
 use tracing::warn;
@@ -552,7 +554,10 @@ fn import_with_ref_filter(
             continue;
         }
         if let Some(change_id) = bridge.mapping.get_heddle(plan.peeled_commit_oid) {
-            let existing = bridge.heddle_repo.refs().get_thread(&ThreadName::new(name.as_str()))?;
+            let existing = bridge
+                .heddle_repo
+                .refs()
+                .get_thread(&ThreadName::new(name.as_str()))?;
             if let Some(existing_change) = existing
                 && !thread_can_adopt_change(bridge.heddle_repo, &existing_change, &change_id)?
             {

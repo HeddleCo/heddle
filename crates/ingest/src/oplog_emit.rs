@@ -51,7 +51,7 @@ use objects::object::{MarkerName, ThreadName};
 use oplog::oplog::OpLogBackend;
 use tracing::warn;
 
-use crate::{git_walk::ReflogEntry, sha_map::ShaMap, IngestError};
+use crate::{IngestError, git_walk::ReflogEntry, sha_map::ShaMap};
 
 /// Rolling tally returned by [`OplogEmitter::emit`].
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

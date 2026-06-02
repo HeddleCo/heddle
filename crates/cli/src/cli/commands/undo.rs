@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Undo and redo commands.
 
-use objects::store::ObjectStore;
 use anyhow::{Result, anyhow};
-use objects::object::{ChangeId, ContentHash};
+use objects::{
+    object::{ChangeId, ContentHash},
+    store::ObjectStore,
+};
 use oplog::{OpBatch, OpRecord};
 use refs::UNDO_RECOVERY_HANDLE;
 use repo::{Repository, ThreadManager};
@@ -216,11 +218,9 @@ pub fn cmd_undo(
     let recovery_state = repo.head()?;
     let generation = repo.oplog().head_id()?;
     let transaction_id = undo_redo_transaction_id("undo", &scope, generation, &batches);
-    let updated_batches = repo::atomic::execute(
-        &repo,
-        UndoOp::new(batches, recovery_state, transaction_id),
-    )
-    .map_err(|e| anyhow!(e))?;
+    let updated_batches =
+        repo::atomic::execute(&repo, UndoOp::new(batches, recovery_state, transaction_id))
+            .map_err(|e| anyhow!(e))?;
 
     let post_undo_repo = Repository::open(repo.root())?;
     let post_undo_trust = build_repository_verification_state(&post_undo_repo);
@@ -338,8 +338,8 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
     // failure mid-redo rewinds every applied step (mirror of `cmd_undo`).
     let generation = repo.oplog().head_id()?;
     let transaction_id = undo_redo_transaction_id("redo", &scope, generation, &batches);
-    let updated_batches =
-        repo::atomic::execute(&repo, RedoOp::new(batches, transaction_id)).map_err(|e| anyhow!(e))?;
+    let updated_batches = repo::atomic::execute(&repo, RedoOp::new(batches, transaction_id))
+        .map_err(|e| anyhow!(e))?;
 
     let post_redo_trust = build_repository_verification_state(&repo);
     let recommended_action = ActionFields::from_action(&post_redo_trust.recommended_action);
@@ -661,8 +661,12 @@ fn states_required_for_undo(op: &OpRecord) -> Vec<ChangeId> {
         // wildcard) so a new state-carrying variant must declare what its undo
         // needs to load, instead of silently skipping the reachability check
         // (heddle#354 r9).
-        OpRecord::Snapshot { prev_head: None, .. }
-        | OpRecord::Goto { prev_head: None, .. }
+        OpRecord::Snapshot {
+            prev_head: None, ..
+        }
+        | OpRecord::Goto {
+            prev_head: None, ..
+        }
         | OpRecord::ThreadCreate { .. }
         | OpRecord::ThreadCreateV2 { .. }
         | OpRecord::Fork { .. }
@@ -1093,8 +1097,9 @@ fn ensure_thread_worktree_undo_safe(repo: &Repository, batches: &[OpBatch]) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     fn record(
         id: &str,
@@ -1177,7 +1182,10 @@ mod tests {
         // Record a `ThreadCreateV2` for the name; its undo converges the name to
         // empty, removing BOTH same-name records.
         std::fs::write(temp.path().join("f.txt"), "x").unwrap();
-        let state = repo.snapshot(Some("s".to_string()), None).unwrap().change_id;
+        let state = repo
+            .snapshot(Some("s".to_string()), None)
+            .unwrap()
+            .change_id;
         let scope = repo.op_scope();
         repo.oplog()
             .record_batch_scoped(

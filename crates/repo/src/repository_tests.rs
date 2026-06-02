@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use std::fs;
 
 use objects::{
     object::{Blob, ChangeId, ThreadName, Tree, TreeEntry},
+    store::ObjectStore,
     util::symlink_target_bytes,
 };
 use oplog::OpRecord;
@@ -11,7 +11,7 @@ use refs::Head;
 use serde_json::json;
 use tempfile::TempDir;
 
-use super::repository_snapshot::{with_snapshot_fault, SnapshotFault};
+use super::repository_snapshot::{SnapshotFault, with_snapshot_fault};
 use crate::{
     ChangedPathFilters, HeddleError, HistoryQuery, RepoConfig, Repository, RepositoryCapability,
     ThreadFreshness, ThreadManager, WorktreeIndex,
@@ -41,7 +41,10 @@ fn test_init_creates_structure() {
     assert!(temp_dir.path().join(".heddle/objects/trees").exists());
     assert!(temp_dir.path().join(".heddle/objects/states").exists());
     let root_state = repo.head().unwrap().expect("init should seed main state");
-    assert_eq!(repo.refs().get_thread(&ThreadName::new("main")).unwrap(), Some(root_state));
+    assert_eq!(
+        repo.refs().get_thread(&ThreadName::new("main")).unwrap(),
+        Some(root_state)
+    );
     let state = repo.store().get_state(&root_state).unwrap().unwrap();
     assert!(state.parents.is_empty());
     let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
@@ -62,8 +65,7 @@ fn test_open_with_store_threads_a_custom_object_store() {
     drop(repo);
 
     let store = FsStore::new(&heddle_dir);
-    let repo: Repository<_, _, FsStore> =
-        Repository::open_with_store(&heddle_dir, store).unwrap();
+    let repo: Repository<_, _, FsStore> = Repository::open_with_store(&heddle_dir, store).unwrap();
 
     let blob = objects::object::Blob::from("open_with_store round-trip");
     let hash = repo.store().put_blob(&blob).unwrap();
@@ -254,7 +256,10 @@ fn snapshot_atomic_mutation_fault_and_exactly_once_contract() {
         .iter()
         .filter(|entry| matches!(entry.operation, OpRecord::TransactionCommit { .. }))
         .count();
-    assert_eq!(snapshot_count, 1, "capture batch must contain one snapshot record");
+    assert_eq!(
+        snapshot_count, 1,
+        "capture batch must contain one snapshot record"
+    );
     assert_eq!(
         transaction_count, 1,
         "capture batch must contain one transaction marker"
@@ -1147,7 +1152,9 @@ fn test_fast_forward_attached_preserves_head_and_advances_thread() {
     // Repo::init_default attaches HEAD to "main"; explicitly rewind the
     // thread ref to state1 so a fast-forward to state2 is meaningful.
     let state1 = repo.head().unwrap().expect("base state should exist");
-    repo.refs().set_thread(&ThreadName::new("main"), &state1).unwrap();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &state1)
+        .unwrap();
     repo.refs()
         .write_head(&Head::Attached {
             thread: ThreadName::new("main"),
@@ -1362,9 +1369,8 @@ mod blob_hydrator_callback {
     use objects::{
         error::Result,
         object::{Blob, ContentHash},
+        store::ObjectStore,
     };
-
-    use objects::store::ObjectStore;
 
     use super::create_test_repo;
     use crate::{BlobHydrator, HeddleError, Repository};
@@ -1656,8 +1662,10 @@ mod require_tree_callback {
     //! `crates/cli/tests/state_management/missing_tree_integrity.rs`
     //! cover the on-disk wiring.
 
-    use objects::object::{ContentHash, Tree};
-    use objects::store::ObjectStore;
+    use objects::{
+        object::{ContentHash, Tree},
+        store::ObjectStore,
+    };
 
     use super::create_test_repo;
     use crate::{HeddleError, Repository};
@@ -1853,12 +1861,18 @@ fn dir_only_ignore_covers_node_modules_symlink_native() {
     let status = repo.compare_worktree_cached(&tree).unwrap();
 
     assert!(
-        !status.added.iter().any(|p| p == std::path::Path::new("node_modules")),
+        !status
+            .added
+            .iter()
+            .any(|p| p == std::path::Path::new("node_modules")),
         "node_modules symlink must be ignored by `node_modules/`, not reported as added: {:?}",
         status.added,
     );
     assert!(
-        status.added.iter().any(|p| p == std::path::Path::new("keep.txt")),
+        status
+            .added
+            .iter()
+            .any(|p| p == std::path::Path::new("keep.txt")),
         "a non-ignored sibling must still be reported (proves the scan ran): {:?}",
         status.added,
     );
@@ -1887,7 +1901,10 @@ fn midsession_ignore_broadening_masks_untracked_without_unlink_native() {
     // First status: no ignore yet, so the dep file is seen as untracked.
     let before = repo.compare_worktree_cached(&tree).unwrap();
     assert!(
-        before.added.iter().any(|p| p == std::path::Path::new("node_modules/dep.js")),
+        before
+            .added
+            .iter()
+            .any(|p| p == std::path::Path::new("node_modules/dep.js")),
         "precondition: node_modules/dep.js should be untracked before the ignore: {:?}",
         before.added,
     );
@@ -1902,7 +1919,10 @@ fn midsession_ignore_broadening_masks_untracked_without_unlink_native() {
         after.added,
     );
     assert!(
-        after.added.iter().any(|p| p == std::path::Path::new("keep.txt")),
+        after
+            .added
+            .iter()
+            .any(|p| p == std::path::Path::new("keep.txt")),
         "non-ignored sibling must still be reported after the refresh: {:?}",
         after.added,
     );
@@ -1932,12 +1952,18 @@ fn dir_only_ignore_covers_node_modules_symlink_git_overlay() {
 
     let status = repo.git_overlay_worktree_status().unwrap().unwrap();
     assert!(
-        !status.added.iter().any(|p| p == std::path::Path::new("node_modules")),
+        !status
+            .added
+            .iter()
+            .any(|p| p == std::path::Path::new("node_modules")),
         "node_modules symlink must be ignored in git-overlay status: {:?}",
         status.added,
     );
     assert!(
-        status.added.iter().any(|p| p == std::path::Path::new("keep.txt")),
+        status
+            .added
+            .iter()
+            .any(|p| p == std::path::Path::new("keep.txt")),
         "a non-ignored sibling must still be reported in git-overlay status: {:?}",
         status.added,
     );
@@ -1962,7 +1988,10 @@ fn midsession_ignore_broadening_masks_untracked_without_unlink_git_overlay() {
 
     let before = repo.git_overlay_worktree_status().unwrap().unwrap();
     assert!(
-        before.added.iter().any(|p| p == std::path::Path::new("node_modules/dep.js")),
+        before
+            .added
+            .iter()
+            .any(|p| p == std::path::Path::new("node_modules/dep.js")),
         "precondition: node_modules/dep.js should be untracked before the ignore: {:?}",
         before.added,
     );

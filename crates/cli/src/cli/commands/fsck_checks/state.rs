@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
@@ -7,7 +6,10 @@ use std::{
 
 use anyhow::Result;
 use crypto::StateSigningExt;
-use objects::object::{ContentHash, State, Tree};
+use objects::{
+    object::{ContentHash, State, Tree},
+    store::ObjectStore,
+};
 use repo::Repository;
 
 use super::{FsckError, make_error};

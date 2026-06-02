@@ -398,8 +398,7 @@ async fn run_next(cli: &Cli, args: &ReviewNextArgs) -> Result<()> {
         };
         println!(
             "{}",
-            serde_json::to_string(&envelope)
-                .context("serialize review next envelope")?
+            serde_json::to_string(&envelope).context("serialize review next envelope")?
         );
     } else {
         match &next_state {

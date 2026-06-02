@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Blame command - show line-by-line attribution for files.
 
-use objects::store::ObjectStore;
 use std::{collections::HashMap, path::Path};
 
 use anyhow::{Result, anyhow};
-use objects::object::{
-    AnnotationStatus, Attribution, ChangeId, ContentHash, ContextTarget, FileProvenance,
-    ProvenanceError, Tree,
+use objects::{
+    object::{
+        AnnotationStatus, Attribution, ChangeId, ContentHash, ContextTarget, FileProvenance,
+        ProvenanceError, Tree,
+    },
+    store::ObjectStore,
 };
 use repo::Repository;
 use serde::Serialize;
@@ -438,8 +440,9 @@ fn fit_author(s: &str, max_len: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use objects::object::{Agent, Attribution, Principal, State};
+
+    use super::*;
 
     fn human() -> Attribution {
         Attribution::human(Principal::new("Ada Lovelace", "ada@example.com"))
@@ -470,7 +473,10 @@ mod tests {
     fn attribution_parts_omits_agent_for_human_only() {
         let (principal, agent) = attribution_parts(&human());
         assert_eq!(principal.name, "Ada Lovelace");
-        assert!(agent.is_none(), "human-only attribution must not synthesize an agent");
+        assert!(
+            agent.is_none(),
+            "human-only attribution must not synthesize an agent"
+        );
     }
 
     #[test]
@@ -484,8 +490,14 @@ mod tests {
         let json = serde_json::to_value(agent.unwrap()).unwrap();
         assert_eq!(json["provider"], "openai");
         assert_eq!(json["model"], "gpt-5");
-        assert!(json.get("session_id").is_none(), "absent session_id must be omitted, not null");
-        assert!(json.get("policy_id").is_none(), "absent policy_id must be omitted, not null");
+        assert!(
+            json.get("session_id").is_none(),
+            "absent session_id must be omitted, not null"
+        );
+        assert!(
+            json.get("policy_id").is_none(),
+            "absent policy_id must be omitted, not null"
+        );
     }
 
     #[test]

@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Thread storage and lifecycle management.
 
-use objects::store::ObjectStore;
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use chrono::{DateTime, Utc};
 use objects::{
     lock::RepoLock,
     object::ChangeId,
-    store::{HeddleError, Result},
+    store::{HeddleError, ObjectStore, Result},
 };
 
 use crate::{
@@ -685,7 +686,9 @@ mod tests {
             "precondition: newer leaked record shadows prev"
         );
 
-        manager.converge_records(name, std::slice::from_ref(&prev)).unwrap();
+        manager
+            .converge_records(name, std::slice::from_ref(&prev))
+            .unwrap();
 
         assert_eq!(
             manager.find_by_thread(name).unwrap().unwrap().id,
@@ -741,7 +744,9 @@ mod tests {
             "precondition: the newer same-name record shadows the target"
         );
 
-        manager.converge_records(name, std::slice::from_ref(&target)).unwrap();
+        manager
+            .converge_records(name, std::slice::from_ref(&target))
+            .unwrap();
 
         let under_name: Vec<_> = manager
             .list()
@@ -749,7 +754,11 @@ mod tests {
             .into_iter()
             .filter(|t| t.thread == name)
             .collect();
-        assert_eq!(under_name.len(), 1, "exactly the target remains under the name");
+        assert_eq!(
+            under_name.len(),
+            1,
+            "exactly the target remains under the name"
+        );
         assert_eq!(under_name[0].id, "rec-target");
         assert_eq!(
             manager.find_by_thread(name).unwrap().unwrap().id,
@@ -800,7 +809,12 @@ mod tests {
         drop_c.updated_at = keep_a.updated_at + chrono::Duration::seconds(10);
         manager.save(&drop_c).unwrap();
         assert_eq!(
-            manager.list().unwrap().iter().filter(|t| t.thread == name).count(),
+            manager
+                .list()
+                .unwrap()
+                .iter()
+                .filter(|t| t.thread == name)
+                .count(),
             3,
             "precondition: three records under the name"
         );
@@ -878,7 +892,9 @@ mod tests {
         rec.thread = name.to_string();
         manager.save(&rec).unwrap();
 
-        manager.converge_records(name, std::slice::from_ref(&rec)).unwrap();
+        manager
+            .converge_records(name, std::slice::from_ref(&rec))
+            .unwrap();
 
         assert_eq!(
             manager.find_by_thread(name).unwrap().unwrap().id,

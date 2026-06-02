@@ -105,11 +105,12 @@ pub trait CoreRefBackend: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::{collections::HashMap, sync::Mutex};
 
-    use objects::error::HeddleError;
-    use objects::object::{ChangeId, MarkerName, ThreadName};
+    use objects::{
+        error::HeddleError,
+        object::{ChangeId, MarkerName, ThreadName},
+    };
 
     use super::CoreRefBackend;
     use crate::refs::{Head, RefBackend, RefExpectation, RefUpdate};
@@ -352,9 +353,7 @@ mod tests {
 
         // write_head_cas writes through to the head slot.
         let head = Head::Detached { state: head_id };
-        backend
-            .write_head_cas(RefExpectation::Any, &head)
-            .unwrap();
+        backend.write_head_cas(RefExpectation::Any, &head).unwrap();
         assert_eq!(backend.read_head().unwrap(), head);
 
         // set_thread_cas inserts; list_threads + get_thread observe it.

@@ -11,8 +11,8 @@ use std::{
     ffi::OsStr,
     fs,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
@@ -47,15 +47,15 @@ pub(crate) mod mocks {
     use std::{
         ffi::OsStr,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
         time::UNIX_EPOCH,
     };
 
     use crate::{
         error::{MountError, Result},
-        shell::{Attrs, Entry, NodeId, NodeKind, PlatformShell, DIR_UNIX_MODE},
+        shell::{Attrs, DIR_UNIX_MODE, Entry, NodeId, NodeKind, PlatformShell},
     };
 
     /// Trivial in-memory shell that lets adapter unit tests validate
@@ -1631,10 +1631,12 @@ mod write_ops {
         mount
             .rmdir_entry(NodeId::ROOT, OsStr::new("scratch"))
             .expect("rmdir");
-        assert!(mount
-            .lookup(NodeId::ROOT, OsStr::new("scratch"))
-            .unwrap()
-            .is_none());
+        assert!(
+            mount
+                .lookup(NodeId::ROOT, OsStr::new("scratch"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// `rmdir_entry` on a directory that has any visible child (pending

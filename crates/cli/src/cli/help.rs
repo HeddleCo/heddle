@@ -290,7 +290,8 @@ fn global_option_takes_value(command: &clap::Command, token: &str) -> Option<boo
     command
         .get_arguments()
         .find(|arg| {
-            arg.get_long().is_some_and(|long| token == format!("--{long}"))
+            arg.get_long()
+                .is_some_and(|long| token == format!("--{long}"))
                 || arg
                     .get_short()
                     .is_some_and(|short| token == format!("-{short}"))
@@ -939,7 +940,10 @@ mod tests {
                 .get_arguments()
                 .find(|arg| arg.get_id().as_str() == *id)
                 .expect("revealed arg present");
-            assert!(!arg.is_hide_set(), "`{id}` should be revealed by --help-agent");
+            assert!(
+                !arg.is_hide_set(),
+                "`{id}` should be revealed by --help-agent"
+            );
         }
     }
 
@@ -954,8 +958,9 @@ mod tests {
     /// `main.rs` makes (`matches!(cli.command, Commands::Capture(a) if
     /// a.help_agent)`), driven entirely by clap's parse.
     fn wants_reveal(args: &[&str]) -> bool {
-        use crate::cli::cli_args::{Cli, Commands};
         use clap::Parser;
+
+        use crate::cli::cli_args::{Cli, Commands};
         let argv = std::iter::once("heddle").chain(args.iter().copied());
         match Cli::try_parse_from(argv) {
             Ok(cli) => matches!(&cli.command, Commands::Capture(a) if a.help_agent),

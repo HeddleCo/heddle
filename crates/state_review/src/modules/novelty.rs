@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use objects::object::{ProducerId, RiskSignal, RiskSignalKind, SignalAnchor, State};
 use semantic::{
-    analysis::{compute_similarity, SimilarityMethod},
+    analysis::{SimilarityMethod, compute_similarity},
     parser::FunctionDef,
 };
 

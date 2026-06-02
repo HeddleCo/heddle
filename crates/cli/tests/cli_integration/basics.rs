@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use cli::config::UserConfig;
-use objects::object::ThreadName;
+use objects::{object::ThreadName, store::ObjectStore};
 
 use super::*;
 
@@ -1055,11 +1054,7 @@ fn test_cli_diff_head_to_worktree_in_plain_git_repo_uses_git_overlay_baseline() 
 
     std::fs::write(temp.path().join("tracked.txt"), "tracked but modified").unwrap();
 
-    let output = heddle(
-        &["--output", "json", "diff", "HEAD"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    let output = heddle(&["--output", "json", "diff", "HEAD"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert!(
         !temp.path().join(".heddle").exists(),
@@ -1515,15 +1510,7 @@ fn test_cli_bridge_git_import_ref_imports_only_selected_tag() {
 
     let import_output = heddle(
         &[
-            "--output",
-            "json",
-            "bridge",
-            "git",
-            "import",
-            "--path",
-            ".",
-            "--ref",
-            "v1.0.0",
+            "--output", "json", "bridge", "git", "import", "--path", ".", "--ref", "v1.0.0",
         ],
         Some(temp.path()),
     )
@@ -4050,7 +4037,11 @@ fn test_cli_diff_patch_nested_deleted_file_round_trips() {
     let apply_dir = TempDir::new().unwrap();
     init_git_repo(apply_dir.path());
     std::fs::create_dir_all(apply_dir.path().join("src/nested")).unwrap();
-    std::fs::write(apply_dir.path().join("src/nested/file.txt"), "alpha\nbeta\n").unwrap();
+    std::fs::write(
+        apply_dir.path().join("src/nested/file.txt"),
+        "alpha\nbeta\n",
+    )
+    .unwrap();
     std::fs::write(apply_dir.path().join("keep.txt"), "keep\n").unwrap();
     git_commit_all(apply_dir.path(), "seed");
     git_apply(apply_dir.path(), &patch);
@@ -4265,8 +4256,7 @@ fn test_cli_diff_patch_plain_git_delete_executable_and_symlink_modes() {
     git_commit_all(apply_dir.path(), "seed");
     git_apply(apply_dir.path(), &patch);
     assert!(
-        !apply_dir.path().join("oldlink").exists()
-            && !apply_dir.path().join("old.sh").exists(),
+        !apply_dir.path().join("oldlink").exists() && !apply_dir.path().join("old.sh").exists(),
         "applying the delete patch must unlink both special files:\n{patch}"
     );
 }

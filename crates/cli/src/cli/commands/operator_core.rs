@@ -1,31 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use std::{collections::BTreeSet, path::Path};
 
 use anyhow::Result;
 use chrono::Utc;
 use gix::bstr::ByteSlice;
-use objects::object::ThreadName;
+use objects::{object::ThreadName, store::ObjectStore};
 use repo::{
-    update_thread_state_from_state, GitOverlayImportHint, GitRemoteTrackingStatus, OperationKind,
-    OperationScope, Repository, RepositoryOperationStatus, ThreadFreshness,
-    ThreadIntegrationPolicy, ThreadManager, ThreadState,
+    GitOverlayImportHint, GitRemoteTrackingStatus, OperationKind, OperationScope, Repository,
+    RepositoryOperationStatus, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
+    ThreadState, update_thread_state_from_state,
 };
-use serde::{ser::SerializeStruct, Serialize, Serializer};
+use serde::{Serialize, Serializer, ser::SerializeStruct};
 
 use super::{
     bisect::reset_bisect_state,
     git_overlay_health::{
-        action_template, repository_verification_blockers,
-        repository_verification_primary_command, RepositoryVerificationState,
+        RepositoryVerificationState, action_template, repository_verification_blockers,
+        repository_verification_primary_command,
     },
-    next_action::{effective_next_action, NextActionInput},
+    next_action::{NextActionInput, effective_next_action},
     rebase::{
-        cmd_rebase_silent, continue_rebase_for_operator, has_persisted_rebase_state,
-        OperatorContinueStatus,
+        OperatorContinueStatus, cmd_rebase_silent, continue_rebase_for_operator,
+        has_persisted_rebase_state,
     },
     resolve::abort_merge_state,
-    snapshot::{create_snapshot, SnapshotAgentOverrides},
+    snapshot::{SnapshotAgentOverrides, create_snapshot},
 };
 use crate::config::UserConfig;
 
@@ -545,7 +544,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::cli::commands::git_overlay_health::{machine_contract_coverage, VerificationCheck};
+    use crate::cli::commands::git_overlay_health::{VerificationCheck, machine_contract_coverage};
 
     #[test]
     fn raw_git_operation_handoff_recommends_heddle_preservation_not_git_cli() {
@@ -566,14 +565,18 @@ mod tests {
         );
         assert!(output.message.contains("no-git runtime"));
         assert!(output.message.contains("conflict.txt"));
-        assert!(output
-            .blockers
-            .iter()
-            .any(|path| path == "unresolved: conflict.txt"));
-        assert!(!output
-            .recommended_action
-            .as_deref()
-            .is_some_and(|action| action.starts_with("git ")));
+        assert!(
+            output
+                .blockers
+                .iter()
+                .any(|path| path == "unresolved: conflict.txt")
+        );
+        assert!(
+            !output
+                .recommended_action
+                .as_deref()
+                .is_some_and(|action| action.starts_with("git "))
+        );
     }
 
     #[test]
@@ -600,9 +603,11 @@ mod tests {
             output.recommended_action.as_deref(),
             Some("heddle checkpoint -m \"...\"")
         );
-        assert!(output
-            .message
-            .contains("repository verification is blocked"));
+        assert!(
+            output
+                .message
+                .contains("repository verification is blocked")
+        );
     }
 
     #[test]

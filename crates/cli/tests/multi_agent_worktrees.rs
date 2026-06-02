@@ -184,10 +184,7 @@ fn head_track(path: &std::path::Path) -> String {
 /// is omitted from the wire). This helper grafts the proof back onto
 /// the returned value for test ergonomics by invoking
 /// `heddle verify --output json` after the original call.
-pub(crate) fn inject_post_verification_at(
-    cwd: &std::path::Path,
-    mut value: Value,
-) -> Value {
+pub(crate) fn inject_post_verification_at(cwd: &std::path::Path, mut value: Value) -> Value {
     let obj = match value.as_object_mut() {
         Some(obj) => obj,
         None => return value,

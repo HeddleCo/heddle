@@ -49,9 +49,7 @@ pub use state_context::{
     Annotation, AnnotationKind, AnnotationRevision, AnnotationScope, AnnotationStatus,
     AnnotationVisibility, ContextBlob, ContextError, ContextTarget,
 };
-pub use state_core::{
-    SignatureStatus, State, StateSignature, Status, Verification,
-};
+pub use state_core::{SignatureStatus, State, StateSignature, Status, Verification};
 pub use state_provenance::{FileProvenance, LineSpan, Origin, OriginSet, ProvenanceError};
 pub use state_review::{
     ReviewKind, ReviewScope, ReviewSignature, ReviewSignatureError, ReviewSignaturesBlob,
@@ -60,5 +58,7 @@ pub use state_review::{
 pub use structured_conflict::{
     ConflictError, ConflictResolution, ConflictSide, ConflictSymbol, StructuredConflict,
 };
-pub use tree::{EntryType, FileMode, Tree, TreeEntry, TreeError, validate_name as validate_tree_entry_name};
+pub use tree::{
+    EntryType, FileMode, Tree, TreeEntry, TreeError, validate_name as validate_tree_entry_name,
+};
 pub use tree_diff::diff_trees;

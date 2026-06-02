@@ -474,7 +474,12 @@ async fn async_main() -> Result<()> {
             }
             let repo = repo::Repository::open(start)?;
             match target {
-                Some(name) if repo.refs().get_thread(&objects::object::ThreadName::new(name.as_str()))?.is_some() => {
+                Some(name)
+                    if repo
+                        .refs()
+                        .get_thread(&objects::object::ThreadName::new(name.as_str()))?
+                        .is_some() =>
+                {
                     cmd_thread_show(&cli, &repo, Some(name.clone()))
                 }
                 Some(state) => cmd_show(&cli, Some(state.clone())),
@@ -940,10 +945,9 @@ fn raw_wants_json(raw: &[String]) -> bool {
             index += 1;
             continue;
         };
-        if arg.get_id().as_str() == "output"
-            && value.is_some_and(|value| value == "json") {
-                wants_json = true;
-            }
+        if arg.get_id().as_str() == "output" && value.is_some_and(|value| value == "json") {
+            wants_json = true;
+        }
         index += consumed;
     }
 

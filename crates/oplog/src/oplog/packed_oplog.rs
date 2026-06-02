@@ -5,11 +5,13 @@
 //! that model: v2 is accepted only as a migration source, and v3 is the latest
 //! single-file container with an EOF index footer.
 
-use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap};
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, HashMap},
+    fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+};
 
 use chrono::{TimeZone, Utc};
 use objects::{

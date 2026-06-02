@@ -21,7 +21,6 @@
 //!   on-read hydration completes against a real promisor remote. Run
 //!   it with `cargo test -p heddle-cli --test lazy_blob_hydration_kernel -- --include-ignored`.
 
-use objects::store::ObjectStore;
 use std::{
     path::Path,
     sync::Arc,
@@ -29,7 +28,7 @@ use std::{
 };
 
 use cli::{bridge::git_core::clone_url_to_bare, cli::commands::GitOverlayBlobHydrator};
-use objects::object::Blob;
+use objects::{object::Blob, store::ObjectStore};
 use repo::Repository;
 use tempfile::TempDir;
 

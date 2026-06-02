@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use std::path::Path;
 
-use objects::object::{ContentHash, EntryType, FileProvenance, State, Tree, TreeEntry};
+use objects::{
+    object::{ContentHash, EntryType, FileProvenance, State, Tree, TreeEntry},
+    store::ObjectStore,
+};
 
 use super::{
     Repository, Result,

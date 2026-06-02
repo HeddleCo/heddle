@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-use super::*;
 use objects::object::ThreadName;
+
+use super::*;
 
 /// Convenience: read the current state's short change-id by opening the repo
 /// directly. Used by undo tests that assert HEAD has moved to a specific state.
@@ -111,10 +112,11 @@ fn test_undo_preserves_ignored_siblings_in_tracked_dirs() {
     assert!(!temp.path().join("main.rs").exists());
     assert!(!temp.path().join("web/index.html").exists());
     // Ignored siblings preserved across the apply.
-    assert!(temp
-        .path()
-        .join("web/node_modules/lodash/index.js")
-        .exists());
+    assert!(
+        temp.path()
+            .join("web/node_modules/lodash/index.js")
+            .exists()
+    );
     assert!(temp.path().join("target/foo.bin").exists());
 
     // HEAD advanced and disk matches state — no divergence.
@@ -140,11 +142,8 @@ fn test_undo_refuses_when_untracked_file_present() {
     let untracked = temp.path().join("my-notes.md");
     std::fs::write(&untracked, "user-written content").unwrap();
 
-    let err = heddle(
-        &["undo", "-n", "1", "--output", "json"],
-        Some(temp.path()),
-    )
-    .expect_err("undo must refuse on dirty worktree");
+    let err = heddle(&["undo", "-n", "1", "--output", "json"], Some(temp.path()))
+        .expect_err("undo must refuse on dirty worktree");
     assert!(
         err.contains("untracked"),
         "error should mention untracked: {err}"
@@ -168,11 +167,8 @@ fn test_undo_refuses_when_tracked_file_modified() {
 
     std::fs::write(temp.path().join("a.txt"), "uncommitted edit").unwrap();
 
-    let err = heddle(
-        &["undo", "-n", "1", "--output", "json"],
-        Some(temp.path()),
-    )
-    .expect_err("undo must refuse with modified file");
+    let err = heddle(&["undo", "-n", "1", "--output", "json"], Some(temp.path()))
+        .expect_err("undo must refuse with modified file");
     assert!(
         err.contains("modified"),
         "error should mention modified: {err}"
@@ -659,7 +655,10 @@ fn test_undo_recovery_lives_outside_user_marker_namespace() {
     heddle_must_succeed(&["marker", "delete", "undo-recovery"], temp.path());
     let repo = Repository::open(temp.path()).unwrap();
     assert_eq!(
-        repo.refs().get_undo_recovery().unwrap().map(|id| id.short()),
+        repo.refs()
+            .get_undo_recovery()
+            .unwrap()
+            .map(|id| id.short()),
         Some(friction_state),
         "user marker create/delete must not touch the internal recovery ref"
     );

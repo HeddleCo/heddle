@@ -1,4 +1,3 @@
-use objects::store::ObjectStore;
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
@@ -13,7 +12,7 @@ use grpc::heddle::v1::{
 };
 use objects::{
     object::{ChangeId, ContentHash, MarkerName, ThreadName},
-    store::PackObjectId,
+    store::{ObjectStore, PackObjectId},
 };
 use proto::{ObjectType, ProtocolError, PullComplete, PushComplete, RefEntry, RefUpdated};
 use repo::{Repository, SyncedThreadMetadata, ThreadManager};
@@ -771,7 +770,8 @@ impl HostedGrpcClient {
                         if let Some(local_thread) = options.local_thread
                             && let Some(state) = final_state
                         {
-                            repo.refs().set_thread(&ThreadName::from(local_thread), &state)?;
+                            repo.refs()
+                                .set_thread(&ThreadName::from(local_thread), &state)?;
                         }
                         if let Some(state) = final_state
                             && allow_partial_fetch

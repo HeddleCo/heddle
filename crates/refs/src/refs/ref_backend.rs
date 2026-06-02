@@ -9,7 +9,7 @@ use objects::{
     object::{ChangeId, ThreadName},
 };
 
-use super::{backend::CoreRefBackend, RefSummaryIndexInspection, RefUpdate};
+use super::{RefSummaryIndexInspection, RefUpdate, backend::CoreRefBackend};
 
 /// Backend-agnostic interface for reading and writing repository references.
 pub trait RefBackend: CoreRefBackend<Error = HeddleError> {

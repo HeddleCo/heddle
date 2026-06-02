@@ -64,7 +64,12 @@ fn build_query(req: &QueryOperationsRequest) -> OperationLogQuery {
         // a hand-maintained list — so a new `OpRecord` variant is surfaced by
         // default the moment it joins the catalog, instead of being silently
         // dropped from the default query (heddle#354 r9, cid 3330304663).
-        q.verbs = Some(OpRecord::verbs(false).iter().map(|s| s.to_string()).collect());
+        q.verbs = Some(
+            OpRecord::verbs(false)
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
     }
     q
 }
@@ -230,8 +235,9 @@ fn primary_change_id(op: &OpRecord) -> Option<ChangeId> {
         OpRecord::GitCheckpoint { state, .. } => Some(*state),
         OpRecord::EphemeralThreadCollapse { final_state, .. } => Some(*final_state),
         OpRecord::Redact { state, .. } => Some(*state),
-        OpRecord::RemoteThreadUpdate { state, .. }
-        | OpRecord::RemoteThreadDelete { state, .. } => Some(*state),
+        OpRecord::RemoteThreadUpdate { state, .. } | OpRecord::RemoteThreadDelete { state, .. } => {
+            Some(*state)
+        }
         OpRecord::UndoRecoveryUpdate { state } => Some(*state),
         OpRecord::TransactionAbort { .. }
         | OpRecord::TransactionCommit { .. }
@@ -404,7 +410,11 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        assert_eq!(resp.hits.len(), 1, "newer non-checkpoint verb must not be dropped");
+        assert_eq!(
+            resp.hits.len(),
+            1,
+            "newer non-checkpoint verb must not be dropped"
+        );
         assert_eq!(resp.hits[0].verb, "transaction_commit");
     }
 

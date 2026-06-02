@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use std::{
     collections::BTreeSet,
     fs,
@@ -7,7 +6,10 @@ use std::{
     time::Instant,
 };
 
-use objects::object::{EntryType, Tree};
+use objects::{
+    object::{EntryType, Tree},
+    store::ObjectStore,
+};
 
 use crate::{
     Repository, Result, WorktreeIndex,

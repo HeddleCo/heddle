@@ -8,8 +8,7 @@ use std::{
 };
 
 use gix::bstr::{BStr, ByteSlice};
-use objects::object::ThreadName;
-use objects::worktree::WorktreeStatus;
+use objects::{object::ThreadName, worktree::WorktreeStatus};
 use refs::Head;
 use repo::{
     CommitGraphIndex, GitOverlayBranchTip, GitOverlayImportHint, GitRemoteTrackingStatus,
@@ -2451,7 +2450,12 @@ pub(crate) fn remote_drift_decision(
             }
             let import = canonical_bridge_import_ref_command(upstream);
             let merge_preview = super::thread_landing::merge_preview_command(upstream);
-            let imported = repo.refs().get_thread(&ThreadName::new(upstream)).ok().flatten().is_some();
+            let imported = repo
+                .refs()
+                .get_thread(&ThreadName::new(upstream))
+                .ok()
+                .flatten()
+                .is_some();
             RemoteDriftDecision {
                 status,
                 verified_as_clean: false,
@@ -2929,7 +2933,9 @@ fn tag_mapping_check(repo: &Repository) -> anyhow::Result<Option<GitOverlayHealt
     let mut unmapped = Vec::new();
 
     for tip in repo.git_overlay_tag_tips()? {
-        let marker = repo.refs().get_marker(&objects::object::MarkerName::new(&tip.tag))?;
+        let marker = repo
+            .refs()
+            .get_marker(&objects::object::MarkerName::new(&tip.tag))?;
         match (marker, tip.mapped_change) {
             (Some(existing), Some(mapped)) if existing == mapped => {}
             (Some(existing), Some(mapped)) => mismatched.push(format!(
@@ -3051,7 +3057,12 @@ fn stale_integration_metadata_check(
             .as_deref()
             .or(thread.merged_state.as_deref())
             .and_then(|state| repo.resolve_state(state).ok().flatten())
-            .or_else(|| repo.refs().get_thread(&ThreadName::new(&thread.thread)).ok().flatten());
+            .or_else(|| {
+                repo.refs()
+                    .get_thread(&ThreadName::new(&thread.thread))
+                    .ok()
+                    .flatten()
+            });
         let Some(candidate) = candidate else {
             continue;
         };
@@ -3692,7 +3703,9 @@ mod tests {
         );
 
         let head = repo.head().unwrap().expect("test repo should have a head");
-        repo.refs().set_thread(&ThreadName::new("origin/main"), &head).unwrap();
+        repo.refs()
+            .set_thread(&ThreadName::new("origin/main"), &head)
+            .unwrap();
         let imported = remote_drift_decision(&repo, &diverged);
         assert_eq!(
             imported.primary_action.as_deref(),
@@ -3750,8 +3763,7 @@ mod tests {
     /// new file.
     #[test]
     fn plain_git_worktree_status_preserves_staged_removal_alongside_untracked() {
-        use std::path::PathBuf;
-        use std::process::Command;
+        use std::{path::PathBuf, process::Command};
 
         let dir = TempDir::new().expect("tempdir");
         let root = dir.path();

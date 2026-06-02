@@ -4,7 +4,6 @@
 //! window. The actual signal *computation* lands in R3 (`crates/state_review`);
 //! this service exposes whatever's already on disk.
 
-use objects::store::ObjectStore;
 use std::{collections::HashMap, pin::Pin};
 
 use futures::Stream;
@@ -14,7 +13,10 @@ use grpc::heddle::v1::{
     SignalAnchor as ProtoSignalAnchor, SignalHealthEntry, SignalUpdate,
     SubscribeSignalUpdatesRequest, signal_service_server::SignalService,
 };
-use objects::object::{ChangeId, RiskSignal, RiskSignalBlob, State};
+use objects::{
+    object::{ChangeId, RiskSignal, RiskSignalBlob, State},
+    store::ObjectStore,
+};
 use repo::Repository;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};

@@ -13,11 +13,12 @@
 //! `heddle fsck` — pre-fix the same scenario produced silent, plausible-
 //! looking output that masked store corruption.
 
-use objects::store::ObjectStore;
 use std::{fs, path::Path};
 
-use objects::object::ContentHash;
-use objects::object::ThreadName;
+use objects::{
+    object::{ContentHash, ThreadName},
+    store::ObjectStore,
+};
 use repo::Repository;
 use tempfile::TempDir;
 

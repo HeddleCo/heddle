@@ -395,9 +395,7 @@ impl Repository {
             }
         }
         let plan = plan_stack_rebase(&records, root_thread, onto, |name| {
-            tips.get(name)
-                .cloned()
-                .unwrap_or_else(|| name.to_string())
+            tips.get(name).cloned().unwrap_or_else(|| name.to_string())
         });
         Ok(plan)
     }
@@ -445,9 +443,7 @@ mod tests {
         r
     }
 
-    fn current_states<'a>(
-        map: &'a HashMap<&'a str, &'a str>,
-    ) -> impl FnMut(&str) -> String + 'a {
+    fn current_states<'a>(map: &'a HashMap<&'a str, &'a str>) -> impl FnMut(&str) -> String + 'a {
         move |name: &str| map.get(name).copied().unwrap_or(name).to_string()
     }
 
@@ -528,8 +524,8 @@ mod tests {
     #[test]
     fn plan_rejects_unknown_root() {
         let records: Vec<ThreadRecord> = Vec::new();
-        let err = plan_stack_rebase(&records, "missing", "new-base", |_| String::new())
-            .unwrap_err();
+        let err =
+            plan_stack_rebase(&records, "missing", "new-base", |_| String::new()).unwrap_err();
         assert_eq!(err, PlanRebaseError::ThreadNotFound("missing".into()));
     }
 
@@ -539,8 +535,8 @@ mod tests {
             record_at("feature-a", None, "main-1"),
             record_at("feature-b", Some("feature-a"), "feature-a-tip"),
         ];
-        let err = plan_stack_rebase(&records, "feature-b", "main-2", |n| n.to_string())
-            .unwrap_err();
+        let err =
+            plan_stack_rebase(&records, "feature-b", "main-2", |n| n.to_string()).unwrap_err();
         assert_eq!(
             err,
             PlanRebaseError::NotARoot("feature-b".into(), "feature-a".into())
@@ -552,8 +548,8 @@ mod tests {
         let records = vec![record_at("feature-a", None, "main-1")];
         let mut current = HashMap::new();
         current.insert("feature-a", "feature-a-tip");
-        let plan = plan_stack_rebase(&records, "feature-a", "main-2", current_states(&current))
-            .unwrap();
+        let plan =
+            plan_stack_rebase(&records, "feature-a", "main-2", current_states(&current)).unwrap();
         assert_eq!(plan.step_count(), 1);
         let step = &plan.steps[0];
         assert_eq!(step.thread, "feature-a");
@@ -579,8 +575,7 @@ mod tests {
         current.insert("b", "b-tip");
         current.insert("c", "c-tip");
         current.insert("d", "d-tip");
-        let plan =
-            plan_stack_rebase(&records, "a", "main-2", current_states(&current)).unwrap();
+        let plan = plan_stack_rebase(&records, "a", "main-2", current_states(&current)).unwrap();
         let order: Vec<&str> = plan.steps.iter().map(|s| s.thread.as_str()).collect();
         assert_eq!(order, vec!["a", "b", "d", "c"]);
 
@@ -626,8 +621,7 @@ mod tests {
         let records = vec![record_at("a", None, "main-2")];
         let mut current = HashMap::new();
         current.insert("a", "main-2");
-        let plan =
-            plan_stack_rebase(&records, "a", "main-2", current_states(&current)).unwrap();
+        let plan = plan_stack_rebase(&records, "a", "main-2", current_states(&current)).unwrap();
         assert!(plan.is_no_op());
     }
 }

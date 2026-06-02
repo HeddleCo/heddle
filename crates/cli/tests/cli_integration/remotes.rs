@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-use super::*;
 use objects::object::{MarkerName, ThreadName};
+
+use super::*;
 
 fn heddle_without_git_for_remote_tests(args: &[&str], cwd: &std::path::Path) -> String {
     let output = heddle_output_with_env(args, Some(cwd), &[("PATH", ""), ("NO_COLOR", "1")])
@@ -908,9 +909,13 @@ fn git_overlay_remote_remove_uneditable_include_leaves_both_configs_unmutated() 
         "removing a remote defined in an uneditable include must refuse, not partially apply"
     );
     let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: Value = serde_json::from_str(stderr)
-        .unwrap_or_else(|err| panic!("uneditable-include refusal should emit JSON: {err}: {stderr}"));
-    assert_eq!(envelope["kind"], "git_remote_in_included_config", "{stderr}");
+    let envelope: Value = serde_json::from_str(stderr).unwrap_or_else(|err| {
+        panic!("uneditable-include refusal should emit JSON: {err}: {stderr}")
+    });
+    assert_eq!(
+        envelope["kind"], "git_remote_in_included_config",
+        "{stderr}"
+    );
 
     // No partial state: every config the command could have touched is unchanged.
     assert_eq!(
@@ -2984,16 +2989,18 @@ fn test_cli_fetch_local_creates_remote_thread_and_marker() {
     assert!(heddle(&["fetch", "origin"], Some(local.path())).is_ok());
 
     let repo = Repository::open(local.path()).unwrap();
-    assert!(repo
-        .refs()
-        .get_remote_thread("origin", &ThreadName::new("main"))
-        .unwrap()
-        .is_some());
-    assert!(repo
-        .refs()
-        .get_marker(&MarkerName::new("v1.0"))
-        .unwrap()
-        .is_some());
+    assert!(
+        repo.refs()
+            .get_remote_thread("origin", &ThreadName::new("main"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        repo.refs()
+            .get_marker(&MarkerName::new("v1.0"))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]

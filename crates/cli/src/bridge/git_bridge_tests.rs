@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
@@ -7,8 +6,8 @@ use std::{
     net::{TcpListener, TcpStream},
     process::{Child, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::Duration,
@@ -16,18 +15,19 @@ use std::{
 
 use base64::Engine;
 use gix::refs::transaction::PreviousValue;
-use objects::object::{
-    Blob, ChangeId, EntryType, FileMode, MarkerName, ThreadName, Tree, TreeEntry,
+use objects::{
+    object::{Blob, ChangeId, EntryType, FileMode, MarkerName, ThreadName, Tree, TreeEntry},
+    store::ObjectStore,
 };
 use repo::Repository;
 use tempfile::TempDir;
 
 use crate::bridge::{
-    git_core::{copy_local_repo_to_bare, delete_reference_if_present, set_reference, GitPushScope},
+    GitBridge,
+    git_core::{GitPushScope, copy_local_repo_to_bare, delete_reference_if_present, set_reference},
     git_export::{export_all, export_tree},
     git_import::{import_all, import_git_tree},
     git_sync::{sync_branches, sync_tags, sync_track_to_branch},
-    GitBridge,
 };
 
 fn init_git_repo() -> (TempDir, gix::Repository) {
@@ -151,16 +151,18 @@ impl GitHttpBackend {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_signal = Arc::clone(&stop);
         let auth = basic_auth.clone();
-        let join = thread::spawn(move || loop {
-            if stop_signal.load(Ordering::Relaxed) {
-                break;
-            }
-            match listener.accept() {
-                Ok((stream, _)) => handle_http_backend_connection(stream, &root, auth.as_ref()),
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10));
+        let join = thread::spawn(move || {
+            loop {
+                if stop_signal.load(Ordering::Relaxed) {
+                    break;
                 }
-                Err(_) => break,
+                match listener.accept() {
+                    Ok((stream, _)) => handle_http_backend_connection(stream, &root, auth.as_ref()),
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
             }
         });
 
@@ -905,16 +907,18 @@ fn pull_imports_remote_branches_and_tags_from_path_remote() {
         .pull(source_temp.path().to_str().expect("remote path"))
         .expect("pull remote");
 
-    assert!(repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .is_some());
-    assert!(repo
-        .refs()
-        .get_marker(&MarkerName::new("v1.0"))
-        .unwrap()
-        .is_some());
+    assert!(
+        repo.refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        repo.refs()
+            .get_marker(&MarkerName::new("v1.0"))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -932,16 +936,18 @@ fn pull_imports_remote_branches_and_tags_from_file_url_remote() {
         .pull(&format!("file://{}", source_temp.path().display()))
         .expect("pull remote");
 
-    assert!(repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .is_some());
-    assert!(repo
-        .refs()
-        .get_marker(&MarkerName::new("v1.0"))
-        .unwrap()
-        .is_some());
+    assert!(
+        repo.refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        repo.refs()
+            .get_marker(&MarkerName::new("v1.0"))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -960,16 +966,18 @@ fn pull_imports_remote_branches_and_tags_from_git_daemon() {
     let mut bridge = GitBridge::new(&repo);
     bridge.pull(&daemon.url("remote.git")).expect("pull remote");
 
-    assert!(repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .is_some());
-    assert!(repo
-        .refs()
-        .get_marker(&MarkerName::new("v1.0"))
-        .unwrap()
-        .is_some());
+    assert!(
+        repo.refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        repo.refs()
+            .get_marker(&MarkerName::new("v1.0"))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -990,16 +998,18 @@ fn pull_imports_remote_branches_and_tags_from_git_http_backend() {
         .pull(&backend.url("remote.git"))
         .expect("pull remote over http");
 
-    assert!(repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .is_some());
-    assert!(repo
-        .refs()
-        .get_marker(&MarkerName::new("v1.0"))
-        .unwrap()
-        .is_some());
+    assert!(
+        repo.refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        repo.refs()
+            .get_marker(&MarkerName::new("v1.0"))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -1020,16 +1030,18 @@ fn pull_imports_remote_branches_and_tags_from_authenticated_git_http_backend() {
         .pull(&backend.url("remote.git"))
         .expect("pull remote over authenticated http");
 
-    assert!(repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .is_some());
-    assert!(repo
-        .refs()
-        .get_marker(&MarkerName::new("v1.0"))
-        .unwrap()
-        .is_some());
+    assert!(
+        repo.refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        repo.refs()
+            .get_marker(&MarkerName::new("v1.0"))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -1885,7 +1897,12 @@ fn export_total_counts_stale_mirror_ref_left_by_dropped_thread() {
     // All three states now exist in the store, and the import populated
     // the mirror with refs/heads/{main,feature}.
     assert_eq!(
-        bridge.heddle_repo.store().list_states().expect("states").len(),
+        bridge
+            .heddle_repo
+            .store()
+            .list_states()
+            .expect("states")
+            .len(),
         3,
         "import should have created three states (two on main, one on feature)"
     );
@@ -1958,11 +1975,12 @@ fn export_counts_exclude_orphan_minted_state_from_total_and_newly() {
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
     let bridge = GitBridge::new(&repo);
 
-    let attribution =
-        || Attribution::human(Principal::new("Alice", "alice@example.com"));
+    let attribution = || Attribution::human(Principal::new("Alice", "alice@example.com"));
     let put_state = |parents: Vec<ChangeId>| -> State {
         let store = bridge.heddle_repo.store();
-        let blob_hash = store.put_blob(&Blob::from_slice(b"contents")).expect("put blob");
+        let blob_hash = store
+            .put_blob(&Blob::from_slice(b"contents"))
+            .expect("put blob");
         let tree_hash = store
             .put_tree(&Tree::from_entries(vec![
                 TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
@@ -2004,7 +2022,12 @@ fn export_counts_exclude_orphan_minted_state_from_total_and_newly() {
     // would have minted (and, pre-r4, counted) it.
     let mut bridge = bridge;
     assert_eq!(
-        bridge.heddle_repo.store().list_states().expect("states").len(),
+        bridge
+            .heddle_repo
+            .store()
+            .list_states()
+            .expect("states")
+            .len(),
         3,
         "store holds main's two states plus the dropped scratch state"
     );

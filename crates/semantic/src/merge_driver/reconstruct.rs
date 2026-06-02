@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use merge::{text_hunk_merge_with_markers, ConflictMarkers, MergeOutcome};
+use merge::{ConflictMarkers, MergeOutcome, text_hunk_merge_with_markers};
 
 use super::items::{FileSegments, Item, ItemKey};
 
