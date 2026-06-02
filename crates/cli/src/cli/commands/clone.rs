@@ -375,13 +375,10 @@ fn finish_git_overlay_clone(
             &remote_label
         ))
     })?;
-    // Materialize the imported tip *while HEAD is still on the
-    // init-time default* — `goto` writes `Head::Detached`, which is
-    // fine here because we re-attach immediately below. Switching to
-    // `fast_forward_attached` would mis-advance whichever thread HEAD
-    // happens to be on at this point (the seeded `main`, not the
-    // cloned thread).
-    repo.goto(&state_id)?;
+    // Materialize the imported tip from a fresh clone baseline. Imported
+    // refs may already make HEAD resolve to the target, but the files on
+    // disk do not yet represent that target.
+    repo.goto_from_materialized_state(&state_id, None)?;
     // Re-attach HEAD to the cloned thread, AND mirror the choice into
     // `.git/HEAD`. `Repository::open` on a git-overlay repo
     // unconditionally syncs heddle's HEAD from `.git/HEAD` via
@@ -1022,15 +1019,13 @@ async fn clone_local(
         sync.fetch_state(&local_repo, &state_id)?
     };
 
-    // Set up the thread locally
+    // Materialize from a fresh clone baseline before publishing the local
+    // thread ref. Otherwise HEAD can resolve to the target first and make
+    // the empty worktree look like deleted target files.
+    local_repo.goto_from_materialized_state(&state_id, None)?;
+    // Set up the thread locally after materialization so the dirty-worktree
+    // guard does not mistake an empty fresh clone for deleted target files.
     local_repo.refs().set_thread(&tn, &state_id)?;
-
-    // Intentional raw `goto`: a fresh `Repository::init` writes HEAD as
-    // `Attached { thread: "main" }`, but we may be cloning a non-"main"
-    // thread (e.g. `develop`). `fast_forward_attached` here would
-    // mis-advance the "main" thread ref instead of the cloned one. Clone
-    // post-HEAD-attach is tracked separately.
-    local_repo.goto(&state_id)?;
     local_repo.refs().write_head(&Head::Attached {
         thread: ThreadName::new(track_name),
     })?;

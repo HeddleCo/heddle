@@ -15,11 +15,13 @@
 //! thread ref to strand, and the legacy `Goto` inverse correctly
 //! rewinds HEAD on its own.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use objects::object::{ChangeId, ThreadName};
 use oplog::OpRecord;
 use refs::Head;
 use repo::Repository;
+
+use super::advice::RecoveryAdvice;
 
 /// Perform a fast-forward of the attached thread to `post_target_id`
 /// and record the operation so undo restores the target thread ref to
@@ -46,10 +48,7 @@ pub(super) fn record_ff_advance(
 ) -> Result<()> {
     let head_before = repo.head_ref()?;
     let pre_target_id = match &head_before {
-        Head::Attached { thread } => repo
-            .refs()
-            .get_thread(thread)?
-            .ok_or_else(|| anyhow!("attached thread '{}' has no ref before FF", thread))?,
+        Head::Attached { thread } => attached_thread_tip(repo, thread)?,
         Head::Detached { state } => *state,
     };
     record_ff_advance_inner(
@@ -59,6 +58,7 @@ pub(super) fn record_ff_advance(
         &pre_target_id,
         post_target_id,
         false,
+        None,
     )
 }
 
@@ -70,9 +70,9 @@ pub(super) fn record_ff_advance(
 ///
 /// Caller must capture `pre_target_id` *before* the mutating
 /// operation that precedes the FF. The preceding mutation must also
-/// have run its dirty-worktree guard: this helper opts into the repo
-/// discard path because the pre-published ref makes the old clean
-/// worktree look dirty against the new ref.
+/// have run its dirty-worktree guard. This helper passes that captured
+/// state as the materialized baseline because the pre-published ref
+/// makes the old clean worktree look dirty against the new ref.
 pub(super) fn record_ff_advance_explicit(
     repo: &Repository,
     source_thread: &str,
@@ -86,7 +86,8 @@ pub(super) fn record_ff_advance_explicit(
         &head_before,
         pre_target_id,
         post_target_id,
-        true,
+        false,
+        Some(Some(*pre_target_id)),
     )
 }
 
@@ -100,10 +101,7 @@ pub(super) fn record_ff_advance_discard_local(
 ) -> Result<()> {
     let head_before = repo.head_ref()?;
     let pre_target_id = match &head_before {
-        Head::Attached { thread } => repo
-            .refs()
-            .get_thread(thread)?
-            .ok_or_else(|| anyhow!("attached thread '{}' has no ref before FF", thread))?,
+        Head::Attached { thread } => attached_thread_tip(repo, thread)?,
         Head::Detached { state } => *state,
     };
     record_ff_advance_inner(
@@ -113,6 +111,7 @@ pub(super) fn record_ff_advance_discard_local(
         &pre_target_id,
         post_target_id,
         true,
+        None,
     )
 }
 
@@ -139,10 +138,7 @@ pub(super) fn ff_advance_deferred(
 ) -> Result<OpRecord> {
     let head_before = repo.head_ref()?;
     let pre_target_id = match &head_before {
-        Head::Attached { thread } => repo
-            .refs()
-            .get_thread(thread)?
-            .ok_or_else(|| anyhow!("attached thread '{}' has no ref before FF", thread))?,
+        Head::Attached { thread } => attached_thread_tip(repo, thread)?,
         Head::Detached { state } => *state,
     };
     if discard_local_changes {
@@ -165,6 +161,25 @@ pub(super) fn ff_advance_deferred(
     })
 }
 
+fn attached_thread_tip(repo: &Repository, thread: &ThreadName) -> Result<ChangeId> {
+    repo.refs()
+        .get_thread(thread)?
+        .ok_or_else(|| anyhow!(attached_thread_missing_ref_advice(thread)))
+}
+
+fn attached_thread_missing_ref_advice(thread: &ThreadName) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "fast_forward_missing_attached_thread",
+        format!("Attached thread '{thread}' has no ref before fast-forward"),
+        "Inspect repository refs before retrying the operation.",
+        format!("HEAD is attached to '{thread}', but that thread ref does not resolve"),
+        "fast-forward cannot determine the pre-operation thread tip for undo/redo",
+        "repository refs and worktree files were left unchanged",
+        "heddle status",
+        vec!["heddle status".to_string()],
+    )
+}
+
 fn record_ff_advance_inner(
     repo: &Repository,
     source_thread: &str,
@@ -172,9 +187,15 @@ fn record_ff_advance_inner(
     pre_target_id: &ChangeId,
     post_target_id: &ChangeId,
     discard_local_changes: bool,
+    materialized_baseline: Option<Option<ChangeId>>,
 ) -> Result<()> {
     if discard_local_changes {
         repo.fast_forward_attached_without_record_discard_local(post_target_id)?;
+    } else if let Some(materialized_baseline) = materialized_baseline {
+        repo.fast_forward_attached_from_materialized_state_without_record(
+            post_target_id,
+            materialized_baseline.as_ref(),
+        )?;
     } else {
         repo.fast_forward_attached_without_record(post_target_id)?;
     }

@@ -2687,7 +2687,11 @@ pub(crate) fn cmd_thread_switch(
         // CWD and reattach HEAD to the thread. Intentional raw `goto`:
         // `fast_forward_attached` would re-attach to the previously
         // attached thread, which is the wrong behavior here.
-        repo.goto(&state)?;
+        if force {
+            repo.goto_discard_local(&state)?;
+        } else {
+            repo.goto(&state)?;
+        }
         repo.refs().write_head(&Head::Attached {
             thread: ThreadName::new(&name),
         })?;

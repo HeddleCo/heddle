@@ -17,6 +17,12 @@ use super::{
 };
 use crate::{thread_model::ThreadFreshness, thread_storage::ThreadManager};
 
+#[derive(Debug, Clone, Copy)]
+enum WorktreeBaseline {
+    Head,
+    Materialized(Option<ChangeId>),
+}
+
 impl Repository {
     /// Move worktree to a different state.
     pub fn goto(&self, target: &ChangeId) -> Result<()> {
@@ -25,6 +31,7 @@ impl Repository {
             true,
             false,
             WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            WorktreeBaseline::Head,
         )
     }
 
@@ -35,6 +42,27 @@ impl Repository {
             true,
             false,
             WorktreeApplyDirtyBehavior::DiscardLocalChanges,
+            WorktreeBaseline::Head,
+        )
+    }
+
+    /// Move worktree to `target` using the state that the worktree currently
+    /// represents as the dirty-check and incremental-apply baseline.
+    ///
+    /// This is for callers that must publish or import refs before they can
+    /// materialize the checkout. In those flows HEAD may already resolve to
+    /// `target`, even though the files on disk still represent `materialized`.
+    pub fn goto_from_materialized_state(
+        &self,
+        target: &ChangeId,
+        materialized: Option<&ChangeId>,
+    ) -> Result<()> {
+        self.goto_internal(
+            target,
+            true,
+            false,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            WorktreeBaseline::Materialized(materialized.copied()),
         )
     }
 
@@ -51,7 +79,12 @@ impl Repository {
     /// pre-op state — this helper preserves attached-HEAD semantics so the
     /// thread's ref and metadata advance with the worktree.
     pub fn fast_forward_attached(&self, target: &ChangeId) -> Result<()> {
-        self.fast_forward_attached_internal(target, true, WorktreeApplyDirtyBehavior::RefuseOnDirty)
+        self.fast_forward_attached_internal(
+            target,
+            true,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            WorktreeBaseline::Head,
+        )
     }
 
     pub fn fast_forward_attached_discard_local(&self, target: &ChangeId) -> Result<()> {
@@ -59,6 +92,20 @@ impl Repository {
             target,
             true,
             WorktreeApplyDirtyBehavior::DiscardLocalChanges,
+            WorktreeBaseline::Head,
+        )
+    }
+
+    pub fn fast_forward_attached_from_materialized_state(
+        &self,
+        target: &ChangeId,
+        materialized: Option<&ChangeId>,
+    ) -> Result<()> {
+        self.fast_forward_attached_internal(
+            target,
+            true,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            WorktreeBaseline::Materialized(materialized.copied()),
         )
     }
 
@@ -75,6 +122,7 @@ impl Repository {
             target,
             false,
             WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            WorktreeBaseline::Head,
         )
     }
 
@@ -86,6 +134,20 @@ impl Repository {
             target,
             false,
             WorktreeApplyDirtyBehavior::DiscardLocalChanges,
+            WorktreeBaseline::Head,
+        )
+    }
+
+    pub fn fast_forward_attached_from_materialized_state_without_record(
+        &self,
+        target: &ChangeId,
+        materialized: Option<&ChangeId>,
+    ) -> Result<()> {
+        self.fast_forward_attached_internal(
+            target,
+            false,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            WorktreeBaseline::Materialized(materialized.copied()),
         )
     }
 
@@ -94,12 +156,13 @@ impl Repository {
         target: &ChangeId,
         record: bool,
         dirty_behavior: WorktreeApplyDirtyBehavior,
+        baseline: WorktreeBaseline,
     ) -> Result<()> {
         let head_before = self.refs.read_head()?;
         if record {
-            self.goto_internal(target, true, false, dirty_behavior)?;
+            self.goto_internal(target, true, false, dirty_behavior, baseline)?;
         } else {
-            self.goto_internal(target, false, false, dirty_behavior)?;
+            self.goto_internal(target, false, false, dirty_behavior, baseline)?;
         }
         if let Head::Attached {
             thread: current_thread,
@@ -126,6 +189,7 @@ impl Repository {
             true,
             true,
             WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            WorktreeBaseline::Head,
         )
     }
 
@@ -135,6 +199,7 @@ impl Repository {
             false,
             true,
             WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            WorktreeBaseline::Head,
         )
     }
 
@@ -144,6 +209,7 @@ impl Repository {
             false,
             false,
             WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            WorktreeBaseline::Head,
         )
     }
 
@@ -153,6 +219,7 @@ impl Repository {
             false,
             false,
             WorktreeApplyDirtyBehavior::DiscardLocalChanges,
+            WorktreeBaseline::Head,
         )
     }
 
@@ -162,6 +229,7 @@ impl Repository {
         record: bool,
         current_worktree_verified_clean: bool,
         dirty_behavior: WorktreeApplyDirtyBehavior,
+        baseline: WorktreeBaseline,
     ) -> Result<()> {
         let total_start = Instant::now();
         let _lock = self
@@ -175,12 +243,17 @@ impl Repository {
             .ok_or(HeddleError::StateNotFound(*target))?;
 
         let prev_head_ref = self.refs.read_head()?;
-        let (prev_head, current_state) = match &prev_head_ref {
+        let (prev_head, head_state) = match &prev_head_ref {
             Head::Attached { thread } => match self.refs.get_thread(thread)? {
                 Some(change_id) => (Some(change_id), self.store.get_state(&change_id)?),
                 None => (None, None),
             },
             Head::Detached { state } => (Some(*state), self.store.get_state(state)?),
+        };
+        let current_state = match baseline {
+            WorktreeBaseline::Head => head_state,
+            WorktreeBaseline::Materialized(Some(change_id)) => self.store.get_state(&change_id)?,
+            WorktreeBaseline::Materialized(None) => None,
         };
         let same_state_verified_clean = current_worktree_verified_clean
             && current_state
