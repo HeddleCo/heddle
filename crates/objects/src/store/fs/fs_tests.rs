@@ -3,15 +3,20 @@ use chrono::{TimeZone, Utc};
 use tempfile::TempDir;
 
 use super::{
+    fs_paths::{blobs_dir, hash_path, packs_dir},
     FsStore, LooseObjectWriteMode,
-    fs_paths::{blobs_dir, hash_path},
 };
 use crate::{
     object::{
         Action, Attribution, Blob, ChangeId, ContentHash, Operation, Principal, State, Tree,
         TreeEntry,
     },
-    store::{HeddleError, ObjectStore, atomic::temp_path},
+    store::{
+        atomic::temp_path,
+        compression::CompressionConfig,
+        pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId},
+        HeddleError, ObjectStore,
+    },
 };
 
 fn create_test_store() -> (TempDir, FsStore) {
@@ -215,6 +220,109 @@ fn put_blobs_packed_with_empty_input_is_a_noop() {
         .map(|iter| iter.count())
         .unwrap_or(0);
     assert_eq!(pack_count, 0, "empty bulk install should not touch packs/");
+}
+
+#[test]
+fn install_pack_rejects_hash_mismatch_without_partial_commit() {
+    let (_temp, store) = create_test_store();
+
+    let valid_blob = Blob::from("valid object that must not be committed");
+    let valid_hash = valid_blob.hash();
+    let claimed_hash = Blob::from("claimed object bytes").hash();
+    let poisoned_bytes = b"different object bytes".to_vec();
+    assert_ne!(
+        ContentHash::compute_typed("blob", &poisoned_bytes),
+        claimed_hash
+    );
+
+    let mut builder = PackBuilder::new(CompressionConfig::disabled());
+    builder.add(
+        valid_hash,
+        PackObjectType::Blob,
+        valid_blob.clone().into_content(),
+    );
+    builder.add(claimed_hash, PackObjectType::Blob, poisoned_bytes);
+    let (pack_data, index_data, _) = builder.build().unwrap();
+
+    let error = store
+        .install_pack(&pack_data, &index_data)
+        .expect_err("poisoned native pack must be rejected");
+    assert!(
+        matches!(error, HeddleError::Corruption { expected, .. } if expected == claimed_hash),
+        "expected claimed-hash mismatch corruption, got {error:?}",
+    );
+
+    assert!(
+        store.get_blob(&valid_hash).unwrap().is_none(),
+        "valid entry before the poisoned entry must not be partially committed",
+    );
+    assert!(
+        store.get_blob(&claimed_hash).unwrap().is_none(),
+        "poisoned object must not be readable under its claimed hash",
+    );
+    let pack_count = std::fs::read_dir(packs_dir(store.root()))
+        .map(|iter| iter.count())
+        .unwrap_or(0);
+    assert_eq!(pack_count, 0, "rejected pack must not commit pack files");
+}
+
+#[test]
+fn install_pack_accepts_valid_mixed_native_pack() {
+    let (_temp, store) = create_test_store();
+
+    let blob = Blob::from("native pack blob");
+    let blob_hash = blob.hash();
+    let tree = Tree::from_entries(vec![TreeEntry::file("file.txt", blob_hash, false).unwrap()]);
+    let tree_hash = tree.hash();
+    let attribution = Attribution::human(Principal::new("Pack Test", "pack@example.com"));
+    let state = State::new(tree_hash, vec![], attribution.clone()).with_intent("packed state");
+    let mut action = Action::new(
+        None,
+        state.change_id,
+        Operation::Snapshot,
+        "packed action",
+        attribution,
+    )
+    .with_timestamp(Utc.timestamp_opt(1_700_000_000, 0).unwrap());
+    let action_id = action.id();
+
+    let mut builder = PackBuilder::new(CompressionConfig::disabled());
+    builder.add(blob_hash, PackObjectType::Blob, blob.clone().into_content());
+    builder.add(
+        tree_hash,
+        PackObjectType::Tree,
+        rmp_serde::to_vec_named(&tree).unwrap(),
+    );
+    builder.add_id(
+        PackObjectId::ChangeId(state.change_id),
+        PackObjectType::State,
+        rmp_serde::to_vec_named(&state).unwrap(),
+    );
+    builder.add(
+        *action_id.as_hash(),
+        PackObjectType::Action,
+        rmp_serde::to_vec_named(&action).unwrap(),
+    );
+    let (pack_data, index_data, _) = builder.build().unwrap();
+
+    let ids = store.install_pack(&pack_data, &index_data).unwrap();
+    assert_eq!(ids.len(), 4);
+    assert_eq!(
+        store.get_blob(&blob_hash).unwrap().unwrap().content(),
+        blob.content(),
+    );
+    assert_eq!(
+        store.get_tree(&tree_hash).unwrap().unwrap().entries(),
+        tree.entries(),
+    );
+    assert_eq!(
+        store.get_state(&state.change_id).unwrap().unwrap().intent,
+        Some("packed state".to_string()),
+    );
+    assert_eq!(
+        store.get_action(&action_id).unwrap().unwrap().description,
+        "packed action",
+    );
 }
 
 #[test]

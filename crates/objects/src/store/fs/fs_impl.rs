@@ -39,6 +39,32 @@ fn validate_loaded_tree(tree: Tree) -> Result<Tree> {
     Ok(tree)
 }
 
+fn validate_blob_bytes(data: &[u8], hash: ContentHash) -> Result<()> {
+    let found = ContentHash::compute_typed("blob", data);
+    if found != hash {
+        return Err(HeddleError::Corruption {
+            expected: hash,
+            found,
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_tree_serialized(data: &[u8], hash: ContentHash) -> Result<Tree> {
+    let tree: Tree = rmp_serde::from_slice(data)?;
+    let tree = validate_loaded_tree(tree)?;
+    let found = tree.hash();
+    if found != hash {
+        return Err(HeddleError::Corruption {
+            expected: hash,
+            found,
+        });
+    }
+
+    Ok(tree)
+}
+
 fn validate_loaded_state(requested_id: &ChangeId, state: State) -> Result<State> {
     if state.change_id != *requested_id {
         return Err(HeddleError::InvalidObject(format!(
@@ -48,6 +74,11 @@ fn validate_loaded_state(requested_id: &ChangeId, state: State) -> Result<State>
     }
 
     Ok(state)
+}
+
+fn validate_state_serialized(data: &[u8], id: ChangeId) -> Result<State> {
+    let state: State = rmp_serde::from_slice(data)?;
+    validate_loaded_state(&id, state)
 }
 
 fn validate_loaded_action(requested_id: &ActionId, action: Action) -> Result<Action> {
@@ -60,6 +91,30 @@ fn validate_loaded_action(requested_id: &ActionId, action: Action) -> Result<Act
     }
 
     Ok(action)
+}
+
+fn validate_action_serialized(data: &[u8], id: ActionId) -> Result<Action> {
+    let action: Action = rmp_serde::from_slice(data)?;
+    validate_loaded_action(&id, action)
+}
+
+fn validate_pack_entry(id: &PackObjectId, obj_type: ObjectType, data: &[u8]) -> Result<()> {
+    match (id, obj_type) {
+        (PackObjectId::Hash(hash), ObjectType::Blob) => validate_blob_bytes(data, *hash),
+        (PackObjectId::Hash(hash), ObjectType::Tree) => {
+            validate_tree_serialized(data, *hash).map(|_| ())
+        }
+        (PackObjectId::Hash(hash), ObjectType::Action) => {
+            validate_action_serialized(data, ActionId::from_hash(*hash)).map(|_| ())
+        }
+        (PackObjectId::ChangeId(change_id), ObjectType::State) => {
+            validate_state_serialized(data, *change_id).map(|_| ())
+        }
+        _ => Err(HeddleError::InvalidObject(format!(
+            "unsupported native pack object: {:?} {:?}",
+            id, obj_type
+        ))),
+    }
 }
 
 impl FsStore {
@@ -393,13 +448,7 @@ impl ObjectStore for FsStore {
 
     #[instrument(skip(self, data), fields(hash = %hash.short(), size = data.len()))]
     fn put_blob_bytes_with_hash(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {
-        let found = ContentHash::compute_typed("blob", data);
-        if found != hash {
-            return Err(HeddleError::Corruption {
-                expected: hash,
-                found,
-            });
-        }
+        validate_blob_bytes(data, hash)?;
 
         let path = hash_path(&blobs_dir(&self.root), &hash);
         if !path.exists() {
@@ -595,15 +644,7 @@ impl ObjectStore for FsStore {
 
     #[instrument(skip(self, data), fields(hash = %hash.short(), size = data.len()))]
     fn put_tree_serialized(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {
-        let tree: Tree = rmp_serde::from_slice(data)?;
-        validate_loaded_tree(tree.clone())?;
-        let found = tree.hash();
-        if found != hash {
-            return Err(HeddleError::Corruption {
-                expected: hash,
-                found,
-            });
-        }
+        let tree = validate_tree_serialized(data, hash)?;
 
         let path = hash_path(&trees_dir(&self.root), &hash);
         if !path.exists() {
@@ -657,13 +698,7 @@ impl ObjectStore for FsStore {
 
     #[instrument(skip(self, data), fields(id = %id.short(), size = data.len()))]
     fn put_state_serialized(&self, data: &[u8], id: ChangeId) -> Result<()> {
-        let state: State = rmp_serde::from_slice(data)?;
-        if state.change_id != id {
-            return Err(HeddleError::InvalidObject(format!(
-                "state change_id mismatch: expected {}, found {}",
-                id, state.change_id
-            )));
-        }
+        let state = validate_state_serialized(data, id)?;
         let path = state_path(&self.root, &id);
         trace!(size = data.len(), "Writing raw serialized state");
         self.write_loose_object_atomic(&path, data)?;
@@ -871,6 +906,12 @@ impl ObjectStore for FsStore {
         let reader =
             crate::store::pack::PackReader::from_bytes(pack_data.to_vec(), index_data.to_vec())?;
         let ids = reader.list_ids();
+        for id in &ids {
+            let Some((obj_type, data)) = reader.get_object(id)? else {
+                continue;
+            };
+            validate_pack_entry(id, obj_type, &data)?;
+        }
         self.install_pack_files(pack_data, index_data)?;
         Ok(ids)
     }
