@@ -25,13 +25,34 @@ const MAX_DELTA_CHAIN_DEPTH: usize = 50;
 /// backed `Bytes` (via [`Bytes::from_owner`] on the
 /// `memmap2::Mmap`) survives across reads without copying the
 /// whole pack into the heap.
-pub struct PackReader {
-    data: Bytes,
+enum PackData<'a> {
+    Borrowed(&'a [u8]),
+    Owned(Bytes),
+}
+
+impl<'a> PackData<'a> {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(data) => data,
+            Self::Owned(data) => data,
+        }
+    }
+
+    fn slice(&self, range: std::ops::Range<usize>) -> Bytes {
+        match self {
+            Self::Borrowed(data) => Bytes::copy_from_slice(&data[range]),
+            Self::Owned(data) => data.slice(range),
+        }
+    }
+}
+
+pub struct PackReader<'a> {
+    data: PackData<'a>,
     index: PackIndex,
     content_end: usize,
 }
 
-impl PackReader {
+impl PackReader<'static> {
     /// Open a pack file. mmap-backed when the pack is large enough
     /// to benefit (the same threshold the loose-blob path uses for
     /// its own mmap decision); read-into-heap otherwise.
@@ -41,17 +62,33 @@ impl PackReader {
         let (_, _, content_end) = verify_container(&pack_bytes, pack_container_spec())?;
         let index = PackIndex::from_bytes(&index_data)?;
         Ok(Self {
-            data: pack_bytes,
+            data: PackData::Owned(pack_bytes),
             index,
             content_end,
         })
     }
 
-    pub fn from_bytes(pack_data: Vec<u8>, index_data: Vec<u8>) -> Result<Self> {
+    pub fn from_bytes(
+        pack_data: impl Into<Bytes>,
+        index_data: impl AsRef<[u8]>,
+    ) -> Result<Self> {
+        let pack_data = pack_data.into();
         let (_, _, content_end) = verify_container(&pack_data, pack_container_spec())?;
-        let index = PackIndex::from_bytes(&index_data)?;
+        let index = PackIndex::from_bytes(index_data.as_ref())?;
         Ok(Self {
-            data: Bytes::from(pack_data),
+            data: PackData::Owned(pack_data),
+            index,
+            content_end,
+        })
+    }
+}
+
+impl<'a> PackReader<'a> {
+    pub fn from_slice(pack_data: &'a [u8], index_data: impl AsRef<[u8]>) -> Result<Self> {
+        let (_, _, content_end) = verify_container(pack_data, pack_container_spec())?;
+        let index = PackIndex::from_bytes(index_data.as_ref())?;
+        Ok(Self {
+            data: PackData::Borrowed(pack_data),
             index,
             content_end,
         })
@@ -234,7 +271,7 @@ impl PackReader {
 
         let data_end = checked_data_end(data_start, compressed_size, self.content_end)?;
 
-        let stored_data = &self.data[data_start..data_end];
+        let stored_data = &self.data.as_slice()[data_start..data_end];
 
         // Raw zstd (no wrapper). For non-delta entries, decompress
         // if sizes differ. For delta entries, the stored data IS the delta
@@ -329,7 +366,7 @@ impl PackReader {
                 "Entry header out of bounds".to_string(),
             ));
         }
-        Ok(&self.data[offset..self.content_end])
+        Ok(&self.data.as_slice()[offset..self.content_end])
     }
 }
 

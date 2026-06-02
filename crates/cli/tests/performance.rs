@@ -607,8 +607,7 @@ fn encode_native_pack(objects: &[ObjectData]) -> (Vec<u8>, Vec<u8>) {
 }
 
 fn decode_native_pack(pack_data: &[u8], index_data: &[u8]) -> Vec<ObjectData> {
-    let reader =
-        objects::store::PackReader::from_bytes(pack_data.to_vec(), index_data.to_vec()).unwrap();
+    let reader = objects::store::PackReader::from_slice(pack_data, index_data).unwrap();
     reader
         .list_ids()
         .into_iter()

@@ -533,7 +533,7 @@ pub trait ObjectStore: Send + Sync {
     }
 
     fn install_pack(&self, pack_data: &[u8], index_data: &[u8]) -> Result<Vec<pack::PackObjectId>> {
-        let reader = pack::PackReader::from_bytes(pack_data.to_vec(), index_data.to_vec())?;
+        let reader = pack::PackReader::from_slice(pack_data, index_data)?;
         let ids = reader.list_ids();
         for id in &ids {
             let Some((obj_type, data)) = reader.get_object(id)? else {
