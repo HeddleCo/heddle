@@ -50,26 +50,7 @@ jobs:
 
       - name: Discover benchmark targets
         run: |
-          python3 - <<'PY' > benchmark-plan.tsv
-          from pathlib import Path
-          import tomllib
-
-          for manifest in sorted(Path("crates").glob("*/Cargo.toml")):
-              data = tomllib.loads(manifest.read_text())
-              benches = data.get("bench", [])
-              if not benches:
-                  continue
-              package = data["package"]["name"]
-              package_features = set(data.get("features", {}))
-              for bench in benches:
-                  features = []
-                  for feature in bench.get("required-features", []):
-                      if feature not in features:
-                          features.append(feature)
-                  if "zstd" in package_features and "zstd" not in features:
-                      features.append("zstd")
-                  print(f"{package}\t{bench['name']}\t{','.join(features)}")
-          PY
+          python3 scripts/discover-benches.py > benchmark-plan.tsv
           cat benchmark-plan.tsv
 
       # `fuse_worker_ipc` resolves the worker as a sibling release

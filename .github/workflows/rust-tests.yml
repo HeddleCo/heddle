@@ -192,10 +192,33 @@ jobs:
 
       # 3c. Compile every workspace benchmark target without running the
       #     measurements. The weekly benchmark workflow owns performance
-      #     trend tracking; this cheap PR-safe guard catches rotten bench
-      #     code and Cargo.toml `[[bench]]` entries before they land.
+      #     trend tracking and shares the same discovery helper. This cheap
+      #     PR-safe guard catches rotten bench code and Cargo.toml `[[bench]]`
+      #     entries before they land, including non-default required features.
+      #     FUSE-required benches are delegated to the dedicated `fuse-bench`
+      #     job because this check job does not install libfuse.
       - name: Compile benchmark targets
-        run: cargo bench --locked --workspace --no-run
+        run: |
+          python3 scripts/discover-benches.py > benchmark-plan.tsv
+          cat benchmark-plan.tsv
+          while IFS=$'\t' read -r package bench features; do
+            [ -n "$package" ] || continue
+            if [ "$features" = "fuse" ] || [[ "$features" == fuse,* ]] || [[ "$features" == *,fuse ]] || [[ "$features" == *,fuse,* ]]; then
+              echo "skipping $package/$bench: fuse benches are covered by the fuse-bench job"
+              continue
+            fi
+            echo "::group::$package/$bench"
+            cmd=(cargo bench --locked -p "$package" --bench "$bench")
+            if [ -n "$features" ]; then
+              cmd+=(--features "$features")
+            fi
+            cmd+=(--no-run)
+            printf 'running:'
+            printf ' %q' "${cmd[@]}"
+            printf '\n'
+            "${cmd[@]}"
+            echo "::endgroup::"
+          done < benchmark-plan.tsv
 
       # 3d. Compile gate for the `postgres` (server / weft) feature. This is
       #     the silent-rot guard: `--features postgres` is NOT exercised by
