@@ -266,37 +266,7 @@ impl HostedGrpcClient {
         }
 
         for info in wanted_redactions {
-            let proto::ObjectId::Hash(blob) = info.id else {
-                return Err(ProtocolError::InvalidState(
-                    "wanted Redaction must be keyed by ObjectId::Hash(content_hash)".to_string(),
-                ));
-            };
-            let hex = blob.to_hex();
-            // Sender-side: load the byte-identical sidecar payload
-            // that `Repository::put_redaction` wrote to disk. The
-            // receiver verifies the signature + trust list and then
-            // persists these bytes verbatim.
-            let bytes = repo
-                .store()
-                .get_redactions_bytes_for_blob(&blob)
-                .map_err(|err| {
-                    ProtocolError::InvalidState(format!(
-                        "load redactions sidecar for {}: {err}",
-                        hex
-                    ))
-                })?
-                .ok_or_else(|| {
-                    ProtocolError::InvalidState(format!(
-                        "server wants redaction for blob {} but sender has no sidecar",
-                        hex
-                    ))
-                })?;
-            let message = PushMessage {
-                body: Some(push_message::Body::Redaction(RedactionTransfer {
-                    blob_hash: hex,
-                    redactions_blob: bytes,
-                })),
-            };
+            let message = redaction_push_message(repo, info)?;
             tx.send(message).await.map_err(|_| {
                 ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
             })?;
@@ -915,6 +885,40 @@ impl HostedGrpcClient {
     }
 }
 
+fn redaction_push_message(
+    repo: &Repository,
+    info: proto::ObjectInfo,
+) -> Result<PushMessage, ProtocolError> {
+    let proto::ObjectId::Hash(blob) = info.id else {
+        return Err(ProtocolError::InvalidState(
+            "wanted Redaction must be keyed by ObjectId::Hash(content_hash)".to_string(),
+        ));
+    };
+    let hex = blob.to_hex();
+    // Sender-side: load the byte-identical sidecar payload
+    // that `Repository::put_redaction` wrote to disk. The
+    // receiver verifies the signature + trust list and then
+    // persists these bytes verbatim.
+    let bytes = repo
+        .store()
+        .get_redactions_bytes_for_blob(&blob)
+        .map_err(|err| {
+            ProtocolError::InvalidState(format!("load redactions sidecar for {}: {err}", hex))
+        })?
+        .ok_or_else(|| {
+            ProtocolError::InvalidState(format!(
+                "server wants redaction for blob {} but sender has no sidecar",
+                hex
+            ))
+        })?;
+    Ok(PushMessage {
+        body: Some(push_message::Body::Redaction(RedactionTransfer {
+            blob_hash: hex,
+            redactions_blob: bytes,
+        })),
+    })
+}
+
 fn load_thread_metadata(
     repo: &Repository,
     target_thread: &str,
@@ -1304,4 +1308,109 @@ fn preferred_transport_mode(
     let _ = transport;
     let _ = object_count;
     TransportMode::NativePack
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{TimeZone, Utc};
+    use grpc::heddle::v1::push_message;
+    use objects::object::{ChangeId, ContentHash, Principal, Redaction};
+    use proto::{ObjectId, ObjectInfo};
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn temp_repo() -> (TempDir, Repository) {
+        let dir = TempDir::new().expect("tempdir");
+        let repo = Repository::init_default(dir.path()).expect("init repo");
+        (dir, repo)
+    }
+
+    fn redaction_info(blob: ContentHash) -> ObjectInfo {
+        ObjectInfo {
+            id: ObjectId::Hash(blob),
+            obj_type: ObjectType::Redaction,
+            size: 0,
+            delta_base: None,
+        }
+    }
+
+    fn sample_blob() -> ContentHash {
+        ContentHash::from_bytes([7u8; 32])
+    }
+
+    fn sample_redaction(blob: ContentHash) -> Redaction {
+        Redaction {
+            redacted_blob: blob,
+            state: ChangeId::from_bytes([1u8; 16]),
+            path: "config/secrets.toml".into(),
+            reason: "leaked credential".into(),
+            redactor: Principal {
+                name: "Grace Hopper".into(),
+                email: "grace@example.com".into(),
+            },
+            redacted_at: Utc.with_ymd_and_hms(2026, 5, 10, 14, 33, 0).unwrap(),
+            signature: None,
+            purged_at: None,
+            supersedes: None,
+        }
+    }
+
+    #[test]
+    fn redaction_push_message_uses_hex_keyed_sidecar_payload() {
+        let (_dir, repo) = temp_repo();
+        let blob = sample_blob();
+        repo.put_redaction(sample_redaction(blob))
+            .expect("put redaction");
+        let expected_bytes = repo
+            .store()
+            .get_redactions_bytes_for_blob(&blob)
+            .expect("load sidecar")
+            .expect("sidecar exists");
+
+        let message = redaction_push_message(&repo, redaction_info(blob)).expect("message");
+
+        let Some(push_message::Body::Redaction(transfer)) = message.body else {
+            panic!("expected redaction transfer");
+        };
+        assert_eq!(transfer.blob_hash, blob.to_hex());
+        assert_eq!(transfer.redactions_blob, expected_bytes);
+    }
+
+    #[test]
+    fn redaction_push_message_reports_missing_sidecar_with_blob_hex() {
+        let (_dir, repo) = temp_repo();
+        let blob = sample_blob();
+
+        let err = redaction_push_message(&repo, redaction_info(blob)).expect_err("missing sidecar");
+
+        assert!(matches!(err, ProtocolError::InvalidState(_)));
+        assert!(
+            err.to_string().contains(&format!(
+                "server wants redaction for blob {} but sender has no sidecar",
+                blob.to_hex()
+            )),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn redaction_push_message_reports_sidecar_load_error_with_blob_hex() {
+        let (_dir, repo) = temp_repo();
+        let blob = sample_blob();
+        let redaction_path = repo
+            .heddle_dir()
+            .join("redactions")
+            .join(format!("{}.bin", blob.to_hex()));
+        std::fs::create_dir_all(&redaction_path).expect("directory at redaction path");
+
+        let err = redaction_push_message(&repo, redaction_info(blob)).expect_err("load error");
+
+        assert!(matches!(err, ProtocolError::InvalidState(_)));
+        assert!(
+            err.to_string()
+                .contains(&format!("load redactions sidecar for {}:", blob.to_hex())),
+            "unexpected error: {err}"
+        );
+    }
 }
