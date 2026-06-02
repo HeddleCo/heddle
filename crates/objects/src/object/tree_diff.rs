@@ -36,33 +36,27 @@ fn diff_trees_recursive<S: ObjectStore + ?Sized>(
     prefix: &str,
     changes: &mut FileChangeSet,
 ) -> Result<(), anyhow::Error> {
-    let from_entries: HashMap<_, _> = from
+    let from_entries: HashMap<&str, _> = from
         .as_ref()
         .map(|tree| {
             tree.entries()
                 .iter()
-                .map(|entry| (entry.name.clone(), entry))
+                .map(|entry| (entry.name.as_str(), entry))
                 .collect()
         })
         .unwrap_or_default();
 
-    let to_entries: HashMap<_, _> = to
+    let to_entries: HashMap<&str, _> = to
         .as_ref()
         .map(|tree| {
             tree.entries()
                 .iter()
-                .map(|entry| (entry.name.clone(), entry))
+                .map(|entry| (entry.name.as_str(), entry))
                 .collect()
         })
         .unwrap_or_default();
 
-    for (name, to_entry) in &to_entries {
-        let path = if prefix.is_empty() {
-            name.clone()
-        } else {
-            format!("{}/{}", prefix, name)
-        };
-
+    for (&name, &to_entry) in &to_entries {
         match from_entries.get(name) {
             None => {
                 // Symmetric with the delete branch below: if the added
@@ -75,6 +69,7 @@ fn diff_trees_recursive<S: ObjectStore + ?Sized>(
                 // file-level overlap to score candidate sessions, and
                 // a root commit's `src/` directory would otherwise
                 // collapse to one entry and miss the actual files.
+                let path = child_path(prefix, name);
                 if to_entry.entry_type == EntryType::Tree {
                     let to_subtree = store.get_tree(&to_entry.hash)?;
                     diff_trees_recursive(store, &None, &to_subtree, &path, changes)?;
@@ -89,8 +84,10 @@ fn diff_trees_recursive<S: ObjectStore + ?Sized>(
                     {
                         let from_subtree = store.get_tree(&from_entry.hash)?;
                         let to_subtree = store.get_tree(&to_entry.hash)?;
+                        let path = child_path(prefix, name);
                         diff_trees_recursive(store, &from_subtree, &to_subtree, &path, changes)?;
                     } else {
+                        let path = child_path(prefix, name);
                         changes.push_modified(&path);
                     }
                 }
@@ -98,13 +95,9 @@ fn diff_trees_recursive<S: ObjectStore + ?Sized>(
         }
     }
 
-    for (name, from_entry) in &from_entries {
+    for (&name, &from_entry) in &from_entries {
         if !to_entries.contains_key(name) {
-            let path = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{}/{}", prefix, name)
-            };
+            let path = child_path(prefix, name);
             // Recursively handle deleted entries - if it's a directory, descend into it
             if from_entry.entry_type == EntryType::Tree {
                 let from_subtree = store.get_tree(&from_entry.hash)?;
@@ -116,6 +109,18 @@ fn diff_trees_recursive<S: ObjectStore + ?Sized>(
     }
 
     Ok(())
+}
+
+fn child_path(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_owned()
+    } else {
+        let mut path = String::with_capacity(prefix.len() + 1 + name.len());
+        path.push_str(prefix);
+        path.push('/');
+        path.push_str(name);
+        path
+    }
 }
 
 #[cfg(test)]
