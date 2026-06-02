@@ -5,11 +5,12 @@ use std::{
     thread,
 };
 
-use objects::object::{ChangeId, ContentHash};
+use chrono::Utc;
+use objects::object::{ChangeId, ContentHash, Principal};
 use tempfile::TempDir;
 
 use super::oplog_backend::OpLogBackend;
-use super::{OpLog, OpRecord};
+use super::{OpEntry, OpLog, OpRecord};
 
 fn create_oplog() -> (TempDir, OpLog) {
     let temp_dir = TempDir::new().unwrap();
@@ -18,6 +19,71 @@ fn create_oplog() -> (TempDir, OpLog) {
     let oplog = OpLog::new_unattributed(&heddle_dir);
     oplog.init().unwrap();
     (temp_dir, oplog)
+}
+
+#[test]
+fn bench_shims_write_entries_and_read_head_id() {
+    let (_temp, oplog) = create_oplog();
+    let actor = Arc::new(Principal::new("Bench Test", "bench@example.com"));
+    let first_state = ChangeId::generate();
+    let second_state = ChangeId::generate();
+    let timestamp = Utc::now();
+    let entries = vec![
+        OpEntry {
+            id: 1,
+            timestamp,
+            operation: OpRecord::Snapshot {
+                new_state: first_state,
+                prev_head: None,
+                head: Some(first_state),
+                thread: Some("main".to_string()),
+            },
+            undone: false,
+            batch_id: 1,
+            batch_index: 0,
+            scope: Some("lane-a".to_string()),
+            actor: Arc::clone(&actor),
+            operation_id: None,
+        },
+        OpEntry {
+            id: 2,
+            timestamp,
+            operation: OpRecord::Snapshot {
+                new_state: second_state,
+                prev_head: Some(first_state),
+                head: Some(second_state),
+                thread: Some("main".to_string()),
+            },
+            undone: false,
+            batch_id: 2,
+            batch_index: 0,
+            scope: Some("lane-a".to_string()),
+            actor,
+            operation_id: None,
+        },
+    ];
+
+    oplog.write_entries_for_bench(entries).unwrap();
+
+    let recent = oplog.recent(2).unwrap();
+    assert_eq!(recent.len(), 2);
+    assert_eq!(recent[0].id, 2);
+    assert_eq!(recent[1].id, 1);
+    assert_eq!(recent[0].scope.as_deref(), Some("lane-a"));
+    assert!(matches!(
+        &recent[0].operation,
+        OpRecord::Snapshot {
+            new_state,
+            prev_head: Some(prev_head),
+            head: Some(head),
+            thread: Some(thread),
+        } if *new_state == second_state
+            && *prev_head == first_state
+            && *head == second_state
+            && thread == "main"
+    ));
+    assert_eq!(oplog.read_head_id_for_bench().unwrap(), 2);
+    assert_eq!(oplog.head_id().unwrap(), 2);
 }
 
 #[test]
