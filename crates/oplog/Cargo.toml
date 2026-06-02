@@ -25,6 +25,7 @@ tokio = { workspace = true, optional = true }
 uuid.workspace = true
 
 [dev-dependencies]
+criterion = "0.8"
 pollster = "0.4"
 tempfile.workspace = true
 
@@ -34,3 +35,8 @@ postgres = ["dep:serde_json", "dep:sqlx", "dep:tokio", "dep:runtime-bridge"]
 [lib]
 path = "src/lib.rs"
 name = "oplog"
+bench = false
+
+[[bench]]
+name = "oplog_io"
+harness = false
