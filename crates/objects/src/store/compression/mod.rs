@@ -120,12 +120,12 @@ pub enum CompressionError {
 
 #[cfg(feature = "zstd")]
 /// Compress data using zstd.
-fn compress_zstd(data: &[u8], level: i32) -> Result<Vec<u8>, CompressionError> {
+pub fn compress_zstd(data: &[u8], level: i32) -> Result<Vec<u8>, CompressionError> {
     zstd::encode_all(data, level).map_err(|e| CompressionError::CompressionFailed(e.to_string()))
 }
 
 #[cfg(not(feature = "zstd"))]
-fn compress_zstd(_data: &[u8], _level: i32) -> Result<Vec<u8>, CompressionError> {
+pub fn compress_zstd(_data: &[u8], _level: i32) -> Result<Vec<u8>, CompressionError> {
     Err(CompressionError::InvalidOperation(
         "zstd compression support not compiled into this build".to_string(),
     ))
@@ -133,7 +133,7 @@ fn compress_zstd(_data: &[u8], _level: i32) -> Result<Vec<u8>, CompressionError>
 
 #[cfg(feature = "zstd")]
 /// Decompress zstd data while enforcing the recorded output size.
-fn decompress_zstd(data: &[u8], expected_size: u64) -> Result<Vec<u8>, CompressionError> {
+pub fn decompress_zstd(data: &[u8], expected_size: u64) -> Result<Vec<u8>, CompressionError> {
     validate_size(expected_size)?;
 
     let mut decoder = zstd::stream::read::Decoder::new(data)
@@ -163,7 +163,7 @@ fn decompress_zstd(data: &[u8], expected_size: u64) -> Result<Vec<u8>, Compressi
 }
 
 #[cfg(not(feature = "zstd"))]
-fn decompress_zstd(_data: &[u8], expected_size: u64) -> Result<Vec<u8>, CompressionError> {
+pub fn decompress_zstd(_data: &[u8], expected_size: u64) -> Result<Vec<u8>, CompressionError> {
     validate_size(expected_size)?;
     Err(CompressionError::InvalidOperation(
         "zstd-compressed data is unsupported in this build".to_string(),
