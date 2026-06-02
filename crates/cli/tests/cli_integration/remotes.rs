@@ -28,6 +28,25 @@ fn verify_json(cwd: &std::path::Path) -> Value {
     envelope["verification"].clone()
 }
 
+fn current_thread_state(cwd: &std::path::Path, thread: &str) -> String {
+    let repo = Repository::open(cwd).expect("open repository");
+    repo.refs()
+        .get_thread(&ThreadName::new(thread))
+        .expect("read thread ref")
+        .unwrap_or_else(|| panic!("{thread} should have a current state"))
+        .to_string()
+}
+
+fn log_head_state(cwd: &std::path::Path) -> String {
+    let log_json =
+        heddle(&["--output", "json", "log", "--limit", "1"], Some(cwd)).expect("log current state");
+    let log: Value = serde_json::from_str(&log_json).expect("log JSON parses");
+    log["states"][0]["change_id"]
+        .as_str()
+        .expect("log entry has change_id")
+        .to_string()
+}
+
 /// Mutation `--output json` replies no longer embed `verification`
 /// (the verification-claim gate still consults it in-memory, but it
 /// is omitted from the wire to keep mutation replies focused).
@@ -449,6 +468,169 @@ fn test_cli_clone_help_hides_planned_lazy_flag() {
     assert!(
         !output.contains("--lazy") && !output.contains("--filter"),
         "clone help should keep planned lazy/partial clone flags out of first-run help: {output}"
+    );
+}
+
+#[test]
+fn test_cli_pull_local_side_thread_updates_ref_without_materializing_checkout() {
+    let source = TempDir::new().unwrap();
+    let target = TempDir::new().unwrap();
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    std::fs::write(source.path().join("source.txt"), "from source\n").unwrap();
+    heddle(&["capture", "-m", "Source state"], Some(source.path())).unwrap();
+
+    heddle(&["init"], Some(target.path())).unwrap();
+    std::fs::write(target.path().join("target.txt"), "from target\n").unwrap();
+    heddle(&["capture", "-m", "Target state"], Some(target.path())).unwrap();
+    let main_before = current_thread_state(target.path(), "main");
+
+    let source_path = source.path().to_str().unwrap().to_string();
+    let pull_json = heddle(
+        &[
+            "--output",
+            "json",
+            "pull",
+            &source_path,
+            "--thread",
+            "main",
+            "--local-thread",
+            "imported",
+        ],
+        Some(target.path()),
+    )
+    .expect("side-thread pull succeeds");
+    let pull: Value = serde_json::from_str(&pull_json).expect("pull JSON parses");
+    assert_eq!(pull["thread"], "imported", "{pull}");
+
+    assert_eq!(
+        current_thread_state(target.path(), "main"),
+        main_before,
+        "side-thread pull must not advance the active main thread"
+    );
+    assert!(
+        !target.path().join("source.txt").exists(),
+        "side-thread pull must not materialize remote files into the active checkout"
+    );
+    assert_eq!(
+        std::fs::read_to_string(target.path().join("target.txt")).unwrap(),
+        "from target\n",
+        "side-thread pull must leave active checkout content untouched"
+    );
+
+    heddle(&["thread", "switch", "imported"], Some(target.path()))
+        .expect("imported thread should be switchable after direct ref update");
+    assert_eq!(
+        std::fs::read_to_string(target.path().join("source.txt")).unwrap(),
+        "from source\n"
+    );
+}
+
+#[test]
+fn test_cli_pull_local_clean_active_checkout_materializes_before_publish() {
+    let source = TempDir::new().unwrap();
+    let target_parent = TempDir::new().unwrap();
+    let target_path = target_parent.path().join("target");
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    std::fs::write(source.path().join("shared.txt"), "base\n").unwrap();
+    heddle(&["capture", "-m", "Base state"], Some(source.path())).unwrap();
+
+    let source_path = source.path().to_str().unwrap().to_string();
+    let target_path_arg = target_path.to_str().unwrap().to_string();
+    heddle(&["clone", &source_path, &target_path_arg], None).unwrap();
+    let pre_pull_ref = current_thread_state(&target_path, "main");
+
+    std::fs::write(source.path().join("shared.txt"), "remote\n").unwrap();
+    heddle(&["capture", "-m", "Remote state"], Some(source.path())).unwrap();
+    let source_main = current_thread_state(source.path(), "main");
+
+    heddle(
+        &["--output", "json", "pull", &source_path],
+        Some(&target_path),
+    )
+    .expect("clean active-checkout pull succeeds");
+
+    assert_eq!(
+        current_thread_state(&target_path, "main"),
+        source_main,
+        "clean pull should publish main after materializing the worktree"
+    );
+    assert_eq!(
+        std::fs::read_to_string(target_path.join("shared.txt")).unwrap(),
+        "remote\n",
+        "clean pull should materialize the pulled content"
+    );
+    let status_json =
+        heddle(&["--output", "json", "status"], Some(&target_path)).expect("status JSON");
+    let status: Value = serde_json::from_str(&status_json).expect("status JSON parses");
+    assert_eq!(status["thread"], "main", "{status_json}");
+
+    heddle(&["undo"], Some(&target_path)).expect("pull fast-forward should be undoable");
+    assert_eq!(
+        current_thread_state(&target_path, "main"),
+        pre_pull_ref,
+        "undo should restore the pre-pull main ref recorded before publication"
+    );
+    assert_eq!(
+        std::fs::read_to_string(target_path.join("shared.txt")).unwrap(),
+        "base\n",
+        "undo should restore the pre-pull materialized checkout"
+    );
+}
+
+#[test]
+fn test_cli_pull_local_detached_head_materializes_then_publishes_thread() {
+    let source = TempDir::new().unwrap();
+    let target_parent = TempDir::new().unwrap();
+    let target_path = target_parent.path().join("target");
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    std::fs::write(source.path().join("shared.txt"), "base\n").unwrap();
+    heddle(&["capture", "-m", "Base state"], Some(source.path())).unwrap();
+
+    let source_path = source.path().to_str().unwrap().to_string();
+    let target_path_arg = target_path.to_str().unwrap().to_string();
+    heddle(&["clone", &source_path, &target_path_arg], None).unwrap();
+    let base_state = current_thread_state(&target_path, "main");
+    heddle(&["goto", &base_state], Some(&target_path)).expect("detach target HEAD");
+    let head_before = std::fs::read_to_string(target_path.join(".heddle").join("HEAD"))
+        .expect("read detached HEAD");
+    assert!(
+        !head_before.trim().starts_with("ref:"),
+        "test setup should leave HEAD detached: {head_before}"
+    );
+
+    std::fs::write(source.path().join("shared.txt"), "remote\n").unwrap();
+    heddle(&["capture", "-m", "Remote state"], Some(source.path())).unwrap();
+    let source_main = current_thread_state(source.path(), "main");
+
+    heddle(
+        &["--output", "json", "pull", &source_path],
+        Some(&target_path),
+    )
+    .expect("detached local pull succeeds");
+
+    assert_eq!(
+        current_thread_state(&target_path, "main"),
+        source_main,
+        "detached pull should publish the local thread after materializing"
+    );
+    assert_eq!(
+        log_head_state(&target_path),
+        source_main,
+        "detached pull should move detached HEAD to the pulled state"
+    );
+    let head_after = std::fs::read_to_string(target_path.join(".heddle").join("HEAD"))
+        .expect("read detached HEAD after pull");
+    assert!(
+        !head_after.trim().starts_with("ref:"),
+        "detached pull should not attach HEAD to the published thread: {head_after}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(target_path.join("shared.txt")).unwrap(),
+        "remote\n",
+        "detached pull should materialize the pulled content"
     );
 }
 
