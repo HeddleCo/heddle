@@ -37,6 +37,7 @@ struct ForkOutput {
 /// If `--name` is provided, a new thread is created pointing to the new state.
 pub fn cmd_fork(cli: &Cli, name: Option<String>, from: Option<String>) -> Result<()> {
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let user_config = UserConfig::load_default()?;
 
     // Determine the source state
     let source_state = if let Some(ref state_spec) = from {
@@ -46,7 +47,7 @@ pub fn cmd_fork(cli: &Cli, name: Option<String>, from: Option<String>) -> Result
         // Use current HEAD
         let change_id = ensure_current_state(
             &repo,
-            &UserConfig::load_default().unwrap_or_default(),
+            &user_config,
             Some("Bootstrap git-overlay before forking".to_string()),
         )?;
         require_resolved_state(&repo, &change_id)?
@@ -54,7 +55,6 @@ pub fn cmd_fork(cli: &Cli, name: Option<String>, from: Option<String>) -> Result
 
     // Create a new state with the same tree but a new change ID
     // The new state has the source state as its parent
-    let user_config = UserConfig::load_default()?;
     let attribution = resolve_attribution(&repo, &user_config)?;
     let mut new_state =
         State::new_fork_of(source_state.tree, vec![source_state.change_id], attribution);

@@ -2837,3 +2837,100 @@ fn test_cli_git_overlay_push_to_native_heddle_local_path_uses_heddle_sync() {
         "push to a native Heddle path must not turn the target into a Git remote"
     );
 }
+
+#[test]
+fn push_bootstrap_validates_tls_config_before_creating_state() {
+    let source = TempDir::new().unwrap();
+    heddle(&["init"], Some(source.path())).expect("init source");
+
+    let repo = Repository::open(source.path()).expect("open source");
+    repo.refs()
+        .delete_thread(&ThreadName::new("main"))
+        .expect("clear current thread ref");
+    assert!(
+        repo.current_state().unwrap().is_none(),
+        "fresh source should have no current state before push"
+    );
+    let states_before = repo.store().list_states().unwrap();
+
+    let config_path = source.path().join("bad-tls-config.toml");
+    let missing_ca = source.path().join("missing-ca.pem");
+    std::fs::write(
+        &config_path,
+        format!(
+            "[principal]\nname = \"Heddle Test\"\nemail = \"heddle@example.com\"\n\n[remote]\ntls_ca_certificate_path = \"{}\"\n",
+            missing_ca.display()
+        ),
+    )
+    .unwrap();
+
+    let config = config_path.to_string_lossy().to_string();
+    let output = heddle_output_with_env(
+        &["push", "heddle://127.0.0.1:1/owner/repo"],
+        Some(source.path()),
+        &[("HEDDLE_CONFIG", &config)],
+    )
+    .expect("invoke push");
+    assert!(!output.status.success(), "push should fail closed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.is_empty(),
+        "failed push should not write stdout: {stdout}"
+    );
+    assert!(
+        stderr.contains("fatal TLS/auth configuration error")
+            && stderr.contains("remote.tls_ca_certificate_path"),
+        "push should fail on TLS config before transport: {stderr}"
+    );
+
+    let repo = Repository::open(source.path()).expect("reopen source");
+    assert!(
+        repo.current_state().unwrap().is_none(),
+        "TLS config failure must not bootstrap a current state"
+    );
+    assert_eq!(
+        repo.store().list_states().unwrap(),
+        states_before,
+        "TLS config failure must not record a default-attributed state"
+    );
+}
+
+#[test]
+fn push_bootstrap_with_valid_config_still_creates_state() {
+    let source = TempDir::new().unwrap();
+    let remote = TempDir::new().unwrap();
+
+    heddle(&["init"], Some(source.path())).expect("init source");
+    heddle(&["init"], Some(remote.path())).expect("init target");
+
+    let before = Repository::open(source.path()).expect("open source");
+    before
+        .refs()
+        .delete_thread(&ThreadName::new("main"))
+        .expect("clear current thread ref");
+    assert!(
+        before.current_state().unwrap().is_none(),
+        "fresh source should start without current state"
+    );
+
+    let remote_path = remote.path().to_str().expect("remote path utf8");
+    heddle(&["push", remote_path], Some(source.path())).expect("bootstrap push succeeds");
+
+    let source_repo = Repository::open(source.path()).expect("reopen source");
+    let source_state = source_repo
+        .current_state()
+        .unwrap()
+        .expect("valid push should bootstrap source state")
+        .change_id;
+    let remote_repo = Repository::open(remote.path()).expect("open target");
+    let remote_state = remote_repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .expect("valid push should update target main");
+    assert_eq!(
+        remote_state, source_state,
+        "bootstrap push should send the newly created state"
+    );
+}

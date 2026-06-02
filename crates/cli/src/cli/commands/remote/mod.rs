@@ -25,7 +25,7 @@ use super::{
     snapshot::ensure_current_state,
 };
 #[cfg(feature = "client")]
-use crate::client::HostedGrpcClient;
+use crate::client::{ClientConfig, HostedGrpcClient};
 use crate::{
     bridge::{
         GitBridge,
@@ -194,6 +194,8 @@ pub async fn cmd_push(
         )));
     }
 
+    let user_config = UserConfig::load_default()?;
+
     if repo.capability() == RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
         let default_remote_name = if remote.is_none() {
             resolved_default_remote_name(&repo)?
@@ -206,7 +208,7 @@ pub async fn cmd_push(
                 if matches!(state_str.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {
                     ensure_current_state(
                         &repo,
-                        &UserConfig::load_default().unwrap_or_default(),
+                        &user_config,
                         Some("Bootstrap git-overlay before push".to_string()),
                     )?;
                 }
@@ -214,7 +216,7 @@ pub async fn cmd_push(
             } else {
                 ensure_current_state(
                     &repo,
-                    &UserConfig::load_default().unwrap_or_default(),
+                    &user_config,
                     Some("Bootstrap git-overlay before push".to_string()),
                 )?
             };
@@ -332,38 +334,17 @@ pub async fn cmd_push(
 
     preflight_native_remote_transport(&repo, remote.as_deref(), "push")?;
 
-    let state_id = if let Some(state_str) = state {
-        if matches!(state_str.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {
-            ensure_current_state(
-                &repo,
-                &UserConfig::load_default().unwrap_or_default(),
-                Some("Bootstrap git-overlay before push".to_string()),
-            )?;
-        }
-        repo.resolve_state(&state_str)?.context("State not found")?
-    } else {
-        ensure_current_state(
-            &repo,
-            &UserConfig::load_default().unwrap_or_default(),
-            Some("Bootstrap git-overlay before push".to_string()),
-        )?
-    };
-
-    let user_config = UserConfig::load_default()?;
-    #[cfg(feature = "client")]
-    let mut token = user_config.remote_token()?;
-    #[cfg(not(feature = "client"))]
     let token = user_config.remote_token()?;
     #[cfg(feature = "client")]
+    let mut token = token;
     let (target, server_key) =
-        resolve_remote_with_key(&repo, remote.as_deref()).map_err(anyhow::Error::msg)?;
-    #[cfg(not(feature = "client"))]
-    let (target, _server_key) =
         resolve_remote_with_key(&repo, remote.as_deref()).map_err(anyhow::Error::msg)?;
 
     // Fall back to the credential store if no token was provided via env/config.
     #[cfg(feature = "client")]
     let mut credential_proof_key: Option<String> = None;
+    #[cfg(not(feature = "client"))]
+    let credential_proof_key: Option<String> = None;
     #[cfg(feature = "client")]
     if token.is_none()
         && let Some(ref key) = server_key
@@ -372,6 +353,38 @@ pub async fn cmd_push(
         token = Some(AuthToken::new(cred.token, "credential-store"));
         credential_proof_key = cred.private_key_pem;
     }
+
+    let network_client_config = if matches!(target, RemoteTarget::Network { .. }) {
+        let mut config = user_config.heddle_client_config(token.clone())?;
+        if let Some(ref key) = server_key {
+            config = config.with_server_key(key.clone());
+        }
+        if let Some(ref pem) = credential_proof_key
+            && config.auth_proof_key_pem.is_none()
+        {
+            config = config.with_auth_proof_key_pem(pem.clone());
+        }
+        Some(config)
+    } else {
+        None
+    };
+
+    let state_id = if let Some(state_str) = state {
+        if matches!(state_str.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {
+            ensure_current_state(
+                &repo,
+                &user_config,
+                Some("Bootstrap git-overlay before push".to_string()),
+            )?;
+        }
+        repo.resolve_state(&state_str)?.context("State not found")?
+    } else {
+        ensure_current_state(
+            &repo,
+            &user_config,
+            Some("Bootstrap git-overlay before push".to_string()),
+        )?
+    };
 
     let track_name = resolve_default_push_thread(&repo, thread.as_deref())?;
 
@@ -386,10 +399,9 @@ pub async fn cmd_push(
                 PushNetworkOptions {
                     addr,
                     repo_path: repo_path.as_deref(),
-                    user_config: &user_config,
-                    token,
-                    server_key,
-                    credential_proof_key,
+                    client_config: network_client_config
+                        .as_ref()
+                        .context("network client config was not prevalidated")?,
                     state_id: &state_id,
                     track_name: &track_name,
                     force,
@@ -398,7 +410,7 @@ pub async fn cmd_push(
             )
             .await?;
             #[cfg(not(feature = "client"))]
-            let _ = (addr, repo_path, token);
+            let _ = (addr, repo_path, token, network_client_config);
             #[cfg(not(feature = "client"))]
             anyhow::bail!(RecoveryAdvice::network_feature_unavailable("push"));
         }
@@ -1145,16 +1157,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         .repo_path
         .context("network remotes must include a hosted repository path")?;
 
-    let mut config = options.user_config.heddle_client_config(options.token)?;
-    if let Some(key) = options.server_key {
-        config = config.with_server_key(key);
-    }
-    if let Some(pem) = options.credential_proof_key
-        && config.auth_proof_key_pem.is_none()
-    {
-        config = config.with_auth_proof_key_pem(pem);
-    }
-    let mut client = HostedGrpcClient::connect(options.addr, &config).await?;
+    let mut client = HostedGrpcClient::connect(options.addr, options.client_config).await?;
     client.auto_rotate_if_needed().await;
 
     if !should_output_json(options.cli, Some(repo.config())) {
@@ -1208,10 +1211,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
 struct PushNetworkOptions<'a> {
     addr: SocketAddr,
     repo_path: Option<&'a str>,
-    user_config: &'a UserConfig,
-    token: Option<AuthToken>,
-    server_key: Option<String>,
-    credential_proof_key: Option<String>,
+    client_config: &'a ClientConfig,
     state_id: &'a objects::object::ChangeId,
     track_name: &'a str,
     force: bool,
