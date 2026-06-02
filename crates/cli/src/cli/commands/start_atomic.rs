@@ -49,8 +49,8 @@ use objects::object::{ChangeId, ThreadName};
 use oplog::OpRecord;
 use refs::RefExpectation;
 use repo::{
-    Repository, Thread, ThreadManager, ThreadMode,
     atomic::{AtomicMutation, StagedCommit, Tx},
+    Repository, Thread, ThreadManager, ThreadMode,
 };
 
 use super::mount_lifecycle::{self, MountOwnership};
@@ -123,6 +123,65 @@ fn hydrate_fault_trips() -> bool {
         }
         _ => false,
     })
+}
+
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TargetSwapPoint {
+    BeforeManifest,
+    BeforePreserveIgnores,
+}
+
+#[cfg(all(test, unix))]
+#[derive(Clone)]
+struct TargetSwapFault {
+    point: TargetSwapPoint,
+    symlink_target: PathBuf,
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static START_TARGET_SWAP: std::cell::RefCell<Option<TargetSwapFault>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+fn with_start_target_swap<T>(
+    point: TargetSwapPoint,
+    symlink_target: PathBuf,
+    body: impl FnOnce() -> T,
+) -> T {
+    START_TARGET_SWAP.with(|f| {
+        *f.borrow_mut() = Some(TargetSwapFault {
+            point,
+            symlink_target,
+        })
+    });
+    let out = body();
+    START_TARGET_SWAP.with(|f| *f.borrow_mut() = None);
+    out
+}
+
+#[cfg(all(test, unix))]
+fn maybe_swap_target_leaf(point: TargetSwapPoint, abs_path: &Path) -> HeddleResult<()> {
+    let fault = START_TARGET_SWAP.with(|f| {
+        let mut fault = f.borrow_mut();
+        if fault.as_ref().is_some_and(|fault| fault.point == point) {
+            fault.take()
+        } else {
+            None
+        }
+    });
+    let Some(fault) = fault else {
+        return Ok(());
+    };
+    let moved_name = abs_path
+        .file_name()
+        .map(|name| format!("{}.claimed-original", name.to_string_lossy()))
+        .unwrap_or_else(|| "claimed-original".to_string());
+    let moved = abs_path.with_file_name(moved_name);
+    std::fs::rename(abs_path, moved).map_err(HeddleError::from)?;
+    std::os::unix::fs::symlink(&fault.symlink_target, abs_path).map_err(HeddleError::from)
 }
 
 /// What the target-dir claim ([`create_target_dir`]) established about the
@@ -708,7 +767,11 @@ impl StartThread {
     /// Write the materialized-thread manifest sidecar (it lives under
     /// `.heddle/threads/<name>/`, OUTSIDE the checkout, so it needs its own
     /// inverse — the checkout rewind won't reach it).
-    fn stage_manifest(&self, tx: &mut Tx<'_>) -> HeddleResult<()> {
+    fn stage_manifest(
+        &self,
+        tx: &mut Tx<'_>,
+        target_claim: Rc<Cell<Option<TargetDir>>>,
+    ) -> HeddleResult<()> {
         let repo = tx.repo();
         let abs = self.abs_path.clone();
         let base_state = self.base_state;
@@ -727,7 +790,10 @@ impl StartThread {
             },
             move |prior| restore_thread_manifest(repo.heddle_dir(), &inv_name, prior),
             move || {
-                repo.record_thread_manifest(&fwd_name, &base_state, &abs)
+                #[cfg(all(test, unix))]
+                maybe_swap_target_leaf(TargetSwapPoint::BeforeManifest, &abs)?;
+                let checkout_root = claimed_worktree_path(claim_from_cell(&target_claim), &abs)?;
+                repo.record_thread_manifest(&fwd_name, &base_state, &checkout_root)
                     .map(|_| ())
             },
         )
@@ -824,14 +890,33 @@ impl StartThread {
         // possibly-tracked `.heddleignore` — keeps a successful `start
         // --hydrate` from dirtying tracked state (heddle#356 cid 3333881577).
         if !linked.is_empty() {
-            let exclude_path = hydrate::hydrate_exclude_path(&checkout_root);
-            let restore_path = exclude_path.clone();
-            let abs = checkout_root.clone();
+            let cap_abs = self.abs_path.clone();
+            let restore_abs = self.abs_path.clone();
+            let fwd_abs = self.abs_path.clone();
+            let cap_claim = Rc::clone(&target_claim);
+            let restore_claim = Rc::clone(&target_claim);
             let linked_fwd = linked.clone();
             tx.step_nonatomic(
-                move || Ok(std::fs::read(&exclude_path).ok()),
-                move |prior| restore_ignore_file(&restore_path, prior),
-                move || hydrate::preserve_hydrated_ignores(&abs, &linked_fwd).map_err(apply_error),
+                move || {
+                    #[cfg(all(test, unix))]
+                    maybe_swap_target_leaf(TargetSwapPoint::BeforePreserveIgnores, &cap_abs)?;
+                    let checkout_root =
+                        claimed_worktree_path(claim_from_cell(&cap_claim), &cap_abs)?;
+                    let exclude_path = hydrate::hydrate_exclude_path(&checkout_root);
+                    Ok(std::fs::read(&exclude_path).ok())
+                },
+                move |prior| {
+                    let checkout_root =
+                        claimed_worktree_path(claim_from_cell(&restore_claim), &restore_abs)?;
+                    let restore_path = hydrate::hydrate_exclude_path(&checkout_root);
+                    restore_ignore_file(&restore_path, prior)
+                },
+                move || {
+                    let checkout_root =
+                        claimed_worktree_path(claim_from_cell(&target_claim), &fwd_abs)?;
+                    hydrate::preserve_hydrated_ignores(&checkout_root, &linked_fwd)
+                        .map_err(apply_error)
+                },
             )?;
         }
         Ok(linked)
@@ -909,7 +994,7 @@ impl AtomicMutation for StartThread {
             ThreadMode::Solid | ThreadMode::Materialized => {
                 self.stage_checkout(tx, Rc::clone(&target_claim))?;
                 if matches!(self.thread_mode, ThreadMode::Materialized) {
-                    self.stage_manifest(tx)?;
+                    self.stage_manifest(tx, Rc::clone(&target_claim))?;
                 }
                 if let Some(dir) = self.shared_target_dir.clone() {
                     let applied = self.stage_cargo_config(tx, &dir, Rc::clone(&target_claim))?;
@@ -1009,6 +1094,17 @@ mod tests {
         }
     }
 
+    fn materialized_args(
+        name: &str,
+        path: &std::path::Path,
+        from: &ChangeId,
+        hydrate: bool,
+    ) -> ThreadStartArgs {
+        let mut args = solid_args(name, path, from, hydrate);
+        args.workspace = WorkspaceModeArg::Materialized;
+        args
+    }
+
     fn has_thread_ref(repo: &Repository, name: &str) -> bool {
         repo.refs()
             .get_thread(&ThreadName::new(name))
@@ -1080,7 +1176,9 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
-        let state = repo.snapshot(Some("rust workspace".to_string()), None).unwrap();
+        let state = repo
+            .snapshot(Some("rust workspace".to_string()), None)
+            .unwrap();
         let checkout = temp.path().join("iso");
         let mut args = solid_args("iso", &checkout, &state.change_id, false);
         args.shared_target = true;
@@ -1174,6 +1272,92 @@ mod tests {
         // The origin's dep dirs are untouched (we unlink, never follow).
         assert!(temp.path().join("dep_a").is_dir());
         assert!(temp.path().join("dep_b").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_manifest_refuses_swapped_target_and_spares_symlink_target() {
+        let (temp, repo, state) = repo_with_state(&[]);
+        let checkout = temp.path().join("iso");
+        let victim = temp.path().join("victim");
+        std::fs::create_dir(&victim).unwrap();
+        std::fs::write(victim.join("a.txt"), b"victim").unwrap();
+        std::fs::write(victim.join("precious.txt"), b"precious").unwrap();
+
+        let out = with_start_target_swap(TargetSwapPoint::BeforeManifest, victim.clone(), || {
+            start_thread(&repo, materialized_args("iso", &checkout, &state, false))
+        });
+        assert!(
+            out.is_err(),
+            "manifest staging must refuse when the claimed target leaf was swapped"
+        );
+        assert!(
+            std::fs::symlink_metadata(&checkout)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "rollback must leave the substituted symlink itself alone"
+        );
+        assert_eq!(
+            std::fs::read(victim.join("a.txt")).unwrap(),
+            b"victim",
+            "manifest staging must not read/stat through the swapped symlink target"
+        );
+        assert_eq!(
+            std::fs::read(victim.join("precious.txt")).unwrap(),
+            b"precious",
+            "rollback must not touch the symlink target"
+        );
+        assert!(
+            repo::thread_manifest::manifest_path(repo.heddle_dir(), "iso")
+                .symlink_metadata()
+                .is_err(),
+            "a refused manifest stage must not leave a sidecar behind"
+        );
+        assert!(
+            !has_thread_ref(&repo, "iso"),
+            "the thread ref must be rolled back"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preserve_hydrated_ignores_refuses_swapped_target_and_spares_symlink_target() {
+        let (temp, repo, state) = repo_with_state(&["dep_a"]);
+        let checkout = temp.path().join("iso");
+        let victim = temp.path().join("victim");
+        std::fs::create_dir(&victim).unwrap();
+        std::fs::write(victim.join("precious.txt"), b"precious").unwrap();
+
+        let out = with_start_target_swap(
+            TargetSwapPoint::BeforePreserveIgnores,
+            victim.clone(),
+            || start_thread(&repo, solid_args("iso", &checkout, &state, true)),
+        );
+        assert!(
+            out.is_err(),
+            "hydrate ignore preservation must refuse when the claimed target leaf was swapped"
+        );
+        assert!(
+            std::fs::symlink_metadata(&checkout)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "rollback must leave the substituted symlink itself alone"
+        );
+        assert!(
+            !victim.join(".heddle").exists(),
+            "hydrate ignore preservation must not create an exclude file through the symlink target"
+        );
+        assert_eq!(
+            std::fs::read(victim.join("precious.txt")).unwrap(),
+            b"precious",
+            "rollback must not touch the symlink target"
+        );
+        assert!(
+            !has_thread_ref(&repo, "iso"),
+            "the thread ref must be rolled back"
+        );
     }
 
     // ---- heddle#356 r2 fixes ----
