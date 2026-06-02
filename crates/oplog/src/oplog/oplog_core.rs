@@ -19,7 +19,7 @@ use super::{
         ConditionalCommitOutcome, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
         isolation_keys_for_record,
     },
-    packed_oplog::PackedOpLog,
+    packed_oplog::{Latest, OplogFormat, PackedOpLog, PackedOpLogIndex, V2},
 };
 
 /// A `TransactionCommit` marker carries no user-facing operation: it is the
@@ -35,7 +35,7 @@ fn is_transaction_commit(op: &OpRecord) -> bool {
 /// Operation log for tracking operations and enabling undo.
 pub struct OpLog {
     pub(crate) root: PathBuf,
-    cached: Mutex<Option<PackedOpLog>>,
+    cached: Mutex<Option<PackedOpLogIndex>>,
     actor: Arc<Principal>,
 }
 
@@ -107,21 +107,64 @@ impl OpLog {
             .collect()
     }
 
+    fn ensure_current_format(&self) -> Result<()> {
+        let path = self.oplog_path();
+        if !path.exists() {
+            return Ok(());
+        }
+        match PackedOpLog::on_disk_version(&path)? {
+            version if version == u32::from(Latest::VERSION) => {
+                let _ = PackedOpLogIndex::open(&path)?;
+                Ok(())
+            }
+            version if version == u32::from(V2::VERSION) => {
+                let _lock = self.write_lock()?;
+                PackedOpLog::ensure_latest(&path)
+            }
+            version => Err(HeddleError::InvalidObject(format!(
+                "unsupported oplog version {version}"
+            ))),
+        }
+    }
+
     /// Load from disk, bypassing cache (used after acquiring write lock).
-    fn load_fresh(&self) -> Result<PackedOpLog> {
+    fn load_fresh_for_write(&self) -> Result<PackedOpLog> {
         let path = self.oplog_path();
         if path.exists() {
+            PackedOpLog::ensure_latest(&path)?;
             PackedOpLog::load(&path)
         } else {
             Ok(PackedOpLog::new(path))
         }
     }
 
+    fn open_index_for_write(&self) -> Result<PackedOpLogIndex> {
+        let path = self.oplog_path();
+        if path.exists() {
+            PackedOpLog::ensure_latest(&path)?;
+        } else {
+            PackedOpLog::new(path.clone()).save()?;
+        }
+        PackedOpLogIndex::open(&path)
+    }
+
     /// Load from cache or disk (for read operations).
-    fn load_cached(&self) -> Result<std::sync::MutexGuard<'_, Option<PackedOpLog>>> {
+    fn load_cached(&self) -> Result<std::sync::MutexGuard<'_, Option<PackedOpLogIndex>>> {
+        let guard = self.cached.lock().unwrap();
+        if guard.is_some() {
+            return Ok(guard);
+        }
+        drop(guard);
+
+        self.ensure_current_format()?;
         let mut guard = self.cached.lock().unwrap();
         if guard.is_none() {
-            *guard = Some(self.load_fresh()?);
+            let path = self.oplog_path();
+            *guard = Some(if path.exists() {
+                PackedOpLogIndex::open(&path)?
+            } else {
+                PackedOpLogIndex::empty(path)
+            });
         }
         Ok(guard)
     }
@@ -131,9 +174,15 @@ impl OpLog {
     /// [`load_cached`]: a long-lived handle's already-populated cache is a stale
     /// view that would miss a batch another process wrote (heddle#354 r6, cid
     /// 3329711888).
-    fn refresh_cached(&self) -> Result<std::sync::MutexGuard<'_, Option<PackedOpLog>>> {
+    fn refresh_cached(&self) -> Result<std::sync::MutexGuard<'_, Option<PackedOpLogIndex>>> {
+        self.ensure_current_format()?;
         let mut guard = self.cached.lock().unwrap();
-        *guard = Some(self.load_fresh()?);
+        let path = self.oplog_path();
+        *guard = Some(if path.exists() {
+            PackedOpLogIndex::open(&path)?
+        } else {
+            PackedOpLogIndex::empty(path)
+        });
         Ok(guard)
     }
 
@@ -153,13 +202,13 @@ impl OpLog {
     /// Get the last operation entry.
     pub fn last(&self) -> Result<Option<OpEntry>> {
         let guard = self.load_cached()?;
-        Ok(guard.as_ref().unwrap().last_entry().cloned())
+        guard.as_ref().unwrap().last_entry()
     }
 
     /// Get the last N operations.
     pub fn recent(&self, count: usize) -> Result<Vec<OpEntry>> {
         let guard = self.load_cached()?;
-        Ok(guard.as_ref().unwrap().recent_entries(count))
+        guard.as_ref().unwrap().recent_entries(count)
     }
 
     pub fn recent_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
@@ -168,6 +217,19 @@ impl OpLog {
 
     pub fn recent_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
         self.collect_batches_scoped(count, |_| true, scope)
+    }
+
+    pub fn recent_batches_after_scoped(
+        &self,
+        since_head_id: u64,
+        count: usize,
+        scope: Option<&str>,
+    ) -> Result<Vec<OpBatch>> {
+        let guard = self.refresh_cached()?;
+        guard
+            .as_ref()
+            .unwrap()
+            .collect_batches_after_scoped(since_head_id, count, |_| true, scope)
     }
 
     /// Like [`recent_batches_scoped`](Self::recent_batches_scoped) but counts
@@ -248,7 +310,7 @@ impl OpLog {
         }
 
         let _lock = self.write_lock()?;
-        let mut packed = self.load_fresh()?;
+        let mut packed = self.load_fresh_for_write()?;
         let mut matching_indices = Vec::new();
         let mut saw_primary = false;
         let mut saw_secondary = false;
@@ -286,7 +348,7 @@ impl OpLog {
             .into_iter()
             .map(|idx| packed.entries[idx].clone())
             .collect::<Vec<_>>();
-        *self.cached.lock().unwrap() = Some(packed);
+        *self.cached.lock().unwrap() = Some(PackedOpLogIndex::open(&self.oplog_path())?);
 
         Ok(OpBatch {
             id: primary_batch_id,
@@ -310,18 +372,17 @@ impl OpLog {
 
         let _lock = self.write_lock()?;
         // Reload from disk to catch any writes from other processes
-        let mut packed = self.load_fresh()?;
+        let index = self.open_index_for_write()?;
 
-        let start_id = packed.head_id + 1;
+        let start_id = index.head_id() + 1;
         let timestamp = Utc::now();
         let scope_owned = scope.map(str::to_string);
         let new_entries =
             Self::build_entries(&self.actor, operations, start_id, timestamp, &scope_owned);
         let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
 
-        packed.append(new_entries);
-        packed.save()?;
-        *self.cached.lock().unwrap() = Some(packed);
+        let updated = index.append_entries(&new_entries)?;
+        *self.cached.lock().unwrap() = Some(updated);
 
         Ok(ids)
     }
@@ -356,9 +417,9 @@ impl OpLog {
         }
 
         let _lock = self.write_lock()?;
-        let mut packed = self.load_fresh()?;
+        let index = self.open_index_for_write()?;
 
-        let recent = packed.collect_batches_scoped(recent_window, |_| true, scope);
+        let recent = index.collect_batches_scoped(recent_window, |_| true, scope)?;
         if recent.iter().any(|batch| {
             batch.entries.iter().any(|entry| {
                 matches!(
@@ -371,16 +432,15 @@ impl OpLog {
             return Ok(None);
         }
 
-        let start_id = packed.head_id + 1;
+        let start_id = index.head_id() + 1;
         let timestamp = Utc::now();
         let scope_owned = scope.map(str::to_string);
         let new_entries =
             Self::build_entries(&self.actor, operations, start_id, timestamp, &scope_owned);
         let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
 
-        packed.append(new_entries);
-        packed.save()?;
-        *self.cached.lock().unwrap() = Some(packed);
+        let updated = index.append_entries(&new_entries)?;
+        *self.cached.lock().unwrap() = Some(updated);
 
         Ok(Some(ids))
     }
@@ -414,30 +474,21 @@ impl OpLog {
         }
 
         let _lock = self.write_lock()?;
-        let mut packed = self.load_fresh()?;
+        let index = self.open_index_for_write()?;
 
-        // Unbounded scan over the ENTIRE committed history — not a window.
-        let already_committed = packed.entries.iter().any(|entry| {
-            matches!(
-                &entry.operation,
-                OpRecord::TransactionCommit { transaction_id: id, .. }
-                    if id == transaction_id
-            )
-        });
-        if already_committed {
+        if index.transaction_commit(transaction_id)?.is_some() {
             return Ok(None);
         }
 
-        let start_id = packed.head_id + 1;
+        let start_id = index.head_id() + 1;
         let timestamp = Utc::now();
         let scope_owned = scope.map(str::to_string);
         let new_entries =
             Self::build_entries(&self.actor, operations, start_id, timestamp, &scope_owned);
         let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
 
-        packed.append(new_entries);
-        packed.save()?;
-        *self.cached.lock().unwrap() = Some(packed);
+        let updated = index.append_entries(&new_entries)?;
+        *self.cached.lock().unwrap() = Some(updated);
 
         Ok(Some(ids))
     }
@@ -454,31 +505,15 @@ impl OpLog {
         }
 
         let _lock = self.write_lock()?;
-        let mut packed = self.load_fresh()?;
+        let index = self.open_index_for_write()?;
 
-        if let Some(commit_entry) = packed.entries.iter().find(|entry| {
-            matches!(
-                &entry.operation,
-                OpRecord::TransactionCommit { transaction_id: id, .. }
-                    if id == transaction_id
-            )
-        }) {
-            let committed = packed
-                .entries
-                .iter()
-                .filter(|entry| entry.batch_id == commit_entry.batch_id)
-                .filter(|entry| !is_transaction_commit(&entry.operation))
-                .map(|entry| entry.operation.clone())
-                .collect();
+        if index.transaction_commit(transaction_id)?.is_some() {
+            let committed = index.committed_batch_records(transaction_id)?;
             return Ok(ConditionalCommitOutcome::AlreadyCommitted(committed));
         }
 
-        if !precondition.keys.is_empty() && packed.head_id != precondition.since_head_id {
-            for entry in packed
-                .entries
-                .iter()
-                .filter(|entry| entry.id > precondition.since_head_id)
-            {
+        if !precondition.keys.is_empty() && index.head_id() != precondition.since_head_id {
+            for entry in index.entries_after(precondition.since_head_id)? {
                 let touched = isolation_keys_for_record(&entry.operation, entry.scope.as_deref());
                 if let Some(key) = touched.intersection(&precondition.keys).next().cloned() {
                     return Ok(ConditionalCommitOutcome::IsolationConflict {
@@ -490,16 +525,15 @@ impl OpLog {
             }
         }
 
-        let start_id = packed.head_id + 1;
+        let start_id = index.head_id() + 1;
         let timestamp = Utc::now();
         let scope_owned = scope.map(str::to_string);
         let new_entries =
             Self::build_entries(&self.actor, operations, start_id, timestamp, &scope_owned);
         let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
 
-        packed.append(new_entries);
-        packed.save()?;
-        *self.cached.lock().unwrap() = Some(packed);
+        let updated = index.append_entries(&new_entries)?;
+        *self.cached.lock().unwrap() = Some(updated);
 
         Ok(ConditionalCommitOutcome::Committed(ids))
     }
@@ -512,6 +546,7 @@ impl OpLog {
     /// one integer compare against a cached watermark — no tail scan. Returns 0
     /// when the oplog file does not exist yet.
     pub fn head_id(&self) -> Result<u64> {
+        self.ensure_current_format()?;
         match PackedOpLog::read_head_id(&self.oplog_path()) {
             Ok(id) => Ok(id),
             // Treat a not-yet-created oplog as generation 0.
@@ -539,38 +574,10 @@ impl OpLog {
         // 3329711888). The committed batch is durable and append-only, so a
         // lock-free fresh read observes it consistently.
         let guard = self.refresh_cached()?;
-        let packed = guard.as_ref().unwrap();
-
-        let Some(commit_entry) = packed.entries.iter().find(|entry| {
-            matches!(
-                &entry.operation,
-                OpRecord::TransactionCommit { transaction_id: id, .. }
-                    if id == transaction_id
-            )
-        }) else {
-            return Ok(Vec::new());
-        };
-        let batch_id = if commit_entry.batch_id == 0 {
-            commit_entry.id
-        } else {
-            commit_entry.batch_id
-        };
-
-        let records = packed
-            .entries
-            .iter()
-            .filter(|entry| {
-                let bid = if entry.batch_id == 0 {
-                    entry.id
-                } else {
-                    entry.batch_id
-                };
-                bid == batch_id
-            })
-            .filter(|entry| !matches!(entry.operation, OpRecord::TransactionCommit { .. }))
-            .map(|entry| entry.operation.clone())
-            .collect();
-        Ok(records)
+        guard
+            .as_ref()
+            .unwrap()
+            .committed_batch_records(transaction_id)
     }
 
     pub(super) fn record_single_scoped(
@@ -579,9 +586,9 @@ impl OpLog {
         scope: Option<&str>,
     ) -> Result<u64> {
         let _lock = self.write_lock()?;
-        let mut packed = self.load_fresh()?;
+        let index = self.open_index_for_write()?;
 
-        let id = packed.head_id + 1;
+        let id = index.head_id() + 1;
         let entry = OpEntry {
             id,
             timestamp: Utc::now(),
@@ -594,9 +601,8 @@ impl OpLog {
             operation_id: None,
         };
 
-        packed.append(vec![entry]);
-        packed.save()?;
-        *self.cached.lock().unwrap() = Some(packed);
+        let updated = index.append_entries(&[entry])?;
+        *self.cached.lock().unwrap() = Some(updated);
 
         Ok(id)
     }
@@ -607,7 +613,7 @@ impl OpLog {
 
     fn update_batch_undone_state(&self, batch: &OpBatch, undone: bool) -> Result<OpBatch> {
         let _lock = self.write_lock()?;
-        let mut packed = self.load_fresh()?;
+        let mut packed = self.load_fresh_for_write()?;
         packed.set_undone(batch.id, undone);
         packed.save()?;
 
@@ -616,7 +622,7 @@ impl OpLog {
             e.undone = undone;
         }
 
-        *self.cached.lock().unwrap() = Some(packed);
+        *self.cached.lock().unwrap() = Some(PackedOpLogIndex::open(&self.oplog_path())?);
 
         Ok(OpBatch {
             id: batch.id,
@@ -634,10 +640,10 @@ impl OpLog {
         F: Fn(&OpBatch) -> bool,
     {
         let guard = self.load_cached()?;
-        Ok(guard
+        guard
             .as_ref()
             .unwrap()
-            .collect_batches_scoped(count, predicate, scope))
+            .collect_batches_scoped(count, predicate, scope)
     }
 }
 

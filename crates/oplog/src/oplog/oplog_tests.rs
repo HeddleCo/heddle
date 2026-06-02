@@ -251,6 +251,53 @@ fn recent_batches_scoped_merges_non_adjacent_coalesced_batches() {
 }
 
 #[test]
+fn committed_batch_records_uses_rebuilt_index_for_non_adjacent_coalesced_batch() {
+    let (_temp, oplog) = create_oplog();
+    let committed_state = ChangeId::generate();
+    let later_state = ChangeId::generate();
+    let middle_state = ChangeId::generate();
+
+    let committed = oplog
+        .record_batch_exactly_once(
+            vec![
+                OpRecord::Snapshot {
+                    new_state: committed_state,
+                    prev_head: None,
+                    head: Some(committed_state),
+                    thread: None,
+                },
+                OpRecord::TransactionCommit {
+                    transaction_id: "tx-coalesced".into(),
+                    op_count: 1,
+                },
+            ],
+            Some("lane-a"),
+            "tx-coalesced",
+        )
+        .unwrap()
+        .unwrap();
+    let middle = oplog
+        .record_snapshot(&middle_state, Some(&committed_state), None, Some("lane-a"))
+        .unwrap();
+    let later = oplog
+        .record_snapshot(&later_state, Some(&middle_state), None, Some("lane-a"))
+        .unwrap();
+
+    oplog.coalesce_batches(committed[0], later).unwrap();
+
+    let records = oplog.committed_batch_records("tx-coalesced").unwrap();
+    let recovered = records
+        .iter()
+        .filter_map(|record| match record {
+            OpRecord::Snapshot { new_state, .. } => Some(*new_state),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(middle, committed[0] + 2, "precondition: non-adjacent batch");
+    assert_eq!(recovered, vec![committed_state, later_state]);
+}
+
+#[test]
 fn test_oplogbackend_trait_async_methods_dispatch() {
     // The CLI calls OpLog's inherent (sync) batch methods; the generic
     // backend plumbing and the hosted server reach the async trait
@@ -677,7 +724,9 @@ fn record_methods_persist_expected_variants() {
     let blob = ContentHash::from_bytes([7u8; 32]);
     let redaction = ContentHash::from_bytes([9u8; 32]);
 
-    oplog.record_goto(&result, Some(&from), Some("lane")).unwrap();
+    oplog
+        .record_goto(&result, Some(&from), Some("lane"))
+        .unwrap();
     oplog
         .record_thread_create("feat", &result, Some(vec![9, 8, 7]), Some("lane"))
         .unwrap();
@@ -716,7 +765,10 @@ fn record_methods_persist_expected_variants() {
             _ => None,
         })
         .expect("a Fork record was written");
-    assert_eq!(fork.0, from, "record_fork's `from` must be the source state");
+    assert_eq!(
+        fork.0, from,
+        "record_fork's `from` must be the source state"
+    );
     assert_eq!(fork.1, result);
     assert_eq!(fork.2.as_deref(), Some("topic"));
     assert_eq!(fork.3, None);
@@ -821,8 +873,8 @@ mod default_backend {
     use objects::error::Result;
     use objects::object::Principal;
 
-    use super::OpLogBackend;
     use super::super::oplog_types::{OpBatch, OpEntry, OpRecord};
+    use super::OpLogBackend;
 
     #[derive(Default)]
     struct MemOpLog {
@@ -973,7 +1025,12 @@ mod default_backend {
             .record_thread_delete(&ThreadName::new("ft"), &cid, Some("s"))
             .unwrap();
         let rename_ids = backend
-            .record_thread_rename(&ThreadName::new("old"), &ThreadName::new("new"), &cid, Some("s"))
+            .record_thread_rename(
+                &ThreadName::new("old"),
+                &ThreadName::new("new"),
+                &cid,
+                Some("s"),
+            )
             .unwrap();
         assert_eq!(rename_ids.len(), 2, "rename emits create + delete");
         backend
@@ -988,7 +1045,9 @@ mod default_backend {
         backend
             .record_remote_thread_delete("origin", "rt", &cid, Some("s"))
             .unwrap();
-        backend.record_undo_recovery_update(&cid, Some("s")).unwrap();
+        backend
+            .record_undo_recovery_update(&cid, Some("s"))
+            .unwrap();
         backend
             .record_marker_create(&MarkerName::new("v1"), &cid)
             .unwrap();
@@ -1000,7 +1059,13 @@ mod default_backend {
             .unwrap();
         backend.record_purge(&redaction, &blob, Some("s")).unwrap();
         backend
-            .record_fast_forward(&ThreadName::new("topic"), &ThreadName::new("main"), &from, &cid, Some("s"))
+            .record_fast_forward(
+                &ThreadName::new("topic"),
+                &ThreadName::new("main"),
+                &from,
+                &cid,
+                Some("s"),
+            )
             .unwrap();
 
         // `coalesce_batches` default is fail-closed.
@@ -1030,7 +1095,10 @@ mod default_backend {
             o,
             OpRecord::RemoteThreadUpdate { remote, thread, .. } if remote == "origin" && thread == "rt"
         )));
-        assert!(ops.iter().any(|o| matches!(o, OpRecord::UndoRecoveryUpdate { .. })));
+        assert!(
+            ops.iter()
+                .any(|o| matches!(o, OpRecord::UndoRecoveryUpdate { .. }))
+        );
         assert!(ops.iter().any(|o| matches!(
             o,
             OpRecord::FastForwardV2 { post_target_id, .. } if *post_target_id == cid
