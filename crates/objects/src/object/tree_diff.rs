@@ -4,11 +4,9 @@
 //! This module provides a generic tree diffing algorithm that can be used
 //! by both `repo` and `semantic` crates.
 
-use std::collections::HashMap;
-
 use super::FileChangeSet;
 use crate::{
-    object::{EntryType, Tree},
+    object::{EntryType, Tree, TreeEntry},
     store::ObjectStore,
 };
 
@@ -36,78 +34,86 @@ fn diff_trees_recursive<S: ObjectStore + ?Sized>(
     prefix: &str,
     changes: &mut FileChangeSet,
 ) -> Result<(), anyhow::Error> {
-    let from_entries: HashMap<&str, _> = from
-        .as_ref()
-        .map(|tree| {
-            tree.entries()
-                .iter()
-                .map(|entry| (entry.name.as_str(), entry))
-                .collect()
-        })
-        .unwrap_or_default();
+    let from_entries = from.as_ref().map_or(&[][..], Tree::entries);
+    let to_entries = to.as_ref().map_or(&[][..], Tree::entries);
 
-    let to_entries: HashMap<&str, _> = to
-        .as_ref()
-        .map(|tree| {
-            tree.entries()
-                .iter()
-                .map(|entry| (entry.name.as_str(), entry))
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut from_index = 0;
+    let mut to_index = 0;
 
-    for (&name, &to_entry) in &to_entries {
-        match from_entries.get(name) {
-            None => {
-                // Symmetric with the delete branch below: if the added
-                // entry is itself a directory, recurse into it so
-                // callers see per-leaf `added` entries
-                // (e.g. `"subdir/file.rs"`) rather than a single
-                // synthetic `"subdir"` directory entry. This matters
-                // for anything that keys on file paths — the ingest
-                // pipeline's transcript matcher, for instance, uses
-                // file-level overlap to score candidate sessions, and
-                // a root commit's `src/` directory would otherwise
-                // collapse to one entry and miss the actual files.
-                let path = child_path(prefix, name);
-                if to_entry.entry_type == EntryType::Tree {
-                    let to_subtree = store.get_tree(&to_entry.hash)?;
-                    diff_trees_recursive(store, &None, &to_subtree, &path, changes)?;
-                } else {
-                    changes.push_added(&path);
-                }
+    while let (Some(from_entry), Some(to_entry)) =
+        (from_entries.get(from_index), to_entries.get(to_index))
+    {
+        match from_entry.name.cmp(&to_entry.name) {
+            std::cmp::Ordering::Less => {
+                push_deleted_entry(store, prefix, from_entry, changes)?;
+                from_index += 1;
             }
-            Some(from_entry) => {
+            std::cmp::Ordering::Greater => {
+                push_added_entry(store, prefix, to_entry, changes)?;
+                to_index += 1;
+            }
+            std::cmp::Ordering::Equal => {
                 if from_entry.hash != to_entry.hash {
                     if from_entry.entry_type == EntryType::Tree
                         && to_entry.entry_type == EntryType::Tree
                     {
                         let from_subtree = store.get_tree(&from_entry.hash)?;
                         let to_subtree = store.get_tree(&to_entry.hash)?;
-                        let path = child_path(prefix, name);
+                        let path = child_path(prefix, &to_entry.name);
                         diff_trees_recursive(store, &from_subtree, &to_subtree, &path, changes)?;
                     } else {
-                        let path = child_path(prefix, name);
+                        let path = child_path(prefix, &to_entry.name);
                         changes.push_modified(&path);
                     }
                 }
+                from_index += 1;
+                to_index += 1;
             }
         }
     }
 
-    for (&name, &from_entry) in &from_entries {
-        if !to_entries.contains_key(name) {
-            let path = child_path(prefix, name);
-            // Recursively handle deleted entries - if it's a directory, descend into it
-            if from_entry.entry_type == EntryType::Tree {
-                let from_subtree = store.get_tree(&from_entry.hash)?;
-                diff_trees_recursive(store, &from_subtree, &None, &path, changes)?;
-            } else {
-                changes.push_deleted(&path);
-            }
-        }
+    for from_entry in &from_entries[from_index..] {
+        push_deleted_entry(store, prefix, from_entry, changes)?;
     }
 
+    for to_entry in &to_entries[to_index..] {
+        push_added_entry(store, prefix, to_entry, changes)?;
+    }
+
+    Ok(())
+}
+
+fn push_added_entry<S: ObjectStore + ?Sized>(
+    store: &S,
+    prefix: &str,
+    to_entry: &TreeEntry,
+    changes: &mut FileChangeSet,
+) -> Result<(), anyhow::Error> {
+    // Symmetric with the delete branch below: if the added entry is itself a
+    // directory, recurse into it so callers see per-leaf `added` entries.
+    let path = child_path(prefix, &to_entry.name);
+    if to_entry.entry_type == EntryType::Tree {
+        let to_subtree = store.get_tree(&to_entry.hash)?;
+        diff_trees_recursive(store, &None, &to_subtree, &path, changes)?;
+    } else {
+        changes.push_added(&path);
+    }
+    Ok(())
+}
+
+fn push_deleted_entry<S: ObjectStore + ?Sized>(
+    store: &S,
+    prefix: &str,
+    from_entry: &TreeEntry,
+    changes: &mut FileChangeSet,
+) -> Result<(), anyhow::Error> {
+    let path = child_path(prefix, &from_entry.name);
+    if from_entry.entry_type == EntryType::Tree {
+        let from_subtree = store.get_tree(&from_entry.hash)?;
+        diff_trees_recursive(store, &from_subtree, &None, &path, changes)?;
+    } else {
+        changes.push_deleted(&path);
+    }
     Ok(())
 }
 
@@ -293,5 +299,62 @@ mod tests {
         assert_eq!(changes.added_count(), 1);
         let added: Vec<_> = changes.added().collect();
         assert_eq!(added[0].path, "a/b/c.txt");
+    }
+
+    #[test]
+    fn test_diff_changes_follow_sorted_tree_entry_order() {
+        let store = InMemoryStore::new();
+        let from_sub_blob = create_blob(&store, "old nested");
+        let from_sub_tree = Tree::from_entries(vec![TreeEntry {
+            name: "c.txt".to_string(),
+            mode: FileMode::Normal,
+            hash: from_sub_blob,
+            entry_type: EntryType::Blob,
+        }]);
+        let from_sub_hash = store.put_tree(&from_sub_tree).unwrap();
+        let to_sub_blob = create_blob(&store, "new nested");
+        let to_sub_tree = Tree::from_entries(vec![TreeEntry {
+            name: "b.txt".to_string(),
+            mode: FileMode::Normal,
+            hash: to_sub_blob,
+            entry_type: EntryType::Blob,
+        }]);
+        let to_sub_hash = store.put_tree(&to_sub_tree).unwrap();
+
+        let from_hash = create_tree(
+            &store,
+            vec![
+                ("z.txt", create_blob(&store, "old z"), EntryType::Blob),
+                ("dir", from_sub_hash, EntryType::Tree),
+                ("m.txt", create_blob(&store, "same"), EntryType::Blob),
+                ("a.txt", create_blob(&store, "old a"), EntryType::Blob),
+            ],
+        );
+        let to_hash = create_tree(
+            &store,
+            vec![
+                ("b.txt", create_blob(&store, "new b"), EntryType::Blob),
+                ("dir", to_sub_hash, EntryType::Tree),
+                ("m.txt", create_blob(&store, "same"), EntryType::Blob),
+                ("z.txt", create_blob(&store, "new z"), EntryType::Blob),
+            ],
+        );
+
+        let changes: Vec<_> = diff_trees(&store, &from_hash, &to_hash)
+            .unwrap()
+            .into_iter()
+            .map(|change| (change.path, change.kind))
+            .collect();
+
+        assert_eq!(
+            changes,
+            vec![
+                ("a.txt".to_string(), crate::object::DiffKind::Deleted),
+                ("b.txt".to_string(), crate::object::DiffKind::Added),
+                ("dir/b.txt".to_string(), crate::object::DiffKind::Added),
+                ("dir/c.txt".to_string(), crate::object::DiffKind::Deleted),
+                ("z.txt".to_string(), crate::object::DiffKind::Modified),
+            ]
+        );
     }
 }
