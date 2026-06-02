@@ -2934,3 +2934,55 @@ fn push_bootstrap_with_valid_config_still_creates_state() {
         "bootstrap push should send the newly created state"
     );
 }
+
+#[test]
+fn push_network_validates_valid_config_before_bootstrapping_state() {
+    let source = TempDir::new().unwrap();
+    heddle(&["init"], Some(source.path())).expect("init source");
+
+    let before = Repository::open(source.path()).expect("open source");
+    before
+        .refs()
+        .delete_thread(&ThreadName::new("main"))
+        .expect("clear current thread ref");
+    assert!(
+        before.current_state().unwrap().is_none(),
+        "fresh source should start without current state"
+    );
+
+    let ca_path = source.path().join("ca.pem");
+    std::fs::write(
+        &ca_path,
+        "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+    )
+    .unwrap();
+    let config_path = source.path().join("valid-network-config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "[principal]\nname = \"Heddle Test\"\nemail = \"heddle@example.com\"\n\n[remote]\ntls_ca_certificate_path = \"{}\"\n",
+            ca_path.display()
+        ),
+    )
+    .unwrap();
+
+    let config = config_path.to_string_lossy().to_string();
+    let output = heddle_output_with_env(
+        &["push", "heddle://127.0.0.1:1/owner/repo"],
+        Some(source.path()),
+        &[("HEDDLE_CONFIG", &config)],
+    )
+    .expect("invoke push");
+    assert!(!output.status.success(), "push should fail at transport");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("fatal TLS/auth configuration error"),
+        "valid TLS config should pass prevalidation before transport failure: {stderr}"
+    );
+
+    let repo = Repository::open(source.path()).expect("reopen source");
+    assert!(
+        repo.current_state().unwrap().is_some(),
+        "valid network config should allow push bootstrap before transport failure"
+    );
+}
