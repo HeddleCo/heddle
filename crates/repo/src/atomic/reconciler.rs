@@ -359,7 +359,9 @@ impl RefReconciler for OplogRefReconciler {
 
         // Replay committed (non-undone) entries newer than the watermark, in id
         // order, so the fold reflects the newest committed target per ref.
-        let batches = self.oplog().recent_batches_scoped(usize::MAX, scope)?;
+        let batches = self
+            .oplog()
+            .recent_batches_after_scoped(since, usize::MAX, scope)?;
         let fold = self.fold_batches(batches, since);
 
         let (republish, remote_updates, undo_recovery) = Self::class_materialization(class, &fold);
