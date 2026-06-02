@@ -11,7 +11,9 @@ use objects::{
     object::{ChangeId, ContentHash, MarkerName, ThreadName},
 };
 
-use super::oplog_types::{OpBatch, OpEntry, OpRecord};
+use super::oplog_types::{
+    ConditionalCommitOutcome, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
+};
 
 /// Backend-agnostic interface for the operation log.
 ///
@@ -74,12 +76,26 @@ pub trait OpLogBackend: Send + Sync {
         }
     }
 
+    /// Exact-once transaction append guarded by a per-key isolation
+    /// precondition. Implementations that support local/hosted AtomicMutation
+    /// commits must override this so dedup, conflict detection, and append are
+    /// serialized at the backend's write authority.
+    fn record_batch_exactly_once_if_unchanged(
+        &self,
+        operations: Vec<OpRecord>,
+        scope: Option<&str>,
+        transaction_id: &str,
+        precondition: &IsolationPrecondition,
+    ) -> Result<ConditionalCommitOutcome> {
+        let _ = (operations, scope, transaction_id, precondition);
+        Err(objects::error::HeddleError::Config(
+            "oplog backend does not support conditional transaction commits".to_string(),
+        ))
+    }
+
     fn last(&self) -> Result<Option<OpEntry>>;
     fn recent(&self, count: usize) -> Result<Vec<OpEntry>>;
-    fn recent_batches(
-        &self,
-        count: usize,
-    ) -> impl Future<Output = Result<Vec<OpBatch>>> + Send {
+    fn recent_batches(&self, count: usize) -> impl Future<Output = Result<Vec<OpBatch>>> + Send {
         async move { self.recent_batches_scoped(count, None).await }
     }
     fn recent_batches_scoped(
@@ -317,15 +333,9 @@ pub trait OpLogBackend: Send + Sync {
 
     /// Record an undo-recovery pointer publish (heddle#330 r9). Local
     /// (per-checkout) ref, so `scope` carries `op_scope()`.
-    fn record_undo_recovery_update(
-        &self,
-        state: &ChangeId,
-        scope: Option<&str>,
-    ) -> Result<u64> {
-        let ids = self.record_batch_scoped(
-            vec![OpRecord::UndoRecoveryUpdate { state: *state }],
-            scope,
-        )?;
+    fn record_undo_recovery_update(&self, state: &ChangeId, scope: Option<&str>) -> Result<u64> {
+        let ids =
+            self.record_batch_scoped(vec![OpRecord::UndoRecoveryUpdate { state: *state }], scope)?;
         Ok(ids[0])
     }
 

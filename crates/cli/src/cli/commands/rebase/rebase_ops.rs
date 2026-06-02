@@ -194,6 +194,10 @@ pub(super) fn flush_rebase_batch(
     // past it is acceptable because the worst-case outcome is a
     // duplicate batch the operator can collapse with a second
     // `heddle undo`.
+    //
+    // heddle#382 boundary: rebase still uses the older exact-once-windowed
+    // append and is explicitly outside same-thread AtomicMutation isolation
+    // until this flow is migrated to an AtomicMutation root.
     repo.oplog().record_batch_scoped_if_no_transaction(
         batch,
         Some(&repo.op_scope()),

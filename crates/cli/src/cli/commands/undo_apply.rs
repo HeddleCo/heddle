@@ -2,6 +2,7 @@
 //! Apply undo/redo operations to the repository.
 
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -18,12 +19,13 @@ use gix::{
 use objects::error::{HeddleError, Result as HeddleResult};
 use objects::lock::{RepoLock, WriteLockGuard};
 use objects::object::{ChangeId, ContentHash, MarkerName, ThreadName};
-use oplog::{OpBatch, OpEntry, OpRecord};
+use oplog::{IsolationKey, OpBatch, OpEntry, OpRecord, isolation_keys_for_record};
 use refs::Head;
 use repo::{
     CommitGraphIndex, Repository, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
-    ThreadState, refresh_thread_freshness,
+    ThreadState,
     atomic::{AtomicMutation, DeferredMutation, StagedCommit, Tx},
+    refresh_thread_freshness,
 };
 
 use super::{advice::RecoveryAdvice, thread_cmd::thread_not_found_advice};
@@ -198,7 +200,9 @@ fn with_nonatomic_forward_fault<T>(skip_then_fail_at: usize, body: impl FnOnce()
 /// Decrement-and-test one of the per-entry fault counters; `true` iff this call
 /// is the armed trip point (the counter disarms on trip).
 #[cfg(test)]
-fn fault_counter_trips(cell: &'static std::thread::LocalKey<std::cell::Cell<Option<usize>>>) -> bool {
+fn fault_counter_trips(
+    cell: &'static std::thread::LocalKey<std::cell::Cell<Option<usize>>>,
+) -> bool {
     cell.with(|f| match f.get() {
         Some(0) => {
             f.set(None);
@@ -337,7 +341,9 @@ impl<'a> EntrySteps<'_, 'a> {
         self.step(
             move || repo.refs().delete_thread(&forward_name).map(|_| ()),
             move || match prev {
-                Some(prev) => repo.refs().set_thread(&ThreadName::new(restore_name), &prev),
+                Some(prev) => repo
+                    .refs()
+                    .set_thread(&ThreadName::new(restore_name), &prev),
                 None => Ok(()),
             },
         )
@@ -374,7 +380,9 @@ impl<'a> EntrySteps<'_, 'a> {
         self.step(
             move || repo.refs().delete_marker(&forward_name).map(|_| ()),
             move || match prev {
-                Some(prev) => repo.refs().create_marker(&MarkerName::new(restore_name), &prev),
+                Some(prev) => repo
+                    .refs()
+                    .create_marker(&MarkerName::new(restore_name), &prev),
                 None => Ok(()),
             },
         )
@@ -404,9 +412,7 @@ impl<'a> EntrySteps<'_, 'a> {
             move |prior| {
                 ThreadManager::new(repo.heddle_dir()).converge_records(&restore_name, &prior)
             },
-            move || {
-                ThreadManager::new(repo.heddle_dir()).converge_records(&forward_name, &desired)
-            },
+            move || ThreadManager::new(repo.heddle_dir()).converge_records(&forward_name, &desired),
         )
     }
 
@@ -1660,6 +1666,14 @@ impl AtomicMutation for StageUndoRecovery {
         "undo:stage-recovery".to_string()
     }
 
+    fn isolation_keys(&self, repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
+        let mut keys = BTreeSet::new();
+        keys.insert(IsolationKey::LocalHead {
+            scope: repo.op_scope(),
+        });
+        Ok(keys)
+    }
+
     fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<()>> {
         let Some(state) = self.head else {
             return Ok(StagedCommit::pure(()));
@@ -1721,6 +1735,13 @@ impl AtomicMutation for ApplyUndoBatch {
         format!("undo:batch:{}", self.batch.id)
     }
 
+    fn isolation_keys(&self, repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
+        Ok(isolation_keys_for_batches(
+            std::slice::from_ref(&self.batch),
+            &repo.op_scope(),
+        ))
+    }
+
     fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<OpBatch>> {
         let mut steps = EntrySteps::new(tx);
         for (applied, entry) in self.batch.entries.iter().rev().enumerate() {
@@ -1734,9 +1755,7 @@ impl AtomicMutation for ApplyUndoBatch {
             apply_undo_entry(&mut steps, entry)?;
             #[cfg(test)]
             if self.fail_after_entries == Some(applied + 1) {
-                return Err(HeddleError::Conflict(
-                    "injected mid-undo fault".to_string(),
-                ));
+                return Err(HeddleError::Conflict("injected mid-undo fault".to_string()));
             }
             #[cfg(not(test))]
             let _ = applied;
@@ -1782,6 +1801,13 @@ impl AtomicMutation for ApplyRedoBatch {
         format!("redo:batch:{}", self.batch.id)
     }
 
+    fn isolation_keys(&self, repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
+        Ok(isolation_keys_for_batches(
+            std::slice::from_ref(&self.batch),
+            &repo.op_scope(),
+        ))
+    }
+
     fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<OpBatch>> {
         let mut steps = EntrySteps::new(tx);
         for (applied, entry) in self.batch.entries.iter().enumerate() {
@@ -1791,9 +1817,7 @@ impl AtomicMutation for ApplyRedoBatch {
             apply_redo_entry(&mut steps, entry)?;
             #[cfg(test)]
             if self.fail_after_entries == Some(applied + 1) {
-                return Err(HeddleError::Conflict(
-                    "injected mid-redo fault".to_string(),
-                ));
+                return Err(HeddleError::Conflict("injected mid-redo fault".to_string()));
             }
             #[cfg(not(test))]
             let _ = applied;
@@ -1804,6 +1828,22 @@ impl AtomicMutation for ApplyRedoBatch {
 }
 
 impl DeferredMutation for ApplyRedoBatch {}
+
+fn isolation_keys_for_batches(batches: &[OpBatch], scope: &str) -> BTreeSet<IsolationKey> {
+    let mut keys = BTreeSet::new();
+    for batch in batches {
+        for entry in &batch.entries {
+            keys.extend(isolation_keys_for_record(
+                &entry.operation,
+                entry.scope.as_deref(),
+            ));
+        }
+    }
+    keys.insert(IsolationKey::LocalHead {
+        scope: scope.to_string(),
+    });
+    keys
+}
 
 /// Root composite for `heddle undo`: stage the recovery pointer, then nest one
 /// [`ApplyUndoBatch`] per batch. Returns the updated (undone) batches for the
@@ -1834,6 +1874,10 @@ impl AtomicMutation for UndoOp {
 
     fn transaction_id(&self) -> String {
         self.transaction_id.clone()
+    }
+
+    fn isolation_keys(&self, repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
+        Ok(isolation_keys_for_batches(&self.batches, &repo.op_scope()))
     }
 
     fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<Vec<OpBatch>>> {
@@ -1871,6 +1915,10 @@ impl AtomicMutation for RedoOp {
 
     fn transaction_id(&self) -> String {
         self.transaction_id.clone()
+    }
+
+    fn isolation_keys(&self, repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
+        Ok(isolation_keys_for_batches(&self.batches, &repo.op_scope()))
     }
 
     fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<Vec<OpBatch>>> {
@@ -1955,6 +2003,10 @@ mod atomic_tests {
             "test-undo-fault".to_string()
         }
 
+        fn isolation_keys(&self, repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
+            Ok(isolation_keys_for_batches(&self.batches, &repo.op_scope()))
+        }
+
         fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<()>> {
             tx.enroll(StageUndoRecovery {
                 head: self.recovery_head,
@@ -1962,7 +2014,10 @@ mod atomic_tests {
             let last = self.batches.len() - 1;
             for (i, batch) in self.batches.iter().enumerate() {
                 if i == last {
-                    tx.enroll(ApplyUndoBatch::failing_after(batch.clone(), self.fail_after))?;
+                    tx.enroll(ApplyUndoBatch::failing_after(
+                        batch.clone(),
+                        self.fail_after,
+                    ))?;
                 } else {
                     tx.enroll(ApplyUndoBatch::new(batch.clone()))?;
                 }
@@ -1985,11 +2040,18 @@ mod atomic_tests {
             "test-redo-fault".to_string()
         }
 
+        fn isolation_keys(&self, repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
+            Ok(isolation_keys_for_batches(&self.batches, &repo.op_scope()))
+        }
+
         fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<()>> {
             let last = self.batches.len() - 1;
             for (i, batch) in self.batches.iter().enumerate() {
                 if i == last {
-                    tx.enroll(ApplyRedoBatch::failing_after(batch.clone(), self.fail_after))?;
+                    tx.enroll(ApplyRedoBatch::failing_after(
+                        batch.clone(),
+                        self.fail_after,
+                    ))?;
                 } else {
                     tx.enroll(ApplyRedoBatch::new(batch.clone()))?;
                 }
@@ -2060,7 +2122,11 @@ mod atomic_tests {
         assert!(result.is_err(), "the injected fault must fail the undo");
 
         // Exact pre-operation state restored across every dimension.
-        assert_eq!(repo.head().unwrap(), Some(s2), "HEAD rewound to pre-undo tip");
+        assert_eq!(
+            repo.head().unwrap(),
+            Some(s2),
+            "HEAD rewound to pre-undo tip"
+        );
         assert_eq!(main_thread(&repo), pre_main, "main ref rewound");
         assert!(temp.path().join("a.txt").exists(), "s1 file restored");
         assert!(temp.path().join("b.txt").exists(), "s2 file restored");
@@ -2129,7 +2195,10 @@ mod atomic_tests {
         // Rewound to the fully-undone pre-redo state.
         assert_eq!(repo.head().unwrap(), pre_redo_head, "HEAD rewound");
         assert_eq!(main_thread(&repo), pre_redo_main, "main ref rewound");
-        assert!(!temp.path().join("a.txt").exists(), "s1 file not resurrected");
+        assert!(
+            !temp.path().join("a.txt").exists(),
+            "s1 file not resurrected"
+        );
         assert_eq!(
             repo.oplog()
                 .redo_batches_scoped(1, Some(&scope))
@@ -2171,7 +2240,10 @@ mod atomic_tests {
         let result = with_entry_write_fault(1, || {
             repo::atomic::execute(&repo, UndoOp::new(batches, pre_head, txid))
         });
-        assert!(result.is_err(), "the injected 2nd-write fault must fail the undo");
+        assert!(
+            result.is_err(),
+            "the injected 2nd-write fault must fail the undo"
+        );
 
         // The goto was rolled back along with everything else.
         assert_eq!(
@@ -2198,7 +2270,11 @@ mod atomic_tests {
             None,
             "recovery pointer cleared by rewind"
         );
-        assert_eq!(commit_marker_count(&repo), pre_markers, "no marker committed");
+        assert_eq!(
+            commit_marker_count(&repo),
+            pre_markers,
+            "no marker committed"
+        );
     }
 
     /// Per-effect rollback, REDO direction (heddle#355 cid 3330966931). Mirror of
@@ -2231,7 +2307,10 @@ mod atomic_tests {
         let result = with_entry_write_fault(1, || {
             repo::atomic::execute(&repo, RedoOp::new(redo_batches, txid))
         });
-        assert!(result.is_err(), "the injected 2nd-write fault must fail the redo");
+        assert!(
+            result.is_err(),
+            "the injected 2nd-write fault must fail the redo"
+        );
 
         assert_eq!(
             repo.head().unwrap(),
@@ -2252,7 +2331,11 @@ mod atomic_tests {
             1,
             "batch still redoable"
         );
-        assert_eq!(commit_marker_count(&repo), pre_markers, "no marker committed");
+        assert_eq!(
+            commit_marker_count(&repo),
+            pre_markers,
+            "no marker committed"
+        );
     }
 
     /// Per-effect rollback of marker writes. Undoing a batch whose entries delete
@@ -2265,7 +2348,9 @@ mod atomic_tests {
         let scope = repo.op_scope();
         // `mc` exists (its MarkerCreate undo = delete_marker, inverse recreate);
         // `md` does not (its MarkerDelete undo = create_marker, inverse delete).
-        repo.refs().create_marker(&MarkerName::new("mc"), &s1).unwrap();
+        repo.refs()
+            .create_marker(&MarkerName::new("mc"), &s1)
+            .unwrap();
         let main_state = main_thread(&repo).unwrap();
 
         repo.oplog()
@@ -2322,7 +2407,9 @@ mod atomic_tests {
         let scope = repo.op_scope();
         // `old` exists (its ThreadCreate undo = delete_thread, inverse re-set);
         // `new` does not (its ThreadDelete undo = set_thread, inverse delete).
-        repo.refs().set_thread(&ThreadName::new("old"), &s1).unwrap();
+        repo.refs()
+            .set_thread(&ThreadName::new("old"), &s1)
+            .unwrap();
         let main_state = main_thread(&repo).unwrap();
 
         repo.oplog()
@@ -2400,7 +2487,10 @@ mod atomic_tests {
         let txid = undo_redo_transaction_id("redo", &scope, generation, &redo_batches);
         repo::atomic::execute(&repo, RedoOp::new(redo_batches, txid)).unwrap();
         assert_eq!(repo.head().unwrap(), Some(s2), "redo restored the s2 tip");
-        assert!(temp.path().join("b.txt").exists(), "s2 file restored by redo");
+        assert!(
+            temp.path().join("b.txt").exists(),
+            "s2 file restored by redo"
+        );
     }
 
     /// The undo/redo serialization lock is mutually exclusive: while one holder
@@ -2493,7 +2583,11 @@ mod atomic_tests {
             .oplog()
             .recent_user_batches_scoped(1, Some(&scope))
             .unwrap();
-        assert_eq!(user.len(), 1, "depth 1 returns exactly one user-facing batch");
+        assert_eq!(
+            user.len(),
+            1,
+            "depth 1 returns exactly one user-facing batch"
+        );
         assert!(
             !user[0].is_transaction_marker_only(),
             "the returned batch is a real op, not the marker sentinel"
@@ -2549,7 +2643,10 @@ mod atomic_tests {
         let txid = undo_redo_transaction_id("undo", &scope, generation, &batches);
         let result = repo::atomic::execute(&repo, UndoOp::new(batches, recovery_head, txid));
 
-        assert!(result.is_err(), "the colliding create_marker must fail the undo");
+        assert!(
+            result.is_err(),
+            "the colliding create_marker must fail the undo"
+        );
         assert_eq!(
             repo.refs().get_marker(&marker).unwrap(),
             Some(s1),
@@ -2595,7 +2692,10 @@ mod atomic_tests {
         let txid = undo_redo_transaction_id("redo", &scope, generation, &redo_batches);
         let result = repo::atomic::execute(&repo, RedoOp::new(redo_batches, txid));
 
-        assert!(result.is_err(), "the colliding create_marker must fail the redo");
+        assert!(
+            result.is_err(),
+            "the colliding create_marker must fail the redo"
+        );
         assert_eq!(
             repo.refs().get_marker(&marker).unwrap(),
             Some(s1),
@@ -2650,7 +2750,11 @@ mod atomic_tests {
             None,
             "recovery pointer cleared by rewind"
         );
-        assert_eq!(commit_marker_count(&repo), pre_markers, "no marker committed");
+        assert_eq!(
+            commit_marker_count(&repo),
+            pre_markers,
+            "no marker committed"
+        );
     }
 
     fn sample_main_thread(current_state: &str, materialized: &str) -> Thread {
@@ -2696,6 +2800,12 @@ mod atomic_tests {
 
         fn transaction_id(&self) -> String {
             "test-save-only".to_string()
+        }
+
+        fn isolation_keys(&self, _repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
+            let mut keys = BTreeSet::new();
+            keys.insert(IsolationKey::Thread(self.record.thread.clone()));
+            Ok(keys)
         }
 
         fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<()>> {
@@ -2788,7 +2898,10 @@ mod atomic_tests {
             "only the prior record survives for the thread, no leaked newer record"
         );
         let restored = manager.find_by_thread("main").unwrap().unwrap();
-        assert_eq!(restored.id, "thread-main-v1", "find_by_thread returns ONLY prev");
+        assert_eq!(
+            restored.id, "thread-main-v1",
+            "find_by_thread returns ONLY prev"
+        );
         assert_eq!(restored.current_state.as_deref(), Some("current-A"));
     }
 
@@ -2833,6 +2946,12 @@ mod atomic_tests {
 
         fn transaction_id(&self) -> String {
             "test-restore-snapshot-only".to_string()
+        }
+
+        fn isolation_keys(&self, _repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
+            let mut keys = BTreeSet::new();
+            keys.insert(IsolationKey::Thread(self.name.clone()));
+            Ok(keys)
         }
 
         fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<()>> {
@@ -2940,7 +3059,12 @@ mod atomic_tests {
         dup.updated_at = to_restore.updated_at + chrono::Duration::seconds(60);
         manager.save(&dup).unwrap();
         assert_eq!(
-            manager.list().unwrap().iter().filter(|t| t.thread == "main").count(),
+            manager
+                .list()
+                .unwrap()
+                .iter()
+                .filter(|t| t.thread == "main")
+                .count(),
             1,
             "precondition: only the duplicate is filed at redo time"
         );
@@ -2993,6 +3117,12 @@ mod atomic_tests {
             "test-remove-record-only".to_string()
         }
 
+        fn isolation_keys(&self, _repo: &Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
+            let mut keys = BTreeSet::new();
+            keys.insert(IsolationKey::Thread(self.name.clone()));
+            Ok(keys)
+        }
+
         fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<()>> {
             let mut steps = EntrySteps::new(tx);
             remove_thread_manager_record(&mut steps, &self.name)?;
@@ -3024,9 +3154,19 @@ mod atomic_tests {
         older.id = "rec-older".to_string();
         older.updated_at = winner.updated_at - chrono::Duration::seconds(60);
         manager.save(&older).unwrap();
-        assert_eq!(manager.list().unwrap().len(), 2, "precondition: two records");
+        assert_eq!(
+            manager.list().unwrap().len(),
+            2,
+            "precondition: two records"
+        );
 
-        repo::atomic::execute(&repo, RemoveRecordOnly { name: "main".to_string() }).unwrap();
+        repo::atomic::execute(
+            &repo,
+            RemoveRecordOnly {
+                name: "main".to_string(),
+            },
+        )
+        .unwrap();
 
         assert!(
             manager.find_by_thread("main").unwrap().is_none(),
@@ -3064,9 +3204,17 @@ mod atomic_tests {
         // under one lock), then the op fails — the inverse must re-converge to the
         // full captured prior set, restoring BOTH records.
         let result = with_nonatomic_forward_fault(0, || {
-            repo::atomic::execute(&repo, RemoveRecordOnly { name: "main".to_string() })
+            repo::atomic::execute(
+                &repo,
+                RemoveRecordOnly {
+                    name: "main".to_string(),
+                },
+            )
         });
-        assert!(result.is_err(), "the injected forward fault must fail the op");
+        assert!(
+            result.is_err(),
+            "the injected forward fault must fail the op"
+        );
 
         let remaining = manager.list().unwrap();
         assert_eq!(
@@ -3074,8 +3222,7 @@ mod atomic_tests {
             2,
             "rollback re-converged to ALL same-name records, not just the winner"
         );
-        let ids: std::collections::HashSet<_> =
-            remaining.iter().map(|t| t.id.clone()).collect();
+        let ids: std::collections::HashSet<_> = remaining.iter().map(|t| t.id.clone()).collect();
         assert!(
             ids.contains("rec-winner") && ids.contains("rec-older"),
             "both the winner and the older duplicate were restored"
@@ -3119,7 +3266,10 @@ mod atomic_tests {
         };
         let redaction_id = repo.put_redaction(redaction).unwrap();
         assert_eq!(
-            repo.get_redactions_for_blob(&blob).unwrap().redactions.len(),
+            repo.get_redactions_for_blob(&blob)
+                .unwrap()
+                .redactions
+                .len(),
             1,
             "redaction planted on disk"
         );

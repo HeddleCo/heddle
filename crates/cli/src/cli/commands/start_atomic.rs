@@ -39,6 +39,7 @@
 //! all lives here, exactly like undo/redo's `EntrySteps`.
 
 use std::cell::Cell;
+use std::collections::BTreeSet;
 #[cfg(unix)]
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -46,11 +47,11 @@ use std::rc::Rc;
 
 use objects::error::{HeddleError, Result as HeddleResult};
 use objects::object::{ChangeId, ThreadName};
-use oplog::OpRecord;
+use oplog::{IsolationKey, OpRecord};
 use refs::RefExpectation;
 use repo::{
-    atomic::{AtomicMutation, StagedCommit, Tx},
     Repository, Thread, ThreadManager, ThreadMode,
+    atomic::{AtomicMutation, StagedCommit, Tx},
 };
 
 use super::mount_lifecycle::{self, MountOwnership};
@@ -969,6 +970,18 @@ impl AtomicMutation for StartThread {
 
     fn transaction_id(&self) -> String {
         self.transaction_id.clone()
+    }
+
+    fn isolation_keys(&self, _repo: &repo::Repository) -> HeddleResult<BTreeSet<IsolationKey>> {
+        let mut keys = BTreeSet::new();
+        keys.insert(IsolationKey::Thread(self.name.clone()));
+        if let Some(thread) = &self.record.target_thread {
+            keys.insert(IsolationKey::Thread(thread.clone()));
+        }
+        if let Some(thread) = &self.record.parent_thread {
+            keys.insert(IsolationKey::Thread(thread.clone()));
+        }
+        Ok(keys)
     }
 
     fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<Vec<String>>> {

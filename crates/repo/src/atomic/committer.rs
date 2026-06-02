@@ -41,6 +41,10 @@ impl RefCommitter for OplogRefCommitter {
                     .map_err(|e| HeddleError::Serialization(e.to_string()))
             })
             .collect::<Result<Vec<_>>>()?;
+        // heddle#382 boundary: ref commit-and-publish is not an AtomicMutation
+        // transaction and does not append a TransactionCommit marker. Commands
+        // needing same-thread isolation must enter through an AtomicMutation
+        // root; this committer intentionally does not grow an ad hoc CAS layer.
         // Fresh handle so the append reloads the current log under the write
         // lock; preserves the configured principal for attribution.
         let oplog = OpLog::new(&self.heddle_dir, self.principal.clone());

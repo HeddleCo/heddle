@@ -228,6 +228,11 @@ impl TransactionService for LocalTransactionService {
                 // append `OpRecord::TransactionCommit` to the oplog. Real
                 // per-op replay (executing the buffered verbs at commit
                 // time rather than at call time) is the next follow-on.
+                //
+                // heddle#382 boundary: the daemon transaction service is not a
+                // local AtomicMutation root and remains outside the same-thread
+                // CAS-on-commit guarantee until this service is migrated to the
+                // conditional oplog API or an AtomicMutation-backed flow.
                 let op_count = sentinel.buffered_ops.len() as u32;
                 let transaction_id = sentinel.transaction_id.clone();
                 sentinel.state = STATE_COMMITTED.to_string();

@@ -15,7 +15,10 @@ use objects::{
 
 use super::{
     oplog_backend::OpLogBackend,
-    oplog_types::{OpBatch, OpEntry, OpRecord},
+    oplog_types::{
+        ConditionalCommitOutcome, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
+        isolation_keys_for_record,
+    },
     packed_oplog::PackedOpLog,
 };
 
@@ -439,6 +442,68 @@ impl OpLog {
         Ok(Some(ids))
     }
 
+    pub fn record_batch_exactly_once_if_unchanged(
+        &self,
+        operations: Vec<OpRecord>,
+        scope: Option<&str>,
+        transaction_id: &str,
+        precondition: &IsolationPrecondition,
+    ) -> Result<ConditionalCommitOutcome> {
+        if operations.is_empty() {
+            return Ok(ConditionalCommitOutcome::Committed(Vec::new()));
+        }
+
+        let _lock = self.write_lock()?;
+        let mut packed = self.load_fresh()?;
+
+        if let Some(commit_entry) = packed.entries.iter().find(|entry| {
+            matches!(
+                &entry.operation,
+                OpRecord::TransactionCommit { transaction_id: id, .. }
+                    if id == transaction_id
+            )
+        }) {
+            let committed = packed
+                .entries
+                .iter()
+                .filter(|entry| entry.batch_id == commit_entry.batch_id)
+                .filter(|entry| !is_transaction_commit(&entry.operation))
+                .map(|entry| entry.operation.clone())
+                .collect();
+            return Ok(ConditionalCommitOutcome::AlreadyCommitted(committed));
+        }
+
+        if !precondition.keys.is_empty() && packed.head_id != precondition.since_head_id {
+            for entry in packed
+                .entries
+                .iter()
+                .filter(|entry| entry.id > precondition.since_head_id)
+            {
+                let touched = isolation_keys_for_record(&entry.operation, entry.scope.as_deref());
+                if let Some(key) = touched.intersection(&precondition.keys).next().cloned() {
+                    return Ok(ConditionalCommitOutcome::IsolationConflict {
+                        key,
+                        since_head_id: precondition.since_head_id,
+                        conflicting_entry_id: entry.id,
+                    });
+                }
+            }
+        }
+
+        let start_id = packed.head_id + 1;
+        let timestamp = Utc::now();
+        let scope_owned = scope.map(str::to_string);
+        let new_entries =
+            Self::build_entries(&self.actor, operations, start_id, timestamp, &scope_owned);
+        let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
+
+        packed.append(new_entries);
+        packed.save()?;
+        *self.cached.lock().unwrap() = Some(packed);
+
+        Ok(ConditionalCommitOutcome::Committed(ids))
+    }
+
     /// Current oplog generation — the monotonic `head_id`
     /// (`packed_oplog.rs` leading field). Reads only the **fixed-size header**
     /// from disk (not the whole log), so it is the cheap O(1) gate the per-read
@@ -601,6 +666,22 @@ impl OpLogBackend for OpLog {
         )
     }
 
+    fn record_batch_exactly_once_if_unchanged(
+        &self,
+        operations: Vec<OpRecord>,
+        scope: Option<&str>,
+        transaction_id: &str,
+        precondition: &IsolationPrecondition,
+    ) -> Result<ConditionalCommitOutcome> {
+        OpLog::record_batch_exactly_once_if_unchanged(
+            self,
+            operations,
+            scope,
+            transaction_id,
+            precondition,
+        )
+    }
+
     fn last(&self) -> Result<Option<OpEntry>> {
         OpLog::last(self)
     }
@@ -609,7 +690,11 @@ impl OpLogBackend for OpLog {
         OpLog::recent(self, count)
     }
 
-    async fn recent_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
+    async fn recent_batches_scoped(
+        &self,
+        count: usize,
+        scope: Option<&str>,
+    ) -> Result<Vec<OpBatch>> {
         OpLog::recent_batches_scoped(self, count, scope)
     }
 

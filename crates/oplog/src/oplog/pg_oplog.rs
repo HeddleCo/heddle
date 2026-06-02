@@ -19,7 +19,10 @@ use uuid::Uuid;
 
 use super::{
     oplog_backend::OpLogBackend,
-    oplog_types::{OpBatch, OpEntry, OpRecord},
+    oplog_types::{
+        ConditionalCommitOutcome, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
+        isolation_keys_for_record,
+    },
 };
 
 fn sqlx_err(e: sqlx::Error) -> HeddleError {
@@ -276,6 +279,146 @@ impl OpLogBackend for PgOpLogBackend {
         })
     }
 
+    fn record_batch_exactly_once_if_unchanged(
+        &self,
+        operations: Vec<OpRecord>,
+        scope: Option<&str>,
+        transaction_id: &str,
+        precondition: &IsolationPrecondition,
+    ) -> Result<ConditionalCommitOutcome> {
+        if operations.is_empty() {
+            return Ok(ConditionalCommitOutcome::Committed(Vec::new()));
+        }
+
+        let pool = Arc::clone(&self.pool);
+        let repo_id = self.repo_id;
+        let scope = scope.map(str::to_string);
+        let transaction_id = transaction_id.to_string();
+        let precondition = precondition.clone();
+
+        self.block(async move {
+            let mut tx = pool.begin().await.map_err(sqlx_err)?;
+
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+                .bind(repo_id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(sqlx_err)?;
+
+            let committed_batch_id: Option<i64> = sqlx::query_scalar(
+                "SELECT batch_id FROM oplog
+                 WHERE repo_id = $1
+                   AND op_data->'TransactionCommit'->>'transaction_id' = $2
+                 ORDER BY id ASC
+                 LIMIT 1",
+            )
+            .bind(repo_id)
+            .bind(&transaction_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(sqlx_err)?;
+
+            if let Some(batch_id) = committed_batch_id {
+                let rows = sqlx::query(
+                    "SELECT id, batch_id, batch_index, op_data, undone, created_at, scope
+                     FROM oplog
+                     WHERE repo_id = $1 AND batch_id = $2
+                     ORDER BY batch_index ASC",
+                )
+                .bind(repo_id)
+                .bind(batch_id)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(sqlx_err)?;
+                let records = rows
+                    .iter()
+                    .map(Self::row_to_entry)
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .filter(|entry| !matches!(entry.operation, OpRecord::TransactionCommit { .. }))
+                    .map(|entry| entry.operation)
+                    .collect();
+                tx.rollback().await.map_err(sqlx_err)?;
+                return Ok(ConditionalCommitOutcome::AlreadyCommitted(records));
+            }
+
+            let current_head_id: i64 =
+                sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM oplog WHERE repo_id = $1")
+                    .bind(repo_id)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(sqlx_err)?;
+
+            if !precondition.keys.is_empty() && current_head_id as u64 != precondition.since_head_id
+            {
+                let rows = sqlx::query(
+                    "SELECT id, batch_id, batch_index, op_data, undone, created_at, scope
+                     FROM oplog
+                     WHERE repo_id = $1 AND id > $2
+                     ORDER BY id ASC",
+                )
+                .bind(repo_id)
+                .bind(precondition.since_head_id as i64)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(sqlx_err)?;
+                for entry in rows
+                    .iter()
+                    .map(Self::row_to_entry)
+                    .collect::<Result<Vec<_>>>()?
+                {
+                    let touched =
+                        isolation_keys_for_record(&entry.operation, entry.scope.as_deref());
+                    if let Some(key) = touched.intersection(&precondition.keys).next().cloned() {
+                        tx.rollback().await.map_err(sqlx_err)?;
+                        return Ok(ConditionalCommitOutcome::IsolationConflict {
+                            key,
+                            since_head_id: precondition.since_head_id,
+                            conflicting_entry_id: entry.id,
+                        });
+                    }
+                }
+            }
+
+            let batch_id = sqlx::query_scalar::<_, i64>(
+                "INSERT INTO oplog_batch_counters (repo_id, next_batch_id, updated_at)
+                 VALUES ($1, 2, NOW())
+                 ON CONFLICT (repo_id)
+                 DO UPDATE SET
+                   next_batch_id = oplog_batch_counters.next_batch_id + 1,
+                   updated_at = NOW()
+                 RETURNING next_batch_id - 1",
+            )
+            .bind(repo_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(sqlx_err)?;
+
+            let mut ids = Vec::with_capacity(operations.len());
+            for (index, op) in operations.iter().enumerate() {
+                let op_data = serde_json::to_value(op)
+                    .map_err(|e| HeddleError::Serialization(e.to_string()))?;
+                let id: i64 = sqlx::query_scalar::<_, i64>(
+                    "INSERT INTO oplog (repo_id, batch_id, batch_index, op_data, undone, scope)
+                     VALUES ($1, $2, $3, $4, false, $5)
+                     RETURNING id",
+                )
+                .bind(repo_id)
+                .bind(batch_id)
+                .bind(index as i32)
+                .bind(op_data)
+                .bind(scope.as_deref())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(sqlx_err)?;
+                ids.push(id as u64);
+            }
+
+            tx.commit().await.map_err(sqlx_err)?;
+            Ok(ConditionalCommitOutcome::Committed(ids))
+        })
+    }
+
     fn last(&self) -> Result<Option<OpEntry>> {
         let pool = Arc::clone(&self.pool);
         let repo_id = self.repo_id;
@@ -309,7 +452,11 @@ impl OpLogBackend for PgOpLogBackend {
         })
     }
 
-    async fn recent_batches_scoped(&self, count: usize, scope: Option<&str>) -> Result<Vec<OpBatch>> {
+    async fn recent_batches_scoped(
+        &self,
+        count: usize,
+        scope: Option<&str>,
+    ) -> Result<Vec<OpBatch>> {
         self.fetch_scoped_batches(count, scope, "", "DESC", false)
             .await
     }

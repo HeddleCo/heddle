@@ -20,7 +20,7 @@
 //! middleware code is identical regardless of backend.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -32,6 +32,7 @@ use objects::{
     lock::{RepoLock, WriteLockGuard},
     object::OperationId,
 };
+use oplog::IsolationKey;
 use serde::{Deserialize, Serialize};
 
 use crate::Repository;
@@ -187,6 +188,10 @@ impl AtomicMutation for ReserveOpId {
         reserve_transaction_id(self.operation_id, &self.verb, self.request_hash)
     }
 
+    fn isolation_keys(&self, _repo: &Repository) -> Result<BTreeSet<IsolationKey>> {
+        Ok(BTreeSet::new())
+    }
+
     fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<Self::Output>> {
         Ok(StagedCommit::pure(self.claim.clone()))
     }
@@ -230,6 +235,10 @@ impl AtomicMutation for ReserveOpIdTransaction {
 
     fn transaction_id(&self) -> String {
         reserve_transaction_id(self.operation_id, &self.verb, self.request_hash)
+    }
+
+    fn isolation_keys(&self, _repo: &Repository) -> Result<BTreeSet<IsolationKey>> {
+        Ok(BTreeSet::new())
     }
 
     fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<Self::Output>> {
@@ -579,6 +588,10 @@ mod tests {
             format!("reserve-then-abort/{}", self.op)
         }
 
+        fn isolation_keys(&self, _repo: &Repository) -> Result<BTreeSet<IsolationKey>> {
+            Ok(BTreeSet::new())
+        }
+
         fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
             tx.enroll_eager(ReserveOpId::new(
                 Arc::clone(&self.store),
@@ -868,5 +881,77 @@ mod tests {
             in_flight, 1,
             "the losing reserve must see InFlight: {outcomes:?}"
         );
+    }
+
+    struct ReserveThenConflictOnce {
+        store: Arc<OperationDedupStore>,
+        op: OperationId,
+        hash: [u8; 32],
+        injected: bool,
+    }
+
+    impl AtomicMutation for ReserveThenConflictOnce {
+        type Output = DedupOutcome;
+
+        fn transaction_id(&self) -> String {
+            format!("reserve-conflict-once/{}", self.op)
+        }
+
+        fn isolation_keys(&self, _repo: &Repository) -> Result<BTreeSet<IsolationKey>> {
+            let mut keys = BTreeSet::new();
+            keys.insert(IsolationKey::Thread("main".to_string()));
+            Ok(keys)
+        }
+
+        fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<DedupOutcome>> {
+            let claim = tx.enroll_eager(ReserveOpId::new(
+                Arc::clone(&self.store),
+                self.op,
+                "capture",
+                self.hash,
+            ))?;
+            if !self.injected {
+                self.injected = true;
+                let state = objects::object::ChangeId::generate();
+                tx.repo().oplog().record_batch(vec![
+                    oplog::OpRecord::Snapshot {
+                        new_state: state,
+                        prev_head: None,
+                        head: None,
+                        thread: Some("main".to_string()),
+                    },
+                    oplog::OpRecord::TransactionCommit {
+                        transaction_id: "reserve-conflict-racer".to_string(),
+                        op_count: 1,
+                    },
+                ])?;
+            }
+            Ok(StagedCommit::pure(claim.into_outcome()?))
+        }
+    }
+
+    #[test]
+    fn eager_reserve_observes_existing_reservation_after_conflict_retry() {
+        let (_t, repo, store) = make_repo_store();
+        let op = OperationId::new();
+        let hash = hash_request_body(b"x");
+
+        let outcome = execute(
+            &repo,
+            ReserveThenConflictOnce {
+                store: Arc::clone(&store),
+                op,
+                hash,
+                injected: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            DedupOutcome::InFlight,
+            "retrying the same op-id reserve must observe the first attempt's pending slot"
+        );
+        assert_eq!(store.len(), 1, "the retry must not create a second slot");
     }
 }

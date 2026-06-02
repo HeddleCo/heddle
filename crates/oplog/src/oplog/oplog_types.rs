@@ -1,11 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Types for the operation log.
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use objects::object::{ChangeId, ContentHash, OperationId, Principal};
 use serde::{Deserialize, Serialize};
+
+/// Logical key used by conditional transaction commits to detect intervening
+/// same-thread changes.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum IsolationKey {
+    Thread(String),
+    LocalHead { scope: String },
+}
+
+/// The oplog generation and logical keys a transaction observed before apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IsolationPrecondition {
+    pub since_head_id: u64,
+    pub keys: BTreeSet<IsolationKey>,
+}
+
+/// Result of an exact-once append guarded by an isolation precondition.
+#[derive(Debug, Clone)]
+pub enum ConditionalCommitOutcome {
+    Committed(Vec<u64>),
+    AlreadyCommitted(Vec<OpRecord>),
+    IsolationConflict {
+        key: IsolationKey,
+        since_head_id: u64,
+        conflicting_entry_id: u64,
+    },
+}
 
 /// Record of an operation that can be undone.
 ///
@@ -281,6 +308,93 @@ pub enum OpRecord {
     UndoRecoveryUpdate { state: ChangeId },
 }
 
+/// The logical isolation keys touched by one committed record.
+///
+/// This is intentionally explicit and shared by the backends and tests. Records
+/// that do not publish or read a thread/head key return an empty set.
+pub fn isolation_keys_for_record(record: &OpRecord, scope: Option<&str>) -> BTreeSet<IsolationKey> {
+    let mut keys = BTreeSet::new();
+    match record {
+        OpRecord::Snapshot {
+            thread: Some(thread),
+            ..
+        }
+        | OpRecord::Checkpoint {
+            thread: Some(thread),
+            ..
+        }
+        | OpRecord::ThreadCreate { name: thread, .. }
+        | OpRecord::ThreadDelete { name: thread, .. }
+        | OpRecord::ThreadUpdate { name: thread, .. }
+        | OpRecord::EphemeralThreadCollapse { thread, .. }
+        | OpRecord::ThreadCreateV2 { name: thread, .. }
+        | OpRecord::GitCheckpoint { branch: thread, .. }
+        | OpRecord::RemoteThreadUpdate { thread, .. }
+        | OpRecord::RemoteThreadDelete { thread, .. } => {
+            keys.insert(IsolationKey::Thread(thread.clone()));
+        }
+        OpRecord::Snapshot { thread: None, .. }
+        | OpRecord::Checkpoint { thread: None, .. }
+        | OpRecord::Goto { .. }
+        | OpRecord::UndoRecoveryUpdate { .. } => {
+            if let Some(scope) = scope {
+                keys.insert(IsolationKey::LocalHead {
+                    scope: scope.to_string(),
+                });
+            }
+        }
+        OpRecord::FastForward {
+            source_thread,
+            target_thread,
+            ..
+        }
+        | OpRecord::FastForwardV2 {
+            source_thread,
+            target_thread,
+            ..
+        } => {
+            keys.insert(IsolationKey::Thread(source_thread.clone()));
+            keys.insert(IsolationKey::Thread(target_thread.clone()));
+        }
+        OpRecord::Fork {
+            thread: Some(thread),
+            ..
+        }
+        | OpRecord::Collapse {
+            thread: Some(thread),
+            ..
+        } => {
+            keys.insert(IsolationKey::Thread(thread.clone()));
+        }
+        OpRecord::Fork {
+            thread: None, head, ..
+        } => {
+            if head.is_some()
+                && let Some(scope) = scope
+            {
+                keys.insert(IsolationKey::LocalHead {
+                    scope: scope.to_string(),
+                });
+            }
+        }
+        OpRecord::Collapse { thread: None, .. } => {
+            if let Some(scope) = scope {
+                keys.insert(IsolationKey::LocalHead {
+                    scope: scope.to_string(),
+                });
+            }
+        }
+        OpRecord::MarkerCreate { .. }
+        | OpRecord::MarkerDelete { .. }
+        | OpRecord::TransactionAbort { .. }
+        | OpRecord::ConflictResolved { .. }
+        | OpRecord::TransactionCommit { .. }
+        | OpRecord::Redact { .. }
+        | OpRecord::Purge { .. } => {}
+    }
+    keys
+}
+
 impl OpRecord {
     /// Get a short description of the operation.
     pub fn description(&self) -> String {
@@ -404,7 +518,12 @@ impl OpRecord {
                 thread,
                 state,
             } => {
-                format!("update remote thread {}/{} -> {}", remote, thread, state.short())
+                format!(
+                    "update remote thread {}/{} -> {}",
+                    remote,
+                    thread,
+                    state.short()
+                )
             }
             OpRecord::RemoteThreadDelete { remote, thread, .. } => {
                 format!("delete remote thread {}/{}", remote, thread)
@@ -736,7 +855,11 @@ mod verb_catalog_tests {
     fn only_checkpoint_is_checkpoint_verb() {
         for op in one_per_variant() {
             let expected = matches!(op, OpRecord::Checkpoint { .. });
-            assert_eq!(op.is_checkpoint_verb(), expected, "checkpoint flag for {op:?}");
+            assert_eq!(
+                op.is_checkpoint_verb(),
+                expected,
+                "checkpoint flag for {op:?}"
+            );
         }
     }
 
