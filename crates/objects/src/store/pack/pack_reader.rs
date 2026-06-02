@@ -6,8 +6,8 @@ use std::path::Path;
 use bytes::Bytes;
 
 use super::{
-    ObjectType, PackObjectId, PackObjectRecord, decompress_pack_payload, has_zstd_magic,
-    pack_container_spec, pack_index::PackIndex, varint, verify_container,
+    decompress_pack_payload, has_zstd_magic, pack_container_spec, pack_index::PackIndex, varint,
+    verify_container, ObjectType, PackObjectId, PackObjectRecord,
 };
 use crate::{
     object::ContentHash,
@@ -90,11 +90,11 @@ impl PackReader {
     /// `FsStore::loose_blob_path` for the blob equivalent).
     pub fn get_object(&self, id: &PackObjectId) -> Result<Option<(ObjectType, Vec<u8>)>> {
         let offset = match self.index.find(id) {
-            Some(offset) => offset,
+            Some(offset) => checked_index_offset(offset)?,
             None => return Ok(None),
         };
 
-        let record = self.read_record_at_depth(offset as usize, 0)?;
+        let record = self.read_record_at_depth(offset, 0)?;
         verify_record_id_matches(id, &record.id)?;
         Ok(Some((record.obj_type, record.data)))
     }
@@ -116,7 +116,7 @@ impl PackReader {
         let Some(offset) = self.index.find(id) else {
             return Ok(None);
         };
-        let offset = offset as usize;
+        let offset = checked_index_offset(offset)?;
         if offset >= self.content_end {
             return Err(StoreError::InvalidObject(
                 "Entry offset out of bounds".to_string(),
@@ -127,32 +127,25 @@ impl PackReader {
         // requested id — guards against stale-index misrouting (see
         // `get_object` for the long-form rationale). 32-byte
         // compare; cheaper than the size+varint decode that follows.
-        let (record_id, id_len) = PackObjectId::decode_tagged(&self.data[offset..])?;
+        let (record_id, id_len) = PackObjectId::decode_tagged(self.content_from(offset)?)?;
         verify_record_id_matches(id, &record_id)?;
-        let header_start = offset + id_len;
+        let header_start = checked_index_add(offset, id_len, "record header start")?;
         let (obj_type, uncompressed_size, type_len) =
-            varint::decode_type_and_size(&self.data[header_start..]).ok_or_else(|| {
+            varint::decode_type_and_size(self.content_from(header_start)?).ok_or_else(|| {
                 StoreError::InvalidObject("Truncated type+size varint".to_string())
             })?;
-        let uncompressed_size = uncompressed_size as usize;
-        let varint_start = header_start + type_len;
-        let (compressed_size, comp_len) = varint::decode_varint(&self.data[varint_start..])
-            .ok_or_else(|| {
-                StoreError::InvalidObject("Truncated compressed_size varint".to_string())
-            })?;
-        let compressed_size = compressed_size as usize;
+        let uncompressed_size = checked_decoded_size("uncompressed_size", uncompressed_size)?;
+        let varint_start = checked_index_add(header_start, type_len, "compressed_size start")?;
+        let (compressed_size, comp_len) = varint::decode_varint(self.content_from(varint_start)?)
+            .ok_or_else(truncated_compressed_size_varint)?;
+        let compressed_size = checked_decoded_size("compressed_size", compressed_size)?;
 
         // Fast path: non-delta entry stored uncompressed. The most
         // common shape for snapshot-time packs (the builder skips
         // the delta search for unrelated blobs).
         if obj_type != ObjectType::Delta && compressed_size == uncompressed_size {
-            let data_start = varint_start + comp_len;
-            let data_end = data_start + compressed_size;
-            if data_end > self.content_end {
-                return Err(StoreError::InvalidObject(
-                    "Entry data out of bounds".to_string(),
-                ));
-            }
+            let data_start = checked_index_add(varint_start, comp_len, "entry data start")?;
+            let data_end = checked_data_end(data_start, compressed_size, self.content_end)?;
             return Ok(Some((obj_type, self.data.slice(data_start..data_end))));
         }
 
@@ -184,19 +177,19 @@ impl PackReader {
         let Some(offset) = self.index.find(&id) else {
             return Ok(None);
         };
-        let offset = offset as usize;
+        let offset = checked_index_offset(offset)?;
         if offset >= self.content_end {
             return Err(StoreError::InvalidObject(
                 "Entry offset out of bounds".to_string(),
             ));
         }
-        let (record_id, id_len) = PackObjectId::decode_tagged(&self.data[offset..])?;
+        let (record_id, id_len) = PackObjectId::decode_tagged(self.content_from(offset)?)?;
         verify_record_id_matches(&id, &record_id)?;
-        let header_start = offset + id_len;
-        let (obj_type, uncompressed_size, _type_len) =
-            super::varint::decode_type_and_size(&self.data[header_start..]).ok_or_else(|| {
-                StoreError::InvalidObject("Truncated type+size varint".to_string())
-            })?;
+        let header_start = checked_index_add(offset, id_len, "record header start")?;
+        let (obj_type, uncompressed_size, _type_len) = super::varint::decode_type_and_size(
+            self.content_from(header_start)?,
+        )
+        .ok_or_else(|| StoreError::InvalidObject("Truncated type+size varint".to_string()))?;
         if obj_type == ObjectType::Delta {
             // Delta entries record the *resolved* output size in the
             // type+size varint already (see `read_record_at_depth`'s
@@ -214,39 +207,32 @@ impl PackReader {
             ));
         }
 
-        let (id, id_len) = PackObjectId::decode_tagged(&self.data[offset..])?;
-        let header_start = offset + id_len;
+        let (id, id_len) = PackObjectId::decode_tagged(self.content_from(offset)?)?;
+        let header_start = checked_index_add(offset, id_len, "record header start")?;
 
         let (obj_type, uncompressed_size, type_len) =
-            varint::decode_type_and_size(&self.data[header_start..]).ok_or_else(|| {
+            varint::decode_type_and_size(self.content_from(header_start)?).ok_or_else(|| {
                 StoreError::InvalidObject("Truncated type+size varint".to_string())
             })?;
-        let uncompressed_size = uncompressed_size as usize;
+        let uncompressed_size = checked_decoded_size("uncompressed_size", uncompressed_size)?;
 
-        let varint_start = header_start + type_len;
-        let (compressed_size, comp_len) = varint::decode_varint(&self.data[varint_start..])
-            .ok_or_else(|| {
-                StoreError::InvalidObject("Truncated compressed_size varint".to_string())
-            })?;
-        let compressed_size = compressed_size as usize;
+        let varint_start = checked_index_add(header_start, type_len, "compressed_size start")?;
+        let (compressed_size, comp_len) = varint::decode_varint(self.content_from(varint_start)?)
+            .ok_or_else(truncated_compressed_size_varint)?;
+        let compressed_size = checked_decoded_size("compressed_size", compressed_size)?;
 
-        let mut data_start = varint_start + comp_len;
+        let mut data_start = checked_index_add(varint_start, comp_len, "entry data start")?;
 
         // Delta entries carry a tagged base id in pack v2.
         let base_id = if obj_type == ObjectType::Delta {
-            let (base_id, base_len) = PackObjectId::decode_tagged(&self.data[data_start..])?;
-            data_start += base_len;
+            let (base_id, base_len) = PackObjectId::decode_tagged(self.content_from(data_start)?)?;
+            data_start = checked_index_add(data_start, base_len, "delta data start")?;
             Some(base_id)
         } else {
             None
         };
 
-        let data_end = data_start + compressed_size;
-        if data_end > self.content_end {
-            return Err(StoreError::InvalidObject(
-                "Entry data out of bounds".to_string(),
-            ));
-        }
+        let data_end = checked_data_end(data_start, compressed_size, self.content_end)?;
 
         let stored_data = &self.data[data_start..data_end];
 
@@ -314,7 +300,8 @@ impl PackReader {
             .index
             .find(&PackObjectId::Hash(base_hash))
             .ok_or_else(|| StoreError::NotFound(base_hash.to_string()))?;
-        let base_record = self.read_record_at_depth(base_offset as usize, depth + 1)?;
+        let base_offset = checked_index_offset(base_offset)?;
+        let base_record = self.read_record_at_depth(base_offset, depth + 1)?;
         let base_type = base_record.obj_type;
         let base_data = base_record.data;
 
@@ -335,6 +322,51 @@ impl PackReader {
             )),
         }
     }
+
+    fn content_from(&self, offset: usize) -> Result<&[u8]> {
+        if offset > self.content_end {
+            return Err(StoreError::InvalidObject(
+                "Entry header out of bounds".to_string(),
+            ));
+        }
+        Ok(&self.data[offset..self.content_end])
+    }
+}
+
+fn checked_index_offset(offset: u64) -> Result<usize> {
+    usize::try_from(offset)
+        .map_err(|_| StoreError::InvalidObject("Entry offset exceeds platform limits".to_string()))
+}
+
+fn checked_decoded_size(field: &str, size: u64) -> Result<usize> {
+    usize::try_from(size)
+        .map_err(|_| StoreError::InvalidObject(format!("Decoded {field} exceeds platform limits")))
+}
+
+fn checked_index_add(start: usize, len: usize, field: &str) -> Result<usize> {
+    start.checked_add(len).ok_or_else(|| {
+        StoreError::InvalidObject(format!("{field} offset overflows platform limits"))
+    })
+}
+
+fn checked_data_end(
+    data_start: usize,
+    compressed_size: usize,
+    content_end: usize,
+) -> Result<usize> {
+    let data_end = data_start.checked_add(compressed_size).ok_or_else(|| {
+        StoreError::InvalidObject("Entry data range overflows platform limits".to_string())
+    })?;
+    if data_end > content_end {
+        return Err(StoreError::InvalidObject(
+            "Entry data out of bounds".to_string(),
+        ));
+    }
+    Ok(data_end)
+}
+
+fn truncated_compressed_size_varint() -> StoreError {
+    StoreError::InvalidObject("Truncated compressed_size varint".to_string())
 }
 
 /// Reject a record whose tagged id at the indexed offset doesn't
@@ -358,7 +390,7 @@ fn verify_record_id_matches(requested: &PackObjectId, found: &PackObjectId) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::{PackObjectId, PackReader, verify_record_id_matches};
+    use super::{verify_record_id_matches, PackObjectId, PackReader};
     use crate::{object::ContentHash, store::StoreError};
 
     #[test]

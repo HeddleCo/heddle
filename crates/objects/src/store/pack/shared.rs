@@ -6,6 +6,8 @@ use crate::{
 };
 
 pub const PACK_CHECKSUM_LEN: usize = 32;
+pub const MAX_PACK_OBJECT_OUTPUT_SIZE: usize = 1024 * 1024 * 1024;
+pub(super) const PACK_DECOMPRESSION_INITIAL_CAP: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum PackObjectId {
@@ -308,25 +310,76 @@ pub fn compress_pack_payload(data: &[u8], config: &CompressionConfig) -> Result<
 pub fn decompress_pack_payload(data: &[u8], expected_size: usize) -> Result<Vec<u8>> {
     #[cfg(feature = "zstd")]
     {
-        use std::io::Read;
-        let mut decoder = zstd::stream::read::Decoder::new(data)
-            .map_err(|e| StoreError::InvalidObject(format!("zstd decode init failed: {e}")))?;
-        let capacity = if expected_size > 0 {
-            expected_size
-        } else {
-            data.len() * 2
-        };
-        let mut buf = Vec::with_capacity(capacity);
-        decoder
-            .read_to_end(&mut buf)
-            .map_err(|e| StoreError::InvalidObject(format!("zstd decompression failed: {e}")))?;
-        Ok(buf)
+        decompress_pack_payload_with_limit(data, expected_size, MAX_PACK_OBJECT_OUTPUT_SIZE)
     }
     #[cfg(not(feature = "zstd"))]
     {
-        let _ = expected_size;
+        reject_pack_object_output_over_limit(expected_size, MAX_PACK_OBJECT_OUTPUT_SIZE)?;
+        reject_pack_object_output_over_limit(data.len(), MAX_PACK_OBJECT_OUTPUT_SIZE)?;
         Ok(data.to_vec())
     }
+}
+
+#[cfg(feature = "zstd")]
+pub(super) fn decompress_pack_payload_with_limit(
+    data: &[u8],
+    expected_size: usize,
+    max_output_size: usize,
+) -> Result<Vec<u8>> {
+    use std::io::Read;
+
+    // Pack objects may be raw blobs, so this bound must be materially
+    // larger than the delta-output limit. It is also intentionally
+    // above the protocol default and loose-compression cap, while
+    // still bounding one untrusted pack record to a finite allocation.
+    reject_pack_object_output_over_limit(expected_size, max_output_size)?;
+
+    let mut decoder = zstd::stream::read::Decoder::new(data)
+        .map_err(|e| StoreError::InvalidObject(format!("zstd decode init failed: {e}")))?;
+    let capacity = initial_decompression_capacity(data.len(), expected_size, max_output_size);
+    let mut buf = Vec::with_capacity(capacity);
+    let mut chunk = [0u8; 8192];
+
+    loop {
+        let bytes_read = decoder
+            .read(&mut chunk)
+            .map_err(|e| StoreError::InvalidObject(format!("zstd decompression failed: {e}")))?;
+        if bytes_read == 0 {
+            break;
+        }
+
+        let next_len = buf.len().checked_add(bytes_read).ok_or_else(|| {
+            StoreError::InvalidObject("Pack object output size overflows".to_string())
+        })?;
+        reject_pack_object_output_over_limit(next_len, max_output_size)?;
+        buf.extend_from_slice(&chunk[..bytes_read]);
+    }
+
+    Ok(buf)
+}
+
+#[cfg(feature = "zstd")]
+fn initial_decompression_capacity(
+    compressed_len: usize,
+    expected_size: usize,
+    max_output_size: usize,
+) -> usize {
+    let hint = if expected_size > 0 {
+        expected_size
+    } else {
+        compressed_len.saturating_mul(2)
+    };
+    hint.min(PACK_DECOMPRESSION_INITIAL_CAP)
+        .min(max_output_size)
+}
+
+fn reject_pack_object_output_over_limit(size: usize, max: usize) -> Result<()> {
+    if size > max {
+        return Err(StoreError::InvalidObject(format!(
+            "Pack object output size {size} exceeds max {max}"
+        )));
+    }
+    Ok(())
 }
 
 pub fn has_zstd_magic(data: &[u8]) -> bool {
