@@ -456,7 +456,7 @@ mod tests {
 
         let ops = all_ops(&log);
         assert_eq!(ops.len(), 1);
-        assert!(matches!(&ops[0], OpRecord::Goto { target, prev_head }
+        assert!(matches!(&ops[0], OpRecord::Goto { target, prev_head, .. }
             if *target == cid_a && *prev_head == Some(cid_b)));
     }
 

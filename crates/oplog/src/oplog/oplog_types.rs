@@ -18,12 +18,20 @@ pub enum OpRecord {
     Snapshot {
         new_state: ChangeId,
         prev_head: Option<ChangeId>,
+        /// Detached HEAD published by this snapshot, if any. Attached
+        /// snapshots publish their `thread` ref instead; detached snapshots
+        /// publish `HEAD = Detached(head)`.
+        head: Option<ChangeId>,
         thread: Option<String>,
     },
     /// Goto operation.
     Goto {
         target: ChangeId,
         prev_head: Option<ChangeId>,
+        /// HEAD published by this goto. This intentionally duplicates `target`
+        /// for the current detached-only command shape so crash replay folds the
+        /// published ref state directly instead of inferring it from intent.
+        head: ChangeId,
     },
     /// Thread creation.
     ThreadCreate { name: String, state: ChangeId },
@@ -576,6 +584,7 @@ mod verb_catalog_tests {
         let sample = OpRecord::Snapshot {
             new_state: cid(),
             prev_head: None,
+            head: Some(cid()),
             thread: None,
         };
         // Exhaustiveness anchor: this match has no wildcard, so a new variant
@@ -610,6 +619,7 @@ mod verb_catalog_tests {
             OpRecord::Goto {
                 target: cid(),
                 prev_head: None,
+                head: cid(),
             },
             OpRecord::ThreadCreate {
                 name: "t".into(),

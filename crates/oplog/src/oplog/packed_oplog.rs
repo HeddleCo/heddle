@@ -387,6 +387,7 @@ mod tests {
             operation: OpRecord::Snapshot {
                 new_state: state,
                 prev_head: None,
+                head: Some(state),
                 thread: None,
             },
             undone: false,

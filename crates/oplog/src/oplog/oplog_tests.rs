@@ -341,6 +341,7 @@ fn committed_batch_records_refreshes_for_cross_process_dedup_hit() {
                 OpRecord::Snapshot {
                     new_state: committed_state,
                     prev_head: None,
+                    head: Some(committed_state),
                     thread: None,
                 },
                 OpRecord::TransactionCommit {
@@ -357,12 +358,14 @@ fn committed_batch_records_refreshes_for_cross_process_dedup_hit() {
     // B replays the same transaction id: a cross-process dedup hit. B's
     // regenerated Snapshot id differs from A's, so a stale reconstruction
     // would diverge even if it found anything.
+    let replay_state = ChangeId::generate();
     let replay = proc_b
         .record_batch_exactly_once(
             vec![
                 OpRecord::Snapshot {
-                    new_state: ChangeId::generate(),
+                    new_state: replay_state,
                     prev_head: None,
+                    head: Some(replay_state),
                     thread: None,
                 },
                 OpRecord::TransactionCommit {
@@ -412,16 +415,19 @@ fn op_record_variants_roundtrip_and_describe() {
         OpRecord::Snapshot {
             new_state: st,
             prev_head: Some(st2),
+            head: None,
             thread: Some("main".into()),
         },
         OpRecord::Snapshot {
             new_state: st,
             prev_head: None,
+            head: Some(st),
             thread: None,
         },
         OpRecord::Goto {
             target: st,
             prev_head: Some(st2),
+            head: st,
         },
         OpRecord::ThreadCreate {
             name: "feat".into(),
@@ -904,6 +910,7 @@ mod default_backend {
             .record_batch(vec![OpRecord::Goto {
                 target: cid,
                 prev_head: Some(from),
+                head: cid,
             }])
             .unwrap();
 

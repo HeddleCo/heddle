@@ -107,6 +107,7 @@ impl AtomicMutation for SnapshotMutation<'_> {
         let record = OpRecord::Snapshot {
             new_state: execution.state.change_id,
             prev_head: self.prev_head,
+            head: self.thread().is_none().then_some(execution.state.change_id),
             thread: self.thread(),
         };
         Ok(StagedCommit::new(execution, vec![record]))

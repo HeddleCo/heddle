@@ -165,6 +165,17 @@ fn current_main_tip(repo: &std::path::Path) -> String {
         .to_string()
 }
 
+fn current_head_tip(repo: &std::path::Path) -> String {
+    let log: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "log", "--limit", "1"], Some(repo)).expect("log"),
+    )
+    .unwrap();
+    log["states"][0]["change_id"]
+        .as_str()
+        .expect("tip change_id")
+        .to_string()
+}
+
 fn assert_intentional_snapshot_crash(crashed: std::process::Output, checkpoint: &str) {
     assert!(
         !crashed.status.success(),
@@ -182,6 +193,16 @@ fn assert_intentional_snapshot_crash(crashed: std::process::Output, checkpoint: 
 fn crash_capture_at(repo: &std::path::Path, checkpoint: &str, message: &str) {
     let crashed = heddle_output_with_env(
         &["capture", "-m", message],
+        Some(repo),
+        &[("HEDDLE_FAULT_INJECT", checkpoint)],
+    )
+    .expect("spawn child");
+    assert_intentional_snapshot_crash(crashed, checkpoint);
+}
+
+fn crash_goto_at(repo: &std::path::Path, checkpoint: &str, target: &str) {
+    let crashed = heddle_output_with_env(
+        &["goto", target],
         Some(repo),
         &[("HEDDLE_FAULT_INJECT", checkpoint)],
     )
@@ -278,5 +299,45 @@ fn snapshot_atomicity_after_commit_crash_recovers_once() {
     assert_eq!(
         retry_read_tip, recovered_tip,
         "retrying reconcile-on-read must not advance the tip again",
+    );
+}
+
+/// Goto is record-first: a crash after its `OpRecord::Goto` commits but before
+/// HEAD is published must reconstruct detached HEAD from the record on the next
+/// read. Re-reading must be idempotent and must not move the still-attached
+/// source thread.
+#[test]
+#[ignore = "fault-injection: spawns child processes with HEDDLE_FAULT_INJECT"]
+fn goto_after_commit_crash_recovers_detached_head_once() {
+    let (temp, baseline_tip) = init_repo_with_baseline();
+
+    std::fs::write(temp.path().join("base.txt"), "second").unwrap();
+    heddle(&["capture", "-m", "second"], Some(temp.path())).expect("second snapshot");
+    let second_tip = current_main_tip(temp.path());
+    assert_ne!(
+        second_tip, baseline_tip,
+        "fixture must have a distinct second tip"
+    );
+
+    crash_goto_at(
+        temp.path(),
+        "goto_after_oplog_commit_before_ref_publish",
+        &baseline_tip,
+    );
+
+    let recovered_head = current_head_tip(temp.path());
+    assert_eq!(
+        recovered_head, baseline_tip,
+        "post-commit goto crash recovery must detach HEAD to the committed target",
+    );
+    assert_eq!(
+        current_head_tip(temp.path()),
+        recovered_head,
+        "a second HEAD read must not apply the committed goto a second time",
+    );
+    assert_eq!(
+        current_main_tip(temp.path()),
+        second_tip,
+        "goto recovery must not move the source thread ref",
     );
 }

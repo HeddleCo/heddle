@@ -124,6 +124,7 @@ pub(super) fn ff_advance_deferred(
         Head::Detached { state } => OpRecord::Goto {
             target: *post_target_id,
             prev_head: Some(state),
+            head: *post_target_id,
         },
     })
 }

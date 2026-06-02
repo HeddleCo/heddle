@@ -130,6 +130,7 @@ pub trait OpLogBackend: Send + Sync {
             vec![OpRecord::Snapshot {
                 new_state: *new_state,
                 prev_head: prev_head.copied(),
+                head: thread.is_none().then_some(*new_state),
                 thread: thread.map(str::to_string),
             }],
             scope,
@@ -147,6 +148,7 @@ pub trait OpLogBackend: Send + Sync {
             vec![OpRecord::Goto {
                 target: *target,
                 prev_head: prev_head.copied(),
+                head: *target,
             }],
             scope,
         )?;
