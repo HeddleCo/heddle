@@ -22,8 +22,8 @@
 //!   content is the target path. Heddle supports them natively via
 //!   [`TreeEntry::symlink`]; we pass the blob hash through unchanged.
 //! - **Gitlinks** (mode `160000`, i.e. submodule pointers) have no Heddle
-//!   equivalent in v1. They're skipped with a `warn!` trace; the caller
-//!   can choose to abort if a tree ends up empty.
+//!   equivalent in v1. Imports refuse them by default; callers can opt into
+//!   lossy import to drop them and receive an end-of-run summary.
 
 use objects::{
     object::{Blob, ContentHash, Tree, TreeEntry},
@@ -34,8 +34,13 @@ use tracing::warn;
 use crate::{
     IngestError,
     git_walk::{GitSource, TreeChild, TreeChildKind},
+    import_options::{
+        ImportOptions, LossyImportEntry, entry_relative_to_prefix, join_tree_path,
+        rebase_lossy_entry,
+    },
     sha_map::ShaMap,
 };
+use std::collections::HashMap;
 
 /// Translates one git tree (recursively) into Heddle blobs and trees.
 ///
@@ -46,28 +51,71 @@ pub struct TreeTranslator<'a, S: ObjectStore> {
     git: &'a GitSource,
     store: &'a S,
     map: &'a mut ShaMap,
+    options: ImportOptions,
+    lossy_entries: Vec<LossyImportEntry>,
+    lossy_by_tree: HashMap<String, Vec<LossyImportEntry>>,
 }
 
 impl<'a, S: ObjectStore> TreeTranslator<'a, S> {
     pub fn new(git: &'a GitSource, store: &'a S, map: &'a mut ShaMap) -> Self {
-        Self { git, store, map }
+        Self::with_options(git, store, map, ImportOptions::default())
+    }
+
+    pub fn with_options(
+        git: &'a GitSource,
+        store: &'a S,
+        map: &'a mut ShaMap,
+        options: ImportOptions,
+    ) -> Self {
+        Self {
+            git,
+            store,
+            map,
+            options,
+            lossy_entries: Vec::new(),
+            lossy_by_tree: HashMap::new(),
+        }
+    }
+
+    pub fn lossy_entries(&self) -> &[LossyImportEntry] {
+        &self.lossy_entries
     }
 
     /// Walk the git tree at `git_tree_sha` and produce the corresponding
     /// Heddle root tree's [`ContentHash`]. Idempotent: re-translating the
     /// same git SHA returns the cached hash without re-reading git.
     pub fn translate_tree(&mut self, git_tree_sha: &str) -> crate::Result<ContentHash> {
+        self.translate_tree_at(git_tree_sha, "")
+    }
+
+    fn translate_tree_at(
+        &mut self,
+        git_tree_sha: &str,
+        path_prefix: &str,
+    ) -> crate::Result<ContentHash> {
         if let Some(hash) = self.map.get_tree(git_tree_sha) {
+            if let Some(entries) = self.lossy_by_tree.get(git_tree_sha) {
+                self.lossy_entries.extend(
+                    entries
+                        .iter()
+                        .map(|entry| rebase_lossy_entry(path_prefix, entry)),
+                );
+            }
             return Ok(hash);
         }
 
+        let before_lossy = self.lossy_entries.len();
         let children = self.git.read_tree(git_tree_sha)?;
         let mut entries = Vec::with_capacity(children.len());
         for child in children {
-            if let Some(entry) = self.translate_child(&child)? {
+            if let Some(entry) = self.translate_child(&child, path_prefix)? {
                 entries.push(entry);
             }
         }
+        let tree_lossy_entries = self.lossy_entries[before_lossy..]
+            .iter()
+            .map(|entry| entry_relative_to_prefix(path_prefix, entry))
+            .collect::<Vec<_>>();
 
         let tree = Tree::from_entries(entries);
         let hash = self.store.put_tree(&tree).map_err(IngestError::from)?;
@@ -75,20 +123,28 @@ impl<'a, S: ObjectStore> TreeTranslator<'a, S> {
         self.map
             .insert_tree(git_tree_sha, hash)
             .map_err(IngestError::from)?;
+        self.lossy_by_tree
+            .insert(git_tree_sha.to_string(), tree_lossy_entries);
         Ok(hash)
     }
 
-    fn translate_child(&mut self, child: &TreeChild) -> crate::Result<Option<TreeEntry>> {
-        // Skip `.` / `..` and control-byte names before they hit Heddle's
-        // validator — we'd rather warn and drop than abort the whole
-        // import because some repo has a weird filename.
+    fn translate_child(
+        &mut self,
+        child: &TreeChild,
+        path_prefix: &str,
+    ) -> crate::Result<Option<TreeEntry>> {
         if child.name.is_empty()
             || child.name == "."
             || child.name == ".."
             || child.name.contains('/')
             || child.name.bytes().any(|b| b < 0x20 || b == 0x7f)
         {
-            warn!(name = %child.name, "skipping tree child with unusable name");
+            let entry = LossyImportEntry::dropped(
+                join_tree_path(path_prefix, &child.name),
+                Some(child.sha.clone()),
+                "tree entry name is not representable in Heddle",
+            );
+            self.record_lossy(entry)?;
             return Ok(None);
         }
 
@@ -101,7 +157,8 @@ impl<'a, S: ObjectStore> TreeTranslator<'a, S> {
                 ))
             }
             TreeChildKind::Tree => {
-                let hash = self.translate_tree(&child.sha)?;
+                let hash =
+                    self.translate_tree_at(&child.sha, &join_tree_path(path_prefix, &child.name))?;
                 Ok(Some(
                     TreeEntry::directory(child.name.clone(), hash)
                         .map_err(|e| IngestError::Heddle(e.into()))?,
@@ -118,17 +175,27 @@ impl<'a, S: ObjectStore> TreeTranslator<'a, S> {
                 ))
             }
             TreeChildKind::Gitlink => {
-                // Submodule pointers. Heddle's tree doesn't model them yet,
-                // so we drop the entry and log loudly; the tree hash will
-                // diverge from the git tree by exactly this entry.
-                warn!(
-                    name = %child.name,
-                    submodule_sha = %child.sha,
-                    "dropping gitlink (submodule) entry — no Heddle equivalent"
+                let entry = LossyImportEntry::dropped(
+                    join_tree_path(path_prefix, &child.name),
+                    Some(child.sha.clone()),
+                    "gitlink/submodule entries have no Heddle tree equivalent",
                 );
+                self.record_lossy(entry)?;
                 Ok(None)
             }
         }
+    }
+
+    fn record_lossy(&mut self, entry: LossyImportEntry) -> crate::Result<()> {
+        if !self.options.lossy {
+            return Err(IngestError::Other(format!(
+                "git import cannot represent tree entry losslessly: {}. Retry with --lossy to accept dropping or converting unrepresentable entries.",
+                entry.summary_line()
+            )));
+        }
+        warn!(entry = %entry.summary_line(), "lossy git import accepted");
+        self.lossy_entries.push(entry);
+        Ok(())
     }
 
     /// Hash `git_blob_sha` into Heddle's object store, memoizing on the git
@@ -200,6 +267,41 @@ mod tests {
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     }
 
+    fn seed_gitlink_repo(path: &Path) -> String {
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .status()
+                .expect("git cmd");
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run(&["init", "-q", "--initial-branch=main"]);
+        std::fs::write(path.join("README.md"), "# hello\n").unwrap();
+        run(&["add", "README.md"]);
+        run(&["commit", "-q", "-m", "initial"]);
+        run(&[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000,0707070707070707070707070707070707070707,vendor",
+        ]);
+        run(&["commit", "-q", "-m", "add gitlink"]);
+
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
     #[test]
     fn translates_tree_round_trip() {
         let tmp = TempDir::new().unwrap();
@@ -257,6 +359,50 @@ mod tests {
             assert!(entry.is_executable(), "run.sh should be marked executable");
             let _ = entry;
         }
+    }
+
+    #[test]
+    fn gitlink_fails_by_default() {
+        let tmp = TempDir::new().unwrap();
+        let head = seed_gitlink_repo(tmp.path());
+        let git = GitSource::open(tmp.path()).unwrap();
+        let store = InMemoryStore::new();
+        let mut map = ShaMap::new();
+        let commit = git.read_commit(&head).unwrap();
+
+        let err = TreeTranslator::new(&git, &store, &mut map)
+            .translate_tree(&commit.tree_sha)
+            .expect_err("gitlink import must fail without lossy opt-in");
+        let message = err.to_string();
+
+        assert!(message.contains("vendor"), "error names entry: {message}");
+        assert!(message.contains("--lossy"), "error names opt-in: {message}");
+    }
+
+    #[test]
+    fn gitlink_lossy_opt_in_drops_and_records_summary() {
+        let tmp = TempDir::new().unwrap();
+        let head = seed_gitlink_repo(tmp.path());
+        let git = GitSource::open(tmp.path()).unwrap();
+        let store = InMemoryStore::new();
+        let mut map = ShaMap::new();
+        let commit = git.read_commit(&head).unwrap();
+
+        let mut tx =
+            TreeTranslator::with_options(&git, &store, &mut map, ImportOptions { lossy: true });
+        let root_hash = tx.translate_tree(&commit.tree_sha).unwrap();
+        let lossy_entries = tx.lossy_entries().to_vec();
+        let tree = store.get_tree(&root_hash).unwrap().unwrap();
+        let names = tree
+            .entries()
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(!names.contains(&"vendor"));
+        assert_eq!(lossy_entries.len(), 1);
+        assert_eq!(lossy_entries[0].path, "vendor");
+        assert!(lossy_entries[0].summary_line().contains("dropped"));
     }
 
     #[test]

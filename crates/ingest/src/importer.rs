@@ -15,13 +15,14 @@
 //! in downstream modules; [`Importer::run`] leaves their seams wired but
 //! stubbed behind TODOs so we can land milestones independently.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use objects::{
     object::{Blob, ChangeId, ContentHash, Tree, TreeEntry},
     store::{
-        pack::{ObjectType as PackObjectType, PackObjectId, StreamingPackBuilder},
         CompressionConfig, ObjectStore,
+        pack::{ObjectType as PackObjectType, PackObjectId, StreamingPackBuilder},
     },
 };
 use oplog::oplog::{OpLog, OpLogBackend};
@@ -29,12 +30,16 @@ use refs::refs::RefBackend;
 use tracing::info;
 
 use crate::{
+    IngestError,
     git_walk::{CommitEntry, GitSource, RefDiscoveryStats, TreeChild, TreeChildKind},
+    import_options::{
+        ImportOptions, LossyImportEntry, entry_relative_to_prefix, join_tree_path,
+        rebase_lossy_entry,
+    },
     oplog_emit::{OplogEmitStats, OplogEmitter},
     ref_emit::{RefEmitStats, RefEmitter},
     sha_map::ShaMap,
     state_writer::state_from_commit,
-    IngestError,
 };
 
 /// Counters reported back from [`Importer::run`] — the post-import
@@ -62,6 +67,9 @@ pub struct ImportStats {
     /// non-zero count here is evidence the reflog rescued work the
     /// refs-only walker would have missed.
     pub reflog_only_commits: usize,
+    /// Git tree entries that were dropped or converted because the caller
+    /// explicitly opted into lossy import.
+    pub lossy_entries: Vec<LossyImportEntry>,
 }
 
 /// Orchestrates one import pass.
@@ -78,6 +86,7 @@ pub struct Importer<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend = OpLog> 
     refs: &'a R,
     map: &'a mut ShaMap,
     oplog: Option<&'a O>,
+    options: ImportOptions,
     /// Where the streaming pack builder writes its in-flight pack
     /// file and 512 index-bucket files. Both are removed on a clean
     /// finalize. Defaults to `std::env::temp_dir()/heddle-ingest-<pid>`
@@ -89,18 +98,14 @@ pub struct Importer<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend = OpLog> 
 }
 
 impl<'a, R: RefBackend, S: ObjectStore> Importer<'a, R, S, OpLog> {
-    pub fn new(
-        git: &'a GitSource,
-        store: &'a S,
-        refs: &'a R,
-        map: &'a mut ShaMap,
-    ) -> Self {
+    pub fn new(git: &'a GitSource, store: &'a S, refs: &'a R, map: &'a mut ShaMap) -> Self {
         Self {
             git,
             store,
             refs,
             map,
             oplog: None,
+            options: ImportOptions::default(),
             pack_staging_dir: None,
         }
     }
@@ -120,8 +125,14 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             refs: self.refs,
             map: self.map,
             oplog: Some(oplog),
+            options: self.options,
             pack_staging_dir: self.pack_staging_dir,
         }
+    }
+
+    pub fn with_options(mut self, options: ImportOptions) -> Self {
+        self.options = options;
+        self
     }
 
     /// Override the directory used to stage the in-progress pack file
@@ -233,7 +244,7 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
                 bucket_dir.clone(),
             )
             .map_err(IngestError::from)?;
-            let mut packed = PackedImport::new(self.git, self.map, builder);
+            let mut packed = PackedImport::new(self.git, self.map, builder, self.options.clone());
             let mut last_log = 0usize;
             for (idx, commit) in commits.iter().enumerate() {
                 let tree_hash = packed.translate_tree(&commit.tree_sha)?;
@@ -313,15 +324,17 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             refs: ref_stats,
             oplog: oplog_stats,
             reflog_only_commits,
+            lossy_entries: packed_stats.lossy_entries,
         })
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct PackedImportStats {
     object_count: usize,
     trees: usize,
     blobs: usize,
+    lossy_entries: Vec<LossyImportEntry>,
 }
 
 struct PackedImport<'a, W: std::io::Write + std::io::Read + std::io::Seek> {
@@ -329,30 +342,59 @@ struct PackedImport<'a, W: std::io::Write + std::io::Read + std::io::Seek> {
     map: &'a mut ShaMap,
     builder: StreamingPackBuilder<W>,
     stats: PackedImportStats,
+    options: ImportOptions,
+    lossy_by_tree: HashMap<String, Vec<LossyImportEntry>>,
 }
 
 impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> {
-    fn new(git: &'a GitSource, map: &'a mut ShaMap, builder: StreamingPackBuilder<W>) -> Self {
+    fn new(
+        git: &'a GitSource,
+        map: &'a mut ShaMap,
+        builder: StreamingPackBuilder<W>,
+        options: ImportOptions,
+    ) -> Self {
         Self {
             git,
             map,
             builder,
             stats: PackedImportStats::default(),
+            options,
+            lossy_by_tree: HashMap::new(),
         }
     }
 
     fn translate_tree(&mut self, git_tree_sha: &str) -> crate::Result<ContentHash> {
+        self.translate_tree_at(git_tree_sha, "")
+    }
+
+    fn translate_tree_at(
+        &mut self,
+        git_tree_sha: &str,
+        path_prefix: &str,
+    ) -> crate::Result<ContentHash> {
         if let Some(hash) = self.map.get_tree(git_tree_sha) {
+            if let Some(entries) = self.lossy_by_tree.get(git_tree_sha) {
+                self.stats.lossy_entries.extend(
+                    entries
+                        .iter()
+                        .map(|entry| rebase_lossy_entry(path_prefix, entry)),
+                );
+            }
             return Ok(hash);
         }
 
+        let before_lossy = self.stats.lossy_entries.len();
         let children = self.git.read_tree(git_tree_sha)?;
         let mut entries = Vec::with_capacity(children.len());
         for child in children {
-            if let Some(entry) = self.translate_child(&child)? {
+            if let Some(entry) = self.translate_child(&child, path_prefix)? {
                 entries.push(entry);
             }
         }
+        let tree_lossy_entries = self.stats.lossy_entries[before_lossy..]
+            .iter()
+            .map(|entry| entry_relative_to_prefix(path_prefix, entry))
+            .collect::<Vec<_>>();
 
         let tree = Tree::from_entries(entries);
         let hash = tree.hash();
@@ -371,17 +413,28 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
         self.map
             .insert_tree(git_tree_sha, hash)
             .map_err(IngestError::from)?;
+        self.lossy_by_tree
+            .insert(git_tree_sha.to_string(), tree_lossy_entries);
         Ok(hash)
     }
 
-    fn translate_child(&mut self, child: &TreeChild) -> crate::Result<Option<TreeEntry>> {
+    fn translate_child(
+        &mut self,
+        child: &TreeChild,
+        path_prefix: &str,
+    ) -> crate::Result<Option<TreeEntry>> {
         if child.name.is_empty()
             || child.name == "."
             || child.name == ".."
             || child.name.contains('/')
             || child.name.bytes().any(|b| b < 0x20 || b == 0x7f)
         {
-            tracing::warn!(name = %child.name, "skipping tree child with unusable name");
+            let entry = LossyImportEntry::dropped(
+                join_tree_path(path_prefix, &child.name),
+                Some(child.sha.clone()),
+                "tree entry name is not representable in Heddle",
+            );
+            self.record_lossy(entry)?;
             return Ok(None);
         }
 
@@ -394,7 +447,8 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
                 ))
             }
             TreeChildKind::Tree => {
-                let hash = self.translate_tree(&child.sha)?;
+                let hash =
+                    self.translate_tree_at(&child.sha, &join_tree_path(path_prefix, &child.name))?;
                 Ok(Some(
                     TreeEntry::directory(child.name.clone(), hash)
                         .map_err(|e| IngestError::Heddle(e.into()))?,
@@ -408,14 +462,27 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
                 ))
             }
             TreeChildKind::Gitlink => {
-                tracing::warn!(
-                    name = %child.name,
-                    submodule_sha = %child.sha,
-                    "dropping gitlink (submodule) entry — no Heddle equivalent"
+                let entry = LossyImportEntry::dropped(
+                    join_tree_path(path_prefix, &child.name),
+                    Some(child.sha.clone()),
+                    "gitlink/submodule entries have no Heddle tree equivalent",
                 );
+                self.record_lossy(entry)?;
                 Ok(None)
             }
         }
+    }
+
+    fn record_lossy(&mut self, entry: LossyImportEntry) -> crate::Result<()> {
+        if !self.options.lossy {
+            return Err(IngestError::Other(format!(
+                "git import cannot represent tree entry losslessly: {}. Retry with --lossy to accept dropping or converting unrepresentable entries.",
+                entry.summary_line()
+            )));
+        }
+        tracing::warn!(entry = %entry.summary_line(), "lossy git import accepted");
+        self.stats.lossy_entries.push(entry);
+        Ok(())
     }
 
     fn translate_blob(&mut self, git_blob_sha: &str) -> crate::Result<ContentHash> {
@@ -502,6 +569,14 @@ pub fn import_git_into(
     git_path: impl AsRef<Path>,
     heddle_path: impl AsRef<Path>,
 ) -> crate::Result<(ImportStats, ShaMap)> {
+    import_git_into_with_options(git_path, heddle_path, ImportOptions::default())
+}
+
+pub fn import_git_into_with_options(
+    git_path: impl AsRef<Path>,
+    heddle_path: impl AsRef<Path>,
+    options: ImportOptions,
+) -> crate::Result<(ImportStats, ShaMap)> {
     let git = GitSource::open(git_path)?;
     let heddle_path = heddle_path.as_ref();
     let root = strip_trailing_heddle(heddle_path);
@@ -530,6 +605,7 @@ pub fn import_git_into(
     // scoped so its `&mut map` borrow ends before `map` is returned.
     let stats = {
         let mut importer = Importer::new(&git, repo.store(), repo.refs(), &mut map)
+            .with_options(options)
             .with_oplog(repo.oplog())
             .with_pack_staging_dir(staging_dir);
         pollster::block_on(importer.run())?
@@ -584,6 +660,34 @@ mod tests {
         String::from_utf8(out.stdout).unwrap().trim().to_string()
     }
 
+    fn seed_gitlink_repo(path: &Path) {
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .status()
+                .expect("git cmd");
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run(&["init", "-q", "--initial-branch=main"]);
+        std::fs::write(path.join("README.md"), "# hello\n").unwrap();
+        run(&["add", "README.md"]);
+        run(&["commit", "-q", "-m", "initial"]);
+        run(&[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000,0808080808080808080808080808080808080808,vendor",
+        ]);
+        run(&["commit", "-q", "-m", "add gitlink"]);
+    }
+
     #[test]
     fn imports_commits_refs_and_tag_end_to_end() {
         let gitdir = TempDir::new().unwrap();
@@ -610,10 +714,61 @@ mod tests {
         assert_eq!(stats.refs.markers_written, 1); // v0.1
         assert_eq!(stats.refs.skipped_unmapped, 0);
         assert!(refs.get_thread(&ThreadName::new("main")).unwrap().is_some());
-        assert!(refs
-            .get_thread(&ThreadName::new("feature/x"))
-            .unwrap()
-            .is_some());
+        assert!(
+            refs.get_thread(&ThreadName::new("feature/x"))
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn import_git_into_rejects_gitlink_by_default() {
+        let gitdir = TempDir::new().unwrap();
+        let heddledir = TempDir::new().unwrap();
+        seed_gitlink_repo(gitdir.path());
+
+        let err = import_git_into(gitdir.path(), heddledir.path())
+            .expect_err("gitlink import must fail without --lossy");
+        let message = err.to_string();
+
+        assert!(message.contains("vendor"), "error names entry: {message}");
+        assert!(message.contains("--lossy"), "error names opt-in: {message}");
+    }
+
+    #[test]
+    fn import_git_into_lossy_drops_gitlink_and_summarizes() {
+        let gitdir = TempDir::new().unwrap();
+        let heddledir = TempDir::new().unwrap();
+        seed_gitlink_repo(gitdir.path());
+
+        let (stats, _map) = import_git_into_with_options(
+            gitdir.path(),
+            heddledir.path(),
+            ImportOptions { lossy: true },
+        )
+        .expect("lossy import succeeds");
+
+        assert!(stats.commits_imported >= 2);
+        assert_eq!(stats.lossy_entries.len(), 1);
+        assert_eq!(stats.lossy_entries[0].path, "vendor");
+        assert!(stats.lossy_entries[0].summary_line().contains("dropped"));
+    }
+
+    #[test]
+    fn import_git_into_lossy_clean_repo_reports_no_lossy_entries() {
+        let gitdir = TempDir::new().unwrap();
+        let heddledir = TempDir::new().unwrap();
+        seed_multibranch_repo(gitdir.path());
+
+        let (stats, _map) = import_git_into_with_options(
+            gitdir.path(),
+            heddledir.path(),
+            ImportOptions { lossy: true },
+        )
+        .expect("clean lossy import succeeds");
+
+        assert!(stats.commits_imported >= 2);
+        assert!(stats.lossy_entries.is_empty());
     }
 
     #[test]
@@ -632,7 +787,8 @@ mod tests {
 
         let first = pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run()).unwrap();
         let states_after_first = store.list_states().unwrap().len();
-        let second = pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run()).unwrap();
+        let second =
+            pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run()).unwrap();
         let states_after_second = store.list_states().unwrap().len();
 
         assert_eq!(first.commits_imported, second.commits_imported);

@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Import Git trees as Heddle trees.
 
-use objects::store::ObjectStore;
 use std::collections::HashMap;
 
 use objects::object::{Blob, ContentHash, FileMode, Tree, TreeEntry};
+use objects::store::ObjectStore;
 use repo::Repository as HeddleRepository;
 
 use crate::bridge::git_core::{GitBridgeError, GitResult};
+use crate::bridge::git_util::{GitImportOptions, LossyGitImportEntry};
 
 const SUBMODULE_PREFIX: &str = "heddle-submodule:";
 
@@ -16,20 +17,53 @@ pub struct GitTreeImporter<'a> {
     repo: &'a gix::Repository,
     tree_cache: HashMap<gix::hash::ObjectId, ContentHash>,
     blob_cache: HashMap<gix::hash::ObjectId, ContentHash>,
+    options: GitImportOptions,
+    lossy_entries: Vec<LossyGitImportEntry>,
+    lossy_by_tree: HashMap<gix::hash::ObjectId, Vec<LossyGitImportEntry>>,
 }
 
 impl<'a> GitTreeImporter<'a> {
     pub fn new(heddle_repo: &'a HeddleRepository, repo: &'a gix::Repository) -> Self {
+        Self::with_options(heddle_repo, repo, GitImportOptions::default())
+    }
+
+    pub fn with_options(
+        heddle_repo: &'a HeddleRepository,
+        repo: &'a gix::Repository,
+        options: GitImportOptions,
+    ) -> Self {
         Self {
             heddle_repo,
             repo,
             tree_cache: HashMap::new(),
             blob_cache: HashMap::new(),
+            options,
+            lossy_entries: Vec::new(),
+            lossy_by_tree: HashMap::new(),
         }
     }
 
+    pub fn lossy_entries(&self) -> &[LossyGitImportEntry] {
+        &self.lossy_entries
+    }
+
     pub fn import_tree(&mut self, tree_oid: gix::hash::ObjectId) -> GitResult<ContentHash> {
+        self.import_tree_at(tree_oid, "")
+    }
+
+    fn import_tree_at(
+        &mut self,
+        tree_oid: gix::hash::ObjectId,
+        path_prefix: &str,
+    ) -> GitResult<ContentHash> {
         if let Some(hash) = self.tree_cache.get(&tree_oid) {
+            if let Some(entries) = self.lossy_by_tree.get(&tree_oid) {
+                self.lossy_entries.extend(
+                    entries
+                        .iter()
+                        .map(|entry| rebase_lossy_entry(path_prefix, entry)),
+                );
+            }
             return Ok(*hash);
         }
 
@@ -39,10 +73,21 @@ impl<'a> GitTreeImporter<'a> {
             .map_err(|err| GitBridgeError::Git(err.to_string()))?;
 
         let mut entries = Vec::new();
+        let before_lossy = self.lossy_entries.len();
 
         for entry in git_tree.iter() {
             let entry = entry.map_err(|err| GitBridgeError::Git(err.to_string()))?;
-            let name = String::from_utf8_lossy(entry.filename().as_ref()).into_owned();
+            let name =
+                self.import_entry_name(path_prefix, entry.filename().as_ref(), entry.object_id())?;
+            if !is_representable_tree_name(&name) {
+                let lossy = LossyGitImportEntry::dropped(
+                    join_tree_path(path_prefix, &name),
+                    Some(entry.object_id().to_string()),
+                    "tree entry name is not representable in Heddle",
+                );
+                self.record_lossy(lossy)?;
+                continue;
+            }
 
             match entry.kind() {
                 gix::object::tree::EntryKind::Blob
@@ -81,7 +126,8 @@ impl<'a> GitTreeImporter<'a> {
                     });
                 }
                 gix::object::tree::EntryKind::Tree => {
-                    let subtree_hash = self.import_tree(entry.object_id())?;
+                    let subtree_hash = self
+                        .import_tree_at(entry.object_id(), &join_tree_path(path_prefix, &name))?;
                     entries.push(TreeEntry {
                         name,
                         mode: FileMode::Normal,
@@ -90,6 +136,12 @@ impl<'a> GitTreeImporter<'a> {
                     });
                 }
                 gix::object::tree::EntryKind::Commit => {
+                    let lossy = LossyGitImportEntry::converted(
+                        join_tree_path(path_prefix, &name),
+                        Some(entry.object_id().to_string()),
+                        "gitlink/submodule entry converted to a heddle-submodule blob",
+                    );
+                    self.record_lossy(lossy)?;
                     let hash = self.import_gitlink(entry.object_id())?;
                     entries.push(TreeEntry {
                         name,
@@ -100,11 +152,49 @@ impl<'a> GitTreeImporter<'a> {
                 }
             }
         }
+        let tree_lossy_entries = self.lossy_entries[before_lossy..]
+            .iter()
+            .map(|entry| entry_relative_to_prefix(path_prefix, entry))
+            .collect::<Vec<_>>();
 
         let tree = Tree::from_entries(entries);
         let hash = self.heddle_repo.store().put_tree(&tree)?;
         self.tree_cache.insert(tree_oid, hash);
+        self.lossy_by_tree.insert(tree_oid, tree_lossy_entries);
         Ok(hash)
+    }
+
+    fn import_entry_name(
+        &mut self,
+        path_prefix: &str,
+        raw_name: &[u8],
+        object_id: gix::hash::ObjectId,
+    ) -> GitResult<String> {
+        match std::str::from_utf8(raw_name) {
+            Ok(name) => Ok(name.to_string()),
+            Err(_) => {
+                let name = String::from_utf8_lossy(raw_name).into_owned();
+                let lossy = LossyGitImportEntry::converted(
+                    join_tree_path(path_prefix, &name),
+                    Some(object_id.to_string()),
+                    "tree entry name is not valid UTF-8 and was converted with replacement characters",
+                );
+                self.record_lossy(lossy)?;
+                Ok(name)
+            }
+        }
+    }
+
+    fn record_lossy(&mut self, entry: LossyGitImportEntry) -> GitResult<()> {
+        if !self.options.lossy {
+            return Err(GitBridgeError::InvalidMapping(format!(
+                "git import cannot represent tree entry losslessly: {}. Retry with --lossy to accept dropping or converting unrepresentable entries.",
+                entry.summary_line()
+            )));
+        }
+        tracing::warn!(entry = %entry.summary_line(), "lossy git import accepted");
+        self.lossy_entries.push(entry);
+        Ok(())
     }
 
     fn import_blob(&mut self, blob_oid: gix::hash::ObjectId) -> GitResult<ContentHash> {
@@ -142,4 +232,49 @@ pub fn import_git_tree(
     tree_oid: gix::hash::ObjectId,
 ) -> GitResult<ContentHash> {
     GitTreeImporter::new(heddle_repo, repo).import_tree(tree_oid)
+}
+
+fn is_representable_tree_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.bytes().any(|b| b < 0x20 || b == 0x7f)
+}
+
+fn join_tree_path(prefix: &str, name: &str) -> String {
+    let name = display_tree_name(name);
+    if prefix.is_empty() {
+        name
+    } else {
+        format!("{prefix}/{name}")
+    }
+}
+
+fn display_tree_name(name: &str) -> String {
+    if name.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        name.escape_debug().to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+fn rebase_lossy_entry(prefix: &str, entry: &LossyGitImportEntry) -> LossyGitImportEntry {
+    let mut rebased = entry.clone();
+    if !prefix.is_empty() {
+        rebased.path = format!("{prefix}/{}", entry.path);
+    }
+    rebased
+}
+
+fn entry_relative_to_prefix(prefix: &str, entry: &LossyGitImportEntry) -> LossyGitImportEntry {
+    if prefix.is_empty() {
+        return entry.clone();
+    }
+
+    let mut relative = entry.clone();
+    if let Some(stripped) = entry.path.strip_prefix(prefix) {
+        relative.path = stripped.trim_start_matches('/').to_string();
+    }
+    relative
 }

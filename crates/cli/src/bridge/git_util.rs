@@ -222,6 +222,71 @@ pub struct ImportStats {
     /// the bridge mirror — see [`PartialMirrorRef`]. SHA-stable export
     /// is degraded for these refs.
     pub partial_mirror_refs: Vec<PartialMirrorRef>,
+    /// Git tree entries converted under an explicit lossy import opt-in.
+    pub lossy_entries: Vec<LossyGitImportEntry>,
+}
+
+/// Policy knobs for bridge git import.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct GitImportOptions {
+    pub lossy: bool,
+}
+
+/// One git tree entry that bridge import could not represent losslessly.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct LossyGitImportEntry {
+    pub path: String,
+    pub git_object: Option<String>,
+    pub action: LossyGitImportAction,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum LossyGitImportAction {
+    Dropped,
+    Converted,
+}
+
+impl LossyGitImportAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LossyGitImportAction::Dropped => "dropped",
+            LossyGitImportAction::Converted => "converted",
+        }
+    }
+}
+
+impl LossyGitImportEntry {
+    pub fn dropped(path: String, git_object: Option<String>, reason: impl Into<String>) -> Self {
+        Self {
+            path,
+            git_object,
+            action: LossyGitImportAction::Dropped,
+            reason: reason.into(),
+        }
+    }
+
+    pub fn converted(path: String, git_object: Option<String>, reason: impl Into<String>) -> Self {
+        Self {
+            path,
+            git_object,
+            action: LossyGitImportAction::Converted,
+            reason: reason.into(),
+        }
+    }
+
+    pub fn summary_line(&self) -> String {
+        match &self.git_object {
+            Some(object) => format!(
+                "{} {} ({}): {}",
+                self.action.as_str(),
+                self.path,
+                object,
+                self.reason
+            ),
+            None => format!("{} {}: {}", self.action.as_str(), self.path, self.reason),
+        }
+    }
 }
 
 /// A ref that pointed at a non-commit object during import.

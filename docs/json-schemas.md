@@ -1598,6 +1598,7 @@ imports the requested Git refs, and returns the post-adoption verification proof
 | `refs` | array<string> | required | Refs explicitly requested with `--ref`; empty means all local refs were imported. |
 | `commits_imported`, `states_created`, `branches_synced`, `tags_synced` | int | required | Git import counts. |
 | `skipped_non_commit_refs`, `partial_mirror_refs` | int | required | Degraded import counts that may require inspection. |
+| `lossy_entries` | array<object> | required | Entries dropped or converted only when `--lossy` was explicitly passed; empty for lossless imports. |
 | `verification` | object | required | Post-adoption repository verification proof. |
 
 ---
@@ -2345,7 +2346,7 @@ key naming:
 `heddle bridge git import --output json` emits:
 
 ```json
-{"output_kind": "bridge_git_import", "commits_imported": 4, "states_created": 4, "branches_synced": 2, "tags_synced": 1, "skipped_non_commit_refs": 0, "partial_mirror_refs": 0, "already_in_sync": false}
+{"output_kind": "bridge_git_import", "commits_imported": 4, "states_created": 4, "branches_synced": 2, "tags_synced": 1, "skipped_non_commit_refs": 0, "partial_mirror_refs": 0, "lossy_entries": [], "already_in_sync": false}
 ```
 
 `heddle bridge git sync --output json` emits:

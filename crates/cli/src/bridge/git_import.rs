@@ -5,7 +5,9 @@ use objects::store::ObjectStore;
 use std::{collections::HashSet, path::Path};
 
 use chrono::{TimeZone, Utc};
-use objects::object::{Agent, Attribution, ChangeId, MarkerName, Principal, State, Status, ThreadName};
+use objects::object::{
+    Agent, Attribution, ChangeId, MarkerName, Principal, State, Status, ThreadName,
+};
 use refs::{Head, RefExpectation};
 use repo::Repository as HeddleRepository;
 use tracing::warn;
@@ -18,7 +20,7 @@ use crate::bridge::{
         thread_is_unclaimed_bootstrap,
     },
     git_notes,
-    git_util::{ImportStats, PartialMirrorRef, SkippedRef},
+    git_util::{GitImportOptions, ImportStats, PartialMirrorRef, SkippedRef},
 };
 
 /// One source ref the import will consider, with both its immediate target
@@ -247,7 +249,15 @@ pub fn import_commit(
 
 /// Import Git commits into Heddle states.
 pub fn import_all(bridge: &mut GitBridge, git_path: Option<&Path>) -> GitResult<ImportStats> {
-    import_with_ref_filter(bridge, git_path, None)
+    import_with_ref_filter(bridge, git_path, None, GitImportOptions::default())
+}
+
+pub fn import_all_with_options(
+    bridge: &mut GitBridge,
+    git_path: Option<&Path>,
+    options: GitImportOptions,
+) -> GitResult<ImportStats> {
+    import_with_ref_filter(bridge, git_path, None, options)
 }
 
 pub fn import_selected_refs(
@@ -256,13 +266,24 @@ pub fn import_selected_refs(
     refs: &[String],
 ) -> GitResult<ImportStats> {
     let wanted = refs.iter().cloned().collect::<HashSet<_>>();
-    import_with_ref_filter(bridge, git_path, Some(&wanted))
+    import_with_ref_filter(bridge, git_path, Some(&wanted), GitImportOptions::default())
+}
+
+pub fn import_selected_refs_with_options(
+    bridge: &mut GitBridge,
+    git_path: Option<&Path>,
+    refs: &[String],
+    options: GitImportOptions,
+) -> GitResult<ImportStats> {
+    let wanted = refs.iter().cloned().collect::<HashSet<_>>();
+    import_with_ref_filter(bridge, git_path, Some(&wanted), options)
 }
 
 fn import_with_ref_filter(
     bridge: &mut GitBridge,
     git_path: Option<&Path>,
     wanted_refs: Option<&HashSet<String>>,
+    options: GitImportOptions,
 ) -> GitResult<ImportStats> {
     let repo = if let Some(path) = git_path {
         open_repo(path)?
@@ -512,7 +533,8 @@ fn import_with_ref_filter(
 
     bridge.build_existing_mapping(Some(repo.path()))?;
 
-    let mut tree_importer = GitTreeImporter::new(bridge.heddle_repo, &repo);
+    let mut tree_importer =
+        GitTreeImporter::with_options(bridge.heddle_repo, &repo, options.clone());
     bridge.heddle_repo.store().begin_snapshot_write_batch()?;
     let import_result = (|| -> GitResult<()> {
         let mut visiting = HashSet::new();
@@ -533,6 +555,9 @@ fn import_with_ref_filter(
     })();
     match import_result {
         Ok(()) => {
+            stats
+                .lossy_entries
+                .extend(tree_importer.lossy_entries().iter().cloned());
             bridge.write_mapping_tmp_to_disk()?;
             bridge.heddle_repo.store().flush_snapshot_write_batch()?;
             bridge.commit_mapping_tmp_to_disk()?;
@@ -552,7 +577,10 @@ fn import_with_ref_filter(
             continue;
         }
         if let Some(change_id) = bridge.mapping.get_heddle(plan.peeled_commit_oid) {
-            let existing = bridge.heddle_repo.refs().get_thread(&ThreadName::new(name.as_str()))?;
+            let existing = bridge
+                .heddle_repo
+                .refs()
+                .get_thread(&ThreadName::new(name.as_str()))?;
             if let Some(existing_change) = existing
                 && !thread_can_adopt_change(bridge.heddle_repo, &existing_change, &change_id)?
             {

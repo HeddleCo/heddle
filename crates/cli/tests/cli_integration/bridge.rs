@@ -5,12 +5,14 @@ use objects::object::ThreadName;
 /// Initialize a colocated (drop-in) Git repo on `main` with one
 /// committed file, mirroring the bootstrap the overlay tests use.
 fn init_colocated_git_repo(path: &std::path::Path) {
-    assert!(Command::new("git")
-        .arg("init")
-        .current_dir(path)
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("git")
+            .arg("init")
+            .current_dir(path)
+            .status()
+            .unwrap()
+            .success()
+    );
     for (k, v) in [
         ("user.name", "Heddle Test"),
         ("user.email", "heddle@example.com"),
@@ -30,18 +32,22 @@ fn init_colocated_git_repo(path: &std::path::Path) {
 }
 
 fn git_commit_all_in(path: &std::path::Path, message: &str) {
-    assert!(Command::new("git")
-        .args(["add", "."])
-        .current_dir(path)
-        .status()
-        .unwrap()
-        .success());
-    assert!(Command::new("git")
-        .args(["commit", "-m", message])
-        .current_dir(path)
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["commit", "-m", message])
+            .current_dir(path)
+            .status()
+            .unwrap()
+            .success()
+    );
 }
 
 fn git_status_porcelain(path: &std::path::Path) -> String {
@@ -54,10 +60,94 @@ fn git_status_porcelain(path: &std::path::Path) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
+fn seed_gitlink_repo(path: &std::path::Path) {
+    init_colocated_git_repo(path);
+    std::fs::write(path.join("README.md"), "root\n").unwrap();
+    git_commit_all_in(path, "initial");
+
+    let submodule_oid = "0606060606060606060606060606060606060606";
+    let status = Command::new("git")
+        .args(["update-index", "--add", "--cacheinfo"])
+        .arg(format!("160000,{submodule_oid},vendor"))
+        .current_dir(path)
+        .status()
+        .expect("git update-index should run");
+    assert!(status.success(), "git update-index should succeed");
+
+    let status = Command::new("git")
+        .args(["commit", "-m", "add gitlink"])
+        .current_dir(path)
+        .status()
+        .expect("git commit should run");
+    assert!(status.success(), "git commit should succeed");
+}
+
 /// The empty-blob object id (SHA-1). An intent-to-add index entry points
 /// at this rather than a real blob — that is what makes Git treat the
 /// path as "added, content not yet staged".
 const EMPTY_BLOB_OID: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
+
+#[test]
+fn bridge_git_import_refuses_gitlink_by_default_and_lossy_summarizes() {
+    let source = TempDir::new().unwrap();
+    seed_gitlink_repo(source.path());
+
+    let default_target = TempDir::new().unwrap();
+    heddle(&["init"], Some(default_target.path())).expect("init default target");
+    let default_output = heddle_output(
+        &[
+            "bridge",
+            "git",
+            "import",
+            "--path",
+            source.path().to_str().unwrap(),
+        ],
+        Some(default_target.path()),
+    )
+    .expect("run default import");
+    assert!(
+        !default_output.status.success(),
+        "default git import must fail on gitlink"
+    );
+    let default_stderr = String::from_utf8_lossy(&default_output.stderr);
+    assert!(
+        default_stderr.contains("vendor"),
+        "error should name the offending entry: {default_stderr}"
+    );
+    assert!(
+        default_stderr.contains("--lossy"),
+        "error should name the opt-in flag: {default_stderr}"
+    );
+
+    let lossy_target = TempDir::new().unwrap();
+    heddle(&["init"], Some(lossy_target.path())).expect("init lossy target");
+    let lossy = heddle(
+        &[
+            "bridge",
+            "git",
+            "import",
+            "--lossy",
+            "--path",
+            source.path().to_str().unwrap(),
+        ],
+        Some(lossy_target.path()),
+    )
+    .expect("lossy import should succeed");
+
+    assert!(
+        lossy.contains("lossy import accepted"),
+        "lossy import should emit an end-of-run summary: {lossy}"
+    );
+    assert!(lossy.contains("vendor"), "summary names entry: {lossy}");
+    assert!(lossy.contains("converted"), "summary names action: {lossy}");
+}
+
+#[test]
+fn bridge_git_import_help_documents_lossy_flag() {
+    let output = heddle(&["bridge", "git", "import", "--help"], None).expect("help");
+
+    assert!(output.contains("--lossy"), "help should document --lossy");
+}
 
 /// After `heddle capture` records a NEW file in a colocated checkout,
 /// `git status` should report it as intent-to-add ("Heddle knows about
@@ -201,7 +291,9 @@ fn recapture_to_empty_tree_prunes_stale_intent_to_add() {
         .output()
         .unwrap();
     assert!(
-        String::from_utf8(staged.stdout).unwrap().contains(EMPTY_BLOB_OID),
+        String::from_utf8(staged.stdout)
+            .unwrap()
+            .contains(EMPTY_BLOB_OID),
         "precondition: new_file.txt must be intent-to-add after first capture"
     );
 
@@ -261,8 +353,11 @@ fn recapture_skips_intent_to_add_that_conflicts_with_tracked_file() {
     std::fs::remove_file(source.path().join("foo")).unwrap();
     std::fs::create_dir(source.path().join("foo")).unwrap();
     std::fs::write(source.path().join("foo").join("bar"), "now a dir\n").unwrap();
-    heddle(&["capture", "-m", "file becomes directory"], Some(source.path()))
-        .expect("recapture should record the file→dir change");
+    heddle(
+        &["capture", "-m", "file becomes directory"],
+        Some(source.path()),
+    )
+    .expect("recapture should record the file→dir change");
 
     // The index must stay valid: never both `foo` and `foo/bar`.
     let staged = Command::new("git")
@@ -366,11 +461,13 @@ fn test_cli_bridge_git_export_and_pull_roundtrip() {
     assert!(pull.is_ok(), "Bridge pull failed: {:?}", pull.err());
 
     let target_repo = Repository::open(target.path()).unwrap();
-    assert!(target_repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .is_some());
+    assert!(
+        target_repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -400,11 +497,12 @@ fn test_cli_bridge_git_import_from_external_repo() {
     assert!(result.is_ok(), "Bridge import failed: {:?}", result.err());
 
     let repo = Repository::open(heddle_repo_dir.path()).unwrap();
-    assert!(repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .is_some());
+    assert!(
+        repo.refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -686,12 +784,14 @@ fn test_cli_push_mirror_in_git_overlay_pushes_to_both_remotes() {
     // Plain `git init` → RepositoryCapability::GitOverlay,
     // hosted_enabled() == false. This is the drop-in case the
     // early-return in cmd_push handles.
-    assert!(Command::new("git")
-        .arg("init")
-        .current_dir(source.path())
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("git")
+            .arg("init")
+            .current_dir(source.path())
+            .status()
+            .unwrap()
+            .success()
+    );
     for (k, v) in [
         ("user.name", "Heddle Test"),
         ("user.email", "heddle@example.com"),

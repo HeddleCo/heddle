@@ -33,6 +33,7 @@
 #![allow(dead_code)] // module is under active construction
 
 pub mod git_walk;
+pub mod import_options;
 pub mod importer;
 pub mod oplog_emit;
 pub mod reasoning;
@@ -47,7 +48,8 @@ pub mod transcript;
 pub mod tree_translate;
 
 pub use git_walk::{CommitEntry, GitSource, RefHead, RefNamespace, ReflogEntry};
-pub use importer::{ImportStats, Importer, import_git_into};
+pub use import_options::{ImportOptions, LossyImportAction, LossyImportEntry};
+pub use importer::{ImportStats, Importer, import_git_into, import_git_into_with_options};
 pub use oplog_emit::{OplogEmitStats, OplogEmitter};
 pub use reasoning::{ReasoningEvidence, ReasoningPoint, ReasoningTarget};
 pub use reasoning_emit::{ReasoningEmitStats, ReasoningEmitter};
