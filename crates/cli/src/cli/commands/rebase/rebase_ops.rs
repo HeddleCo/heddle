@@ -699,6 +699,10 @@ fn apply_changes_to_tree(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use objects::object::ThreadName;
+    use refs::Head;
     use tempfile::TempDir;
 
     use super::*;
@@ -737,6 +741,99 @@ mod tests {
             prev_head: Some(objects::object::ChangeId::generate()),
             head: target,
         }
+    }
+
+    fn rebase_replay_fixture() -> (TempDir, Repository, ChangeId) {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+
+        fs::write(temp.path().join("base.txt"), "base\n").unwrap();
+        let base = repo
+            .snapshot(Some("base".to_string()), None)
+            .unwrap()
+            .change_id;
+
+        fs::write(temp.path().join("feature.txt"), "feature\n").unwrap();
+        let feature = repo
+            .snapshot(Some("feature".to_string()), None)
+            .unwrap()
+            .change_id;
+
+        repo.goto(&base).unwrap();
+        fs::write(temp.path().join("main.txt"), "main\n").unwrap();
+        let main = repo
+            .snapshot(Some("main".to_string()), None)
+            .unwrap()
+            .change_id;
+
+        repo.goto(&feature).unwrap();
+        let feature_thread = ThreadName::new("feature");
+        repo.refs().set_thread(&feature_thread, &feature).unwrap();
+        repo.refs()
+            .write_head(&Head::Attached {
+                thread: feature_thread,
+            })
+            .unwrap();
+
+        let rebase_state = super::super::rebase_state::RebaseState {
+            onto: main,
+            commits_to_replay: vec![feature],
+            current_index: 0,
+            original_head: feature,
+            pending_manual_resolution: None,
+            pre_conflict_head: None,
+            pending_advances: Vec::new(),
+            transaction_id: "rebase-dirty-routing-test".to_string(),
+        };
+        save_rebase_state(&repo.heddle_dir().join("REBASE_STATE"), &rebase_state).unwrap();
+
+        (temp, repo, main)
+    }
+
+    #[test]
+    fn replay_commits_refuses_dirty_worktree_without_discard_opt_in() {
+        let (temp, repo, _main) = rebase_replay_fixture();
+        let tracked = temp.path().join("feature.txt");
+        fs::write(&tracked, "local edit\n").unwrap();
+
+        let err =
+            replay_commits_internal(&repo, &repo.heddle_dir().join("REBASE_STATE"), None, false)
+                .unwrap_err();
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("dirty worktree") && msg.contains("feature.txt"),
+            "dirty replay should refuse and name the at-risk edit: {msg}"
+        );
+        assert_eq!(fs::read_to_string(&tracked).unwrap(), "local edit\n");
+        assert!(
+            repo.heddle_dir().join("REBASE_STATE").exists(),
+            "failed replay must leave rebase state for retry or abort"
+        );
+    }
+
+    #[test]
+    fn replay_commits_with_discard_opt_in_overwrites_dirty_worktree() {
+        let (temp, repo, _main) = rebase_replay_fixture();
+        fs::write(temp.path().join("feature.txt"), "local edit\n").unwrap();
+        fs::write(temp.path().join("scratch.txt"), "scratch\n").unwrap();
+
+        replay_commits_internal(&repo, &repo.heddle_dir().join("REBASE_STATE"), None, true)
+            .unwrap();
+
+        assert!(!temp.path().join("scratch.txt").exists());
+        assert_eq!(
+            fs::read_to_string(temp.path().join("feature.txt")).unwrap(),
+            "feature\n"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join("main.txt")).unwrap(),
+            "main\n"
+        );
+        assert!(
+            !repo.heddle_dir().join("REBASE_STATE").exists(),
+            "successful replay should remove rebase state"
+        );
     }
 
     /// heddle#198 r2 (Codex PR #218 P2): `flush_rebase_batch` must be

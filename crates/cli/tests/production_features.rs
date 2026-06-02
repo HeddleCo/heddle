@@ -1779,6 +1779,64 @@ mod rebase {
             "HEAD must remain attached to the parent thread after fast-forward rebase"
         );
     }
+
+    #[test]
+    fn test_rebase_refuses_dirty_worktree_unless_force_discards_it() {
+        let temp = TempDir::new().unwrap();
+        heddle(&["init"], Some(temp.path())).unwrap();
+        fs::write(temp.path().join("base.txt"), "base\n").unwrap();
+        heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
+
+        heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
+        heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
+        fs::write(temp.path().join("feature.txt"), "feature\n").unwrap();
+        heddle(&["capture", "-m", "Feature"], Some(temp.path())).unwrap();
+
+        heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
+        fs::write(temp.path().join("main.txt"), "main\n").unwrap();
+        heddle(&["capture", "-m", "Main"], Some(temp.path())).unwrap();
+
+        heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
+        fs::write(temp.path().join("feature.txt"), "unsnapped feature edit\n").unwrap();
+        fs::write(temp.path().join("scratch.txt"), "local only\n").unwrap();
+
+        let err = heddle(&["rebase", "main"], Some(temp.path()))
+            .expect_err("dirty rebase should refuse without --force");
+        assert!(
+            err.contains("rebase") && err.contains("unsaved") || err.contains("dirty"),
+            "dirty rebase refusal should explain the safety gate: {err}"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join("feature.txt")).unwrap(),
+            "unsnapped feature edit\n"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join("scratch.txt")).unwrap(),
+            "local only\n"
+        );
+
+        let output = heddle(&["rebase", "main", "--force"], Some(temp.path()))
+            .expect("forced rebase should discard local edits and proceed");
+        assert!(
+            output.contains("Rebasing")
+                || output.contains("Rebase completed")
+                || output.contains("\"status\": \"started\"")
+                || output.contains("\"status\":\"started\""),
+            "forced rebase should run the replay path: {output}"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join("feature.txt")).unwrap(),
+            "feature\n"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join("main.txt")).unwrap(),
+            "main\n"
+        );
+        assert!(
+            !temp.path().join("scratch.txt").exists(),
+            "--force must discard untracked local work during rebase materialization"
+        );
+    }
 }
 
 mod hooks {

@@ -1355,6 +1355,103 @@ mod tests {
     }
 
     #[test]
+    fn non_root_full_rematerialize_refuses_existing_worktree_content() {
+        let (temp_dir, repo) = create_repo();
+        fs::write(temp_dir.path().join("tracked.txt"), "tracked\n").unwrap();
+        let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
+        let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
+        let non_root = temp_dir.path().join("checkout");
+
+        let err = repo
+            .plan_worktree_apply(
+                Some(&tree),
+                &tree,
+                &non_root,
+                false,
+                WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            )
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("non_root_directory") && msg.contains("existing: tracked.txt"),
+            "non-root fallback should refuse before overwriting existing checkout content: {msg}"
+        );
+        assert_eq!(
+            fs::read_to_string(temp_dir.path().join("tracked.txt")).unwrap(),
+            "tracked\n"
+        );
+    }
+
+    #[test]
+    fn non_root_full_rematerialize_with_discard_clears_and_writes_target_tree() {
+        let (temp_dir, repo) = create_repo();
+        fs::write(temp_dir.path().join("tracked.txt"), "tracked\n").unwrap();
+        let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
+        let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
+        fs::write(temp_dir.path().join("local.txt"), "local\n").unwrap();
+        let non_root = temp_dir.path().join("checkout");
+
+        let plan = repo
+            .plan_worktree_apply(
+                Some(&tree),
+                &tree,
+                &non_root,
+                false,
+                WorktreeApplyDirtyBehavior::DiscardLocalChanges,
+            )
+            .unwrap();
+        assert_eq!(plan.strategy, WorktreeApplyStrategy::FullRematerialize);
+        assert_eq!(
+            plan.fallback_reason,
+            Some(WorktreeApplyFallbackReason::NonRootDirectory)
+        );
+
+        repo.execute_worktree_apply(&plan, &tree, &non_root)
+            .unwrap();
+
+        assert!(!temp_dir.path().join("local.txt").exists());
+        assert_eq!(
+            fs::read_to_string(non_root.join("tracked.txt")).unwrap(),
+            "tracked\n"
+        );
+        assert!(
+            !temp_dir.path().join(".heddle/state/index.bin").exists(),
+            "non-root full rematerialize must invalidate the root worktree index"
+        );
+    }
+
+    #[test]
+    fn execute_full_rematerialize_regates_refuse_on_dirty_plans() {
+        let (temp_dir, repo) = create_repo();
+        fs::write(temp_dir.path().join("tracked.txt"), "tracked\n").unwrap();
+        let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
+        let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
+        fs::write(temp_dir.path().join("local.txt"), "local\n").unwrap();
+        let plan = WorktreeApplyPlan::fallback(
+            WorktreeApplyFallbackReason::MissingCurrentTree,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+        );
+
+        let err = repo
+            .execute_worktree_apply(&plan, &tree, temp_dir.path())
+            .unwrap_err();
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("missing_current_tree") && msg.contains("existing: local.txt"),
+            "execute-time re-gate should refuse stale full-rematerialize plans: {msg}"
+        );
+        assert_eq!(
+            fs::read_to_string(temp_dir.path().join("local.txt")).unwrap(),
+            "local\n"
+        );
+        assert_eq!(
+            fs::read_to_string(temp_dir.path().join("tracked.txt")).unwrap(),
+            "tracked\n"
+        );
+    }
+
+    #[test]
     fn clean_worktree_apply_still_succeeds_by_default() {
         let (temp_dir, repo) = create_repo();
         let tracked = temp_dir.path().join("tracked.txt");

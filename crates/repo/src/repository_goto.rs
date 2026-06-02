@@ -338,3 +338,135 @@ impl Repository {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use objects::object::ThreadName;
+    use refs::Head;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn create_repo() -> (TempDir, Repository) {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        (temp, repo)
+    }
+
+    fn write_snapshot(
+        repo: &Repository,
+        root: &std::path::Path,
+        path: &str,
+        content: &str,
+    ) -> ChangeId {
+        fs::write(root.join(path), content).unwrap();
+        repo.snapshot(Some(path.to_string()), None)
+            .unwrap()
+            .change_id
+    }
+
+    #[test]
+    fn goto_from_unknown_materialized_state_full_rematerializes_clean_checkout() {
+        let (temp, repo) = create_repo();
+        let target = write_snapshot(&repo, temp.path(), "target.txt", "target\n");
+        repo.clear_worktree().unwrap();
+
+        repo.goto_from_materialized_state(&target, None).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(temp.path().join("target.txt")).unwrap(),
+            "target\n"
+        );
+        assert!(matches!(
+            repo.refs().read_head().unwrap(),
+            Head::Detached { state } if state == target
+        ));
+    }
+
+    #[test]
+    fn goto_from_materialized_pre_target_uses_disk_baseline_when_head_already_moved() {
+        let (temp, repo) = create_repo();
+        let file = temp.path().join("tracked.txt");
+        let pre_target = write_snapshot(&repo, temp.path(), "tracked.txt", "before\n");
+        fs::write(&file, "after\n").unwrap();
+        fs::write(temp.path().join("added.txt"), "added\n").unwrap();
+        let target = repo
+            .snapshot(Some("target".to_string()), None)
+            .unwrap()
+            .change_id;
+
+        repo.goto(&pre_target).unwrap();
+        repo.refs()
+            .write_head(&Head::Detached { state: target })
+            .unwrap();
+
+        repo.goto_from_materialized_state(&target, Some(&pre_target))
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(&file).unwrap(), "after\n");
+        assert_eq!(
+            fs::read_to_string(temp.path().join("added.txt")).unwrap(),
+            "added\n"
+        );
+        assert!(matches!(
+            repo.refs().read_head().unwrap(),
+            Head::Detached { state } if state == target
+        ));
+    }
+
+    #[test]
+    fn discard_local_goto_variants_overwrite_unsnapped_edits() {
+        let (temp, repo) = create_repo();
+        let tracked = temp.path().join("tracked.txt");
+        let base = write_snapshot(&repo, temp.path(), "tracked.txt", "base\n");
+        fs::write(&tracked, "target\n").unwrap();
+        let target = repo
+            .snapshot(Some("target".to_string()), None)
+            .unwrap()
+            .change_id;
+
+        repo.goto(&base).unwrap();
+        fs::write(&tracked, "local edit\n").unwrap();
+        fs::write(temp.path().join("local.txt"), "local only\n").unwrap();
+
+        repo.goto_without_record_discard_local(&target).unwrap();
+
+        assert_eq!(fs::read_to_string(&tracked).unwrap(), "target\n");
+        assert!(!temp.path().join("local.txt").exists());
+    }
+
+    #[test]
+    fn attached_fast_forward_from_materialized_state_advances_thread_without_detaching() {
+        let (temp, repo) = create_repo();
+        let base = write_snapshot(&repo, temp.path(), "base.txt", "base\n");
+        fs::write(temp.path().join("next.txt"), "next\n").unwrap();
+        let target = repo
+            .snapshot(Some("target".to_string()), None)
+            .unwrap()
+            .change_id;
+
+        repo.goto(&base).unwrap();
+        let thread = ThreadName::new("main");
+        repo.refs().set_thread(&thread, &target).unwrap();
+        repo.refs()
+            .write_head(&Head::Attached {
+                thread: thread.clone(),
+            })
+            .unwrap();
+
+        repo.fast_forward_attached_from_materialized_state(&target, Some(&base))
+            .unwrap();
+
+        assert_eq!(repo.refs().get_thread(&thread).unwrap(), Some(target));
+        assert!(matches!(
+            repo.refs().read_head().unwrap(),
+            Head::Attached { thread: current } if current == thread
+        ));
+        assert_eq!(
+            fs::read_to_string(temp.path().join("next.txt")).unwrap(),
+            "next\n"
+        );
+    }
+}

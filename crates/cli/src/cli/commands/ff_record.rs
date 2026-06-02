@@ -188,3 +188,154 @@ fn record_ff_advance_inner(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use objects::object::ThreadName;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn create_repo() -> (TempDir, Repository) {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        (temp, repo)
+    }
+
+    fn snapshot_file(
+        repo: &Repository,
+        root: &std::path::Path,
+        name: &str,
+        content: &str,
+    ) -> ChangeId {
+        fs::write(root.join(name), content).unwrap();
+        repo.snapshot(Some(name.to_string()), None)
+            .unwrap()
+            .change_id
+    }
+
+    #[test]
+    fn record_ff_advance_attached_records_fast_forward_v2() {
+        let (temp, repo) = create_repo();
+        let base = snapshot_file(&repo, temp.path(), "base.txt", "base\n");
+        let target = snapshot_file(&repo, temp.path(), "target.txt", "target\n");
+
+        repo.goto(&base).unwrap();
+        let thread = ThreadName::new("main");
+        repo.refs().set_thread(&thread, &base).unwrap();
+        repo.refs()
+            .write_head(&Head::Attached {
+                thread: thread.clone(),
+            })
+            .unwrap();
+
+        record_ff_advance(&repo, "source", &target).unwrap();
+
+        assert_eq!(repo.refs().get_thread(&thread).unwrap(), Some(target));
+        assert!(matches!(
+            repo.refs().read_head().unwrap(),
+            Head::Attached { thread: current } if current == thread
+        ));
+        let batches = repo
+            .oplog()
+            .recent_batches_scoped(4, Some(&repo.op_scope()))
+            .unwrap();
+        assert!(
+            batches
+                .iter()
+                .flat_map(|batch| &batch.entries)
+                .any(|entry| matches!(
+                    &entry.operation,
+                    oplog::OpRecord::FastForwardV2 {
+                        source_thread,
+                        target_thread,
+                        pre_target_id,
+                        post_target_id,
+                    } if source_thread == "source"
+                        && target_thread == "main"
+                        && *pre_target_id == base
+                        && *post_target_id == target
+                ))
+        );
+    }
+
+    #[test]
+    fn record_ff_advance_discard_local_overwrites_dirty_checkout() {
+        let (temp, repo) = create_repo();
+        let tracked = temp.path().join("tracked.txt");
+        let base = snapshot_file(&repo, temp.path(), "tracked.txt", "base\n");
+        fs::write(&tracked, "target\n").unwrap();
+        let target = repo
+            .snapshot(Some("target".to_string()), None)
+            .unwrap()
+            .change_id;
+
+        repo.goto(&base).unwrap();
+        repo.refs()
+            .set_thread(&ThreadName::new("main"), &base)
+            .unwrap();
+        repo.refs()
+            .write_head(&Head::Attached {
+                thread: ThreadName::new("main"),
+            })
+            .unwrap();
+        fs::write(&tracked, "local edit\n").unwrap();
+
+        record_ff_advance_discard_local(&repo, "source", &target).unwrap();
+
+        assert_eq!(fs::read_to_string(&tracked).unwrap(), "target\n");
+        assert_eq!(
+            repo.refs().get_thread(&ThreadName::new("main")).unwrap(),
+            Some(target)
+        );
+    }
+
+    #[test]
+    fn ff_advance_deferred_detached_returns_goto_record() {
+        let (temp, repo) = create_repo();
+        let base = snapshot_file(&repo, temp.path(), "base.txt", "base\n");
+        let target = snapshot_file(&repo, temp.path(), "target.txt", "target\n");
+        repo.goto(&base).unwrap();
+
+        let advance = ff_advance_deferred(&repo, "source", &target, false).unwrap();
+
+        assert!(matches!(
+            advance,
+            oplog::OpRecord::Goto {
+                target: recorded_target,
+                prev_head: Some(prev),
+                head
+            } if recorded_target == target && prev == base && head == target
+        ));
+        assert!(matches!(
+            repo.refs().read_head().unwrap(),
+            Head::Detached { state } if state == target
+        ));
+    }
+
+    #[test]
+    fn record_ff_advance_refuses_attached_head_without_thread_ref() {
+        let (temp, repo) = create_repo();
+        let target = snapshot_file(&repo, temp.path(), "target.txt", "target\n");
+        repo.refs()
+            .write_head(&Head::Attached {
+                thread: ThreadName::new("missing"),
+            })
+            .unwrap();
+
+        let err = record_ff_advance(&repo, "source", &target).unwrap_err();
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("fast_forward_missing_attached_thread")
+                || msg.contains("Attached thread 'missing' has no ref"),
+            "missing attached thread should produce typed recovery advice: {msg}"
+        );
+        assert!(matches!(
+            repo.refs().read_head().unwrap(),
+            Head::Attached { thread } if thread == "missing"
+        ));
+    }
+}
