@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use crypto::{Ed25519Signer, P256Signer, RsaSigner, Signer, SignerError};
+use objects::store::ObjectStore;
 
 use super::*;
 
@@ -54,7 +54,7 @@ fn test_snapshot_sign_cli() {
     let signer = Ed25519Signer::generate().expect("generate key");
     let key_pem = signer.to_pem().expect("export PEM");
     let key_path = temp.path().join("signing_key.pem");
-    fs::write(&key_path, &key_pem).unwrap();
+    objects::fs_atomic::write_file_atomic_secret(&key_path, key_pem.as_bytes()).unwrap();
 
     let result = heddle(
         &[

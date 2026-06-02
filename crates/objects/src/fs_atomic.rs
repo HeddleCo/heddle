@@ -1,11 +1,62 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::{
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[derive(Clone, Copy)]
+enum AtomicWriteKind {
+    Normal,
+    Secret,
+}
+
+impl AtomicWriteKind {
+    fn open_tmp(self, tmp: &Path) -> io::Result<File> {
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+
+        #[cfg(unix)]
+        if matches!(self, Self::Secret) {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+
+        options.open(tmp)
+    }
+
+    fn enforce_before_write(self, file: &File) -> io::Result<()> {
+        match self {
+            Self::Normal => Ok(()),
+            Self::Secret => enforce_secret_permissions_before_write(file),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn enforce_secret_permissions_before_write(file: &File) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    let mode = file.metadata()?.permissions().mode() & 0o777;
+    if mode != 0o600 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("secret temp file permissions are {mode:o}, expected 600"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn enforce_secret_permissions_before_write(_file: &File) -> io::Result<()> {
+    // Non-Unix platforms do not expose POSIX mode bits through
+    // OpenOptions. The secret variant still uses the same create-new,
+    // write-fsync-rename discipline, but cannot verify a 0600 mode.
+    Ok(())
+}
 
 static TEMP_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -319,17 +370,20 @@ impl std::error::Error for EnrichedFsError {
     }
 }
 
-pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+fn write_file_atomic_impl(
+    path: &Path,
+    bytes: &[u8],
+    kind: AtomicWriteKind,
+    before_write: impl FnOnce(&File, &Path) -> io::Result<()>,
+) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
 
     let tmp = temp_path(path);
     let inner = (|| -> io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&tmp)?;
+        let mut file = kind.open_tmp(&tmp)?;
+        kind.enforce_before_write(&file)?;
+        before_write(&file, &tmp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         Ok(())
@@ -345,6 +399,23 @@ pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
     fs::rename(&tmp, path).map_err(|e| enrich_rename_error(&tmp, path, e))?;
     sync_directory(parent).map_err(|e| enrich_fs_error(parent, "syncing", e))
+}
+
+pub fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_file_atomic_impl(path, bytes, AtomicWriteKind::Normal, |_, _| Ok(()))
+}
+
+/// Atomically write secret material without ever creating a group/world
+/// readable temporary file.
+///
+/// On Unix the temp inode is created with `OpenOptions::mode(0o600)` before
+/// any bytes are written, then the open file descriptor is enforced to exact
+/// `0600` before the payload is written. Permission failures are hard errors
+/// and the temp file is removed best-effort. On non-Unix platforms there is no
+/// portable POSIX mode API, so this uses the normal create-new temp file,
+/// fsync, and rename sequence.
+pub fn write_file_atomic_secret(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_file_atomic_impl(path, bytes, AtomicWriteKind::Secret, |_, _| Ok(()))
 }
 
 #[cfg(test)]
@@ -602,6 +673,50 @@ mod tests {
         let target = dir.path().join("nested/under/here/file.bin");
         write_file_atomic(&target, b"hello").unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"hello");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_atomic_secret_is_0600_before_write_and_after_rename() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("nested/secret.txt");
+        let mut observed_tmp_mode = None;
+
+        write_file_atomic_impl(&target, b"secret", AtomicWriteKind::Secret, |file, tmp| {
+            let fd_mode = file.metadata()?.permissions().mode() & 0o777;
+            let path_mode = fs::metadata(tmp)?.permissions().mode() & 0o777;
+            observed_tmp_mode = Some((fd_mode, path_mode));
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(observed_tmp_mode, Some((0o600, 0o600)));
+        let final_mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(final_mode, 0o600);
+        assert_eq!(fs::read(&target).unwrap(), b"secret");
+    }
+
+    #[test]
+    fn write_file_atomic_secret_cleans_up_when_pre_write_check_fails() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let target = dir.path().join("secret.txt");
+        let mut tmp_path = None;
+
+        let err = write_file_atomic_impl(&target, b"secret", AtomicWriteKind::Secret, |_, tmp| {
+            tmp_path = Some(tmp.to_path_buf());
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected permission failure",
+            ))
+        })
+        .expect_err("permission failure should propagate");
+
+        assert!(is_permission_denied(&err), "unexpected error: {err}");
+        assert!(!target.exists(), "secret write must not publish target");
+        let tmp = tmp_path.expect("pre-write hook observed temp path");
+        assert!(!tmp.exists(), "failed secret write should remove temp file");
     }
 
     /// Regression for heddle#105: `sync_directory` must succeed on any

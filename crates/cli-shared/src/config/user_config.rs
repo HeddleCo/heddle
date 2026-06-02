@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use objects::fs_atomic::write_file_atomic;
+use objects::fs_atomic::write_file_atomic_secret;
 use proto::AuthToken;
 use repo::{FsMonitorMode, FsMonitorSettings, OutputFormat, WorktreeStatusOptions};
 use serde::{Deserialize, Serialize};
@@ -318,7 +318,7 @@ impl UserConfig {
             fs::create_dir_all(parent)?;
         }
         let contents = toml::to_string_pretty(self)?;
-        write_file_atomic(path, contents.as_bytes())?;
+        write_file_atomic_secret(path, contents.as_bytes())?;
         Ok(())
     }
 

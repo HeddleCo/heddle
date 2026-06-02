@@ -5,7 +5,7 @@
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
-use objects::fs_atomic::write_file_atomic;
+use objects::fs_atomic::write_file_atomic_secret;
 use serde::{Deserialize, Serialize};
 
 static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -77,15 +77,8 @@ pub fn save_credentials(store: &CredentialStore) -> Result<()> {
             .with_context(|| format!("creating directory {}", parent.display()))?;
     }
     let contents = toml::to_string_pretty(store).context("serializing credentials")?;
-    write_file_atomic(&path, contents.as_bytes())
+    write_file_atomic_secret(&path, contents.as_bytes())
         .with_context(|| format!("writing {}", path.display()))?;
-
-    // Best-effort: restrict file permissions on unix.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-    }
 
     Ok(())
 }
@@ -262,6 +255,81 @@ mod tests {
             assert_eq!(cred.token, "token-123");
         });
 
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_credentials_writes_credential_file_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = unique_temp_dir("heddle-credentials-mode-test");
+        fs::create_dir_all(&home).expect("create temp home");
+
+        with_home_dir(home.clone(), || {
+            let mut store = CredentialStore::default();
+            store.servers.insert(
+                "heddle.example:8421".to_string(),
+                ServerCredential {
+                    token: "token-123".to_string(),
+                    subject: "dev".to_string(),
+                    device_id: None,
+                    credential_id: None,
+                    private_key_pem: Some("pem".to_string()),
+                    expires_at: None,
+                },
+            );
+            save_credentials(&store).expect("save credentials");
+
+            let mode = fs::metadata(credentials_path())
+                .expect("credentials metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        });
+
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_credentials_permission_failure_returns_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = unique_temp_dir("heddle-credentials-permission-test");
+        let heddle_dir = home.join(".heddle");
+        fs::create_dir_all(&heddle_dir).expect("create credentials dir");
+        fs::set_permissions(&heddle_dir, fs::Permissions::from_mode(0o500))
+            .expect("make credentials dir unwritable");
+
+        with_home_dir(home.clone(), || {
+            let mut store = CredentialStore::default();
+            store.servers.insert(
+                "heddle.example:8421".to_string(),
+                ServerCredential {
+                    token: "token-123".to_string(),
+                    subject: "dev".to_string(),
+                    device_id: None,
+                    credential_id: None,
+                    private_key_pem: Some("pem".to_string()),
+                    expires_at: None,
+                },
+            );
+
+            let err = save_credentials(&store).expect_err("permission failure must propagate");
+            assert!(
+                err.to_string().contains("writing") || err.to_string().contains("Permission"),
+                "unexpected error: {err:?}"
+            );
+            assert!(
+                !credentials_path().exists(),
+                "failed write must not publish credentials"
+            );
+        });
+
+        fs::set_permissions(&heddle_dir, fs::Permissions::from_mode(0o700))
+            .expect("restore credentials dir");
         let _ = fs::remove_dir_all(home);
     }
 

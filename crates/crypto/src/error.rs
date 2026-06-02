@@ -18,6 +18,7 @@ pub enum SignerError {
     P256(String),
     Pkcs8(String),
     KeyNotFound(PathBuf),
+    InsecureKeyPermissions { path: PathBuf, mode: u32 },
     VerificationFailed,
 }
 
@@ -38,6 +39,11 @@ impl std::fmt::Display for SignerError {
             SignerError::P256(msg) => write!(f, "P256 error: {}", msg),
             SignerError::Pkcs8(msg) => write!(f, "PKCS8 error: {}", msg),
             SignerError::KeyNotFound(path) => write!(f, "key file not found: {}", path.display()),
+            SignerError::InsecureKeyPermissions { path, mode } => write!(
+                f,
+                "private key file {} is group/world-accessible ({mode:o}); set permissions to 0600",
+                path.display()
+            ),
             SignerError::VerificationFailed => write!(f, "signature verification failed"),
         }
     }
