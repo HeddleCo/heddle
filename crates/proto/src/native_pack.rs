@@ -6,6 +6,24 @@ use objects::store::{
 
 use crate::{ObjectId, ObjectInfo, ObjectType, ProtocolError, Result, load_object_data};
 
+/// Maximum hosted native-pack body accepted by the receive primitive.
+///
+/// Native sync packs are produced from bounded state-closure wants and
+/// each decoded pack object is separately capped at 1 GiB in the pack
+/// reader. A 2 GiB compressed pack is materially above normal hosted
+/// sync use while still preventing an untrusted server from growing the
+/// in-memory receive buffer without limit. The receive path should move
+/// to temp-file spooling plus `install_pack_streaming` once that install
+/// API can report installed ids to callers that need them.
+pub const MAX_RECEIVED_PACK_SIZE: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Maximum hosted native-pack index accepted by the receive primitive.
+///
+/// Pack indexes are proportional to object count, not object payload
+/// size. 256 MiB leaves room for millions of entries while bounding the
+/// second in-memory buffer controlled by the remote sender.
+pub const MAX_RECEIVED_PACK_INDEX_SIZE: u64 = 256 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct NativePackBundle {
     pub pack_data: Vec<u8>,
@@ -96,6 +114,34 @@ pub fn receive_pack_chunk(
     data: &[u8],
     is_final_chunk: bool,
 ) -> Result<()> {
+    let max_bytes = if is_index {
+        MAX_RECEIVED_PACK_INDEX_SIZE
+    } else {
+        MAX_RECEIVED_PACK_SIZE
+    };
+    receive_pack_chunk_with_limit(
+        state,
+        is_index,
+        resume_offset,
+        chunk_index,
+        is_complete,
+        data,
+        is_final_chunk,
+        max_bytes,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn receive_pack_chunk_with_limit(
+    state: &mut PackChunkState,
+    is_index: bool,
+    resume_offset: u64,
+    chunk_index: u32,
+    is_complete: bool,
+    data: &[u8],
+    is_final_chunk: bool,
+    max_bytes: u64,
+) -> Result<()> {
     let (buffer, progress, complete) = if is_index {
         (
             &mut state.index_data,
@@ -123,8 +169,21 @@ pub fn receive_pack_chunk(
         )));
     }
 
+    let data_len = u64::try_from(data.len()).map_err(|_| {
+        ProtocolError::InvalidState("native pack chunk length does not fit in u64".to_string())
+    })?;
+    let next_offset = progress.0.checked_add(data_len).ok_or_else(|| {
+        ProtocolError::InvalidState("native pack chunk offset overflow".to_string())
+    })?;
+    if next_offset > max_bytes {
+        let stream_name = if is_index { "index" } else { "body" };
+        return Err(ProtocolError::InvalidState(format!(
+            "native pack {stream_name} exceeds receive size limit: {next_offset} bytes (max {max_bytes})"
+        )));
+    }
+
     buffer.extend_from_slice(data);
-    *progress = (progress.0 + data.len() as u64, progress.1 + 1);
+    *progress = (next_offset, progress.1 + 1);
     if is_final_chunk || is_complete {
         *complete = true;
     }
@@ -148,5 +207,135 @@ fn to_pack_object_type(obj_type: ObjectType) -> Result<PackObjectType> {
             "Redaction sidecar records cannot be packed into the content-addressed object pack"
                 .to_string(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use objects::{
+        object::Blob,
+        store::{FsStore, ObjectStore},
+    };
+    use tempfile::TempDir;
+
+    use super::{
+        MAX_RECEIVED_PACK_SIZE, ObjectId, ObjectInfo, ObjectType, PackChunkState,
+        build_native_pack, install_received_pack, next_pack_chunk, receive_pack_chunk,
+        receive_pack_chunk_with_limit,
+    };
+
+    fn create_test_store() -> (TempDir, FsStore) {
+        let temp = TempDir::new().unwrap();
+        let store = FsStore::new(temp.path().join(".heddle"));
+        store.init().unwrap();
+        (temp, store)
+    }
+
+    #[test]
+    fn receive_pack_chunk_rejects_cumulative_size_over_limit_before_buffering() {
+        let mut state = PackChunkState::default();
+
+        receive_pack_chunk_with_limit(&mut state, false, 0, 0, false, b"abcd", false, 8).unwrap();
+        receive_pack_chunk_with_limit(&mut state, false, 4, 1, false, b"efgh", false, 8).unwrap();
+
+        let error = receive_pack_chunk_with_limit(&mut state, false, 8, 2, false, b"i", false, 8)
+            .unwrap_err();
+
+        assert_eq!(state.pack_data, b"abcdefgh");
+        assert!(
+            error
+                .to_string()
+                .contains("native pack body exceeds receive size limit")
+        );
+        assert!(error.to_string().contains("9 bytes (max 8)"));
+    }
+
+    #[test]
+    fn receive_pack_chunk_checks_production_limit_before_extending_buffer() {
+        let mut state = PackChunkState {
+            pack_progress: (MAX_RECEIVED_PACK_SIZE - 1, 0),
+            ..PackChunkState::default()
+        };
+
+        let error = receive_pack_chunk(
+            &mut state,
+            false,
+            MAX_RECEIVED_PACK_SIZE - 1,
+            0,
+            false,
+            b"xx",
+            false,
+        )
+        .unwrap_err();
+
+        assert!(state.pack_data.is_empty());
+        assert!(
+            error
+                .to_string()
+                .contains("native pack body exceeds receive size limit")
+        );
+    }
+
+    #[test]
+    fn normal_size_native_pack_receives_and_installs() {
+        let (_source_temp, source_store) = create_test_store();
+        let (_dest_temp, dest_store) = create_test_store();
+        let blob = Blob::from("native pack receive regression");
+        let hash = source_store.put_blob(&blob).unwrap();
+        let bundle = build_native_pack(
+            &source_store,
+            &[ObjectInfo {
+                id: ObjectId::Hash(hash),
+                obj_type: ObjectType::Blob,
+                size: blob.size() as u64,
+                delta_base: None,
+            }],
+        )
+        .unwrap();
+
+        let mut state = PackChunkState::default();
+        let mut chunk_index = 0usize;
+        while let Some((start, data, is_final)) = next_pack_chunk(&bundle.pack_data, 7, chunk_index)
+        {
+            receive_pack_chunk(
+                &mut state,
+                false,
+                start as u64,
+                chunk_index as u32,
+                is_final,
+                &data,
+                is_final,
+            )
+            .unwrap();
+            chunk_index += 1;
+        }
+
+        let mut index_chunk = 0usize;
+        while let Some((start, data, is_final)) =
+            next_pack_chunk(&bundle.index_data, 5, index_chunk)
+        {
+            receive_pack_chunk(
+                &mut state,
+                true,
+                start as u64,
+                index_chunk as u32,
+                is_final,
+                &data,
+                is_final,
+            )
+            .unwrap();
+            index_chunk += 1;
+        }
+
+        assert!(state.is_complete());
+        assert_eq!(state.pack_data, bundle.pack_data);
+        assert_eq!(state.index_data, bundle.index_data);
+
+        let installed_ids =
+            install_received_pack(&dest_store, &state.pack_data, &state.index_data).unwrap();
+
+        assert_eq!(installed_ids, bundle.ids);
+        let installed_blob = dest_store.get_blob(&hash).unwrap().unwrap();
+        assert_eq!(installed_blob.content(), blob.content());
     }
 }
