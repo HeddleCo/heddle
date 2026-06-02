@@ -403,31 +403,19 @@ impl GitHubRestClient {
                 .json()
                 .await
                 .map_err(|err| ReviewError::Serialization(err.to_string()))?;
-            let page_len = page.len();
             items.extend(page);
-            url = next_page_url(link_header.as_deref(), page_len, label)?;
+            url = next_page_url(link_header.as_deref())?;
         }
 
         Ok(items)
     }
 }
 
-fn next_page_url(link: Option<&str>, page_len: usize, label: &str) -> Result<Option<String>> {
+fn next_page_url(link: Option<&str>) -> Result<Option<String>> {
     let Some(link) = link else {
-        if page_len == GITHUB_PER_PAGE {
-            return Err(ReviewError::Github(format!(
-                "{label} pagination failed: missing Link header after a full page"
-            )));
-        }
         return Ok(None);
     };
-    let next = parse_next_link(link)?;
-    if next.is_none() && page_len == GITHUB_PER_PAGE {
-        return Err(ReviewError::Github(format!(
-            "{label} pagination failed: Link header did not include a next page after a full page"
-        )));
-    }
-    Ok(next)
+    parse_next_link(link)
 }
 
 fn parse_next_link(link: &str) -> Result<Option<String>> {
@@ -806,34 +794,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_files_errors_on_missing_link_after_full_page() {
+    async fn fetch_files_accepts_exact_full_page_without_link_header() {
         let base_url =
             spawn_server(|_| vec![MockResponse::json(200, file_page(0, GITHUB_PER_PAGE))]).await;
-        let err = client_for(&base_url)
+        let files = client_for(&base_url)
             .fetch_files(&review_key(), None)
             .await
-            .expect_err("full page without a Link header is incomplete");
-        assert!(err.to_string().contains("missing Link header"));
+            .unwrap();
+        assert_eq!(files.len(), GITHUB_PER_PAGE);
+        assert_eq!(files.last().unwrap().filename, "file-99.rs");
     }
 
     #[tokio::test]
-    async fn fetch_files_errors_on_full_page_link_without_next() {
+    async fn fetch_files_accepts_exact_full_page_terminal_link_without_next() {
         let base_url = spawn_server(|base_url| {
             vec![
                 MockResponse::json(200, file_page(0, GITHUB_PER_PAGE)).with_header(
                     "Link",
                     format!(
-                        "<{base_url}/repos/heddle/repo/pulls/439/files?per_page={GITHUB_PER_PAGE}>; rel=\"last\""
+                        "<{base_url}/repos/heddle/repo/pulls/439/files?per_page={GITHUB_PER_PAGE}&page=2>; rel=\"next\""
+                    ),
+                ),
+                MockResponse::json(200, file_page(GITHUB_PER_PAGE, GITHUB_PER_PAGE)).with_header(
+                    "Link",
+                    format!(
+                        "<{base_url}/repos/heddle/repo/pulls/439/files?per_page={GITHUB_PER_PAGE}>; rel=\"first\", \
+                         <{base_url}/repos/heddle/repo/pulls/439/files?per_page={GITHUB_PER_PAGE}>; rel=\"prev\", \
+                         <{base_url}/repos/heddle/repo/pulls/439/files?per_page={GITHUB_PER_PAGE}&page=2>; rel=\"last\""
                     ),
                 ),
             ]
         })
         .await;
-        let err = client_for(&base_url)
+        let files = client_for(&base_url)
             .fetch_files(&review_key(), None)
             .await
-            .expect_err("full page without a next link is incomplete");
-        assert!(err.to_string().contains("did not include a next page"));
+            .unwrap();
+        assert_eq!(files.len(), GITHUB_PER_PAGE * 2);
+        assert_eq!(files.last().unwrap().filename, "file-199.rs");
     }
 
     #[tokio::test]
