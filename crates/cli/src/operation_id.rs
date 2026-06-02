@@ -11,13 +11,15 @@
 //! generate and save an op-id for interrupted retry loops. Current
 //! explicit replay support does not imply generated persistence.
 
-use std::{io::Write, path::PathBuf, process::Command, str::FromStr};
+use std::{io::Write, path::PathBuf, process::Command, str::FromStr, sync::Arc};
 
 use anyhow::{Context, Result, anyhow};
 use objects::object::OperationId;
 use repo::{
     Repository,
-    operation_dedup::{DedupOutcome, OperationDedupStore, hash_request_body},
+    operation_dedup::{
+        DedupOutcome, OperationDedupStore, hash_request_body, reserve_operation_id_eager,
+    },
 };
 use serde::{Deserialize, Serialize};
 
@@ -87,12 +89,16 @@ pub fn run_local_idempotency_if_requested(
             .as_ref()
             .map(|scope| scope.hash_material.as_str()),
     )?;
+    let repo_for_eager;
     let store = if bootstrap_store {
         let scope = bootstrap_scope
             .as_ref()
             .expect("bootstrap scope should be present for bootstrap store");
-        OperationDedupStore::open(bootstrap_op_id_store_dir(scope))
-            .context("open bootstrap op-id dedup store")?
+        repo_for_eager = None;
+        Arc::new(
+            OperationDedupStore::open(bootstrap_op_id_store_dir(scope))
+                .context("open bootstrap op-id dedup store")?,
+        )
     } else {
         let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
         let bootstrap_scope = bootstrap_op_id_scope_for_root(repo.root().to_path_buf())?;
@@ -108,11 +114,21 @@ pub fn run_local_idempotency_if_requested(
                 Some(existing),
             )));
         }
-        OperationDedupStore::open(repo.heddle_dir()).context("open op-id dedup store")?
+        let store = Arc::new(
+            OperationDedupStore::open(repo.heddle_dir()).context("open op-id dedup store")?,
+        );
+        repo_for_eager = Some(repo);
+        store
     };
     let json_mode = explicit_json_requested(cli);
 
-    match store.reserve(op_id, command_name, request_hash)? {
+    let reserve_outcome = if let Some(repo) = repo_for_eager.as_ref() {
+        reserve_operation_id_eager(repo, Arc::clone(&store), op_id, command_name, request_hash)?
+    } else {
+        store.reserve(op_id, command_name, request_hash)?
+    };
+
+    match reserve_outcome {
         DedupOutcome::Replay { response } => {
             let replay: LocalOpIdResponse =
                 serde_json::from_slice(&response).context("decode cached op-id response")?;

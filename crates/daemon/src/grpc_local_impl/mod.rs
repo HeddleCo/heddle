@@ -25,7 +25,10 @@ pub use discussion::LocalDiscussionService;
 pub use hook::LocalHookService;
 pub use hook_events::{EmitWaiter, HookEventBroadcaster, HookResponse};
 pub use operation_log_query::LocalOperationLogQueryService;
-use repo::{Repository, operation_dedup::OperationDedupStore};
+use repo::{
+    Repository,
+    operation_dedup::{OperationDedupStore, reserve_operation_id_eager},
+};
 pub use signal::LocalSignalService;
 pub use state_review::LocalStateReviewService;
 pub use transaction::LocalTransactionService;
@@ -79,7 +82,7 @@ impl GrpcLocalService {
 /// must be a deterministic byte representation of the request (typically
 /// the protobuf-encoded request).
 pub(super) async fn with_idempotency<F, Fut, T>(
-    dedup: &OperationDedupStore,
+    service: &GrpcLocalService,
     client_operation_id: &str,
     verb: &'static str,
     request_body: &[u8],
@@ -101,12 +104,12 @@ where
         tonic::Status::invalid_argument(format!("invalid client_operation_id: {err}"))
     })?;
     let hash = hash_request_body(request_body);
-    // `reserve` atomically claims the (op_id, verb) slot before we run the
-    // mutation. Two concurrent retries with the same operation_id can no
-    // longer both observe "Fresh" and both apply side effects: the second
-    // sees `InFlight` and surfaces a transient `Aborted` to the client.
-    let outcome = dedup
-        .reserve(op_id, verb, hash)
+    // The eager reservation atomically claims the (op_id, verb) slot before
+    // we run the mutation. Two concurrent retries with the same operation_id
+    // can no longer both observe "Fresh" and both apply side effects: the
+    // second sees `InFlight` and surfaces a transient `Aborted` to the client.
+    let dedup = Arc::clone(&service.dedup);
+    let outcome = reserve_operation_id_eager(service.repo(), Arc::clone(&dedup), op_id, verb, hash)
         .map_err(|err| tonic::Status::internal(format!("dedup reserve failed: {err}")))?;
     match outcome {
         DedupOutcome::Replay { response } => decode_response(response),
@@ -168,29 +171,28 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use objects::object::OperationId;
-    use repo::operation_dedup::OperationDedupStore;
+    use repo::{Repository, operation_dedup::OperationDedupStore};
     use tempfile::TempDir;
     use tokio::sync::oneshot;
 
-    use super::with_idempotency;
+    use super::{GrpcLocalService, with_idempotency};
 
-    fn make_store() -> (TempDir, Arc<OperationDedupStore>) {
+    fn make_service() -> (TempDir, GrpcLocalService) {
         let temp = TempDir::new().unwrap();
-        let heddle = temp.path().join(".heddle");
-        std::fs::create_dir_all(&heddle).unwrap();
-        let store = OperationDedupStore::open(&heddle).unwrap();
-        (temp, Arc::new(store))
+        let repo = Arc::new(Repository::init_default(temp.path()).unwrap());
+        let store = Arc::new(OperationDedupStore::open(repo.heddle_dir()).unwrap());
+        (temp, GrpcLocalService::new(repo, store))
     }
 
     #[tokio::test]
     async fn replays_recorded_response() {
-        let (_t, store) = make_store();
+        let (_t, service) = make_service();
         let op_id = OperationId::new().to_string();
         let body = b"req";
 
         // First call executes and records.
         let first: i32 = with_idempotency(
-            &store,
+            &service,
             &op_id,
             "verb",
             body,
@@ -209,7 +211,7 @@ mod tests {
         // Second call must replay without re-executing — proven by the
         // execute closure returning a sentinel that would mismatch.
         let second: i32 = with_idempotency(
-            &store,
+            &service,
             &op_id,
             "verb",
             body,
@@ -236,18 +238,18 @@ mod tests {
         // Both used to apply side effects. With reservation, B must see
         // `InFlight` and surface `Aborted`.
 
-        let (_t, store) = make_store();
+        let (_t, service) = make_service();
         let op_id = OperationId::new().to_string();
         let body = b"req";
 
         // We gate the first execution on a oneshot so caller B starts
         // while A is still pending.
         let (tx, rx) = oneshot::channel::<()>();
-        let store_a = Arc::clone(&store);
+        let service_a = service.clone();
         let op_a = op_id.clone();
         let a_handle = tokio::spawn(async move {
             with_idempotency(
-                &store_a,
+                &service_a,
                 &op_a,
                 "verb",
                 body,
@@ -270,10 +272,10 @@ mod tests {
         // awaits, so once we yield the entry is visible.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let store_b = Arc::clone(&store);
+        let service_b = service.clone();
         let op_b = op_id.clone();
         let b_result = with_idempotency(
-            &store_b,
+            &service_b,
             &op_b,
             "verb",
             body,
@@ -301,7 +303,7 @@ mod tests {
         // After A finishes, the entry is finalised: a third call with the
         // same body replays.
         let third = with_idempotency(
-            &store,
+            &service,
             &op_id,
             "verb",
             body,
@@ -328,12 +330,12 @@ mod tests {
         // every subsequent retry would see Conflict/InFlight until
         // compaction.
 
-        let (_t, store) = make_store();
+        let (_t, service) = make_service();
         let op_id = OperationId::new().to_string();
         let body = b"req";
 
         let first = with_idempotency::<_, _, i32>(
-            &store,
+            &service,
             &op_id,
             "verb",
             body,
@@ -350,7 +352,7 @@ mod tests {
 
         // Retry must succeed — the reservation was released.
         let second = with_idempotency(
-            &store,
+            &service,
             &op_id,
             "verb",
             body,
