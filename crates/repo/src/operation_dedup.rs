@@ -394,6 +394,12 @@ pub fn hash_request_body(bytes: &[u8]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use crate::atomic::{AtomicMutation, StagedCommit, Tx, execute};
+    use crate::operation_dedup::{ReserveOpId, reserve_operation_id_eager};
+    use crate::Repository;
+    use objects::error::{HeddleError, Result};
     use tempfile::TempDir;
 
     use super::*;
@@ -405,6 +411,85 @@ mod tests {
         std::fs::create_dir_all(&heddle).unwrap();
         let store = OperationDedupStore::open(&heddle).unwrap();
         (temp, store)
+    }
+
+    fn make_repo_store() -> (TempDir, Repository, Arc<OperationDedupStore>) {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let store = Arc::new(OperationDedupStore::open(repo.heddle_dir()).unwrap());
+        (temp, repo, store)
+    }
+
+    struct ReserveThenAbort {
+        store: Arc<OperationDedupStore>,
+        op: OperationId,
+        hash: [u8; 32],
+    }
+
+    impl AtomicMutation for ReserveThenAbort {
+        type Output = ();
+
+        fn transaction_id(&self) -> String {
+            format!("reserve-then-abort/{}", self.op)
+        }
+
+        fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
+            tx.enroll_eager(ReserveOpId::new(
+                Arc::clone(&self.store),
+                self.op,
+                "capture",
+                self.hash,
+            ))?;
+            Err(HeddleError::Config("outer transaction aborted".to_string()))
+        }
+    }
+
+    #[test]
+    fn eager_reserve_survives_outer_abort() {
+        let (_t, repo, store) = make_repo_store();
+        let op = OperationId::new();
+        let hash = hash_request_body(b"x");
+
+        let result = execute(
+            &repo,
+            ReserveThenAbort {
+                store: Arc::clone(&store),
+                op,
+                hash,
+            },
+        );
+
+        assert!(result.is_err(), "outer transaction must abort");
+        let reopened = OperationDedupStore::open(repo.heddle_dir()).unwrap();
+        assert_eq!(
+            reopened.reserve(op, "capture", hash).unwrap(),
+            DedupOutcome::InFlight,
+            "eager op-id reservation must remain durable after outer abort"
+        );
+    }
+
+    #[test]
+    fn eager_parallel_distinct_reserves_both_win() {
+        let (_t, repo, store) = make_repo_store();
+        let op_a = OperationId::new();
+        let op_b = OperationId::new();
+        let hash = hash_request_body(b"x");
+
+        std::thread::scope(|scope| {
+            let a = scope.spawn(|| {
+                reserve_operation_id_eager(&repo, Arc::clone(&store), op_a, "capture", hash)
+                    .unwrap()
+            });
+            let b = scope.spawn(|| {
+                reserve_operation_id_eager(&repo, Arc::clone(&store), op_b, "capture", hash)
+                    .unwrap()
+            });
+
+            assert_eq!(a.join().unwrap(), DedupOutcome::Reserved);
+            assert_eq!(b.join().unwrap(), DedupOutcome::Reserved);
+        });
+
+        assert_eq!(store.len(), 2);
     }
 
     #[test]
