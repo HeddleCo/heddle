@@ -555,6 +555,36 @@ impl OpLog {
         }
     }
 
+    /// Header-only v3 `head_id` read for I/O benchmarks.
+    ///
+    /// Production callers should use [`OpLog::head_id`], which also handles
+    /// current-format validation and migration. The benchmark fixtures are
+    /// already seeded as v3, so this exposes the raw fixed-header read without
+    /// widening the packed-oplog internals.
+    #[cfg(feature = "bench")]
+    pub fn read_head_id_for_bench(&self) -> Result<u64> {
+        PackedOpLog::read_head_id(&self.oplog_path())
+    }
+
+    /// Replace the on-disk oplog with prebuilt entries for I/O benchmarks.
+    ///
+    /// This keeps benchmark setup deterministic and cheap without widening the
+    /// packed-oplog model itself. Production code must append through the
+    /// normal record paths so locking, attribution, and transaction semantics
+    /// stay centralized.
+    #[cfg(feature = "bench")]
+    pub fn write_entries_for_bench(&self, entries: Vec<OpEntry>) -> Result<()> {
+        std::fs::create_dir_all(self.oplog_dir())?;
+        std::fs::create_dir_all(self.root.join("locks"))?;
+        let head_id = entries.last().map(|entry| entry.id).unwrap_or(0);
+        let mut packed = PackedOpLog::new(self.oplog_path());
+        packed.entries = entries;
+        packed.head_id = head_id;
+        packed.save()?;
+        *self.cached.lock().unwrap() = Some(PackedOpLogIndex::open(&self.oplog_path())?);
+        Ok(())
+    }
+
     /// The non-marker records of the batch that committed `transaction_id`
     /// (heddle#354 r5, cid 3329631075) — i.e. the batch whose `TransactionCommit`
     /// marker carries that id, minus the marker itself. A crash-retry that
