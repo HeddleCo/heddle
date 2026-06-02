@@ -7,7 +7,7 @@ use crate::{
 
 pub const PACK_CHECKSUM_LEN: usize = 32;
 pub const MAX_PACK_OBJECT_OUTPUT_SIZE: usize = 1024 * 1024 * 1024;
-#[cfg(any(feature = "zstd", test))]
+#[cfg(feature = "zstd")]
 pub(super) const PACK_DECOMPRESSION_INITIAL_CAP: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
