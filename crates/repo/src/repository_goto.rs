@@ -11,15 +11,59 @@ use tracing::debug;
 use super::{
     HeddleError, Repository, Result,
     repository_worktree_apply::{
-        WorktreeApplyPlan, WorktreeApplyReport, WorktreeApplyStats, WorktreeApplyStrategy,
+        WorktreeApplyDirtyBehavior, WorktreeApplyPlan, WorktreeApplyReport, WorktreeApplyStats,
+        WorktreeApplyStrategy,
     },
 };
 use crate::{thread_model::ThreadFreshness, thread_storage::ThreadManager};
 
+#[derive(Debug, Clone, Copy)]
+enum WorktreeBaseline {
+    Head,
+    Materialized(Option<ChangeId>),
+}
+
 impl Repository {
     /// Move worktree to a different state.
     pub fn goto(&self, target: &ChangeId) -> Result<()> {
-        self.goto_internal(target, true, false)
+        self.goto_internal(
+            target,
+            true,
+            false,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            WorktreeBaseline::Head,
+        )
+    }
+
+    /// Move worktree to a different state, discarding unsnapped local edits.
+    pub fn goto_discard_local(&self, target: &ChangeId) -> Result<()> {
+        self.goto_internal(
+            target,
+            true,
+            false,
+            WorktreeApplyDirtyBehavior::DiscardLocalChanges,
+            WorktreeBaseline::Head,
+        )
+    }
+
+    /// Move worktree to `target` using the state that the worktree currently
+    /// represents as the dirty-check and incremental-apply baseline.
+    ///
+    /// This is for callers that must publish or import refs before they can
+    /// materialize the checkout. In those flows HEAD may already resolve to
+    /// `target`, even though the files on disk still represent `materialized`.
+    pub fn goto_from_materialized_state(
+        &self,
+        target: &ChangeId,
+        materialized: Option<&ChangeId>,
+    ) -> Result<()> {
+        self.goto_internal(
+            target,
+            true,
+            false,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            WorktreeBaseline::Materialized(materialized.copied()),
+        )
     }
 
     /// Fast-forward the current checkout to `target`.
@@ -35,7 +79,34 @@ impl Repository {
     /// pre-op state — this helper preserves attached-HEAD semantics so the
     /// thread's ref and metadata advance with the worktree.
     pub fn fast_forward_attached(&self, target: &ChangeId) -> Result<()> {
-        self.fast_forward_attached_internal(target, true)
+        self.fast_forward_attached_internal(
+            target,
+            true,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            WorktreeBaseline::Head,
+        )
+    }
+
+    pub fn fast_forward_attached_discard_local(&self, target: &ChangeId) -> Result<()> {
+        self.fast_forward_attached_internal(
+            target,
+            true,
+            WorktreeApplyDirtyBehavior::DiscardLocalChanges,
+            WorktreeBaseline::Head,
+        )
+    }
+
+    pub fn fast_forward_attached_from_materialized_state(
+        &self,
+        target: &ChangeId,
+        materialized: Option<&ChangeId>,
+    ) -> Result<()> {
+        self.fast_forward_attached_internal(
+            target,
+            true,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            WorktreeBaseline::Materialized(materialized.copied()),
+        )
     }
 
     /// Variant of [`Self::fast_forward_attached`] that performs the
@@ -47,15 +118,51 @@ impl Repository {
     /// merged-into thread ref (heddle#99 r1); a name-resolved redo was
     /// also non-deterministic if the source thread moved (heddle#99 r2).
     pub fn fast_forward_attached_without_record(&self, target: &ChangeId) -> Result<()> {
-        self.fast_forward_attached_internal(target, false)
+        self.fast_forward_attached_internal(
+            target,
+            false,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            WorktreeBaseline::Head,
+        )
     }
 
-    fn fast_forward_attached_internal(&self, target: &ChangeId, record: bool) -> Result<()> {
+    pub fn fast_forward_attached_without_record_discard_local(
+        &self,
+        target: &ChangeId,
+    ) -> Result<()> {
+        self.fast_forward_attached_internal(
+            target,
+            false,
+            WorktreeApplyDirtyBehavior::DiscardLocalChanges,
+            WorktreeBaseline::Head,
+        )
+    }
+
+    pub fn fast_forward_attached_from_materialized_state_without_record(
+        &self,
+        target: &ChangeId,
+        materialized: Option<&ChangeId>,
+    ) -> Result<()> {
+        self.fast_forward_attached_internal(
+            target,
+            false,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            WorktreeBaseline::Materialized(materialized.copied()),
+        )
+    }
+
+    fn fast_forward_attached_internal(
+        &self,
+        target: &ChangeId,
+        record: bool,
+        dirty_behavior: WorktreeApplyDirtyBehavior,
+        baseline: WorktreeBaseline,
+    ) -> Result<()> {
         let head_before = self.refs.read_head()?;
         if record {
-            self.goto(target)?;
+            self.goto_internal(target, true, false, dirty_behavior, baseline)?;
         } else {
-            self.goto_without_record(target)?;
+            self.goto_internal(target, false, false, dirty_behavior, baseline)?;
         }
         if let Head::Attached {
             thread: current_thread,
@@ -77,15 +184,43 @@ impl Repository {
     }
 
     pub fn goto_verified_clean(&self, target: &ChangeId) -> Result<()> {
-        self.goto_internal(target, true, true)
+        self.goto_internal(
+            target,
+            true,
+            true,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            WorktreeBaseline::Head,
+        )
     }
 
     pub fn goto_verified_clean_without_record(&self, target: &ChangeId) -> Result<()> {
-        self.goto_internal(target, false, true)
+        self.goto_internal(
+            target,
+            false,
+            true,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            WorktreeBaseline::Head,
+        )
     }
 
     pub fn goto_without_record(&self, target: &ChangeId) -> Result<()> {
-        self.goto_internal(target, false, false)
+        self.goto_internal(
+            target,
+            false,
+            false,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            WorktreeBaseline::Head,
+        )
+    }
+
+    pub fn goto_without_record_discard_local(&self, target: &ChangeId) -> Result<()> {
+        self.goto_internal(
+            target,
+            false,
+            false,
+            WorktreeApplyDirtyBehavior::DiscardLocalChanges,
+            WorktreeBaseline::Head,
+        )
     }
 
     fn goto_internal(
@@ -93,6 +228,8 @@ impl Repository {
         target: &ChangeId,
         record: bool,
         current_worktree_verified_clean: bool,
+        dirty_behavior: WorktreeApplyDirtyBehavior,
+        baseline: WorktreeBaseline,
     ) -> Result<()> {
         let total_start = Instant::now();
         let _lock = self
@@ -106,12 +243,17 @@ impl Repository {
             .ok_or(HeddleError::StateNotFound(*target))?;
 
         let prev_head_ref = self.refs.read_head()?;
-        let (prev_head, current_state) = match &prev_head_ref {
+        let (prev_head, head_state) = match &prev_head_ref {
             Head::Attached { thread } => match self.refs.get_thread(thread)? {
                 Some(change_id) => (Some(change_id), self.store.get_state(&change_id)?),
                 None => (None, None),
             },
             Head::Detached { state } => (Some(*state), self.store.get_state(state)?),
+        };
+        let current_state = match baseline {
+            WorktreeBaseline::Head => head_state,
+            WorktreeBaseline::Materialized(Some(change_id)) => self.store.get_state(&change_id)?,
+            WorktreeBaseline::Materialized(None) => None,
         };
         let same_state_verified_clean = current_worktree_verified_clean
             && current_state
@@ -140,6 +282,7 @@ impl Repository {
                 tree,
                 &self.root,
                 current_worktree_verified_clean,
+                dirty_behavior,
             )?;
             let apply_report = self.execute_worktree_apply(&apply_plan, tree, &self.root)?;
             (apply_plan, apply_report)
@@ -147,6 +290,7 @@ impl Repository {
             (
                 WorktreeApplyPlan {
                     strategy: WorktreeApplyStrategy::Incremental,
+                    dirty_behavior: WorktreeApplyDirtyBehavior::RefuseOnDirty,
                     removals: Vec::new(),
                     directories: Vec::new(),
                     writes: Vec::new(),
@@ -192,5 +336,137 @@ impl Repository {
             "Goto complete"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use objects::object::ThreadName;
+    use refs::Head;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn create_repo() -> (TempDir, Repository) {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        (temp, repo)
+    }
+
+    fn write_snapshot(
+        repo: &Repository,
+        root: &std::path::Path,
+        path: &str,
+        content: &str,
+    ) -> ChangeId {
+        fs::write(root.join(path), content).unwrap();
+        repo.snapshot(Some(path.to_string()), None)
+            .unwrap()
+            .change_id
+    }
+
+    #[test]
+    fn goto_from_unknown_materialized_state_full_rematerializes_clean_checkout() {
+        let (temp, repo) = create_repo();
+        let target = write_snapshot(&repo, temp.path(), "target.txt", "target\n");
+        repo.clear_worktree().unwrap();
+
+        repo.goto_from_materialized_state(&target, None).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(temp.path().join("target.txt")).unwrap(),
+            "target\n"
+        );
+        assert!(matches!(
+            repo.refs().read_head().unwrap(),
+            Head::Detached { state } if state == target
+        ));
+    }
+
+    #[test]
+    fn goto_from_materialized_pre_target_uses_disk_baseline_when_head_already_moved() {
+        let (temp, repo) = create_repo();
+        let file = temp.path().join("tracked.txt");
+        let pre_target = write_snapshot(&repo, temp.path(), "tracked.txt", "before\n");
+        fs::write(&file, "after\n").unwrap();
+        fs::write(temp.path().join("added.txt"), "added\n").unwrap();
+        let target = repo
+            .snapshot(Some("target".to_string()), None)
+            .unwrap()
+            .change_id;
+
+        repo.goto(&pre_target).unwrap();
+        repo.refs()
+            .write_head(&Head::Detached { state: target })
+            .unwrap();
+
+        repo.goto_from_materialized_state(&target, Some(&pre_target))
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(&file).unwrap(), "after\n");
+        assert_eq!(
+            fs::read_to_string(temp.path().join("added.txt")).unwrap(),
+            "added\n"
+        );
+        assert!(matches!(
+            repo.refs().read_head().unwrap(),
+            Head::Detached { state } if state == target
+        ));
+    }
+
+    #[test]
+    fn discard_local_goto_variants_overwrite_unsnapped_edits() {
+        let (temp, repo) = create_repo();
+        let tracked = temp.path().join("tracked.txt");
+        let base = write_snapshot(&repo, temp.path(), "tracked.txt", "base\n");
+        fs::write(&tracked, "target\n").unwrap();
+        let target = repo
+            .snapshot(Some("target".to_string()), None)
+            .unwrap()
+            .change_id;
+
+        repo.goto(&base).unwrap();
+        fs::write(&tracked, "local edit\n").unwrap();
+        fs::write(temp.path().join("local.txt"), "local only\n").unwrap();
+
+        repo.goto_without_record_discard_local(&target).unwrap();
+
+        assert_eq!(fs::read_to_string(&tracked).unwrap(), "target\n");
+        assert!(!temp.path().join("local.txt").exists());
+    }
+
+    #[test]
+    fn attached_fast_forward_from_materialized_state_advances_thread_without_detaching() {
+        let (temp, repo) = create_repo();
+        let base = write_snapshot(&repo, temp.path(), "base.txt", "base\n");
+        fs::write(temp.path().join("next.txt"), "next\n").unwrap();
+        let target = repo
+            .snapshot(Some("target".to_string()), None)
+            .unwrap()
+            .change_id;
+
+        repo.goto(&base).unwrap();
+        let thread = ThreadName::new("main");
+        repo.refs().set_thread(&thread, &target).unwrap();
+        repo.refs()
+            .write_head(&Head::Attached {
+                thread: thread.clone(),
+            })
+            .unwrap();
+
+        repo.fast_forward_attached_from_materialized_state(&target, Some(&base))
+            .unwrap();
+
+        assert_eq!(repo.refs().get_thread(&thread).unwrap(), Some(target));
+        assert!(matches!(
+            repo.refs().read_head().unwrap(),
+            Head::Attached { thread: current } if current == thread
+        ));
+        assert_eq!(
+            fs::read_to_string(temp.path().join("next.txt")).unwrap(),
+            "next\n"
+        );
     }
 }

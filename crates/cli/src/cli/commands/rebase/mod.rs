@@ -68,17 +68,16 @@ pub fn cmd_rebase(
         Repository::open(&target_path)?
     };
 
-    // Rebase replays commits onto another thread by mutating the worktree
-    // (fast-forward via `fast_forward_attached` flows through
-    // `plan_worktree_apply`, which silently auto-falls back to
-    // `FullRematerialize` on a dirty worktree — that wipes uncommitted
-    // edits). The guard runs only on the entry path (not `--abort` /
-    // `--continue`, which need access to the in-progress state on disk).
+    // Rebase replays commits onto another thread by mutating the worktree.
+    // The guard runs only on the entry path (not `--abort` / `--continue`,
+    // which need access to the in-progress state on disk). `--force` is
+    // threaded down to the repo apply layer as the explicit opt-in to discard
+    // local worktree changes during the fast-forward materialization.
     if !force && !abort && !cont {
         ensure_worktree_clean(&repo, "rebase")?;
     }
 
-    run_rebase(&repo, thread, abort, cont, Some(cli))
+    run_rebase(&repo, thread, abort, cont, force, Some(cli))
 }
 
 pub(crate) fn cmd_rebase_silent(
@@ -87,7 +86,7 @@ pub(crate) fn cmd_rebase_silent(
     abort: bool,
     cont: bool,
 ) -> Result<()> {
-    run_rebase(repo, thread, abort, cont, None)
+    run_rebase(repo, thread, abort, cont, false, None)
 }
 
 pub(crate) fn continue_rebase_for_operator(repo: &Repository) -> Result<OperatorContinueStatus> {
@@ -146,6 +145,7 @@ fn run_rebase(
     thread: Option<&str>,
     abort: bool,
     cont: bool,
+    discard_local_changes: bool,
     cli: Option<&Cli>,
 ) -> Result<()> {
     let rebase_state_path = repo.heddle_dir().join(REBASE_STATE_FILE);
@@ -189,7 +189,12 @@ fn run_rebase(
         // Wrap the single-FF arm in the same TransactionCommit-bracketed
         // batch shape replay_commits uses, so `heddle undo` treats this
         // path identically to a multi-commit rebase (heddle#198).
-        let advance = ff_advance_deferred(repo, target_thread, &target_change_id)?;
+        let advance = ff_advance_deferred(
+            repo,
+            target_thread,
+            &target_change_id,
+            discard_local_changes,
+        )?;
         flush_rebase_batch(repo, &[advance], &mint_rebase_transaction_id())?;
 
         if let Some(cli) = cli
@@ -253,7 +258,7 @@ fn run_rebase(
     }
 
     if let Some(cli) = cli {
-        replay_commits(repo, &rebase_state_path, cli)
+        replay_commits(repo, &rebase_state_path, cli, discard_local_changes)
     } else {
         replay_commits_silent(repo, &rebase_state_path)
     }
@@ -359,7 +364,7 @@ fn handle_abort(
     // REBASE_STATE (malformed pending_advance entry) still lets the
     // operator rewind via --abort; only `original_head` is required.
     let state = load_rebase_state_for_abort(rebase_state_path)?;
-    repo.goto_without_record(&state.original_head)?;
+    repo.goto_without_record_discard_local(&state.original_head)?;
 
     fs::remove_file(rebase_state_path)?;
 
@@ -384,7 +389,7 @@ fn handle_continue(
     }
 
     if let Some(cli) = cli {
-        replay_commits(repo, rebase_state_path, cli)
+        replay_commits(repo, rebase_state_path, cli, false)
     } else {
         replay_commits_silent(repo, rebase_state_path)
     }

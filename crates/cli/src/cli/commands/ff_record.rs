@@ -2,7 +2,7 @@
 //! Shared helper for fast-forward call sites that need to record an
 //! `OpRecord::FastForwardV2` instead of the implicit `OpRecord::Goto`.
 //!
-//! See heddle#99 (merge FF) and heddle#110 (rebase / pull / ship /
+//! See heddle#99 (merge FF) and heddle#110 (rebase / ship /
 //! merge-abort): recording a thread-advancing fast-forward as a plain
 //! `OpRecord::Goto` strands the target thread ref on undo, because the
 //! `Goto` inverse only rewinds HEAD. The fix is to perform the FF
@@ -15,11 +15,13 @@
 //! thread ref to strand, and the legacy `Goto` inverse correctly
 //! rewinds HEAD on its own.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use objects::object::{ChangeId, ThreadName};
 use oplog::OpRecord;
 use refs::Head;
 use repo::Repository;
+
+use super::advice::RecoveryAdvice;
 
 /// Perform a fast-forward of the attached thread to `post_target_id`
 /// and record the operation so undo restores the target thread ref to
@@ -29,8 +31,9 @@ use repo::Repository;
 /// Reads the pre-FF tip from the attached thread's ref (or from HEAD
 /// for detached). Use this overload at call sites where the thread
 /// ref has *not* been mutated since whatever you want undo to restore
-/// — e.g. merge / rebase / ship. Pull pre-sets the thread ref before
-/// materializing and must call [`record_ff_advance_explicit`].
+/// — e.g. merge / rebase / ship. Callers that also materialize a
+/// worktree must not publish the ref first: a dirty refusal must never
+/// leave a ref advanced without the matching worktree materialization.
 ///
 /// `source_thread` is the thread name surfaced in the OpRecord for
 /// forensic context. Neither undo nor redo reads it. For rebase-replay
@@ -46,10 +49,7 @@ pub(super) fn record_ff_advance(
 ) -> Result<()> {
     let head_before = repo.head_ref()?;
     let pre_target_id = match &head_before {
-        Head::Attached { thread } => repo
-            .refs()
-            .get_thread(thread)?
-            .ok_or_else(|| anyhow!("attached thread '{}' has no ref before FF", thread))?,
+        Head::Attached { thread } => attached_thread_tip(repo, thread)?,
         Head::Detached { state } => *state,
     };
     record_ff_advance_inner(
@@ -58,30 +58,32 @@ pub(super) fn record_ff_advance(
         &head_before,
         &pre_target_id,
         post_target_id,
+        false,
+        None,
     )
 }
 
-/// Variant of [`record_ff_advance`] that takes an explicit
-/// `pre_target_id`. Use when the thread ref was already mutated
-/// before the FF (e.g. `cmd_pull` advances the local thread ref
-/// directly so a non-materializing pull still advances the ref), so
-/// reading it back would return the *post* state.
-///
-/// Caller must capture `pre_target_id` *before* the mutating
-/// operation that precedes the FF.
-pub(super) fn record_ff_advance_explicit(
+/// Record a fast-forward whose worktree reset is itself the explicit
+/// destructive action, such as aborting a merge with conflict markers
+/// in the worktree.
+pub(super) fn record_ff_advance_discard_local(
     repo: &Repository,
     source_thread: &str,
-    pre_target_id: &ChangeId,
     post_target_id: &ChangeId,
 ) -> Result<()> {
     let head_before = repo.head_ref()?;
+    let pre_target_id = match &head_before {
+        Head::Attached { thread } => attached_thread_tip(repo, thread)?,
+        Head::Detached { state } => *state,
+    };
     record_ff_advance_inner(
         repo,
         source_thread,
         &head_before,
-        pre_target_id,
+        &pre_target_id,
         post_target_id,
+        true,
+        None,
     )
 }
 
@@ -104,16 +106,18 @@ pub(super) fn ff_advance_deferred(
     repo: &Repository,
     source_thread: &str,
     post_target_id: &ChangeId,
+    discard_local_changes: bool,
 ) -> Result<OpRecord> {
     let head_before = repo.head_ref()?;
     let pre_target_id = match &head_before {
-        Head::Attached { thread } => repo
-            .refs()
-            .get_thread(thread)?
-            .ok_or_else(|| anyhow!("attached thread '{}' has no ref before FF", thread))?,
+        Head::Attached { thread } => attached_thread_tip(repo, thread)?,
         Head::Detached { state } => *state,
     };
-    repo.fast_forward_attached_without_record(post_target_id)?;
+    if discard_local_changes {
+        repo.fast_forward_attached_without_record_discard_local(post_target_id)?;
+    } else {
+        repo.fast_forward_attached_without_record(post_target_id)?;
+    }
     Ok(match head_before {
         Head::Attached { thread } => OpRecord::FastForwardV2 {
             source_thread: source_thread.to_string(),
@@ -129,14 +133,44 @@ pub(super) fn ff_advance_deferred(
     })
 }
 
+fn attached_thread_tip(repo: &Repository, thread: &ThreadName) -> Result<ChangeId> {
+    repo.refs()
+        .get_thread(thread)?
+        .ok_or_else(|| anyhow!(attached_thread_missing_ref_advice(thread)))
+}
+
+fn attached_thread_missing_ref_advice(thread: &ThreadName) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "fast_forward_missing_attached_thread",
+        format!("Attached thread '{thread}' has no ref before fast-forward"),
+        "Inspect repository refs before retrying the operation.",
+        format!("HEAD is attached to '{thread}', but that thread ref does not resolve"),
+        "fast-forward cannot determine the pre-operation thread tip for undo/redo",
+        "repository refs and worktree files were left unchanged",
+        "heddle status",
+        vec!["heddle status".to_string()],
+    )
+}
+
 fn record_ff_advance_inner(
     repo: &Repository,
     source_thread: &str,
     head_before: &Head,
     pre_target_id: &ChangeId,
     post_target_id: &ChangeId,
+    discard_local_changes: bool,
+    materialized_baseline: Option<Option<ChangeId>>,
 ) -> Result<()> {
-    repo.fast_forward_attached_without_record(post_target_id)?;
+    if discard_local_changes {
+        repo.fast_forward_attached_without_record_discard_local(post_target_id)?;
+    } else if let Some(materialized_baseline) = materialized_baseline {
+        repo.fast_forward_attached_from_materialized_state_without_record(
+            post_target_id,
+            materialized_baseline.as_ref(),
+        )?;
+    } else {
+        repo.fast_forward_attached_without_record(post_target_id)?;
+    }
     match head_before {
         Head::Attached { thread } => {
             repo.oplog().record_fast_forward(
@@ -153,4 +187,155 @@ fn record_ff_advance_inner(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use objects::object::ThreadName;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn create_repo() -> (TempDir, Repository) {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        (temp, repo)
+    }
+
+    fn snapshot_file(
+        repo: &Repository,
+        root: &std::path::Path,
+        name: &str,
+        content: &str,
+    ) -> ChangeId {
+        fs::write(root.join(name), content).unwrap();
+        repo.snapshot(Some(name.to_string()), None)
+            .unwrap()
+            .change_id
+    }
+
+    #[test]
+    fn record_ff_advance_attached_records_fast_forward_v2() {
+        let (temp, repo) = create_repo();
+        let base = snapshot_file(&repo, temp.path(), "base.txt", "base\n");
+        let target = snapshot_file(&repo, temp.path(), "target.txt", "target\n");
+
+        repo.goto(&base).unwrap();
+        let thread = ThreadName::new("main");
+        repo.refs().set_thread(&thread, &base).unwrap();
+        repo.refs()
+            .write_head(&Head::Attached {
+                thread: thread.clone(),
+            })
+            .unwrap();
+
+        record_ff_advance(&repo, "source", &target).unwrap();
+
+        assert_eq!(repo.refs().get_thread(&thread).unwrap(), Some(target));
+        assert!(matches!(
+            repo.refs().read_head().unwrap(),
+            Head::Attached { thread: current } if current == thread
+        ));
+        let batches = repo
+            .oplog()
+            .recent_batches_scoped(4, Some(&repo.op_scope()))
+            .unwrap();
+        assert!(
+            batches
+                .iter()
+                .flat_map(|batch| &batch.entries)
+                .any(|entry| matches!(
+                    &entry.operation,
+                    oplog::OpRecord::FastForwardV2 {
+                        source_thread,
+                        target_thread,
+                        pre_target_id,
+                        post_target_id,
+                    } if source_thread == "source"
+                        && target_thread == "main"
+                        && *pre_target_id == base
+                        && *post_target_id == target
+                ))
+        );
+    }
+
+    #[test]
+    fn record_ff_advance_discard_local_overwrites_dirty_checkout() {
+        let (temp, repo) = create_repo();
+        let tracked = temp.path().join("tracked.txt");
+        let base = snapshot_file(&repo, temp.path(), "tracked.txt", "base\n");
+        fs::write(&tracked, "target\n").unwrap();
+        let target = repo
+            .snapshot(Some("target".to_string()), None)
+            .unwrap()
+            .change_id;
+
+        repo.goto(&base).unwrap();
+        repo.refs()
+            .set_thread(&ThreadName::new("main"), &base)
+            .unwrap();
+        repo.refs()
+            .write_head(&Head::Attached {
+                thread: ThreadName::new("main"),
+            })
+            .unwrap();
+        fs::write(&tracked, "local edit\n").unwrap();
+
+        record_ff_advance_discard_local(&repo, "source", &target).unwrap();
+
+        assert_eq!(fs::read_to_string(&tracked).unwrap(), "target\n");
+        assert_eq!(
+            repo.refs().get_thread(&ThreadName::new("main")).unwrap(),
+            Some(target)
+        );
+    }
+
+    #[test]
+    fn ff_advance_deferred_detached_returns_goto_record() {
+        let (temp, repo) = create_repo();
+        let base = snapshot_file(&repo, temp.path(), "base.txt", "base\n");
+        let target = snapshot_file(&repo, temp.path(), "target.txt", "target\n");
+        repo.goto(&base).unwrap();
+
+        let advance = ff_advance_deferred(&repo, "source", &target, false).unwrap();
+
+        assert!(matches!(
+            advance,
+            oplog::OpRecord::Goto {
+                target: recorded_target,
+                prev_head: Some(prev),
+                head
+            } if recorded_target == target && prev == base && head == target
+        ));
+        assert!(matches!(
+            repo.refs().read_head().unwrap(),
+            Head::Detached { state } if state == target
+        ));
+    }
+
+    #[test]
+    fn record_ff_advance_refuses_attached_head_without_thread_ref() {
+        let (temp, repo) = create_repo();
+        let target = snapshot_file(&repo, temp.path(), "target.txt", "target\n");
+        repo.refs()
+            .write_head(&Head::Attached {
+                thread: ThreadName::new("missing"),
+            })
+            .unwrap();
+
+        let err = record_ff_advance(&repo, "source", &target).unwrap_err();
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("fast_forward_missing_attached_thread")
+                || msg.contains("Attached thread 'missing' has no ref"),
+            "missing attached thread should produce typed recovery advice: {msg}"
+        );
+        assert!(matches!(
+            repo.refs().read_head().unwrap(),
+            Head::Attached { thread } if thread == "missing"
+        ));
+    }
 }

@@ -43,6 +43,21 @@ impl WorktreeApplyStrategy {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorktreeApplyDirtyBehavior {
+    RefuseOnDirty,
+    DiscardLocalChanges,
+}
+
+impl WorktreeApplyDirtyBehavior {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::RefuseOnDirty => "refuse_on_dirty",
+            Self::DiscardLocalChanges => "discard_local_changes",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorktreeApplyFallbackReason {
     MissingCurrentTree,
     NonRootDirectory,
@@ -68,6 +83,7 @@ pub(crate) struct WorktreeApplyStats {
 #[derive(Debug)]
 pub(crate) struct WorktreeApplyPlan {
     pub(crate) strategy: WorktreeApplyStrategy,
+    pub(crate) dirty_behavior: WorktreeApplyDirtyBehavior,
     pub(crate) removals: Vec<PathBuf>,
     pub(crate) directories: Vec<PathBuf>,
     pub(crate) writes: Vec<WorktreeWriteOp>,
@@ -98,6 +114,7 @@ impl WorktreeApplyPlan {
     fn incremental() -> Self {
         Self {
             strategy: WorktreeApplyStrategy::Incremental,
+            dirty_behavior: WorktreeApplyDirtyBehavior::RefuseOnDirty,
             removals: Vec::new(),
             directories: Vec::new(),
             writes: Vec::new(),
@@ -106,9 +123,13 @@ impl WorktreeApplyPlan {
         }
     }
 
-    fn fallback(reason: WorktreeApplyFallbackReason) -> Self {
+    fn fallback(
+        reason: WorktreeApplyFallbackReason,
+        dirty_behavior: WorktreeApplyDirtyBehavior,
+    ) -> Self {
         Self {
             strategy: WorktreeApplyStrategy::FullRematerialize,
+            dirty_behavior,
             removals: Vec::new(),
             directories: Vec::new(),
             writes: Vec::new(),
@@ -129,35 +150,54 @@ impl Repository {
         to_tree: &Tree,
         dir: &Path,
         current_worktree_verified_clean: bool,
+        dirty_behavior: WorktreeApplyDirtyBehavior,
     ) -> Result<WorktreeApplyPlan> {
         let plan_start = Instant::now();
         let plan = match from_tree {
-            None => WorktreeApplyPlan::fallback(WorktreeApplyFallbackReason::MissingCurrentTree),
+            None => {
+                self.refuse_full_rematerialize_on_dirty(
+                    dirty_behavior,
+                    WorktreeApplyFallbackReason::MissingCurrentTree,
+                )?;
+                WorktreeApplyPlan::fallback(
+                    WorktreeApplyFallbackReason::MissingCurrentTree,
+                    dirty_behavior,
+                )
+            }
             Some(_) if dir != self.root() => {
-                WorktreeApplyPlan::fallback(WorktreeApplyFallbackReason::NonRootDirectory)
+                self.refuse_full_rematerialize_on_dirty(
+                    dirty_behavior,
+                    WorktreeApplyFallbackReason::NonRootDirectory,
+                )?;
+                WorktreeApplyPlan::fallback(
+                    WorktreeApplyFallbackReason::NonRootDirectory,
+                    dirty_behavior,
+                )
             }
             Some(from_tree) => {
-                // FOOTGUN: when the worktree is dirty we silently fall back to
-                // `FullRematerialize`, which calls `clear_worktree` on the way
-                // out — wiping any tracked-but-unsnapshotted edits and any
-                // untracked files on tracked paths. Callers cannot tell from
-                // the return value whether their tree-apply preserved or
-                // destroyed uncommitted work.
-                //
-                // Defense-in-depth lives at the CLI layer: `goto`, `revert`,
-                // `undo`, `redo`, `cherry-pick`, and `rebase` all refuse on a
-                // dirty worktree (with `--force` to bypass) before reaching
-                // here. The remaining direct callers of `goto_internal` are
-                // either internal (`fast_forward_attached`, rebase replay,
-                // operator continue) or already pass
-                // `current_worktree_verified_clean=true`.
-                //
-                // TODO: surface the strategy choice as an explicit parameter
-                // (e.g. `apply_strategy: AllowDirtyFallback | RefuseOnDirty`)
-                // so library callers cannot accidentally clobber a dirty
-                // worktree. That refactor is out of scope for this change.
-                if !current_worktree_verified_clean && !self.worktree_is_clean_cached(from_tree)? {
-                    WorktreeApplyPlan::fallback(WorktreeApplyFallbackReason::DirtyWorktree)
+                if !current_worktree_verified_clean {
+                    let detailed = self.compare_worktree_cached_detailed(from_tree)?;
+                    if !detailed.is_clean() {
+                        if dirty_behavior == WorktreeApplyDirtyBehavior::RefuseOnDirty {
+                            return Err(full_rematerialize_dirty_refusal_from_status(
+                                WorktreeApplyFallbackReason::DirtyWorktree,
+                                &detailed,
+                            ));
+                        }
+                        WorktreeApplyPlan::fallback(
+                            WorktreeApplyFallbackReason::DirtyWorktree,
+                            dirty_behavior,
+                        )
+                    } else {
+                        let mut plan = WorktreeApplyPlan::incremental();
+                        self.plan_tree_apply_recursive(
+                            Path::new(""),
+                            Some(from_tree),
+                            Some(to_tree),
+                            &mut plan,
+                        )?;
+                        plan
+                    }
                 } else {
                     let mut plan = WorktreeApplyPlan::incremental();
                     self.plan_tree_apply_recursive(
@@ -173,6 +213,7 @@ impl Repository {
 
         debug!(
             strategy = plan.strategy.as_str(),
+            dirty_behavior = plan.dirty_behavior.as_str(),
             changed_count = plan.stats.changed_count,
             unchanged_count = plan.stats.unchanged_count,
             fallback_reason = plan
@@ -197,6 +238,14 @@ impl Repository {
                 self.execute_incremental_worktree_apply(plan, tree)
             }
             WorktreeApplyStrategy::FullRematerialize => {
+                if plan.dirty_behavior == WorktreeApplyDirtyBehavior::RefuseOnDirty {
+                    self.refuse_full_rematerialize_on_dirty(
+                        plan.dirty_behavior,
+                        plan.fallback_reason
+                            .unwrap_or(WorktreeApplyFallbackReason::MissingCurrentTree),
+                    )?;
+                }
+
                 let delete_start = Instant::now();
                 if self.worktree_requires_clear()? {
                     self.clear_worktree()?;
@@ -519,6 +568,46 @@ impl Repository {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    fn refuse_full_rematerialize_on_dirty(
+        &self,
+        dirty_behavior: WorktreeApplyDirtyBehavior,
+        reason: WorktreeApplyFallbackReason,
+    ) -> Result<()> {
+        if dirty_behavior == WorktreeApplyDirtyBehavior::DiscardLocalChanges {
+            return Ok(());
+        }
+        let at_risk_paths = self.full_rematerialize_at_risk_paths()?;
+        if at_risk_paths.is_empty() {
+            return Ok(());
+        }
+        Err(full_rematerialize_dirty_refusal(reason, at_risk_paths))
+    }
+
+    fn full_rematerialize_at_risk_paths(&self) -> Result<Vec<String>> {
+        let patterns = self.ignore_patterns()?;
+        let walker = ignore::WalkBuilder::new(&self.root)
+            .hidden(false)
+            .git_ignore(false)
+            .follow_links(false)
+            .build();
+
+        let mut paths = Vec::new();
+        for entry in walker {
+            let entry = entry.map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
+            let path = entry.path();
+            if path == self.root {
+                continue;
+            }
+            let rel_path = path.strip_prefix(&self.root).unwrap_or(path);
+            if should_ignore_path(rel_path, &patterns) {
+                continue;
+            }
+            paths.push(format!("existing: {}", rel_path.display()));
+        }
+        paths.sort();
+        Ok(paths)
     }
 
     fn invalidate_worktree_performance_state(&self) -> Result<()> {
@@ -934,6 +1023,56 @@ fn remove_existing_path(path: &Path) -> Result<()> {
     }
 }
 
+fn full_rematerialize_dirty_refusal_from_status(
+    reason: WorktreeApplyFallbackReason,
+    detailed: &crate::WorktreeStatusDetailed,
+) -> HeddleError {
+    let untracked = detailed.untracked.flatten_paths();
+    let at_risk_paths = detailed
+        .modified
+        .iter()
+        .map(|path| format!("modified: {}", path.display()))
+        .chain(
+            detailed
+                .deleted
+                .iter()
+                .map(|path| format!("deleted: {}", path.display())),
+        )
+        .chain(
+            untracked
+                .iter()
+                .map(|path| format!("untracked: {}", path.display())),
+        )
+        .collect();
+    full_rematerialize_dirty_refusal(reason, at_risk_paths)
+}
+
+fn full_rematerialize_dirty_refusal(
+    reason: WorktreeApplyFallbackReason,
+    at_risk_paths: Vec<String>,
+) -> HeddleError {
+    HeddleError::Conflict(format!(
+        "dirty worktree would be overwritten by full rematerialize ({reason}); unsnapped edits at risk: {paths}. Capture, commit, or stash them first, or rerun with --force to discard local changes.",
+        reason = reason.as_str(),
+        paths = format_at_risk_paths(&at_risk_paths),
+    ))
+}
+
+fn format_at_risk_paths(paths: &[String]) -> String {
+    const LIMIT: usize = 20;
+    let mut rendered = paths
+        .iter()
+        .take(LIMIT)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remaining = paths.len().saturating_sub(LIMIT);
+    if remaining > 0 {
+        rendered.push_str(&format!(", ... and {remaining} more"));
+    }
+    rendered
+}
+
 /// Legacy ignore-driven walker — backs the deprecated
 /// [`Repository::remove_tracked_descendants`] entrypoint. Walks `dir`
 /// recursively, removing every entry whose worktree-relative path is
@@ -1099,7 +1238,13 @@ mod tests {
         let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
 
         let plan = repo
-            .plan_worktree_apply(Some(&tree), &tree, temp_dir.path(), true)
+            .plan_worktree_apply(
+                Some(&tree),
+                &tree,
+                temp_dir.path(),
+                true,
+                WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            )
             .unwrap();
 
         assert_eq!(plan.strategy, WorktreeApplyStrategy::Incremental);
@@ -1128,7 +1273,13 @@ mod tests {
 
         thread::sleep(Duration::from_millis(20));
         let plan = repo
-            .plan_worktree_apply(Some(&tree_one), &tree_two, temp_dir.path(), true)
+            .plan_worktree_apply(
+                Some(&tree_one),
+                &tree_two,
+                temp_dir.path(),
+                true,
+                WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            )
             .unwrap();
         let report = repo
             .execute_worktree_apply(&plan, &tree_two, temp_dir.path())
@@ -1145,6 +1296,178 @@ mod tests {
     }
 
     #[test]
+    fn full_rematerialize_refuses_dirty_worktree_and_preserves_edits() {
+        let (temp_dir, repo) = create_repo();
+        let tracked = temp_dir.path().join("tracked.txt");
+        let notes = temp_dir.path().join("notes.md");
+
+        fs::write(&tracked, "base\n").unwrap();
+        let state_one = repo.snapshot(Some("one".to_string()), None).unwrap();
+
+        fs::write(&tracked, "target\n").unwrap();
+        fs::write(temp_dir.path().join("target-only.txt"), "target file\n").unwrap();
+        let state_two = repo.snapshot(Some("two".to_string()), None).unwrap();
+
+        repo.goto(&state_one.change_id).unwrap();
+        fs::write(&tracked, "unsnapped edit\n").unwrap();
+        fs::write(&notes, "local notes\n").unwrap();
+
+        let err = repo.goto(&state_two.change_id).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("dirty worktree")
+                && msg.contains("full rematerialize")
+                && msg.contains("modified: tracked.txt")
+                && msg.contains("untracked: notes.md")
+                && msg.contains("--force"),
+            "refusal should name the destructive apply and at-risk edits: {msg}"
+        );
+        assert_eq!(fs::read_to_string(&tracked).unwrap(), "unsnapped edit\n");
+        assert_eq!(fs::read_to_string(&notes).unwrap(), "local notes\n");
+        assert!(!temp_dir.path().join("target-only.txt").exists());
+    }
+
+    #[test]
+    fn full_rematerialize_discard_opt_in_proceeds_on_dirty_worktree() {
+        let (temp_dir, repo) = create_repo();
+        let tracked = temp_dir.path().join("tracked.txt");
+        let notes = temp_dir.path().join("notes.md");
+
+        fs::write(&tracked, "base\n").unwrap();
+        let state_one = repo.snapshot(Some("one".to_string()), None).unwrap();
+
+        fs::write(&tracked, "target\n").unwrap();
+        fs::write(temp_dir.path().join("target-only.txt"), "target file\n").unwrap();
+        let state_two = repo.snapshot(Some("two".to_string()), None).unwrap();
+
+        repo.goto(&state_one.change_id).unwrap();
+        fs::write(&tracked, "unsnapped edit\n").unwrap();
+        fs::write(&notes, "local notes\n").unwrap();
+
+        repo.goto_discard_local(&state_two.change_id).unwrap();
+
+        assert_eq!(fs::read_to_string(&tracked).unwrap(), "target\n");
+        assert!(!notes.exists());
+        assert_eq!(
+            fs::read_to_string(temp_dir.path().join("target-only.txt")).unwrap(),
+            "target file\n"
+        );
+    }
+
+    #[test]
+    fn non_root_full_rematerialize_refuses_existing_worktree_content() {
+        let (temp_dir, repo) = create_repo();
+        fs::write(temp_dir.path().join("tracked.txt"), "tracked\n").unwrap();
+        let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
+        let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
+        let non_root = temp_dir.path().join("checkout");
+
+        let err = repo
+            .plan_worktree_apply(
+                Some(&tree),
+                &tree,
+                &non_root,
+                false,
+                WorktreeApplyDirtyBehavior::RefuseOnDirty,
+            )
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("non_root_directory") && msg.contains("existing: tracked.txt"),
+            "non-root fallback should refuse before overwriting existing checkout content: {msg}"
+        );
+        assert_eq!(
+            fs::read_to_string(temp_dir.path().join("tracked.txt")).unwrap(),
+            "tracked\n"
+        );
+    }
+
+    #[test]
+    fn non_root_full_rematerialize_with_discard_clears_and_writes_target_tree() {
+        let (temp_dir, repo) = create_repo();
+        fs::write(temp_dir.path().join("tracked.txt"), "tracked\n").unwrap();
+        let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
+        let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
+        fs::write(temp_dir.path().join("local.txt"), "local\n").unwrap();
+        let non_root = temp_dir.path().join("checkout");
+
+        let plan = repo
+            .plan_worktree_apply(
+                Some(&tree),
+                &tree,
+                &non_root,
+                false,
+                WorktreeApplyDirtyBehavior::DiscardLocalChanges,
+            )
+            .unwrap();
+        assert_eq!(plan.strategy, WorktreeApplyStrategy::FullRematerialize);
+        assert_eq!(
+            plan.fallback_reason,
+            Some(WorktreeApplyFallbackReason::NonRootDirectory)
+        );
+
+        repo.execute_worktree_apply(&plan, &tree, &non_root)
+            .unwrap();
+
+        assert!(!temp_dir.path().join("local.txt").exists());
+        assert_eq!(
+            fs::read_to_string(non_root.join("tracked.txt")).unwrap(),
+            "tracked\n"
+        );
+        assert!(
+            !temp_dir.path().join(".heddle/state/index.bin").exists(),
+            "non-root full rematerialize must invalidate the root worktree index"
+        );
+    }
+
+    #[test]
+    fn execute_full_rematerialize_regates_refuse_on_dirty_plans() {
+        let (temp_dir, repo) = create_repo();
+        fs::write(temp_dir.path().join("tracked.txt"), "tracked\n").unwrap();
+        let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
+        let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
+        fs::write(temp_dir.path().join("local.txt"), "local\n").unwrap();
+        let plan = WorktreeApplyPlan::fallback(
+            WorktreeApplyFallbackReason::MissingCurrentTree,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+        );
+
+        let err = repo
+            .execute_worktree_apply(&plan, &tree, temp_dir.path())
+            .unwrap_err();
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("missing_current_tree") && msg.contains("existing: local.txt"),
+            "execute-time re-gate should refuse stale full-rematerialize plans: {msg}"
+        );
+        assert_eq!(
+            fs::read_to_string(temp_dir.path().join("local.txt")).unwrap(),
+            "local\n"
+        );
+        assert_eq!(
+            fs::read_to_string(temp_dir.path().join("tracked.txt")).unwrap(),
+            "tracked\n"
+        );
+    }
+
+    #[test]
+    fn clean_worktree_apply_still_succeeds_by_default() {
+        let (temp_dir, repo) = create_repo();
+        let tracked = temp_dir.path().join("tracked.txt");
+
+        fs::write(&tracked, "base\n").unwrap();
+        let state_one = repo.snapshot(Some("one".to_string()), None).unwrap();
+        fs::write(&tracked, "target\n").unwrap();
+        let state_two = repo.snapshot(Some("two".to_string()), None).unwrap();
+
+        repo.goto(&state_one.change_id).unwrap();
+        repo.goto(&state_two.change_id).unwrap();
+
+        assert_eq!(fs::read_to_string(&tracked).unwrap(), "target\n");
+    }
+
+    #[test]
     fn full_rematerialize_reseeds_worktree_index() {
         let (temp_dir, repo) = create_repo();
         let nested_dir = temp_dir.path().join("src/bin");
@@ -1156,7 +1479,10 @@ mod tests {
 
         repo.clear_worktree().unwrap();
 
-        let plan = WorktreeApplyPlan::fallback(WorktreeApplyFallbackReason::MissingCurrentTree);
+        let plan = WorktreeApplyPlan::fallback(
+            WorktreeApplyFallbackReason::MissingCurrentTree,
+            WorktreeApplyDirtyBehavior::DiscardLocalChanges,
+        );
         let report = repo
             .execute_worktree_apply(&plan, &tree, temp_dir.path())
             .unwrap();

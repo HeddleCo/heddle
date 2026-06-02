@@ -67,6 +67,8 @@ pub fn cmd_goto(cli: &Cli, target: String, force: bool) -> Result<()> {
 
     if current_worktree_verified_clean {
         repo.goto_verified_clean(&target_id)?;
+    } else if force {
+        repo.goto_discard_local(&target_id)?;
     } else {
         repo.goto(&target_id)?;
     }

@@ -269,7 +269,7 @@ Examples:
         /// Target state.
         target: String,
 
-        /// Discard uncommitted changes.
+        /// Discard unsnapped local changes.
         #[arg(short, long)]
         force: bool,
     },

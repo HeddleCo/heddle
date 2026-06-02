@@ -220,7 +220,7 @@ fn fault_counter_trips(
 /// the worktree (if a state was captured), then restore the exact `Head` ref.
 fn restore_head(repo: &Repository, state: Option<ChangeId>, head_ref: &Head) -> HeddleResult<()> {
     if let Some(state) = state {
-        repo.goto_without_record(&state)?;
+        repo.goto_without_record_discard_local(&state)?;
     }
     repo.refs().write_head(head_ref)
 }
@@ -297,7 +297,7 @@ impl<'a> EntrySteps<'_, 'a> {
         self.step_nonatomic(
             move || Ok((repo.head()?, repo.head_ref()?)),
             move |(prev_state, prev_head_ref)| restore_head(repo, prev_state, &prev_head_ref),
-            move || repo.goto_without_record(&target),
+            move || repo.goto_without_record_discard_local(&target),
         )
     }
 

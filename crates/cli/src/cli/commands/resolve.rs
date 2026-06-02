@@ -97,7 +97,7 @@ pub(crate) fn abort_merge_state(
     // that *does* move HEAD before aborting (e.g. a partial-apply
     // shape) would then get correct undo semantics for free without
     // a second migration.
-    super::ff_record::record_ff_advance(repo, "<abort>", &merge_state.ours)?;
+    super::ff_record::record_ff_advance_discard_local(repo, "<abort>", &merge_state.ours)?;
     merge_manager.abort()?;
     Ok(())
 }

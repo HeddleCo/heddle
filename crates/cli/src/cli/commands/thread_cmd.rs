@@ -530,7 +530,7 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
 fn restore_refresh_rebase_abort(repo: &Repository, rebase_state_path: &Path) -> Result<()> {
     let rebase_state = super::rebase::load_persisted_rebase_state(rebase_state_path)?;
     let head_before = repo.head_ref()?;
-    repo.goto_without_record(&rebase_state.original_head)?;
+    repo.goto_without_record_discard_local(&rebase_state.original_head)?;
     if let Head::Attached { thread } = head_before {
         repo.refs()
             .set_thread(&thread, &rebase_state.original_head)?;
