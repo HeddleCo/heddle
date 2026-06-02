@@ -190,7 +190,14 @@ jobs:
       - name: Bench-compare script unit tests
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
-      # 3c. Compile gate for the `postgres` (server / weft) feature. This is
+      # 3c. Compile every workspace benchmark target without running the
+      #     measurements. The weekly benchmark workflow owns performance
+      #     trend tracking; this cheap PR-safe guard catches rotten bench
+      #     code and Cargo.toml `[[bench]]` entries before they land.
+      - name: Compile benchmark targets
+        run: cargo bench --locked --workspace --no-run
+
+      # 3d. Compile gate for the `postgres` (server / weft) feature. This is
       #     the silent-rot guard: `--features postgres` is NOT exercised by
       #     the default-feature build above, so a server-path regression
       #     (e.g. a backend that wasn't updated after a newtype migration)
