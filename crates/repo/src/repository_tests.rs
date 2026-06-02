@@ -2,7 +2,10 @@
 use objects::store::ObjectStore;
 use std::fs;
 
-use objects::object::{ChangeId, ThreadName};
+use objects::{
+    object::{Blob, ChangeId, ThreadName, Tree, TreeEntry},
+    util::symlink_target_bytes,
+};
 use oplog::OpRecord;
 use refs::Head;
 use serde_json::json;
@@ -18,6 +21,13 @@ fn create_test_repo() -> (TempDir, Repository) {
     let temp_dir = TempDir::new().unwrap();
     let repo = Repository::init_default(temp_dir.path()).unwrap();
     (temp_dir, repo)
+}
+
+#[cfg(unix)]
+fn handcrafted_symlink_tree(repo: &Repository, target: &std::path::Path) -> Tree {
+    let blob = Blob::new(symlink_target_bytes(target));
+    let hash = repo.store().put_blob(&blob).unwrap();
+    Tree::from_entries(vec![TreeEntry::symlink("link", hash).unwrap()])
 }
 
 #[test]
@@ -629,6 +639,99 @@ fn test_materialize_tree_creates_symlinks() {
     let target = fs::read_link(&link_path).expect("readlink should succeed");
     assert_eq!(target, std::path::Path::new("target.txt"));
     assert!(target_path.exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn test_materialize_tree_rejects_relative_symlink_escape() {
+    let (temp_dir, repo) = create_test_repo();
+    let materialize_root = temp_dir.path().join("materialized");
+    let tree = handcrafted_symlink_tree(&repo, std::path::Path::new("../outside"));
+
+    let result = repo.materialize_tree(&tree, &materialize_root);
+
+    assert!(matches!(result, Err(HeddleError::InvalidSymlinkTarget(_))));
+    assert!(
+        fs::symlink_metadata(materialize_root.join("link")).is_err(),
+        "escaping symlink must fail before the link is created"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_materialize_tree_rejects_normalized_relative_symlink_escape() {
+    let (temp_dir, repo) = create_test_repo();
+    let materialize_root = temp_dir.path().join("materialized");
+    let tree = handcrafted_symlink_tree(&repo, std::path::Path::new(".heddle/../../outside"));
+
+    let result = repo.materialize_tree(&tree, &materialize_root);
+
+    assert!(matches!(result, Err(HeddleError::InvalidSymlinkTarget(_))));
+    assert!(
+        fs::symlink_metadata(materialize_root.join("link")).is_err(),
+        "normalized escaping symlink must fail before the link is created"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_materialize_tree_rejects_absolute_symlink_escape() {
+    let (temp_dir, repo) = create_test_repo();
+    let materialize_root = temp_dir.path().join("materialized");
+    let outside_target = temp_dir.path().join("outside-target");
+    let tree = handcrafted_symlink_tree(&repo, &outside_target);
+
+    let result = repo.materialize_tree(&tree, &materialize_root);
+
+    assert!(matches!(result, Err(HeddleError::InvalidSymlinkTarget(_))));
+    assert!(
+        fs::symlink_metadata(materialize_root.join("link")).is_err(),
+        "absolute escaping symlink must fail before the link is created"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_materialize_tree_allows_handcrafted_in_repo_symlink() {
+    let (temp_dir, repo) = create_test_repo();
+    let materialize_root = temp_dir.path().join("materialized");
+    let tree = handcrafted_symlink_tree(&repo, std::path::Path::new("target.txt"));
+
+    repo.materialize_tree(&tree, &materialize_root).unwrap();
+
+    let link_path = materialize_root.join("link");
+    let meta = fs::symlink_metadata(&link_path).unwrap();
+    assert!(meta.file_type().is_symlink());
+    assert_eq!(
+        fs::read_link(&link_path).unwrap(),
+        std::path::Path::new("target.txt")
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_capture_and_materialize_reject_same_escaping_symlink_target() {
+    let (temp_dir, repo) = create_test_repo();
+    let target = std::path::Path::new("../outside");
+    std::os::unix::fs::symlink(target, temp_dir.path().join("capture-link")).unwrap();
+
+    let capture_result = repo.build_tree(temp_dir.path());
+    assert!(matches!(
+        capture_result,
+        Err(HeddleError::InvalidSymlinkTarget(_))
+    ));
+
+    let materialize_root = temp_dir.path().join("materialized");
+    let tree = handcrafted_symlink_tree(&repo, target);
+    let materialize_result = repo.materialize_tree(&tree, &materialize_root);
+    assert!(matches!(
+        materialize_result,
+        Err(HeddleError::InvalidSymlinkTarget(_))
+    ));
+    assert!(
+        fs::symlink_metadata(materialize_root.join("link")).is_err(),
+        "materialize must reject the same target capture rejects"
+    );
 }
 
 #[test]

@@ -483,24 +483,89 @@ pub(crate) fn validate_symlink_target(base: &Path, symlink_dir: &Path, target: &
     if !canonical_symlink_dir.starts_with(&canonical_base) {
         return false;
     }
-    if target.is_absolute() {
-        return target
-            .canonicalize()
-            .map(|resolved| resolved.starts_with(&canonical_base))
-            .unwrap_or_else(|_| target.starts_with(&canonical_base));
+    let target_path = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        canonical_symlink_dir.join(target)
+    };
+    if let Ok(resolved) = target_path.canonicalize() {
+        return resolved.starts_with(&canonical_base);
     }
-    let mut depth_from_base = canonical_symlink_dir
-        .components()
-        .skip(canonical_base.components().count())
-        .count();
-    for component in target.components() {
+    dangling_path_stays_within_base(&canonical_base, &target_path)
+}
+
+fn dangling_path_stays_within_base(base: &Path, path: &Path) -> bool {
+    let mut existing = path.to_path_buf();
+    let mut missing_components = Vec::new();
+    while !existing.exists() {
+        let Some(name) = existing.file_name() else {
+            return false;
+        };
+        missing_components.push(name.to_os_string());
+        let Some(parent) = existing.parent() else {
+            return false;
+        };
+        existing = parent.to_path_buf();
+    }
+
+    let Ok(mut resolved) = existing.canonicalize() else {
+        return false;
+    };
+    if !resolved.starts_with(base) {
+        return false;
+    }
+    for component in missing_components.iter().rev() {
+        resolved.push(component);
+    }
+    path_stays_within_base_lexically(base, &resolved)
+}
+
+fn path_stays_within_base_lexically(base: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(base) else {
+        return false;
+    };
+    let mut depth = 0_usize;
+    for component in relative.components() {
         match component {
-            Component::ParentDir if depth_from_base == 0 => return false,
-            Component::ParentDir => depth_from_base -= 1,
+            Component::ParentDir if depth == 0 => return false,
+            Component::ParentDir => depth -= 1,
             Component::CurDir => {}
-            Component::Normal(_) => depth_from_base += 1,
+            Component::Normal(_) => depth += 1,
             Component::RootDir | Component::Prefix(_) => return false,
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_symlink_target;
+    use std::path::Path;
+
+    #[test]
+    #[cfg(unix)]
+    fn validate_symlink_target_rejects_dangling_target_through_escaping_ancestor() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("escape")).unwrap();
+
+        assert!(!validate_symlink_target(
+            root.path(),
+            root.path(),
+            Path::new("escape/missing")
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn validate_symlink_target_allows_dangling_target_under_real_in_repo_dir() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("inside")).unwrap();
+
+        assert!(validate_symlink_target(
+            root.path(),
+            root.path(),
+            Path::new("inside/missing")
+        ));
+    }
 }
