@@ -3,14 +3,13 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
-    process,
     thread::{self},
     time::{Duration, Instant},
 };
 
-use chrono::Utc;
+use fs2::FileExt;
 use objects::{
     error::{HeddleError, Result},
     object::ThreadName,
@@ -19,20 +18,20 @@ use objects::{
 use super::{RefManager, name::validate_ref_name};
 use crate::fs_atomic::write_file_atomic;
 
-const STALE_LOCK_TIMEOUT_SECS: i64 = 300;
 const MAX_LOCK_WAIT_SECS: u64 = 10;
 const FLAT_THREADS_DIR_NAME: &str = "__heddle_flat";
 const FLAT_THREAD_SUFFIX: &str = ".ref";
 
 pub(super) struct RefsLock {
+    file: File,
     path: PathBuf,
 }
 
 impl Drop for RefsLock {
     fn drop(&mut self) {
-        if let Err(err) = fs::remove_file(&self.path) {
+        if let Err(err) = self.file.unlock() {
             eprintln!(
-                "Warning: failed to remove refs lock file {}: {}",
+                "Warning: failed to unlock refs lock file {}: {}",
                 self.path.display(),
                 err
             );
@@ -153,7 +152,7 @@ impl RefManager {
     pub(super) fn lock_refs(&self) -> Result<RefsLock> {
         std::fs::create_dir_all(self.refs_dir())?;
         let path = self.lock_path();
-        let current_pid = process::id();
+        let file = Self::open_lock_file(&path)?;
         let start_time = Instant::now();
         let mut delay = Duration::from_millis(5);
 
@@ -165,30 +164,9 @@ impl RefManager {
                 )));
             }
 
-            if let Ok(content) = self.read_string(&path)
-                && let Some((pid, ts)) = Self::parse_lock_content(&content)
-            {
-                let now = Utc::now().timestamp();
-                if pid != current_pid && now - ts > STALE_LOCK_TIMEOUT_SECS {
-                    let _ = fs::remove_file(&path);
-                }
-            }
-
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(file) => {
-                    let now = Utc::now().timestamp();
-                    let content = format!("{} {}", current_pid, now);
-                    let file = write_lock_body_or_cleanup(file, content.as_bytes(), &path)?;
-                    if let Err(err) = file.sync_all() {
-                        // Drop-before-remove is load-bearing on Windows.
-                        // See `write_lock_body_or_cleanup` doc-comment.
-                        drop(file);
-                        let _ = fs::remove_file(&path);
-                        return Err(err.into());
-                    }
-                    return Ok(RefsLock { path });
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            match file.try_lock_exclusive() {
+                Ok(()) => return Ok(RefsLock { file, path }),
+                Err(err) if is_lock_contended(&err) => {
                     let jitter_window = (delay.as_millis() as u64 / 2).max(1);
                     let jitter = rand::random::<u64>() % jitter_window;
                     thread::sleep(delay + Duration::from_millis(jitter));
@@ -198,18 +176,30 @@ impl RefManager {
             }
         }
     }
-    fn parse_lock_content(content: &str) -> Option<(u32, i64)> {
-        let parts: Vec<&str> = content.split_whitespace().collect();
-        if parts.len() == 2 {
-            if let (Ok(pid), Ok(ts)) = (parts[0].parse::<u32>(), parts[1].parse::<i64>()) {
-                Some((pid, ts))
-            } else {
-                None
-            }
-        } else {
-            None
+
+    fn open_lock_file(path: &Path) -> Result<File> {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map_err(Into::into)
+    }
+
+    #[cfg(test)]
+    fn try_lock_refs_for_test(&self) -> Result<Option<RefsLock>> {
+        std::fs::create_dir_all(self.refs_dir())?;
+        let path = self.lock_path();
+        let file = Self::open_lock_file(&path)?;
+
+        match file.try_lock_exclusive() {
+            Ok(()) => Ok(Some(RefsLock { file, path })),
+            Err(err) if is_lock_contended(&err) => Ok(None),
+            Err(err) => Err(err.into()),
         }
     }
+
     pub(super) fn write_string(&self, path: &Path, contents: &str) -> Result<()> {
         Ok(write_file_atomic(path, contents.as_bytes())?)
     }
@@ -259,33 +249,11 @@ impl RefManager {
     }
 }
 
-/// Write `body` to `writer`; on failure drop the writer (closing any
-/// underlying OS handle) and remove the orphan at `cleanup_path`,
-/// returning the original write error. On success, return the writer
-/// so the caller can continue using it (e.g. for `sync_all`).
-///
-/// Generic over `Write` so tests can inject a failing writer to
-/// exercise the cleanup branch — the production caller passes the
-/// freshly-`create_new`'d lock file by value.
-///
-/// **Drop-before-remove is load-bearing on Windows.** Without
-/// `FILE_SHARE_DELETE`, `DeleteFile` against a still-open handle fails
-/// with `ERROR_SHARING_VIOLATION`. Taking the writer by value makes
-/// ownership obvious at the call site and forces the close to happen
-/// before `remove_file`. Lifted from the heddle#86 r2 helper in
-/// `shared_target.rs`.
-fn write_lock_body_or_cleanup<W: Write>(
-    mut writer: W,
-    body: &[u8],
-    cleanup_path: &Path,
-) -> Result<W> {
-    match writer.write_all(body) {
-        Ok(()) => Ok(writer),
-        Err(err) => {
-            drop(writer);
-            let _ = fs::remove_file(cleanup_path);
-            Err(err.into())
-        }
+fn is_lock_contended(err: &io::Error) -> bool {
+    let lock_error = fs2::lock_contended_error();
+    match lock_error.raw_os_error() {
+        Some(code) => err.raw_os_error() == Some(code),
+        None => err.kind() == lock_error.kind(),
     }
 }
 
@@ -314,23 +282,11 @@ fn decode_flat_thread_name(file_name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::mpsc, time::Duration};
+
     use tempfile::TempDir;
 
     use super::*;
-
-    #[test]
-    fn test_parse_lock_content_valid() {
-        let content = "1234 1640995200";
-        let result = RefManager::parse_lock_content(content);
-        assert_eq!(result, Some((1234, 1640995200)));
-    }
-
-    #[test]
-    fn test_parse_lock_content_invalid() {
-        assert_eq!(RefManager::parse_lock_content("invalid"), None);
-        assert_eq!(RefManager::parse_lock_content("1234"), None);
-        assert_eq!(RefManager::parse_lock_content("abc 123"), None);
-    }
 
     #[test]
     fn test_lock_refs_basic() {
@@ -338,74 +294,60 @@ mod tests {
         let repo = RefManager::new(temp_dir.path());
         let lock = repo.lock_refs().unwrap();
         assert!(repo.lock_path().exists());
+        assert!(repo.try_lock_refs_for_test().unwrap().is_none());
         drop(lock);
-        assert!(!repo.lock_path().exists());
-    }
-
-    /// `Write` wrapper that flips a flag from its `Drop` impl. The
-    /// regression test below uses this to assert the writer is closed
-    /// before the helper's `remove_file` call — load-bearing on Windows,
-    /// where `DeleteFile` against a still-open handle fails with
-    /// `ERROR_SHARING_VIOLATION` and the orphan would otherwise survive.
-    /// Mirrors `DropTrackingFailingWriter` from
-    /// `shared_target.rs` (heddle#86 r2).
-    struct DropTrackingFailingWriter<'a> {
-        dropped: &'a std::cell::Cell<bool>,
-    }
-    impl Write for DropTrackingFailingWriter<'_> {
-        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::other("simulated write failure"))
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    impl Drop for DropTrackingFailingWriter<'_> {
-        fn drop(&mut self) {
-            self.dropped.set(true);
-        }
+        assert!(repo.lock_path().exists());
+        assert!(repo.try_lock_refs_for_test().unwrap().is_some());
     }
 
     #[test]
-    fn write_lock_body_or_cleanup_drops_writer_before_returning_on_failure() {
-        // Regression for heddle#95 (sweep follow-up to heddle#86 r2). On
-        // Windows, `remove_file` against a still-open handle fails with
-        // `ERROR_SHARING_VIOLATION`; the lock file stays, and the next
-        // operation waits the full 5-minute stale-lock timeout. The
-        // helper must take the writer by value and drop it before
-        // `remove_file`. POSIX would let the unlink succeed against an
-        // open handle, so this test asserts the ownership-transfer
-        // guarantee directly: by the time the helper returns on the
-        // failure path, the writer has been dropped (i.e. on a real
-        // `File`, the OS handle is closed).
-        let temp = TempDir::new().unwrap();
-        let orphan = temp.path().join("LOCK");
-        fs::write(&orphan, b"").unwrap();
-
-        let dropped = std::cell::Cell::new(false);
-        let writer = DropTrackingFailingWriter { dropped: &dropped };
-        let result = write_lock_body_or_cleanup(writer, b"would-be body", &orphan);
-
-        assert!(result.is_err());
-        assert!(
-            dropped.get(),
-            "writer must be dropped before the helper returns on failure — \
-             on Windows, the file handle must be closed before remove_file"
-        );
-        assert!(!orphan.exists());
-    }
-
-    #[test]
-    fn test_lock_refs_stale_removal() {
+    fn lock_refs_does_not_reap_old_lock_body_while_holder_is_alive() {
         let temp_dir = TempDir::new().unwrap();
         let repo = RefManager::new(temp_dir.path());
         let lock_path = repo.lock_path();
         fs::create_dir_all(repo.refs_dir()).unwrap();
-        let fake_pid = 99999;
-        let old_ts = Utc::now().timestamp() - STALE_LOCK_TIMEOUT_SECS - 1;
-        let content = format!("{} {}", fake_pid, old_ts);
-        fs::write(&lock_path, content).unwrap();
-        let _lock = repo.lock_refs().unwrap();
+        let old_lock_body = "99999 0";
+        fs::write(&lock_path, old_lock_body).unwrap();
+
+        let holder = repo.lock_refs().unwrap();
+        assert!(repo.try_lock_refs_for_test().unwrap().is_none());
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let root = temp_dir.path().to_path_buf();
+        let waiter = thread::spawn(move || {
+            let repo = RefManager::new(&root);
+            started_tx.send(()).unwrap();
+            let _lock = repo.lock_refs().unwrap();
+            acquired_tx.send(()).unwrap();
+        });
+
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(
+            acquired_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err()
+        );
         assert!(lock_path.exists());
+        assert_eq!(fs::read_to_string(&lock_path).unwrap(), old_lock_body);
+
+        drop(holder);
+        acquired_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        waiter.join().unwrap();
+        assert!(lock_path.exists());
+    }
+
+    #[test]
+    fn lock_refs_reclaims_when_owner_fd_closes() {
+        let temp_dir = TempDir::new().unwrap();
+        let repo = RefManager::new(temp_dir.path());
+
+        let holder = repo.lock_refs().unwrap();
+        assert!(repo.try_lock_refs_for_test().unwrap().is_none());
+
+        drop(holder);
+        let successor = repo.try_lock_refs_for_test().unwrap();
+        assert!(successor.is_some());
+        assert!(repo.lock_path().exists());
     }
 }
