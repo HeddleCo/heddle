@@ -365,6 +365,7 @@ impl Repository {
                 plan.writes.push(WorktreeWriteOp::Symlink {
                     path: self.root().join(rel_path),
                     hash: entry.hash,
+                    validation_root: self.root().to_path_buf(),
                 });
             }
             EntryType::Tree => {
@@ -460,6 +461,7 @@ impl Repository {
             plan.writes.push(WorktreeWriteOp::Symlink {
                 path: self.root().join(rel_path),
                 hash: to_entry.hash,
+                validation_root: self.root().to_path_buf(),
             });
             return Ok(());
         }

@@ -25,7 +25,7 @@ use super::repository_worktree_apply::is_directory_not_empty;
 use super::{HeddleError, Repository, Result};
 use crate::{
     worktree_index::IndexEntry,
-    worktree_walk::{build_cached_entry, cache_key},
+    worktree_walk::{build_cached_entry, cache_key, validate_symlink_target},
 };
 
 /// State threaded through a single `materialize_write_ops_seeded` call.
@@ -94,6 +94,7 @@ const MATERIALIZE_PARALLEL_THRESHOLD: usize = 32;
 const MATERIALIZE_THREADS_ENV: &str = "HEDDLE_MATERIALIZE_THREADS";
 
 struct MaterializationPlan {
+    validation_root: PathBuf,
     directories: Vec<PathBuf>,
     directory_contexts: Vec<MaterializedDirectoryContext>,
     leaves: Vec<WorktreeWriteOp>,
@@ -131,6 +132,7 @@ pub(crate) enum WorktreeWriteOp {
     Symlink {
         path: PathBuf,
         hash: ContentHash,
+        validation_root: PathBuf,
     },
 }
 
@@ -307,6 +309,7 @@ impl Repository {
     ) -> Result<MaterializedTree> {
         let plan_start = Instant::now();
         let mut plan = MaterializationPlan {
+            validation_root: dir.to_path_buf(),
             directories: Vec::new(),
             directory_contexts: Vec::new(),
             leaves: Vec::new(),
@@ -380,6 +383,7 @@ impl Repository {
                 plan.leaves.push(WorktreeWriteOp::Symlink {
                     path,
                     hash: entry.hash,
+                    validation_root: plan.validation_root.clone(),
                 });
                 continue;
             }
@@ -496,7 +500,11 @@ impl Repository {
             } => {
                 self.materialize_blob(path, hash, *executable, context)?;
             }
-            WorktreeWriteOp::Symlink { path, hash } => {
+            WorktreeWriteOp::Symlink {
+                path,
+                hash,
+                validation_root,
+            } => {
                 let blob = self
                     .store
                     .get_blob(hash)?
@@ -506,6 +514,11 @@ impl Repository {
                     let target = std::str::from_utf8(blob.content()).map_err(|_| {
                         HeddleError::InvalidObject("invalid symlink target".to_string())
                     })?;
+                    let target_path = Path::new(target);
+                    let symlink_dir = path.parent().unwrap_or(validation_root);
+                    if !validate_symlink_target(validation_root, symlink_dir, target_path) {
+                        return Err(HeddleError::InvalidSymlinkTarget(target_path.to_path_buf()));
+                    }
                     remove_materialized_leaf(path)?;
                     std::os::unix::fs::symlink(target, path)?;
                 }
@@ -517,7 +530,7 @@ impl Repository {
                 // bindings rather than ship a half-implementation.
                 #[cfg(not(unix))]
                 {
-                    let _ = (blob, path);
+                    let _ = (blob, path, validation_root);
                 }
             }
         }
@@ -1166,6 +1179,7 @@ mod tests {
         repo.materialize_write_ops(&[WorktreeWriteOp::Symlink {
             path: path.clone(),
             hash: symlink_hash,
+            validation_root: temp_dir.path().to_path_buf(),
         }])
         .unwrap();
 
@@ -1193,11 +1207,13 @@ mod tests {
         repo.materialize_write_ops(&[WorktreeWriteOp::Symlink {
             path: path.clone(),
             hash: first_hash,
+            validation_root: temp_dir.path().to_path_buf(),
         }])
         .unwrap();
         repo.materialize_write_ops(&[WorktreeWriteOp::Symlink {
             path: path.clone(),
             hash: second_hash,
+            validation_root: temp_dir.path().to_path_buf(),
         }])
         .unwrap();
 
@@ -1226,6 +1242,7 @@ mod tests {
             WorktreeWriteOp::Symlink {
                 path: link_path.clone(),
                 hash: symlink_hash,
+                validation_root: temp_dir.path().to_path_buf(),
             },
         ])
         .unwrap();
