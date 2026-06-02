@@ -1,6 +1,6 @@
 use std::{
     net::ToSocketAddrs,
-    sync::{Mutex, OnceLock, mpsc},
+    sync::{Arc, Mutex, OnceLock, mpsc},
     thread,
 };
 
@@ -142,7 +142,10 @@ impl BlobHydrator for LazyHostedHydrator {
         // `pull --lazy` advanced the local thread between clone and now,
         // the cached state would point at the OLD tip and we'd leave any
         // post-pull missing blobs unresolved — that was the round-2 P1.
-        let target_state = match repo.refs().get_thread(&ThreadName::from(self.local_thread.as_str())) {
+        let target_state = match repo
+            .refs()
+            .get_thread(&ThreadName::from(self.local_thread.as_str()))
+        {
             Ok(Some(id)) => id,
             Ok(None) => {
                 return Err(HeddleError::Config(format!(
@@ -169,8 +172,9 @@ impl BlobHydrator for LazyHostedHydrator {
 
 /// Background worker bridging sync `BlobHydrator::hydrate` calls to the
 /// async gRPC stack. Owns a dedicated current-thread Tokio runtime and a
-/// connected `HostedGrpcClient`. Callers dispatch hydrate requests over an
-/// mpsc channel and block on a per-request reply channel.
+/// connected `HostedGrpcClient`. Callers reopen the repository root into
+/// an owned handle, dispatch hydrate requests over an mpsc channel, and
+/// block on a per-request reply channel.
 ///
 /// This indirection is what makes the hydrator safe to call from a
 /// `#[tokio::main]` async context: the worker's runtime is private, so the
@@ -184,25 +188,13 @@ struct HydrationBridge {
 
 enum HydrateMessage {
     Run {
-        repo: RepoPtr,
+        repo: Arc<Repository>,
         repo_path: String,
         remote_thread: String,
         target_state: ChangeId,
         reply: mpsc::SyncSender<Result<usize, ProtocolError>>,
     },
 }
-
-/// Wrapper that lets us send `&Repository` to the worker thread via a
-/// raw pointer. Safe because every caller blocks on the reply channel
-/// before returning from `hydrate`, so the `&Repository` borrow held by
-/// the caller outlives the worker's use of the pointer. There is no path
-/// by which the worker can outlive the borrow without the caller
-/// observing it via `recv()`.
-#[derive(Copy, Clone)]
-struct RepoPtr(*const Repository);
-// SAFETY: see `HydrationBridge::hydrate` — synchronous reply gates the
-// borrow lifetime.
-unsafe impl Send for RepoPtr {}
 
 impl HydrationBridge {
     fn connect(endpoint: &str) -> objects::error::Result<Self> {
@@ -302,15 +294,9 @@ impl HydrationBridge {
                                 target_state,
                                 reply,
                             } => {
-                                // SAFETY: the sender of this message
-                                // blocks on `reply` before returning, so
-                                // the `&Repository` borrow it built `repo`
-                                // from is still live for the entire span
-                                // of this RPC.
-                                let repo_ref: &Repository = unsafe { &*repo.0 };
                                 let result = client
                                     .hydrate_pulled_state(
-                                        repo_ref,
+                                        repo.as_ref(),
                                         &repo_path,
                                         &remote_thread,
                                         target_state,
@@ -348,13 +334,14 @@ impl HydrationBridge {
         remote_thread: &str,
         target_state: ChangeId,
     ) -> Result<usize, ProtocolError> {
-        // Bounded reply channel of capacity 1 so the worker's `send` is
-        // synchronous from its end — sender blocks until we recv, which
-        // is the property the RepoPtr SAFETY note relies on.
+        let repo = Arc::new(Repository::open(repo.root()).map_err(ProtocolError::from)?);
+
+        // Bounded reply channel of capacity 1; each sync caller blocks until
+        // the worker returns the gRPC result for this request.
         let (reply_tx, reply_rx) = mpsc::sync_channel::<Result<usize, ProtocolError>>(1);
         self.tx
             .send(HydrateMessage::Run {
-                repo: RepoPtr(repo as *const _),
+                repo,
                 repo_path: repo_path.to_string(),
                 remote_thread: remote_thread.to_string(),
                 target_state,
@@ -439,7 +426,7 @@ mod tests {
 
     use super::{
         super::{HostedGrpcClient, helpers::HostedTransportPolicy},
-        BlobHydrator, HydrationBridge, LazyHostedHydrator, RepoPtr,
+        BlobHydrator, HydrationBridge, LazyHostedHydrator,
     };
 
     /// Build a `HostedGrpcClient` that points at a closed loopback port
@@ -492,10 +479,9 @@ mod tests {
                                 target_state,
                                 reply,
                             } => {
-                                let repo_ref: &Repository = unsafe { &*repo.0 };
                                 let result = client
                                     .hydrate_pulled_state(
-                                        repo_ref,
+                                        repo.as_ref(),
                                         &repo_path,
                                         &remote_thread,
                                         target_state,
@@ -545,7 +531,11 @@ mod tests {
             .expect("multi-thread runtime");
         runtime.block_on(async {
             let (_temp, repo) = temp_repo();
-            let target = repo.refs().get_thread(&ThreadName::from("main")).unwrap().unwrap();
+            let target = repo
+                .refs()
+                .get_thread(&ThreadName::from("main"))
+                .unwrap()
+                .unwrap();
             // Seed a known thread tip the hydrator can resolve via
             // `local_thread`.
             let _ = target;
@@ -621,7 +611,11 @@ mod tests {
         hydrator.bridge.set(bridge).map_err(|_| ()).expect("set");
 
         let (_temp, repo) = temp_repo();
-        let first_tip = repo.refs().get_thread(&ThreadName::from("main")).unwrap().unwrap();
+        let first_tip = repo
+            .refs()
+            .get_thread(&ThreadName::from("main"))
+            .unwrap()
+            .unwrap();
 
         // First hydrate — bridge sees the original tip.
         let blake3 = Blob::new(b"a".to_vec()).hash();
@@ -630,7 +624,9 @@ mod tests {
         // Advance the local "main" thread to a fresh, distinct ChangeId.
         let advanced = ChangeId::generate();
         assert_ne!(advanced, first_tip, "fresh ChangeId must differ");
-        repo.refs().set_thread(&ThreadName::from("main"), &advanced).expect("advance");
+        repo.refs()
+            .set_thread(&ThreadName::from("main"), &advanced)
+            .expect("advance");
 
         // Second hydrate — bridge MUST see the advanced tip, not the
         // first one (round-2 cached-state bug regression guard).
@@ -655,25 +651,22 @@ mod tests {
     fn concurrent_first_use_no_race() {
         const N: usize = 8;
         let (_temp, repo) = temp_repo();
+        let repo = Arc::new(repo);
         // The arc allows N threads to share one hydrator that they all
         // race to initialize.
         let hydrator = Arc::new(offline_lazy_hydrator("main"));
         let observed_ok: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
         let observed_err: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
 
-        // SAFETY: `&repo` is borrowed inside each thread via a raw send
-        // wrapper. We join all threads before `_temp` / `repo` drop, so
-        // the borrows are valid.
-        let repo_ptr = &repo as *const Repository as usize;
         let mut handles = Vec::with_capacity(N);
         for _ in 0..N {
+            let repo = Arc::clone(&repo);
             let hydrator = Arc::clone(&hydrator);
             let observed_ok = Arc::clone(&observed_ok);
             let observed_err = Arc::clone(&observed_err);
             handles.push(thread::spawn(move || {
-                let repo: &Repository = unsafe { &*(repo_ptr as *const Repository) };
                 let blake3 = Blob::new(b"placeholder".to_vec()).hash();
-                match hydrator.hydrate(repo, &blake3) {
+                match hydrator.hydrate(repo.as_ref(), &blake3) {
                     Ok(()) => observed_ok.fetch_add(1, Ordering::SeqCst),
                     Err(_) => observed_err.fetch_add(1, Ordering::SeqCst),
                 };
@@ -705,16 +698,37 @@ mod tests {
         thread::sleep(Duration::from_millis(50));
     }
 
-    /// Force the RepoPtr `Send` impl into the type system. If a refactor
-    /// removes the `unsafe impl Send for RepoPtr`, this test stops
-    /// compiling — which is the point: the Send-ness is load-bearing for
-    /// the bridge's cross-thread dispatch.
+    /// Force the owned repo handle into the type system. The hydration
+    /// worker must receive an owned `Arc<Repository>` rather than a raw
+    /// borrowed pointer whose lifetime is erased across the mpsc channel.
     #[test]
-    fn repo_ptr_is_send() {
-        fn assert_send<T: Send>(_: &T) {}
+    fn hydration_message_carries_send_owned_repo_handle() {
+        fn assert_send_static<T: Send + 'static>(_: &T) {}
         let (_temp, repo) = temp_repo();
-        let ptr = RepoPtr(&repo as *const _);
-        assert_send(&ptr);
+        let (reply, _recv) = mpsc::sync_channel::<Result<usize, proto::ProtocolError>>(1);
+        let message = super::HydrateMessage::Run {
+            repo: Arc::new(repo),
+            repo_path: "org/acme/repo".to_string(),
+            remote_thread: "main".to_string(),
+            target_state: ChangeId::generate(),
+            reply,
+        };
+        assert_send_static(&message);
+    }
+
+    #[test]
+    fn hydration_bridge_does_not_reintroduce_raw_repo_pointer() {
+        let source = include_str!("hydration.rs");
+        let raw_wrapper = ["Repo", "Ptr"].concat();
+        let raw_repo_pointer = ["*const ", "Repository"].concat();
+        assert!(
+            !source.contains(&raw_wrapper),
+            "hydration bridge must not reintroduce the raw-pointer send wrapper"
+        );
+        assert!(
+            !source.contains(&raw_repo_pointer),
+            "hydration bridge must not send raw Repository pointers across threads"
+        );
     }
 
     /// Round-4 patch-coverage fill: exercise the `hydrate` early-return
