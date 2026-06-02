@@ -2271,7 +2271,7 @@ impl HostedPresenceWatch {
             return None;
         }
 
-        let token = UserConfig::load_default().ok()?.remote_token()?;
+        let token = UserConfig::load_default().ok()?.remote_token().ok()??;
         let mut request = normalize_presence_ws_url(upstream)
             .ok()?
             .into_client_request()

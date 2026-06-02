@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::{
     collections::BTreeMap,
-    fs,
+    env, fs,
     io::Read,
     path::{Path, PathBuf},
 };
@@ -329,21 +329,29 @@ impl UserConfig {
         });
     }
 
-    pub fn remote_token(&self) -> Option<AuthToken> {
-        std::env::var("HEDDLE_REMOTE_TOKEN")
-            .ok()
-            .filter(|token| !token.is_empty())
-            .map(|token| AuthToken::new(token, "env"))
-            .or_else(|| {
-                self.remote
-                    .token
-                    .clone()
-                    .map(|token| AuthToken::new(token, "user-config"))
-            })
+    pub fn remote_token(&self) -> anyhow::Result<Option<AuthToken>> {
+        match env::var("HEDDLE_REMOTE_TOKEN") {
+            Ok(token) if !token.is_empty() => Ok(Some(AuthToken::new(token, "env"))),
+            Ok(_) | Err(env::VarError::NotPresent) => Ok(self
+                .remote
+                .token
+                .clone()
+                .map(|token| AuthToken::new(token, "user-config"))),
+            Err(err @ env::VarError::NotUnicode(_)) => Err(security_config_error(
+                "HEDDLE_REMOTE_TOKEN",
+                format!("read environment value: {err}"),
+            )),
+        }
     }
 
-    pub fn heddle_client_config(&self, token_override: Option<AuthToken>) -> ClientConfig {
-        let token = token_override.or_else(|| self.remote_token());
+    pub fn heddle_client_config(
+        &self,
+        token_override: Option<AuthToken>,
+    ) -> anyhow::Result<ClientConfig> {
+        let token = match token_override {
+            Some(token) => Some(token),
+            None => self.remote_token()?,
+        };
         let mut config = token
             .map(|token| ClientConfig::default().with_token(token))
             .unwrap_or_default();
@@ -354,37 +362,43 @@ impl UserConfig {
         if let Some(domain) = &self.remote.tls_domain_name {
             config = config.with_tls_domain_name(domain.clone());
         }
-        if let Some(path) = &self.remote.tls_ca_certificate_path
-            && let Ok(pem) = fs::read_to_string(path)
-        {
+        if let Some(path) = &self.remote.tls_ca_certificate_path {
+            let pem = read_security_config_file("remote.tls_ca_certificate_path", path)?;
             config = config.with_tls_ca_certificate_pem(pem);
         }
-        if let Some(path) = &self.remote.auth_proof_key_pem_path
-            && let Ok(pem) = fs::read_to_string(path)
-        {
+        if let Some(path) = &self.remote.auth_proof_key_pem_path {
+            let pem = read_security_config_file("remote.auth_proof_key_pem_path", path)?;
             config = config.with_auth_proof_key_pem(pem);
         }
 
-        if std::env::var("HEDDLE_REMOTE_TLS")
-            .ok()
-            .is_some_and(|value| {
-                matches!(
-                    value.to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            })
-        {
+        if env_bool("HEDDLE_REMOTE_TLS")? {
             config = config.with_tls(false);
         }
-        if let Ok(domain) = std::env::var("HEDDLE_REMOTE_TLS_DOMAIN") {
-            config = config.with_tls_domain_name(domain);
+        match env::var("HEDDLE_REMOTE_TLS_DOMAIN") {
+            Ok(domain) => config = config.with_tls_domain_name(domain),
+            Err(env::VarError::NotPresent) => {}
+            Err(err @ env::VarError::NotUnicode(_)) => {
+                return Err(security_config_error(
+                    "HEDDLE_REMOTE_TLS_DOMAIN",
+                    format!("read environment value: {err}"),
+                ));
+            }
         }
-        if let Ok(path) = std::env::var("HEDDLE_REMOTE_TLS_CA_CERT")
-            && let Ok(pem) = fs::read_to_string(path)
-        {
-            config = config.with_tls_ca_certificate_pem(pem);
+        match env::var("HEDDLE_REMOTE_TLS_CA_CERT") {
+            Ok(path) => {
+                let pem =
+                    read_security_config_file("HEDDLE_REMOTE_TLS_CA_CERT", &PathBuf::from(path))?;
+                config = config.with_tls_ca_certificate_pem(pem);
+            }
+            Err(env::VarError::NotPresent) => {}
+            Err(err @ env::VarError::NotUnicode(_)) => {
+                return Err(security_config_error(
+                    "HEDDLE_REMOTE_TLS_CA_CERT",
+                    format!("read environment value: {err}"),
+                ));
+            }
         }
-        config
+        Ok(config)
     }
 
     pub fn worktree_status_options(
@@ -409,6 +423,44 @@ impl UserConfig {
     }
 }
 
+fn read_security_config_file(setting: &str, path: &Path) -> anyhow::Result<String> {
+    fs::read_to_string(path).map_err(|err| {
+        security_config_error(
+            setting,
+            format!("read configured file {}: {err}", path.display()),
+        )
+    })
+}
+
+fn env_bool(name: &str) -> anyhow::Result<bool> {
+    let value = match env::var(name) {
+        Ok(value) => value,
+        Err(env::VarError::NotPresent) => return Ok(false),
+        Err(err @ env::VarError::NotUnicode(_)) => {
+            return Err(security_config_error(
+                name,
+                format!("read environment value: {err}"),
+            ));
+        }
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(security_config_error(
+            name,
+            format!(
+                "parse boolean value {value:?}; expected one of 1/0, true/false, yes/no, or on/off"
+            ),
+        )),
+    }
+}
+
+fn security_config_error(setting: &str, reason: String) -> anyhow::Error {
+    anyhow::anyhow!(
+        "fatal TLS/auth configuration error for `{setting}`: {reason}; refusing to proceed with an ambiguous security posture"
+    )
+}
+
 fn path_missing(err: &anyhow::Error) -> bool {
     err.downcast_ref::<std::io::Error>()
         .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
@@ -416,9 +468,77 @@ fn path_missing(err: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        ffi::OsString,
+        fs,
+        path::PathBuf,
+        sync::MutexGuard,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
     use repo::{FsMonitorMode, RepoConfig};
 
-    use super::{HarnessMode, HarnessTranscriptMode, HarnessTransport, UserConfig};
+    use super::{
+        HarnessMode, HarnessTranscriptMode, HarnessTransport, UserConfig, UserRemoteConfig,
+    };
+
+    static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    const REMOTE_ENV_KEYS: &[&str] = &[
+        "HEDDLE_REMOTE_TOKEN",
+        "HEDDLE_REMOTE_TLS",
+        "HEDDLE_REMOTE_TLS_DOMAIN",
+        "HEDDLE_REMOTE_TLS_CA_CERT",
+    ];
+
+    struct RemoteEnvGuard {
+        _guard: MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl RemoteEnvGuard {
+        fn clean() -> Self {
+            let guard = TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let saved = REMOTE_ENV_KEYS
+                .iter()
+                .map(|key| (*key, std::env::var_os(key)))
+                .collect();
+            for key in REMOTE_ENV_KEYS {
+                unsafe { std::env::remove_var(key) };
+            }
+            Self {
+                _guard: guard,
+                saved,
+            }
+        }
+
+        fn set(&self, key: &str, value: impl AsRef<std::ffi::OsStr>) {
+            unsafe { std::env::set_var(key, value) };
+        }
+    }
+
+    impl Drop for RemoteEnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                unsafe {
+                    if let Some(value) = value {
+                        std::env::set_var(key, value);
+                    } else {
+                        std::env::remove_var(key);
+                    }
+                }
+            }
+        }
+    }
+
+    fn unique_temp_path(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{}-{unique}", std::process::id()))
+    }
 
     #[test]
     fn user_worktree_status_options_fall_back_to_repo_config() {
@@ -439,5 +559,122 @@ mod tests {
         assert_eq!(config.harness.transcript, HarnessTranscriptMode::Off);
         assert!(config.harness.auto_infer);
         assert!(config.harness.harnesses.is_empty());
+    }
+
+    #[test]
+    fn heddle_client_config_absent_security_settings_uses_defaults() {
+        let _env = RemoteEnvGuard::clean();
+        let config = UserConfig::default()
+            .heddle_client_config(None)
+            .expect("absent optional settings should not error");
+
+        assert!(!config.tls_enabled);
+        assert!(!config.tls_skip_verify);
+        assert!(config.tls_ca_certificate_pem.is_none());
+        assert!(config.auth_proof_key_pem.is_none());
+        assert!(config.token.is_none());
+    }
+
+    #[test]
+    fn heddle_client_config_valid_security_files_are_applied() {
+        let _env = RemoteEnvGuard::clean();
+        let dir = unique_temp_path("heddle-user-config-valid-security");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let ca_path = dir.join("ca.pem");
+        let key_path = dir.join("proof-key.pem");
+        fs::write(&ca_path, "test ca pem").expect("write ca pem");
+        fs::write(&key_path, "test key pem").expect("write key pem");
+        let user = UserConfig {
+            remote: UserRemoteConfig {
+                tls_ca_certificate_path: Some(ca_path),
+                auth_proof_key_pem_path: Some(key_path),
+                ..UserRemoteConfig::default()
+            },
+            ..UserConfig::default()
+        };
+
+        let config = user
+            .heddle_client_config(None)
+            .expect("valid TLS/auth files should load");
+
+        assert!(config.tls_enabled);
+        assert_eq!(
+            config.tls_ca_certificate_pem.as_deref(),
+            Some("test ca pem")
+        );
+        assert_eq!(config.auth_proof_key_pem.as_deref(), Some("test key pem"));
+
+        fs::remove_dir_all(dir).expect("remove temp dir");
+    }
+
+    #[test]
+    fn heddle_client_config_missing_tls_ca_path_fails_closed() {
+        let _env = RemoteEnvGuard::clean();
+        let missing = unique_temp_path("heddle-user-config-missing-ca").join("ca.pem");
+        let user = UserConfig {
+            remote: UserRemoteConfig {
+                tls_ca_certificate_path: Some(missing),
+                ..UserRemoteConfig::default()
+            },
+            ..UserConfig::default()
+        };
+
+        let err = user
+            .heddle_client_config(None)
+            .expect_err("missing configured CA path must fail closed");
+        let message = err.to_string();
+
+        assert!(message.contains("fatal TLS/auth configuration error"));
+        assert!(message.contains("remote.tls_ca_certificate_path"));
+    }
+
+    #[test]
+    fn heddle_client_config_missing_auth_proof_key_path_fails_closed() {
+        let _env = RemoteEnvGuard::clean();
+        let missing = unique_temp_path("heddle-user-config-missing-key").join("proof-key.pem");
+        let user = UserConfig {
+            remote: UserRemoteConfig {
+                auth_proof_key_pem_path: Some(missing),
+                ..UserRemoteConfig::default()
+            },
+            ..UserConfig::default()
+        };
+
+        let err = user
+            .heddle_client_config(None)
+            .expect_err("missing configured proof key path must fail closed");
+        let message = err.to_string();
+
+        assert!(message.contains("fatal TLS/auth configuration error"));
+        assert!(message.contains("remote.auth_proof_key_pem_path"));
+    }
+
+    #[test]
+    fn heddle_client_config_missing_env_tls_ca_path_fails_closed() {
+        let env = RemoteEnvGuard::clean();
+        let missing = unique_temp_path("heddle-user-config-missing-env-ca").join("ca.pem");
+        env.set("HEDDLE_REMOTE_TLS_CA_CERT", missing);
+
+        let err = UserConfig::default()
+            .heddle_client_config(None)
+            .expect_err("missing env CA path must fail closed");
+        let message = err.to_string();
+
+        assert!(message.contains("fatal TLS/auth configuration error"));
+        assert!(message.contains("HEDDLE_REMOTE_TLS_CA_CERT"));
+    }
+
+    #[test]
+    fn heddle_client_config_invalid_env_tls_value_fails_closed() {
+        let env = RemoteEnvGuard::clean();
+        env.set("HEDDLE_REMOTE_TLS", "enabled");
+
+        let err = UserConfig::default()
+            .heddle_client_config(None)
+            .expect_err("invalid TLS env value must fail closed");
+        let message = err.to_string();
+
+        assert!(message.contains("fatal TLS/auth configuration error"));
+        assert!(message.contains("HEDDLE_REMOTE_TLS"));
     }
 }

@@ -119,10 +119,10 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
 
     let mut total_refs = 0;
     let mut total_objects = 0;
-    let user_config = UserConfig::load_default().unwrap_or_default();
+    let user_config = UserConfig::load_default()?;
 
     for remote_name in &remotes {
-        let token = user_config.remote_token();
+        let token = user_config.remote_token()?;
         #[cfg(feature = "client")]
         let (target, server_key) = resolve_remote_with_key(&repo, Some(remote_name.as_str()))
             .map_err(anyhow::Error::msg)?;
@@ -269,7 +269,7 @@ async fn fetch_network(
         .repo_path
         .context("network remotes must include a hosted repository path")?;
 
-    let mut config = options.user_config.heddle_client_config(options.token);
+    let mut config = options.user_config.heddle_client_config(options.token)?;
     if let Some(key) = options.server_key {
         config = config.with_server_key(key);
     }

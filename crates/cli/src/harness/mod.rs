@@ -2010,6 +2010,8 @@ fn decode_token_claims(token: &str) -> Option<TokenClaims> {
 fn user_config_token_claims(user_config: &UserConfig) -> Option<TokenClaims> {
     user_config
         .remote_token()
+        .ok()
+        .flatten()
         .and_then(|token| decode_token_claims(&token.id))
 }
 

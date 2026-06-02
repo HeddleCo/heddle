@@ -1215,10 +1215,10 @@ async fn clone_network(
     // Initialize the local repository
     let local_repo = Repository::init(local_path)?;
 
-    let user_config = UserConfig::load_default().unwrap_or_default();
+    let user_config = UserConfig::load_default()?;
 
     // Connect to remote
-    let mut config = user_config.heddle_client_config(None);
+    let mut config = user_config.heddle_client_config(None)?;
     if let Some(key) = server_key {
         config = config.with_server_key(key);
     }
