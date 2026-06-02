@@ -195,8 +195,11 @@ jobs:
       #     trend tracking and shares the same discovery helper. This cheap
       #     PR-safe guard catches rotten bench code and Cargo.toml `[[bench]]`
       #     entries before they land, including non-default required features.
-      #     FUSE-required benches are delegated to the dedicated `fuse-bench`
-      #     job because this check job does not install libfuse.
+      #     Invariant: every target enumerated by `discover-benches.py` is
+      #     compile-checked by a PR-time gate. Non-FUSE benches are checked
+      #     here; FUSE benches are skipped here only because the dedicated
+      #     `fuse-bench` job below has libfuse and compile-checks all
+      #     `heddle-mount` benches with `--features fuse --no-run`.
       - name: Compile benchmark targets
         run: |
           python3 scripts/discover-benches.py > benchmark-plan.tsv
@@ -645,6 +648,16 @@ jobs:
       # is untouched.
       - name: Clear stale criterion residue
         run: rm -rf target/criterion
+
+      # Complete the benchmark rot-guard invariant documented in the
+      # `Compile benchmark targets` step: this FUSE-capable job
+      # compile-checks every `heddle-mount` bench target, including
+      # future FUSE benches, before running the measured suite.
+      - name: Compile FUSE benchmark targets
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        run: cargo bench --locked --features fuse -p heddle-mount --no-run
 
       # Run the bench. Criterion writes per-workload `estimates.json`
       # under `target/criterion/<group>/<variant>/new/` which the

@@ -57,7 +57,7 @@ jobs:
       # artifact. Build it once before the generic bench loop so that
       # the discovered mount bench can measure the real IPC path.
       - name: Build FUSE worker
-        run: cargo build --locked -p heddle-cli --bin heddle-fuse-worker --features mount
+        run: cargo build --locked --release -p heddle-cli --bin heddle-fuse-worker --features mount
 
       - name: Clear stale Criterion residue
         run: rm -rf target/criterion
