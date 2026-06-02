@@ -3157,6 +3157,7 @@ version = "0.2.4"
 dependencies = [
  "chrono",
  "criterion",
+ "fs2",
  "heddle-objects",
  "heddle-runtime-bridge",
  "pollster",
