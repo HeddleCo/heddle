@@ -9,7 +9,8 @@
 //! - exact-once transaction dedup and #392 CAS commit paths over a large
 //!   transaction directory
 //!
-//! Run: `cargo bench -p heddle-oplog --bench oplog_io`
+//! Run: `cargo bench -p heddle-oplog --features bench --bench oplog_io`
+//! (the `bench` feature is required — the bench links feature-gated shims).
 
 use std::{
     collections::BTreeSet,
