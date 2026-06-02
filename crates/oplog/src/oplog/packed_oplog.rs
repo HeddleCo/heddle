@@ -77,8 +77,7 @@ impl OplogFormat for V2 {
             )));
         }
         let entry_bytes = &bytes[cursor.offset..];
-        let (entries, _schema) =
-            parse_entries_unversioned(entry_bytes, header.entry_count as usize)?;
+        let entries = parse_entries_unversioned(entry_bytes, header.entry_count as usize)?;
         Ok(OplogData {
             entries,
             head_id: header.head_id,
@@ -106,8 +105,7 @@ impl OplogFormat for V3 {
         let entry_bytes_end = usize::try_from(footer.entry_data_end)
             .map_err(|_| HeddleError::InvalidObject("oplog entry section too large".to_string()))?;
         let entry_bytes = &bytes[cursor.offset..entry_bytes_end];
-        let (entries, _schema) =
-            parse_entries_unversioned(entry_bytes, header.entry_count as usize)?;
+        let entries = parse_entries_unversioned(entry_bytes, header.entry_count as usize)?;
         let entry_cursor_offset = encoded_entries_len(entry_bytes, header.entry_count as usize)?;
         if cursor.offset + entry_cursor_offset != entry_bytes_end {
             return Err(HeddleError::InvalidObject(
@@ -1487,21 +1485,39 @@ fn parse_entries_with_schema(
     Ok(entries)
 }
 
-fn parse_entries_unversioned(
-    bytes: &[u8],
-    entry_count: usize,
-) -> Result<(Vec<OpEntry>, OpRecordSchemaVersion)> {
+fn parse_entries_unversioned(bytes: &[u8], entry_count: usize) -> Result<Vec<OpEntry>> {
+    let mut cursor = Cursor::new(bytes);
+    let mut entries = Vec::with_capacity(entry_count);
+    for entry_index in 0..entry_count {
+        let entry_start = cursor.offset;
+        skip_entry(&mut cursor).map_err(|err| {
+            HeddleError::InvalidObject(format!(
+                "failed to frame unversioned oplog entry index {entry_index}: {err}"
+            ))
+        })?;
+        let entry_bytes = &bytes[entry_start..cursor.offset];
+        entries.push(parse_unversioned_entry(entry_bytes, entry_index)?);
+    }
+    if cursor.offset != bytes.len() {
+        return Err(HeddleError::InvalidObject(
+            "unversioned oplog entry stream has trailing bytes".to_string(),
+        ));
+    }
+    Ok(entries)
+}
+
+fn parse_unversioned_entry(bytes: &[u8], entry_index: usize) -> Result<OpEntry> {
     let mut errors = Vec::new();
     for schema in candidate_versions_newest_first() {
         let mut cursor = Cursor::new(bytes);
-        match parse_entries_with_schema(&mut cursor, entry_count, schema) {
-            Ok(entries) if cursor.offset == bytes.len() => return Ok((entries, schema)),
+        match parse_entry_with_schema(&mut cursor, schema) {
+            Ok(entry) if cursor.offset == bytes.len() => return Ok(entry),
             Ok(_) => errors.push(format!("{} left trailing entry bytes", schema.name())),
             Err(err) => errors.push(format!("{}: {err}", schema.name())),
         }
     }
     Err(HeddleError::InvalidObject(format!(
-        "oplog OpRecord payloads do not match any supported schema ({})",
+        "unversioned oplog entry index {entry_index} did not decode under any known OpRecord schema ({})",
         errors.join("; ")
     )))
 }
@@ -2040,6 +2056,92 @@ mod tests {
         std::fs::write(path, bytes).unwrap();
     }
 
+    #[derive(Clone, Copy)]
+    enum TestEntrySchema {
+        Current,
+        AtomicNoHead,
+        PreAtomic,
+    }
+
+    fn write_mixed_schema_v3(path: &Path, entries: &[(OpEntry, TestEntrySchema)], head_id: u64) {
+        let mut bytes = Vec::new();
+        write_header_to_vec(
+            &mut bytes,
+            u32::from(V3::VERSION),
+            entries.len() as u64,
+            head_id,
+        );
+        let mut entry_offsets = Vec::with_capacity(entries.len());
+        for (entry, schema) in entries {
+            entry_offsets.push(EntryOffsetRecord {
+                entry_id: entry.id,
+                entry_offset: bytes.len() as u64,
+            });
+            match schema {
+                TestEntrySchema::Current => encode_entry(entry, &mut bytes).unwrap(),
+                TestEntrySchema::AtomicNoHead => {
+                    encode_entry_with(entry, &mut bytes, encode_atomic_no_head).unwrap()
+                }
+                TestEntrySchema::PreAtomic => {
+                    encode_entry_with(entry, &mut bytes, encode_pre_atomic).unwrap()
+                }
+            }
+        }
+        let entry_data_end = bytes.len() as u64;
+        let batch_index = build_index_sections(
+            entries
+                .iter()
+                .map(|(entry, _schema)| entry.clone())
+                .zip(entry_offsets.iter().copied()),
+        )
+        .unwrap();
+        write_index_sections_to_vec(
+            &mut bytes,
+            IndexWritePlan {
+                entry_data_end,
+                entry_offsets: &entry_offsets,
+                batch_offsets: &batch_index.batch_offsets,
+                batch_dir: &batch_index.batch_dir,
+                tx_key_bytes: &batch_index.tx_key_bytes,
+                tx_dir: &batch_index.tx_dir,
+                entry_count: entries.len() as u64,
+                head_id,
+            },
+        );
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn corrupt_payload_first_byte(path: &Path, entry_index: usize) {
+        let mut bytes = std::fs::read(path).unwrap();
+        let header = parse_header(&bytes).unwrap();
+        let footer = PackedFooter::parse(&bytes, &header).unwrap();
+        let mut cursor = Cursor::new(&bytes[footer.entry_offsets_offset as usize..]);
+        let mut offsets = Vec::with_capacity(footer.entry_offsets_count as usize);
+        for _ in 0..footer.entry_offsets_count {
+            offsets.push(EntryOffsetRecord {
+                entry_id: cursor.read_u64().unwrap(),
+                entry_offset: cursor.read_u64().unwrap(),
+            });
+        }
+        let entry_offset = offsets[entry_index].entry_offset as usize;
+        let payload_offset = {
+            let mut cursor = Cursor::new(&bytes[entry_offset..]);
+            let _id = cursor.read_u64().unwrap();
+            let _batch_id = cursor.read_u64().unwrap();
+            let _batch_index = cursor.read_u32().unwrap();
+            let _timestamp_secs = cursor.read_i64().unwrap();
+            let _timestamp_ns = cursor.read_u32().unwrap();
+            let _undone = cursor.read_u8().unwrap();
+            let scope_len = cursor.read_u16().unwrap() as usize;
+            let _scope = cursor.read_bytes(scope_len).unwrap();
+            let op_data_len = cursor.read_u32().unwrap() as usize;
+            assert!(op_data_len > 0);
+            cursor.offset
+        };
+        bytes[entry_offset + payload_offset] = 0xc1;
+        std::fs::write(path, bytes).unwrap();
+    }
+
     #[test]
     fn round_trip_empty() {
         let tmp = TempDir::new().unwrap();
@@ -2400,6 +2502,124 @@ mod tests {
             OpRecord::Snapshot { new_state, head: None, thread: Some(thread), .. }
                 if *new_state == snapshot_state && thread == "main"
         ));
+    }
+
+    #[test]
+    fn mixed_schema_v3_entries_migrate_per_entry_to_current_schema() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("oplog.bin");
+        let pre_atomic_state = ChangeId::generate();
+        let atomic_state = ChangeId::generate();
+        let current_state = ChangeId::generate();
+
+        let mut pre_atomic_snapshot = make_batch_entry(1, 1, 0, Some("lane"));
+        pre_atomic_snapshot.operation = OpRecord::Snapshot {
+            new_state: pre_atomic_state,
+            prev_head: None,
+            head: Some(pre_atomic_state),
+            thread: None,
+        };
+
+        let mut atomic_no_head_snapshot = make_batch_entry(2, 2, 0, Some("lane"));
+        atomic_no_head_snapshot.operation = OpRecord::Snapshot {
+            new_state: atomic_state,
+            prev_head: Some(pre_atomic_state),
+            head: Some(atomic_state),
+            thread: None,
+        };
+
+        let mut current_attached_snapshot = make_batch_entry(3, 3, 0, Some("lane"));
+        current_attached_snapshot.operation = OpRecord::Snapshot {
+            new_state: current_state,
+            prev_head: Some(atomic_state),
+            head: None,
+            thread: Some("main".to_string()),
+        };
+
+        let entries = vec![
+            (pre_atomic_snapshot, TestEntrySchema::PreAtomic),
+            (atomic_no_head_snapshot, TestEntrySchema::AtomicNoHead),
+            (current_attached_snapshot, TestEntrySchema::Current),
+        ];
+        write_mixed_schema_v3(&path, &entries, 3);
+
+        let loaded = PackedOpLog::load(&path).unwrap();
+        assert_eq!(loaded.entries.len(), 3);
+        assert!(matches!(
+            &loaded.entries[0].operation,
+            OpRecord::Snapshot { new_state, prev_head: None, head: Some(head), thread: None }
+                if *new_state == pre_atomic_state && *head == pre_atomic_state
+        ));
+        assert!(matches!(
+            &loaded.entries[1].operation,
+            OpRecord::Snapshot { new_state, prev_head: Some(prev), head: Some(head), thread: None }
+                if *new_state == atomic_state
+                    && *prev == pre_atomic_state
+                    && *head == atomic_state
+        ));
+        assert!(matches!(
+            &loaded.entries[2].operation,
+            OpRecord::Snapshot { new_state, prev_head: Some(prev), head: None, thread: Some(thread) }
+                if *new_state == current_state && *prev == atomic_state && thread == "main"
+        ));
+
+        PackedOpLog::ensure_latest(&path).unwrap();
+        assert_eq!(
+            read_header(&path).unwrap().record_schema_version,
+            Some(OpRecordSchemaVersion::Current)
+        );
+        let migrated = PackedOpLog::load(&path).unwrap();
+        assert_eq!(
+            migrated
+                .entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert!(matches!(
+            &migrated.entries[0].operation,
+            OpRecord::Snapshot { new_state, head: Some(head), thread: None, .. }
+                if *new_state == pre_atomic_state && *head == pre_atomic_state
+        ));
+        assert!(matches!(
+            &migrated.entries[2].operation,
+            OpRecord::Snapshot { new_state, head: None, thread: Some(thread), .. }
+                if *new_state == current_state && thread == "main"
+        ));
+        assert_eq!(
+            PackedOpLogIndex::open(&path)
+                .unwrap()
+                .recent_entries(3)
+                .unwrap()
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![3, 2, 1]
+        );
+    }
+
+    #[test]
+    fn unversioned_entry_with_unknown_schema_names_failed_entry_index() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("oplog.bin");
+        write_current_v3(
+            &path,
+            &[make_entry(1, Some("lane")), make_entry(2, Some("lane"))],
+            2,
+        );
+        corrupt_payload_first_byte(&path, 1);
+
+        let err = match PackedOpLog::load(&path) {
+            Ok(_) => panic!("expected load to fail on a corrupted unversioned entry"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(&err, HeddleError::InvalidObject(message)
+                if message.contains("entry index 1")
+                    && message.contains("any known OpRecord schema")),
+            "unknown per-entry schema failure must name the entry index, got: {err:?}"
+        );
     }
 
     #[test]
