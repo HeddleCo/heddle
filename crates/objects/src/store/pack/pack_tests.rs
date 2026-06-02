@@ -297,6 +297,80 @@ fn test_pack_reader_rejects_delta_output_above_limit() {
     );
 }
 
+#[cfg(feature = "zstd")]
+#[test]
+fn test_pack_reader_rejects_compressed_record_claiming_huge_uncompressed_size() {
+    let hash = create_test_hash(46);
+    let payload = b"small compressed payload".repeat(32);
+    let compressed = zstd::encode_all(payload.as_slice(), 3).expect("test zstd compression works");
+
+    let (pack_data, index_data) = single_record_pack(hash, |record| {
+        super::varint::encode_type_and_size(ObjectType::Blob, 0xFFFF_FFFF, record);
+        super::varint::encode_varint(compressed.len() as u64, record);
+        record.extend_from_slice(&compressed);
+    });
+    let reader = PackReader::from_bytes(pack_data, index_data).expect("container is well-formed");
+
+    let error = reader
+        .get_hashed_object(&hash)
+        .expect_err("hostile uncompressed_size must be rejected without eager allocation");
+    assert_invalid_object_message_contains(error, "Pack object output size");
+
+    let bytes_error = reader
+        .get_hashed_object_bytes(&hash)
+        .expect_err("zero-copy fallback must reject hostile uncompressed_size too");
+    assert_invalid_object_message_contains(bytes_error, "Pack object output size");
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn test_pack_decompression_rejects_streaming_output_past_limit() {
+    let payload = vec![0xA5; 64 * 1024];
+    let compressed = zstd::encode_all(payload.as_slice(), 3).expect("test zstd compression works");
+    assert!(
+        compressed.len() < 1024,
+        "test payload should exercise compressed-small/decompressed-large shape"
+    );
+
+    let error = super::shared::decompress_pack_payload_with_limit(&compressed, 0, 32 * 1024)
+        .expect_err("streaming output above the cap must fail cleanly");
+    assert_invalid_object_message_contains(error, "Pack object output size");
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn test_pack_reader_decodes_compressed_object_larger_than_initial_hint() {
+    let hash = create_test_hash(47);
+    let payload = vec![0x5C; super::shared::PACK_DECOMPRESSION_INITIAL_CAP + 64 * 1024];
+    assert!(payload.len() < super::shared::MAX_PACK_OBJECT_OUTPUT_SIZE);
+    let compressed = zstd::encode_all(payload.as_slice(), 3).expect("test zstd compression works");
+    assert!(
+        compressed.len() < payload.len(),
+        "manual pack must use the compressed reader path"
+    );
+
+    let (pack_data, index_data) = single_record_pack(hash, |record| {
+        super::varint::encode_type_and_size(ObjectType::Blob, payload.len() as u64, record);
+        super::varint::encode_varint(compressed.len() as u64, record);
+        record.extend_from_slice(&compressed);
+    });
+    let reader = PackReader::from_bytes(pack_data, index_data).expect("container is well-formed");
+
+    let (obj_type, data) = reader
+        .get_hashed_object(&hash)
+        .expect("large compressed object should decode")
+        .expect("record should exist");
+    assert_eq!(obj_type, ObjectType::Blob);
+    assert_eq!(data, payload);
+
+    let (bytes_type, bytes) = reader
+        .get_hashed_object_bytes(&hash)
+        .expect("large compressed object should decode through bytes path")
+        .expect("record should exist");
+    assert_eq!(bytes_type, ObjectType::Blob);
+    assert_eq!(bytes.as_ref(), payload.as_slice());
+}
+
 #[test]
 fn test_pack_index_rejects_impossible_entry_count() {
     let mut bytes = Vec::new();
