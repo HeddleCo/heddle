@@ -715,6 +715,7 @@ fn apply_redo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
             new_state,
             prev_head,
             thread,
+            ..
         } => {
             steps.goto(*new_state)?;
             if let Some(thread) = thread {

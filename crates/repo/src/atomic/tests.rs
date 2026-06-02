@@ -305,11 +305,13 @@ impl AtomicMutation for CommitFailsRewindFails {
             std::fs::remove_file(&oplog_path)?;
         }
         std::fs::create_dir(&oplog_path)?;
+        let state = ChangeId::generate();
         Ok(StagedCommit::new(
             (),
             vec![OpRecord::Snapshot {
-                new_state: ChangeId::generate(),
+                new_state: state,
                 prev_head: None,
+                head: Some(state),
                 thread: None,
             }],
         ))
@@ -355,6 +357,7 @@ impl AtomicMutation for Recorder {
             vec![OpRecord::Snapshot {
                 new_state: self.state,
                 prev_head: None,
+                head: Some(self.state),
                 thread: None,
             }],
         ))
@@ -693,15 +696,19 @@ fn tx_accessors_and_rewind_error_paths() {
 
     // A second commit after a successful one is a no-op (committed guard).
     let mut tx2 = Tx::root(&repo, "double-commit-tx".to_string());
+    let first_state = ChangeId::generate();
     tx2.commit(vec![OpRecord::Snapshot {
-        new_state: ChangeId::generate(),
+        new_state: first_state,
         prev_head: None,
+        head: Some(first_state),
         thread: None,
     }])
     .unwrap();
+    let second_state = ChangeId::generate();
     tx2.commit(vec![OpRecord::Snapshot {
-        new_state: ChangeId::generate(),
+        new_state: second_state,
         prev_head: None,
+        head: Some(second_state),
         thread: None,
     }])
     .unwrap();
@@ -996,6 +1003,7 @@ impl AtomicMutation for StableKeyed {
             vec![OpRecord::Snapshot {
                 new_state: self.state,
                 prev_head: None,
+                head: Some(self.state),
                 thread: None,
             }],
         ))
@@ -1074,11 +1082,13 @@ impl AtomicMutation for ReplayStages {
 
     fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<u32>> {
         *self.staged_count.borrow_mut() += 1;
+        let state = ChangeId::generate();
         Ok(StagedCommit::new(
             7,
             vec![OpRecord::Snapshot {
-                new_state: ChangeId::generate(),
+                new_state: state,
                 prev_head: None,
+                head: Some(state),
                 thread: None,
             }],
         ))
@@ -1468,6 +1478,7 @@ fn fork_then_goto_reconcile_yields_goto_target_not_stale_fork() {
             vec![OpRecord::Goto {
                 target: goto_b,
                 prev_head: Some(fork_a),
+                head: goto_b,
             }],
             Some(&scope),
         )
@@ -1577,6 +1588,7 @@ fn detached_snapshot_after_fork_reconcile_yields_snapshot_head() {
             vec![OpRecord::Snapshot {
                 new_state: snap_b,
                 prev_head: Some(fork_a),
+                head: Some(snap_b),
                 thread: None,
             }],
             Some(&scope),
@@ -1634,6 +1646,77 @@ fn detached_snapshot_record_first_crash_recovery_reconstructs_head() {
         repo.refs().read_head().unwrap(),
         Head::Detached { state: snap },
         "a record-first detached snapshot's HEAD must be reconstructed after a phase-5 crash"
+    );
+}
+
+#[test]
+fn attached_snapshot_record_first_crash_recovery_materializes_head_state() {
+    let (_t, repo) = test_repo();
+    let scope = repo.op_scope();
+    let base = ChangeId::generate();
+    let main = ThreadName::new("main");
+    repo.refs().set_thread(&main, &base).unwrap();
+    repo.refs()
+        .write_head(&Head::Attached {
+            thread: main.clone(),
+        })
+        .unwrap();
+
+    let snap = ChangeId::generate();
+    repo.oplog()
+        .record_snapshot(&snap, Some(&base), Some(main.as_str()), Some(&scope))
+        .unwrap();
+
+    assert_eq!(
+        repo.head().unwrap(),
+        Some(snap),
+        "a record-first attached snapshot must reconstruct the resolved HEAD state"
+    );
+
+    let raw = RefManager::new(repo.heddle_dir());
+    assert_eq!(
+        raw.get_thread(&main).unwrap(),
+        Some(snap),
+        "the attached thread target must be materialized exactly once"
+    );
+
+    assert_eq!(
+        repo.head().unwrap(),
+        Some(snap),
+        "a second HEAD read must be idempotent"
+    );
+}
+
+#[test]
+fn goto_record_first_crash_recovery_reconstructs_head() {
+    let (_t, repo) = test_repo();
+    let scope = repo.op_scope();
+    let base = ChangeId::generate();
+    repo.refs()
+        .write_head(&Head::Detached { state: base })
+        .unwrap();
+
+    let target = ChangeId::generate();
+    repo.oplog()
+        .record_goto(&target, Some(&base), Some(&scope))
+        .unwrap();
+
+    assert_eq!(
+        repo.refs().read_head().unwrap(),
+        Head::Detached { state: target },
+        "a record-first goto's HEAD must be reconstructed after a phase-5 crash"
+    );
+
+    assert_eq!(
+        RefManager::new(repo.heddle_dir()).read_head().unwrap(),
+        Head::Detached { state: target },
+        "the reconstructed goto HEAD must be materialized exactly once"
+    );
+
+    assert_eq!(
+        repo.refs().read_head().unwrap(),
+        Head::Detached { state: target },
+        "a second HEAD read must be idempotent"
     );
 }
 
@@ -2481,6 +2564,7 @@ impl AtomicMutation for RegeneratesChangeId {
             vec![OpRecord::Snapshot {
                 new_state: fresh,
                 prev_head: None,
+                head: Some(fresh),
                 thread: None,
             }],
         ))

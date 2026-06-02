@@ -157,12 +157,12 @@ impl Repository {
             )
         };
 
-        self.refs.write_head(&Head::Detached { state: *target })?;
-
         if record {
             self.oplog
                 .record_goto(target, prev_head.as_ref(), Some(&self.op_scope()))?;
+            objects::fault_inject::maybe_panic_at("goto_after_oplog_commit_before_ref_publish");
         }
+        self.refs.write_head(&Head::Detached { state: *target })?;
 
         debug!(
             load_duration_ms,

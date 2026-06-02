@@ -57,21 +57,16 @@ impl OplogRefReconciler {
 ///   but HEAD unpublished, so reconstruct from the record and republish to
 ///   recover it (the `crash_replay_reconstructs_committed_head_update` case).
 ///   This set is the *HEAD-moving* shapes only: a named `Fork` (creates a
-///   thread and attaches HEAD to it), a detached `Fork`/`Collapse`/`Snapshot`
-///   (publishes a detached HEAD). An ATTACHED `Collapse` or `Snapshot` is NOT
-///   here — it only advances the thread it is already attached to, so HEAD's
-///   identity is unchanged and canonical already reflects it (the attached
-///   collapse was wrongly republishing `Attached` until heddle#354 r9, cid
-///   3330304665). The detached snapshot joined this set in heddle#354 r8 when
-///   its publish moved record-first through `commit_and_publish`.
-/// - [`HeadFold::Canonical`] — `Goto`, detached `Checkpoint`, and `FastForward`
-///   write HEAD DIRECTLY *before* recording (`repository_goto.rs` `:160`,
-///   `ff_record.rs`). Canonical therefore already reflects the move; worse, an
-///   unrecorded follow-up write (e.g. `fast_forward_attached`'s re-attach to a
-///   thread) may have superseded it. Defer to canonical — republishing the
-///   record's intermediate target here would clobber a newer,
-///   legitimately-published HEAD. Reaching this mode still MASKS an earlier
-///   `Republish`, which is what stops the stale Fork from resurrecting.
+///   thread and attaches HEAD to it), a detached `Fork`/`Collapse`/`Snapshot`,
+///   and `Goto` (publishes a detached HEAD).
+/// - [`HeadFold::Canonical`] — detached `Checkpoint` and `FastForward` write
+///   HEAD DIRECTLY *before* recording. Canonical therefore already reflects the
+///   move; worse, an unrecorded follow-up write (e.g.
+///   `fast_forward_attached`'s re-attach to a thread) may have superseded it.
+///   Defer to canonical — republishing the record's intermediate target here
+///   would clobber a newer, legitimately-published HEAD. Reaching this mode
+///   still MASKS an earlier `Republish`, which is what stops the stale Fork from
+///   resurrecting.
 ///
 /// Invariant: HEAD reconciliation considers EVERY HEAD-moving record shape, not
 /// a Fork/Collapse allowlist. A publish-first mover defers to canonical (never
@@ -84,8 +79,8 @@ enum HeadFold {
     #[default]
     Untouched,
     /// Latest mover is a record-first atomic publish (Fork / Collapse /
-    /// detached Snapshot): reconstruct and republish to recover a crash-lost
-    /// HEAD publish.
+    /// detached Snapshot / Goto): reconstruct and republish to recover a
+    /// crash-lost HEAD publish.
     Republish(Head),
     /// Latest mover is a publish-first direct write (Goto / detached
     /// Checkpoint / FastForward): canonical wins.
@@ -106,24 +101,28 @@ impl Fold {
     fn apply(&mut self, op: &OpRecord) {
         match op {
             OpRecord::Snapshot {
-                new_state, thread, ..
+                new_state,
+                thread,
+                head,
+                ..
             } => match thread {
                 Some(name) => {
-                    // Attached snapshot advances the thread; HEAD stays
-                    // `Attached{name}` (identity unchanged), so it is not a
-                    // HEAD-mover. Now record-first (commit_and_publish,
-                    // heddle#354 r8), so a later record IS the later write —
-                    // the authoritative thread fold can no longer be clobbered
-                    // by a stale snapshot appended after a concurrent write.
+                    // Attached snapshot advances the thread and leaves HEAD
+                    // attached to that thread. Treat it as the latest
+                    // reconstructable HEAD state so it masks any earlier
+                    // HEAD-mover and materializes the paired thread target
+                    // during Local recovery.
                     self.threads.insert(name.clone(), Some(*new_state));
+                    self.head = HeadFold::Republish(Head::Attached {
+                        thread: ThreadName::new(name),
+                    });
                 }
-                // Detached snapshot is record-first as of heddle#354 r8
-                // (commit_and_publish appends the `Snapshot` record before
-                // publishing HEAD). A crash between phase-4 commit and phase-5
-                // publish must therefore reconstruct HEAD = Detached{new_state}
-                // from the record — the symmetric recovery to Fork/Collapse.
+                // Detached snapshot is record-first. Use the record's published
+                // HEAD field directly so the replay target is explicit.
                 None => {
-                    self.head = HeadFold::Republish(Head::Detached { state: *new_state });
+                    if let Some(head) = head {
+                        self.head = HeadFold::Republish(Head::Detached { state: *head });
+                    }
                 }
             },
             OpRecord::ThreadCreate { name, state }
@@ -225,12 +224,14 @@ impl Fold {
             OpRecord::UndoRecoveryUpdate { state } => {
                 self.undo_recovery = Some(*state);
             }
-            // Publish-first HEAD moves: `goto` writes `Head::Detached` directly
-            // before recording (repository_goto.rs:160); legacy V1 `FastForward`
-            // likewise moved HEAD via a direct write. Canonical already reflects
-            // them (and may carry a newer unrecorded re-attach), so defer — while
-            // masking any earlier `Republish` so a stale Fork cannot resurrect.
-            OpRecord::Goto { .. } | OpRecord::FastForward { .. } => {
+            OpRecord::Goto { head, .. } => {
+                self.head = HeadFold::Republish(Head::Detached { state: *head });
+            }
+            // Publish-first HEAD move: legacy V1 `FastForward` moved HEAD via a
+            // direct write. Canonical already reflects it (and may carry a
+            // newer unrecorded re-attach), so defer — while masking any earlier
+            // `Republish` so a stale Fork cannot resurrect.
+            OpRecord::FastForward { .. } => {
                 self.head = HeadFold::Canonical;
             }
             // Records that do not move canonical HEAD: transaction markers,

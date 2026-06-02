@@ -809,6 +809,7 @@ mod tests {
                 OpRecord::Snapshot {
                     new_state: cid_a,
                     prev_head: None,
+                    head: None,
                     thread: Some("modulo-race".into()),
                 },
                 OpRecord::ThreadCreate {
@@ -839,12 +840,14 @@ mod tests {
             json: true,
             filter: Some(vec!["snapshot".into()]),
         };
+        let snap_id = ChangeId::generate();
         let snap = EmittedEntry {
             entry: make_entry(
                 1,
                 OpRecord::Snapshot {
-                    new_state: ChangeId::generate(),
+                    new_state: snap_id,
                     prev_head: None,
+                    head: Some(snap_id),
                     thread: None,
                 },
             ),
@@ -887,6 +890,7 @@ mod tests {
                 OpRecord::Snapshot {
                     new_state: cid,
                     prev_head: None,
+                    head: None,
                     thread: Some("modulo-race/approach-anthropic".into()),
                 },
             ),
@@ -932,6 +936,7 @@ mod tests {
                 OpRecord::Snapshot {
                     new_state: cid,
                     prev_head: None,
+                    head: None,
                     thread: Some("modulo-race/approach-anthropic".into()),
                 },
             ),
@@ -963,11 +968,13 @@ mod tests {
             OpRecord::Snapshot {
                 new_state: cid,
                 prev_head: None,
+                head: Some(cid),
                 thread: None,
             },
             OpRecord::Goto {
                 target: cid,
                 prev_head: None,
+                head: cid,
             },
             OpRecord::ThreadCreate {
                 name: "x".into(),

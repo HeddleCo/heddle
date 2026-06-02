@@ -263,6 +263,7 @@ fn resume_manual_resolution_if_present(
         Head::Detached { .. } => OpRecord::Goto {
             target: current_state.change_id,
             prev_head: Some(pre_conflict_head),
+            head: current_state.change_id,
         },
     };
     state.pending_advances.push(resolution_advance);
@@ -701,9 +702,11 @@ mod tests {
     }
 
     fn synthetic_goto_advance() -> OpRecord {
+        let target = objects::object::ChangeId::generate();
         OpRecord::Goto {
-            target: objects::object::ChangeId::generate(),
+            target,
             prev_head: Some(objects::object::ChangeId::generate()),
+            head: target,
         }
     }
 

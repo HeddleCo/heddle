@@ -1749,6 +1749,7 @@ impl Repository {
         let record = OpRecord::Snapshot {
             new_state: *new_state,
             prev_head,
+            head: thread.is_none().then_some(*new_state),
             thread: thread.map(|name| name.to_string()),
         };
         let ref_update = match thread {
