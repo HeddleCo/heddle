@@ -271,6 +271,7 @@ impl HostedGrpcClient {
                     "wanted Redaction must be keyed by ObjectId::Hash(content_hash)".to_string(),
                 ));
             };
+            let hex = blob.to_hex();
             // Sender-side: load the byte-identical sidecar payload
             // that `Repository::put_redaction` wrote to disk. The
             // receiver verifies the signature + trust list and then
@@ -281,18 +282,18 @@ impl HostedGrpcClient {
                 .map_err(|err| {
                     ProtocolError::InvalidState(format!(
                         "load redactions sidecar for {}: {err}",
-                        blob.to_hex()
+                        hex
                     ))
                 })?
                 .ok_or_else(|| {
                     ProtocolError::InvalidState(format!(
                         "server wants redaction for blob {} but sender has no sidecar",
-                        blob.to_hex()
+                        hex
                     ))
                 })?;
             let message = PushMessage {
                 body: Some(push_message::Body::Redaction(RedactionTransfer {
-                    blob_hash: blob.to_hex(),
+                    blob_hash: hex,
                     redactions_blob: bytes,
                 })),
             };
