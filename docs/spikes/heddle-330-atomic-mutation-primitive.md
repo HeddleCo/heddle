@@ -1832,14 +1832,14 @@ publishes it), so deferring is safe.
 `Reserved`) — and `commit_eager` *returns* the compensator, which `enroll_eager`
 **registers** with the outer `Tx` (`RewindEntry::Compensator`). Tying the eager
 effect and the compensator into one method's body+return value is what makes a
-leaked reservation unrepresentable (§3.3). If the outer
+missing rollback entry unrepresentable (§3.3). If the outer
 transaction later fails, `rewind_all` runs that compensator — for the reserve,
-the compensator is `store.cancel(op_id, verb)` (`operation_id.rs:152`,
-`operation_dedup.rs:288`), which releases the reservation so a retry isn't
-wedged on a stale `InFlight`. The compensator is saga semantics for that one
-leg: the effect was really visible for a while, and the compensator makes the
-*net* outcome correct. Eager legs commit in apply-order; their compensators run
-in reverse with everything else.
+the compensator is a no-op (`operation_dedup.rs:201`), because a handed-out
+op-id reservation must remain durable even when an unrelated outer transaction
+aborts. Releasing it would reopen the #251 cross-process reuse race. The
+compensator is saga semantics for that one leg: the effect was really visible
+for a while, and the compensator defines the correct *net* outcome. Eager legs
+commit in apply-order; their compensators run in reverse with everything else.
 
 ### 3.3 — The compile-time enforcement (a type-level split, not a runtime const)
 
@@ -2137,7 +2137,7 @@ Nests: no. Eager: no.
 
 **Today** (`cli/src/operation_id.rs:62` `run_local_idempotency_if_requested`):
 `store.reserve(op_id, command_name, request_hash)` (`:115`,
-`operation_dedup.rs:216`) returns `Reserved` / `Replay` / `InFlight` / `Conflict`
+`operation_dedup.rs:362`) returns `Reserved` / `Replay` / `InFlight` / `Conflict`
 (`operation_dedup.rs:104`); on `Reserved` it spawns the child, then `store.record`
 (`:162`) or `store.cancel` on spawn failure (`:152`).
 
@@ -2146,22 +2146,21 @@ in a transaction, the reserve is the canonical eager leg — enrolled via
 `enroll_eager` (bounded `M: EagerMutation`, §3.3), never `enroll`:
 ```rust
 impl EagerMutation for ReserveOpId {
-    fn commit_eager(&mut self, tx: &mut Tx) -> Result<Compensator> {
-        match self.store.reserve(self.op_id, self.verb, self.hash)? {
-            DedupOutcome::Reserved => {
-                let (store, op, verb) = (self.store.clone(), self.op_id, self.verb.clone());
-                Ok(Compensator::new(move || store.cancel(op, &verb)))   // outer rollback releases it
-            }
-            DedupOutcome::Replay { .. } | InFlight | Conflict => /* surface as the existing typed error */,
-        }
+    fn commit_eager(&mut self, _tx: &mut Tx) -> Result<Compensator> {
+        let outcome = self.store.reserve(self.op_id, self.verb, self.hash)?;
+        self.claim.set(outcome);
+        Ok(Compensator::new(|| Ok(())))   // outer rollback intentionally keeps the handed-out id
     }
 }
 ```
 The reservation is visible to other processes the instant `reserve` returns
-(cross-process file lock, `operation_dedup.rs:216`) — it **cannot** defer to the
+(cross-process file lock, `operation_dedup.rs:362`, `:370`) — it **cannot** defer to the
 outer commit (§3.2 rule, both conditions met: cross-process store + racing
-process branches on it). On outer rollback the compensator runs `store.cancel`
-(`operation_dedup.rs:288`) so a retry isn't wedged on a stale `InFlight`.
+process branches on it). On outer rollback the compensator is intentionally a
+no-op: once an op-id has been handed out, an unrelated outer abort must not free
+it for reuse. Releasing that reservation would reintroduce the #251
+cross-process reuse race; durability-on-reserve is the whole point of using
+`EagerMutation` here.
 Eager: **yes** — this is the whole reason `EagerMutation` + the `enroll_eager`
 path exist.
 
@@ -2244,7 +2243,7 @@ preceding ref-carrying record" holds for the Postgres backend too, by its own me
 | undo/redo | `undo.rs:93` | yes | no | 1 | mid-apply leaves repo half-rewound |
 | thread start | `thread.rs` `cmd_start` (`:1709`+) | yes | no | 2 | half-started thread; precise dir rewind (#302 r4) |
 | capture | `repository_snapshot.rs:52` | no | no | 3 | ref-moved-but-not-recorded window; ref publish becomes a post-commit materialized view |
-| op-id reserve | `operation_id.rs:115` | as sub-op | **yes** | 4 | eager-commit exemplar; stale `InFlight` on rollback |
+| op-id reserve | `operation_id.rs:115` | as sub-op | **yes** | 4 | eager-commit exemplar; durable handed-out id survives outer rollback |
 | ref writes | `refs_manager.rs:319` | n/a | no | — | already in-domain atomic; becomes the "stage refs" leg |
 | remote/undo refs | `refs_manager.rs:242`,`:261`,`:284` | n/a | no | — | were direct-write, no `OpRecord` (cid 3328869364); r9 routes through oplog-commit + new variants so reconciliation is non-vacuous |
 | fork | `fork.rs:74-92` | no | no | — | published thread+HEAD *before* `record_fork` (`:94`), passed `record_fork`'s args **reversed** (`oplog_records.rs:113` vs `:94-95`, r15), and `OpRecord::Fork` was ref-blind (cid 3328926767); fix: `cmd_fork` builds `Fork { from: source_state, new_state, thread, head }` (corrected order + published ref) and calls `commit_and_publish(&[op_record], ref_updates)` (one-element batch; r11 chokepoint, records-first; existing variant extended in place, pre-1.0 clean format break, no shim) |
