@@ -61,8 +61,23 @@ const STATE_ACTIVE: &str = "active";
 const STATE_COMMITTED: &str = "committed";
 const STATE_ABORTED: &str = "aborted";
 
+fn parse_transaction_id(raw: &str) -> Result<OperationId, Status> {
+    let transaction_id: OperationId = raw
+        .parse()
+        .map_err(|err| Status::invalid_argument(format!("invalid transaction_id: {err}")))?;
+    if transaction_id.to_string() != raw {
+        return Err(Status::invalid_argument(
+            "invalid transaction_id: expected canonical UUID",
+        ));
+    }
+    Ok(transaction_id)
+}
+
 /// Build the on-disk sentinel path for a transaction id.
-fn sentinel_path(repo: &repo::Repository, transaction_id: &str) -> PathBuf {
+///
+/// Taking [`OperationId`] keeps unvalidated wire strings from reaching
+/// filesystem path construction.
+fn sentinel_path(repo: &repo::Repository, transaction_id: &OperationId) -> PathBuf {
     repo.heddle_dir()
         .join("state")
         .join("transactions")
@@ -147,7 +162,9 @@ impl TransactionService for LocalTransactionService {
                 // repository has no snapshots yet — tests therefore seed at
                 // least one snapshot before calling `begin_transaction`.
                 let base_change_id = if !req.thread.is_empty() {
-                    repo.refs().get_thread(&ThreadName::from(req.thread.as_str())).map_err(to_status)?
+                    repo.refs()
+                        .get_thread(&ThreadName::from(req.thread.as_str()))
+                        .map_err(to_status)?
                 } else {
                     repo.head().map_err(to_status)?
                 };
@@ -161,10 +178,11 @@ impl TransactionService for LocalTransactionService {
 
                 let started_by_email = repo.get_principal().map(|p| p.email).unwrap_or_default();
                 let started_at_secs = now_secs();
-                let transaction_id = OperationId::new().to_string();
+                let transaction_id = OperationId::new();
+                let transaction_id_wire = transaction_id.to_string();
 
                 let sentinel = TransactionSentinel {
-                    transaction_id: transaction_id.clone(),
+                    transaction_id: transaction_id_wire.clone(),
                     repo_path: req.repo_path.clone(),
                     thread: req.thread.clone(),
                     message: req.message.clone(),
@@ -179,7 +197,7 @@ impl TransactionService for LocalTransactionService {
                 save_sentinel(&path, &sentinel)?;
 
                 Ok(BeginTransactionResponse {
-                    transaction_id,
+                    transaction_id: transaction_id_wire,
                     started_at: Some(prost_types::Timestamp {
                         seconds: started_at_secs,
                         nanos: 0,
@@ -197,6 +215,7 @@ impl TransactionService for LocalTransactionService {
         request: Request<CommitTransactionRequest>,
     ) -> Result<Response<CommitTransactionResponse>, Status> {
         let req = request.into_inner();
+        let transaction_id = parse_transaction_id(&req.transaction_id)?;
         let request_body = req.encode_to_vec();
         let client_op = req.client_operation_id.clone();
         let inner = self.inner.clone();
@@ -213,7 +232,7 @@ impl TransactionService for LocalTransactionService {
             },
             move || async move {
                 let repo = inner.repo();
-                let path = sentinel_path(repo, &req.transaction_id);
+                let path = sentinel_path(repo, &transaction_id);
                 let mut sentinel = load_sentinel(&path)?;
 
                 if sentinel.state != STATE_ACTIVE {
@@ -267,6 +286,7 @@ impl TransactionService for LocalTransactionService {
         request: Request<AbortTransactionRequest>,
     ) -> Result<Response<AbortTransactionResponse>, Status> {
         let req = request.into_inner();
+        let transaction_id = parse_transaction_id(&req.transaction_id)?;
         let request_body = req.encode_to_vec();
         let client_op = req.client_operation_id.clone();
         let inner = self.inner.clone();
@@ -283,7 +303,7 @@ impl TransactionService for LocalTransactionService {
             },
             move || async move {
                 let repo = inner.repo();
-                let path = sentinel_path(repo, &req.transaction_id);
+                let path = sentinel_path(repo, &transaction_id);
                 let mut sentinel = load_sentinel(&path)?;
 
                 if sentinel.state != STATE_ACTIVE {
@@ -332,8 +352,9 @@ impl TransactionService for LocalTransactionService {
         request: Request<GetTransactionStatusRequest>,
     ) -> Result<Response<TransactionStatus>, Status> {
         let req = request.into_inner();
+        let transaction_id = parse_transaction_id(&req.transaction_id)?;
         let repo = self.inner.repo();
-        let path = sentinel_path(repo, &req.transaction_id);
+        let path = sentinel_path(repo, &transaction_id);
         let sentinel = load_sentinel(&path)?;
 
         Ok(Response::new(TransactionStatus {
@@ -350,7 +371,7 @@ impl TransactionService for LocalTransactionService {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{fs, path::Path, sync::Arc};
 
     use repo::{Repository, operation_dedup::OperationDedupStore};
     use tempfile::TempDir;
@@ -377,6 +398,83 @@ mod tests {
             message: "test txn".to_string(),
             client_operation_id: String::new(),
         }
+    }
+
+    fn parse_begin_id(raw: &str) -> OperationId {
+        raw.parse()
+            .expect("begin_transaction should return an OperationId")
+    }
+
+    fn legacy_string_sentinel_path(repo: &Repository, transaction_id: &str) -> PathBuf {
+        repo.heddle_dir()
+            .join("state")
+            .join("transactions")
+            .join(format!("{transaction_id}.toml"))
+    }
+
+    fn write_trap_sentinel(path: &Path) -> Vec<u8> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("trap parent");
+        }
+        let sentinel = TransactionSentinel {
+            transaction_id: OperationId::new().to_string(),
+            repo_path: "trap".to_string(),
+            thread: String::new(),
+            message: "must not be touched".to_string(),
+            state: STATE_ACTIVE.to_string(),
+            started_at_secs: 1,
+            started_by_email: "trap@example.com".to_string(),
+            base_state: ChangeId::from_bytes([0; 16]).to_string_full(),
+            buffered_ops: vec!["trap-op".to_string()],
+            aborted_reason: None,
+        };
+        let body = toml::to_string_pretty(&sentinel).expect("serialize trap");
+        fs::write(path, body.as_bytes()).expect("write trap");
+        body.into_bytes()
+    }
+
+    async fn assert_invalid_transaction_id_rejected(svc: &LocalTransactionService, raw: &str) {
+        let commit_err = svc
+            .commit_transaction(Request::new(CommitTransactionRequest {
+                repo_path: String::new(),
+                transaction_id: raw.to_string(),
+                client_operation_id: String::new(),
+            }))
+            .await
+            .expect_err("commit must reject invalid transaction_id");
+        assert_eq!(commit_err.code(), tonic::Code::InvalidArgument);
+        assert!(
+            commit_err.message().contains("invalid transaction_id"),
+            "unexpected commit error: {commit_err}"
+        );
+
+        let abort_err = svc
+            .abort_transaction(Request::new(AbortTransactionRequest {
+                repo_path: String::new(),
+                transaction_id: raw.to_string(),
+                reason: "nope".to_string(),
+                client_operation_id: String::new(),
+            }))
+            .await
+            .expect_err("abort must reject invalid transaction_id");
+        assert_eq!(abort_err.code(), tonic::Code::InvalidArgument);
+        assert!(
+            abort_err.message().contains("invalid transaction_id"),
+            "unexpected abort error: {abort_err}"
+        );
+
+        let status_err = svc
+            .get_transaction_status(Request::new(GetTransactionStatusRequest {
+                repo_path: String::new(),
+                transaction_id: raw.to_string(),
+            }))
+            .await
+            .expect_err("status must reject invalid transaction_id");
+        assert_eq!(status_err.code(), tonic::Code::InvalidArgument);
+        assert!(
+            status_err.message().contains("invalid transaction_id"),
+            "unexpected status error: {status_err}"
+        );
     }
 
     #[tokio::test]
@@ -457,7 +555,8 @@ mod tests {
 
         // Read the sentinel back via the loader to confirm `aborted_reason`
         // round-trips through TOML.
-        let path = sentinel_path(svc.inner.repo(), &begin.transaction_id);
+        let transaction_id = parse_begin_id(&begin.transaction_id);
+        let path = sentinel_path(svc.inner.repo(), &transaction_id);
         let sentinel = load_sentinel(&path).expect("load");
         assert_eq!(sentinel.state, STATE_ABORTED);
         assert_eq!(sentinel.aborted_reason.as_deref(), Some("user cancelled"));
@@ -525,7 +624,8 @@ mod tests {
         // Hand-write a couple of buffered ops onto the sentinel —
         // mirrors what the CLI front-end does today
         // (`append_op_to_active_for_thread`).
-        let path = sentinel_path(svc.inner.repo(), &begin.transaction_id);
+        let transaction_id = parse_begin_id(&begin.transaction_id);
+        let path = sentinel_path(svc.inner.repo(), &transaction_id);
         let mut sentinel = load_sentinel(&path).expect("load");
         sentinel.buffered_ops = vec!["capture".into(), "merge".into()];
         save_sentinel(&path, &sentinel).expect("save");
@@ -643,5 +743,55 @@ mod tests {
             .into_inner();
         assert_eq!(first.transaction_id, second.transaction_id);
         assert_eq!(first.started_at, second.started_at);
+    }
+
+    #[test]
+    fn sentinel_path_is_derived_from_operation_id() {
+        let (_tmp, svc) = build_service();
+        let transaction_id = OperationId::new();
+        let path = sentinel_path(svc.inner.repo(), &transaction_id);
+        let expected_file_name = format!("{transaction_id}.toml");
+
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(expected_file_name.as_str())
+        );
+        assert!(
+            path.starts_with(
+                svc.inner
+                    .repo()
+                    .heddle_dir()
+                    .join("state")
+                    .join("transactions")
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_transaction_ids_are_rejected_before_sentinel_path_io() {
+        let (tmp, svc) = build_service();
+        let absolute = tmp.path().join("outside-absolute").display().to_string();
+        let invalid_ids = [
+            "../../x".to_string(),
+            "a/b".to_string(),
+            "..".to_string(),
+            absolute,
+            String::new(),
+        ];
+
+        for raw in invalid_ids {
+            let trap_path = legacy_string_sentinel_path(svc.inner.repo(), &raw);
+            let before = write_trap_sentinel(&trap_path);
+
+            assert_invalid_transaction_id_rejected(&svc, &raw).await;
+
+            let after = fs::read(&trap_path).expect("trap should still exist");
+            assert_eq!(
+                after,
+                before,
+                "invalid transaction_id {raw:?} must not touch {}",
+                trap_path.display()
+            );
+        }
     }
 }
