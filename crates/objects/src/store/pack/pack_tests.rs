@@ -3,16 +3,44 @@
 
 use tempfile::TempDir;
 
-use super::{ObjectType, PackBuilder, PackObjectId, PackReader, pack_index::PackIndex};
+use super::{pack_index::PackIndex, ObjectType, PackBuilder, PackObjectId, PackReader};
 use crate::{
     delta::MAX_DELTA_OUTPUT_SIZE,
     object::{ChangeId, ContentHash},
-    store::{compression::CompressionConfig, pack::pack_container_spec},
+    store::{compression::CompressionConfig, pack::pack_container_spec, StoreError},
 };
 
 fn create_test_hash(n: u8) -> ContentHash {
     let bytes: [u8; 32] = [n; 32];
     ContentHash::from_bytes(bytes)
+}
+
+fn single_record_pack(
+    hash: ContentHash,
+    write_record_tail: impl FnOnce(&mut Vec<u8>),
+) -> (Vec<u8>, Vec<u8>) {
+    let mut pack_data = Vec::new();
+    pack_data.extend_from_slice(pack_container_spec().magic);
+    pack_data.extend_from_slice(&pack_container_spec().version.to_be_bytes());
+    pack_data.extend_from_slice(&1u64.to_be_bytes());
+
+    let entry_offset = u64::try_from(pack_data.len()).expect("test pack offset fits in u64");
+    PackObjectId::Hash(hash).encode_tagged(&mut pack_data);
+    write_record_tail(&mut pack_data);
+    super::append_container_checksum(&mut pack_data);
+
+    let mut index = PackIndex::new();
+    index.add(PackObjectId::Hash(hash), entry_offset);
+    index.sort();
+
+    (pack_data, index.to_bytes())
+}
+
+fn assert_invalid_object_message_contains(error: StoreError, expected: &str) {
+    assert!(
+        matches!(error, StoreError::InvalidObject(ref message) if message.contains(expected)),
+        "expected InvalidObject containing '{expected}', got: {error:?}"
+    );
 }
 
 #[test]
@@ -110,6 +138,107 @@ fn test_delta_compression() {
 
     assert!(stats.delta_count > 0);
     assert!(stats.compression_ratio < 1.0);
+}
+
+#[test]
+fn test_pack_reader_rejects_compressed_size_that_overflows_record_end() {
+    let hash = create_test_hash(42);
+    let (pack_data, index_data) = single_record_pack(hash, |record| {
+        super::varint::encode_type_and_size(ObjectType::Blob, u64::MAX, record);
+        super::varint::encode_varint(u64::MAX, record);
+    });
+    let reader = PackReader::from_bytes(pack_data, index_data).expect("container is well-formed");
+
+    let error = reader
+        .get_hashed_object(&hash)
+        .expect_err("oversized compressed_size must fail before slicing");
+    assert!(
+        matches!(
+            error,
+            StoreError::InvalidObject(ref message)
+                if message.contains("overflows") || message.contains("platform limits")
+        ),
+        "expected overflow/platform-limit error, got: {error:?}",
+    );
+
+    let bytes_error = reader
+        .get_hashed_object_bytes(&hash)
+        .expect_err("zero-copy path must reject oversized compressed_size too");
+    assert!(
+        matches!(
+            bytes_error,
+            StoreError::InvalidObject(ref message)
+                if message.contains("overflows") || message.contains("platform limits")
+        ),
+        "expected overflow/platform-limit error, got: {bytes_error:?}",
+    );
+}
+
+#[test]
+fn test_pack_reader_rejects_truncated_compressed_size_varint() {
+    let hash = create_test_hash(43);
+    let (pack_data, index_data) = single_record_pack(hash, |record| {
+        super::varint::encode_type_and_size(ObjectType::Blob, 4, record);
+        record.push(0x80);
+    });
+    let reader = PackReader::from_bytes(pack_data, index_data).expect("container is well-formed");
+
+    let error = reader
+        .get_hashed_object(&hash)
+        .expect_err("truncated compressed_size must not read into checksum bytes");
+    assert_invalid_object_message_contains(error, "Truncated compressed_size varint");
+
+    let bytes_error = reader
+        .get_hashed_object_bytes(&hash)
+        .expect_err("zero-copy path must reject truncated compressed_size too");
+    assert_invalid_object_message_contains(bytes_error, "Truncated compressed_size varint");
+}
+
+#[test]
+fn test_pack_reader_rejects_compressed_size_past_content_end() {
+    let hash = create_test_hash(44);
+    let (pack_data, index_data) = single_record_pack(hash, |record| {
+        super::varint::encode_type_and_size(ObjectType::Blob, 10, record);
+        super::varint::encode_varint(10, record);
+        record.extend_from_slice(b"abc");
+    });
+    let reader = PackReader::from_bytes(pack_data, index_data).expect("container is well-formed");
+
+    let error = reader
+        .get_hashed_object(&hash)
+        .expect_err("record payload shorter than compressed_size must fail");
+    assert_invalid_object_message_contains(error, "Entry data out of bounds");
+
+    let bytes_error = reader
+        .get_hashed_object_bytes(&hash)
+        .expect_err("zero-copy path must reject payload shorter than compressed_size too");
+    assert_invalid_object_message_contains(bytes_error, "Entry data out of bounds");
+}
+
+#[test]
+fn test_pack_reader_decodes_well_formed_manual_record() {
+    let hash = create_test_hash(45);
+    let payload = b"manual-pack-record".to_vec();
+    let (pack_data, index_data) = single_record_pack(hash, |record| {
+        super::varint::encode_type_and_size(ObjectType::Blob, payload.len() as u64, record);
+        super::varint::encode_varint(payload.len() as u64, record);
+        record.extend_from_slice(&payload);
+    });
+    let reader = PackReader::from_bytes(pack_data, index_data).expect("container is well-formed");
+
+    let (obj_type, data) = reader
+        .get_hashed_object(&hash)
+        .expect("well-formed record should decode")
+        .expect("record should exist");
+    assert_eq!(obj_type, ObjectType::Blob);
+    assert_eq!(data, payload);
+
+    let (bytes_type, bytes) = reader
+        .get_hashed_object_bytes(&hash)
+        .expect("well-formed zero-copy record should decode")
+        .expect("record should exist");
+    assert_eq!(bytes_type, ObjectType::Blob);
+    assert_eq!(bytes.as_ref(), payload.as_slice());
 }
 
 #[test]
@@ -300,7 +429,7 @@ fn test_pack_reader_missing_object_returns_none() {
 /// with the expected diagnostic phrase.
 #[test]
 fn stale_index_swapped_offsets_surfaces_as_invalid_object() {
-    use crate::store::{StoreError, pack::pack_index::PackIndex};
+    use crate::store::{pack::pack_index::PackIndex, StoreError};
 
     let blob_a = b"alpha-payload alpha-payload alpha-payload alpha".to_vec();
     let blob_b = b"bravo-payload bravo-payload bravo-payload bravo".to_vec();
