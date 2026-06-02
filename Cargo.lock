@@ -3086,6 +3086,7 @@ dependencies = [
  "blake3",
  "bytes",
  "chrono",
+ "criterion",
  "fs2",
  "heddle-runtime-bridge",
  "hex",

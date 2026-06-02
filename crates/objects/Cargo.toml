@@ -45,6 +45,7 @@ memory-backend = []
 zstd = ["dep:zstd"]
 
 [dev-dependencies]
+criterion = "0.8"
 tempfile.workspace = true
 tokio-test.workspace = true
 serial_test.workspace = true
@@ -58,3 +59,23 @@ proptest.workspace = true
 [lib]
 path = "src/lib.rs"
 name = "objects"
+
+[[bench]]
+name = "hashing"
+harness = false
+
+[[bench]]
+name = "compression"
+harness = false
+
+[[bench]]
+name = "pack_io"
+harness = false
+
+[[bench]]
+name = "tree_diff"
+harness = false
+
+[[bench]]
+name = "delta"
+harness = false
