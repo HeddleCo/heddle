@@ -1,0 +1,125 @@
+name: Benchmarks
+
+on:
+  schedule:
+    # Weekly full Criterion suite: Sunday 00:00 UTC.
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+concurrency:
+  group: benchmarks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  criterion:
+    name: Criterion suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: benchmarks-${{ runner.os }}
+          cache-on-failure: true
+
+      - name: Install FUSE
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fuse3 libfuse3-dev
+          fusermount3 --version
+          ls -l /dev/fuse
+
+      - name: Discover benchmark targets
+        run: |
+          python3 scripts/discover-benches.py > benchmark-plan.tsv
+          cat benchmark-plan.tsv
+
+      # `fuse_worker_ipc` resolves the worker as a sibling release
+      # artifact. Build it once before the generic bench loop so that
+      # the discovered mount bench can measure the real IPC path.
+      - name: Build FUSE worker
+        run: cargo build --locked --release -p heddle-cli --bin heddle-fuse-worker --features mount
+
+      - name: Clear stale Criterion residue
+        run: rm -rf target/criterion
+
+      - name: Run discovered Criterion benches
+        run: |
+          : > benchmark-output.txt
+          while IFS=$'\t' read -r package bench features; do
+            [ -n "$package" ] || continue
+            echo "::group::$package/$bench"
+            cmd=(cargo bench --locked -p "$package" --bench "$bench")
+            if [ -n "$features" ]; then
+              cmd+=(--features "$features")
+            fi
+            cmd+=(-- --output-format bencher)
+            printf 'running:'
+            printf ' %q' "${cmd[@]}"
+            printf '\n'
+            "${cmd[@]}" 2>&1 | tee -a benchmark-output.txt
+            echo "::endgroup::"
+          done < benchmark-plan.tsv
+
+      # Use github-action-benchmark for the broad scheduled suite instead
+      # of extending the committed FUSE baseline pattern. The workspace now
+      # has many Criterion targets, and more can appear independently; the
+      # action stores every run on gh-pages, charts history, and emits alert
+      # comments without forcing PR checks to wait on benchmark execution.
+      - name: Store benchmark history
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: Heddle Criterion Suite
+          tool: cargo
+          output-file-path: benchmark-output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          comment-on-alert: true
+          fail-on-alert: false
+          alert-threshold: '120%'
+          benchmark-data-dir-path: dev/bench
+
+      - name: Publish benchmark summary
+        if: always()
+        run: |
+          {
+            echo '## Benchmarks'
+            echo
+            echo 'Trend tracking: benchmark-action/github-action-benchmark writes scheduled/manual results to gh-pages and surfaces >20% regressions as alerts without failing normal PR CI.'
+            echo
+            echo 'Discovered targets:'
+            sed 's/^/- /; s/\t/ /g' benchmark-plan.tsv
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-suite
+          path: |
+            benchmark-plan.tsv
+            benchmark-output.txt
+            target/criterion/
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats

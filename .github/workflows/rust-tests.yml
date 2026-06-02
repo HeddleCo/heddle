@@ -190,7 +190,40 @@ jobs:
       - name: Bench-compare script unit tests
         run: python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
-      # 3c. Compile gate for the `postgres` (server / weft) feature. This is
+      # 3c. Compile every workspace benchmark target in the dev profile
+      #     without running the measurements. The weekly benchmark workflow
+      #     owns optimized performance trend tracking and shares the same
+      #     discovery helper. This cheap PR-safe guard catches rotten bench
+      #     code and Cargo.toml `[[bench]]` entries before they land,
+      #     including non-default required features.
+      #     Invariant: every target enumerated by `discover-benches.py` is
+      #     compile-checked by a PR-time gate. Non-FUSE benches are checked
+      #     here; FUSE benches are skipped here only because the dedicated
+      #     `fuse-bench` job below has libfuse and compile-checks all
+      #     `heddle-mount` benches with `cargo build --features fuse --benches`.
+      - name: Compile benchmark targets
+        run: |
+          python3 scripts/discover-benches.py > benchmark-plan.tsv
+          cat benchmark-plan.tsv
+          while IFS=$'\t' read -r package bench features; do
+            [ -n "$package" ] || continue
+            if [ "$features" = "fuse" ] || [[ "$features" == fuse,* ]] || [[ "$features" == *,fuse ]] || [[ "$features" == *,fuse,* ]]; then
+              echo "skipping $package/$bench: fuse benches are covered by the fuse-bench job"
+              continue
+            fi
+            echo "::group::$package/$bench"
+            cmd=(cargo build --locked -p "$package" --bench "$bench")
+            if [ -n "$features" ]; then
+              cmd+=(--features "$features")
+            fi
+            printf 'running:'
+            printf ' %q' "${cmd[@]}"
+            printf '\n'
+            "${cmd[@]}"
+            echo "::endgroup::"
+          done < benchmark-plan.tsv
+
+      # 3d. Compile gate for the `postgres` (server / weft) feature. This is
       #     the silent-rot guard: `--features postgres` is NOT exercised by
       #     the default-feature build above, so a server-path regression
       #     (e.g. a backend that wasn't updated after a newtype migration)
@@ -615,6 +648,17 @@ jobs:
       # is untouched.
       - name: Clear stale criterion residue
         run: rm -rf target/criterion
+
+      # Complete the benchmark rot-guard invariant documented in the
+      # `Compile benchmark targets` step: this FUSE-capable job
+      # compile-checks every `heddle-mount` bench target in the dev
+      # profile, including future FUSE benches, before running the
+      # measured optimized suite.
+      - name: Compile FUSE benchmark targets
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+        run: cargo build --locked --features fuse -p heddle-mount --benches
 
       # Run the bench. Criterion writes per-workload `estimates.json`
       # under `target/criterion/<group>/<variant>/new/` which the
