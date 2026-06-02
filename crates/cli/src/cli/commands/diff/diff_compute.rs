@@ -509,14 +509,14 @@ fn group_changes_by_category(changes: &[FileChange]) -> serde_json::Value {
     serde_json::Value::Object(map)
 }
 
-/// Order a state-to-state change list deterministically by path. `diff_trees`
-/// yields its change set in hash order, which differs between process
-/// invocations — so `heddle diff <a> <b> --patch` and the JSON `.patch` field
-/// from a separate run disagree on the order of unrelated files. git emits
-/// diff entries in path order; sorting here matches that and keeps every
-/// render of the same diff byte-identical. Sort *before* `expand_type_changes`
-/// so each type change's local delete-before-add ordering stays intact (the
-/// expansion replaces a single entry in place).
+/// Order a state-to-state change list by flat path. `diff_trees` emits a
+/// deterministic merge-join order over sorted tree entries, but recursive
+/// directory descent can still differ from this flat `String::cmp` order for
+/// paths such as `a.txt` and `a/file.txt`. git emits diff entries in flat path
+/// order; sorting here matches that and keeps every render of the same diff
+/// byte-identical. Sort *before* `expand_type_changes` so each type change's
+/// local delete-before-add ordering stays intact (the expansion replaces a
+/// single entry in place).
 fn sort_changes_by_path(mut changes: Vec<FileChange>) -> Vec<FileChange> {
     changes.sort_by(|a, b| a.path.cmp(&b.path));
     changes
