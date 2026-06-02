@@ -40,7 +40,9 @@ fn validate_loaded_tree(tree: Tree) -> Result<Tree> {
 }
 
 fn validate_blob_bytes(data: &[u8], hash: ContentHash) -> Result<()> {
-    let found = ContentHash::compute_typed("blob", data);
+    let mut hasher = ContentHash::typed_hasher("blob", data.len() as u64);
+    hasher.update(data);
+    let found = ContentHash::from_bytes(hasher.finalize().into());
     if found != hash {
         return Err(HeddleError::Corruption {
             expected: hash,
@@ -906,10 +908,10 @@ impl ObjectStore for FsStore {
         let reader = crate::store::pack::PackReader::from_slice(pack_data, index_data)?;
         let ids = reader.list_ids();
         for id in &ids {
-            let Some((obj_type, data)) = reader.get_object(id)? else {
+            let Some((obj_type, data)) = reader.get_object_bytes(id)? else {
                 continue;
             };
-            validate_pack_entry(id, obj_type, &data)?;
+            validate_pack_entry(id, obj_type, data.as_ref())?;
         }
         self.install_pack_files(pack_data, index_data)?;
         Ok(ids)

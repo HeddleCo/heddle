@@ -3,8 +3,8 @@ use chrono::{TimeZone, Utc};
 use tempfile::TempDir;
 
 use super::{
-    fs_paths::{blobs_dir, hash_path, packs_dir},
     FsStore, LooseObjectWriteMode,
+    fs_paths::{blobs_dir, hash_path, packs_dir},
 };
 use crate::{
     object::{
@@ -12,10 +12,10 @@ use crate::{
         TreeEntry,
     },
     store::{
+        HeddleError, ObjectStore,
         atomic::temp_path,
         compression::CompressionConfig,
         pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId},
-        HeddleError, ObjectStore,
     },
 };
 
@@ -322,6 +322,35 @@ fn install_pack_accepts_valid_mixed_native_pack() {
     assert_eq!(
         store.get_action(&action_id).unwrap().unwrap().description,
         "packed action",
+    );
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn install_pack_accepts_valid_compressed_blob_pack() {
+    let (_temp, store) = create_test_store();
+
+    let content = b"compressible native pack blob\n".repeat(512);
+    let blob = Blob::from(content);
+    let blob_hash = blob.hash();
+    let mut builder = PackBuilder::new(CompressionConfig {
+        enabled: true,
+        min_size: 0,
+        max_delta_size: 0,
+        ..CompressionConfig::default()
+    });
+    builder.add(blob_hash, PackObjectType::Blob, blob.clone().into_content());
+    let (pack_data, index_data, stats) = builder.build().unwrap();
+    assert!(
+        stats.total_compressed < stats.total_uncompressed,
+        "test pack must exercise the compressed get_object_bytes fallback",
+    );
+
+    let ids = store.install_pack(&pack_data, &index_data).unwrap();
+    assert_eq!(ids, vec![PackObjectId::Hash(blob_hash)]);
+    assert_eq!(
+        store.get_blob(&blob_hash).unwrap().unwrap().content(),
+        blob.content(),
     );
 }
 
