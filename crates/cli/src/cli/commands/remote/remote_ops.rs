@@ -396,44 +396,38 @@ async fn pull_local(
     let track_to_update = local_thread.unwrap_or(remote_thread);
     let track_tn = ThreadName::new(track_to_update);
 
-    // Capture the local thread's pre-pull tip *before* mutating it
-    // (heddle#110). The materializing branch records an
-    // `OpRecord::FastForwardV2` whose `pre_target_id` must be the
-    // pre-pull state so undo restores both HEAD and the local thread
-    // ref. Reading the ref after `set_thread` would return the
-    // post-pull state and silently strand the thread on undo —
-    // exactly the bug we're closing.
     let pre_target = repo.refs().get_thread(&track_tn)?;
     let changed = pre_target.as_ref() != Some(&state_id) || objects_copied > 0;
-    repo.refs().set_thread(&track_tn, &state_id)?;
 
     // Preserve attached-HEAD semantics only when the pull target is the
     // current checkout. Pulling a remote into a side thread must not move
     // the operator's active thread or overwrite its worktree.
-    let should_materialize = match repo.head_ref()? {
+    let head_ref = repo.head_ref()?;
+    let should_materialize = match &head_ref {
         Head::Attached { thread } => thread == track_to_update,
         Head::Detached { .. } => local_thread.is_none(),
     };
     if should_materialize {
-        // First-time pull of this thread has no pre_target_id; the
-        // `set_thread` above effectively created the ref. Fall back to
-        // recording the generic `Goto` inverse — there's no pre-FF tip
-        // to restore on undo, only HEAD to rewind. Repeat pulls flow
-        // through the `FastForwardV2` arm so undo restores the local
-        // thread ref alongside HEAD.
-        match pre_target {
-            Some(pre) => {
-                super::super::ff_record::record_ff_advance_explicit(
-                    repo,
-                    remote_thread,
-                    &pre,
-                    &state_id,
-                )?;
+        // A dirty-refusal must NEVER leave a ref advanced without its
+        // corresponding worktree materialization. Run the refuse-able
+        // apply before publishing `track_tn`; `fast_forward_attached*`
+        // publishes the attached current thread only after the worktree
+        // apply succeeds, and the detached arm publishes `track_tn`
+        // explicitly below after the same guard has passed.
+        match (&head_ref, pre_target) {
+            (Head::Attached { .. }, Some(_)) => {
+                super::super::ff_record::record_ff_advance(repo, remote_thread, &state_id)?;
             }
-            None => {
+            (Head::Attached { .. }, None) => {
                 repo.fast_forward_attached_from_materialized_state(&state_id, None)?;
             }
+            (Head::Detached { .. }, _) => {
+                repo.goto(&state_id)?;
+                repo.refs().set_thread(&track_tn, &state_id)?;
+            }
         }
+    } else {
+        repo.refs().set_thread(&track_tn, &state_id)?;
     }
 
     if should_output_json(cli, Some(repo.config())) {

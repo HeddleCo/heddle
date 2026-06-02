@@ -2,7 +2,7 @@
 //! Shared helper for fast-forward call sites that need to record an
 //! `OpRecord::FastForwardV2` instead of the implicit `OpRecord::Goto`.
 //!
-//! See heddle#99 (merge FF) and heddle#110 (rebase / pull / ship /
+//! See heddle#99 (merge FF) and heddle#110 (rebase / ship /
 //! merge-abort): recording a thread-advancing fast-forward as a plain
 //! `OpRecord::Goto` strands the target thread ref on undo, because the
 //! `Goto` inverse only rewinds HEAD. The fix is to perform the FF
@@ -31,8 +31,9 @@ use super::advice::RecoveryAdvice;
 /// Reads the pre-FF tip from the attached thread's ref (or from HEAD
 /// for detached). Use this overload at call sites where the thread
 /// ref has *not* been mutated since whatever you want undo to restore
-/// — e.g. merge / rebase / ship. Pull pre-sets the thread ref before
-/// materializing and must call [`record_ff_advance_explicit`].
+/// — e.g. merge / rebase / ship. Callers that also materialize a
+/// worktree must not publish the ref first: a dirty refusal must never
+/// leave a ref advanced without the matching worktree materialization.
 ///
 /// `source_thread` is the thread name surfaced in the OpRecord for
 /// forensic context. Neither undo nor redo reads it. For rebase-replay
@@ -59,35 +60,6 @@ pub(super) fn record_ff_advance(
         post_target_id,
         false,
         None,
-    )
-}
-
-/// Variant of [`record_ff_advance`] that takes an explicit
-/// `pre_target_id`. Use when the thread ref was already mutated
-/// before the FF (e.g. `cmd_pull` advances the local thread ref
-/// directly so a non-materializing pull still advances the ref), so
-/// reading it back would return the *post* state.
-///
-/// Caller must capture `pre_target_id` *before* the mutating
-/// operation that precedes the FF. The preceding mutation must also
-/// have run its dirty-worktree guard. This helper passes that captured
-/// state as the materialized baseline because the pre-published ref
-/// makes the old clean worktree look dirty against the new ref.
-pub(super) fn record_ff_advance_explicit(
-    repo: &Repository,
-    source_thread: &str,
-    pre_target_id: &ChangeId,
-    post_target_id: &ChangeId,
-) -> Result<()> {
-    let head_before = repo.head_ref()?;
-    record_ff_advance_inner(
-        repo,
-        source_thread,
-        &head_before,
-        pre_target_id,
-        post_target_id,
-        false,
-        Some(Some(*pre_target_id)),
     )
 }
 

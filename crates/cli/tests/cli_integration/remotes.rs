@@ -374,6 +374,76 @@ fn test_cli_pull_local_updates_requested_track() {
 }
 
 #[test]
+fn test_cli_pull_local_dirty_refusal_leaves_thread_ref_unchanged() {
+    let source = TempDir::new().unwrap();
+    let target_parent = TempDir::new().unwrap();
+    let target_path = target_parent.path().join("target");
+
+    heddle(&["init"], Some(source.path())).unwrap();
+    std::fs::write(source.path().join("shared.txt"), "base\n").unwrap();
+    heddle(&["capture", "-m", "Base state"], Some(source.path())).unwrap();
+
+    let source_path = source.path().to_str().unwrap().to_string();
+    let target_path_arg = target_path.to_str().unwrap().to_string();
+    heddle(&["clone", &source_path, &target_path_arg], None).unwrap();
+
+    let target_repo = Repository::open(&target_path).unwrap();
+    let pre_pull_ref = target_repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .expect("cloned main ref exists");
+
+    std::fs::write(source.path().join("shared.txt"), "remote\n").unwrap();
+    heddle(&["capture", "-m", "Remote state"], Some(source.path())).unwrap();
+    std::fs::write(target_path.join("shared.txt"), "local dirty\n").unwrap();
+
+    let pull = heddle_output(
+        &["--output", "json", "pull", &source_path],
+        Some(&target_path),
+    )
+    .expect("invoke dirty local pull");
+    assert!(
+        !pull.status.success(),
+        "dirty local pull should refuse before publishing the ref"
+    );
+    assert!(
+        pull.stdout.is_empty(),
+        "JSON refusal should keep stdout quiet: {}",
+        String::from_utf8_lossy(&pull.stdout)
+    );
+
+    let target_repo = Repository::open(&target_path).unwrap();
+    assert_eq!(
+        target_repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap(),
+        Some(pre_pull_ref),
+        "dirty pull refusal must leave main at the pre-pull state"
+    );
+    assert_eq!(
+        std::fs::read_to_string(target_path.join("shared.txt")).unwrap(),
+        "local dirty\n",
+        "dirty pull refusal must preserve the user's edit"
+    );
+
+    let status_json =
+        heddle(&["--output", "json", "status"], Some(&target_path)).expect("status succeeds");
+    let status: Value = serde_json::from_str(&status_json).expect("status JSON parses");
+    assert_eq!(
+        status["state"]["change_id"],
+        pre_pull_ref.to_string(),
+        "status must continue attributing the dirty file against the pre-pull state: {status_json}"
+    );
+    assert_eq!(
+        status["changes"]["modified"],
+        serde_json::json!(["shared.txt"]),
+        "dirty edit should remain attributed to the pulled clone's original baseline: {status_json}"
+    );
+}
+
+#[test]
 fn test_cli_clone_help_hides_planned_lazy_flag() {
     let output = heddle(&["clone", "--help"], None).unwrap();
     assert!(
