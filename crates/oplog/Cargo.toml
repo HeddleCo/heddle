@@ -30,6 +30,7 @@ pollster = "0.4"
 tempfile.workspace = true
 
 [features]
+bench = []
 postgres = ["dep:serde_json", "dep:sqlx", "dep:tokio", "dep:runtime-bridge"]
 
 [lib]
@@ -40,3 +41,4 @@ bench = false
 [[bench]]
 name = "oplog_io"
 harness = false
+required-features = ["bench"]
