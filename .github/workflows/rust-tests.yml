@@ -37,7 +37,7 @@ jobs:
   #
   # Outputs:
   #   docs_only — every changed path is doc-only (see below); skip all Rust.
-  #   rust      — !docs_only; gates check-and-test / coverage / postgres.
+  #   rust      — !docs_only; gates check-and-test / coverage / postgres / CLI fault-injection.
   #   mount     — a mount-relevant path changed; gates fuse/projfs smoke.
   changes:
     name: Detect changed paths
@@ -280,6 +280,38 @@ jobs:
           DATABASE_URL: postgres://heddle_test:heddle_test@localhost:5432/heddle_test
         run: |
           cargo test --locked -p heddle-refs -p heddle-oplog --features postgres \
+            -- --ignored --test-threads=1 --nocapture
+
+      - name: sccache stats
+        run: sccache --show-stats
+
+  # CLI crash-recovery / atomicity tests. These are `#[ignore]` because they
+  # spawn child `heddle` processes with `HEDDLE_FAULT_INJECT` armed, so the
+  # default workspace test run intentionally skips them. Keep this filter on
+  # the `fault_injection` module only: the same `cli_integration` ignored set
+  # also contains timing-sensitive perf smoke and real-world Git fixture tests
+  # that are not deterministic enough to become a required Rust gate.
+  cli-fault-injection-tests:
+    name: CLI fault-injection tests
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cli-fault-injection-tests-${{ runner.os }}
+          cache-on-failure: true
+
+      - name: CLI fault-injection tests
+        run: |
+          cargo test --locked -p heddle-cli --test cli_integration fault_injection:: \
             -- --ignored --test-threads=1 --nocapture
 
       - name: sccache stats
