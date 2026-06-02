@@ -23,6 +23,11 @@ use tempfile::TempDir;
 
 use super::{assert_json_recovery_advice_fields, heddle, heddle_output};
 
+fn write_test_private_key(path: &std::path::Path, pem: &str) {
+    objects::fs_atomic::write_file_atomic_secret(path, pem.as_bytes())
+        .expect("write test private key");
+}
+
 /// Bootstrap a repo containing a fake-secret file in a captured state.
 /// Returns the temp dir and the short change-id of the capture.
 fn setup_repo_with_secret() -> (TempDir, String) {
@@ -371,7 +376,7 @@ fn redact_apply_with_sign_with_records_signature_verifiable_on_show() {
     let signer = Ed25519Signer::generate().expect("generate ed25519 signing key");
     let key_pem = signer.to_pem().expect("export PEM");
     let key_path = temp.path().join("redact_signing_key.pem");
-    fs::write(&key_path, &key_pem).unwrap();
+    write_test_private_key(&key_path, &key_pem);
 
     let apply_raw = heddle(
         &[
@@ -603,7 +608,7 @@ fn redact_apply_signed_propagates_to_cloned_replica() {
     let signer = Ed25519Signer::generate().unwrap();
     let pem = signer.to_pem().unwrap();
     let pem_path = a.path().join("ed25519.pem");
-    fs::write(&pem_path, &pem).unwrap();
+    write_test_private_key(&pem_path, &pem);
     let apply = signed_redact_on_repo_a(&a, &state, &pem_path);
     let redaction_id = apply["redaction_id"].as_str().unwrap().to_string();
 
@@ -709,7 +714,7 @@ fn purge_apply_signed_propagates_byte_removal_to_cloned_replica() {
     let signer = Ed25519Signer::generate().unwrap();
     let pem = signer.to_pem().unwrap();
     let pem_path = a.path().join("ed25519.pem");
-    fs::write(&pem_path, &pem).unwrap();
+    write_test_private_key(&pem_path, &pem);
     let _ = signed_redact_on_repo_a(&a, &state, &pem_path);
 
     heddle(
@@ -774,7 +779,7 @@ fn tampered_redaction_is_refused_at_fetch_boundary() {
     let signer = Ed25519Signer::generate().unwrap();
     let pem = signer.to_pem().unwrap();
     let pem_path = a.path().join("ed25519.pem");
-    fs::write(&pem_path, &pem).unwrap();
+    write_test_private_key(&pem_path, &pem);
     let _ = signed_redact_on_repo_a(&a, &state, &pem_path);
 
     // Tamper with A's stored redaction sidecar by mutating the reason
@@ -1056,7 +1061,7 @@ fn redact_after_peer_fetch_still_propagates_on_resync() {
     let signer = Ed25519Signer::generate().unwrap();
     let pem = signer.to_pem().unwrap();
     let pem_path = a.path().join("ed25519.pem");
-    fs::write(&pem_path, &pem).unwrap();
+    write_test_private_key(&pem_path, &pem);
     let _ = signed_redact_on_repo_a(&a, &state, &pem_path);
 
     // Re-sync: B trusts A's signing key, registers A as a remote,
@@ -1111,7 +1116,7 @@ fn untrusted_signed_redaction_is_refused_at_fetch_boundary() {
     let attacker = Ed25519Signer::generate().unwrap();
     let pem = attacker.to_pem().unwrap();
     let pem_path = a.path().join("attacker.pem");
-    fs::write(&pem_path, &pem).unwrap();
+    write_test_private_key(&pem_path, &pem);
     let _ = signed_redact_on_repo_a(&a, &state, &pem_path);
 
     let b_dir = TempDir::new().unwrap();
@@ -1155,7 +1160,7 @@ fn redact_trust_add_and_list_round_trip() {
     let signer = Ed25519Signer::generate().unwrap();
     let pem = signer.to_pem().unwrap();
     let pem_path = temp.path().join("key.pem");
-    fs::write(&pem_path, &pem).unwrap();
+    write_test_private_key(&pem_path, &pem);
 
     let add_raw = heddle(
         &[

@@ -36,6 +36,7 @@ pub trait Signer: Send + Sync {
 /// header (or raw-seed shape) selects the backend via
 /// [`pem_loader::load_signer_from_pem`].
 pub fn load_signer(path: &Path, algorithm: Option<&str>) -> Result<Box<dyn Signer>, SignerError> {
+    reject_group_or_world_readable_key(path)?;
     let key_data = std::fs::read(path)?;
     let pem_content = String::from_utf8_lossy(&key_data);
 
@@ -53,6 +54,25 @@ pub fn load_signer(path: &Path, algorithm: Option<&str>) -> Result<Box<dyn Signe
     }
 
     pem_loader::load_signer_from_pem(&pem_content)
+}
+
+#[cfg(unix)]
+fn reject_group_or_world_readable_key(path: &Path) -> Result<(), SignerError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(SignerError::InsecureKeyPermissions {
+            path: path.to_path_buf(),
+            mode,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn reject_group_or_world_readable_key(_path: &Path) -> Result<(), SignerError> {
+    Ok(())
 }
 
 /// Verify a state's signature.
@@ -84,6 +104,10 @@ pub fn verify_payload_signature(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    use objects::fs_atomic::write_file_atomic_secret;
     use tempfile::TempDir;
 
     use super::*;
@@ -117,10 +141,32 @@ mod tests {
 
         let signer = Ed25519Signer::generate().expect("generate key");
         let pem = signer.to_pem().expect("export to PEM");
-        std::fs::write(&key_path, &pem).expect("write key file");
+        write_file_atomic_secret(&key_path, pem.as_bytes()).expect("write key file");
 
         let loaded = load_signer(&key_path, Some("ed25519")).expect("load signer");
         assert_eq!(loaded.algorithm(), "ed25519");
         assert_eq!(loaded.public_key(), signer.public_key());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_signer_refuses_group_or_world_readable_private_key() {
+        let temp = TempDir::new().expect("create temp dir");
+        let key_path = temp.path().join("test_ed25519.pem");
+
+        let signer = Ed25519Signer::generate().expect("generate key");
+        let pem = signer.to_pem().expect("export to PEM");
+        write_file_atomic_secret(&key_path, pem.as_bytes()).expect("write key file");
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644))
+            .expect("make key insecure");
+
+        let err = match load_signer(&key_path, Some("ed25519")) {
+            Ok(_) => panic!("insecure key must fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            SignerError::InsecureKeyPermissions { mode: 0o644, .. }
+        ));
     }
 }
