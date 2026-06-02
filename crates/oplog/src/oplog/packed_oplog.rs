@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Packed binary oplog: all entries in a single file, loaded into memory.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{TimeZone, Utc};
@@ -267,8 +267,37 @@ impl PackedOpLog {
             return Vec::new();
         }
 
+        struct PendingBatch {
+            entries: Vec<OpEntry>,
+            scope_matches: bool,
+        }
+
         let mut batches: Vec<OpBatch> = Vec::new();
-        let mut seen_batch_ids: HashSet<u64> = HashSet::new();
+        // Entries are append-ordered, so a batch is complete once the reverse
+        // scan reaches a different batch id. Pending therefore stays <= count.
+        let mut pending: HashMap<u64, PendingBatch> = HashMap::with_capacity(count.min(1));
+        let mut current_batch_id: Option<u64> = None;
+
+        let finalize_batch = |batch_id: u64,
+                              pending: &mut HashMap<u64, PendingBatch>,
+                              batches: &mut Vec<OpBatch>| {
+            let Some(mut pending_batch) = pending.remove(&batch_id) else {
+                return;
+            };
+            if !pending_batch.scope_matches {
+                return;
+            }
+
+            pending_batch.entries.sort_by_key(|e| e.batch_index);
+            let batch = OpBatch {
+                id: batch_id,
+                entries: pending_batch.entries,
+            };
+
+            if predicate(&batch) {
+                batches.push(batch);
+            }
+        };
 
         for entry in self.entries.iter().rev() {
             let batch_id = if entry.batch_id == 0 {
@@ -276,47 +305,33 @@ impl PackedOpLog {
             } else {
                 entry.batch_id
             };
-            if !seen_batch_ids.insert(batch_id) {
-                continue;
-            }
 
-            // Check scope filter before cloning
-            if let Some(scope) = scope {
-                let all_match = self.entries.iter().all(|e| {
-                    let bid = if e.batch_id == 0 { e.id } else { e.batch_id };
-                    bid != batch_id || e.scope.as_deref() == Some(scope)
-                });
-                if !all_match {
-                    continue;
+            if current_batch_id != Some(batch_id) {
+                if let Some(previous_batch_id) = current_batch_id {
+                    finalize_batch(previous_batch_id, &mut pending, &mut batches);
+                    if batches.len() == count {
+                        break;
+                    }
                 }
+                current_batch_id = Some(batch_id);
             }
 
-            let mut batch_entries: Vec<OpEntry> = self
-                .entries
-                .iter()
-                .filter(|e| {
-                    let bid = if e.batch_id == 0 { e.id } else { e.batch_id };
-                    bid == batch_id
-                })
-                .cloned()
-                .collect();
-
-            if batch_entries.is_empty() {
-                continue;
+            let batch = pending.entry(batch_id).or_insert_with(|| PendingBatch {
+                entries: Vec::new(),
+                scope_matches: true,
+            });
+            if let Some(scope) = scope
+                && entry.scope.as_deref() != Some(scope)
+            {
+                batch.scope_matches = false;
             }
+            batch.entries.push(entry.clone());
+        }
 
-            batch_entries.sort_by_key(|e| e.batch_index);
-            let batch = OpBatch {
-                id: batch_id,
-                entries: batch_entries,
-            };
-
-            if predicate(&batch) {
-                batches.push(batch);
-                if batches.len() == count {
-                    break;
-                }
-            }
+        if batches.len() < count
+            && let Some(batch_id) = current_batch_id
+        {
+            finalize_batch(batch_id, &mut pending, &mut batches);
         }
 
         batches
@@ -399,6 +414,13 @@ mod tests {
         }
     }
 
+    fn make_batch_entry(id: u64, batch_id: u64, batch_index: u32, scope: Option<&str>) -> OpEntry {
+        let mut entry = make_entry(id, scope);
+        entry.batch_id = batch_id;
+        entry.batch_index = batch_index;
+        entry
+    }
+
     #[test]
     fn round_trip_empty() {
         let tmp = TempDir::new().unwrap();
@@ -473,6 +495,35 @@ mod tests {
         assert!(log.entries[0].undone);
         log.set_undone(1, false);
         assert!(!log.entries[0].undone);
+    }
+
+    #[test]
+    fn collect_batches_scoped_excludes_mixed_scope_batches_without_counting_them() {
+        let tmp = TempDir::new().unwrap();
+        let mut log = PackedOpLog::new(tmp.path().join("oplog.bin"));
+        log.append(vec![
+            make_batch_entry(1, 10, 0, Some("lane-a")),
+            make_batch_entry(2, 10, 1, Some("lane-a")),
+            make_batch_entry(3, 20, 0, Some("lane-a")),
+            make_batch_entry(4, 20, 1, Some("lane-b")),
+            make_batch_entry(5, 30, 0, Some("lane-a")),
+            make_batch_entry(6, 40, 0, Some("lane-a")),
+        ]);
+
+        let batches = log.collect_batches_scoped(3, |_| true, Some("lane-a"));
+
+        assert_eq!(
+            batches.iter().map(|batch| batch.id).collect::<Vec<_>>(),
+            vec![40, 30, 10]
+        );
+        assert_eq!(
+            batches[2]
+                .entries
+                .iter()
+                .map(|entry| entry.batch_index)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
     }
 
     #[test]
