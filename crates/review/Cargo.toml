@@ -16,6 +16,7 @@ chrono.workspace = true
 jsonwebtoken.workspace = true
 regex-lite.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -25,3 +26,6 @@ uuid.workspace = true
 [lib]
 path = "src/lib.rs"
 name = "review"
+
+[dev-dependencies]
+tokio.workspace = true
