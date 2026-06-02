@@ -116,9 +116,9 @@ async fn open_client(repo: &Repository, remote: &str) -> Result<HostedGrpcClient
             )));
         }
     };
-    let user_config = UserConfig::load_default().unwrap_or_default();
-    let token = user_config.remote_token();
-    let mut config = user_config.heddle_client_config(token);
+    let user_config = UserConfig::load_default()?;
+    let token = user_config.remote_token()?;
+    let mut config = user_config.heddle_client_config(token)?;
     if let Some(key) = server_key {
         config = config.with_server_key(key);
     }

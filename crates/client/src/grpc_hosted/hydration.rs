@@ -214,8 +214,14 @@ impl HydrationBridge {
                 ))
             })?;
 
-        let user_config = cli_shared::UserConfig::load_default().unwrap_or_default();
-        let client_config = user_config.heddle_client_config(None);
+        let user_config = cli_shared::UserConfig::load_default().map_err(|err| {
+            HeddleError::Config(format!("lazy hosted hydrator: load user config: {err}"))
+        })?;
+        let client_config = user_config.heddle_client_config(None).map_err(|err| {
+            HeddleError::Config(format!(
+                "lazy hosted hydrator: load TLS/auth client config: {err}"
+            ))
+        })?;
 
         // Build the worker thread first so the bridge can store the
         // tx side immediately. The worker's runtime + client are

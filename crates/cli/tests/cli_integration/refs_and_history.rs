@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
+use objects::object::ThreadName;
 
 #[test]
 fn test_cli_track_operations() {
@@ -295,6 +296,65 @@ fn test_cli_fork_creates_exploration_branch() {
         output.contains("Created fork") || output.contains("experiment"),
         "Should show fork created: {}",
         output
+    );
+}
+
+#[test]
+fn test_cli_fork_bootstraps_current_state_with_user_config() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).expect("init repo");
+
+    let before = Repository::open(temp.path()).expect("open repo");
+    before
+        .refs()
+        .delete_thread(&ThreadName::new("main"))
+        .expect("clear current thread ref");
+    assert!(
+        before.current_state().unwrap().is_none(),
+        "fresh repo should have no current state after clearing main"
+    );
+
+    let config_path = temp.path().join("fork-config.toml");
+    std::fs::write(
+        &config_path,
+        "[principal]\nname = \"Fork Tester\"\nemail = \"fork@example.com\"\n",
+    )
+    .unwrap();
+    let config = config_path.to_string_lossy().to_string();
+
+    let output = heddle_output_with_env(
+        &["fork", "--name", "bootstrap-fork"],
+        Some(temp.path()),
+        &[("HEDDLE_CONFIG", &config)],
+    )
+    .expect("invoke fork");
+    assert!(
+        output.status.success(),
+        "fork should succeed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let repo = Repository::open(temp.path()).expect("reopen repo");
+    let bootstrapped = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .expect("fork should bootstrap main before creating fork");
+    let forked = repo
+        .refs()
+        .get_thread(&ThreadName::new("bootstrap-fork"))
+        .unwrap()
+        .expect("fork should create named thread");
+    let fork_state = repo
+        .store()
+        .get_state(&forked)
+        .unwrap()
+        .expect("fork state should be stored");
+    assert_eq!(
+        fork_state.first_parent(),
+        Some(&bootstrapped),
+        "fork should be based on the bootstrapped current state"
     );
 }
 

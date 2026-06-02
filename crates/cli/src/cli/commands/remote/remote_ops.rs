@@ -295,11 +295,11 @@ pub async fn cmd_pull(
 
     super::preflight_native_remote_transport(&repo, remote.as_deref(), "pull")?;
 
-    let user_config = UserConfig::load_default().unwrap_or_default();
+    let user_config = UserConfig::load_default()?;
     #[cfg(feature = "client")]
-    let mut token = user_config.remote_token();
+    let mut token = user_config.remote_token()?;
     #[cfg(not(feature = "client"))]
-    let token = user_config.remote_token();
+    let token = user_config.remote_token()?;
     #[cfg(feature = "client")]
     let (target, server_key) =
         resolve_remote_with_key(&repo, remote.as_deref()).map_err(anyhow::Error::msg)?;
@@ -500,7 +500,7 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
     let repo_path = options
         .repo_path
         .context("network remotes must include a hosted repository path")?;
-    let mut config = options.user_config.heddle_client_config(options.token);
+    let mut config = options.user_config.heddle_client_config(options.token)?;
     if let Some(key) = options.server_key {
         config = config.with_server_key(key);
     }

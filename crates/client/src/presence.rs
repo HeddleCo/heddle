@@ -152,7 +152,7 @@ pub async fn cmd_presence_publish(
     let hosted = repo.config().hosted.clone();
     let agent = load_agent_entry(repo.heddle_dir(), &session)?;
 
-    let user_config = UserConfig::load_default().unwrap_or_default();
+    let user_config = UserConfig::load_default()?;
 
     match resolve_publisher_config(
         &hosted,
@@ -201,7 +201,7 @@ pub fn resolve_publisher_config(
         return Ok(None);
     };
 
-    let (token, credential_subject) = if let Some(token) = user_config.remote_token() {
+    let (token, credential_subject) = if let Some(token) = user_config.remote_token()? {
         (token.id, None)
     } else {
         let stored_credential = credentials::resolve_credential_for_server(upstream)

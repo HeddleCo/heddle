@@ -15,6 +15,7 @@
 #![cfg(feature = "client")]
 
 use anyhow::{Context, Result, anyhow};
+use objects::object::ThreadName;
 use repo::Repository;
 use serde::Serialize;
 
@@ -109,13 +110,13 @@ async fn open_heddle_client(
         }
     };
 
-    let user_config = UserConfig::load_default().unwrap_or_default();
+    let user_config = UserConfig::load_default()?;
     // If a token isn't in the user-level config, the per-server
     // credential file (looked up via `server_key`) supplies it. Pass
     // whatever the user-level config has and let `with_server_key`
     // resolve the rest.
-    let token = user_config.remote_token();
-    let mut config = user_config.heddle_client_config(token);
+    let token = user_config.remote_token()?;
+    let mut config = user_config.heddle_client_config(token)?;
     if let Some(key) = server_key {
         config = config.with_server_key(key);
     }
@@ -129,7 +130,7 @@ async fn open_heddle_client(
 /// will invalidate the prior approval.
 fn thread_head_state(repo: &Repository, thread: &str) -> Result<String> {
     repo.refs()
-        .get_thread(thread)?
+        .get_thread(&ThreadName::new(thread))?
         .map(|change_id| change_id.to_string())
         .ok_or_else(|| anyhow!("thread '{thread}' has no head state"))
 }
