@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use objects::object::{Blob, ContentHash, FileMode, Tree, TreeEntry};
 use objects::store::ObjectStore;
+use objects::util::{GitTreeNameClassification, GitTreeNameLossyAction, classify_git_tree_name};
 use repo::Repository as HeddleRepository;
 
 use crate::bridge::git_core::{GitBridgeError, GitResult};
@@ -77,17 +78,11 @@ impl<'a> GitTreeImporter<'a> {
 
         for entry in git_tree.iter() {
             let entry = entry.map_err(|err| GitBridgeError::Git(err.to_string()))?;
-            let name =
-                self.import_entry_name(path_prefix, entry.filename().as_ref(), entry.object_id())?;
-            if !is_representable_tree_name(&name) {
-                let lossy = LossyGitImportEntry::dropped(
-                    join_tree_path(path_prefix, &name),
-                    Some(entry.object_id().to_string()),
-                    "tree entry name is not representable in Heddle",
-                );
-                self.record_lossy(lossy)?;
+            let Some(name) =
+                self.import_entry_name(path_prefix, entry.filename().as_ref(), entry.object_id())?
+            else {
                 continue;
-            }
+            };
 
             match entry.kind() {
                 gix::object::tree::EntryKind::Blob
@@ -169,18 +164,29 @@ impl<'a> GitTreeImporter<'a> {
         path_prefix: &str,
         raw_name: &[u8],
         object_id: gix::hash::ObjectId,
-    ) -> GitResult<String> {
-        match std::str::from_utf8(raw_name) {
-            Ok(name) => Ok(name.to_string()),
-            Err(_) => {
-                let name = String::from_utf8_lossy(raw_name).into_owned();
-                let lossy = LossyGitImportEntry::converted(
-                    join_tree_path(path_prefix, &name),
-                    Some(object_id.to_string()),
-                    "tree entry name is not valid UTF-8 and was converted with replacement characters",
-                );
-                self.record_lossy(lossy)?;
-                Ok(name)
+    ) -> GitResult<Option<String>> {
+        match classify_git_tree_name(raw_name) {
+            GitTreeNameClassification::Representable(name) => Ok(Some(name)),
+            GitTreeNameClassification::NeedsLossy(lossy) => {
+                let path = join_tree_path(path_prefix, &lossy.name);
+                let entry = match lossy.action {
+                    GitTreeNameLossyAction::Dropped => LossyGitImportEntry::dropped(
+                        path,
+                        Some(object_id.to_string()),
+                        lossy.reason,
+                    ),
+                    GitTreeNameLossyAction::Converted => LossyGitImportEntry::converted(
+                        path,
+                        Some(object_id.to_string()),
+                        lossy.reason,
+                    ),
+                };
+                self.record_lossy(entry)?;
+                if matches!(lossy.action, GitTreeNameLossyAction::Dropped) {
+                    Ok(None)
+                } else {
+                    Ok(Some(lossy.name))
+                }
             }
         }
     }
@@ -232,14 +238,6 @@ pub fn import_git_tree(
     tree_oid: gix::hash::ObjectId,
 ) -> GitResult<ContentHash> {
     GitTreeImporter::new(heddle_repo, repo).import_tree(tree_oid)
-}
-
-fn is_representable_tree_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.contains('/')
-        && !name.bytes().any(|b| b < 0x20 || b == 0x7f)
 }
 
 fn join_tree_path(prefix: &str, name: &str) -> String {

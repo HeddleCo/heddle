@@ -28,6 +28,7 @@
 use objects::{
     object::{Blob, ContentHash, Tree, TreeEntry},
     store::ObjectStore,
+    util::{GitTreeNameClassification, GitTreeNameLossyAction, classify_git_tree_name},
 };
 use tracing::warn;
 
@@ -133,35 +134,39 @@ impl<'a, S: ObjectStore> TreeTranslator<'a, S> {
         child: &TreeChild,
         path_prefix: &str,
     ) -> crate::Result<Option<TreeEntry>> {
-        if child.name.is_empty()
-            || child.name == "."
-            || child.name == ".."
-            || child.name.contains('/')
-            || child.name.bytes().any(|b| b < 0x20 || b == 0x7f)
-        {
-            let entry = LossyImportEntry::dropped(
-                join_tree_path(path_prefix, &child.name),
-                Some(child.sha.clone()),
-                "tree entry name is not representable in Heddle",
-            );
-            self.record_lossy(entry)?;
-            return Ok(None);
-        }
+        let name = match classify_git_tree_name(&child.raw_name) {
+            GitTreeNameClassification::Representable(name) => name,
+            GitTreeNameClassification::NeedsLossy(lossy) => {
+                let path = join_tree_path(path_prefix, &lossy.name);
+                let entry = match lossy.action {
+                    GitTreeNameLossyAction::Dropped => {
+                        LossyImportEntry::dropped(path, Some(child.sha.clone()), lossy.reason)
+                    }
+                    GitTreeNameLossyAction::Converted => {
+                        LossyImportEntry::converted(path, Some(child.sha.clone()), lossy.reason)
+                    }
+                };
+                self.record_lossy(entry)?;
+                if matches!(lossy.action, GitTreeNameLossyAction::Dropped) {
+                    return Ok(None);
+                }
+                lossy.name
+            }
+        };
 
         match child.kind {
             TreeChildKind::Blob { executable } => {
                 let hash = self.translate_blob(&child.sha)?;
                 Ok(Some(
-                    TreeEntry::file(child.name.clone(), hash, executable)
+                    TreeEntry::file(name, hash, executable)
                         .map_err(|e| IngestError::Heddle(e.into()))?,
                 ))
             }
             TreeChildKind::Tree => {
                 let hash =
-                    self.translate_tree_at(&child.sha, &join_tree_path(path_prefix, &child.name))?;
+                    self.translate_tree_at(&child.sha, &join_tree_path(path_prefix, &name))?;
                 Ok(Some(
-                    TreeEntry::directory(child.name.clone(), hash)
-                        .map_err(|e| IngestError::Heddle(e.into()))?,
+                    TreeEntry::directory(name, hash).map_err(|e| IngestError::Heddle(e.into()))?,
                 ))
             }
             TreeChildKind::Symlink => {
@@ -170,13 +175,12 @@ impl<'a, S: ObjectStore> TreeTranslator<'a, S> {
                 // bytes round-trip without special handling.
                 let hash = self.translate_blob(&child.sha)?;
                 Ok(Some(
-                    TreeEntry::symlink(child.name.clone(), hash)
-                        .map_err(|e| IngestError::Heddle(e.into()))?,
+                    TreeEntry::symlink(name, hash).map_err(|e| IngestError::Heddle(e.into()))?,
                 ))
             }
             TreeChildKind::Gitlink => {
                 let entry = LossyImportEntry::dropped(
-                    join_tree_path(path_prefix, &child.name),
+                    join_tree_path(path_prefix, &name),
                     Some(child.sha.clone()),
                     "gitlink/submodule entries have no Heddle tree equivalent",
                 );
@@ -218,7 +222,7 @@ impl<'a, S: ObjectStore> TreeTranslator<'a, S> {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, process::Command};
+    use std::{io::Write, path::Path, process::Command};
 
     use objects::store::InMemoryStore;
     use tempfile::TempDir;
@@ -300,6 +304,61 @@ mod tests {
             .output()
             .unwrap();
         String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn git_output(path: &Path, args: &[&str], stdin: Option<&[u8]>) -> String {
+        let mut command = Command::new("git");
+        command
+            .args(args)
+            .current_dir(path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null");
+        if stdin.is_some() {
+            command.stdin(std::process::Stdio::piped());
+        }
+        let mut child = command.spawn().expect("git cmd");
+        if let Some(stdin) = stdin {
+            child
+                .stdin
+                .as_mut()
+                .expect("stdin")
+                .write_all(stdin)
+                .expect("write stdin");
+        }
+        let output = child.wait_with_output().expect("git output");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    fn seed_invalid_utf8_name_repo(path: &Path) -> String {
+        let status = Command::new("git")
+            .args(["init", "-q", "--initial-branch=main"])
+            .current_dir(path)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("git init");
+        assert!(status.success(), "git init failed");
+
+        let blob = git_output(path, &["hash-object", "-w", "--stdin"], Some(b"hello\n"));
+        let mut tree_input = Vec::new();
+        write!(&mut tree_input, "100644 blob {blob}\t").expect("tree record");
+        tree_input.extend_from_slice(b"bad\xffname\0");
+        let tree = git_output(path, &["mktree", "-z"], Some(&tree_input));
+        let commit = git_output(path, &["commit-tree", &tree, "-m", "invalid name"], None);
+        git_output(path, &["update-ref", "refs/heads/main", &commit], None);
+        commit
     }
 
     #[test]
@@ -403,6 +462,55 @@ mod tests {
         assert_eq!(lossy_entries.len(), 1);
         assert_eq!(lossy_entries[0].path, "vendor");
         assert!(lossy_entries[0].summary_line().contains("dropped"));
+    }
+
+    #[test]
+    fn invalid_utf8_name_fails_by_default() {
+        let tmp = TempDir::new().unwrap();
+        let head = seed_invalid_utf8_name_repo(tmp.path());
+        let git = GitSource::open(tmp.path()).unwrap();
+        let store = InMemoryStore::new();
+        let mut map = ShaMap::new();
+        let commit = git.read_commit(&head).unwrap();
+
+        let err = TreeTranslator::new(&git, &store, &mut map)
+            .translate_tree(&commit.tree_sha)
+            .expect_err("invalid UTF-8 name must fail without lossy opt-in");
+        let message = err.to_string();
+
+        assert!(message.contains("bad"), "error names entry: {message}");
+        assert!(
+            message.contains("not valid UTF-8"),
+            "error explains conversion: {message}"
+        );
+        assert!(message.contains("--lossy"), "error names opt-in: {message}");
+    }
+
+    #[test]
+    fn invalid_utf8_name_lossy_opt_in_converts_and_records_summary() {
+        let tmp = TempDir::new().unwrap();
+        let head = seed_invalid_utf8_name_repo(tmp.path());
+        let git = GitSource::open(tmp.path()).unwrap();
+        let store = InMemoryStore::new();
+        let mut map = ShaMap::new();
+        let commit = git.read_commit(&head).unwrap();
+
+        let mut tx =
+            TreeTranslator::with_options(&git, &store, &mut map, ImportOptions { lossy: true });
+        let root_hash = tx.translate_tree(&commit.tree_sha).unwrap();
+        let lossy_entries = tx.lossy_entries().to_vec();
+        let tree = store.get_tree(&root_hash).unwrap().unwrap();
+        let converted_name = "bad\u{fffd}name";
+
+        assert!(
+            tree.entries()
+                .iter()
+                .any(|entry| entry.name == converted_name),
+            "converted entry should be retained"
+        );
+        assert_eq!(lossy_entries.len(), 1);
+        assert_eq!(lossy_entries[0].path, converted_name);
+        assert!(lossy_entries[0].summary_line().contains("converted"));
     }
 
     #[test]

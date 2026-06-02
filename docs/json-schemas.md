@@ -1598,7 +1598,6 @@ imports the requested Git refs, and returns the post-adoption verification proof
 | `refs` | array<string> | required | Refs explicitly requested with `--ref`; empty means all local refs were imported. |
 | `commits_imported`, `states_created`, `branches_synced`, `tags_synced` | int | required | Git import counts. |
 | `skipped_non_commit_refs`, `partial_mirror_refs` | int | required | Degraded import counts that may require inspection. |
-| `lossy_entries` | array<object> | required | Entries dropped or converted only when `--lossy` was explicitly passed; empty for lossless imports. |
 | `verification` | object | required | Post-adoption repository verification proof. |
 
 ---
@@ -2326,7 +2325,7 @@ key naming:
 |------|-------|
 | `init` | `{"initialized": true, "path": "..."}` |
 | `export` | `{"states_exported": N, "threads_synced": N, "markers_synced": N, "destination": "..."}` |
-| `import` | `{"output_kind": "bridge_git_import", "commits_imported": N, "states_created": N, "branches_synced": N, "tags_synced": N, "skipped_non_commit_refs": N, "partial_mirror_refs": N}` |
+| `import` | `{"output_kind": "bridge_git_import", "commits_imported": N, "states_created": N, "branches_synced": N, "tags_synced": N, "skipped_non_commit_refs": N, "partial_mirror_refs": N, "lossy_entries": [], "already_in_sync": false}` |
 | `sync` | `{"output_kind": "bridge_git_sync", "states_exported": N, "commits_imported": N, "threads_synced": N, "markers_synced": N}` |
 | `push` | `{"output_kind": "bridge_git_push", "action": "bridge git push", "status": "pushed", "success": true, "pushed": true, "changed": true, "transport": "git", "remote": "origin"}` |
 | `pull` | `{"output_kind": "bridge_git_pull", "action": "bridge git pull", "status": "updated", "success": true, "pulled": true, "changed": true, "transport": "git", "remote": "origin"}` |
@@ -2366,6 +2365,12 @@ key naming:
 ```json
 {"output_kind": "bridge_git_pull", "action": "bridge git pull", "status": "updated", "success": true, "pulled": true, "changed": true, "transport": "git", "remote": "origin"}
 ```
+
+### Bridge Git Import Fields
+
+| Field | Type | Optionality | Semantics |
+|-------|------|-------------|-----------|
+| `lossy_entries` | array<object> | required | Entries dropped or converted only when `--lossy` was explicitly passed; empty for lossless imports. |
 
 ---
 
