@@ -564,7 +564,7 @@ fn stale_index_swapped_offsets_surfaces_as_invalid_object() {
 /// Helper to write a pack+index to disk and open a reader.
 fn build_and_open_pack(
     objects: Vec<(ContentHash, ObjectType, Vec<u8>, Option<String>)>,
-) -> PackReader {
+) -> PackReader<'static> {
     let temp_dir = TempDir::new().unwrap();
     let pack_path = temp_dir.path().join("test.pack");
     let index_path = temp_dir.path().join("test.idx");

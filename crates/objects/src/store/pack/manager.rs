@@ -24,7 +24,7 @@ pub struct PackManager {
 struct CachedPack {
     pack_path: PathBuf,
     index_path: PathBuf,
-    reader: PackReader,
+    reader: PackReader<'static>,
 }
 
 impl PackManager {
