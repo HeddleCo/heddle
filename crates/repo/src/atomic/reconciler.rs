@@ -79,11 +79,11 @@ enum HeadFold {
     #[default]
     Untouched,
     /// Latest mover is a record-first atomic publish (Fork / Collapse /
-    /// detached Snapshot / Goto): reconstruct and republish to recover a
+    /// Snapshot / Goto): reconstruct and republish to recover a
     /// crash-lost HEAD publish.
     Republish(Head),
-    /// Latest mover is a publish-first direct write (Goto / detached
-    /// Checkpoint / FastForward): canonical wins.
+    /// Latest mover is a publish-first direct write (detached Checkpoint /
+    /// FastForward): canonical wins.
     Canonical,
 }
 
@@ -302,8 +302,8 @@ impl OplogRefReconciler {
                 }
             }
             RefClass::Local => {
-                // Only a record-first mover (Fork / Collapse / detached
-                // Snapshot) republishes a reconstructed HEAD; a publish-first
+                // Only a record-first mover (Fork / Collapse / Snapshot /
+                // Goto) republishes a reconstructed HEAD; a publish-first
                 // mover defers to canonical (`HeadFold::Canonical`) so it never
                 // clobbers a newer HEAD.
                 if let HeadFold::Republish(head) = &fold.head {
