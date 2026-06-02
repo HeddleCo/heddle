@@ -259,7 +259,7 @@ impl StateReviewService for LocalStateReviewService {
         let inner = self.inner.clone();
 
         let response = with_idempotency(
-            self.inner.dedup(),
+            &self.inner,
             &client_operation_id,
             "state_review.sign_state",
             &req_bytes,

@@ -130,7 +130,7 @@ impl TransactionService for LocalTransactionService {
         let inner = self.inner.clone();
 
         let response = with_idempotency(
-            self.inner.dedup(),
+            &self.inner,
             &client_op,
             "TransactionService.BeginTransaction",
             &request_body,
@@ -202,7 +202,7 @@ impl TransactionService for LocalTransactionService {
         let inner = self.inner.clone();
 
         let response = with_idempotency(
-            self.inner.dedup(),
+            &self.inner,
             &client_op,
             "TransactionService.CommitTransaction",
             &request_body,
@@ -267,7 +267,7 @@ impl TransactionService for LocalTransactionService {
         let inner = self.inner.clone();
 
         let response = with_idempotency(
-            self.inner.dedup(),
+            &self.inner,
             &client_op,
             "TransactionService.AbortTransaction",
             &request_body,
