@@ -58,6 +58,7 @@ pub(super) fn record_ff_advance(
         &head_before,
         &pre_target_id,
         post_target_id,
+        false,
     )
 }
 
@@ -68,7 +69,10 @@ pub(super) fn record_ff_advance(
 /// reading it back would return the *post* state.
 ///
 /// Caller must capture `pre_target_id` *before* the mutating
-/// operation that precedes the FF.
+/// operation that precedes the FF. The preceding mutation must also
+/// have run its dirty-worktree guard: this helper opts into the repo
+/// discard path because the pre-published ref makes the old clean
+/// worktree look dirty against the new ref.
 pub(super) fn record_ff_advance_explicit(
     repo: &Repository,
     source_thread: &str,
@@ -82,6 +86,33 @@ pub(super) fn record_ff_advance_explicit(
         &head_before,
         pre_target_id,
         post_target_id,
+        true,
+    )
+}
+
+/// Record a fast-forward whose worktree reset is itself the explicit
+/// destructive action, such as aborting a merge with conflict markers
+/// in the worktree.
+pub(super) fn record_ff_advance_discard_local(
+    repo: &Repository,
+    source_thread: &str,
+    post_target_id: &ChangeId,
+) -> Result<()> {
+    let head_before = repo.head_ref()?;
+    let pre_target_id = match &head_before {
+        Head::Attached { thread } => repo
+            .refs()
+            .get_thread(thread)?
+            .ok_or_else(|| anyhow!("attached thread '{}' has no ref before FF", thread))?,
+        Head::Detached { state } => *state,
+    };
+    record_ff_advance_inner(
+        repo,
+        source_thread,
+        &head_before,
+        &pre_target_id,
+        post_target_id,
+        true,
     )
 }
 
@@ -104,6 +135,7 @@ pub(super) fn ff_advance_deferred(
     repo: &Repository,
     source_thread: &str,
     post_target_id: &ChangeId,
+    discard_local_changes: bool,
 ) -> Result<OpRecord> {
     let head_before = repo.head_ref()?;
     let pre_target_id = match &head_before {
@@ -113,7 +145,11 @@ pub(super) fn ff_advance_deferred(
             .ok_or_else(|| anyhow!("attached thread '{}' has no ref before FF", thread))?,
         Head::Detached { state } => *state,
     };
-    repo.fast_forward_attached_without_record(post_target_id)?;
+    if discard_local_changes {
+        repo.fast_forward_attached_without_record_discard_local(post_target_id)?;
+    } else {
+        repo.fast_forward_attached_without_record(post_target_id)?;
+    }
     Ok(match head_before {
         Head::Attached { thread } => OpRecord::FastForwardV2 {
             source_thread: source_thread.to_string(),
@@ -135,8 +171,13 @@ fn record_ff_advance_inner(
     head_before: &Head,
     pre_target_id: &ChangeId,
     post_target_id: &ChangeId,
+    discard_local_changes: bool,
 ) -> Result<()> {
-    repo.fast_forward_attached_without_record(post_target_id)?;
+    if discard_local_changes {
+        repo.fast_forward_attached_without_record_discard_local(post_target_id)?;
+    } else {
+        repo.fast_forward_attached_without_record(post_target_id)?;
+    }
     match head_before {
         Head::Attached { thread } => {
             repo.oplog().record_fast_forward(

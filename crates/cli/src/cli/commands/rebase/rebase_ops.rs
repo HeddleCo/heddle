@@ -35,21 +35,23 @@ pub(super) fn replay_commits(
     repo: &Repository,
     rebase_state_path: &std::path::Path,
     cli: &Cli,
+    discard_local_changes: bool,
 ) -> Result<()> {
-    replay_commits_internal(repo, rebase_state_path, Some(cli))
+    replay_commits_internal(repo, rebase_state_path, Some(cli), discard_local_changes)
 }
 
 pub(super) fn replay_commits_silent(
     repo: &Repository,
     rebase_state_path: &std::path::Path,
 ) -> Result<()> {
-    replay_commits_internal(repo, rebase_state_path, None)
+    replay_commits_internal(repo, rebase_state_path, None, false)
 }
 
 fn replay_commits_internal(
     repo: &Repository,
     rebase_state_path: &std::path::Path,
     cli: Option<&Cli>,
+    discard_local_changes: bool,
 ) -> Result<()> {
     let mut state = load_rebase_state(rebase_state_path)?;
     resume_manual_resolution_if_present(repo, &mut state, rebase_state_path, cli)?;
@@ -90,7 +92,12 @@ fn replay_commits_internal(
             println!("Applying {}...", commit_id.short());
         }
 
-        let result = apply_commit(repo, &commit_state, &current_head)?;
+        let result = apply_commit(
+            repo,
+            &commit_state,
+            &current_head,
+            discard_local_changes,
+        )?;
 
         match result {
             ApplyResult::Success { new_head, advance } => {
@@ -312,6 +319,7 @@ fn apply_commit(
     repo: &Repository,
     commit_state: &objects::object::State,
     current_head: &ChangeId,
+    discard_local_changes: bool,
 ) -> Result<ApplyResult> {
     let current_tree_hash = get_tree_for_state(repo, current_head)?;
     let commit_tree_hash = commit_state.tree;
@@ -339,7 +347,13 @@ fn apply_commit(
     let parent_tree_hash = if let Some(parent_id) = commit_state.parents.first() {
         get_tree_for_state(repo, parent_id)?
     } else {
-        return apply_tree_to_worktree(repo, commit_state, &commit_tree, current_head);
+        return apply_tree_to_worktree(
+            repo,
+            commit_state,
+            &commit_tree,
+            current_head,
+            discard_local_changes,
+        );
     };
 
     let parent_tree = repo
@@ -434,7 +448,12 @@ fn apply_commit(
 
     let new_state_id = new_state.change_id;
     repo.store().put_state(&new_state)?;
-    let advance = ff_advance_deferred(repo, REBASE_REPLAY_SOURCE, &new_state_id)?;
+    let advance = ff_advance_deferred(
+        repo,
+        REBASE_REPLAY_SOURCE,
+        &new_state_id,
+        discard_local_changes,
+    )?;
 
     Ok(ApplyResult::Success {
         new_head: new_state_id,
@@ -525,6 +544,7 @@ fn apply_tree_to_worktree(
     commit_state: &objects::object::State,
     tree: &objects::object::Tree,
     current_head: &ChangeId,
+    discard_local_changes: bool,
 ) -> Result<ApplyResult> {
     let tree_hash = repo.store().put_tree(tree)?;
     let new_state = State::new_refresh_of(
@@ -544,7 +564,12 @@ fn apply_tree_to_worktree(
 
     let new_state_id = new_state.change_id;
     repo.store().put_state(&new_state)?;
-    let advance = ff_advance_deferred(repo, REBASE_REPLAY_SOURCE, &new_state_id)?;
+    let advance = ff_advance_deferred(
+        repo,
+        REBASE_REPLAY_SOURCE,
+        &new_state_id,
+        discard_local_changes,
+    )?;
 
     Ok(ApplyResult::Success {
         new_head: new_state_id,

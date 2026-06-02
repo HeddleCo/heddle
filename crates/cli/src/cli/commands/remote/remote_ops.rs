@@ -431,7 +431,7 @@ async fn pull_local(
                 )?;
             }
             None => {
-                repo.fast_forward_attached(&state_id)?;
+                repo.fast_forward_attached_discard_local(&state_id)?;
             }
         }
     }

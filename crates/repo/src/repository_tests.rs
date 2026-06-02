@@ -347,7 +347,7 @@ fn test_goto_clears_non_empty_directories() {
 
     fs::write(temp_dir.path().join("new_file.txt"), "new").unwrap();
 
-    repo.goto(&state1.change_id).unwrap();
+    repo.goto_discard_local(&state1.change_id).unwrap();
 
     assert!(!temp_dir.path().join("new_file.txt").exists());
     assert!(temp_dir.path().join("subdir").exists());

@@ -11,7 +11,8 @@ use tracing::debug;
 use super::{
     HeddleError, Repository, Result,
     repository_worktree_apply::{
-        WorktreeApplyPlan, WorktreeApplyReport, WorktreeApplyStats, WorktreeApplyStrategy,
+        WorktreeApplyDirtyBehavior, WorktreeApplyPlan, WorktreeApplyReport, WorktreeApplyStats,
+        WorktreeApplyStrategy,
     },
 };
 use crate::{thread_model::ThreadFreshness, thread_storage::ThreadManager};
@@ -19,7 +20,22 @@ use crate::{thread_model::ThreadFreshness, thread_storage::ThreadManager};
 impl Repository {
     /// Move worktree to a different state.
     pub fn goto(&self, target: &ChangeId) -> Result<()> {
-        self.goto_internal(target, true, false)
+        self.goto_internal(
+            target,
+            true,
+            false,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+        )
+    }
+
+    /// Move worktree to a different state, discarding unsnapped local edits.
+    pub fn goto_discard_local(&self, target: &ChangeId) -> Result<()> {
+        self.goto_internal(
+            target,
+            true,
+            false,
+            WorktreeApplyDirtyBehavior::DiscardLocalChanges,
+        )
     }
 
     /// Fast-forward the current checkout to `target`.
@@ -35,7 +51,15 @@ impl Repository {
     /// pre-op state — this helper preserves attached-HEAD semantics so the
     /// thread's ref and metadata advance with the worktree.
     pub fn fast_forward_attached(&self, target: &ChangeId) -> Result<()> {
-        self.fast_forward_attached_internal(target, true)
+        self.fast_forward_attached_internal(target, true, WorktreeApplyDirtyBehavior::RefuseOnDirty)
+    }
+
+    pub fn fast_forward_attached_discard_local(&self, target: &ChangeId) -> Result<()> {
+        self.fast_forward_attached_internal(
+            target,
+            true,
+            WorktreeApplyDirtyBehavior::DiscardLocalChanges,
+        )
     }
 
     /// Variant of [`Self::fast_forward_attached`] that performs the
@@ -47,15 +71,35 @@ impl Repository {
     /// merged-into thread ref (heddle#99 r1); a name-resolved redo was
     /// also non-deterministic if the source thread moved (heddle#99 r2).
     pub fn fast_forward_attached_without_record(&self, target: &ChangeId) -> Result<()> {
-        self.fast_forward_attached_internal(target, false)
+        self.fast_forward_attached_internal(
+            target,
+            false,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+        )
     }
 
-    fn fast_forward_attached_internal(&self, target: &ChangeId, record: bool) -> Result<()> {
+    pub fn fast_forward_attached_without_record_discard_local(
+        &self,
+        target: &ChangeId,
+    ) -> Result<()> {
+        self.fast_forward_attached_internal(
+            target,
+            false,
+            WorktreeApplyDirtyBehavior::DiscardLocalChanges,
+        )
+    }
+
+    fn fast_forward_attached_internal(
+        &self,
+        target: &ChangeId,
+        record: bool,
+        dirty_behavior: WorktreeApplyDirtyBehavior,
+    ) -> Result<()> {
         let head_before = self.refs.read_head()?;
         if record {
-            self.goto(target)?;
+            self.goto_internal(target, true, false, dirty_behavior)?;
         } else {
-            self.goto_without_record(target)?;
+            self.goto_internal(target, false, false, dirty_behavior)?;
         }
         if let Head::Attached {
             thread: current_thread,
@@ -77,15 +121,39 @@ impl Repository {
     }
 
     pub fn goto_verified_clean(&self, target: &ChangeId) -> Result<()> {
-        self.goto_internal(target, true, true)
+        self.goto_internal(
+            target,
+            true,
+            true,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+        )
     }
 
     pub fn goto_verified_clean_without_record(&self, target: &ChangeId) -> Result<()> {
-        self.goto_internal(target, false, true)
+        self.goto_internal(
+            target,
+            false,
+            true,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+        )
     }
 
     pub fn goto_without_record(&self, target: &ChangeId) -> Result<()> {
-        self.goto_internal(target, false, false)
+        self.goto_internal(
+            target,
+            false,
+            false,
+            WorktreeApplyDirtyBehavior::RefuseOnDirty,
+        )
+    }
+
+    pub fn goto_without_record_discard_local(&self, target: &ChangeId) -> Result<()> {
+        self.goto_internal(
+            target,
+            false,
+            false,
+            WorktreeApplyDirtyBehavior::DiscardLocalChanges,
+        )
     }
 
     fn goto_internal(
@@ -93,6 +161,7 @@ impl Repository {
         target: &ChangeId,
         record: bool,
         current_worktree_verified_clean: bool,
+        dirty_behavior: WorktreeApplyDirtyBehavior,
     ) -> Result<()> {
         let total_start = Instant::now();
         let _lock = self
@@ -140,6 +209,7 @@ impl Repository {
                 tree,
                 &self.root,
                 current_worktree_verified_clean,
+                dirty_behavior,
             )?;
             let apply_report = self.execute_worktree_apply(&apply_plan, tree, &self.root)?;
             (apply_plan, apply_report)
@@ -147,6 +217,7 @@ impl Repository {
             (
                 WorktreeApplyPlan {
                     strategy: WorktreeApplyStrategy::Incremental,
+                    dirty_behavior: WorktreeApplyDirtyBehavior::RefuseOnDirty,
                     removals: Vec::new(),
                     directories: Vec::new(),
                     writes: Vec::new(),
