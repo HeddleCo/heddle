@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Snapshot operations for Repository.
 
+use std::collections::BTreeSet;
+
 use objects::store::ObjectStore;
 use objects::{
     lock::RepositoryLockExt,
     object::{Attribution, Blob, ChangeId, ContentHash, State, Tree, TreeEntry},
 };
-use oplog::OpRecord;
+use oplog::{IsolationKey, OpRecord};
 use refs::Head;
 use tracing::{debug, instrument};
 
@@ -94,6 +96,21 @@ impl AtomicMutation for SnapshotMutation<'_> {
 
     fn transaction_id(&self) -> String {
         self.transaction_id.clone()
+    }
+
+    fn isolation_keys(&self, _repo: &Repository) -> Result<BTreeSet<IsolationKey>> {
+        let mut keys = BTreeSet::new();
+        match &self.head {
+            Head::Attached { thread } => {
+                keys.insert(IsolationKey::Thread(thread.to_string()));
+            }
+            Head::Detached { .. } => {
+                keys.insert(IsolationKey::LocalHead {
+                    scope: self.repo.op_scope(),
+                });
+            }
+        }
+        Ok(keys)
     }
 
     fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<Self::Output>> {
@@ -452,12 +469,14 @@ impl Repository {
     fn snapshot_worktree_fingerprint(&self) -> Result<ContentHash> {
         let patterns = self.ignore_patterns()?;
         let nested_exclusions = self.nested_thread_worktree_exclusions(&self.root)?;
-        let ignore_matcher =
-            WorktreeIgnoreMatcher::new(&patterns).with_nested_worktree_exclusions(nested_exclusions);
+        let ignore_matcher = WorktreeIgnoreMatcher::new(&patterns)
+            .with_nested_worktree_exclusions(nested_exclusions);
         let mut policy = SnapshotFingerprintPolicy::new(&self.root);
-        Ok(walk_worktree(self, &self.root, &ignore_matcher, None, &mut policy)?
-            .tree
-            .hash())
+        Ok(
+            walk_worktree(self, &self.root, &ignore_matcher, None, &mut policy)?
+                .tree
+                .hash(),
+        )
     }
 
     /// Create a snapshot of the current worktree.

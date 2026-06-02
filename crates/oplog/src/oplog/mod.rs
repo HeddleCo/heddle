@@ -15,6 +15,9 @@ mod oplog_tests;
 
 pub use oplog_backend::OpLogBackend;
 pub use oplog_core::OpLog;
-pub use oplog_types::{OpBatch, OpEntry, OpRecord};
+pub use oplog_types::{
+    ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
+    isolation_keys_for_record,
+};
 #[cfg(feature = "postgres")]
 pub use pg_oplog::PgOpLogBackend;

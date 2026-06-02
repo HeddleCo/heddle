@@ -2,12 +2,16 @@
 //! Unit tests for the atomic-mutation primitive (heddle#330 §7 item 1).
 
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 use objects::error::{HeddleError, Result};
 use objects::object::{ChangeId, MarkerName, ThreadName};
-use oplog::{OpLogBackend, OpRecord};
+use oplog::{
+    ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpLogBackend, OpRecord,
+    isolation_keys_for_record,
+};
 use refs::{Head, RefExpectation, RefManager, RefUpdate};
 use tempfile::TempDir;
 
@@ -21,6 +25,47 @@ fn test_repo() -> (TempDir, Repository) {
     let temp = TempDir::new().unwrap();
     let repo = Repository::init_default(temp.path()).unwrap();
     (temp, repo)
+}
+
+macro_rules! empty_isolation_keys {
+    () => {
+        fn isolation_keys(&self, _repo: &Repository) -> Result<BTreeSet<IsolationKey>> {
+            Ok(BTreeSet::new())
+        }
+    };
+}
+
+fn test_precondition() -> IsolationPrecondition {
+    IsolationPrecondition {
+        since_head_id: 0,
+        keys: BTreeSet::new(),
+    }
+}
+
+fn thread_precondition(since_head_id: u64, thread: &str) -> IsolationPrecondition {
+    let mut keys = BTreeSet::new();
+    keys.insert(IsolationKey::Thread(thread.to_string()));
+    IsolationPrecondition {
+        since_head_id,
+        keys,
+    }
+}
+
+fn snapshot_on(thread: &str) -> OpRecord {
+    let state = ChangeId::generate();
+    OpRecord::Snapshot {
+        new_state: state,
+        prev_head: None,
+        head: None,
+        thread: Some(thread.to_string()),
+    }
+}
+
+fn commit_marker(transaction_id: &str, op_count: u32) -> OpRecord {
+    OpRecord::TransactionCommit {
+        transaction_id: transaction_id.to_string(),
+        op_count,
+    }
 }
 
 /// A savepoint leg that records its id when its inverse runs, and can be made
@@ -37,6 +82,8 @@ impl AtomicMutation for Leg {
     fn transaction_id(&self) -> String {
         format!("leg-{}", self.id)
     }
+
+    empty_isolation_keys!();
 
     fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         let id = self.id;
@@ -65,6 +112,8 @@ impl AtomicMutation for FailingComposite {
     fn transaction_id(&self) -> String {
         "failing-composite".to_string()
     }
+
+    empty_isolation_keys!();
 
     fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         tx.enroll(Leg {
@@ -123,7 +172,7 @@ fn reverse_order_rewind_on_failure() {
 #[test]
 fn step_registers_no_inverse_when_forward_fails() {
     let (_t, repo) = test_repo();
-    let mut tx = Tx::root(&repo, "step-forward-fails".to_string());
+    let mut tx = Tx::root(&repo, "step-forward-fails".to_string(), test_precondition());
     let inverse_ran = Rc::new(RefCell::new(false));
     let flag = Rc::clone(&inverse_ran);
 
@@ -149,7 +198,7 @@ fn step_registers_no_inverse_when_forward_fails() {
 #[test]
 fn step_registers_one_inverse_after_forward_succeeds() {
     let (_t, repo) = test_repo();
-    let mut tx = Tx::root(&repo, "step-forward-ok".to_string());
+    let mut tx = Tx::root(&repo, "step-forward-ok".to_string(), test_precondition());
     let unwound = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&unwound);
     let forward_ran = Rc::new(RefCell::new(false));
@@ -195,6 +244,8 @@ impl AtomicMutation for Panicker {
         "panicker".to_string()
     }
 
+    empty_isolation_keys!();
+
     fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         let log = Rc::clone(&self.log);
         tx.on_rewind("test-panicker", move || {
@@ -219,6 +270,8 @@ impl AtomicMutation for WholeOpPanicker {
     fn transaction_id(&self) -> String {
         "whole-op-panicker".to_string()
     }
+
+    empty_isolation_keys!();
 
     fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         *self.staged.borrow_mut() = true;
@@ -299,6 +352,8 @@ impl AtomicMutation for CommitFailsRewindFails {
         "commit-fails-rewind-fails".to_string()
     }
 
+    empty_isolation_keys!();
+
     fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         let oplog_path = tx.repo().heddle_dir().join("oplog").join("oplog.bin");
         if oplog_path.exists() {
@@ -350,6 +405,8 @@ impl AtomicMutation for Recorder {
     fn transaction_id(&self) -> String {
         format!("recorder-{}", self.state.to_string_full())
     }
+
+    empty_isolation_keys!();
 
     fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<u32>> {
         Ok(StagedCommit::new(
@@ -404,6 +461,8 @@ impl AtomicMutation for Reserve {
         "reserve".to_string()
     }
 
+    empty_isolation_keys!();
+
     fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         Ok(StagedCommit::pure(()))
     }
@@ -434,6 +493,8 @@ impl AtomicMutation for EagerThenFail {
     fn transaction_id(&self) -> String {
         "eager-then-fail".to_string()
     }
+
+    empty_isolation_keys!();
 
     fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         tx.enroll_eager(Reserve {
@@ -675,7 +736,7 @@ fn tx_accessors_and_rewind_error_paths() {
     let (_t, repo) = test_repo();
 
     // Accessors.
-    let mut tx = Tx::root(&repo, "accessor-tx".to_string());
+    let mut tx = Tx::root(&repo, "accessor-tx".to_string(), test_precondition());
     assert_eq!(tx.depth(), 0);
     assert_eq!(tx.scope(), repo.op_scope());
     assert_eq!(tx.transaction_id(), "accessor-tx");
@@ -695,7 +756,7 @@ fn tx_accessors_and_rewind_error_paths() {
     );
 
     // A second commit after a successful one is a no-op (committed guard).
-    let mut tx2 = Tx::root(&repo, "double-commit-tx".to_string());
+    let mut tx2 = Tx::root(&repo, "double-commit-tx".to_string(), test_precondition());
     let first_state = ChangeId::generate();
     tx2.commit(vec![OpRecord::Snapshot {
         new_state: first_state,
@@ -727,9 +788,291 @@ fn tx_accessors_and_rewind_error_paths() {
 
     // Drop backstop: an uncommitted Tx whose inverse fails logs (never panics).
     {
-        let mut tx3 = Tx::root(&repo, "drop-backstop-tx".to_string());
-        tx3.on_rewind("drop-time", || Err(HeddleError::Config("drop-time".to_string())));
+        let mut tx3 = Tx::root(&repo, "drop-backstop-tx".to_string(), test_precondition());
+        tx3.on_rewind("drop-time", || {
+            Err(HeddleError::Config("drop-time".to_string()))
+        });
         // tx3 dropped here without commit ⇒ Drop runs rewind_all, gets Err, logs.
+    }
+}
+
+struct ConflictOnce {
+    transaction_id: String,
+    thread: String,
+    applied: Rc<RefCell<u32>>,
+    rewound: Rc<RefCell<u32>>,
+    injected: Rc<RefCell<bool>>,
+}
+
+impl AtomicMutation for ConflictOnce {
+    type Output = u32;
+
+    fn transaction_id(&self) -> String {
+        self.transaction_id.clone()
+    }
+
+    fn isolation_keys(&self, _repo: &Repository) -> Result<BTreeSet<IsolationKey>> {
+        let mut keys = BTreeSet::new();
+        keys.insert(IsolationKey::Thread(self.thread.clone()));
+        Ok(keys)
+    }
+
+    fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<u32>> {
+        *self.applied.borrow_mut() += 1;
+        let rewound = Rc::clone(&self.rewound);
+        tx.on_rewind("conflict-once", move || {
+            *rewound.borrow_mut() += 1;
+            Ok(())
+        });
+        if !*self.injected.borrow() {
+            *self.injected.borrow_mut() = true;
+            tx.repo().oplog().record_batch(vec![
+                snapshot_on(&self.thread),
+                commit_marker("racer-once", 1),
+            ])?;
+        }
+        Ok(StagedCommit::new(
+            *self.applied.borrow(),
+            vec![snapshot_on(&self.thread)],
+        ))
+    }
+}
+
+#[test]
+fn same_thread_conflict_rewinds_and_retries_successfully() {
+    let (_t, repo) = test_repo();
+    let applied = Rc::new(RefCell::new(0));
+    let rewound = Rc::new(RefCell::new(0));
+    let injected = Rc::new(RefCell::new(false));
+
+    let output = execute(
+        &repo,
+        ConflictOnce {
+            transaction_id: "retry-main".to_string(),
+            thread: "main".to_string(),
+            applied: Rc::clone(&applied),
+            rewound: Rc::clone(&rewound),
+            injected,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(output, 2, "the second attempt must be the committed run");
+    assert_eq!(*applied.borrow(), 2, "the logical mutation retried once");
+    assert_eq!(*rewound.borrow(), 1, "the conflicted staging was rewound");
+    let commits = repo
+        .oplog()
+        .recent(16)
+        .unwrap()
+        .into_iter()
+        .filter(|entry| {
+            matches!(
+                &entry.operation,
+                OpRecord::TransactionCommit { transaction_id, .. }
+                    if transaction_id == "retry-main"
+            )
+        })
+        .count();
+    assert_eq!(commits, 1, "the retried transaction commits once");
+}
+
+#[test]
+fn conditional_commit_allows_different_thread_tail() {
+    let (_t, repo) = test_repo();
+    let since = repo.oplog().head_id().unwrap();
+    let precondition = thread_precondition(since, "main");
+
+    repo.oplog()
+        .record_batch(vec![
+            snapshot_on("feature"),
+            commit_marker("feature-advance", 1),
+        ])
+        .unwrap();
+
+    let outcome = repo
+        .oplog()
+        .record_batch_exactly_once_if_unchanged(
+            vec![snapshot_on("main"), commit_marker("main-after-feature", 1)],
+            Some(&repo.op_scope()),
+            "main-after-feature",
+            &precondition,
+        )
+        .unwrap();
+    assert!(matches!(outcome, ConditionalCommitOutcome::Committed(_)));
+}
+
+#[test]
+fn conditional_commit_dedups_before_isolation_scan() {
+    let (_t, repo) = test_repo();
+    let precondition = thread_precondition(repo.oplog().head_id().unwrap(), "main");
+    let first = repo
+        .oplog()
+        .record_batch_exactly_once_if_unchanged(
+            vec![snapshot_on("main"), commit_marker("dedup-main", 1)],
+            Some(&repo.op_scope()),
+            "dedup-main",
+            &precondition,
+        )
+        .unwrap();
+    assert!(matches!(first, ConditionalCommitOutcome::Committed(_)));
+
+    repo.oplog()
+        .record_batch(vec![snapshot_on("main"), commit_marker("main-advanced", 1)])
+        .unwrap();
+
+    let replay = repo
+        .oplog()
+        .record_batch_exactly_once_if_unchanged(
+            vec![snapshot_on("main"), commit_marker("dedup-main", 1)],
+            Some(&repo.op_scope()),
+            "dedup-main",
+            &precondition,
+        )
+        .unwrap();
+    assert!(
+        matches!(replay, ConditionalCommitOutcome::AlreadyCommitted(records) if records.len() == 1),
+        "a replay must dedup even after the isolated thread advanced"
+    );
+}
+
+struct SavepointConflict {
+    log: Rc<RefCell<Vec<u32>>>,
+    injected: Rc<RefCell<bool>>,
+}
+
+impl AtomicMutation for SavepointConflict {
+    type Output = ();
+
+    fn transaction_id(&self) -> String {
+        "savepoint-conflict".to_string()
+    }
+
+    fn isolation_keys(&self, _repo: &Repository) -> Result<BTreeSet<IsolationKey>> {
+        let mut keys = BTreeSet::new();
+        keys.insert(IsolationKey::Thread("main".to_string()));
+        Ok(keys)
+    }
+
+    fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
+        tx.enroll(Leg {
+            id: *self.log.borrow().last().unwrap_or(&0) + 1,
+            fail: false,
+            log: Rc::clone(&self.log),
+        })?;
+        if !*self.injected.borrow() {
+            *self.injected.borrow_mut() = true;
+            tx.repo().oplog().record_batch(vec![
+                snapshot_on("main"),
+                commit_marker("savepoint-racer", 1),
+            ])?;
+        }
+        Ok(StagedCommit::new((), vec![snapshot_on("main")]))
+    }
+}
+
+#[test]
+fn savepoint_child_effects_rewind_on_isolation_conflict() {
+    let (_t, repo) = test_repo();
+    let log = Rc::new(RefCell::new(Vec::new()));
+    execute(
+        &repo,
+        SavepointConflict {
+            log: Rc::clone(&log),
+            injected: Rc::new(RefCell::new(false)),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        *log.borrow(),
+        vec![1],
+        "the first attempt's savepoint child must rewind on conflict"
+    );
+}
+
+struct AlwaysConflict {
+    applied: Rc<RefCell<u32>>,
+    rewound: Rc<RefCell<u32>>,
+}
+
+impl AtomicMutation for AlwaysConflict {
+    type Output = ();
+
+    fn transaction_id(&self) -> String {
+        "always-conflict".to_string()
+    }
+
+    fn isolation_keys(&self, _repo: &Repository) -> Result<BTreeSet<IsolationKey>> {
+        let mut keys = BTreeSet::new();
+        keys.insert(IsolationKey::Thread("main".to_string()));
+        Ok(keys)
+    }
+
+    fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
+        *self.applied.borrow_mut() += 1;
+        let attempt = *self.applied.borrow();
+        let rewound = Rc::clone(&self.rewound);
+        tx.on_rewind("always-conflict", move || {
+            *rewound.borrow_mut() += 1;
+            Ok(())
+        });
+        tx.repo().oplog().record_batch(vec![
+            snapshot_on("main"),
+            commit_marker(&format!("always-racer-{attempt}"), 1),
+        ])?;
+        Ok(StagedCommit::new((), vec![snapshot_on("main")]))
+    }
+}
+
+#[test]
+fn retry_cap_returns_structured_conflict() {
+    let (_t, repo) = test_repo();
+    let applied = Rc::new(RefCell::new(0));
+    let rewound = Rc::new(RefCell::new(0));
+    let err = execute(
+        &repo,
+        AlwaysConflict {
+            applied: Rc::clone(&applied),
+            rewound: Rc::clone(&rewound),
+        },
+    )
+    .unwrap_err();
+    let message = err.to_string();
+    assert!(message.contains("isolation conflict on Thread(\"main\")"));
+    assert!(message.contains("oplog entry"));
+    assert_eq!(*applied.borrow(), 4, "initial attempt plus three retries");
+    assert_eq!(*rewound.borrow(), 4, "every conflicted attempt is rewound");
+}
+
+#[test]
+fn staged_record_keys_are_covered_by_declared_root_keys() {
+    let scope = "lane-a";
+    let mut declared = BTreeSet::new();
+    declared.insert(IsolationKey::Thread("main".to_string()));
+    declared.insert(IsolationKey::Thread("feature".to_string()));
+    declared.insert(IsolationKey::LocalHead {
+        scope: scope.to_string(),
+    });
+    let records = vec![
+        snapshot_on("main"),
+        OpRecord::FastForwardV2 {
+            source_thread: "feature".to_string(),
+            target_thread: "main".to_string(),
+            pre_target_id: ChangeId::generate(),
+            post_target_id: ChangeId::generate(),
+        },
+        OpRecord::Goto {
+            target: ChangeId::generate(),
+            prev_head: None,
+            head: ChangeId::generate(),
+        },
+    ];
+
+    for record in records {
+        let touched = isolation_keys_for_record(&record, Some(scope));
+        assert!(
+            touched.is_subset(&declared),
+            "staged record {record:?} touched {touched:?}, outside {declared:?}"
+        );
     }
 }
 
@@ -887,6 +1230,8 @@ impl AtomicMutation for StageThenFail {
         "stage-then-fail".to_string()
     }
 
+    empty_isolation_keys!();
+
     fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         // Stage state, relying on the whole-op `rewind` (NOT a granular inverse)
         // to undo it — then fail.
@@ -946,6 +1291,8 @@ impl AtomicMutation for EnrollStageThenFail {
         "enroll-stage-then-fail".to_string()
     }
 
+    empty_isolation_keys!();
+
     fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         tx.enroll(StageThenFail {
             staged: Rc::clone(&self.staged),
@@ -995,6 +1342,8 @@ impl AtomicMutation for StableKeyed {
     fn transaction_id(&self) -> String {
         self.key.clone()
     }
+
+    empty_isolation_keys!();
 
     fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         *self.applied.borrow_mut() += 1;
@@ -1079,6 +1428,8 @@ impl AtomicMutation for ReplayStages {
     fn transaction_id(&self) -> String {
         self.key.clone()
     }
+
+    empty_isolation_keys!();
 
     fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<u32>> {
         *self.staged_count.borrow_mut() += 1;
@@ -2000,6 +2351,8 @@ impl AtomicMutation for EagerOverrideRewind {
         "eager-override-rewind".to_string()
     }
 
+    empty_isolation_keys!();
+
     fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         Ok(StagedCommit::pure(()))
     }
@@ -2032,6 +2385,8 @@ impl AtomicMutation for EagerOverrideThenFail {
     fn transaction_id(&self) -> String {
         "eager-override-then-fail".to_string()
     }
+
+    empty_isolation_keys!();
 
     fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
         tx.enroll_eager(EagerOverrideRewind {
@@ -2201,7 +2556,10 @@ fn shared_watermark_is_cross_worktree_no_resurrect() {
     // the current (pre-create) generation — the "behind" per-worktree state.
     {
         let repo_b = Repository::open(&wt_b).unwrap();
-        let _ = repo_b.refs().get_thread(&ThreadName::new("not-yet")).unwrap();
+        let _ = repo_b
+            .refs()
+            .get_thread(&ThreadName::new("not-yet"))
+            .unwrap();
     }
 
     // A records + publishes a shared-ref create, then a read advances + persists
@@ -2527,7 +2885,9 @@ fn lagging_reader_never_clobbers_concurrent_publish() {
             .recent(64)
             .unwrap()
             .into_iter()
-            .filter(|e| matches!(&e.operation, OpRecord::Fork { thread: Some(t), .. } if t == "main"))
+            .filter(
+                |e| matches!(&e.operation, OpRecord::Fork { thread: Some(t), .. } if t == "main"),
+            )
             .max_by_key(|e| e.id)
             .map(|e| match e.operation {
                 OpRecord::Fork { new_state, .. } => new_state,
@@ -2553,6 +2913,8 @@ impl AtomicMutation for RegeneratesChangeId {
     fn transaction_id(&self) -> String {
         self.key.clone()
     }
+
+    empty_isolation_keys!();
 
     fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<ChangeId>> {
         // A fresh, NON-deterministic output each run — a crash-retry's value
@@ -2620,10 +2982,7 @@ fn dedup_hit_returns_prior_committed_output_not_replays_fresh_one() {
         minted[0], minted[1],
         "the replay regenerated a DIFFERENT id (non-vacuous)"
     );
-    assert_eq!(
-        first, minted[0],
-        "the first run returns its committed id"
-    );
+    assert_eq!(first, minted[0], "the first run returns its committed id");
     assert_eq!(
         second, minted[0],
         "the dedup-hit replay returns the ORIGINALLY committed id, not its own fresh one"

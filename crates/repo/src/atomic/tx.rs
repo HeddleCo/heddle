@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use objects::error::{HeddleError, Result};
-use oplog::OpRecord;
+use oplog::{ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpRecord};
 
 use super::traits::{DeferredMutation, EagerMutation, StagedCommit};
 use crate::Repository;
@@ -35,6 +35,7 @@ struct RewindAction<'a> {
 }
 
 pub(crate) type EnrolledMutation<M> = Rc<RefCell<Option<M>>>;
+pub(crate) type EnrolledRoot<M> = Rc<RefCell<M>>;
 
 /// The ledger snapshot handed to [`AtomicMutation::rewind`](super::AtomicMutation::rewind).
 /// Carries the per-transaction scope + depth captured at apply time; a mutation
@@ -58,6 +59,7 @@ pub struct Tx<'a> {
     repo: &'a Repository,
     scope: String,
     transaction_id: String,
+    isolation: IsolationPrecondition,
     depth: u32,
     ledger: Vec<RewindAction<'a>>,
     committed: bool,
@@ -71,11 +73,16 @@ impl<'a> Tx<'a> {
     /// [`AtomicMutation::transaction_id`](super::AtomicMutation::transaction_id)
     /// — so a crash-retry deduplicates against the prior commit instead of
     /// minting a new key and double-applying.
-    pub(crate) fn root(repo: &'a Repository, transaction_id: String) -> Self {
+    pub(crate) fn root(
+        repo: &'a Repository,
+        transaction_id: String,
+        isolation: IsolationPrecondition,
+    ) -> Self {
         Self {
             repo,
             scope: repo.op_scope(),
             transaction_id,
+            isolation,
             depth: 0,
             ledger: Vec::new(),
             committed: false,
@@ -211,12 +218,28 @@ impl<'a> Tx<'a> {
         mutation
     }
 
+    pub(crate) fn enroll_root<M>(&mut self, m: M) -> EnrolledRoot<M>
+    where
+        M: super::AtomicMutation + 'a,
+    {
+        let mutation = Rc::new(RefCell::new(m));
+        let rewind_mutation = Rc::clone(&mutation);
+        let ledger = self.ledger_view();
+        self.on_rewind("enroll_root", move || {
+            rewind_mutation.borrow_mut().rewind(&ledger)
+        });
+        mutation
+    }
+
     /// Shared `enroll`/`enroll_eager` scaffolding: pre-register the child's
     /// whole-op rewind (so an apply error or panic unwinds it through the shared
     /// ledger), then run its `apply` against the *same* ledger. Returns the
     /// enrolled handle (still live, for the eager `commit_eager` follow-up) plus
     /// the staged result. The caller owns the surrounding `depth` inc/dec.
-    fn enroll_then_apply<M>(&mut self, m: M) -> (EnrolledMutation<M>, Result<StagedCommit<M::Output>>)
+    fn enroll_then_apply<M>(
+        &mut self,
+        m: M,
+    ) -> (EnrolledMutation<M>, Result<StagedCommit<M::Output>>)
     where
         M: super::AtomicMutation + 'a,
     {
@@ -321,23 +344,33 @@ impl<'a> Tx<'a> {
             transaction_id: self.transaction_id.clone(),
             op_count,
         });
-        let outcome = self.repo.oplog().record_batch_exactly_once(
+        let outcome = self.repo.oplog().record_batch_exactly_once_if_unchanged(
             records,
             Some(&self.scope),
             &self.transaction_id,
+            &self.isolation,
         )?;
-        if outcome.is_some() {
-            self.committed = true;
-            Ok(CommitOutcome::Committed)
-        } else {
-            // Dedup hit: a prior (possibly cross-process) run already committed
-            // this transaction. Carry its records back so the executor can
-            // reconstruct the originally-committed output (cid 3329631075).
-            let prior = self
-                .repo
-                .oplog()
-                .committed_batch_records(&self.transaction_id)?;
-            Ok(CommitOutcome::AlreadyCommitted(prior))
+        match outcome {
+            ConditionalCommitOutcome::Committed(_) => {
+                self.committed = true;
+                Ok(CommitOutcome::Committed)
+            }
+            ConditionalCommitOutcome::AlreadyCommitted(prior) => {
+                // Dedup hit: a prior (possibly cross-process) run already
+                // committed this transaction. Carry its records back so the
+                // executor can reconstruct the originally-committed output
+                // (cid 3329631075).
+                Ok(CommitOutcome::AlreadyCommitted(prior))
+            }
+            ConditionalCommitOutcome::IsolationConflict {
+                key,
+                since_head_id,
+                conflicting_entry_id,
+            } => Ok(CommitOutcome::IsolationConflict {
+                key,
+                since_head_id,
+                conflicting_entry_id,
+            }),
         }
     }
 
@@ -373,6 +406,11 @@ pub(crate) enum CommitOutcome {
     /// committed batch's records (marker stripped) so the executor can
     /// reconstruct the originally-committed output (cid 3329631075).
     AlreadyCommitted(Vec<OpRecord>),
+    IsolationConflict {
+        key: IsolationKey,
+        since_head_id: u64,
+        conflicting_entry_id: u64,
+    },
 }
 
 impl Drop for Tx<'_> {

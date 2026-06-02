@@ -7,10 +7,13 @@
 //! public surface — `execute`/`enroll` are monomorphized per mutation type and
 //! no mutation is ever invoked through a vtable.
 
+use std::collections::BTreeSet;
+
 use objects::error::Result;
-use oplog::OpRecord;
+use oplog::{IsolationKey, OpRecord};
 
 use super::tx::{RewindLedger, Tx};
+use crate::Repository;
 
 /// What `apply` returns: the value to surface to the caller plus the oplog
 /// record(s) the executor appends **at the commit point**. The mutation never
@@ -63,6 +66,11 @@ pub trait AtomicMutation {
     /// "minted fresh" footgun is unrepresentable. Only the *root* mutation's key
     /// is used — an enrolled child never reaches the commit point.
     fn transaction_id(&self) -> String;
+
+    /// Logical thread/head keys this root mutation read or may write. The root
+    /// executor captures these keys with the current oplog head before apply and
+    /// uses them for CAS-on-commit isolation.
+    fn isolation_keys(&self, repo: &Repository) -> Result<BTreeSet<IsolationKey>>;
 
     /// Forward, staged, fallible side effects. Every effect performed here
     /// MUST be paired with an inverse registered via [`Tx::step`] (the
