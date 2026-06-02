@@ -203,6 +203,54 @@ fn test_undo_batches_scoped() {
 }
 
 #[test]
+fn recent_batches_scoped_merges_non_adjacent_coalesced_batches() {
+    let (_temp, oplog) = create_oplog();
+    let state1 = ChangeId::generate();
+    let state2 = ChangeId::generate();
+    let state3 = ChangeId::generate();
+
+    let first = oplog
+        .record_snapshot(&state1, None, None, Some("lane-a"))
+        .unwrap();
+    let middle = oplog
+        .record_snapshot(&state2, Some(&state1), None, Some("lane-a"))
+        .unwrap();
+    let last = oplog
+        .record_snapshot(&state3, Some(&state2), None, Some("lane-a"))
+        .unwrap();
+
+    oplog.coalesce_batches(first, last).unwrap();
+
+    let batches = oplog.recent_batches_scoped(2, Some("lane-a")).unwrap();
+
+    assert_eq!(
+        batches.iter().map(|batch| batch.id).collect::<Vec<_>>(),
+        vec![first, middle]
+    );
+    assert_eq!(
+        batches[0]
+            .entries
+            .iter()
+            .map(|entry| entry.id)
+            .collect::<Vec<_>>(),
+        vec![first, last]
+    );
+    assert_eq!(
+        batches[0]
+            .entries
+            .iter()
+            .map(|entry| entry.batch_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+
+    let limited = oplog.recent_batches_scoped(1, Some("lane-a")).unwrap();
+    assert_eq!(limited.len(), 1);
+    assert_eq!(limited[0].id, first);
+    assert_eq!(limited[0].entries.len(), 2);
+}
+
+#[test]
 fn test_oplogbackend_trait_async_methods_dispatch() {
     // The CLI calls OpLog's inherent (sync) batch methods; the generic
     // backend plumbing and the hosted server reach the async trait
