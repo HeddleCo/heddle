@@ -15,6 +15,7 @@
 #![cfg(feature = "client")]
 
 use anyhow::{Context, Result, anyhow};
+use objects::object::ThreadName;
 use repo::Repository;
 use serde::Serialize;
 
@@ -129,7 +130,7 @@ async fn open_heddle_client(
 /// will invalidate the prior approval.
 fn thread_head_state(repo: &Repository, thread: &str) -> Result<String> {
     repo.refs()
-        .get_thread(thread)?
+        .get_thread(&ThreadName::new(thread))?
         .map(|change_id| change_id.to_string())
         .ok_or_else(|| anyhow!("thread '{thread}' has no head state"))
 }

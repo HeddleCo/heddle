@@ -1187,6 +1187,35 @@ fn hosted_endpoint_spec(remote: &str) -> String {
 }
 
 #[cfg(feature = "client")]
+struct CloneDestinationCleanup<'a> {
+    path: &'a Path,
+    armed: bool,
+}
+
+#[cfg(feature = "client")]
+impl<'a> CloneDestinationCleanup<'a> {
+    fn new(path: &'a Path) -> Self {
+        Self {
+            path,
+            armed: !path.exists(),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(feature = "client")]
+impl Drop for CloneDestinationCleanup<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_dir_all(self.path);
+        }
+    }
+}
+
+#[cfg(feature = "client")]
 async fn clone_network(
     cli: &Cli,
     addr: std::net::SocketAddr,
@@ -1209,20 +1238,25 @@ async fn clone_network(
     // remotes; both produce a clone whose blob content is hydrated on demand.
     let lazy = *lazy || filter.is_some();
 
-    // Create the local directory
-    fs::create_dir_all(local_path)?;
-
-    // Initialize the local repository
-    let local_repo = Repository::init(local_path)?;
-
     let user_config = UserConfig::load_default()?;
-
-    // Connect to remote
+    // On every network-connecting command, TLS/auth config validation
+    // (`heddle_client_config`) must succeed before any irreversible
+    // filesystem/repo mutation such as `create_dir_all`, `Repository::init`,
+    // state writes, or ref publishes. A rejected security config must leave
+    // no partial on-disk artifact.
     let mut config = user_config.heddle_client_config(None)?;
     if let Some(key) = server_key {
         config = config.with_server_key(key);
     }
     let repo_path = repo_path.context("network remotes must include a hosted repository path")?;
+
+    let mut cleanup = CloneDestinationCleanup::new(local_path);
+
+    // Create the local directory only after TLS/auth prevalidation.
+    fs::create_dir_all(local_path)?;
+
+    // Initialize the local repository only after TLS/auth prevalidation.
+    let local_repo = Repository::init(local_path)?;
 
     let mut client = HostedGrpcClient::connect(addr, &config).await?;
     client.auto_rotate_if_needed().await;
@@ -1306,6 +1340,7 @@ async fn clone_network(
         )));
     }
 
+    cleanup.disarm();
     Ok(())
 }
 
@@ -1661,6 +1696,41 @@ mod tests {
         assert_eq!(
             hosted_endpoint_spec("heddle://example.heddle.cloud:443/org/acme/repo"),
             "example.heddle.cloud:443",
+        );
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn clone_destination_cleanup_removes_armed_destination() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let path = temp.path().join("partial-clone");
+
+        {
+            let _cleanup = CloneDestinationCleanup::new(&path);
+            std::fs::create_dir_all(&path).expect("create partial destination");
+        }
+
+        assert!(
+            !path.exists(),
+            "armed clone cleanup must remove the partial destination"
+        );
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn clone_destination_cleanup_disarm_preserves_destination() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let path = temp.path().join("successful-clone");
+
+        {
+            let mut cleanup = CloneDestinationCleanup::new(&path);
+            std::fs::create_dir_all(&path).expect("create successful destination");
+            cleanup.disarm();
+        }
+
+        assert!(
+            path.exists(),
+            "disarmed clone cleanup must preserve the successful destination"
         );
     }
 

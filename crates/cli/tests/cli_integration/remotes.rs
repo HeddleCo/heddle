@@ -940,6 +940,87 @@ fn test_cli_clone_missing_local_remote_uses_typed_advice() {
 }
 
 #[test]
+#[cfg(feature = "client")]
+fn clone_network_validates_tls_config_before_creating_destination() {
+    let temp = TempDir::new().unwrap();
+    let local = temp.path().join("network-clone");
+    let config_path = temp.path().join("bad-tls-config.toml");
+    let missing_ca = temp.path().join("missing-ca.pem");
+    std::fs::write(
+        &config_path,
+        format!(
+            "[principal]\nname = \"Heddle Test\"\nemail = \"heddle@example.com\"\n\n[remote]\ntls_ca_certificate_path = \"{}\"\n",
+            missing_ca.display()
+        ),
+    )
+    .unwrap();
+
+    let config = config_path.to_string_lossy().to_string();
+    let local_arg = local.to_string_lossy().to_string();
+    let output = heddle_output_with_env(
+        &[
+            "clone",
+            "heddle://127.0.0.1:1/owner/repo",
+            local_arg.as_str(),
+        ],
+        Some(temp.path()),
+        &[("HEDDLE_CONFIG", &config)],
+    )
+    .expect("invoke network clone");
+
+    assert!(!output.status.success(), "clone should fail closed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.is_empty(),
+        "failed clone should not write stdout: {stdout}"
+    );
+    assert!(
+        stderr.contains("fatal TLS/auth configuration error")
+            && stderr.contains("remote.tls_ca_certificate_path"),
+        "clone should fail on TLS config before transport: {stderr}"
+    );
+    assert!(
+        !local.exists(),
+        "TLS config failure must not create a partial clone destination at {}",
+        local.display()
+    );
+}
+
+#[test]
+#[cfg(feature = "client")]
+fn clone_network_removes_self_created_destination_after_later_failure() {
+    let temp = TempDir::new().unwrap();
+    let local = temp.path().join("network-clone-cleanup");
+    let local_arg = local.to_string_lossy().to_string();
+
+    let output = heddle_output(
+        &[
+            "clone",
+            "heddle://127.0.0.1:1/owner/repo",
+            local_arg.as_str(),
+        ],
+        Some(temp.path()),
+    )
+    .expect("invoke network clone");
+
+    assert!(
+        !output.status.success(),
+        "clone should fail against a closed local port"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("fatal TLS/auth configuration error"),
+        "default TLS/auth config should pass before the transport failure: {stderr}"
+    );
+    assert!(
+        !local.exists(),
+        "later network clone failure must remove the self-created destination at {}",
+        local.display()
+    );
+}
+
+#[test]
 fn test_cli_clone_git_overlay_depth_is_rejected() {
     // Issue 49 / 20b: `--depth` is wired through to gix at the wire
     // layer (`clone_url_to_bare` honours it), but the import step
