@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 use crate::{
     Result,
@@ -12,10 +13,12 @@ use crate::{
 };
 
 const GITHUB_API: &str = "https://api.github.com";
+const GITHUB_PER_PAGE: usize = 100;
 
 #[derive(Debug, Clone)]
 pub struct GitHubRestClient {
     http: reqwest::Client,
+    api_base_url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -115,11 +118,17 @@ struct IssueCommentResponse {
 
 impl GitHubRestClient {
     pub fn new() -> Result<Self> {
+        Self::new_with_api_base(GITHUB_API.to_string())
+    }
+
+    fn new_with_api_base(api_base_url: String) -> Result<Self> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         Ok(Self {
             http: reqwest::Client::builder()
                 .user_agent("heddle-review")
                 .build()
                 .map_err(|err| ReviewError::Github(err.to_string()))?,
+            api_base_url,
         })
     }
 
@@ -157,8 +166,8 @@ impl GitHubRestClient {
             .request(
                 token,
                 format!(
-                    "{GITHUB_API}/repos/{}/{}/pulls/{}",
-                    key.owner, key.repo, key.pr_number
+                    "{}/repos/{}/{}/pulls/{}",
+                    self.api_base_url, key.owner, key.repo, key.pr_number
                 ),
             )
             .send()
@@ -217,42 +226,26 @@ impl GitHubRestClient {
         key: &ReviewJobKey,
         token: Option<&str>,
     ) -> Result<Vec<GitHubPullRequestFile>> {
-        let mut url = Some(format!(
-            "{GITHUB_API}/repos/{}/{}/pulls/{}/files?per_page=100",
-            key.owner, key.repo, key.pr_number
-        ));
-        let mut files = Vec::new();
-        while let Some(next_url) = url.take() {
-            let response = self
-                .request(token, next_url)
-                .send()
-                .await
-                .map_err(|err| ReviewError::Github(err.to_string()))?;
-            if !response.status().is_success() {
-                return Err(ReviewError::Github(format!(
-                    "pull request files fetch failed with {}",
-                    response.status()
-                )));
-            }
-            let link_header = response
-                .headers()
-                .get("link")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned);
-            let page: Vec<PullRequestFileResponse> = response
-                .json()
-                .await
-                .map_err(|err| ReviewError::Serialization(err.to_string()))?;
-            files.extend(page.into_iter().map(|file| GitHubPullRequestFile {
+        let files: Vec<PullRequestFileResponse> = self
+            .fetch_paginated_json(
+                format!(
+                    "{}/repos/{}/{}/pulls/{}/files?per_page={GITHUB_PER_PAGE}",
+                    self.api_base_url, key.owner, key.repo, key.pr_number
+                ),
+                token,
+                "pull request files",
+            )
+            .await?;
+        Ok(files
+            .into_iter()
+            .map(|file| GitHubPullRequestFile {
                 filename: file.filename,
                 status: file.status,
                 additions: file.additions,
                 deletions: file.deletions,
                 patch: file.patch,
-            }));
-            url = link_header.and_then(parse_next_link);
-        }
-        Ok(files)
+            })
+            .collect())
     }
 
     async fn fetch_contributors(
@@ -262,60 +255,44 @@ impl GitHubRestClient {
     ) -> Result<Vec<ReviewContributor>> {
         let mut seen = std::collections::BTreeMap::<String, ReviewContributor>::new();
         let mut seen_names = std::collections::BTreeSet::<String>::new();
-        let mut url = Some(format!(
-            "{GITHUB_API}/repos/{}/{}/pulls/{}/commits?per_page=100",
-            key.owner, key.repo, key.pr_number
-        ));
+        let commits: Vec<PullRequestCommitResponse> = self
+            .fetch_paginated_json(
+                format!(
+                    "{}/repos/{}/{}/pulls/{}/commits?per_page={GITHUB_PER_PAGE}",
+                    self.api_base_url, key.owner, key.repo, key.pr_number
+                ),
+                token,
+                "pull request commits",
+            )
+            .await?;
 
-        while let Some(next_url) = url.take() {
-            let response = self
-                .request(token, next_url)
-                .send()
-                .await
-                .map_err(|err| ReviewError::Github(err.to_string()))?;
-            if !response.status().is_success() {
-                return Ok(seen.into_values().collect());
-            }
-            let link_header = response
-                .headers()
-                .get("link")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned);
-            let commits: Vec<PullRequestCommitResponse> = response
-                .json()
-                .await
-                .map_err(|err| ReviewError::Serialization(err.to_string()))?;
+        for commit in commits {
+            let author_name = commit
+                .author
+                .as_ref()
+                .and_then(|author| author.login.clone())
+                .or_else(|| {
+                    commit
+                        .commit
+                        .author
+                        .as_ref()
+                        .and_then(|author| author.name.clone())
+                })
+                .unwrap_or_else(|| "unknown".to_string());
+            let author_email = commit
+                .commit
+                .author
+                .as_ref()
+                .and_then(|author| author.email.clone())
+                .unwrap_or_default();
+            insert_contributor(&mut seen, &mut seen_names, &author_name, &author_email);
 
-            for commit in commits {
-                let author_name = commit
-                    .author
-                    .as_ref()
-                    .and_then(|author| author.login.clone())
-                    .or_else(|| {
-                        commit
-                            .commit
-                            .author
-                            .as_ref()
-                            .and_then(|author| author.name.clone())
-                    })
-                    .unwrap_or_else(|| "unknown".to_string());
-                let author_email = commit
-                    .commit
-                    .author
-                    .as_ref()
-                    .and_then(|author| author.email.clone())
-                    .unwrap_or_default();
-                insert_contributor(&mut seen, &mut seen_names, &author_name, &author_email);
-
-                if let Some(message) = commit.commit.message {
-                    for raw in co_authored_lines(&message) {
-                        let (name, email) = parse_name_email(&raw);
-                        insert_contributor(&mut seen, &mut seen_names, &name, &email);
-                    }
+            if let Some(message) = commit.commit.message {
+                for raw in co_authored_lines(&message) {
+                    let (name, email) = parse_name_email(&raw);
+                    insert_contributor(&mut seen, &mut seen_names, &name, &email);
                 }
             }
-
-            url = link_header.and_then(parse_next_link);
         }
 
         Ok(seen.into_values().collect())
@@ -329,8 +306,8 @@ impl GitHubRestClient {
         let mut comments = self
             .fetch_comment_pages(
                 format!(
-                    "{GITHUB_API}/repos/{}/{}/issues/{}/comments?per_page=100",
-                    key.owner, key.repo, key.pr_number
+                    "{}/repos/{}/{}/issues/{}/comments?per_page={GITHUB_PER_PAGE}",
+                    self.api_base_url, key.owner, key.repo, key.pr_number
                 ),
                 false,
                 token,
@@ -339,8 +316,8 @@ impl GitHubRestClient {
         comments.extend(
             self.fetch_comment_pages(
                 format!(
-                    "{GITHUB_API}/repos/{}/{}/pulls/{}/comments?per_page=100",
-                    key.owner, key.repo, key.pr_number
+                    "{}/repos/{}/{}/pulls/{}/comments?per_page={GITHUB_PER_PAGE}",
+                    self.api_base_url, key.owner, key.repo, key.pr_number
                 ),
                 true,
                 token,
@@ -357,7 +334,33 @@ impl GitHubRestClient {
         is_review_comment: bool,
         token: Option<&str>,
     ) -> Result<Vec<ReviewComment>> {
-        let mut comments = Vec::new();
+        let comments: Vec<IssueCommentResponse> = self
+            .fetch_paginated_json(first_url, token, "pull request comments")
+            .await?;
+        Ok(comments
+            .into_iter()
+            .map(|comment| ReviewComment {
+                author: comment.user.map(|user| ReviewCommentAuthor {
+                    login: user.login,
+                    avatar_url: user.avatar_url,
+                }),
+                body: comment.body,
+                created_at: comment.created_at,
+                is_review_comment,
+            })
+            .collect())
+    }
+
+    async fn fetch_paginated_json<T>(
+        &self,
+        first_url: String,
+        token: Option<&str>,
+        label: &str,
+    ) -> Result<Vec<T>>
+    where
+        T: DeserializeOwned,
+    {
+        let mut items = Vec::new();
         let mut url = Some(first_url);
 
         while let Some(next_url) = url.take() {
@@ -366,43 +369,82 @@ impl GitHubRestClient {
                 .send()
                 .await
                 .map_err(|err| ReviewError::Github(err.to_string()))?;
+            let status = response.status();
+            if status == reqwest::StatusCode::FORBIDDEN
+                && response
+                    .headers()
+                    .get("x-ratelimit-remaining")
+                    .and_then(|value| value.to_str().ok())
+                    == Some("0")
+            {
+                return Err(ReviewError::GithubRateLimited);
+            }
             if !response.status().is_success() {
-                break;
+                return Err(ReviewError::Github(format!(
+                    "{label} fetch failed with {}",
+                    response.status()
+                )));
             }
             let link_header = response
                 .headers()
                 .get("link")
-                .and_then(|value| value.to_str().ok())
-                .map(ToOwned::to_owned);
-            let page: Vec<IssueCommentResponse> = response
+                .map(|value| {
+                    value
+                        .to_str()
+                        .map_err(|err| {
+                            ReviewError::Github(format!(
+                                "{label} pagination failed: malformed Link header: {err}"
+                            ))
+                        })
+                        .map(ToOwned::to_owned)
+                })
+                .transpose()?;
+            let page: Vec<T> = response
                 .json()
                 .await
                 .map_err(|err| ReviewError::Serialization(err.to_string()))?;
-            comments.extend(page.into_iter().map(|comment| ReviewComment {
-                author: comment.user.map(|user| ReviewCommentAuthor {
-                    login: user.login,
-                    avatar_url: user.avatar_url,
-                }),
-                body: comment.body,
-                created_at: comment.created_at,
-                is_review_comment,
-            }));
-            url = link_header.and_then(parse_next_link);
+            items.extend(page);
+            url = next_page_url(link_header.as_deref())?;
         }
 
-        Ok(comments)
+        Ok(items)
     }
 }
 
-fn parse_next_link(link: String) -> Option<String> {
-    link.split(',').find_map(|part| {
+fn next_page_url(link: Option<&str>) -> Result<Option<String>> {
+    let Some(link) = link else {
+        return Ok(None);
+    };
+    parse_next_link(link)
+}
+
+fn parse_next_link(link: &str) -> Result<Option<String>> {
+    let mut next = None;
+    for part in link.split(',') {
         let trimmed = part.trim();
-        trimmed
-            .strip_suffix("rel=\"next\"")
-            .and_then(|value| value.split('<').nth(1))
-            .and_then(|value| value.split('>').next())
-            .map(ToOwned::to_owned)
-    })
+        let (url, attrs) = trimmed
+            .split_once(';')
+            .ok_or_else(|| ReviewError::Github("malformed Link header".to_string()))?;
+        let url = url
+            .trim()
+            .strip_prefix('<')
+            .and_then(|value| value.strip_suffix('>'))
+            .ok_or_else(|| ReviewError::Github("malformed Link header".to_string()))?;
+        let mut has_rel = false;
+        for attr in attrs.split(';') {
+            let attr = attr.trim();
+            if attr.starts_with("rel=") {
+                has_rel = true;
+            }
+            if attr == "rel=\"next\"" {
+                next = Some(url.to_string());
+            }
+        }
+        if !has_rel {
+            return Err(ReviewError::Github("malformed Link header".to_string()));
+        }
+    }
+    Ok(next)
 }
 
 fn is_agent_author(name: &str, email: &str) -> bool {
@@ -467,16 +509,411 @@ fn parse_name_email(raw: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use std::collections::VecDeque;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    struct MockResponse {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: String,
+    }
+
+    impl MockResponse {
+        fn json(status: u16, body: String) -> Self {
+            Self {
+                status,
+                headers: Vec::new(),
+                body,
+            }
+        }
+
+        fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+            self.headers.push((name.into(), value.into()));
+            self
+        }
+    }
+
+    async fn spawn_server(build_responses: impl FnOnce(&str) -> Vec<MockResponse>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let mut responses = VecDeque::from(build_responses(&base_url));
+        tokio::spawn(async move {
+            while let Some(response) = responses.pop_front() {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                loop {
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+
+                let mut header = format!(
+                    "HTTP/1.1 {} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
+                    response.status,
+                    response.body.len()
+                );
+                for (name, value) in response.headers {
+                    header.push_str(&format!("{name}: {value}\r\n"));
+                }
+                header.push_str("\r\n");
+                socket.write_all(header.as_bytes()).await.unwrap();
+                socket.write_all(response.body.as_bytes()).await.unwrap();
+                socket.shutdown().await.unwrap();
+            }
+        });
+        base_url
+    }
+
+    fn review_key() -> ReviewJobKey {
+        ReviewJobKey {
+            provider: "github".to_string(),
+            owner: "heddle".to_string(),
+            repo: "repo".to_string(),
+            pr_number: 439,
+        }
+    }
+
+    fn file_page(start: usize, count: usize) -> String {
+        let files: Vec<_> = (start..start + count)
+            .map(|index| {
+                json!({
+                    "filename": format!("file-{index}.rs"),
+                    "status": "modified",
+                    "additions": 1,
+                    "deletions": 0,
+                    "patch": null
+                })
+            })
+            .collect();
+        serde_json::to_string(&files).unwrap()
+    }
+
+    fn commit_page(start: usize, count: usize) -> String {
+        let commits: Vec<_> = (start..start + count)
+            .map(|index| {
+                json!({
+                    "commit": {
+                        "author": {
+                            "name": format!("Author {index}"),
+                            "email": format!("author-{index}@example.com")
+                        },
+                        "message": "subject"
+                    },
+                    "author": {
+                        "login": format!("author-{index}")
+                    }
+                })
+            })
+            .collect();
+        serde_json::to_string(&commits).unwrap()
+    }
+
+    fn comment_page(start: usize, count: usize) -> String {
+        let comments: Vec<_> = (start..start + count)
+            .map(|index| {
+                json!({
+                    "user": {
+                        "login": format!("commenter-{index}"),
+                        "avatar_url": "https://example.com/avatar.png"
+                    },
+                    "body": format!("comment {index}"),
+                    "created_at": null
+                })
+            })
+            .collect();
+        serde_json::to_string(&comments).unwrap()
+    }
+
+    fn metadata_body() -> String {
+        serde_json::to_string(&json!({
+            "title": "Fix pagination",
+            "body": "Fail loud",
+            "state": "open",
+            "draft": false,
+            "changed_files": 1,
+            "additions": 2,
+            "deletions": 1,
+            "head": {
+                "sha": "abc123",
+                "ref": "task/439"
+            },
+            "base": {
+                "sha": "def456",
+                "ref": "main"
+            },
+            "user": {
+                "login": "reviewer",
+                "avatar_url": "https://example.com/reviewer.png"
+            },
+            "labels": [
+                {
+                    "name": "bug",
+                    "color": "d73a4a"
+                }
+            ],
+            "created_at": null,
+            "updated_at": null,
+            "merged_at": null
+        }))
+        .unwrap()
+    }
+
+    fn client_for(base_url: &str) -> GitHubRestClient {
+        GitHubRestClient::new_with_api_base(base_url.to_string()).unwrap()
+    }
 
     #[test]
     fn parse_next_link_extracts_next_url_from_link_header() {
         let next = parse_next_link(
             r#"<https://api.github.com/resource?page=2>; rel="next", <https://api.github.com/resource?page=4>; rel="last""#
-                .to_string(),
-        );
+        )
+        .unwrap();
         assert_eq!(
             next.as_deref(),
             Some("https://api.github.com/resource?page=2")
+        );
+    }
+
+    #[test]
+    fn parse_next_link_rejects_malformed_link_header() {
+        let err = parse_next_link("https://api.github.com/resource?page=2; rel=\"next\"")
+            .expect_err("malformed link header must fail");
+        assert!(err.to_string().contains("malformed Link header"));
+    }
+
+    #[test]
+    fn parse_next_link_rejects_link_without_rel_attribute() {
+        let err = parse_next_link("<https://api.github.com/resource?page=2>; title=\"next\"")
+            .expect_err("Link header entries without rel are malformed");
+        assert!(err.to_string().contains("malformed Link header"));
+    }
+
+    #[tokio::test]
+    async fn fetch_pull_request_accepts_complete_data() {
+        let base_url = spawn_server(|_| {
+            vec![
+                MockResponse::json(200, metadata_body()),
+                MockResponse::json(200, file_page(0, 1)),
+                MockResponse::json(200, commit_page(0, 1)),
+                MockResponse::json(200, comment_page(0, 1)),
+                MockResponse::json(200, comment_page(1, 1)),
+            ]
+        })
+        .await;
+        let data = client_for(&base_url)
+            .fetch_pull_request(&review_key(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(data.metadata.title, "Fix pagination");
+        assert_eq!(data.metadata.head_sha, "abc123");
+        assert_eq!(data.files.len(), 1);
+        assert_eq!(data.contributors.len(), 1);
+        assert_eq!(data.comments.len(), 2);
+        assert_eq!(
+            data.comments
+                .iter()
+                .filter(|comment| comment.is_review_comment)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_files_accepts_single_page() {
+        let base_url = spawn_server(|_| vec![MockResponse::json(200, file_page(0, 2))]).await;
+        let files = client_for(&base_url)
+            .fetch_files(&review_key(), None)
+            .await
+            .unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].filename, "file-0.rs");
+    }
+
+    #[tokio::test]
+    async fn fetch_files_accepts_multi_page_complete_result() {
+        let base_url = spawn_server(|base_url| {
+            vec![
+                MockResponse::json(200, file_page(0, GITHUB_PER_PAGE)).with_header(
+                    "Link",
+                    format!(
+                        "<{base_url}/repos/heddle/repo/pulls/439/files?per_page={GITHUB_PER_PAGE}&page=2>; rel=\"next\""
+                    ),
+                ),
+                MockResponse::json(200, file_page(GITHUB_PER_PAGE, 2)),
+            ]
+        })
+        .await;
+        let files = client_for(&base_url)
+            .fetch_files(&review_key(), None)
+            .await
+            .unwrap();
+        assert_eq!(files.len(), GITHUB_PER_PAGE + 2);
+        assert_eq!(files.last().unwrap().filename, "file-101.rs");
+    }
+
+    #[tokio::test]
+    async fn fetch_files_accepts_genuinely_empty_page() {
+        let base_url = spawn_server(|_| vec![MockResponse::json(200, "[]".to_string())]).await;
+        let files = client_for(&base_url)
+            .fetch_files(&review_key(), None)
+            .await
+            .unwrap();
+        assert!(files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fetch_files_errors_on_mid_pagination_failure() {
+        let base_url = spawn_server(|base_url| {
+            vec![
+                MockResponse::json(200, file_page(0, GITHUB_PER_PAGE)).with_header(
+                    "Link",
+                    format!(
+                        "<{base_url}/repos/heddle/repo/pulls/439/files?per_page={GITHUB_PER_PAGE}&page=2>; rel=\"next\""
+                    ),
+                ),
+                MockResponse::json(500, "[]".to_string()),
+            ]
+        })
+        .await;
+        let err = client_for(&base_url)
+            .fetch_files(&review_key(), None)
+            .await
+            .expect_err("mid-pagination failure must not return a partial file list");
+        assert!(err.to_string().contains("pull request files fetch failed"));
+    }
+
+    #[tokio::test]
+    async fn fetch_files_accepts_exact_full_page_without_link_header() {
+        let base_url =
+            spawn_server(|_| vec![MockResponse::json(200, file_page(0, GITHUB_PER_PAGE))]).await;
+        let files = client_for(&base_url)
+            .fetch_files(&review_key(), None)
+            .await
+            .unwrap();
+        assert_eq!(files.len(), GITHUB_PER_PAGE);
+        assert_eq!(files.last().unwrap().filename, "file-99.rs");
+    }
+
+    #[tokio::test]
+    async fn fetch_files_accepts_exact_full_page_terminal_link_without_next() {
+        let base_url = spawn_server(|base_url| {
+            vec![
+                MockResponse::json(200, file_page(0, GITHUB_PER_PAGE)).with_header(
+                    "Link",
+                    format!(
+                        "<{base_url}/repos/heddle/repo/pulls/439/files?per_page={GITHUB_PER_PAGE}&page=2>; rel=\"next\""
+                    ),
+                ),
+                MockResponse::json(200, file_page(GITHUB_PER_PAGE, GITHUB_PER_PAGE)).with_header(
+                    "Link",
+                    format!(
+                        "<{base_url}/repos/heddle/repo/pulls/439/files?per_page={GITHUB_PER_PAGE}>; rel=\"first\", \
+                         <{base_url}/repos/heddle/repo/pulls/439/files?per_page={GITHUB_PER_PAGE}>; rel=\"prev\", \
+                         <{base_url}/repos/heddle/repo/pulls/439/files?per_page={GITHUB_PER_PAGE}&page=2>; rel=\"last\""
+                    ),
+                ),
+            ]
+        })
+        .await;
+        let files = client_for(&base_url)
+            .fetch_files(&review_key(), None)
+            .await
+            .unwrap();
+        assert_eq!(files.len(), GITHUB_PER_PAGE * 2);
+        assert_eq!(files.last().unwrap().filename, "file-199.rs");
+    }
+
+    #[tokio::test]
+    async fn fetch_files_errors_on_malformed_link_header() {
+        let base_url = spawn_server(|_| {
+            vec![
+                MockResponse::json(200, file_page(0, GITHUB_PER_PAGE))
+                    .with_header("Link", "not a link"),
+            ]
+        })
+        .await;
+        let err = client_for(&base_url)
+            .fetch_files(&review_key(), None)
+            .await
+            .expect_err("malformed Link header must not return a partial file list");
+        assert!(err.to_string().contains("malformed Link header"));
+    }
+
+    #[tokio::test]
+    async fn fetch_files_returns_rate_limit_error() {
+        let base_url = spawn_server(|_| {
+            vec![
+                MockResponse::json(403, "[]".to_string()).with_header("x-ratelimit-remaining", "0"),
+            ]
+        })
+        .await;
+        let err = client_for(&base_url)
+            .fetch_files(&review_key(), None)
+            .await
+            .expect_err("rate-limited pagination must fail loudly");
+        assert!(matches!(err, ReviewError::GithubRateLimited));
+    }
+
+    #[tokio::test]
+    async fn fetch_contributors_errors_instead_of_returning_partial_on_failure() {
+        let base_url = spawn_server(|base_url| {
+            vec![
+                MockResponse::json(200, commit_page(0, GITHUB_PER_PAGE)).with_header(
+                    "Link",
+                    format!(
+                        "<{base_url}/repos/heddle/repo/pulls/439/commits?per_page={GITHUB_PER_PAGE}&page=2>; rel=\"next\""
+                    ),
+                ),
+                MockResponse::json(502, "[]".to_string()),
+            ]
+        })
+        .await;
+        let err = client_for(&base_url)
+            .fetch_contributors(&review_key(), None)
+            .await
+            .expect_err("commit pagination failure must not return partial contributors");
+        assert!(
+            err.to_string()
+                .contains("pull request commits fetch failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_comment_pages_errors_instead_of_returning_partial_on_failure() {
+        let base_url = spawn_server(|base_url| {
+            vec![
+                MockResponse::json(200, comment_page(0, GITHUB_PER_PAGE)).with_header(
+                    "Link",
+                    format!(
+                        "<{base_url}/repos/heddle/repo/issues/439/comments?per_page={GITHUB_PER_PAGE}&page=2>; rel=\"next\""
+                    ),
+                ),
+                MockResponse::json(404, "[]".to_string()),
+            ]
+        })
+        .await;
+        let err = client_for(&base_url)
+            .fetch_comment_pages(
+                format!("{base_url}/repos/heddle/repo/issues/439/comments?per_page=100"),
+                false,
+                None,
+            )
+            .await
+            .expect_err("comment pagination failure must not return partial comments");
+        assert!(
+            err.to_string()
+                .contains("pull request comments fetch failed")
         );
     }
 
