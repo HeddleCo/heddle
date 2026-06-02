@@ -1156,9 +1156,9 @@ fn mark_missing_blobs_for_state(
         .store()
         .get_state(&state_id)?
         .ok_or_else(|| ProtocolError::ObjectNotFound(state_id.to_string_full()))?;
-    let mut missing = collect_missing_blobs(repo, &state.tree);
+    let mut missing = collect_missing_blobs(repo, &state.tree)?;
     if let Some(context_root) = state.context.as_ref() {
-        missing.extend(collect_missing_blobs(repo, context_root));
+        missing.extend(collect_missing_blobs(repo, context_root)?);
     }
     missing
         .into_iter()
@@ -1173,41 +1173,56 @@ fn clear_missing_blobs_for_state(
         .store()
         .get_state(&state_id)?
         .ok_or_else(|| ProtocolError::ObjectNotFound(state_id.to_string_full()))?;
-    let mut missing = collect_missing_blobs(repo, &state.tree);
+    let mut missing = collect_missing_blobs(repo, &state.tree)?;
     if let Some(context_root) = state.context.as_ref() {
-        missing.extend(collect_missing_blobs(repo, context_root));
+        missing.extend(collect_missing_blobs(repo, context_root)?);
     }
     missing
         .into_iter()
         .try_for_each(|hash| repo.clear_missing_blob(&hash).map_err(ProtocolError::from))
 }
 
-fn collect_missing_blobs(repo: &Repository, tree_hash: &ContentHash) -> Vec<ContentHash> {
+fn collect_missing_blobs(
+    repo: &Repository,
+    tree_hash: &ContentHash,
+) -> Result<Vec<ContentHash>, ProtocolError> {
     let mut missing = Vec::new();
-    collect_missing_blobs_recursive(repo, tree_hash, &mut missing);
-    missing
+    collect_missing_blobs_recursive(repo, tree_hash, &mut missing)?;
+    Ok(missing)
 }
 
 fn collect_missing_blobs_recursive(
     repo: &Repository,
     tree_hash: &ContentHash,
     missing: &mut Vec<ContentHash>,
-) {
-    let Some(tree) = repo.store().get_tree(tree_hash).ok().flatten() else {
-        return;
+) -> Result<(), ProtocolError> {
+    let Some(tree) = repo.store().get_tree(tree_hash).map_err(|err| {
+        ProtocolError::InvalidState(format!(
+            "load tree {} while collecting lazy hydration missing blobs: {err}",
+            tree_hash.to_hex()
+        ))
+    })?
+    else {
+        return Ok(());
     };
     for entry in tree.entries() {
         match entry.entry_type {
             objects::object::EntryType::Blob | objects::object::EntryType::Symlink => {
-                if !repo.store().has_blob(&entry.hash).unwrap_or(true) {
+                if !repo.store().has_blob(&entry.hash).map_err(|err| {
+                    ProtocolError::InvalidState(format!(
+                        "check blob {} while collecting lazy hydration missing blobs: {err}",
+                        entry.hash.to_hex()
+                    ))
+                })? {
                     missing.push(entry.hash);
                 }
             }
             objects::object::EntryType::Tree => {
-                collect_missing_blobs_recursive(repo, &entry.hash, missing);
+                collect_missing_blobs_recursive(repo, &entry.hash, missing)?;
             }
         }
     }
+    Ok(())
 }
 
 fn partial_fetch_status_for_repo(repo: &Repository) -> i32 {
@@ -1314,7 +1329,10 @@ fn preferred_transport_mode(
 mod tests {
     use chrono::{TimeZone, Utc};
     use grpc::heddle::v1::push_message;
-    use objects::object::{ChangeId, ContentHash, Principal, Redaction};
+    use objects::{
+        object::{Blob, ChangeId, ContentHash, Principal, Redaction, Tree, TreeEntry},
+        store::ObjectStore,
+    };
     use proto::{ObjectId, ObjectInfo};
     use tempfile::TempDir;
 
@@ -1339,6 +1357,16 @@ mod tests {
         ContentHash::from_bytes([7u8; 32])
     }
 
+    fn loose_tree_path(repo: &Repository, hash: &ContentHash) -> std::path::PathBuf {
+        let hex = hash.to_hex();
+        let (prefix, rest) = hex.split_at(2);
+        repo.heddle_dir()
+            .join("objects")
+            .join("trees")
+            .join(prefix)
+            .join(rest)
+    }
+
     fn sample_redaction(blob: ContentHash) -> Redaction {
         Redaction {
             redacted_blob: blob,
@@ -1354,6 +1382,53 @@ mod tests {
             purged_at: None,
             supersedes: None,
         }
+    }
+
+    #[test]
+    fn collect_missing_blobs_treats_absent_tree_as_empty() {
+        let (_dir, repo) = temp_repo();
+        let absent_tree = ContentHash::from_bytes([99u8; 32]);
+
+        let missing =
+            collect_missing_blobs(&repo, &absent_tree).expect("absent tree is not an error");
+
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn collect_missing_blobs_reports_only_genuinely_missing_blobs() {
+        let (_dir, repo) = temp_repo();
+        let present_blob = Blob::from("already local");
+        let present_hash = repo.store().put_blob(&present_blob).expect("put blob");
+        let missing_hash = ContentHash::from_bytes([42u8; 32]);
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file("local.txt", present_hash, false).expect("present entry"),
+            TreeEntry::file("remote.txt", missing_hash, false).expect("missing entry"),
+        ]);
+        let tree_hash = repo.store().put_tree(&tree).expect("put tree");
+
+        let missing = collect_missing_blobs(&repo, &tree_hash).expect("collect missing blobs");
+
+        assert_eq!(missing, vec![missing_hash]);
+    }
+
+    #[test]
+    fn collect_missing_blobs_reports_corrupt_tree_read() {
+        let (_dir, repo) = temp_repo();
+        let tree_hash = repo.store().put_tree(&Tree::new()).expect("put tree");
+        std::fs::write(loose_tree_path(&repo, &tree_hash), [0xc1]).expect("corrupt tree");
+        repo.store().clear_recent_caches();
+
+        let err = collect_missing_blobs(&repo, &tree_hash).expect_err("corrupt tree must fail");
+
+        assert!(matches!(err, ProtocolError::InvalidState(_)));
+        assert!(
+            err.to_string().contains(&format!(
+                "load tree {} while collecting lazy hydration missing blobs",
+                tree_hash.to_hex()
+            )),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
