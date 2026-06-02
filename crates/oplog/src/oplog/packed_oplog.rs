@@ -1466,8 +1466,12 @@ fn parse_header_with_cursor(bytes: &[u8]) -> Result<(PackedHeader, Cursor<'_>)> 
 }
 
 fn read_header(path: &Path) -> Result<PackedHeader> {
-    let bytes = std::fs::read(path)?;
-    if bytes.len() < LEGACY_HEADER_LEN as usize {
+    // Read only the largest supported fixed header, never the whole file: this
+    // path backs the O(1) `head_id`/`is_latest` per-read reconciliation checks.
+    let file = File::open(path)?;
+    let mut bytes = Vec::with_capacity(V4_HEADER_LEN as usize);
+    file.take(V4_HEADER_LEN).read_to_end(&mut bytes)?;
+    if (bytes.len() as u64) < LEGACY_HEADER_LEN {
         return Err(HeddleError::InvalidObject("oplog truncated".to_string()));
     }
     parse_header(&bytes)
