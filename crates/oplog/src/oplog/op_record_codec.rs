@@ -72,7 +72,8 @@ impl VersionedOpRecordSchema for CurrentOpRecordSchema {
     const NAME: &'static str = "current-v3";
 
     fn decode(bytes: &[u8]) -> Result<OpRecord> {
-        decode_rmp(bytes, Self::NAME)
+        let record: StrictCurrentOpRecord = decode_rmp(bytes, Self::NAME)?;
+        Ok(record.into_current())
     }
 }
 
@@ -127,11 +128,11 @@ pub(crate) fn encode_latest_record(record: &OpRecord) -> Result<Vec<u8>> {
     rmp_serde::to_vec(record).map_err(|e| HeddleError::Serialization(e.to_string()))
 }
 
-pub(crate) fn candidate_versions_oldest_first() -> [OpRecordSchemaVersion; 3] {
+pub(crate) fn candidate_versions_newest_first() -> [OpRecordSchemaVersion; 3] {
     [
-        OpRecordSchemaVersion::PreAtomic,
-        OpRecordSchemaVersion::AtomicNoHead,
         OpRecordSchemaVersion::Current,
+        OpRecordSchemaVersion::AtomicNoHead,
+        OpRecordSchemaVersion::PreAtomic,
     ]
 }
 
@@ -144,6 +145,294 @@ where
             "failed to decode OpRecord payload as {schema_name}: {e}"
         ))
     })
+}
+
+/// Strict frozen snapshot of the current record schema.
+///
+/// `OpRecord` keeps `serde(default)` on some tail fields for general
+/// compatibility, but unversioned schema probing must not let legacy-short
+/// reshaped variants decode as current. This mirror has no defaults: a current
+/// `Snapshot` must carry `head`, a current `Goto` must carry `head`, and current
+/// `Fork`/`Collapse` must carry their published-ref tail fields.
+#[derive(Debug, Clone, Deserialize)]
+enum StrictCurrentOpRecord {
+    Snapshot {
+        new_state: ChangeId,
+        prev_head: Option<ChangeId>,
+        head: Option<ChangeId>,
+        thread: Option<String>,
+    },
+    Goto {
+        target: ChangeId,
+        prev_head: Option<ChangeId>,
+        head: ChangeId,
+    },
+    ThreadCreate {
+        name: String,
+        state: ChangeId,
+    },
+    ThreadDelete {
+        name: String,
+        state: ChangeId,
+    },
+    ThreadUpdate {
+        name: String,
+        old_state: ChangeId,
+        new_state: ChangeId,
+    },
+    Fork {
+        from: ChangeId,
+        new_state: ChangeId,
+        thread: Option<String>,
+        head: Option<ChangeId>,
+    },
+    Collapse {
+        sources: Vec<ChangeId>,
+        result: ChangeId,
+        thread: Option<String>,
+    },
+    MarkerCreate {
+        name: String,
+        state: ChangeId,
+    },
+    MarkerDelete {
+        name: String,
+        state: ChangeId,
+    },
+    Checkpoint {
+        parent: Option<ChangeId>,
+        state: ChangeId,
+        thread: Option<String>,
+    },
+    TransactionAbort {
+        transaction_id: String,
+        reason: String,
+    },
+    EphemeralThreadCollapse {
+        thread: String,
+        final_state: ChangeId,
+    },
+    ConflictResolved {
+        conflict_id: String,
+        resolution: String,
+    },
+    TransactionCommit {
+        transaction_id: String,
+        op_count: u32,
+    },
+    Redact {
+        redaction_id: ContentHash,
+        blob: ContentHash,
+        state: ChangeId,
+        path: String,
+    },
+    Purge {
+        redaction_id: ContentHash,
+        blob: ContentHash,
+    },
+    FastForward {
+        source_thread: String,
+        target_thread: String,
+        pre_target_id: ChangeId,
+    },
+    FastForwardV2 {
+        source_thread: String,
+        target_thread: String,
+        pre_target_id: ChangeId,
+        post_target_id: ChangeId,
+    },
+    ThreadCreateV2 {
+        name: String,
+        state: ChangeId,
+        manager_snapshot: Option<Vec<u8>>,
+    },
+    GitCheckpoint {
+        branch: String,
+        state: ChangeId,
+        previous_git_oid: Option<String>,
+        new_git_oid: String,
+    },
+    RemoteThreadUpdate {
+        remote: String,
+        thread: String,
+        state: ChangeId,
+    },
+    RemoteThreadDelete {
+        remote: String,
+        thread: String,
+        state: ChangeId,
+    },
+    UndoRecoveryUpdate {
+        state: ChangeId,
+    },
+}
+
+impl StrictCurrentOpRecord {
+    fn into_current(self) -> OpRecord {
+        match self {
+            Self::Snapshot {
+                new_state,
+                prev_head,
+                head,
+                thread,
+            } => OpRecord::Snapshot {
+                new_state,
+                prev_head,
+                head,
+                thread,
+            },
+            Self::Goto {
+                target,
+                prev_head,
+                head,
+            } => OpRecord::Goto {
+                target,
+                prev_head,
+                head,
+            },
+            Self::ThreadCreate { name, state } => OpRecord::ThreadCreate { name, state },
+            Self::ThreadDelete { name, state } => OpRecord::ThreadDelete { name, state },
+            Self::ThreadUpdate {
+                name,
+                old_state,
+                new_state,
+            } => OpRecord::ThreadUpdate {
+                name,
+                old_state,
+                new_state,
+            },
+            Self::Fork {
+                from,
+                new_state,
+                thread,
+                head,
+            } => OpRecord::Fork {
+                from,
+                new_state,
+                thread,
+                head,
+            },
+            Self::Collapse {
+                sources,
+                result,
+                thread,
+            } => OpRecord::Collapse {
+                sources,
+                result,
+                thread,
+            },
+            Self::MarkerCreate { name, state } => OpRecord::MarkerCreate { name, state },
+            Self::MarkerDelete { name, state } => OpRecord::MarkerDelete { name, state },
+            Self::Checkpoint {
+                parent,
+                state,
+                thread,
+            } => OpRecord::Checkpoint {
+                parent,
+                state,
+                thread,
+            },
+            Self::TransactionAbort {
+                transaction_id,
+                reason,
+            } => OpRecord::TransactionAbort {
+                transaction_id,
+                reason,
+            },
+            Self::EphemeralThreadCollapse {
+                thread,
+                final_state,
+            } => OpRecord::EphemeralThreadCollapse {
+                thread,
+                final_state,
+            },
+            Self::ConflictResolved {
+                conflict_id,
+                resolution,
+            } => OpRecord::ConflictResolved {
+                conflict_id,
+                resolution,
+            },
+            Self::TransactionCommit {
+                transaction_id,
+                op_count,
+            } => OpRecord::TransactionCommit {
+                transaction_id,
+                op_count,
+            },
+            Self::Redact {
+                redaction_id,
+                blob,
+                state,
+                path,
+            } => OpRecord::Redact {
+                redaction_id,
+                blob,
+                state,
+                path,
+            },
+            Self::Purge { redaction_id, blob } => OpRecord::Purge { redaction_id, blob },
+            Self::FastForward {
+                source_thread,
+                target_thread,
+                pre_target_id,
+            } => OpRecord::FastForward {
+                source_thread,
+                target_thread,
+                pre_target_id,
+            },
+            Self::FastForwardV2 {
+                source_thread,
+                target_thread,
+                pre_target_id,
+                post_target_id,
+            } => OpRecord::FastForwardV2 {
+                source_thread,
+                target_thread,
+                pre_target_id,
+                post_target_id,
+            },
+            Self::ThreadCreateV2 {
+                name,
+                state,
+                manager_snapshot,
+            } => OpRecord::ThreadCreateV2 {
+                name,
+                state,
+                manager_snapshot,
+            },
+            Self::GitCheckpoint {
+                branch,
+                state,
+                previous_git_oid,
+                new_git_oid,
+            } => OpRecord::GitCheckpoint {
+                branch,
+                state,
+                previous_git_oid,
+                new_git_oid,
+            },
+            Self::RemoteThreadUpdate {
+                remote,
+                thread,
+                state,
+            } => OpRecord::RemoteThreadUpdate {
+                remote,
+                thread,
+                state,
+            },
+            Self::RemoteThreadDelete {
+                remote,
+                thread,
+                state,
+            } => OpRecord::RemoteThreadDelete {
+                remote,
+                thread,
+                state,
+            },
+            Self::UndoRecoveryUpdate { state } => OpRecord::UndoRecoveryUpdate { state },
+        }
+    }
 }
 
 /// Frozen `OpRecord` snapshot from immediately before 7125992
@@ -412,15 +701,12 @@ enum AtomicNoHeadOpRecord {
     Fork {
         from: ChangeId,
         new_state: ChangeId,
-        #[serde(default)]
         thread: Option<String>,
-        #[serde(default)]
         head: Option<ChangeId>,
     },
     Collapse {
         sources: Vec<ChangeId>,
         result: ChangeId,
-        #[serde(default)]
         thread: Option<String>,
     },
     MarkerCreate {
@@ -829,16 +1115,165 @@ mod tests {
         );
         assert!(schema_version_from_u32(99).is_err());
         assert_eq!(
-            candidate_versions_oldest_first()
+            candidate_versions_newest_first()
                 .into_iter()
                 .map(OpRecordSchemaVersion::number)
                 .collect::<Vec<_>>(),
             vec![
-                PreAtomicOpRecordSchema::VERSION,
-                AtomicNoHeadOpRecordSchema::VERSION,
                 CurrentOpRecordSchema::VERSION,
+                AtomicNoHeadOpRecordSchema::VERSION,
+                PreAtomicOpRecordSchema::VERSION,
             ]
         );
+    }
+
+    #[test]
+    fn current_nil_head_snapshot_serializes_required_nil_and_preserves_thread() {
+        let record = OpRecord::Snapshot {
+            new_state: cid(1),
+            prev_head: Some(cid(2)),
+            head: None,
+            thread: Some("main".into()),
+        };
+        let bytes = encode_latest_record(&record).unwrap();
+
+        let current = CurrentOpRecordSchema::decode(&bytes).unwrap();
+        assert_same_record(&current, &record);
+        assert!(PreAtomicOpRecordSchema::decode(&bytes).is_err());
+        assert!(AtomicNoHeadOpRecordSchema::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn migration_sensitive_legacy_shapes_do_not_decode_as_current() {
+        let pre_atomic_reshaped = [
+            OpRecord::Snapshot {
+                new_state: cid(1),
+                prev_head: None,
+                head: Some(cid(1)),
+                thread: None,
+            },
+            OpRecord::Snapshot {
+                new_state: cid(2),
+                prev_head: Some(cid(1)),
+                head: None,
+                thread: Some("main".into()),
+            },
+            OpRecord::Goto {
+                target: cid(3),
+                prev_head: Some(cid(2)),
+                head: cid(3),
+            },
+            OpRecord::Fork {
+                from: cid(4),
+                new_state: cid(5),
+                thread: None,
+                head: None,
+            },
+            OpRecord::Collapse {
+                sources: vec![cid(4), cid(5)],
+                result: cid(6),
+                thread: None,
+            },
+        ];
+        for legacy in pre_atomic_reshaped {
+            let bytes = tests_support::encode_pre_atomic(&legacy).unwrap();
+            assert!(
+                CurrentOpRecordSchema::decode(&bytes).is_err(),
+                "pre-atomic {legacy:?} must not decode as current"
+            );
+        }
+
+        let atomic_no_head_requires_head = [
+            OpRecord::Snapshot {
+                new_state: cid(7),
+                prev_head: None,
+                head: Some(cid(7)),
+                thread: None,
+            },
+            OpRecord::Snapshot {
+                new_state: cid(8),
+                prev_head: Some(cid(7)),
+                head: None,
+                thread: Some("main".into()),
+            },
+            OpRecord::Goto {
+                target: cid(9),
+                prev_head: Some(cid(8)),
+                head: cid(9),
+            },
+        ];
+        for legacy in atomic_no_head_requires_head {
+            let bytes = tests_support::encode_atomic_no_head(&legacy).unwrap();
+            assert!(
+                CurrentOpRecordSchema::decode(&bytes).is_err(),
+                "atomic-no-head {legacy:?} must not decode as current"
+            );
+        }
+    }
+
+    #[test]
+    fn pre_atomic_fork_and_collapse_do_not_decode_as_atomic_no_head() {
+        let pre_atomic_only_shapes = [
+            OpRecord::Fork {
+                from: cid(1),
+                new_state: cid(2),
+                thread: None,
+                head: None,
+            },
+            OpRecord::Collapse {
+                sources: vec![cid(1), cid(2)],
+                result: cid(3),
+                thread: None,
+            },
+        ];
+
+        for legacy in pre_atomic_only_shapes {
+            let bytes = tests_support::encode_pre_atomic(&legacy).unwrap();
+            assert!(
+                AtomicNoHeadOpRecordSchema::decode(&bytes).is_err(),
+                "pre-atomic {legacy:?} must fall through atomic-no-head probing"
+            );
+        }
+    }
+
+    #[test]
+    fn atomic_no_head_same_shape_tail_records_decode_identically_as_current() {
+        let same_shape_records = [
+            OpRecord::Fork {
+                from: cid(10),
+                new_state: cid(11),
+                thread: Some("topic".into()),
+                head: None,
+            },
+            OpRecord::Fork {
+                from: cid(12),
+                new_state: cid(13),
+                thread: None,
+                head: Some(cid(13)),
+            },
+            OpRecord::Collapse {
+                sources: vec![cid(10), cid(11)],
+                result: cid(14),
+                thread: Some("main".into()),
+            },
+            OpRecord::RemoteThreadUpdate {
+                remote: "origin".into(),
+                thread: "main".into(),
+                state: cid(15),
+            },
+            OpRecord::RemoteThreadDelete {
+                remote: "origin".into(),
+                thread: "old".into(),
+                state: cid(16),
+            },
+            OpRecord::UndoRecoveryUpdate { state: cid(17) },
+        ];
+
+        for expected in same_shape_records {
+            let bytes = tests_support::encode_atomic_no_head(&expected).unwrap();
+            let decoded = CurrentOpRecordSchema::decode(&bytes).unwrap();
+            assert_same_record(&decoded, &expected);
+        }
     }
 
     #[test]

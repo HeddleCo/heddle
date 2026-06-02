@@ -19,7 +19,7 @@ use objects::{
 
 use super::{
     op_record_codec::{
-        LATEST_RECORD_SCHEMA_VERSION, OpRecordSchemaVersion, candidate_versions_oldest_first,
+        LATEST_RECORD_SCHEMA_VERSION, OpRecordSchemaVersion, candidate_versions_newest_first,
         decode_versioned_record, encode_latest_record, schema_version_from_u32,
     },
     oplog_types::{OpBatch, OpEntry, OpRecord},
@@ -1492,7 +1492,7 @@ fn parse_entries_unversioned(
     entry_count: usize,
 ) -> Result<(Vec<OpEntry>, OpRecordSchemaVersion)> {
     let mut errors = Vec::new();
-    for schema in candidate_versions_oldest_first() {
+    for schema in candidate_versions_newest_first() {
         let mut cursor = Cursor::new(bytes);
         match parse_entries_with_schema(&mut cursor, entry_count, schema) {
             Ok(entries) if cursor.offset == bytes.len() => return Ok((entries, schema)),
@@ -2004,6 +2004,42 @@ mod tests {
         std::fs::write(path, bytes).unwrap();
     }
 
+    fn write_current_v3(path: &Path, entries: &[OpEntry], head_id: u64) {
+        let mut bytes = Vec::new();
+        write_header_to_vec(
+            &mut bytes,
+            u32::from(V3::VERSION),
+            entries.len() as u64,
+            head_id,
+        );
+        let mut entry_offsets = Vec::with_capacity(entries.len());
+        for entry in entries {
+            entry_offsets.push(EntryOffsetRecord {
+                entry_id: entry.id,
+                entry_offset: bytes.len() as u64,
+            });
+            encode_entry(entry, &mut bytes).unwrap();
+        }
+        let entry_data_end = bytes.len() as u64;
+        let batch_index =
+            build_index_sections(entries.iter().cloned().zip(entry_offsets.iter().copied()))
+                .unwrap();
+        write_index_sections_to_vec(
+            &mut bytes,
+            IndexWritePlan {
+                entry_data_end,
+                entry_offsets: &entry_offsets,
+                batch_offsets: &batch_index.batch_offsets,
+                batch_dir: &batch_index.batch_dir,
+                tx_key_bytes: &batch_index.tx_key_bytes,
+                tx_dir: &batch_index.tx_dir,
+                entry_count: entries.len() as u64,
+                head_id,
+            },
+        );
+        std::fs::write(path, bytes).unwrap();
+    }
+
     #[test]
     fn round_trip_empty() {
         let tmp = TempDir::new().unwrap();
@@ -2326,6 +2362,161 @@ mod tests {
         PackedOpLog::ensure_latest(&path).unwrap();
         let index = PackedOpLogIndex::open(&path).unwrap();
         assert_eq!(index.transaction_commit("tx-atomic").unwrap(), Some((6, 3)));
+    }
+
+    #[test]
+    fn current_v3_attached_nil_head_snapshot_migrates_without_losing_thread() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("oplog.bin");
+        let snapshot_state = ChangeId::generate();
+        let mut snapshot = make_batch_entry(1, 1, 0, Some("lane"));
+        snapshot.operation = OpRecord::Snapshot {
+            new_state: snapshot_state,
+            prev_head: None,
+            head: None,
+            thread: Some("main".to_string()),
+        };
+        write_current_v3(&path, &[snapshot], 1);
+
+        assert_eq!(
+            read_header(&path).unwrap().record_schema_version,
+            None,
+            "v3 is intentionally unversioned"
+        );
+        let loaded = PackedOpLog::load(&path).unwrap();
+        assert!(matches!(
+            &loaded.entries[0].operation,
+            OpRecord::Snapshot { head: None, thread: Some(thread), .. } if thread == "main"
+        ));
+
+        PackedOpLog::ensure_latest(&path).unwrap();
+        assert_eq!(
+            read_header(&path).unwrap().record_schema_version,
+            Some(OpRecordSchemaVersion::Current)
+        );
+        let migrated = PackedOpLog::load(&path).unwrap();
+        assert!(matches!(
+            &migrated.entries[0].operation,
+            OpRecord::Snapshot { new_state, head: None, thread: Some(thread), .. }
+                if *new_state == snapshot_state && thread == "main"
+        ));
+    }
+
+    #[test]
+    fn current_v3_records_are_semantically_identical_after_ensure_latest() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("oplog.bin");
+        let state_1 = ChangeId::generate();
+        let state_2 = ChangeId::generate();
+        let state_3 = ChangeId::generate();
+        let state_4 = ChangeId::generate();
+        let state_5 = ChangeId::generate();
+        let state_6 = ChangeId::generate();
+        let state_7 = ChangeId::generate();
+        let state_8 = ChangeId::generate();
+
+        let mut entries = Vec::new();
+        let mut attached_snapshot = make_batch_entry(1, 1, 0, Some("lane"));
+        attached_snapshot.operation = OpRecord::Snapshot {
+            new_state: state_1,
+            prev_head: None,
+            head: None,
+            thread: Some("main".to_string()),
+        };
+        entries.push(attached_snapshot);
+
+        let mut detached_snapshot = make_batch_entry(2, 2, 0, Some("lane"));
+        detached_snapshot.operation = OpRecord::Snapshot {
+            new_state: state_2,
+            prev_head: Some(state_1),
+            head: Some(state_2),
+            thread: None,
+        };
+        entries.push(detached_snapshot);
+
+        let mut goto = make_batch_entry(3, 3, 0, Some("lane"));
+        goto.operation = OpRecord::Goto {
+            target: state_3,
+            prev_head: Some(state_2),
+            head: state_3,
+        };
+        entries.push(goto);
+
+        let mut fork_thread = make_batch_entry(4, 4, 0, Some("lane"));
+        fork_thread.operation = OpRecord::Fork {
+            from: state_3,
+            new_state: state_4,
+            thread: Some("topic".to_string()),
+            head: None,
+        };
+        entries.push(fork_thread);
+
+        let mut fork_head = make_batch_entry(5, 5, 0, Some("lane"));
+        fork_head.operation = OpRecord::Fork {
+            from: state_4,
+            new_state: state_5,
+            thread: None,
+            head: Some(state_5),
+        };
+        entries.push(fork_head);
+
+        let mut collapse = make_batch_entry(6, 6, 0, Some("lane"));
+        collapse.operation = OpRecord::Collapse {
+            sources: vec![state_4, state_5],
+            result: state_6,
+            thread: Some("main".to_string()),
+        };
+        entries.push(collapse);
+
+        let mut remote_update = make_batch_entry(7, 7, 0, Some("lane"));
+        remote_update.operation = OpRecord::RemoteThreadUpdate {
+            remote: "origin".to_string(),
+            thread: "main".to_string(),
+            state: state_7,
+        };
+        entries.push(remote_update);
+
+        let mut remote_delete = make_batch_entry(8, 8, 0, Some("lane"));
+        remote_delete.operation = OpRecord::RemoteThreadDelete {
+            remote: "origin".to_string(),
+            thread: "old".to_string(),
+            state: state_7,
+        };
+        entries.push(remote_delete);
+
+        let mut undo = make_batch_entry(9, 9, 0, Some("lane"));
+        undo.operation = OpRecord::UndoRecoveryUpdate { state: state_8 };
+        entries.push(undo);
+
+        write_current_v3(&path, &entries, 9);
+        let before = PackedOpLog::load(&path).unwrap();
+        let before_entries = before
+            .entries
+            .iter()
+            .map(|entry| format!("{entry:?}"))
+            .collect::<Vec<_>>();
+        let before_payloads = before
+            .entries
+            .iter()
+            .map(|entry| encode_latest_record(&entry.operation).unwrap())
+            .collect::<Vec<_>>();
+
+        PackedOpLog::ensure_latest(&path).unwrap();
+        let after = PackedOpLog::load(&path).unwrap();
+        let after_entries = after
+            .entries
+            .iter()
+            .map(|entry| format!("{entry:?}"))
+            .collect::<Vec<_>>();
+        let after_payloads = after
+            .entries
+            .iter()
+            .map(|entry| encode_latest_record(&entry.operation).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(after_entries, before_entries);
+        assert_eq!(after_payloads, before_payloads);
+        assert_eq!(PackedOpLog::read_head_id(&path).unwrap(), 9);
     }
 
     #[test]
