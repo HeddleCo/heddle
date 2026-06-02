@@ -193,6 +193,52 @@ pub fn print_direct_help_for_raw(
     })
 }
 
+/// Clap arg ids of the agent-automation flags on `capture` that are
+/// `hide = true` in the everyday surface. Kept in sync with
+/// `SnapshotArgs` (see `cli_args/commands_args.rs`); the
+/// `capture_agent_flags_hidden_by_default_revealed_on_demand` test fails
+/// if an id here no longer maps to a hidden `capture` arg.
+const CAPTURE_AGENT_FLAG_IDS: &[&str] = &[
+    "agent_provider",
+    "agent_model",
+    "agent_session",
+    "agent_segment",
+    "policy",
+    "no_policy",
+    "no_agent",
+    "split",
+    "into",
+    "paths",
+];
+
+/// Return a copy of `command` with the agent-automation flags un-hidden,
+/// so `print_long_help` renders them. Used by `capture --help-agent`.
+fn reveal_capture_agent_flags(command: clap::Command) -> clap::Command {
+    command.mut_args(|arg| {
+        if CAPTURE_AGENT_FLAG_IDS.contains(&arg.get_id().as_str()) {
+            arg.hide(false)
+        } else {
+            arg
+        }
+    })
+}
+
+/// Render `capture`'s clap-derived help with the hidden agent-automation
+/// flags revealed. Called from the `Commands::Capture` dispatch arm once
+/// clap has parsed `--help-agent` (a first-class flag on `capture`).
+///
+/// Because clap owns the parsing, every global spelling it accepts —
+/// `-C <path>`, `--output <fmt>`, clustered `-vC <path>`, attached forms, in
+/// any legal position — is handled natively; there is no hand-rolled
+/// pre-parse token scan to keep in sync with clap's grammar.
+pub fn print_capture_agent_help(cmd: &clap::Command) -> std::io::Result<()> {
+    let capture = find_subcommand_or_alias(cmd, "capture")
+        .expect("capture subcommand exists in the clap command tree");
+    let bin_name = format!("{} {}", cmd.get_name(), capture.get_name());
+    let mut help = reveal_capture_agent_flags(capture.clone()).bin_name(bin_name);
+    help.print_long_help()
+}
+
 fn help_command_for_path(cmd: &clap::Command, path: &[String]) -> Option<clap::Command> {
     if path.is_empty() {
         return None;
@@ -225,6 +271,31 @@ fn help_command_for_path(cmd: &clap::Command, path: &[String]) -> Option<clap::C
         help = help.arg(arg.clone().hide(false).value_name("UUID"));
     }
     Some(help)
+}
+
+/// Whether `token` names an option on `command` — in either its `--long`
+/// or `-x` separated spelling — and, if so, whether the following token is
+/// that option's value. Used by the `heddle <path> --help` pre-parse scan
+/// (`command_path_from_raw_help_request`) so a valued global before the verb
+/// (`-C <path>`, `--output <fmt>`) isn't mistaken for the command path.
+/// Derived from clap's own arg definitions, so short and long forms stay
+/// covered as globals are added or renamed.
+///
+/// Only the *separated* spellings (`-C path`, `--output fmt`) need a
+/// following-value skip. Attached spellings (`--output=fmt`, `-Cpath`,
+/// `-C=path`) carry the value in the same token, so they never set
+/// `skip_next`; the leading-dash fall-through in the scan loop already
+/// drops them without consuming the next token.
+fn global_option_takes_value(command: &clap::Command, token: &str) -> Option<bool> {
+    command
+        .get_arguments()
+        .find(|arg| {
+            arg.get_long().is_some_and(|long| token == format!("--{long}"))
+                || arg
+                    .get_short()
+                    .is_some_and(|short| token == format!("-{short}"))
+        })
+        .map(|arg| arg.get_action().takes_values())
 }
 
 fn find_subcommand_or_alias<'a>(
@@ -260,14 +331,8 @@ fn command_path_from_raw_help_request(cmd: &clap::Command, raw: &[String]) -> Op
         if token == "--help" || token == "-h" {
             continue;
         }
-        if let Some(arg) = current.get_arguments().find(|arg| {
-            arg.get_long()
-                .is_some_and(|long| token == &format!("--{long}"))
-        }) {
-            skip_next = arg.get_action().takes_values();
-            continue;
-        }
-        if token.starts_with("--") {
+        if let Some(takes_value) = global_option_takes_value(current, token) {
+            skip_next = takes_value;
             continue;
         }
         if token.starts_with('-') {
@@ -286,6 +351,7 @@ fn command_path_from_raw_help_request(cmd: &clap::Command, raw: &[String]) -> Op
 pub fn topic_text(topic: &str) -> Option<&'static str> {
     Some(match topic {
         "advanced" => ADVANCED_HELP,
+        "agent-flags" => AGENT_FLAGS_TOPIC,
         "agent" | "daemon" => DAEMON_TOPIC,
         "git-overlay" => GIT_OVERLAY_TOPIC,
         "model" | "mental-model" | "concepts" => MODEL_TOPIC,
@@ -313,6 +379,36 @@ docs.\n\
 This is intentional. The everyday surface stays minimal so first-time users aren't\n\
 overwhelmed; agents and power users reach for the advanced affordances when they\n\
 need them.\n";
+
+const AGENT_FLAGS_TOPIC: &str = r#"Agent automation flags for `heddle capture`.
+
+These flags are hidden from the everyday `heddle capture --help` so it stays
+terse for human use. They let an automated caller override agent attribution
+and split captures across threads. Run `heddle capture --help-agent` to see
+them inline in capture's own help.
+
+Attribution overrides (each falls back to the matching env var, then config):
+
+  --agent-provider <NAME>   Override HEDDLE_AGENT_PROVIDER.
+  --agent-model <NAME>      Override HEDDLE_AGENT_MODEL.
+  --agent-session <ID>      Override the active agent session id (HEDDLE_SESSION_ID).
+  --agent-segment <ID>      Override the active session segment (HEDDLE_SESSION_SEGMENT).
+  --policy <ID>             Override HEDDLE_AGENT_POLICY.
+  --no-policy               Omit policy attribution.
+  --no-agent                Omit agent attribution.
+
+Path splitting (no env equivalent):
+
+  --split                   Split selected paths into another thread instead of
+                            capturing the whole worktree.
+  --into <THREAD>           Target thread when using --split.
+  --path <PATH>             Repository-relative path prefix to include with
+                            --split (repeatable).
+
+Attribution precedence (highest first): explicit flag, active thread actor,
+env var, harness probe, active session, user config, repo config. See
+`crates/cli/src/cli/commands/snapshot.rs` for the full cascade.
+"#;
 
 const DAEMON_TOPIC: &str = "Two daemons — both have legitimate uses; they are not interchangeable.\n\
 \n\
@@ -704,6 +800,7 @@ mod tests {
     fn topic_text_returns_some_for_advertised_topics() {
         for topic in [
             "advanced",
+            "agent-flags",
             "git-overlay",
             "agent",
             "daemon",
@@ -787,6 +884,168 @@ mod tests {
                 "`{verb}` belongs behind advanced/topic help, not the core-loop surface"
             );
         }
+    }
+
+    /// heddle#278. The hidden agent-automation flags on `capture` need a
+    /// discovery route: `heddle help agent-flags` must list them with their
+    /// env equivalents.
+    #[test]
+    fn agent_flags_topic_lists_hidden_capture_flags() {
+        let text = topic_text("agent-flags").expect("agent-flags topic should exist");
+        for flag in [
+            "--agent-provider",
+            "--agent-model",
+            "--agent-session",
+            "--agent-segment",
+            "--policy",
+            "--no-policy",
+            "--no-agent",
+            "--split",
+            "--into",
+            "--path",
+        ] {
+            assert!(text.contains(flag), "agent-flags topic missing `{flag}`");
+        }
+        for env in [
+            "HEDDLE_AGENT_PROVIDER",
+            "HEDDLE_AGENT_MODEL",
+            "HEDDLE_AGENT_POLICY",
+            "HEDDLE_SESSION_ID",
+            "HEDDLE_SESSION_SEGMENT",
+        ] {
+            assert!(text.contains(env), "agent-flags topic missing env `{env}`");
+        }
+    }
+
+    /// heddle#278. The agent flags stay `hide = true` in the default surface
+    /// but `--help-agent` reveals every one of them.
+    #[test]
+    fn capture_agent_flags_hidden_by_default_revealed_on_demand() {
+        use clap::CommandFactory;
+        let cmd = crate::cli::cli_args::Cli::command();
+        let capture = cmd
+            .find_subcommand("capture")
+            .expect("capture subcommand exists");
+        for id in CAPTURE_AGENT_FLAG_IDS {
+            let arg = capture
+                .get_arguments()
+                .find(|arg| arg.get_id().as_str() == *id)
+                .unwrap_or_else(|| panic!("capture has no `{id}` arg"));
+            assert!(arg.is_hide_set(), "`{id}` should be hidden by default");
+        }
+        let revealed = reveal_capture_agent_flags(capture.clone());
+        for id in CAPTURE_AGENT_FLAG_IDS {
+            let arg = revealed
+                .get_arguments()
+                .find(|arg| arg.get_id().as_str() == *id)
+                .expect("revealed arg present");
+            assert!(!arg.is_hide_set(), "`{id}` should be revealed by --help-agent");
+        }
+    }
+
+    /// heddle#278 r4 (cid 3327325850). Close-the-class: `--help-agent` is a
+    /// first-class clap flag on `capture`, so clap parses the whole command
+    /// line and the dispatch arm inspects the parsed result. Whether the
+    /// reveal help shows is exactly "did clap resolve `capture` with
+    /// `--help-agent` set?" — no hand-rolled pre-parse verb scan, so every
+    /// global spelling clap accepts is handled for free.
+    ///
+    /// `wants_reveal` mirrors the decision the `Commands::Capture` arm in
+    /// `main.rs` makes (`matches!(cli.command, Commands::Capture(a) if
+    /// a.help_agent)`), driven entirely by clap's parse.
+    fn wants_reveal(args: &[&str]) -> bool {
+        use crate::cli::cli_args::{Cli, Commands};
+        use clap::Parser;
+        let argv = std::iter::once("heddle").chain(args.iter().copied());
+        match Cli::try_parse_from(argv) {
+            Ok(cli) => matches!(&cli.command, Commands::Capture(a) if a.help_agent),
+            // A parse error (e.g. `--help-agent` on a verb that has no such
+            // flag) means: don't reveal — clap reports it as it would any
+            // other invalid invocation.
+            Err(_) => false,
+        }
+    }
+
+    /// heddle#278. `--help-agent` reveals capture's agent flags only for the
+    /// `capture` verb; plain `--help` and `--help-agent` on another verb do
+    /// not.
+    #[test]
+    fn capture_help_agent_is_capture_scoped() {
+        assert!(
+            wants_reveal(&["capture", "--help-agent"]),
+            "capture --help-agent should request the reveal help"
+        );
+        assert!(
+            !wants_reveal(&["status", "--help-agent"]),
+            "--help-agent on a non-capture verb is not a capture reveal request"
+        );
+        // `capture --help` is clap's own help; it exits during parse (a
+        // DisplayHelp error), so it is never a `help_agent` reveal request.
+        assert!(
+            !wants_reveal(&["capture", "--help"]),
+            "plain --help is clap's help, not the agent reveal"
+        );
+    }
+
+    /// heddle#278 r2/r3/r4 (cids 3327112975 / 3327231819 / 3327325850).
+    /// Because clap now owns parsing, every global spelling it accepts —
+    /// long valued (`--output <fmt>`), short valued (`-C <path>`), and
+    /// clustered short (`-vC <path>`) — is handled natively. With a repo dir
+    /// literally named `capture`, the `-C` VALUE must not be read as the verb.
+    /// This is the whole class the per-form pre-scan kept missing.
+    #[test]
+    fn capture_help_agent_handles_every_global_form_clap_accepts() {
+        // Valued global before the verb: long and short, separated forms.
+        assert!(
+            wants_reveal(&["-C", "/tmp/repo", "capture", "--help-agent"]),
+            "`-C <path> capture --help-agent` should reveal — clap parses the path"
+        );
+        assert!(
+            wants_reveal(&["--output", "text", "capture", "--help-agent"]),
+            "`--output text capture --help-agent` should reveal"
+        );
+        // Repo dir named `capture`: the `-C` value is `capture`, the verb is
+        // the following `capture`.
+        assert!(
+            wants_reveal(&["-C", "capture", "capture", "--help-agent"]),
+            "`-C capture capture --help-agent` (repo dir named `capture`) should reveal"
+        );
+        // r4: clustered short global `-vC <path>` — `-v` then valued `-C`.
+        assert!(
+            wants_reveal(&["-vC", "/tmp/repo", "capture", "--help-agent"]),
+            "`-vC <path> capture --help-agent` (clustered short globals) should reveal"
+        );
+        assert!(
+            wants_reveal(&["-vC", "capture", "capture", "--help-agent"]),
+            "`-vC capture capture --help-agent` (clustered, repo dir named `capture`) should reveal"
+        );
+        // Attached short form `-C<path>`: value rides in the token.
+        assert!(
+            wants_reveal(&["-C/tmp/repo", "capture", "--help-agent"]),
+            "`-C<path> capture --help-agent` (attached) should reveal"
+        );
+        // Plain invocation still reveals.
+        assert!(
+            wants_reveal(&["capture", "--help-agent"]),
+            "plain `capture --help-agent` should reveal"
+        );
+
+        // Fall-through cases: the verb is NOT capture, so no reveal. With a
+        // repo dir named `capture`, the `-C` value is consumed by clap and
+        // `status` is the verb — `status` has no `--help-agent`, so clap
+        // errors and we do not reveal.
+        assert!(
+            !wants_reveal(&["-C", "capture", "status", "--help-agent"]),
+            "`-C capture status --help-agent` — verb is `status`, no reveal"
+        );
+        assert!(
+            !wants_reveal(&["-vC", "capture", "status", "--help-agent"]),
+            "`-vC capture status --help-agent` (clustered) — verb is `status`, no reveal"
+        );
+        assert!(
+            !wants_reveal(&["--output", "text", "status", "--help-agent"]),
+            "`--output text status --help-agent` — verb is `status`, no reveal"
+        );
     }
 
     #[test]

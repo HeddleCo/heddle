@@ -225,16 +225,41 @@ fn load_rebase_state_internal(path: &std::path::Path, for_abort: bool) -> Result
                         OpRecord::FastForward { .. }
                         | OpRecord::FastForwardV2 { .. }
                         | OpRecord::Goto { .. } => pending_advances.push(advance),
-                        other if for_abort => {
-                            let _ = other;
-                            continue;
-                        }
-                        other => {
+                        // Anything else would land in the committed batch
+                        // verbatim and pollute undo/redo with records the
+                        // rebase never produced. Abort silently drops them (the
+                        // buffered FF history is discarded on rewind); the
+                        // strict loader rejects. Enumerated explicitly (no
+                        // wildcard) so a new FF-style variant must be decided
+                        // here rather than silently rejected (heddle#354 r9).
+                        OpRecord::Snapshot { .. }
+                        | OpRecord::ThreadCreate { .. }
+                        | OpRecord::ThreadCreateV2 { .. }
+                        | OpRecord::ThreadDelete { .. }
+                        | OpRecord::ThreadUpdate { .. }
+                        | OpRecord::Fork { .. }
+                        | OpRecord::Collapse { .. }
+                        | OpRecord::MarkerCreate { .. }
+                        | OpRecord::MarkerDelete { .. }
+                        | OpRecord::Checkpoint { .. }
+                        | OpRecord::TransactionAbort { .. }
+                        | OpRecord::EphemeralThreadCollapse { .. }
+                        | OpRecord::ConflictResolved { .. }
+                        | OpRecord::TransactionCommit { .. }
+                        | OpRecord::Redact { .. }
+                        | OpRecord::Purge { .. }
+                        | OpRecord::GitCheckpoint { .. }
+                        | OpRecord::RemoteThreadUpdate { .. }
+                        | OpRecord::RemoteThreadDelete { .. }
+                        | OpRecord::UndoRecoveryUpdate { .. } => {
+                            if for_abort {
+                                continue;
+                            }
                             return Err(anyhow!(RecoveryAdvice::rebase_state_corrupted(
                                 "Unexpected pending_advance variant in rebase state",
                                 format!(
                                     "{} — only FastForward/FastForwardV2/Goto are accepted",
-                                    other.description()
+                                    advance.description()
                                 ),
                             )));
                         }

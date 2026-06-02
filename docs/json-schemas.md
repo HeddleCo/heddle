@@ -589,6 +589,27 @@ state and worktree/default comparison target.
 
 ### Sample
 
+Worktree-mode diff (`heddle diff` with no revision args) groups the
+per-file changes into `{modified, added, deleted}` category arrays,
+mirroring the `status` command's `changes` shape so a UI can derive
+add/modify/delete badges from `diff` alone:
+
+```json
+{
+  "output_kind": "diff",
+  "from_state": "hd-base123",
+  "to_state": null,
+  "changes": {
+    "modified": [{"path": "src/lib.rs", "kind": "modified"}],
+    "added": [{"path": "src/new.rs", "kind": "added"}],
+    "deleted": [{"path": "src/old.rs", "kind": "deleted"}]
+  }
+}
+```
+
+A state-to-state diff (`heddle diff <a> <b>`) instead emits `changes` as a
+flat `array<object>` (the shape `merge --with-diff` embeds):
+
 ```json
 {
   "output_kind": "diff",
@@ -602,8 +623,8 @@ state and worktree/default comparison target.
 
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
-| `from_state`, `to_state` | string \| null | required | State identifiers resolved for the comparison. |
-| `changes` | array<object> | required | Structured file-level or semantic changes. Empty when there are no changes. |
+| `from_state`, `to_state` | string \| null | required | State identifiers resolved for the comparison. Worktree-mode diffs leave `to_state` null. |
+| `changes` | object \| array<object> | required | Worktree mode: `{modified, added, deleted}` category arrays (each entry carries `path`, `kind`, and the other per-file diff fields; a `renamed` entry buckets under `modified`). State-to-state mode: a flat `array<object>` of file-level or semantic changes. Empty when there are no changes. |
 | `semantic_changes` | array<object> \| null | optional | Semantic diff entries when semantic analysis is requested and available. |
 | `context`, `broader_guidance` | array<object> \| null | optional | Context snippets and broader guidance when requested. |
 
@@ -1186,7 +1207,7 @@ array.
     "principal_email": "agent@example.com",
     "signals": ["CODEX_THREAD_ID"]
   },
-  "recommended_action": "heddle actor spawn --provider openai --model gpt-5",
+  "recommended_action": "heddle actor spawn --no-thread --provider openai --model gpt-5",
   "verification": {
     "verified": true,
     "status": "clean",
@@ -2960,10 +2981,15 @@ outside clean verification coverage.
 {"output_kind": "bisect_start", "status": "started"}
 ```
 
-`heddle blame --output json` emits:
+`heddle blame --output json` emits structured attribution that mirrors
+`log` / `show`: each line (and each entry in `origins`) carries a
+`principal` object (`name`, `email`) and an `agent` field that is either
+a structured object (`provider`, `model`, optional `session_id` /
+`policy_id`) or `null` for human-only changes — no string-parsing
+required:
 
 ```json
-{"file": "src/lib.rs", "context": [], "lines": [{"line_number": 1, "content": "pub fn run() {}", "change_id": "hd-sqr398dvx9ay", "author": "A. Engineer <a@example.com>", "timestamp": "2026-01-01T00:00:00Z", "origins": [{"change_id": "hd-sqr398dvx9ay", "author": "A. Engineer <a@example.com>", "timestamp": "2026-01-01T00:00:00Z"}]}]}
+{"file": "src/lib.rs", "context": [], "lines": [{"line_number": 1, "content": "pub fn run() {}", "change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z", "origins": [{"change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z"}]}]}
 ```
 
 `heddle bridge git ingest|reason --output json` emit:

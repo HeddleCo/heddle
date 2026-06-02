@@ -242,7 +242,7 @@ impl DiscussionService for LocalDiscussionService {
         let inner = self.inner.clone();
 
         let result = with_idempotency(
-            self.inner.dedup(),
+            &self.inner,
             &client_op_id,
             "discussion.open",
             &req_bytes,
@@ -317,7 +317,7 @@ impl DiscussionService for LocalDiscussionService {
         let inner = self.inner.clone();
 
         let result = with_idempotency(
-            self.inner.dedup(),
+            &self.inner,
             &client_op_id,
             "discussion.append_turn",
             &req_bytes,
@@ -377,7 +377,7 @@ impl DiscussionService for LocalDiscussionService {
         let inner = self.inner.clone();
 
         let result = with_idempotency(
-            self.inner.dedup(),
+            &self.inner,
             &client_op_id,
             "discussion.resolve",
             &req_bytes,

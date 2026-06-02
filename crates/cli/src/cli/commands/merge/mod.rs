@@ -1438,7 +1438,29 @@ fn merge_op_targets_state(op: &OpRecord, state: &ChangeId) -> bool {
             state: checkpoint_state,
             ..
         } => checkpoint_state == state,
-        _ => false,
+        // These records don't advance HEAD/thread to the merge state the merge
+        // flow tracks (legacy V1 `FastForward` carries no post-target id).
+        // Enumerated explicitly (no wildcard) so a new state-advancing variant
+        // must be considered as a possible merge target here (heddle#354 r9).
+        OpRecord::ThreadCreate { .. }
+        | OpRecord::ThreadCreateV2 { .. }
+        | OpRecord::ThreadDelete { .. }
+        | OpRecord::ThreadUpdate { .. }
+        | OpRecord::Fork { .. }
+        | OpRecord::Collapse { .. }
+        | OpRecord::MarkerCreate { .. }
+        | OpRecord::MarkerDelete { .. }
+        | OpRecord::TransactionAbort { .. }
+        | OpRecord::EphemeralThreadCollapse { .. }
+        | OpRecord::ConflictResolved { .. }
+        | OpRecord::TransactionCommit { .. }
+        | OpRecord::Redact { .. }
+        | OpRecord::Purge { .. }
+        | OpRecord::FastForward { .. }
+        | OpRecord::GitCheckpoint { .. }
+        | OpRecord::RemoteThreadUpdate { .. }
+        | OpRecord::RemoteThreadDelete { .. }
+        | OpRecord::UndoRecoveryUpdate { .. } => false,
     }
 }
 

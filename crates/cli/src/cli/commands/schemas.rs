@@ -613,7 +613,8 @@ pub struct BlameLineSchema {
     pub line_number: usize,
     pub content: String,
     pub change_id: String,
-    pub author: String,
+    pub principal: BlamePrincipalSchema,
+    pub agent: Option<BlameAgentSchema>,
     pub timestamp: String,
     pub origins: Option<Vec<BlameOriginSchema>>,
 }
@@ -621,8 +622,25 @@ pub struct BlameLineSchema {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct BlameOriginSchema {
     pub change_id: String,
-    pub author: String,
+    pub principal: BlamePrincipalSchema,
+    pub agent: Option<BlameAgentSchema>,
     pub timestamp: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct BlamePrincipalSchema {
+    pub name: String,
+    pub email: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct BlameAgentSchema {
+    pub provider: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -974,7 +992,12 @@ pub struct DiffSchema {
     pub to_state: Option<String>,
     pub changed_path_count: usize,
     pub stats: DiffStatsSchema,
-    pub changes: Vec<Value>,
+    /// Worktree-mode diff (`heddle diff` with no revision args) groups the
+    /// per-file changes into `{modified, added, deleted}` category arrays,
+    /// mirroring the `status` command's `changes` shape so a UI can derive
+    /// add/modify/delete badges from `diff` alone. A state-to-state diff
+    /// (`heddle diff <a> <b>`) instead emits a flat `array<object>` here.
+    pub changes: DiffChangesSchema,
     pub semantic_changes: Option<Vec<Value>>,
     pub context: Option<Vec<Value>>,
     pub broader_guidance: Option<Vec<Value>>,
@@ -982,6 +1005,32 @@ pub struct DiffSchema {
     /// Present whenever line-level hunks exist, regardless of the
     /// `--patch` CLI flag — JSON consumers always get a parseable diff.
     pub patch: Option<String>,
+}
+
+/// `changes` admits the two documented shapes the `diff` command emits:
+/// worktree mode (`heddle diff` with no revision args) groups entries into
+/// `{modified, added, deleted}` category arrays; a state-to-state diff
+/// (`heddle diff <a> <b>`) emits a flat `array<object>`. The schema is a
+/// union of both so either documented output validates.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(untagged)]
+#[allow(dead_code)]
+pub enum DiffChangesSchema {
+    /// Worktree-mode: per-file diff entries bucketed by category, mirroring
+    /// the `status` command's `{modified, added, deleted}` field names. Each
+    /// entry carries its path plus the per-file diff fields (`kind`,
+    /// `old_path`, `lines`, …). A `renamed` entry buckets under `modified`
+    /// (its `kind`/`old_path` identify the rename).
+    Grouped(DiffChangesGroupedSchema),
+    /// State-to-state: a flat array of per-file diff entries.
+    Flat(Vec<Value>),
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DiffChangesGroupedSchema {
+    pub modified: Vec<Value>,
+    pub added: Vec<Value>,
+    pub deleted: Vec<Value>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

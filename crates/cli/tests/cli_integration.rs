@@ -54,6 +54,8 @@ mod git_overlay_sync_adoption;
 mod git_replacement_matrix;
 #[path = "cli_integration/hooks.rs"]
 mod hooks;
+#[path = "cli_integration/hydrate.rs"]
+mod hydrate;
 #[path = "cli_integration/misc.rs"]
 mod misc;
 #[path = "cli_integration/oss_cli_polish.rs"]
@@ -66,10 +68,10 @@ mod output_kind_runtime;
 mod output_mode_no_auto;
 #[path = "cli_integration/perf_core_loop.rs"]
 mod perf_core_loop;
+#[path = "cli_integration/quickstart.rs"]
+mod quickstart;
 #[path = "cli_integration/realworld_git.rs"]
 mod realworld_git;
-#[path = "cli_integration/hydrate.rs"]
-mod hydrate;
 #[path = "cli_integration/redact_purge.rs"]
 mod redact_purge;
 #[path = "cli_integration/refs_and_history.rs"]

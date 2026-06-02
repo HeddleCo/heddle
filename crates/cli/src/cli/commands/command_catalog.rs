@@ -546,6 +546,22 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         &["thread"],
         true,
     ),
+    // Current-thread drop recovery (heddle#258): switch to a sibling
+    // thread first (or create one) instead of the circular `thread list`.
+    // The `<other>` slot is agent-fillable so a JSON caller can run it
+    // after picking a real sibling thread name.
+    (
+        "heddle thread switch <other>",
+        &["heddle", "thread", "switch", "<other>"],
+        &["other"],
+        true,
+    ),
+    (
+        "heddle thread create <other>",
+        &["heddle", "thread", "create", "<other>"],
+        &["other"],
+        true,
+    ),
     (
         "heddle thread show <THREAD>",
         &["heddle", "thread", "show", "<thread>"],

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Implementation of `heddle start --hydrate`.
+//! Implementation of `heddle start --hydrate` (heddle#302).
 //!
 //! An isolated `heddle start --path` checkout is a faithful *source*
 //! tree: ignored dependency directories (`node_modules`, `.venv`,
@@ -27,6 +27,17 @@
 //! - A **copy** would be correct but expensive; a **post-checkout hook**
 //!   pushes the work back onto the user and isn't a first-class
 //!   affordance. Symlink is the ergonomic + correct middle ground.
+//!
+//! ## Atomicity (heddle#356)
+//!
+//! `--hydrate` is the last fallible leg of `thread start` and can fail on
+//! a host/filesystem that rejects directory symlinks. The whole start runs
+//! under the [`AtomicMutation`](repo::atomic) primitive, so the rollback is
+//! not hand-rolled here: the start mutation calls [`symlink_one`] inside a
+//! `Tx::step`, registering a precise unlink inverse per created link, and
+//! the checkout materialization registers its own dir-rewind inverse. A
+//! partial hydrate (k of N links made, the (k+1)-th fails) unwinds all k
+//! links AND the checkout, back to the exact pre-start state.
 //!
 //! ## Scope
 //!
@@ -93,31 +104,71 @@ pub(crate) fn hydratable_ignored_dirs(repo: &Repository) -> Result<Vec<PathBuf>>
     Ok(dirs)
 }
 
-/// Symlink each directory in `sources` into `checkout`, using the
-/// source's final path component as the link name. Skips any entry whose
-/// destination already exists (captured or pre-staged) so we never
-/// clobber. Returns the names actually linked, in input order.
-pub(crate) fn hydrate_checkout(checkout: &Path, sources: &[PathBuf]) -> Result<Vec<String>> {
-    let mut linked = Vec::new();
-    for source in sources {
-        let Some(name) = source.file_name() else {
-            continue;
-        };
-        let dest = checkout.join(name);
+/// Decide whether `source` should be hydrated into `checkout`, returning
+/// the `(dest, link_name)` to create or `None` to skip. Skips a `source`
+/// with no final component, or a destination that already exists (captured
+/// or pre-staged) so we never clobber.
+///
+/// Separated from [`create_symlink`] so the start mutation can wrap ONLY
+/// the actual link creation in a forward-first `Tx::step`: the per-link
+/// unlink inverse is registered after the create succeeds, and a skipped
+/// `source` (`None`) never touches the rewind ledger.
+pub(crate) fn plan_link(checkout: &Path, source: &Path) -> Option<(PathBuf, String)> {
+    let name = source.file_name()?;
+    let dest = checkout.join(name);
 
-        // `symlink_metadata` (not `exists`) so a broken symlink or any
-        // already-present entry counts as a collision — we never clobber
-        // captured content or a user's pre-staged link.
-        if dest.symlink_metadata().is_ok() {
-            continue;
-        }
-
-        symlink_dir(source, &dest).with_context(|| {
-            format!("hydrate '{}' -> '{}'", dest.display(), source.display())
-        })?;
-        linked.push(name.to_string_lossy().into_owned());
+    // `symlink_metadata` (not `exists`) so a broken symlink or any
+    // already-present entry counts as a collision — we never clobber
+    // captured content or a user's pre-staged link.
+    if dest.symlink_metadata().is_ok() {
+        return None;
     }
-    Ok(linked)
+
+    Some((dest, name.to_string_lossy().into_owned()))
+}
+
+/// Create one hydrate symlink: `dest` -> `source`. A single all-or-nothing
+/// filesystem op (the forward of a `Tx::step`); the caller registers
+/// [`unlink_hydrated`] as the inverse only after this returns `Ok`.
+pub(crate) fn create_symlink(source: &Path, dest: &Path) -> Result<()> {
+    symlink_dir(source, dest)
+        .with_context(|| format!("hydrate '{}' -> '{}'", dest.display(), source.display()))
+}
+
+/// Best-effort inverse of [`create_symlink`]: unlink a hydrate symlink this
+/// invocation created. Tolerant of a missing link — the checkout-rewind
+/// inverse (LIFO, after this) may already have removed the whole tree.
+pub(crate) fn unlink_hydrated(checkout: &Path, name: &str) -> std::io::Result<()> {
+    match remove_symlink_dir(&checkout.join(name)) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+/// Remove a directory symlink created by [`create_symlink`]/[`symlink_dir`]. The
+/// forward always makes a *directory* symlink, and on Windows a directory
+/// symlink must be removed with `RemoveDirectory` (`remove_dir`) — `DeleteFile`
+/// (`remove_file`) errors on it, so the rollback would fail (heddle#356 cid
+/// 3333881572). On Unix a symlink (file or dir) is removed by `unlink`
+/// (`remove_file`).
+#[cfg(not(windows))]
+fn remove_symlink_dir(link: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(link)
+}
+
+#[cfg(windows)]
+fn remove_symlink_dir(link: &Path) -> std::io::Result<()> {
+    std::fs::remove_dir(link)
+}
+
+/// The worktree-local, never-captured exclude file hydrate records its
+/// dep-ignore rules in — heddle's analogue of `.git/info/exclude`. It lives
+/// under the checkout's own `.heddle/` (which is always ignored), so writing to
+/// it never surfaces as worktree content. [`Repository::ignore_patterns`]
+/// reads it alongside `.heddleignore`.
+pub(crate) fn hydrate_exclude_path(checkout: &Path) -> PathBuf {
+    checkout.join(".heddle").join("info").join("exclude")
 }
 
 /// Make the hydrated dep symlinks stay ignored in the isolated checkout.
@@ -125,51 +176,52 @@ pub(crate) fn hydrate_checkout(checkout: &Path, sources: &[PathBuf]) -> Result<V
 /// The origin may ignore deps only via `.gitignore` (the common
 /// git-overlay setup). The isolated checkout has no `.git` and is
 /// reopened as a *native* heddle repo, whose ignore resolution reads
-/// `.heddleignore` — never `.gitignore`. Without preserving the rule the
-/// symlinked dep dirs surface as uncaptured *added* paths, and capture
-/// fails trying to follow the absolute link target out of the checkout.
+/// `.heddleignore` + the worktree-local exclude — never `.gitignore`.
+/// Without preserving the rule the symlinked dep dirs surface as uncaptured
+/// *added* paths, and capture fails trying to follow the absolute link target
+/// out of the checkout.
 ///
-/// We materialize the effective ignore rule for each linked name into
-/// the checkout's own `.heddleignore`, so the checkout is self-consistent
-/// regardless of which ignore source the origin used. Names already
-/// covered by an existing `.heddleignore` are left untouched. When we
-/// create the file from scratch it self-ignores, so the generated
-/// artifact does not itself surface as uncaptured content.
+/// We materialize the rule for each linked name into the checkout's
+/// worktree-local exclude file ([`hydrate_exclude_path`]) — NOT the
+/// possibly-tracked `.heddleignore`. The exclude file is never captured, so a
+/// successful `start --hydrate` leaves the tracked tree clean even when the
+/// checkout already carries a tracked `.heddleignore` (heddle#356 cid
+/// 3333881577). Names already covered by the checkout's `.heddleignore` or a
+/// prior exclude entry are skipped rather than duplicated.
 pub(crate) fn preserve_hydrated_ignores(checkout: &Path, linked: &[String]) -> Result<()> {
     if linked.is_empty() {
         return Ok(());
     }
 
-    let ignore_path = checkout.join(".heddleignore");
-    let existing = match std::fs::read_to_string(&ignore_path) {
-        Ok(contents) => Some(contents),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-        Err(err) => {
-            return Err(err)
-                .with_context(|| format!("read '{}'", ignore_path.display()));
+    let read_opt = |path: &Path| -> Result<Option<String>> {
+        match std::fs::read_to_string(path) {
+            Ok(contents) => Ok(Some(contents)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err).with_context(|| format!("read '{}'", path.display())),
         }
     };
+    let active_patterns = |contents: &Option<String>| -> Vec<String> {
+        contents
+            .iter()
+            .flat_map(|c| c.lines())
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(str::to_string)
+            .collect()
+    };
 
-    let patterns: Vec<String> = existing
-        .iter()
-        .flat_map(|c| c.lines())
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(str::to_string)
-        .collect();
+    // Rules already in force via the checkout's tracked `.heddleignore` plus any
+    // prior exclude entries — a dep already covered needs no new rule.
+    let tracked = read_opt(&checkout.join(".heddleignore"))?;
+    let exclude_path = hydrate_exclude_path(checkout);
+    let existing_exclude = read_opt(&exclude_path)?;
+
+    let mut covered: Vec<String> = active_patterns(&tracked);
+    covered.extend(active_patterns(&existing_exclude));
 
     let mut to_add: Vec<String> = Vec::new();
-
-    // When creating the file fresh, ignore it too — it's a hydration
-    // artifact local to this checkout, not source the user authored.
-    if existing.is_none() {
-        to_add.push(".heddleignore".to_string());
-    }
-
     for name in linked {
-        // Already covered by the checkout's native ignore source? Leave
-        // the existing rule in place rather than appending a duplicate.
-        let mut probe = patterns.clone();
+        let mut probe = covered.clone();
         probe.extend(to_add.iter().cloned());
         if objects::worktree::should_ignore(Path::new(name), &probe) {
             continue;
@@ -183,7 +235,11 @@ pub(crate) fn preserve_hydrated_ignores(checkout: &Path, linked: &[String]) -> R
         return Ok(());
     }
 
-    let mut out = existing.unwrap_or_default();
+    if let Some(parent) = exclude_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create '{}'", parent.display()))?;
+    }
+    let mut out = existing_exclude.unwrap_or_default();
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
@@ -191,8 +247,8 @@ pub(crate) fn preserve_hydrated_ignores(checkout: &Path, linked: &[String]) -> R
         out.push_str(line);
         out.push('\n');
     }
-    std::fs::write(&ignore_path, out)
-        .with_context(|| format!("write hydrate ignore rules to '{}'", ignore_path.display()))?;
+    std::fs::write(&exclude_path, out)
+        .with_context(|| format!("write hydrate ignore rules to '{}'", exclude_path.display()))?;
     Ok(())
 }
 
@@ -218,8 +274,17 @@ mod tests {
 
     use super::*;
 
+    /// Link one source into the checkout via plan + create, mirroring the
+    /// start mutation's per-link `Tx::step`. Returns the linked name (or
+    /// `None` when the plan skipped a collision).
+    fn link_one(checkout: &Path, source: &Path) -> Option<String> {
+        let (dest, name) = plan_link(checkout, source)?;
+        create_symlink(source, &dest).unwrap();
+        Some(name)
+    }
+
     #[test]
-    fn hydrate_checkout_symlinks_each_source_and_skips_existing() {
+    fn plan_link_links_source_and_skips_existing() {
         let temp = TempDir::new().unwrap();
         let origin = temp.path().join("origin");
         let checkout = temp.path().join("checkout");
@@ -229,14 +294,11 @@ mod tests {
         // Pre-existing entry in the checkout must not be clobbered.
         std::fs::create_dir_all(checkout.join(".venv")).unwrap();
 
-        let sources = vec![origin.join("node_modules"), origin.join(".venv")];
-        let linked = hydrate_checkout(&checkout, &sources).unwrap();
+        let linked_nm = link_one(&checkout, &origin.join("node_modules"));
+        let skipped_venv = plan_link(&checkout, &origin.join(".venv"));
 
-        assert_eq!(
-            linked,
-            vec!["node_modules".to_string()],
-            "only the non-colliding source should be linked"
-        );
+        assert_eq!(linked_nm.as_deref(), Some("node_modules"));
+        assert!(skipped_venv.is_none(), "a colliding source links nothing");
         let nm = checkout.join("node_modules");
         assert!(
             std::fs::symlink_metadata(&nm)
@@ -254,5 +316,55 @@ mod tests {
                 .is_symlink(),
             "pre-existing .venv must be preserved, not replaced by a link"
         );
+    }
+
+    #[test]
+    fn unlink_hydrated_removes_link_and_is_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let origin = temp.path().join("origin");
+        let checkout = temp.path().join("checkout");
+        std::fs::create_dir_all(origin.join("node_modules")).unwrap();
+        std::fs::create_dir_all(&checkout).unwrap();
+
+        link_one(&checkout, &origin.join("node_modules")).unwrap();
+        assert!(std::fs::symlink_metadata(checkout.join("node_modules")).is_ok());
+
+        unlink_hydrated(&checkout, "node_modules").unwrap();
+        assert!(
+            std::fs::symlink_metadata(checkout.join("node_modules")).is_err(),
+            "the hydrate link must be unlinked"
+        );
+        // The origin dir behind the link must survive (we unlink, never follow).
+        assert!(origin.join("node_modules").is_dir());
+        // Idempotent: unlinking an already-gone link is a no-op.
+        unlink_hydrated(&checkout, "node_modules").unwrap();
+    }
+
+    /// heddle#356 cid 3333881572: on Windows a *directory* symlink must be
+    /// removed with `RemoveDirectory` (`remove_dir`) — `DeleteFile`
+    /// (`remove_file`) errors on it, so the rollback would fail. The forward
+    /// always creates a directory symlink, so the inverse must use the dir
+    /// remover. (Gated to Windows; on Unix the same contract is covered by
+    /// `unlink_hydrated_removes_link_and_is_idempotent`, which unlinks a dir
+    /// symlink via `remove_file`.)
+    #[cfg(windows)]
+    #[test]
+    fn unlink_hydrated_removes_directory_symlink_on_windows() {
+        let temp = TempDir::new().unwrap();
+        let origin = temp.path().join("origin");
+        let checkout = temp.path().join("checkout");
+        std::fs::create_dir_all(origin.join("node_modules")).unwrap();
+        std::fs::create_dir_all(&checkout).unwrap();
+
+        // Create a directory symlink exactly like the hydrate forward does.
+        symlink_dir(&origin.join("node_modules"), &checkout.join("node_modules")).unwrap();
+        assert!(std::fs::symlink_metadata(checkout.join("node_modules")).is_ok());
+
+        unlink_hydrated(&checkout, "node_modules").unwrap();
+        assert!(
+            std::fs::symlink_metadata(checkout.join("node_modules")).is_err(),
+            "a directory symlink must be removed on rollback (remove_dir, not remove_file)"
+        );
+        assert!(origin.join("node_modules").is_dir(), "the link target must survive");
     }
 }

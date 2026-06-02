@@ -354,12 +354,8 @@ mod resolve {
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(&blame).unwrap();
-        assert!(
-            parsed["lines"][0]["author"]
-                .as_str()
-                .unwrap()
-                .contains("openai/gpt-feature")
-        );
+        assert_eq!(parsed["lines"][0]["agent"]["provider"], "openai");
+        assert_eq!(parsed["lines"][0]["agent"]["model"], "gpt-feature");
     }
 
     #[test]
@@ -399,12 +395,8 @@ mod resolve {
         )
         .unwrap();
         let parsed: Value = serde_json::from_str(&blame).unwrap();
-        assert!(
-            parsed["lines"][0]["author"]
-                .as_str()
-                .unwrap()
-                .contains("openai/gpt-resolver")
-        );
+        assert_eq!(parsed["lines"][0]["agent"]["provider"], "openai");
+        assert_eq!(parsed["lines"][0]["agent"]["model"], "gpt-resolver");
     }
 }
 
@@ -936,18 +928,10 @@ mod blame {
         .unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
         let lines = parsed["lines"].as_array().unwrap();
-        assert!(
-            lines[0]["author"]
-                .as_str()
-                .unwrap()
-                .contains("anthropic/claude-sonnet-a")
-        );
-        assert!(
-            lines[1]["author"]
-                .as_str()
-                .unwrap()
-                .contains("openai/gpt-4.1-b")
-        );
+        assert_eq!(lines[0]["agent"]["provider"], "anthropic");
+        assert_eq!(lines[0]["agent"]["model"], "claude-sonnet-a");
+        assert_eq!(lines[1]["agent"]["provider"], "openai");
+        assert_eq!(lines[1]["agent"]["model"], "gpt-4.1-b");
     }
 
     #[test]
@@ -979,18 +963,10 @@ mod blame {
         .unwrap();
         let parsed: Value = serde_json::from_str(&output).unwrap();
         let lines = parsed["lines"].as_array().unwrap();
-        assert!(
-            lines[0]["author"]
-                .as_str()
-                .unwrap()
-                .contains("anthropic/claude-opus-base")
-        );
-        assert!(
-            lines[1]["author"]
-                .as_str()
-                .unwrap()
-                .contains("openai/gpt-4.1-feature")
-        );
+        assert_eq!(lines[0]["agent"]["provider"], "anthropic");
+        assert_eq!(lines[0]["agent"]["model"], "claude-opus-base");
+        assert_eq!(lines[1]["agent"]["provider"], "openai");
+        assert_eq!(lines[1]["agent"]["model"], "gpt-4.1-feature");
     }
 }
 

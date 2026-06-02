@@ -69,3 +69,67 @@ fn clone_help_pins_behavior_stanza() {
         "clone help should point at the threads topic: {help}"
     );
 }
+
+/// heddle#278 r4 (cid 3327325850). `capture --help-agent` is a first-class
+/// clap flag, so clap parses the whole command line and the dispatch arm
+/// renders the reveal help. End-to-end through the real binary: the hidden
+/// agent-automation flags appear, and every global spelling clap accepts —
+/// including the clustered short `-vC <path>` that the old hand-rolled
+/// pre-parse scan kept missing — reaches the reveal help.
+#[test]
+fn capture_help_agent_reveals_hidden_flags_through_clap() {
+    let expect_revealed = |help: &str, ctx: &str| {
+        for flag in [
+            "--agent-provider",
+            "--agent-model",
+            "--agent-session",
+            "--agent-segment",
+            "--policy",
+            "--no-policy",
+            "--no-agent",
+            "--split",
+            "--into",
+        ] {
+            assert!(
+                help.contains(flag),
+                "`{ctx}` should reveal `{flag}` inline: {help}"
+            );
+        }
+    };
+
+    let plain = heddle(&["capture", "--help-agent"], None).expect("capture --help-agent renders");
+    expect_revealed(&plain, "capture --help-agent");
+
+    // Clustered short globals before the verb: `-v` then valued `-C <path>`.
+    // clap parses the path natively; the verb is still `capture`.
+    let clustered = heddle(&["-vC", ".", "capture", "--help-agent"], None)
+        .expect("-vC <path> capture --help-agent renders");
+    expect_revealed(&clustered, "-vC <path> capture --help-agent");
+
+    // Long valued global before the verb.
+    let long_global = heddle(&["--output", "text", "capture", "--help-agent"], None)
+        .expect("--output text capture --help-agent renders");
+    expect_revealed(&long_global, "--output text capture --help-agent");
+}
+
+/// heddle#278 r6 (cid 3327633095). `--help-agent` is `hide = true`: the
+/// reveal still works (asserted above), but everyday `capture --help` stays
+/// terse — the flag itself must not appear, only the after-help pointer to
+/// the reveal surface. Progressive disclosure: discover via the pointer, not
+/// by seeing the flag in the human help.
+#[test]
+fn capture_help_keeps_help_agent_hidden_but_keeps_the_pointer() {
+    let help = heddle(&["capture", "--help"], None).expect("capture --help renders");
+    // The discovery pointer in after-help stays so agents can still find it.
+    assert!(
+        help.contains("heddle capture --help-agent"),
+        "`capture --help` should keep the after-help pointer to `--help-agent`: {help}"
+    );
+    // ...but the flag must not appear in the options listing. The only
+    // mention allowed is the single after-help pointer line.
+    assert_eq!(
+        help.matches("--help-agent").count(),
+        1,
+        "`capture --help` must not list the hidden `--help-agent` flag (only the after-help pointer): {help}"
+    );
+}

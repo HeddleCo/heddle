@@ -23,6 +23,27 @@ pub(crate) fn prepare_worktree_target(
     repo: &Repository,
     path: &Path,
 ) -> Result<PreparedWorktreeTarget> {
+    let prepared = plan_worktree_target(repo, path)?;
+    let requested = absolute_path(path)?;
+    std::fs::create_dir_all(&prepared.path).map_err(|error| {
+        anyhow::anyhow!(worktree_target_prepare_failed_advice(&requested, error))
+    })?;
+    validate_worktree_target(repo, &prepared.path)?;
+    Ok(prepared)
+}
+
+/// Validate + resolve a `--path` target WITHOUT creating the directory, and
+/// report whether the resolved target is absent (so the caller can create it
+/// itself and know to remove it on rollback).
+///
+/// The atomic `thread start` path uses this so the target-dir creation happens
+/// *inside* the transaction (its first step), not before `execute` has a rewind
+/// ledger — otherwise a failure in the remaining pre-transaction work would
+/// orphan a directory this command created (heddle#356 cid 3333881552).
+pub(crate) fn plan_worktree_target(
+    repo: &Repository,
+    path: &Path,
+) -> Result<PreparedWorktreeTarget> {
     let requested = absolute_path(path)?;
     if let Ok(metadata) = std::fs::symlink_metadata(&requested)
         && metadata.file_type().is_symlink()
@@ -31,14 +52,11 @@ pub(crate) fn prepare_worktree_target(
     }
     let resolved = canonicalize_existing_ancestor(&requested)?;
     validate_worktree_target(repo, &resolved)?;
-    // Capture pre-existence BEFORE we create the dir: this is the only
-    // point where "the user gave us an existing empty dir" vs "we made
-    // it" is still distinguishable.
+    // Capture pre-existence: this is the only point where "the user gave us an
+    // existing empty dir" vs "we will create it" is still distinguishable. The
+    // creation itself is deferred to the caller (the transaction) so a failure
+    // before the dir is made leaves nothing to clean up.
     let target_dir_created = !resolved.exists();
-    std::fs::create_dir_all(&resolved).map_err(|error| {
-        anyhow::anyhow!(worktree_target_prepare_failed_advice(&requested, error))
-    })?;
-    validate_worktree_target(repo, &resolved)?;
     Ok(PreparedWorktreeTarget {
         path: resolved,
         target_dir_created,
@@ -250,6 +268,14 @@ pub(crate) fn write_isolated_checkout(
         pointer_file.sync_all()?;
     }
     std::fs::create_dir_all(heddle_dir.join("state"))?;
+    // Fault point for the partial-materialize rollback test (heddle#356):
+    // the checkout's `.heddle` metadata is already on disk here but no tree
+    // bytes are, modeling a materialize that fails partway. The transaction's
+    // checkout-rewind inverse must remove the whole created tree (incl
+    // `.heddle`) — or, for a user-supplied pre-existing dir, clear its
+    // contents. No-op in production (env var unset).
+    objects::fault_inject::maybe_fail_at("start_materialize_checkout")
+        .map_err(|error| anyhow::anyhow!(error))?;
 
     let checkout_head = heddle_dir.join("HEAD");
     let head_content = match thread {

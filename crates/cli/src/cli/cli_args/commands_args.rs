@@ -8,6 +8,7 @@ Examples:
   heddle init                                  # initialize the current directory
   heddle init my-project                       # initialize a subdirectory
   heddle init --principal-name 'Ada Lovelace'  # set attribution at init time
+  heddle init --quickstart                     # init, identity, first capture + checkpoint in one step
 ")]
 pub struct InitArgs {
     /// Directory to initialize (default: current directory).
@@ -20,6 +21,21 @@ pub struct InitArgs {
     /// Principal email for attribution.
     #[arg(long)]
     pub principal_email: Option<String>,
+
+    /// Walk from a fresh directory to a first checkpointed commit in one
+    /// command: after the normal init steps, resolve identity, start a
+    /// thread, make one capture, and (on Git-overlay repos) one checkpoint.
+    #[arg(long)]
+    pub quickstart: bool,
+
+    /// Name for the thread `--quickstart` starts (default: `quickstart`).
+    #[arg(long, value_name = "NAME")]
+    pub quickstart_thread: Option<String>,
+
+    /// Skip the `--quickstart` confirmation gate before writing into a
+    /// directory that already has Heddle data or non-empty Git history.
+    #[arg(long)]
+    pub yes: bool,
 
     /// Install harness integrations after init.
     #[arg(long)]
@@ -183,8 +199,23 @@ fn parse_confidence(s: &str) -> Result<f32, String> {
 Examples:
   heddle capture -m 'add login route'           # capture the worktree with intent
   heddle capture -m 'wip' --confidence 0.6      # honest confidence on a draft step
+
+Agent automation flags (provider/model/session/policy/split) are hidden here.
+Run `heddle help agent-flags`, or `heddle capture --help-agent` to list them inline.
 ")]
 pub struct SnapshotArgs {
+    /// Reveal the hidden agent-automation flags inline instead of capturing.
+    /// A first-class clap flag so the whole command line (including global
+    /// options in any spelling clap accepts) is parsed by clap; the dispatch
+    /// arm inspects the parsed result rather than scanning raw tokens.
+    /// `hide`d to keep everyday `capture --help` terse (the after-help
+    /// pointer is the discovery route). It is still a registered clap arg,
+    /// so `doctor docs` recognizes `heddle capture --help-agent` via the
+    /// registered-but-hidden flag seam — the machine contract stays in sync
+    /// without cluttering human help.
+    #[arg(long, hide = true)]
+    pub help_agent: bool,
+
     /// Natural language intent for this recoverable step.
     #[arg(short = 'm', long, visible_alias = "message")]
     pub intent: Option<String>,
@@ -1405,6 +1436,12 @@ pub struct ActorSpawnArgs {
     /// Thread name for the actor (auto-generated if not specified).
     #[arg(long)]
     pub thread: Option<String>,
+
+    /// Attach the actor to the current thread instead of minting a new
+    /// `actor/<session>` thread. Use this to record the detected agent
+    /// identity without leaving a stray thread behind.
+    #[arg(long, conflicts_with = "thread")]
+    pub no_thread: bool,
 
     /// AI provider name (e.g. `anthropic`).
     #[arg(long)]

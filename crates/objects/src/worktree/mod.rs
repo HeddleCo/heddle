@@ -11,5 +11,5 @@ mod worktree_tests;
 
 pub use worktree_compare::compare_worktree;
 pub use worktree_diff::{DiffLine, diff_blobs};
-pub use worktree_ignore::should_ignore;
+pub use worktree_ignore::{WorktreeIgnoreMatcher, build_worktree_ignore, should_ignore};
 pub use worktree_types::{FileStatus, WorktreeChange, WorktreeStatus};

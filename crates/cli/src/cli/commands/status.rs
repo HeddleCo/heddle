@@ -12,9 +12,9 @@ use anyhow::Result;
 use futures::{SinkExt, StreamExt};
 use objects::worktree::WorktreeStatus;
 use repo::{
-    AgentUsageSummary, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus, Thread,
-    ThreadFreshness, ThreadImpactCategory, ThreadMode, ThreadState, WorktreeCompareProfile,
-    describe_thread_advice_with_initial, is_synthetic_root,
+    AgentUsageSummary, GitRemoteTrackingStatus, Repository, RepositoryCapability,
+    RepositoryOperationStatus, Thread, ThreadFreshness, ThreadImpactCategory, ThreadMode,
+    ThreadState, WorktreeCompareProfile, describe_thread_advice_with_initial, is_synthetic_root,
 };
 #[cfg(feature = "client")]
 use serde::Deserialize;
@@ -115,6 +115,19 @@ pub(crate) struct StatusOutput {
     recovery_action_templates: Vec<super::command_catalog::ActionTemplate>,
     thread_health: String,
     coordination_status: CoordinationStatus,
+    /// Provenance of a `coordination_status == Blocked`: `true` when the
+    /// Blocked is the trust/health re-encoding (the status builder forces
+    /// `coordination_status = Blocked` to surface a dirty / uncaptured /
+    /// unverified *health* blocker via the coordination field — sites
+    /// ~571 short-path, ~956 trust override), `false` when it is a
+    /// genuine inter-thread block from `build_thread_view`
+    /// (`ThreadState::Blocked` or concurrent actives). Carried so the
+    /// effective-coordination mask keys on *why* the axis is Blocked
+    /// rather than guessing from `thread_health` cleanliness — a genuine
+    /// inter-thread block can co-exist with a dirty worktree and must
+    /// still surface. Render-only; excluded from the JSON contract.
+    #[serde(skip)]
+    coordination_blocked_by_trust: bool,
     is_isolated: bool,
     parallel_threads: Vec<ParallelThreadInfo>,
     state: Option<StateInfo>,
@@ -211,6 +224,28 @@ struct PlainGitStatusOutput {
     changed_path_count: usize,
     changes: ChangesInfo,
     git_index: Option<GitIndexPlan>,
+}
+
+/// Recommend the one-command first run when a native Heddle repository
+/// has been initialized but has no user-visible history yet (the log
+/// shows only the filtered synthetic root) and the worktree is clean —
+/// i.e. there is genuinely nothing to act on yet. A dirty worktree
+/// already has its own advice (`heddle commit`), and Git-overlay repos
+/// have their own onboarding (import/adopt), so both are left alone.
+fn quickstart_init_recommendation(
+    repo: &Repository,
+    current_state: Option<&objects::object::State>,
+    worktree_clean: bool,
+) -> Option<String> {
+    if !worktree_clean || repo.capability() != RepositoryCapability::NativeHeddle {
+        return None;
+    }
+    let empty_log = current_state.map(is_synthetic_root).unwrap_or(true);
+    // The repo already has `.heddle/` (it has been init'd to reach this
+    // branch), so a bare `heddle init --quickstart` hits the confirmation
+    // gate and is refused non-interactively. Recommend the runnable form —
+    // `--yes` clears the gate — so an agent/script can run it verbatim.
+    empty_log.then(|| "heddle init --quickstart --yes".to_string())
 }
 
 fn changes_from_status(status: &WorktreeStatus) -> ChangesInfo {
@@ -473,6 +508,12 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         } else {
             trust.recommended_action.clone()
         };
+        let worktree_clean = changes.modified.is_empty()
+            && changes.added.is_empty()
+            && changes.deleted.is_empty();
+        let recommended_action =
+            quickstart_init_recommendation(&repo, current_state.as_ref(), worktree_clean)
+                .unwrap_or(recommended_action);
         debug!(
             repo_open_ms,
             body_ms = body_start.elapsed().as_millis(),
@@ -570,6 +611,10 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
             } else {
                 CoordinationStatus::Blocked
             },
+            // This short-path Blocked is purely the unverified-trust
+            // re-encoding (the only non-Clean branch above is the
+            // `!trust.verified` one), so it is trust-derived.
+            coordination_blocked_by_trust: !trust.verified,
             is_isolated: false,
             parallel_threads: Vec::new(),
             state: None,
@@ -783,6 +828,10 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
             .as_ref()
             .map(|thread| thread.coordination_status.clone())
             .unwrap_or(CoordinationStatus::Clean),
+        // This coordination_status comes straight from `build_thread_view`
+        // (genuine inter-thread state). The trust re-encoding, if any, is
+        // applied in the rebuild below; here it is never trust-derived.
+        coordination_blocked_by_trust: false,
         is_isolated: thread_summary
             .as_ref()
             .map(|thread| thread.is_isolated)
@@ -908,6 +957,12 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     {
         override_trust_recommended_action(&mut trust, recommended_action.clone());
     }
+    // A freshly-`init`'d native repo whose log is still empty (only the
+    // synthetic root) and whose worktree is clean has nothing to act on
+    // yet — point the user at the one-command first run.
+    let recommended_action =
+        quickstart_init_recommendation(&repo, current_state.as_ref(), !has_changes)
+            .unwrap_or(recommended_action);
     let recommended_action_fields = ActionFields::from_action(&recommended_action);
     let thread_health = if trust.verified {
         advice
@@ -938,6 +993,14 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     let worktree_changed_path_count = changes_path_count(&output.changes);
     let thread_changed_path_count =
         captured_thread_path_count(thread_summary.as_ref(), &output.changes);
+    // Resolve the trust/health override against the PRE-override (genuine,
+    // from `build_thread_view`) coordination status. A genuine inter-thread
+    // `Blocked` captured here must survive the override and stay surfaceable.
+    let (coordination_status, coordination_blocked_by_trust) = resolve_coordination_with_trust(
+        output.coordination_status.clone(),
+        blocked_by_trust,
+        needs_checkpoint,
+    );
     let output = StatusOutput {
         blockers: if blocked_by_trust {
             trust_blockers
@@ -953,11 +1016,13 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         recovery_commands: trust.recovery_commands.clone(),
         recovery_action_templates: trust.recovery_action_templates.clone(),
         thread_health,
-        coordination_status: if blocked_by_trust && !needs_checkpoint {
-            CoordinationStatus::Blocked
-        } else {
-            output.coordination_status
-        },
+        coordination_status,
+        // `coordination_blocked_by_trust` is true ONLY when the resulting
+        // `Blocked`'s SOLE source is the trust/health override; a genuine
+        // inter-thread `Blocked` captured before the override keeps it false
+        // so the mask never hides it (even with a dirty worktree). See
+        // `resolve_coordination_with_trust`.
+        coordination_blocked_by_trust,
         // `thread_state` is lifecycle-only and must match `thread list` for the
         // same thread/instant (heddle#306). The verification/dirty-worktree
         // blocker is a health signal, surfaced via `coordination_status` above.
@@ -1319,13 +1384,28 @@ fn render_status_thread(output: &StatusOutput, verbose: bool) {
     } else {
         println!("HEAD detached");
     }
-    // Health text is short ("clean" / "blocked" / etc.) — colour it
-    // so a glance tells you the state without reading the word.
-    println!(
-        "Health: {}",
-        style::thread_state(&human_thread_health(&output.thread_health))
-    );
-    println!("Coordination: {}", human_coordination_status(output));
+    // Progressive disclosure: the default view shows ONE combined
+    // verdict answering "is my checkout OK?". The two component axes
+    // (Health = local checkout state, Coordination = cross-thread
+    // integration state) overlap and create read-carefully overhead,
+    // so they only appear under `-v`. The combined verdict still
+    // signals non-clean whenever either axis is, so the default reader
+    // never loses the "something's wrong" signal — `-v` then tells
+    // them which axis. JSON is unaffected (both fields always emitted).
+    let (verdict, verdict_reason) = status_combined_verdict(output);
+    println!("Verdict: {}", style::thread_state(&verdict));
+    if let Some(reason) = verdict_reason {
+        println!("  {}", style::dim(reason));
+    }
+    if verbose {
+        // Health text is short ("clean" / "blocked" / etc.) — colour it
+        // so a glance tells you the state without reading the word.
+        println!(
+            "Health: {}",
+            style::thread_state(&human_thread_health(&output.thread_health))
+        );
+        println!("Coordination: {}", human_coordination_status(output));
+    }
     if verbose && let Some(base) = &output.base_state {
         println!("Base: {}", style::dim(base));
     }
@@ -1979,13 +2059,168 @@ fn human_thread_health(status: &str) -> String {
     }
 }
 
+/// Severity rank for the `thread_health` axis. Higher = more
+/// blocking. Drives which axis a non-clean combined verdict surfaces.
+fn health_severity(thread_health: &str) -> u8 {
+    match thread_health {
+        "clean" => 0,
+        "needs_reconcile" | "git_branch_advanced" => 4,
+        "needs_init" | "needs_import" => 3,
+        "needs_checkpoint" => 2,
+        // dirty_worktree / uncaptured / unknown: local work in progress.
+        _ => 1,
+    }
+}
+
+/// Severity rank for the coordination axis. Ahead / merge-ready are
+/// non-clean but benign forward states, so they rank below the
+/// integration blockers (diverged / blocked).
+fn coordination_severity(status: &CoordinationStatus) -> u8 {
+    match status {
+        CoordinationStatus::Clean => 0,
+        CoordinationStatus::Ahead | CoordinationStatus::MergeReady => 1,
+        CoordinationStatus::Diverged => 3,
+        CoordinationStatus::Blocked => 4,
+    }
+}
+
+/// Combine the PRE-override (genuine, from `build_thread_view`) coordination
+/// status with the trust/health override. The override may re-encode a
+/// dirty / uncaptured / unverified-trust *health* blocker onto the
+/// coordination axis (as a maskable trust-derived `Blocked`) ONLY when the
+/// pre-override axis was genuinely CLEAN. Any genuine non-clean state from
+/// `build_thread_view` — `Blocked`, `Diverged`, `Ahead`, `MergeReady`, or a
+/// variant added later — wins: it is preserved as-is and stays surfaceable
+/// even when the worktree is also dirty, so the health blocker never hides
+/// the real coordination state.
+///
+/// Returns the final `coordination_status` and `coordination_blocked_by_trust`
+/// — the latter true ONLY when the resulting `Blocked`'s sole source is the
+/// trust/health path (i.e. a genuinely-clean axis was re-encoded). Keying the
+/// whole rule on the single "was the pre-override axis genuinely clean?"
+/// predicate — derived from `coordination_axis_clean`, an exhaustive match,
+/// NOT a hardcoded state list — is what closes the masking class: a new
+/// `CoordinationStatus` variant is covered automatically and can never be
+/// silently re-stamped as trust-derived (cid 3328810941).
+fn resolve_coordination_with_trust(
+    pre_override: CoordinationStatus,
+    blocked_by_trust: bool,
+    needs_checkpoint: bool,
+) -> (CoordinationStatus, bool) {
+    // The pre-override status comes straight from `build_thread_view`, so it
+    // carries no trust encoding — read its genuine cleanliness with
+    // `blocked_by_trust = false`.
+    let pre_override_clean = coordination_axis_clean(&pre_override, false);
+    let trust_override = blocked_by_trust && !needs_checkpoint;
+    // Re-encode (and mark maskable) ONLY a genuinely-clean axis; a genuine
+    // non-clean state is preserved and never marked trust-only.
+    let mask_as_trust = trust_override && pre_override_clean;
+    let coordination_status = if mask_as_trust {
+        CoordinationStatus::Blocked
+    } else {
+        pre_override
+    };
+    (coordination_status, mask_as_trust)
+}
+
+/// Single source of truth for "is the coordination axis genuinely
+/// (non-trust) clean?". `coordination_status` is overloaded: the status
+/// builder re-encodes a dirty / uncaptured / unverified-trust *health*
+/// blocker by forcing `coordination_status = Blocked` (build sites ~571
+/// short-path, ~956 trust override), carrying `blocked_by_trust = true`.
+/// That Blocked is a health signal, so the coordination axis is
+/// effectively clean — the health axis owns the blocker. A genuine
+/// inter-thread Blocked from `build_thread_view` (`ThreadState::Blocked`
+/// or concurrent actives) carries `blocked_by_trust = false` and is
+/// NEVER masked, even when the worktree is also dirty — a real
+/// inter-thread block can co-exist with local WIP and must still
+/// surface. Keying on the Blocked's *provenance* (this flag), not on
+/// `thread_health` cleanliness, is what keeps those two cases apart.
+/// Both the human `-v` render and the combined verdict route through
+/// here so they can't drift.
+fn coordination_axis_clean(coordination: &CoordinationStatus, blocked_by_trust: bool) -> bool {
+    match coordination {
+        CoordinationStatus::Clean => true,
+        CoordinationStatus::Blocked => blocked_by_trust,
+        CoordinationStatus::Ahead
+        | CoordinationStatus::Diverged
+        | CoordinationStatus::MergeReady => false,
+    }
+}
+
+/// Pure core of the combined verdict: which axes are effectively clean
+/// and the resulting reason line. Split from rendering so it is
+/// unit-testable without constructing a full `StatusOutput`.
+fn combined_verdict_axes(
+    thread_health: &str,
+    coordination: &CoordinationStatus,
+    coordination_blocked_by_trust: bool,
+) -> (bool, bool, Option<&'static str>) {
+    let health_clean = thread_health == "clean";
+    let coordination_clean = coordination_axis_clean(coordination, coordination_blocked_by_trust);
+    let reason = match (health_clean, coordination_clean) {
+        (true, true) => None,
+        (false, false) => Some("checkout health and thread coordination both need attention"),
+        (false, true) => Some("checkout health needs attention"),
+        (true, false) => Some("thread coordination needs attention"),
+    };
+    (health_clean, coordination_clean, reason)
+}
+
+/// Combined top-line verdict for the default long view. Returns the
+/// styled verdict word plus an optional one-line reason.
+///
+/// `clean` only when BOTH the health and coordination axes are
+/// *effectively* clean; otherwise the more-severe axis is surfaced as
+/// the verdict word so a reader of the default view still learns the
+/// checkout is not clean. Ties favour the local health axis — that's the
+/// blocker the user usually acts on first. The reason names which axis
+/// (or both) is at fault; `-v` then prints the per-axis detail.
+fn status_combined_verdict(output: &StatusOutput) -> (String, Option<&'static str>) {
+    let (health_clean, coordination_clean, reason) = combined_verdict_axes(
+        &output.thread_health,
+        &output.coordination_status,
+        output.coordination_blocked_by_trust,
+    );
+    if health_clean && coordination_clean {
+        return ("clean".to_string(), None);
+    }
+    // Surface health when it's the (or the more-severe) non-clean axis,
+    // and always when the coordination axis is only health-encoded — in
+    // that case the health blocker is the real story.
+    let surface_health = !health_clean
+        && (coordination_clean
+            || health_severity(&output.thread_health)
+                >= coordination_severity(&output.coordination_status));
+    let word = if surface_health {
+        human_thread_health(&output.thread_health)
+    } else {
+        human_coordination_status(output)
+    };
+    (word, reason)
+}
+
 fn human_coordination_status(output: &StatusOutput) -> String {
-    if local_work_in_progress(output)
-        && matches!(output.coordination_status, CoordinationStatus::Blocked)
+    coordination_label(
+        &output.coordination_status,
+        output.coordination_blocked_by_trust,
+    )
+}
+
+/// Render the coordination axis for the `-v` view. A trust-derived `Blocked`
+/// (sole source = the health override, so `coordination_axis_clean` reports
+/// the axis effectively clean) shows as "work in progress" — the health axis
+/// owns the blocker. Every genuine coordination state renders under its own
+/// name: a genuine inter-thread `Blocked` and the non-clean siblings
+/// (`Diverged` / `Ahead` / `MergeReady`) are never hidden behind the WIP mask.
+/// Split from the `StatusOutput` wrapper so the render path is unit-testable.
+fn coordination_label(coordination: &CoordinationStatus, blocked_by_trust: bool) -> String {
+    if matches!(coordination, CoordinationStatus::Blocked)
+        && coordination_axis_clean(coordination, blocked_by_trust)
     {
         "work in progress".to_string()
     } else {
-        output.coordination_status.to_string()
+        coordination.to_string()
     }
 }
 
@@ -2143,7 +2378,11 @@ mod tests {
     use repo::Repository;
     use tempfile::TempDir;
 
-    use super::{MaterializedThreadInfo, assess_materialized_threads, render_status_materialized};
+    use super::{
+        CoordinationStatus, MaterializedThreadInfo, assess_materialized_threads,
+        combined_verdict_axes, coordination_axis_clean, coordination_label,
+        render_status_materialized, resolve_coordination_with_trust,
+    };
 
     fn init_repo_with_materialized_thread(content: &[u8]) -> (TempDir, TempDir, Repository) {
         let repo_dir = TempDir::new().unwrap();
@@ -2258,5 +2497,249 @@ mod tests {
             stale: false,
         }];
         render_status_materialized(&fresh_only, false);
+    }
+
+    #[test]
+    fn dirty_wip_combined_verdict_reason_is_health_only() {
+        // (a) Repro: a dirty/uncaptured checkout re-encodes its health
+        // blocker as a *trust-derived* `coordination_status = Blocked`
+        // (`coordination_blocked_by_trust = true`). The combined verdict
+        // must NOT double-count that as a coordination failure — the
+        // reason is the health/WIP reason alone, and the axis masks.
+        for health in ["dirty_worktree", "uncaptured"] {
+            let (health_clean, coordination_clean, reason) =
+                combined_verdict_axes(health, &CoordinationStatus::Blocked, true);
+            assert!(!health_clean, "{health} is a non-clean health state");
+            assert!(
+                coordination_clean,
+                "{health}'s trust-derived Blocked is a health-signal encoding → coordination effectively clean"
+            );
+            assert!(
+                coordination_axis_clean(&CoordinationStatus::Blocked, true),
+                "{health}: trust-derived Blocked must mask (work in progress)"
+            );
+            assert_eq!(
+                reason,
+                Some("checkout health needs attention"),
+                "{health}: reason must be health-only, not a coordination/both warning"
+            );
+            let reason = reason.unwrap();
+            assert!(
+                !reason.contains("coordination") && !reason.contains("both need attention"),
+                "{health}: reason must not mention coordination: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn trust_blocked_combined_verdict_reason_is_health_only() {
+        // (a') The same masking covers a trust-blocked WIP checkout: its
+        // Blocked is the verification health signal (trust-derived), not
+        // coordination.
+        let (_, coordination_clean, reason) =
+            combined_verdict_axes("git_branch_advanced", &CoordinationStatus::Blocked, true);
+        assert!(coordination_clean);
+        assert_eq!(reason, Some("checkout health needs attention"));
+    }
+
+    #[test]
+    fn genuine_blocked_surfaces_even_when_worktree_dirty() {
+        // (b) THE LEAK (cid 3327990627). A *genuine* inter-thread block —
+        // `build_thread_view` set `coordination_status = Blocked` from
+        // `ThreadState::Blocked`, carrying `coordination_blocked_by_trust
+        // = false` — can co-exist with local WIP, where
+        // `describe_thread_advice` reports a non-clean `thread_health`
+        // (e.g. `dirty_worktree`). r2 keyed the mask on health
+        // cleanliness, so this Blocked was wrongly masked as "work in
+        // progress" and the verdict named only checkout health, hiding
+        // the real coordination block until the worktree was cleaned.
+        // The provenance-keyed mask must NOT mask it: a non-trust Blocked
+        // is always a genuine coordination block.
+        //
+        // The current (a)/(b) inputs differ ONLY in provenance — same
+        // `thread_health="dirty_worktree"`, same `Blocked` — which is why
+        // a `thread_health`-keyed helper cannot tell them apart and the
+        // provenance flag is required.
+        for health in ["dirty_worktree", "uncaptured"] {
+            assert!(
+                !coordination_axis_clean(&CoordinationStatus::Blocked, false),
+                "{health}: a genuine (non-trust) Blocked must never mask, even when health is dirty"
+            );
+            let (health_clean, coordination_clean, reason) =
+                combined_verdict_axes(health, &CoordinationStatus::Blocked, false);
+            assert!(!health_clean, "{health} is a non-clean health state");
+            assert!(
+                !coordination_clean,
+                "{health}: a genuine inter-thread Blocked is a real coordination block"
+            );
+            assert_eq!(
+                reason,
+                Some("checkout health and thread coordination both need attention"),
+                "{health}: the verdict reason must name the coordination block, not just health"
+            );
+            assert!(
+                reason.unwrap().contains("coordination"),
+                "{health}: reason must surface coordination: {reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn genuine_coordination_states_still_surface() {
+        // (c) A real inter-thread coordination state with clean health
+        // must still be reported by the combined verdict. A clean-health
+        // Blocked is genuine (`coordination_blocked_by_trust = false`).
+        for coordination in [
+            CoordinationStatus::Ahead,
+            CoordinationStatus::Diverged,
+            CoordinationStatus::MergeReady,
+            CoordinationStatus::Blocked,
+        ] {
+            assert!(
+                !coordination_axis_clean(&coordination, false),
+                "{coordination:?} as a genuine (non-trust) state is never clean"
+            );
+            let (health_clean, coordination_clean, reason) =
+                combined_verdict_axes("clean", &coordination, false);
+            assert!(health_clean && !coordination_clean);
+            assert_eq!(
+                reason,
+                Some("thread coordination needs attention"),
+                "{coordination:?}: combined verdict must name coordination"
+            );
+        }
+    }
+
+    #[test]
+    fn both_axes_clean_verdict_has_no_reason() {
+        // (d) All clean → clean verdict, no reason.
+        let (health_clean, coordination_clean, reason) =
+            combined_verdict_axes("clean", &CoordinationStatus::Clean, false);
+        assert!(health_clean && coordination_clean);
+        assert_eq!(reason, None);
+    }
+
+    /// Every `CoordinationStatus` variant, so the table below is driven from
+    /// the enum rather than a hardcoded subset — a newly added variant fails
+    /// to compile here until it is listed, which is what keeps the
+    /// close-the-class coverage honest.
+    const ALL_COORDINATION_STATES: [CoordinationStatus; 5] = [
+        CoordinationStatus::Clean,
+        CoordinationStatus::Ahead,
+        CoordinationStatus::Diverged,
+        CoordinationStatus::Blocked,
+        CoordinationStatus::MergeReady,
+    ];
+
+    #[test]
+    fn coordination_provenance_survives_trust_override_across_all_states() {
+        // (b'') CLOSE-THE-CLASS (cid 3328810941), generalising r4's
+        // Blocked-only ordering fix (cid 3328765243). The trust/health
+        // override re-encodes a dirty / unverified checkout as a maskable
+        // `coordination_status = Blocked`. It may do so — and mark the axis
+        // trust-only/maskable — ONLY when the PRE-override coordination was
+        // genuinely CLEAN. Every genuine non-clean state from
+        // `build_thread_view` (`Blocked`, `Diverged`, `Ahead`, `MergeReady`,
+        // …) must WIN over the override: preserved as-is, never marked
+        // trust-only, surfacing in the combined verdict and the `-v` label
+        // even with a dirty worktree. r4 special-cased only `Blocked`, so on
+        // the pre-fix code the `Diverged` / `Ahead` / `MergeReady` × dirty
+        // cells leaked (re-stamped to a masked trust-only `Blocked`).
+        //
+        // The table is keyed off `coordination_axis_clean(&state, false)` —
+        // the single source of truth for "is the genuine axis clean?" — NOT a
+        // hardcoded clean/non-clean split, which is what proves the class is
+        // closed: a new variant is classified automatically.
+        for pre_override in ALL_COORDINATION_STATES {
+            let genuinely_clean = coordination_axis_clean(&pre_override, false);
+            for &trust_verified in &[true, false] {
+                // `blocked_by_trust = !trust.verified`; a dirty/unverified
+                // worktree (trust_verified == false) drives the override.
+                let blocked_by_trust = !trust_verified;
+                let (coordination, blocked_by_trust_only) = resolve_coordination_with_trust(
+                    pre_override.clone(),
+                    blocked_by_trust,
+                    false,
+                );
+                let health = if trust_verified { "clean" } else { "dirty_worktree" };
+                let (health_clean, coordination_clean, reason) =
+                    combined_verdict_axes(health, &coordination, blocked_by_trust_only);
+                let label = coordination_label(&coordination, blocked_by_trust_only);
+                let ctx = format!("{pre_override:?} / trust_verified={trust_verified}");
+
+                assert_eq!(health_clean, trust_verified, "{ctx}: health axis cleanliness");
+
+                if genuinely_clean {
+                    // Genuinely-clean axis: any override is its SOLE source, so
+                    // the axis masks as work-in-progress (the health axis owns
+                    // the blocker) — this cell must STAY masked.
+                    assert!(coordination_clean, "{ctx}: a genuinely-clean axis stays effectively clean");
+                    if trust_verified {
+                        assert_eq!(reason, None, "{ctx}: all-clean → no reason");
+                        assert_eq!(label, "clean", "{ctx}: clean axis renders as clean");
+                    } else {
+                        assert_eq!(
+                            reason,
+                            Some("checkout health needs attention"),
+                            "{ctx}: clean axis + dirty worktree → health-only WIP (coordination masked)"
+                        );
+                        assert_eq!(
+                            label, "work in progress",
+                            "{ctx}: a sole-trust-derived Blocked renders as WIP, never a coordination state"
+                        );
+                    }
+                } else {
+                    // Genuine non-clean state: WINS over the override.
+                    assert_eq!(
+                        coordination, pre_override,
+                        "{ctx}: a genuine non-clean state must be preserved, not re-stamped to Blocked"
+                    );
+                    assert!(
+                        !blocked_by_trust_only,
+                        "{ctx}: a genuine non-clean axis is never marked trust-only/maskable"
+                    );
+                    assert!(
+                        !coordination_clean,
+                        "{ctx}: a genuine non-clean axis must surface, even with a dirty worktree"
+                    );
+                    let reason = reason.expect("a non-clean axis always yields a verdict reason");
+                    assert!(
+                        reason.contains("coordination"),
+                        "{ctx}: the default verdict reason must name coordination: {reason}"
+                    );
+                    if !trust_verified {
+                        assert_eq!(
+                            reason, "checkout health and thread coordination both need attention",
+                            "{ctx}: dirty worktree + genuine coordination state → BOTH axes surface"
+                        );
+                    }
+                    assert_eq!(
+                        label,
+                        pre_override.to_string(),
+                        "{ctx}: -v must show the genuine Coordination state, not the WIP mask"
+                    );
+                    assert_ne!(
+                        label, "work in progress",
+                        "{ctx}: a genuine coordination state must never be hidden behind WIP"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn needs_checkpoint_suppresses_the_trust_override() {
+        // `needs_checkpoint` short-circuits the override regardless of state:
+        // a genuine block is preserved, and a clean axis is left clean rather
+        // than re-encoded to a trust-derived Blocked.
+        let (coordination, blocked_by_trust_only) =
+            resolve_coordination_with_trust(CoordinationStatus::Blocked, true, true);
+        assert!(matches!(coordination, CoordinationStatus::Blocked));
+        assert!(!blocked_by_trust_only, "needs_checkpoint suppresses the override; genuine block wins");
+
+        let (coordination, blocked_by_trust_only) =
+            resolve_coordination_with_trust(CoordinationStatus::Clean, true, true);
+        assert!(matches!(coordination, CoordinationStatus::Clean), "no override → axis stays clean");
+        assert!(!blocked_by_trust_only);
     }
 }

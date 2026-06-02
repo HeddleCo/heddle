@@ -52,6 +52,81 @@ fn test_diff_between_arbitrary_states() {
 }
 
 #[test]
+fn test_diff_worktree_json_groups_changes_by_category() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(temp.path().join("modified.txt"), "original\n").unwrap();
+    std::fs::write(temp.path().join("delete.txt"), "remove me\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "Initial"], temp.path());
+
+    std::fs::write(temp.path().join("modified.txt"), "changed\n").unwrap();
+    std::fs::remove_file(temp.path().join("delete.txt")).unwrap();
+    std::fs::write(temp.path().join("added.txt"), "brand new\n").unwrap();
+
+    let json = heddle(&["diff", "--output", "json"], Some(temp.path())).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&json)
+        .unwrap_or_else(|_| panic!("worktree diff should emit JSON. Got: {json}"));
+
+    // A consumer must derive add/modify/delete from `diff` alone: `changes`
+    // is a category object, not a flat array.
+    let changes = parsed["changes"].as_object().unwrap_or_else(|| {
+        panic!("worktree diff `changes` should be a category object, not a flat array. Got: {json}")
+    });
+    assert!(
+        changes.contains_key("modified")
+            && changes.contains_key("added")
+            && changes.contains_key("deleted"),
+        "changes must mirror the status command's {{modified,added,deleted}} shape. Got: {json}"
+    );
+
+    let paths = |key: &str| -> Vec<String> {
+        changes[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("changes.{key} should be an array. Got: {json}"))
+            .iter()
+            .map(|entry| entry["path"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+    assert_eq!(paths("modified"), vec!["modified.txt".to_string()], "{json}");
+    assert_eq!(paths("added"), vec!["added.txt".to_string()], "{json}");
+    assert_eq!(paths("deleted"), vec!["delete.txt".to_string()], "{json}");
+}
+
+#[test]
+fn test_diff_worktree_changes_shape_matches_status() {
+    let temp = TempDir::new().unwrap();
+    heddle_must_succeed(&["init"], temp.path());
+    std::fs::write(temp.path().join("file.txt"), "original\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "Initial"], temp.path());
+    std::fs::write(temp.path().join("file.txt"), "changed\n").unwrap();
+
+    let diff_json = heddle(&["diff", "--output", "json"], Some(temp.path())).unwrap();
+    let status_json = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
+    let diff: serde_json::Value = serde_json::from_str(&diff_json).unwrap();
+    let status: serde_json::Value = serde_json::from_str(&status_json).unwrap();
+
+    let mut diff_keys: Vec<String> = diff["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("diff changes should be an object. Got: {diff_json}"))
+        .keys()
+        .cloned()
+        .collect();
+    let mut status_keys: Vec<String> = status["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("status changes should be an object. Got: {status_json}"))
+        .keys()
+        .cloned()
+        .collect();
+    diff_keys.sort();
+    status_keys.sort();
+    assert_eq!(
+        diff_keys, status_keys,
+        "diff and status `changes` must share the same category field names. \
+         diff={diff_json}\nstatus={status_json}"
+    );
+}
+
+#[test]
 fn test_diff_with_deletions() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
@@ -85,25 +160,34 @@ fn test_diff_stat_detects_clear_rename_with_small_edit() {
     let json = heddle(&["diff", "--stat", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&json)
         .unwrap_or_else(|_| panic!("diff --stat should emit JSON in tests. Got: {json}"));
+    // Worktree-mode diff groups `changes` into {modified, added, deleted};
+    // a collapsed rename buckets under `modified` (it is an existing file
+    // whose identity changed, with `old_path`/`kind` carrying the detail).
     let changes = parsed["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("worktree changes should be a category object. Got: {json}"));
+    let modified = changes["modified"]
         .as_array()
-        .unwrap_or_else(|| panic!("changes should be an array. Got: {json}"));
+        .unwrap_or_else(|| panic!("changes.modified should be an array. Got: {json}"));
     assert_eq!(
-        changes.len(),
+        modified.len(),
         1,
-        "rename should collapse add/delete: {json}"
+        "rename should collapse add/delete into one modified-bucket entry: {json}"
     );
-    assert_eq!(
-        changes[0]["kind"], "renamed",
-        "expected renamed row: {json}"
+    let entry = &modified[0];
+    assert_eq!(entry["kind"], "renamed", "expected renamed row: {json}");
+    assert_eq!(entry["old_path"], "src/renamed.txt");
+    assert_eq!(entry["path"], "src/final-name.txt");
+    assert!(
+        changes["added"].as_array().is_some_and(|a| a.is_empty())
+            && changes["deleted"].as_array().is_some_and(|a| a.is_empty()),
+        "collapsed rename must not leave stray add/delete entries: {json}"
     );
-    assert_eq!(changes[0]["old_path"], "src/renamed.txt");
-    assert_eq!(changes[0]["path"], "src/final-name.txt");
     assert_eq!(parsed["changed_path_count"], 1);
     assert_eq!(parsed["stats"]["files_changed"], 1);
     assert_eq!(parsed["stats"]["renames"], 1);
     assert!(
-        changes[0].get("lines").is_none(),
+        entry.get("lines").is_none(),
         "diff --stat JSON should be a stat payload, not a hunk payload: {json}"
     );
 

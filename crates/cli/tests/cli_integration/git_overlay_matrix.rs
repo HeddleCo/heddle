@@ -2538,19 +2538,27 @@ fn git_overlay_matrix_undo_rewinds_git_checkpoint_when_safe() {
     let operations = undo_list["batches"][0]["operations"]
         .as_array()
         .expect("undo list should expose operations");
+    let logical_operations: Vec<_> = operations
+        .iter()
+        .filter(|op| {
+            !op["description"]
+                .as_str()
+                .is_some_and(|description| description.starts_with("transaction commit "))
+        })
+        .collect();
     assert_eq!(
-        operations.len(),
+        logical_operations.len(),
         2,
         "compat commit should be one logical undo batch containing capture + Git checkpoint: {undo_list}"
     );
     assert!(
-        operations.iter().any(|op| op["description"]
+        logical_operations.iter().any(|op| op["description"]
             .as_str()
             .is_some_and(|description| description.starts_with("snapshot "))),
         "commit undo batch should include the captured Heddle state: {undo_list}"
     );
     assert!(
-        operations.iter().any(|op| op["description"]
+        logical_operations.iter().any(|op| op["description"]
             .as_str()
             .is_some_and(|description| description.starts_with("git checkpoint "))),
         "commit undo batch should include the Git checkpoint: {undo_list}"
@@ -4303,8 +4311,10 @@ fn git_overlay_matrix_subdirectory_dirty_commands() {
 
     let diff = json(&nested, &["diff", "HEAD"]);
     assert!(
-        diff["changes"].as_array().is_some(),
-        "diff should remain well-formed after nested-path bootstrap/show/log sequencing: {diff}"
+        diff["changes"]["modified"].as_array().is_some()
+            && diff["changes"]["added"].as_array().is_some()
+            && diff["changes"]["deleted"].as_array().is_some(),
+        "diff should remain well-formed (category object) after nested-path bootstrap/show/log sequencing: {diff}"
     );
 
     let thread_list = json(&nested, &["thread", "list", "--output", "json"]);
@@ -4369,7 +4379,7 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
     );
     assert_eq!(status["verification"]["workflow_status"], "not_checked");
     assert_eq!(status["verification"]["worktree_state"], "not_checked");
-    let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
+    let status_text = heddle(&["status", "--output", "text", "-v"], Some(temp.path())).unwrap();
     assert!(
         status_text.contains(
             "Verification: Git branch 'feature/drop-in' advanced outside Heddle; import the new Git tip to restore the mapping"
@@ -4457,8 +4467,13 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
         "diagnose must not resurrect stale Heddle-vs-state paths when Git is clean but import is needed: {diagnose}"
     );
     let diff = json(temp.path(), &["diff", "--output", "json", "--stat"]);
+    let diff_changes = diff["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("worktree diff changes should be a category object: {diff}"));
     assert!(
-        diff["changes"].as_array().unwrap().is_empty(),
+        ["modified", "added", "deleted"]
+            .iter()
+            .all(|key| diff_changes[*key].as_array().is_some_and(|a| a.is_empty())),
         "diff must not report stale paths when Git is clean but import is needed: {diff}"
     );
 
@@ -4472,9 +4487,16 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
         "diagnose should show the same current Git dirty set as status under needs_import: {dirty_diagnose}"
     );
     let dirty_diff = json(temp.path(), &["diff", "--output", "json", "--stat"]);
+    let dirty_changes = dirty_diff["changes"]
+        .as_object()
+        .unwrap_or_else(|| panic!("worktree diff changes should be a category object: {dirty_diff}"));
+    let dirty_total: usize = ["modified", "added", "deleted"]
+        .iter()
+        .filter_map(|key| dirty_changes[*key].as_array())
+        .map(Vec::len)
+        .sum();
     assert_eq!(
-        dirty_diff["changes"].as_array().unwrap().len(),
-        1,
+        dirty_total, 1,
         "diff should show the same current Git dirty set as status under needs_import: {dirty_diff}"
     );
 
@@ -4542,7 +4564,7 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
                 && summary.contains("Heddle thread state")),
         "status should describe Git/Heddle disagreement: {status}"
     );
-    let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
+    let status_text = heddle(&["status", "--output", "text", "-v"], Some(temp.path())).unwrap();
     assert!(
         status_text.contains("Git/Heddle mismatch")
             && status_text.contains("Health: Git/Heddle mismatch")
@@ -5632,12 +5654,12 @@ fn git_overlay_matrix_diff_added_symlink_renders_link_target() {
 
     symlink("README.md", temp.path().join("link-to-readme")).unwrap();
     let diff = json(temp.path(), &["--output", "json", "diff"]);
-    let link_change = diff["changes"]
+    let link_change = diff["changes"]["added"]
         .as_array()
         .unwrap()
         .iter()
         .find(|change| change["path"] == "link-to-readme")
-        .unwrap_or_else(|| panic!("diff should include added symlink: {diff}"));
+        .unwrap_or_else(|| panic!("diff should include added symlink under the added category: {diff}"));
     assert_eq!(link_change["kind"], "added");
     let added_line = link_change["lines"]
         .as_array()
@@ -6916,7 +6938,7 @@ fn git_overlay_matrix_side_only_import_is_available_not_next_action() {
         );
     }
 
-    let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
+    let status_text = heddle(&["status", "--output", "text", "-v"], Some(temp.path())).unwrap();
     assert!(
         status_text.contains("Health: clean")
             && !status_text.contains("Setup needed")
@@ -8451,4 +8473,235 @@ fn git_overlay_matrix_continue_retry_loops_block_then_succeed_after_resolution()
         "raw Git continue should explain the native no-git boundary: {continued_git}"
     );
     assert_operator_json_contract(&continued_git, "merge");
+}
+
+// ---------------------------------------------------------------------------
+// `--no-thread` lane-existence conformance (heddle#307, Codex cid 3327525677
+// + cid 3327725478).
+//
+// The bug class: every actor-surface site that asks "is there a current lane /
+// active actor for THIS checkout?" must consult the single git-overlay-aware
+// oracle `Repository::current_lane()`. In a git-overlay repo, Git HEAD can be
+// detached while `.heddle/HEAD` still names a stale attached thread; any site
+// that reads `head_ref()` / `.heddle/HEAD` directly then falls back to that
+// stale `Attached`, so the execute path attached the actor to a dead branch and
+// the recommend path either advertised a `--no-thread` command that cannot
+// succeed or resolved a stale actor instead of recommending a mint.
+//
+// Round 2 routed `actor spawn --no-thread` (execute) and the recommend fallback
+// through `current_lane()`. Round 3 (cid 3327725478) closes the *upstream*
+// leak: `resolve_actor_entry` decided "is there an attached actor?" off
+// `head_ref()` and the unconditional "any active actor" fallback, so an active
+// actor on `main` plus a detached-unmapped HEAD resolved the stale `main` actor
+// and `actor explain` printed it — never reaching the mint recommendation —
+// while `actor spawn --no-thread` rejected. This harness pins the invariant
+// across the whole matrix: recommend and execute must agree, including when an
+// active actor exists.
+
+/// `actor explain` recommends `--no-thread` iff a current lane exists.
+fn explain_recommends_no_thread(path: &std::path::Path) -> bool {
+    let output = heddle_output_with_env(
+        &["actor", "explain", "--output", "json"],
+        Some(path),
+        &[
+            ("CODEX_THREAD_ID", "thread-cold-agent"),
+            ("CODEX_MODEL", "gpt-5.3-codex"),
+            ("CODEX_REASONING_EFFORT", "high"),
+        ],
+    )
+    .expect("actor explain should run");
+    assert!(
+        output.status.success(),
+        "actor explain should succeed; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("actor explain JSON should parse: {err}: {stdout}"));
+    parsed["recommended_action"]
+        .as_str()
+        .expect("recommended_action should be a string")
+        .contains("--no-thread")
+}
+
+/// `actor spawn --no-thread` succeeds iff a current lane exists.
+fn spawn_no_thread_succeeds(path: &std::path::Path) -> bool {
+    heddle(
+        &[
+            "actor",
+            "spawn",
+            "--no-thread",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.3-codex",
+        ],
+        Some(path),
+    )
+    .is_ok()
+}
+
+#[test]
+fn git_overlay_no_thread_lane_predicate_recommend_and_execute_agree() {
+    // (c) On-lane: adopted git-overlay repo sits attached to `main`. A lane
+    // exists, so recommend and execute both accept `--no-thread`.
+    let on_lane = TempDir::new().unwrap();
+    init_git_repo_with_branch(on_lane.path(), "main");
+    std::fs::write(on_lane.path().join("base.txt"), "base\n").unwrap();
+    git_commit_all(on_lane.path(), "base");
+    heddle_adopt(on_lane.path());
+    assert_eq!(
+        Repository::open(on_lane.path())
+            .unwrap()
+            .current_lane()
+            .unwrap(),
+        Some("main".to_string()),
+        "adopted git-overlay repo should report `main` as the current lane"
+    );
+    assert!(
+        explain_recommends_no_thread(on_lane.path()),
+        "on-lane: explain should recommend --no-thread"
+    );
+    assert!(
+        spawn_no_thread_succeeds(on_lane.path()),
+        "on-lane: spawn --no-thread should succeed"
+    );
+
+    // (a) Detached Git HEAD whose commit has NO Heddle mapping. We adopt, then
+    // detach and make a *fresh* Git commit directly (bypassing heddle) so the
+    // detached commit is provably unmapped. `read_head_state` defaults to
+    // `Attached{main}` when `.heddle/HEAD` is absent, so the old `head_ref()`
+    // fell back to that stale `main` thread — but there is no lane to attach to.
+    let detached_no_mapping = TempDir::new().unwrap();
+    init_git_repo_with_branch(detached_no_mapping.path(), "main");
+    std::fs::write(detached_no_mapping.path().join("base.txt"), "base\n").unwrap();
+    git_commit_all(detached_no_mapping.path(), "base");
+    heddle_adopt(detached_no_mapping.path());
+    git(&["checkout", "--detach"], detached_no_mapping.path());
+    git(
+        &["commit", "--allow-empty", "-m", "unmapped detached commit"],
+        detached_no_mapping.path(),
+    );
+    assert_eq!(
+        Repository::open(detached_no_mapping.path())
+            .unwrap()
+            .current_lane()
+            .unwrap(),
+        None,
+        "detached Git HEAD with no Heddle mapping must report no current lane, \
+         not the stale `.heddle/HEAD` thread"
+    );
+    assert!(
+        !explain_recommends_no_thread(detached_no_mapping.path()),
+        "detached-no-mapping: explain must NOT recommend --no-thread (mint instead)"
+    );
+    assert!(
+        !spawn_no_thread_succeeds(detached_no_mapping.path()),
+        "detached-no-mapping: spawn --no-thread must be rejected, not attached to a stale branch"
+    );
+
+    // (b) Detached Git HEAD whose commit DOES map to a Heddle change (the
+    // adopted tip). It is still detached — no attached lane — so recommend and
+    // execute must agree on rejecting `--no-thread`.
+    let detached_mapped = TempDir::new().unwrap();
+    init_git_repo_with_branch(detached_mapped.path(), "main");
+    std::fs::write(detached_mapped.path().join("base.txt"), "base\n").unwrap();
+    git_commit_all(detached_mapped.path(), "base");
+    std::fs::write(detached_mapped.path().join("next.txt"), "next\n").unwrap();
+    git_commit_all(detached_mapped.path(), "next");
+    heddle_adopt(detached_mapped.path());
+    let mapped_tip = git_stdout(detached_mapped.path(), &["rev-parse", "HEAD"]);
+    git(&["checkout", &mapped_tip], detached_mapped.path());
+    let recommend = explain_recommends_no_thread(detached_mapped.path());
+    let execute = spawn_no_thread_succeeds(detached_mapped.path());
+    assert_eq!(
+        recommend, execute,
+        "detached-with-mapping: recommend and execute must agree on --no-thread"
+    );
+    assert!(
+        !execute,
+        "detached-with-mapping: a detached HEAD has no attached lane, so --no-thread is rejected"
+    );
+
+    // (d) The leak round 2 missed (cid 3327725478): an *active actor* attached
+    // to `main`, then Git HEAD detached to an UNMAPPED commit so `.heddle/HEAD`
+    // still says `Attached(main)`. `resolve_actor_entry` used to resolve that
+    // stale `main` actor off `head_ref()` (and the unconditional "any active
+    // actor" fallback), so `actor explain` printed the stale actor — never
+    // reaching the mint recommendation — while `actor spawn --no-thread`
+    // rejected. The single `current_lane()` oracle reports no lane here, so
+    // explain must fall through to the minting recommendation and agree with
+    // execute's rejection.
+    let active_then_detached = TempDir::new().unwrap();
+    init_git_repo_with_branch(active_then_detached.path(), "main");
+    std::fs::write(active_then_detached.path().join("base.txt"), "base\n").unwrap();
+    git_commit_all(active_then_detached.path(), "base");
+    heddle_adopt(active_then_detached.path());
+    // Spawn an actor attached to the current lane (`main`). It records
+    // `path: None`, so it is reachable only via the lane oracle / the "any
+    // active actor" fallback — exactly the surfaces under test.
+    heddle(
+        &[
+            "actor",
+            "spawn",
+            "--no-thread",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.3-codex",
+        ],
+        Some(active_then_detached.path()),
+    )
+    .expect("spawn an active actor attached to `main`");
+    git(&["checkout", "--detach"], active_then_detached.path());
+    git(
+        &["commit", "--allow-empty", "-m", "unmapped detached commit"],
+        active_then_detached.path(),
+    );
+    assert_eq!(
+        Repository::open(active_then_detached.path())
+            .unwrap()
+            .current_lane()
+            .unwrap(),
+        None,
+        "active-actor-on-main + detached-unmapped HEAD must report no current lane"
+    );
+    // Recommend: `actor explain` must NOT resolve the stale `main` actor. It
+    // must report no active actor (`attached: false`) and recommend the minting
+    // spawn form, not `--no-thread`.
+    let explained = heddle_output_with_env(
+        &["actor", "explain", "--output", "json"],
+        Some(active_then_detached.path()),
+        &[
+            ("CODEX_THREAD_ID", "thread-cold-agent"),
+            ("CODEX_MODEL", "gpt-5.3-codex"),
+            ("CODEX_REASONING_EFFORT", "high"),
+        ],
+    )
+    .expect("actor explain should run");
+    assert!(
+        explained.status.success(),
+        "actor explain should succeed; stderr={}",
+        String::from_utf8_lossy(&explained.stderr)
+    );
+    let explained_json: Value = serde_json::from_slice(&explained.stdout)
+        .unwrap_or_else(|err| panic!("actor explain JSON should parse: {err}"));
+    assert_eq!(
+        explained_json["attached"], false,
+        "detached-unmapped HEAD with a stale `.heddle/HEAD` must not resolve the \
+         stale `main` actor: {explained_json}"
+    );
+    let recommended = explained_json["recommended_action"]
+        .as_str()
+        .unwrap_or_else(|| panic!("recommended_action should be present: {explained_json}"));
+    assert!(
+        recommended.contains("actor spawn") && !recommended.contains("--no-thread"),
+        "active-actor-on-main + detached-unmapped: explain must recommend the minting \
+         spawn form, not `--no-thread`: {explained_json}"
+    );
+    // Execute agrees: `--no-thread` is rejected because there is no current lane.
+    assert!(
+        !spawn_no_thread_succeeds(active_then_detached.path()),
+        "active-actor-on-main + detached-unmapped: spawn --no-thread must be rejected"
+    );
 }

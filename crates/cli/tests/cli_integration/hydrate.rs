@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-//! End-to-end coverage of `heddle start --hydrate` (heddle#302).
+//! End-to-end coverage of `heddle start --hydrate` + the atomic start
+//! rollback (heddle#302 / heddle#356).
 //!
 //! `--hydrate` symlinks the origin checkout's top-level ignored
 //! dependency directories (`node_modules`, `.venv`, …) into a fresh
-//! isolated checkout so it's immediately buildable. These tests run the
-//! built `heddle` binary inside temp dirs and inspect what `start`
-//! leaves on disk: the links must exist, point back at the origin, and
-//! stay ignored (never captured).
+//! isolated checkout so it's immediately buildable. The whole `start`
+//! write-path runs as one atomic transaction on the heddle#330 primitive,
+//! so a failure mid-materialize (or mid-hydrate) rewinds every applied
+//! effect — with precise directory + symlink rewind — back to the exact
+//! pre-start state. These tests run the built `heddle` binary inside temp
+//! dirs and inspect what `start` leaves on disk.
 
 use super::*;
 
@@ -121,6 +124,99 @@ fn hydrate_preserves_gitignore_only_ignores_in_isolated_checkout() {
 }
 
 #[test]
+fn hydrate_does_not_dirty_a_tracked_heddleignore() {
+    // heddle#356 cid 3333881577: a git-overlay repo that tracks a root
+    // `.heddleignore` (covering unrelated paths) while ignoring deps via
+    // `.gitignore`. The isolated checkout materializes that TRACKED
+    // `.heddleignore`, so `existing` is `Some`. hydrate must record the
+    // dep-ignore rule in the worktree-local, never-captured exclude file —
+    // NOT by appending to the tracked `.heddleignore` — so a successful
+    // `start --hydrate` leaves the checkout's tracked tree clean.
+    let temp = TempDir::new().unwrap();
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(temp.path())
+            .status()
+            .expect("git should run");
+        assert!(status.success(), "git {args:?} should succeed");
+    };
+    git(&["init"]);
+    git(&["config", "user.name", "Heddle Test"]);
+    git(&["config", "user.email", "heddle@example.com"]);
+    git(&["checkout", "-b", "main"]);
+
+    // Deps ignored via `.gitignore`; a TRACKED `.heddleignore` with an
+    // unrelated rule that does NOT cover the deps.
+    std::fs::write(temp.path().join(".gitignore"), "node_modules/\n").unwrap();
+    std::fs::write(temp.path().join(".heddleignore"), "*.log\n").unwrap();
+    std::fs::write(temp.path().join("index.ts"), "export const x = 1;\n").unwrap();
+    let node_modules = temp.path().join("node_modules");
+    std::fs::create_dir_all(node_modules.join("left-pad")).unwrap();
+    std::fs::write(
+        node_modules.join("left-pad").join("index.js"),
+        "module.exports = () => {};\n",
+    )
+    .unwrap();
+
+    heddle(&["init"], Some(temp.path())).unwrap();
+    heddle(&["capture", "-m", "main"], Some(temp.path())).unwrap();
+
+    let checkout_root = TempDir::new().unwrap();
+    let thread_path = checkout_root.path().join("iso");
+    heddle(
+        &[
+            "start",
+            "iso",
+            "--path",
+            thread_path.to_str().unwrap(),
+            "--hydrate",
+        ],
+        Some(temp.path()),
+    )
+    .expect("start --hydrate should succeed");
+
+    // node_modules is hydrated as a symlink...
+    assert!(
+        std::fs::symlink_metadata(thread_path.join("node_modules"))
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false),
+        "node_modules should be hydrated as a symlink"
+    );
+
+    // ...and the TRACKED `.heddleignore` is byte-for-byte UNCHANGED (pre-fix
+    // hydrate appended `node_modules/` to it, dirtying the tracked tree).
+    let checkout_ignore = std::fs::read_to_string(thread_path.join(".heddleignore")).unwrap();
+    assert_eq!(
+        checkout_ignore, "*.log\n",
+        "hydrate must not modify the tracked .heddleignore"
+    );
+
+    // The dep-ignore rule landed in the worktree-local, never-captured exclude.
+    let exclude = std::fs::read_to_string(
+        thread_path.join(".heddle").join("info").join("exclude"),
+    )
+    .expect("hydrate should write the worktree-local exclude");
+    assert!(
+        exclude.contains("node_modules"),
+        "the dep-ignore rule must live in the worktree-local exclude; got:\n{exclude}"
+    );
+
+    // `status` from the checkout is clean: the dep stays ignored, and the
+    // tracked `.heddleignore` is not reported as modified.
+    let status = heddle(&["status"], Some(&thread_path))
+        .expect("status should run from the hydrated checkout");
+    assert!(
+        !status.contains("node_modules"),
+        "hydrated node_modules must stay ignored in the checkout; got:\n{status}"
+    );
+
+    // Capture must not choke on the absolute, out-of-checkout link target.
+    heddle(&["capture", "-m", "iso work"], Some(&thread_path))
+        .expect("capture in the hydrated checkout must succeed");
+}
+
+#[test]
 fn hydrate_symlinks_ignored_dep_dirs_into_checkout() {
     let temp = TempDir::new().unwrap();
     init_deps_in_ignored_dir_project(temp.path());
@@ -176,7 +272,10 @@ fn hydrate_symlinks_ignored_dep_dirs_into_checkout() {
     let src = thread_path.join("index.ts");
     assert!(src.is_file());
     assert!(
-        !std::fs::symlink_metadata(&src).unwrap().file_type().is_symlink(),
+        !std::fs::symlink_metadata(&src)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
         "tracked source must be a real captured file, not a symlink"
     );
 }
@@ -427,5 +526,98 @@ fn hydrated_deps_stay_ignored_in_checkout() {
     assert!(
         !status.contains("node_modules"),
         "hydrated node_modules must stay ignored (not reported by status); got:\n{status}"
+    );
+}
+
+#[test]
+fn start_partial_materialize_rolls_back_self_created_dir() {
+    // heddle#356: a failure PARTWAY THROUGH the checkout materialize (the
+    // `.heddle` metadata is on disk but the tree bytes are not) must rewind
+    // the whole created checkout — the self-created target dir is removed
+    // wholesale, and no `.heddle` is left behind. Pre-migration this left a
+    // half-written checkout + a dangling thread ref; post-migration the repo
+    // is as if `start` never ran.
+    let temp = TempDir::new().unwrap();
+    init_deps_in_ignored_dir_project(temp.path());
+    heddle(&["init"], Some(temp.path())).unwrap();
+    heddle(&["capture", "-m", "main"], Some(temp.path())).unwrap();
+
+    let thread_path = temp.path().join("iso");
+    let output = heddle_output_with_env(
+        &["start", "iso", "--path", thread_path.to_str().unwrap()],
+        Some(temp.path()),
+        &[("HEDDLE_FAULT_INJECT", "start_materialize_checkout")],
+    )
+    .expect("the heddle binary should run");
+
+    assert!(
+        !output.status.success(),
+        "a mid-materialize fault must fail the start"
+    );
+    // The created checkout dir (and its partial `.heddle`) is fully removed.
+    assert!(
+        std::fs::symlink_metadata(&thread_path).is_err(),
+        "a partial materialize must remove the self-created checkout dir: {}",
+        thread_path.display()
+    );
+    // No dangling thread ref.
+    let list = heddle(&["thread", "list"], Some(temp.path()))
+        .expect("thread list should run after the rolled-back start");
+    assert!(
+        !list.contains("iso"),
+        "a materialize fault must not leave a dangling thread ref; got:\n{list}"
+    );
+}
+
+#[test]
+fn start_partial_materialize_preserves_preexisting_empty_dir() {
+    // heddle#356, mirror of the hydrate case: a mid-materialize fault into a
+    // USER-supplied empty `--path` dir must clear only the contents this
+    // invocation wrote (the partial `.heddle`), never delete the directory
+    // the user created.
+    let temp = TempDir::new().unwrap();
+    init_deps_in_ignored_dir_project(temp.path());
+    heddle(&["init"], Some(temp.path())).unwrap();
+    heddle(&["capture", "-m", "main"], Some(temp.path())).unwrap();
+
+    let thread_path = temp.path().join("iso-existing");
+    std::fs::create_dir(&thread_path).unwrap();
+
+    let output = heddle_output_with_env(
+        &[
+            "start",
+            "iso-existing",
+            "--path",
+            thread_path.to_str().unwrap(),
+        ],
+        Some(temp.path()),
+        &[("HEDDLE_FAULT_INJECT", "start_materialize_checkout")],
+    )
+    .expect("the heddle binary should run");
+
+    assert!(
+        !output.status.success(),
+        "a mid-materialize fault must fail the start"
+    );
+    let meta = std::fs::symlink_metadata(&thread_path).unwrap_or_else(|e| {
+        panic!(
+            "a pre-existing user dir must NOT be deleted on rollback ({}): {e}",
+            thread_path.display()
+        )
+    });
+    assert!(meta.is_dir(), "the pre-existing target must remain a directory");
+    let remaining: Vec<_> = std::fs::read_dir(&thread_path)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        remaining.is_empty(),
+        "rollback must clear materialized contents from a pre-existing dir; found: {remaining:?}"
+    );
+    let list = heddle(&["thread", "list"], Some(temp.path()))
+        .expect("thread list should run after the rolled-back start");
+    assert!(
+        !list.contains("iso-existing"),
+        "a materialize fault must not leave a dangling thread ref; got:\n{list}"
     );
 }

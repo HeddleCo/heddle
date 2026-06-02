@@ -6,7 +6,8 @@ use std::time::Instant;
 
 use anyhow::Result;
 use objects::object::State;
-use refs::Head;
+use oplog::OpRecord;
+use refs::{Head, RefExpectation, RefUpdate};
 use repo::Repository;
 use serde::Serialize;
 
@@ -95,22 +96,40 @@ pub fn cmd_collapse(
         eprintln!("Writing collapsed state {}...", new_state.change_id.short());
     }
 
-    // Update HEAD to point to the new state
-    match repo.refs().read_head()? {
-        Head::Attached { ref thread } => {
-            repo.refs().set_thread(thread, &new_state.change_id)?;
-        }
-        Head::Detached { .. } => {
-            repo.refs().write_head(&Head::Detached {
-                state: new_state.change_id,
-            })?;
-        }
-    }
+    // Build the published ref batch + its matching `Collapse` record, then
+    // publish record-first through the write chokepoint (heddle#330 §2.2): the
+    // record is the commit point and the ref publish is a post-commit
+    // materialization, replacing the prior publish-then-record order. The
+    // `Collapse` record names the published ref (a thread when HEAD was
+    // attached, or a detached HEAD at the collapse result).
+    let (ref_updates, published_thread): (Vec<RefUpdate>, Option<String>) =
+        match repo.refs().read_head()? {
+            Head::Attached { ref thread } => (
+                vec![RefUpdate::Thread {
+                    name: thread.clone(),
+                    expected: RefExpectation::Any,
+                    new: Some(new_state.change_id),
+                }],
+                Some(thread.to_string()),
+            ),
+            Head::Detached { .. } => (
+                vec![RefUpdate::Head {
+                    expected: RefExpectation::Any,
+                    new: Head::Detached {
+                        state: new_state.change_id,
+                    },
+                }],
+                None,
+            ),
+        };
 
-    // Record in oplog
     let source_ids: Vec<_> = resolved_states.iter().map(|s| s.change_id).collect();
-    repo.oplog()
-        .record_collapse(&source_ids, &new_state.change_id)?;
+    let collapse_record = OpRecord::Collapse {
+        sources: source_ids,
+        result: new_state.change_id,
+        thread: published_thread,
+    };
+    repo.commit_and_publish(vec![collapse_record], &ref_updates)?;
 
     let output = CollapseOutput {
         change_id: new_state.change_id.short(),

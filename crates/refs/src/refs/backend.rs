@@ -112,7 +112,7 @@ mod tests {
     use objects::object::{ChangeId, MarkerName, ThreadName};
 
     use super::CoreRefBackend;
-    use crate::refs::{Head, RefExpectation, RefUpdate};
+    use crate::refs::{Head, RefBackend, RefExpectation, RefUpdate};
 
     /// In-memory backend that does **not** override `resolve`, so the
     /// trait's default `resolve` (the only non-Pg, non-`RefManager`
@@ -231,6 +231,56 @@ mod tests {
             Ok(())
         }
         // `resolve` deliberately left unimplemented — exercises the default.
+    }
+
+    /// Implements only the required remote methods, leaving
+    /// `commit_and_publish` (and the other maintenance methods) on the trait
+    /// default — the exerciser for the default `commit_and_publish` fail-closed
+    /// path.
+    impl RefBackend for MemRefBackend {
+        fn get_remote_thread(
+            &self,
+            _remote: &str,
+            _thread: &ThreadName,
+        ) -> Result<Option<ChangeId>, HeddleError> {
+            Ok(None)
+        }
+        fn set_remote_thread(
+            &self,
+            _remote: &str,
+            _thread: &ThreadName,
+            _state: &ChangeId,
+        ) -> Result<(), HeddleError> {
+            Ok(())
+        }
+        fn delete_remote_thread(
+            &self,
+            _remote: &str,
+            _thread: &ThreadName,
+        ) -> Result<Option<ChangeId>, HeddleError> {
+            Ok(None)
+        }
+        fn list_remotes(&self) -> Result<Vec<String>, HeddleError> {
+            Ok(Vec::new())
+        }
+        fn list_remote_threads(&self, _remote: &str) -> Result<Vec<ThreadName>, HeddleError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// The default `commit_and_publish` (no record committer) must fail closed
+    /// when handed records (heddle#354 r9, cid 3330304656): committed data can
+    /// never be silently dropped while the ref batch is published anyway. A
+    /// record-free publish still succeeds.
+    #[test]
+    fn default_commit_and_publish_fails_closed_on_records() {
+        let backend = MemRefBackend::default();
+        assert!(
+            RefBackend::commit_and_publish(&backend, &[vec![1u8, 2, 3]], &[], None).is_err(),
+            "records with no committer must fail closed, not be silently dropped"
+        );
+        RefBackend::commit_and_publish(&backend, &[], &[], None)
+            .expect("a record-free publish has nothing to lose and must succeed");
     }
 
     #[test]

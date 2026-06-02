@@ -4,12 +4,19 @@
 use objects::store::ObjectStore;
 use objects::{
     lock::RepositoryLockExt,
-    object::{Attribution, ChangeId, State, Tree},
+    object::{Attribution, Blob, ChangeId, ContentHash, State, Tree, TreeEntry},
 };
+use oplog::OpRecord;
 use refs::Head;
 use tracing::{debug, instrument};
 
 use super::{HeddleError, Repository, Result, repository_tree::TreeBuildProfile};
+use crate::atomic::{AtomicMutation, RewindLedger, StagedCommit, Tx, execute};
+use crate::worktree_ignore::WorktreeIgnoreMatcher;
+use crate::worktree_walk::{
+    WalkDirectory, WalkEntry, WorktreeWalkPolicy, read_file_hash, validate_symlink_target,
+    walk_worktree,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct SnapshotProfile {
@@ -27,7 +34,431 @@ pub struct SnapshotExecution {
     pub profile: SnapshotProfile,
 }
 
+enum SnapshotSource {
+    Worktree { fingerprint: ContentHash },
+    SuppliedTree(Tree),
+}
+
+struct SnapshotMutation<'a> {
+    repo: &'a Repository,
+    source: SnapshotSource,
+    intent: Option<String>,
+    confidence: Option<f32>,
+    attribution: Attribution,
+    prev_head: Option<ChangeId>,
+    head: Head,
+    transaction_id: String,
+}
+
+impl<'a> SnapshotMutation<'a> {
+    fn new(
+        repo: &'a Repository,
+        source: SnapshotSource,
+        intent: Option<String>,
+        confidence: Option<f32>,
+        attribution: Attribution,
+        prev_head: Option<ChangeId>,
+        head: Head,
+    ) -> Self {
+        let transaction_id = snapshot_transaction_id(
+            repo,
+            &source,
+            intent.as_deref(),
+            confidence,
+            &attribution,
+            prev_head,
+            &head,
+        );
+        Self {
+            repo,
+            source,
+            intent,
+            confidence,
+            attribution,
+            prev_head,
+            head,
+            transaction_id,
+        }
+    }
+
+    fn thread(&self) -> Option<String> {
+        match &self.head {
+            Head::Attached { thread } => Some(thread.to_string()),
+            Head::Detached { .. } => None,
+        }
+    }
+}
+
+impl AtomicMutation for SnapshotMutation<'_> {
+    type Output = SnapshotExecution;
+
+    fn transaction_id(&self) -> String {
+        self.transaction_id.clone()
+    }
+
+    fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<Self::Output>> {
+        self.repo.store.begin_snapshot_write_batch()?;
+        let execution = self.stage_snapshot_objects()?;
+
+        objects::fault_inject::maybe_panic_at("snapshot_after_stage_before_atomic_commit");
+        #[cfg(test)]
+        maybe_snapshot_fault(SnapshotFault::AfterStageBeforeAtomicCommit);
+
+        let record = OpRecord::Snapshot {
+            new_state: execution.state.change_id,
+            prev_head: self.prev_head,
+            thread: self.thread(),
+        };
+        Ok(StagedCommit::new(execution, vec![record]))
+    }
+
+    fn rewind(&mut self, _ledger: &RewindLedger) -> Result<()> {
+        self.repo.store.abort_snapshot_write_batch();
+        Ok(())
+    }
+
+    fn reconstruct_committed_output(
+        &self,
+        committed_records: &[OpRecord],
+        this_run: Self::Output,
+    ) -> Result<Self::Output> {
+        let Some(committed_state) = committed_records.iter().find_map(|record| match record {
+            OpRecord::Snapshot { new_state, .. } => Some(*new_state),
+            OpRecord::Goto { .. }
+            | OpRecord::ThreadCreate { .. }
+            | OpRecord::ThreadDelete { .. }
+            | OpRecord::ThreadUpdate { .. }
+            | OpRecord::Fork { .. }
+            | OpRecord::Collapse { .. }
+            | OpRecord::MarkerCreate { .. }
+            | OpRecord::MarkerDelete { .. }
+            | OpRecord::Checkpoint { .. }
+            | OpRecord::TransactionAbort { .. }
+            | OpRecord::EphemeralThreadCollapse { .. }
+            | OpRecord::ConflictResolved { .. }
+            | OpRecord::TransactionCommit { .. }
+            | OpRecord::Redact { .. }
+            | OpRecord::Purge { .. }
+            | OpRecord::FastForward { .. }
+            | OpRecord::FastForwardV2 { .. }
+            | OpRecord::ThreadCreateV2 { .. }
+            | OpRecord::GitCheckpoint { .. }
+            | OpRecord::RemoteThreadUpdate { .. }
+            | OpRecord::RemoteThreadDelete { .. }
+            | OpRecord::UndoRecoveryUpdate { .. } => None,
+        }) else {
+            return Ok(this_run);
+        };
+        let Some(state) = self.repo.store.get_state(&committed_state)? else {
+            return Ok(this_run);
+        };
+        let Some(tree) = self.repo.store.get_tree(&state.tree)? else {
+            return Ok(this_run);
+        };
+        Ok(SnapshotExecution {
+            state,
+            tree,
+            profile: SnapshotProfile::default(),
+        })
+    }
+}
+
+impl SnapshotMutation<'_> {
+    fn stage_snapshot_objects(&self) -> Result<SnapshotExecution> {
+        debug!("Building tree from worktree");
+        let (tree, tree_profile) = match &self.source {
+            SnapshotSource::Worktree { .. } => self.build_worktree_tree()?,
+            SnapshotSource::SuppliedTree(tree) => (tree.clone(), TreeBuildProfile::default()),
+        };
+        debug!(duration_ms = tree_profile.tree_walk_ms, "Tree built");
+
+        debug!("Storing tree");
+        let root_tree_write_start = std::time::Instant::now();
+        let tree_hash = self.repo.store.put_tree(&tree)?;
+        let root_tree_write_ms = root_tree_write_start.elapsed().as_millis();
+
+        let parents = match self.prev_head {
+            Some(id) => vec![id],
+            None => vec![],
+        };
+
+        let mut state = State::new_snapshot(tree_hash, parents, self.attribution.clone());
+
+        if let Some(intent) = self.intent.clone() {
+            state = state.with_intent(intent);
+        }
+
+        if let Some(confidence) = self.confidence {
+            state = state.with_confidence(confidence);
+        }
+
+        if let Some(parent_id) = self.prev_head
+            && let Some(parent_state) = self.repo.store.get_state(&parent_id)?
+            && let Some(inherited) = Repository::inherit_parent_context(&parent_state)
+        {
+            state = state.with_context(inherited);
+        }
+
+        #[cfg(feature = "tree-sitter-symbols")]
+        {
+            let prior_state = match self.prev_head {
+                Some(id) => self.repo.store.get_state(&id).ok().flatten(),
+                None => None,
+            };
+            match self
+                .repo
+                .compute_and_persist_signals(prior_state.as_ref(), &state)
+            {
+                Ok(Some(hash)) => {
+                    state = state.with_risk_signals(hash);
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(error = %err, "risk signal computation failed; continuing without signals");
+                }
+            }
+        }
+
+        let state_ref_oplog_start = std::time::Instant::now();
+        self.repo.store.put_state(&state)?;
+        self.repo.store.flush_snapshot_write_batch()?;
+
+        Ok(SnapshotExecution {
+            state,
+            tree,
+            profile: snapshot_profile_from_tree(
+                tree_profile,
+                root_tree_write_ms,
+                state_ref_oplog_start.elapsed().as_millis(),
+            ),
+        })
+    }
+
+    fn build_worktree_tree(&self) -> Result<(Tree, TreeBuildProfile)> {
+        let manifest_context: Option<(String, crate::thread_manifest::ThreadManifest)> =
+            match &self.head {
+                Head::Attached { thread } => {
+                    match crate::thread_manifest::read_manifest(self.repo.heddle_dir(), thread) {
+                        Ok(Some(m)) => {
+                            let self_root_canonical =
+                                super::repository_thread_materialize::canonical_worktree_path(
+                                    &self.repo.root,
+                                );
+                            if m.worktree_path == self_root_canonical {
+                                Some((thread.to_string(), m))
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    }
+                }
+                Head::Detached { .. } => None,
+            };
+
+        match manifest_context.as_ref() {
+            Some((_, manifest)) => self
+                .repo
+                .build_tree_profiled_with_stat_cache(&self.repo.root, manifest),
+            None => self.repo.build_tree_profiled(&self.repo.root),
+        }
+    }
+}
+
+#[derive(Default)]
+struct SnapshotFingerprintState {
+    entries: Vec<TreeEntry>,
+}
+
+struct SnapshotFingerprintOutput {
+    tree: Tree,
+}
+
+struct SnapshotFingerprintPolicy<'a> {
+    walk_root: &'a std::path::Path,
+}
+
+impl<'a> SnapshotFingerprintPolicy<'a> {
+    fn new(walk_root: &'a std::path::Path) -> Self {
+        Self { walk_root }
+    }
+}
+
+impl WorktreeWalkPolicy for SnapshotFingerprintPolicy<'_> {
+    type DirectoryState = SnapshotFingerprintState;
+    type Output = SnapshotFingerprintOutput;
+
+    fn enter_directory(
+        &mut self,
+        _directory: &WalkDirectory<'_>,
+        _tree: Option<&Tree>,
+    ) -> Result<Self::DirectoryState> {
+        Ok(SnapshotFingerprintState::default())
+    }
+
+    fn visit_file(
+        &mut self,
+        entry: WalkEntry<'_>,
+        _tree_entry: Option<&TreeEntry>,
+        state: &mut Self::DirectoryState,
+    ) -> Result<()> {
+        let hash = read_file_hash(entry.path, entry.metadata.len())?;
+        state.entries.push(TreeEntry::file(
+            entry.name.to_string(),
+            hash,
+            entry.executable,
+        )?);
+        Ok(())
+    }
+
+    fn visit_symlink(
+        &mut self,
+        entry: WalkEntry<'_>,
+        _tree_entry: Option<&TreeEntry>,
+        state: &mut Self::DirectoryState,
+    ) -> Result<()> {
+        let target = std::fs::read_link(entry.path)?;
+        let symlink_dir = entry.path.parent().unwrap_or(self.walk_root);
+        if !validate_symlink_target(self.walk_root, symlink_dir, &target) {
+            return Err(HeddleError::InvalidSymlinkTarget(target));
+        }
+
+        let blob = Blob::new(objects::util::symlink_target_bytes(&target));
+        state
+            .entries
+            .push(TreeEntry::symlink(entry.name.to_string(), blob.hash())?);
+        Ok(())
+    }
+
+    fn visit_directory_output(
+        &mut self,
+        entry: WalkEntry<'_>,
+        _tree_entry: Option<&TreeEntry>,
+        subtree: Self::Output,
+        state: &mut Self::DirectoryState,
+    ) -> Result<()> {
+        state.entries.push(TreeEntry::directory(
+            entry.name.to_string(),
+            subtree.tree.hash(),
+        )?);
+        Ok(())
+    }
+
+    fn visit_missing(
+        &mut self,
+        _rel_path: &std::path::Path,
+        _tree_entry: &TreeEntry,
+        _state: &mut Self::DirectoryState,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn leave_directory(
+        &mut self,
+        _directory: &WalkDirectory<'_>,
+        _tree: Option<&Tree>,
+        state: Self::DirectoryState,
+    ) -> Result<Self::Output> {
+        Ok(SnapshotFingerprintOutput {
+            tree: Tree::from_entries(state.entries),
+        })
+    }
+}
+
+fn snapshot_transaction_id(
+    repo: &Repository,
+    source: &SnapshotSource,
+    intent: Option<&str>,
+    confidence: Option<f32>,
+    attribution: &Attribution,
+    _prev_head: Option<ChangeId>,
+    head: &Head,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"snapshot-v1\0");
+    hasher.update(repo.op_scope().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(repo.root.to_string_lossy().as_bytes());
+    hasher.update(b"\0");
+    match source {
+        SnapshotSource::Worktree { fingerprint } => {
+            hasher.update(b"worktree\0");
+            hasher.update(fingerprint.as_bytes());
+        }
+        SnapshotSource::SuppliedTree(tree) => {
+            hasher.update(b"tree\0");
+            hasher.update(tree.hash().as_bytes());
+        }
+    };
+    hasher.update(b"\0");
+    hasher.update(head.to_text().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(intent.unwrap_or_default().as_bytes());
+    hasher.update(b"\0");
+    if let Some(confidence) = confidence {
+        hasher.update(&confidence.to_bits().to_le_bytes());
+    }
+    hasher.update(b"\0");
+    hasher.update(attribution.principal.name.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(attribution.principal.email.as_bytes());
+    if let Some(agent) = &attribution.agent {
+        hasher.update(b"\0agent\0");
+        hasher.update(agent.provider.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(agent.model.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(agent.session_id.as_deref().unwrap_or_default().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(agent.segment_id.as_deref().unwrap_or_default().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(agent.policy_id.as_deref().unwrap_or_default().as_bytes());
+    }
+    format!("snapshot-{}", hasher.finalize().to_hex())
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SnapshotFault {
+    AfterStageBeforeAtomicCommit,
+    AfterAtomicCommitBeforeRefPublish,
+}
+
+#[cfg(test)]
+thread_local! {
+    static SNAPSHOT_FAULT: std::cell::Cell<Option<SnapshotFault>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_snapshot_fault<T>(fault: SnapshotFault, body: impl FnOnce() -> T) -> T {
+    SNAPSHOT_FAULT.with(|f| f.set(Some(fault)));
+    let out = body();
+    SNAPSHOT_FAULT.with(|f| f.set(None));
+    out
+}
+
+#[cfg(test)]
+fn maybe_snapshot_fault(fault: SnapshotFault) {
+    SNAPSHOT_FAULT.with(|f| {
+        if f.get() == Some(fault) {
+            f.set(None);
+            panic!("snapshot fault checkpoint");
+        }
+    });
+}
+
 impl Repository {
+    fn snapshot_worktree_fingerprint(&self) -> Result<ContentHash> {
+        let patterns = self.ignore_patterns()?;
+        let nested_exclusions = self.nested_thread_worktree_exclusions(&self.root)?;
+        let ignore_matcher =
+            WorktreeIgnoreMatcher::new(&patterns).with_nested_worktree_exclusions(nested_exclusions);
+        let mut policy = SnapshotFingerprintPolicy::new(&self.root);
+        Ok(walk_worktree(self, &self.root, &ignore_matcher, None, &mut policy)?
+            .tree
+            .hash())
+    }
+
     /// Create a snapshot of the current worktree.
     #[instrument(skip(self), fields(intent = ?intent))]
     pub fn snapshot(&self, intent: Option<String>, confidence: Option<f32>) -> Result<State> {
@@ -98,223 +529,32 @@ impl Repository {
             });
         }
 
-        // Materialized-thread context detection: when HEAD is attached
-        // to a thread and that thread has a manifest on disk *whose
-        // recorded worktree_path matches our `self.root`*, the agent
-        // is capturing inside a clonefile-backed materialized worktree
-        // (the day-one shape for `--workspace light`). Two opportunities:
-        //   1. Reuse the manifest's per-file stat-cache during the tree
-        //      build, so unchanged files skip `read + hash + put_blob`.
-        //      Wall-clock drop scales with file count × file size; on the
-        //      heddle workspace fixture, a single-file edit captures in
-        //      ~one read's worth of I/O instead of walking the entire tree.
-        //   2. Refresh the manifest after the capture lands so the next
-        //      `heddle capture` against the same worktree stays on the
-        //      fast path (stat fields drift forward; the cache shouldn't
-        //      get stale just because we ran `capture`).
-        //
-        // The `worktree_path` check is load-bearing: if the user
-        // materialized thread X at `/mat/` and then runs `heddle
-        // capture` from the *main* repo at `/repo/`, the manifest's
-        // stat records describe `/mat/`. Using it as a stat-cache
-        // against `/repo/`'s files always misses (wasted I/O); worse,
-        // refreshing the manifest with `/repo/`'s stats corrupts the
-        // sidecar so `heddle status` falsely reports `/mat/` as
-        // fresh when its on-disk content is actually stale. The
-        // guard restricts both legs to the case the comment promises.
-        //
-        // Best-effort and read-only on the detection side: a missing or
-        // malformed manifest collapses to the plain `build_tree_profiled`
-        // path. The slow path is always correct; the fast path is the
-        // optimisation.
-        let head_for_manifest = self.head_ref().ok();
-        let manifest_context: Option<(String, crate::thread_manifest::ThreadManifest)> =
-            match head_for_manifest.as_ref() {
-                Some(Head::Attached { thread }) => {
-                    match crate::thread_manifest::read_manifest(self.heddle_dir(), thread) {
-                        Ok(Some(m)) => {
-                            let self_root_canonical =
-                                super::repository_thread_materialize::canonical_worktree_path(
-                                    &self.root,
-                                );
-                            if m.worktree_path == self_root_canonical {
-                                Some((thread.to_string(), m))
-                            } else {
-                                None
-                            }
-                        }
-                        _ => None,
-                    }
-                }
-                _ => None,
-            };
+        let head = self.head_ref()?;
+        let prev_head = self.head()?;
+        let fingerprint = self.snapshot_worktree_fingerprint()?;
+        let execution = execute(
+            self,
+            SnapshotMutation::new(
+                self,
+                SnapshotSource::Worktree { fingerprint },
+                intent,
+                confidence,
+                attribution,
+                prev_head,
+                head.clone(),
+            ),
+        )?;
 
-        self.store.begin_snapshot_write_batch()?;
-        let snapshot = (|| -> Result<SnapshotExecution> {
-            debug!("Building tree from worktree");
-            let (tree, tree_profile) = match manifest_context.as_ref() {
-                Some((_, manifest)) => {
-                    self.build_tree_profiled_with_stat_cache(&self.root, manifest)?
-                }
-                None => self.build_tree_profiled(&self.root)?,
-            };
-            debug!(duration_ms = tree_profile.tree_walk_ms, "Tree built");
+        objects::fault_inject::maybe_panic_at("snapshot_after_atomic_commit_before_ref_publish");
+        #[cfg(test)]
+        maybe_snapshot_fault(SnapshotFault::AfterAtomicCommitBeforeRefPublish);
 
-            debug!("Storing tree");
-            let root_tree_write_start = std::time::Instant::now();
-            let tree_hash = self.store.put_tree(&tree)?;
-            let root_tree_write_ms = root_tree_write_start.elapsed().as_millis();
-
-            let prev_head = self.head()?;
-            let parents = match prev_head {
-                Some(id) => vec![id],
-                None => vec![],
-            };
-
-            let mut state = State::new_snapshot(tree_hash, parents, attribution);
-
-            if let Some(intent) = intent {
-                state = state.with_intent(intent);
-            }
-
-            if let Some(confidence) = confidence {
-                state = state.with_confidence(confidence);
-            }
-
-            // Carry the parent's context tree forward so annotations attached
-            // upstream remain active at this state. The tree is content-
-            // addressed, so this is a pointer copy. The on-demand staleness
-            // check (compares stored `source_hash` against current bytes at
-            // the anchor) reports drift caused by the new tree without us
-            // re-stamping anything here.
-            if let Some(parent_id) = prev_head
-                && let Some(parent_state) = self.store.get_state(&parent_id)?
-                && let Some(inherited) = Repository::inherit_parent_context(&parent_state)
-            {
-                state = state.with_context(inherited);
-            }
-
-            // Risk-signal computation. Runs the `state_review`
-            // registry against the freshly-built `(prior, new)` pair,
-            // persists the resulting `RiskSignalBlob`, and attaches its
-            // hash to the new state. The function returns `None` when
-            // either no signals fire (avoid an empty blob) or anything
-            // goes wrong below the line — capture must not fail because
-            // of a signal hiccup. Gated behind `tree-sitter-symbols` to
-            // match anchor-travel; the registry's tree-sitter modules
-            // would otherwise sit idle anyway.
-            #[cfg(feature = "tree-sitter-symbols")]
-            {
-                let prior_state = match prev_head {
-                    Some(id) => self.store.get_state(&id).ok().flatten(),
-                    None => None,
-                };
-                match self.compute_and_persist_signals(prior_state.as_ref(), &state) {
-                    Ok(Some(hash)) => {
-                        state = state.with_risk_signals(hash);
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        tracing::warn!(error = %err, "risk signal computation failed; continuing without signals");
-                    }
-                }
-            }
-
-            let state_ref_oplog_start = std::time::Instant::now();
-            self.store.put_state(&state)?;
-            self.store.flush_snapshot_write_batch()?;
-
-            // Fault-injection checkpoint: a crash here leaves the
-            // state object durable on disk but no ref pointing at
-            // it. The next heddle invocation re-reads HEAD and sees
-            // the prior tip — captured work is effectively dropped
-            // (no corruption). Tested by
-            // `agent_capture_atomicity_under_sigkill`.
-            objects::fault_inject::maybe_panic_at("snapshot_after_state_before_ref");
-
-            let head = self.head_ref()?;
-            let thread = match &head {
-                Head::Attached { thread } => Some(thread.clone()),
-                Head::Detached { .. } => None,
-            };
-
-            match head {
-                Head::Attached { thread } => {
-                    self.refs.set_thread(&thread, &state.change_id)?;
-                }
-                Head::Detached { .. } => {
-                    self.refs.write_head(&Head::Detached {
-                        state: state.change_id,
-                    })?;
-                }
-            }
-
-            self.oplog.record_snapshot(
-                &state.change_id,
-                prev_head.as_ref(),
-                thread.as_deref(),
-                Some(&self.op_scope()),
-            )?;
-
-            // Refresh the thread manifest when capturing inside a
-            // materialized-thread worktree: bump `state_id` + `tree_hash`
-            // to the just-landed state, and re-stat the worktree so the
-            // per-file `(inode, mtime, ctime, mode)` reflects what's on
-            // disk *after* the capture. This keeps the stat-cache fast
-            // path live across consecutive captures. Best-effort: a
-            // failure here doesn't unwind the capture — the state +
-            // ref are already durable, and the next `capture` will
-            // fall through to the full read+hash path on a stale
-            // manifest and self-heal.
-            if let Some((thread_name, original)) = manifest_context.as_ref() {
-                // Preserve the worktree_path from the manifest we
-                // matched against — by construction it equals
-                // `self.root` canonicalized, which is the worktree
-                // we just captured from.
-                let mut refreshed = crate::thread_manifest::ThreadManifest::new(
-                    state.change_id,
-                    tree_hash,
-                    original.worktree_path.clone(),
-                );
-                if let Err(err) = super::repository_thread_materialize::populate_manifest_from_tree(
-                    self,
-                    &tree,
-                    &self.root,
-                    "",
-                    &mut refreshed.files,
-                ) {
-                    tracing::warn!(
-                        error = %err,
-                        thread = %thread_name,
-                        "manifest refresh post-capture failed; next capture will rebuild"
-                    );
-                } else if let Err(err) = crate::thread_manifest::write_manifest(
-                    self.heddle_dir(),
-                    thread_name,
-                    &refreshed,
-                ) {
-                    tracing::warn!(
-                        error = %err,
-                        thread = %thread_name,
-                        "manifest write post-capture failed; next capture will rebuild"
-                    );
-                }
-            }
-
-            Ok(SnapshotExecution {
-                state,
-                tree,
-                profile: snapshot_profile_from_tree(
-                    tree_profile,
-                    root_tree_write_ms,
-                    state_ref_oplog_start.elapsed().as_millis(),
-                ),
-            })
-        })();
-        if snapshot.is_err() {
-            self.store.abort_snapshot_write_batch();
-        }
-        snapshot
+        // Phase 5 is a materialized view, not the commit point: force the
+        // success-path ref publish through the same per-read reconciliation that
+        // recovers a crash after the atomic oplog append.
+        let _ = self.head()?;
+        refresh_materialized_thread_manifest(self, &head, &execution.state, &execution.tree);
+        Ok(execution)
     }
 
     /// Create a snapshot from a caller-supplied tree instead of walking
@@ -352,96 +592,27 @@ impl Repository {
             }
         }
 
-        self.store.begin_snapshot_write_batch()?;
-        let snapshot = (|| -> Result<SnapshotExecution> {
-            let root_tree_write_start = std::time::Instant::now();
-            let tree_hash = self.store.put_tree(&tree)?;
-            let root_tree_write_ms = root_tree_write_start.elapsed().as_millis();
+        let head = self.head_ref()?;
+        let prev_head = self.head()?;
+        let execution = execute(
+            self,
+            SnapshotMutation::new(
+                self,
+                SnapshotSource::SuppliedTree(tree),
+                intent,
+                confidence,
+                attribution,
+                prev_head,
+                head,
+            ),
+        )?;
 
-            let prev_head = self.head()?;
-            let parents = match prev_head {
-                Some(id) => vec![id],
-                None => vec![],
-            };
+        objects::fault_inject::maybe_panic_at("snapshot_after_atomic_commit_before_ref_publish");
+        #[cfg(test)]
+        maybe_snapshot_fault(SnapshotFault::AfterAtomicCommitBeforeRefPublish);
 
-            let mut state = State::new_snapshot(tree_hash, parents, attribution);
-
-            if let Some(intent) = intent {
-                state = state.with_intent(intent);
-            }
-
-            if let Some(confidence) = confidence {
-                state = state.with_confidence(confidence);
-            }
-
-            if let Some(parent_id) = prev_head
-                && let Some(parent_state) = self.store.get_state(&parent_id)?
-                && let Some(inherited) = Repository::inherit_parent_context(&parent_state)
-            {
-                state = state.with_context(inherited);
-            }
-
-            #[cfg(feature = "tree-sitter-symbols")]
-            {
-                let prior_state = match prev_head {
-                    Some(id) => self.store.get_state(&id).ok().flatten(),
-                    None => None,
-                };
-                match self.compute_and_persist_signals(prior_state.as_ref(), &state) {
-                    Ok(Some(hash)) => {
-                        state = state.with_risk_signals(hash);
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        tracing::warn!(error = %err, "risk signal computation failed; continuing without signals");
-                    }
-                }
-            }
-
-            let state_ref_oplog_start = std::time::Instant::now();
-            self.store.put_state(&state)?;
-            self.store.flush_snapshot_write_batch()?;
-
-            objects::fault_inject::maybe_panic_at("snapshot_after_state_before_ref");
-
-            let head = self.head_ref()?;
-            let thread = match &head {
-                Head::Attached { thread } => Some(thread.clone()),
-                Head::Detached { .. } => None,
-            };
-
-            match head {
-                Head::Attached { thread } => {
-                    self.refs.set_thread(&thread, &state.change_id)?;
-                }
-                Head::Detached { .. } => {
-                    self.refs.write_head(&Head::Detached {
-                        state: state.change_id,
-                    })?;
-                }
-            }
-
-            self.oplog.record_snapshot(
-                &state.change_id,
-                prev_head.as_ref(),
-                thread.as_deref(),
-                Some(&self.op_scope()),
-            )?;
-
-            Ok(SnapshotExecution {
-                state,
-                tree,
-                profile: SnapshotProfile {
-                    tree_write_ms: root_tree_write_ms,
-                    state_ref_oplog_ms: state_ref_oplog_start.elapsed().as_millis(),
-                    ..SnapshotProfile::default()
-                },
-            })
-        })();
-        if snapshot.is_err() {
-            self.store.abort_snapshot_write_batch();
-        }
-        snapshot
+        let _ = self.head()?;
+        Ok(execution)
     }
 
     /// Create a merge state with two parents.
@@ -507,23 +678,8 @@ impl Repository {
             Head::Detached { .. } => None,
         };
 
-        match head {
-            Head::Attached { thread } => {
-                self.refs.set_thread(&thread, &state.change_id)?;
-            }
-            Head::Detached { .. } => {
-                self.refs.write_head(&Head::Detached {
-                    state: state.change_id,
-                })?;
-            }
-        }
-
-        self.oplog.record_snapshot(
-            &state.change_id,
-            Some(&first_parent),
-            thread.as_deref(),
-            Some(&self.op_scope()),
-        )?;
+        // Record-first through the write chokepoint (heddle#354 r8).
+        self.commit_snapshot_atomic(&state.change_id, Some(first_parent), thread.as_ref())?;
 
         Ok(state)
     }
@@ -540,5 +696,52 @@ fn snapshot_profile_from_tree(
         blob_write_ms: tree_profile.blob_write_ms,
         tree_write_ms: tree_profile.tree_write_ms + root_tree_write_ms,
         state_ref_oplog_ms,
+    }
+}
+
+fn refresh_materialized_thread_manifest(
+    repo: &Repository,
+    head: &Head,
+    state: &State,
+    tree: &Tree,
+) {
+    let Head::Attached { thread } = head else {
+        return;
+    };
+    let Ok(Some(original)) = crate::thread_manifest::read_manifest(repo.heddle_dir(), thread)
+    else {
+        return;
+    };
+    let self_root_canonical =
+        super::repository_thread_materialize::canonical_worktree_path(&repo.root);
+    if original.worktree_path != self_root_canonical {
+        return;
+    }
+
+    let mut refreshed = crate::thread_manifest::ThreadManifest::new(
+        state.change_id,
+        state.tree,
+        original.worktree_path,
+    );
+    if let Err(err) = super::repository_thread_materialize::populate_manifest_from_tree(
+        repo,
+        tree,
+        &repo.root,
+        "",
+        &mut refreshed.files,
+    ) {
+        tracing::warn!(
+            error = %err,
+            thread = %thread,
+            "manifest refresh post-capture failed; next capture will rebuild"
+        );
+    } else if let Err(err) =
+        crate::thread_manifest::write_manifest(repo.heddle_dir(), thread, &refreshed)
+    {
+        tracing::warn!(
+            error = %err,
+            thread = %thread,
+            "manifest write post-capture failed; next capture will rebuild"
+        );
     }
 }

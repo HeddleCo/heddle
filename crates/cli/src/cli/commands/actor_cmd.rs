@@ -9,7 +9,6 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 use objects::object::ThreadName;
 use objects::store::{ActorChainNode, AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary};
-use refs::Head;
 use repo::Repository;
 use serde::Serialize;
 
@@ -262,6 +261,7 @@ impl ActorOutput {
 pub async fn cmd_actor_spawn(
     cli: &Cli,
     thread: Option<String>,
+    no_thread: bool,
     provider: Option<String>,
     model: Option<String>,
 ) -> Result<()> {
@@ -272,6 +272,22 @@ pub async fn cmd_actor_spawn(
             "actor spawn"
         ))
     })?;
+
+    // `--no-thread` attaches the actor to the current lane rather than minting
+    // a fresh `actor/<session>` thread. `current_lane()` is the single source
+    // of truth for "is there a lane to attach to?": it consults the git-overlay
+    // HEAD state, so a detached Git HEAD reports no lane even when `.heddle/HEAD`
+    // still names a stale attached thread. Resolve it up front so we fail
+    // cleanly before creating any registry entry. The same predicate drives the
+    // `actor explain` recommendation, so recommend and execute never disagree.
+    let attach_thread = if no_thread {
+        match repo.current_lane()? {
+            Some(lane) => Some(ThreadName::new(lane)),
+            None => return Err(anyhow!(actor_spawn_no_thread_detached_advice())),
+        }
+    } else {
+        None
+    };
 
     let explicit_identity = provider
         .as_ref()
@@ -304,11 +320,18 @@ pub async fn cmd_actor_spawn(
 
     let registry = AgentRegistry::new(repo.heddle_dir());
     let entry = registry.create_generated_entry(|session_id| {
-        let thread_name = ThreadName::new(thread
-            .clone()
-            .unwrap_or_else(|| format!("actor/{session_id}")));
+        let thread_name = match &attach_thread {
+            Some(current) => current.clone(),
+            None => ThreadName::new(
+                thread
+                    .clone()
+                    .unwrap_or_else(|| format!("actor/{session_id}")),
+            ),
+        };
 
-        if repo.refs().get_thread(&thread_name)?.is_none() {
+        // In `--no-thread` mode we attach to the existing current thread
+        // and never create a ref, so no stray thread is left behind.
+        if attach_thread.is_none() && repo.refs().get_thread(&thread_name)?.is_none() {
             repo.refs().set_thread(&thread_name, &base_state)?;
         }
 
@@ -338,11 +361,25 @@ pub async fn cmd_actor_spawn(
             usage_summary: AgentUsageSummary::default(),
             last_progress_at: None,
             report_flush_state: None,
-            attach_reason: Some(format!(
-                "actor {session_id} was spawned explicitly on thread {thread_name}"
-            )),
-            attach_precedence: vec!["explicit-actor-spawn".to_string()],
-            winning_attach_rule: Some("explicit-actor-spawn".to_string()),
+            attach_reason: Some(if attach_thread.is_some() {
+                format!(
+                    "actor {session_id} was attached to the current thread {thread_name} without minting a new thread"
+                )
+            } else {
+                format!("actor {session_id} was spawned explicitly on thread {thread_name}")
+            }),
+            attach_precedence: vec![
+                if attach_thread.is_some() {
+                    "no-thread-attach".to_string()
+                } else {
+                    "explicit-actor-spawn".to_string()
+                },
+            ],
+            winning_attach_rule: Some(if attach_thread.is_some() {
+                "no-thread-attach".to_string()
+            } else {
+                "explicit-actor-spawn".to_string()
+            }),
             probe_source: probe_source.clone(),
             probe_confidence,
             status: AgentStatus::Active,
@@ -611,7 +648,16 @@ fn explain_detected_actor_identity(cli: &Cli, repo: &Repository) -> Result<()> {
         std::env::var("HEDDLE_AGENT_POLICY").ok(),
     )?;
     let env_signals = actor_identity_env_signals();
-    let next_action = detected_actor_next_action(probe.provider.as_deref(), probe.model.as_deref());
+    // Route through the same "is there a current lane?" predicate that
+    // `actor spawn --no-thread` uses, so the recommendation is always runnable
+    // in this context. `current_lane()` is git-overlay-aware: a detached Git
+    // HEAD reports no lane even when `.heddle/HEAD` still names a stale thread.
+    let no_current_lane = repo.current_lane()?.is_none();
+    let next_action = detected_actor_next_action(
+        probe.provider.as_deref(),
+        probe.model.as_deref(),
+        no_current_lane,
+    );
     let next_action_template = next_action.as_deref().and_then(action_template);
 
     if should_output_json(cli, None) {
@@ -704,10 +750,23 @@ fn actor_identity_env_signals() -> Vec<String> {
     signals
 }
 
-fn detected_actor_next_action(provider: Option<&str>, model: Option<&str>) -> Option<String> {
+fn detected_actor_next_action(
+    provider: Option<&str>,
+    model: Option<&str>,
+    no_current_lane: bool,
+) -> Option<String> {
     match (provider, model) {
-        (Some(provider), Some(model)) => Some(format!(
+        // The recommendation must be runnable as-is from the current context.
+        // With no current lane (e.g. a detached HEAD) there is no thread to
+        // attach to, so `--no-thread` would fail
+        // (`actor_spawn_no_thread_detached`); mint a dedicated thread instead.
+        // On a lane, `--no-thread` attaches the detected identity to the current
+        // thread without leaving a stray `actor/<session>`.
+        (Some(provider), Some(model)) if no_current_lane => Some(format!(
             "heddle actor spawn --provider {provider} --model {model}"
+        )),
+        (Some(provider), Some(model)) => Some(format!(
+            "heddle actor spawn --no-thread --provider {provider} --model {model}"
         )),
         _ => None,
     }
@@ -724,11 +783,20 @@ fn resolve_actor_entry(
             .ok_or_else(|| anyhow!("Actor not found for session: {}", session_id));
     }
 
-    if let Head::Attached { thread } = repo.head_ref()?
+    // Single git-overlay-aware oracle for "what lane is THIS checkout on?".
+    // `current_lane()` consults the git-overlay HEAD state, so a detached Git
+    // HEAD reports no lane even when `.heddle/HEAD` still names a stale attached
+    // thread. Deriving the implicit actor lookup from it — instead of
+    // `head_ref()` / `.heddle/HEAD` directly — keeps `actor explain`/`show`/`done`
+    // in agreement with `actor spawn --no-thread`, which rejects on the same
+    // no-lane predicate. There must be exactly one answer to "current lane?".
+    let current_lane = repo.current_lane()?;
+
+    if let Some(thread) = current_lane.as_deref()
         && let Some(entry) = registry
             .list()?
             .into_iter()
-            .filter(|entry| entry.status == AgentStatus::Active && thread == entry.thread)
+            .filter(|entry| entry.status == AgentStatus::Active && entry.thread == thread)
             .max_by_key(|entry| entry.started_at)
     {
         return Ok(entry);
@@ -738,17 +806,44 @@ fn resolve_actor_entry(
         return Ok(entry);
     }
 
-    registry
-        .list()?
-        .into_iter()
-        .find(|entry| entry.status == AgentStatus::Active)
-        .ok_or_else(|| anyhow!(no_active_actor_advice()))
+    // The "any active actor" fallback only applies when this checkout is on a
+    // lane. With no current lane (a detached Git HEAD whose `.heddle/HEAD` is
+    // stale, or a genuinely detached HEAD), resolving an arbitrary active actor
+    // would contradict `actor spawn --no-thread`'s rejection and re-introduce
+    // the recommend/execute split this oracle exists to prevent.
+    if current_lane.is_some()
+        && let Some(entry) = registry
+            .list()?
+            .into_iter()
+            .find(|entry| entry.status == AgentStatus::Active)
+    {
+        return Ok(entry);
+    }
+
+    Err(anyhow!(no_active_actor_advice()))
 }
 
 fn is_no_active_actor_error(err: &anyhow::Error) -> bool {
     err.chain()
         .filter_map(|cause| cause.downcast_ref::<RecoveryAdvice>())
         .any(|advice| advice.kind == "no_active_actor")
+}
+
+fn actor_spawn_no_thread_detached_advice() -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "actor_spawn_no_thread_detached",
+        "Cannot attach to the current thread",
+        "`--no-thread` attaches the actor to the thread HEAD points at. Check out a thread first (`heddle thread switch <name>`), or run `heddle actor spawn` without `--no-thread` to mint a dedicated thread.",
+        "HEAD is not attached to a thread, so there is no current thread to attach the actor to",
+        "minting a thread implicitly would create exactly the stray thread `--no-thread` is meant to avoid",
+        "no actor registry entries, refs, repository objects, or worktree files were changed",
+        "heddle thread switch <name>",
+        vec![
+            "heddle thread list".to_string(),
+            "heddle thread switch <name>".to_string(),
+            "heddle actor spawn".to_string(),
+        ],
+    )
 }
 
 fn no_active_actor_advice() -> RecoveryAdvice {

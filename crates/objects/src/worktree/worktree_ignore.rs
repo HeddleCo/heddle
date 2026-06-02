@@ -36,7 +36,37 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 /// unaffected — gitignore-spec rules without a trailing slash match
 /// regardless of the `is_dir` flag.
 pub fn should_ignore(path: &Path, patterns: &[String]) -> bool {
-    matched(&build_matcher(patterns), path)
+    build_worktree_ignore(patterns).is_ignored(path)
+}
+
+/// A compiled `.heddleignore` matcher. Compiling the glob set is the
+/// expensive part; matching a single path against an already-built
+/// matcher is cheap. Callers that test many paths against the same
+/// patterns (e.g. counting unignored entries across a large diff)
+/// should build the matcher once and reuse it, rather than paying the
+/// per-path compile cost that the [`should_ignore`] convenience wrapper
+/// incurs.
+pub struct WorktreeIgnoreMatcher {
+    gi: Gitignore,
+}
+
+impl WorktreeIgnoreMatcher {
+    /// Whether `path` is covered by any of the compiled patterns. See
+    /// [`should_ignore`] for the matching semantics (`is_dir = true`,
+    /// negation handling).
+    pub fn is_ignored(&self, path: &Path) -> bool {
+        matched(&self.gi, path)
+    }
+}
+
+/// Compile a [`WorktreeIgnoreMatcher`] from the given pattern strings,
+/// once, for reuse across many path checks. This is the compile-once
+/// counterpart to [`should_ignore`], which rebuilds the matcher on
+/// every call.
+pub fn build_worktree_ignore(patterns: &[String]) -> WorktreeIgnoreMatcher {
+    WorktreeIgnoreMatcher {
+        gi: build_matcher(patterns),
+    }
 }
 
 /// Build a `Gitignore` matcher from the given pattern strings,
@@ -263,6 +293,33 @@ mod tests {
         let patterns = vec!["# comment".to_string(), "".to_string(), "*.log".to_string()];
         assert!(should_ignore(&PathBuf::from("foo.log"), &patterns));
         assert!(!should_ignore(&PathBuf::from("foo.txt"), &patterns));
+    }
+
+    #[test]
+    fn prebuilt_matcher_matches_same_as_should_ignore() {
+        // The compile-once API must produce identical match results to
+        // the per-call `should_ignore` wrapper — it only hoists WHEN
+        // the glob set is compiled, not WHAT it matches.
+        let patterns = vec!["node_modules".to_string(), "*.log".to_string()];
+        let matcher = build_worktree_ignore(&patterns);
+        let cases = [
+            "node_modules/left-pad/index.js",
+            "debug.log",
+            "src/main.rs",
+            "config/app.toml",
+        ];
+        for case in cases {
+            let p = PathBuf::from(case);
+            assert_eq!(
+                matcher.is_ignored(&p),
+                should_ignore(&p, &patterns),
+                "prebuilt matcher and should_ignore disagree on {case}"
+            );
+        }
+        // Reusing the same matcher across many paths is the whole point;
+        // assert a couple of explicit outcomes too.
+        assert!(matcher.is_ignored(&PathBuf::from("node_modules/x")));
+        assert!(!matcher.is_ignored(&PathBuf::from("src/lib.rs")));
     }
 
     #[test]

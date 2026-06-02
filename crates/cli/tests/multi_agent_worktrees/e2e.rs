@@ -1111,6 +1111,84 @@ fn ready_blocks_stale_or_heavy_impact_threads_and_status_reports_next_step() {
 }
 
 #[test]
+fn genuine_blocked_thread_surfaces_coordination_axis_in_long_status() {
+    // heddle#276 r3 / cid 3327990627. A *genuine* inter-thread block —
+    // `heddle ready` failing closed persists `ThreadState::Blocked`, which
+    // `build_thread_view` maps to `CoordinationStatus::Blocked` — must
+    // surface on the coordination axis of the long status view. r2 masked
+    // ANY Blocked whenever `thread_health` was non-clean (here it is
+    // `blocked`), so the real coordination block was hidden as "work in
+    // progress" and the verdict reason named only checkout health. The
+    // provenance-keyed mask masks only the trust/health re-encoding, never
+    // a genuine `build_thread_view` Blocked, so the block stays visible.
+    let main = setup_repo("base.txt", "base");
+    let started: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "start",
+                "feature/dep",
+                "--workspace",
+                "auto",
+                "--task",
+                "update dependencies",
+            ],
+            Some(main.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let thread = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
+
+    fs::write(
+        thread.join("Cargo.toml"),
+        "[package]\nname='dep'\nversion='0.1.0'\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "touch deps"], Some(&thread)).unwrap();
+
+    // Heavy-impact `ready` fails closed and persists ThreadState::Blocked.
+    let ready_output = heddle_output(
+        &["--output", "json", "ready", "--thread", "feature/dep"],
+        Some(main.path()),
+    )
+    .unwrap();
+    assert!(
+        !ready_output.status.success(),
+        "heavy-impact ready should fail closed and block the thread"
+    );
+
+    // Sanity: the worktree is still clean/verified, yet the thread is
+    // genuinely Blocked — exactly the case r2 mis-masked.
+    let status_json: Value =
+        serde_json::from_str(&heddle(&["--output", "json", "status"], Some(&thread)).unwrap())
+            .unwrap();
+    assert_eq!(status_json["thread_state"], "blocked");
+    assert_eq!(status_json["coordination_status"], "blocked");
+
+    // Default long view: the verdict reason must NAME the coordination
+    // block (r2 said only "checkout health needs attention").
+    let text = heddle(&["--output", "text", "status"], Some(&thread)).unwrap();
+    assert!(
+        text.contains("thread coordination"),
+        "default verdict reason must name the genuine coordination block, not hide it behind health: {text}"
+    );
+
+    // Verbose: the coordination axis must read "blocked", not the
+    // health-only "work in progress" mask.
+    let verbose = heddle(&["--output", "text", "-v", "status"], Some(&thread)).unwrap();
+    assert!(
+        verbose.contains("Coordination: blocked"),
+        "a genuine inter-thread block must surface on the coordination axis: {verbose}"
+    );
+    assert!(
+        !verbose.contains("Coordination: work in progress"),
+        "a genuine inter-thread block must not be masked as work in progress: {verbose}"
+    );
+}
+
+#[test]
 fn sync_refreshes_stale_thread_when_replay_is_clean() {
     let main = setup_repo("base.txt", "base");
     let started: Value = serde_json::from_str(

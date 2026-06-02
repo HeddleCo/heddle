@@ -154,28 +154,42 @@ fn bridge_recovers_from_crash_after_tmp_before_commit() {
     );
 }
 
-/// R7: snapshot atomicity under SIGKILL-equivalent.
-///
-/// `repo::Repository::snapshot_with_attribution` is the workhorse for
-/// `heddle capture`, `heddle agent capture`, etc.
-/// Its atomicity contract: between `store.put_state(&state)` and
-/// `refs.set_thread(&thread, &state.change_id)` is a small window
-/// where the state is durable on disk but no ref points to it. A
-/// crash there must result in: state object exists (orphan, harmless
-/// — gc will eventually collect it) AND the prior ref is unchanged
-/// (no half-applied advance).
-///
-/// This is the agent-API version of the same contract: a SIGKILL'd
-/// `heddle agent capture` either fully landed or nothing — never a
-/// half-write where the user's worktree thinks the change happened
-/// but the ref disagrees.
-///
-/// We use `HEDDLE_FAULT_INJECT=snapshot_after_state_before_ref` to
-/// hit the crash deterministically rather than relying on real
-/// signal-based timing (which would be flaky).
-#[test]
-#[ignore = "fault-injection: spawns child processes with HEDDLE_FAULT_INJECT"]
-fn snapshot_atomicity_under_simulated_sigkill() {
+fn current_main_tip(repo: &std::path::Path) -> String {
+    let log: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "log", "main", "-n", "5"], Some(repo)).expect("log"),
+    )
+    .unwrap();
+    log["states"][0]["change_id"]
+        .as_str()
+        .expect("tip change_id")
+        .to_string()
+}
+
+fn assert_intentional_snapshot_crash(crashed: std::process::Output, checkpoint: &str) {
+    assert!(
+        !crashed.status.success(),
+        "child should panic, got success: stdout={} stderr={}",
+        String::from_utf8_lossy(&crashed.stdout),
+        String::from_utf8_lossy(&crashed.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&crashed.stderr);
+    assert!(
+        stderr.contains("HEDDLE_FAULT_INJECT") && stderr.contains(checkpoint),
+        "child should report the intentional panic at {checkpoint}: stderr={stderr}"
+    );
+}
+
+fn crash_capture_at(repo: &std::path::Path, checkpoint: &str, message: &str) {
+    let crashed = heddle_output_with_env(
+        &["capture", "-m", message],
+        Some(repo),
+        &[("HEDDLE_FAULT_INJECT", checkpoint)],
+    )
+    .expect("spawn child");
+    assert_intentional_snapshot_crash(crashed, checkpoint);
+}
+
+fn init_repo_with_baseline() -> (TempDir, String) {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).expect("init");
 
@@ -184,82 +198,85 @@ fn snapshot_atomicity_under_simulated_sigkill() {
     std::fs::write(temp.path().join("base.txt"), "baseline").unwrap();
     heddle(&["capture", "-m", "baseline"], Some(temp.path())).expect("baseline snapshot");
 
-    let log_before: Value = serde_json::from_str(
-        &heddle(
-            &["--output", "json", "log", "main", "-n", "5"],
-            Some(temp.path()),
-        )
-        .expect("log"),
-    )
-    .unwrap();
-    let baseline_tip = log_before["states"][0]["change_id"]
-        .as_str()
-        .expect("baseline tip change_id")
-        .to_string();
+    let baseline_tip = current_main_tip(temp.path());
+    (temp, baseline_tip)
+}
 
-    // ── Phase 1: snapshot with fault injection armed ──
+/// R7/O1: pre-commit snapshot crash is invisible.
+///
+/// `repo::Repository::snapshot_with_attribution` stages snapshot objects before
+/// appending the atomic `TransactionCommit` marker. A crash at
+/// `snapshot_after_stage_before_atomic_commit` leaves staged content behind, but
+/// without the commit marker it is not authoritative. The next Heddle read must
+/// keep the thread tip on the prior baseline and must not resurrect the staged
+/// but uncommitted content.
+#[test]
+#[ignore = "fault-injection: spawns child processes with HEDDLE_FAULT_INJECT"]
+fn snapshot_atomicity_before_commit_crash_stays_on_baseline() {
+    let (temp, baseline_tip) = init_repo_with_baseline();
+
+    // ── Phase 1: snapshot with pre-commit fault injection armed ──
     std::fs::write(temp.path().join("base.txt"), "would-be-captured").unwrap();
-    let crashed = Command::new(env!("CARGO_BIN_EXE_heddle"))
-        .args(["capture", "-m", "the capture that crashes"])
-        .current_dir(temp.path())
-        .env("HEDDLE_FAULT_INJECT", "snapshot_after_state_before_ref")
-        .env(
-            "HEDDLE_CONFIG",
-            temp.path().join(".heddle-user/config.toml"),
-        )
-        .output()
-        .expect("spawn child");
-    assert!(
-        !crashed.status.success(),
-        "child should panic, got success: stderr={}",
-        String::from_utf8_lossy(&crashed.stderr)
-    );
-    let stderr = String::from_utf8_lossy(&crashed.stderr);
-    assert!(
-        stderr.contains("HEDDLE_FAULT_INJECT")
-            && stderr.contains("snapshot_after_state_before_ref"),
-        "child should report the intentional panic: stderr={stderr}"
+    crash_capture_at(
+        temp.path(),
+        "snapshot_after_stage_before_atomic_commit",
+        "the capture that crashes before commit",
     );
 
-    // ── Phase 2: invariant — the prior tip is still the active
-    //              ref. The captured state may exist as an orphan
-    //              object (this is fine — gc collects it later)
-    //              but no ref advanced and no thread is in a
-    //              half-applied state.
-    let log_after: Value = serde_json::from_str(
-        &heddle(
-            &["--output", "json", "log", "main", "-n", "5"],
-            Some(temp.path()),
-        )
-        .expect("post-crash log"),
-    )
-    .unwrap();
-    let post_crash_tip = log_after["states"][0]["change_id"]
-        .as_str()
-        .expect("post-crash tip change_id");
+    // ── Phase 2: invariant — no TransactionCommit marker landed, so the
+    //              prior tip remains authoritative after reconcile-on-read.
+    let post_crash_tip = current_main_tip(temp.path());
     assert_eq!(
         post_crash_tip, baseline_tip,
         "thread tip must still point at the baseline state — anything else \
-         is a half-written advance and a real atomicity bug"
+         is a half-written advance and a real atomicity bug",
     );
 
-    // ── Phase 3: a fresh capture (without fault injection) lands
-    //              cleanly. The worktree has the would-be-captured
-    //              content; we just need to make sure we can record
-    //              it now.
-    let recovered_capture = heddle(
-        &["--output", "json", "capture", "-m", "post-recovery capture"],
-        Some(temp.path()),
-    )
-    .expect("post-recovery capture succeeds");
-    let recovered: Value = serde_json::from_str(&recovered_capture).unwrap();
-    assert_eq!(recovered["intent"], "post-recovery capture");
-    let new_tip = recovered["change_id"]
-        .as_str()
-        .expect("post-recovery change_id");
+    let reread_tip = current_main_tip(temp.path());
+    assert_eq!(
+        reread_tip, baseline_tip,
+        "a second read must not resurrect the staged-but-uncommitted snapshot",
+    );
+}
+
+/// R7/O1: post-commit snapshot crash is recovered exactly once.
+///
+/// After `TransactionCommit` is durable, the oplog is the commit point and the
+/// thread ref is only a materialized view. A crash at
+/// `snapshot_after_atomic_commit_before_ref_publish` leaves the ref stale, but
+/// the next Heddle read reconciles from the committed oplog tail and republishes
+/// the capture. Re-reading must be idempotent: no second logical snapshot is
+/// applied.
+#[test]
+#[ignore = "fault-injection: spawns child processes with HEDDLE_FAULT_INJECT"]
+fn snapshot_atomicity_after_commit_crash_recovers_once() {
+    let (temp, baseline_tip) = init_repo_with_baseline();
+
+    // ── Phase 1: snapshot with post-commit fault injection armed ──
+    std::fs::write(temp.path().join("base.txt"), "committed-before-ref-publish").unwrap();
+    crash_capture_at(
+        temp.path(),
+        "snapshot_after_atomic_commit_before_ref_publish",
+        "the capture that commits before crashing",
+    );
+
+    // ── Phase 2: the first Heddle read reconciles the committed oplog record
+    //              and advances the materialized thread ref.
+    let recovered_tip = current_main_tip(temp.path());
     assert_ne!(
-        new_tip, baseline_tip,
-        "the recovered capture must produce a fresh state, not silently \
-         accept the orphaned mid-crash state"
+        recovered_tip, baseline_tip,
+        "post-commit crash recovery must advance the tip from the baseline",
+    );
+
+    let reread_tip = current_main_tip(temp.path());
+    assert_eq!(
+        reread_tip, recovered_tip,
+        "a second read must not apply the committed snapshot a second time",
+    );
+
+    let retry_read_tip = current_main_tip(temp.path());
+    assert_eq!(
+        retry_read_tip, recovered_tip,
+        "retrying reconcile-on-read must not advance the tip again",
     );
 }

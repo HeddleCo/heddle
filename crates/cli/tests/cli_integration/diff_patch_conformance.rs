@@ -387,25 +387,32 @@ fn json_diff_value(cwd: &Path, base: &[&str], mode: &[&str]) -> Value {
 /// a type-change split) produces a *different* signature here — which is
 /// exactly the mode-divergence class we are closing.
 fn change_signature(value: &Value) -> Vec<(String, String, String)> {
-    let mut sig: Vec<(String, String, String)> = value
-        .get("changes")
-        .and_then(Value::as_array)
-        .map(|changes| {
-            changes
-                .iter()
-                .map(|change| {
-                    let field = |key| {
-                        change
-                            .get(key)
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string()
-                    };
-                    (field("kind"), field("path"), field("old_path"))
-                })
-                .collect()
+    // Worktree-mode diffs group `changes` into `{modified, added, deleted}`
+    // category arrays; state-to-state diffs keep a flat array. Flatten both
+    // to the same triple list so the signature is shape-independent.
+    let entries: Vec<&Value> = match value.get("changes") {
+        Some(Value::Array(arr)) => arr.iter().collect(),
+        Some(Value::Object(map)) => ["modified", "added", "deleted"]
+            .iter()
+            .filter_map(|key| map.get(*key))
+            .filter_map(Value::as_array)
+            .flatten()
+            .collect(),
+        _ => Vec::new(),
+    };
+    let mut sig: Vec<(String, String, String)> = entries
+        .iter()
+        .map(|change| {
+            let field = |key| {
+                change
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            };
+            (field("kind"), field("path"), field("old_path"))
         })
-        .unwrap_or_default();
+        .collect();
     sig.sort();
     sig
 }

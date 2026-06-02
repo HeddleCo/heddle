@@ -3474,7 +3474,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
 
     let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
     assert!(
-        status_text.contains("Health: checkpoint needed")
+        status_text.contains("Verdict: checkpoint needed")
             && status_text
                 .contains("Git checkpoint pending: saved Heddle state is not yet a Git commit")
             && status_text.contains("Saved in Heddle")
@@ -4877,12 +4877,31 @@ fn branch_delete_current_refuses_with_typed_advice() {
             .is_some_and(|error| error.contains("Refusing to delete current thread")),
         "error should explain the unsafe branch delete: {envelope}"
     );
+    // The recovery is to switch/create a sibling thread first, never the
+    // circular `heddle thread list` that loops a junior (heddle#258).
     assert!(
         envelope["hint"]
             .as_str()
-            .is_some_and(|hint| hint.contains("heddle thread list")),
-        "hint should name the primary recovery command: {envelope}"
+            .is_some_and(|hint| hint.contains("heddle thread create <other>")),
+        "hint should name a non-circular recovery command: {envelope}"
     );
+    assert!(
+        envelope["hint"]
+            .as_str()
+            .is_some_and(|hint| !hint.contains("heddle thread list")),
+        "hint must not loop back to the circular `thread list`: {envelope}"
+    );
+    let templates = envelope["recovery_action_templates"]
+        .as_array()
+        .expect("recovery_action_templates should be an array");
+    let create = templates
+        .iter()
+        .find(|template| {
+            template["argv_template"]
+                == heddle_argv_json(["thread", "create", "<other>"])
+        })
+        .unwrap_or_else(|| panic!("create recovery template should be present: {envelope}"));
+    assert_eq!(create["agent_may_fill"], Value::Bool(true));
 }
 
 #[test]
@@ -6058,6 +6077,214 @@ fn thread_drop_current_checkout_refuses_instead_of_claiming_missing() {
         "current thread drop should refuse with the real reason: {stderr}"
     );
     assert_json_recovery_advice_fields(&envelope, &envelope.to_string());
+}
+
+#[test]
+fn thread_drop_current_recovery_points_to_create_when_no_sibling() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    let output = heddle_output(
+        &["--output", "json", "thread", "drop", "main"],
+        Some(temp.path()),
+    )
+    .expect("invoke current thread drop");
+    assert!(!output.status.success(), "current thread drop should fail");
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).expect("current thread drop should emit JSON envelope");
+    assert_eq!(envelope["kind"], "current_thread_not_droppable");
+
+    // The circular `heddle thread list` hint is gone: with no sibling
+    // thread to switch to, the recovery is to create one, switch to it,
+    // then retry the drop (heddle#258).
+    let hint = envelope["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("heddle thread create <other>"),
+        "hint should suggest creating a sibling thread: {stderr}"
+    );
+    assert!(
+        !hint.contains("heddle thread list"),
+        "hint must not loop back to the circular `thread list`: {stderr}"
+    );
+    assert_eq!(envelope["primary_command"], "heddle thread create <other>");
+
+    // Plain `thread drop` keeps its plain retry — the destructive
+    // `--delete-thread` flag must NOT leak into the non-destructive mode.
+    assert!(
+        hint.contains("heddle thread drop main") && !hint.contains("--delete-thread"),
+        "plain drop recovery should suggest the plain retry, not the destructive form: {stderr}"
+    );
+
+    let templates = envelope["recovery_action_templates"]
+        .as_array()
+        .expect("recovery_action_templates should be an array");
+    let create = templates
+        .iter()
+        .find(|template| {
+            template["argv_template"]
+                == heddle_argv_json(["thread", "create", "<other>"])
+        })
+        .unwrap_or_else(|| panic!("create recovery template should be present: {stderr}"));
+    assert_eq!(create["agent_may_fill"], Value::Bool(true));
+    assert!(
+        create["argv_template"]
+            .as_array()
+            .is_some_and(|argv| argv.iter().any(|arg| arg == "<other>")),
+        "create template should mark <other> as a fillable slot: {stderr}"
+    );
+}
+
+/// heddle#258 r2 (cid 3327829289): when the user asks for the destructive
+/// `thread drop --delete-thread` on the current (lightweight, no-record)
+/// ref, the recovery retry hint must PRESERVE `--delete-thread`. The r1
+/// hint hardcoded a bare `heddle thread drop {current}`, which on retry
+/// re-enters with `manager.load == None && delete_thread == false` and
+/// dead-ends at `thread_not_found` — the user's destructive intent is lost.
+#[test]
+fn thread_drop_delete_thread_current_recovery_preserves_delete_flag() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    let output = heddle_output(
+        &["--output", "json", "thread", "drop", "main", "--delete-thread"],
+        Some(temp.path()),
+    )
+    .expect("invoke destructive current thread drop");
+    assert!(
+        !output.status.success(),
+        "destructive current thread drop should still refuse"
+    );
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).expect("destructive drop should emit JSON envelope");
+    assert_eq!(envelope["kind"], "branch_delete_current");
+
+    let hint = envelope["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("heddle thread drop main --delete-thread"),
+        "destructive drop recovery must preserve --delete-thread so a lightweight ref is removed on retry: {stderr}"
+    );
+    assert!(
+        !hint.contains("heddle thread list"),
+        "hint must not loop back to the circular `thread list`: {stderr}"
+    );
+}
+
+/// Same class via the `branch -d` entry point — it rewrites to a
+/// `--delete-thread` drop, so its recovery hint must also carry the
+/// destructive mode (close-the-class: both entries share one helper).
+#[test]
+fn branch_delete_current_recovery_preserves_delete_mode() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    let output = heddle_output(
+        &["--output", "json", "branch", "-d", "main"],
+        Some(temp.path()),
+    )
+    .expect("invoke current branch delete");
+    assert!(!output.status.success(), "current branch delete should refuse");
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).expect("branch delete should emit JSON envelope");
+    assert_eq!(envelope["kind"], "branch_delete_current");
+
+    let hint = envelope["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("--delete-thread"),
+        "branch -d recovery must preserve the ref-deleting mode on retry: {stderr}"
+    );
+}
+
+/// End-to-end: after following the create+switch advice, the SUGGESTED
+/// destructive retry must actually remove the lightweight ref (not
+/// dead-end at `thread_not_found`).
+#[test]
+fn thread_drop_delete_thread_recovery_retry_actually_deletes_ref() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    // Refused while `main` is the current checkout.
+    let refused = heddle_output(
+        &["--output", "json", "thread", "drop", "main", "--delete-thread"],
+        Some(temp.path()),
+    )
+    .expect("invoke destructive current thread drop");
+    assert!(!refused.status.success());
+
+    // Follow the advice: create a sibling and switch to it.
+    heddle(&["thread", "create", "feature"], Some(temp.path()))
+        .expect("create a sibling thread");
+    heddle(&["thread", "switch", "feature"], Some(temp.path()))
+        .expect("switch to the sibling thread");
+
+    // The SUGGESTED retry (mode preserved) must now succeed.
+    heddle(
+        &["thread", "drop", "main", "--delete-thread"],
+        Some(temp.path()),
+    )
+    .expect("suggested destructive retry should delete the lightweight ref");
+
+    let listed = json_value(temp.path(), &["thread", "list", "--output", "json"]);
+    assert!(
+        listed["threads"]
+            .as_array()
+            .is_some_and(|threads| threads.iter().all(|thread| thread["name"] != "main")),
+        "the lightweight `main` ref should be gone after the suggested retry: {listed}"
+    );
+}
+
+#[test]
+fn thread_drop_current_recovery_points_to_switch_when_sibling_exists() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    heddle(&["thread", "create", "feature"], Some(temp.path()))
+        .expect("create a sibling thread");
+
+    let output = heddle_output(
+        &["--output", "json", "thread", "drop", "main"],
+        Some(temp.path()),
+    )
+    .expect("invoke current thread drop");
+    assert!(!output.status.success(), "current thread drop should fail");
+    let stderr = std::str::from_utf8(&output.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).expect("current thread drop should emit JSON envelope");
+    assert_eq!(envelope["kind"], "current_thread_not_droppable");
+
+    // A sibling thread exists, so the recovery is to switch to it first
+    // (creating a fresh one stays available as a secondary path).
+    let hint = envelope["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("heddle thread switch <other>"),
+        "hint should suggest switching to a sibling thread first: {stderr}"
+    );
+    assert!(
+        !hint.contains("heddle thread list"),
+        "hint must not loop back to the circular `thread list`: {stderr}"
+    );
+    assert_eq!(envelope["primary_command"], "heddle thread switch <other>");
+
+    let templates = envelope["recovery_action_templates"]
+        .as_array()
+        .expect("recovery_action_templates should be an array");
+    let switch = templates
+        .iter()
+        .find(|template| {
+            template["argv_template"]
+                == heddle_argv_json(["thread", "switch", "<other>"])
+        })
+        .unwrap_or_else(|| panic!("switch recovery template should be present: {stderr}"));
+    assert_eq!(switch["agent_may_fill"], Value::Bool(true));
+    // Both recovery paths are exposed so machine callers can choose.
+    assert!(
+        templates.iter().any(|template| {
+            template["argv_template"]
+                == heddle_argv_json(["thread", "create", "<other>"])
+        }),
+        "create recovery template should also be present: {stderr}"
+    );
 }
 
 #[test]
@@ -7331,7 +7558,7 @@ fn quiet_no_color_and_narrow_text_outputs_preserve_global_contract() {
         "narrow text status should not need stderr: {narrow_stderr}"
     );
     assert!(
-        narrow_stdout.contains("Heddle status") && narrow_stdout.contains("Health:"),
+        narrow_stdout.contains("Heddle status") && narrow_stdout.contains("Verdict:"),
         "narrow status should retain the primary labels: {narrow_stdout}"
     );
     assert!(
@@ -7401,7 +7628,7 @@ fn narrow_no_color_text_outputs_cover_everyday_read_surfaces() {
     assert_text_surface(
         temp.path(),
         vec!["--quiet", "--output", "text", "status"],
-        &["Heddle status", "Health:"],
+        &["Heddle status", "Verdict:"],
     );
     assert_text_surface(
         temp.path(),
@@ -8035,8 +8262,8 @@ fn isolated_thread_status_and_diff_report_untracked_only_work() {
         "isolated diff must share the same worktree observation as status: {diff}"
     );
     assert_eq!(
-        diff["changes"][0]["path"], "docs/new.md",
-        "isolated diff should list the new file without needing a tracked-file edit: {diff}"
+        diff["changes"]["added"][0]["path"], "docs/new.md",
+        "isolated diff should list the new file under the added category without needing a tracked-file edit: {diff}"
     );
 }
 
@@ -10028,15 +10255,18 @@ fn actor_explain_json_detects_harness_without_active_actor() {
             .any(|signal| signal == "CODEX_THREAD_ID"),
         "actor explain should name detected signal keys without leaking unrelated values: {parsed}"
     );
+    // On-thread context (fresh `init` leaves HEAD attached to a thread):
+    // `--no-thread` attaches the detected identity to the current thread.
     assert_eq!(
         parsed["recommended_action"],
-        "heddle actor spawn --provider openai --model gpt-5.3-codex"
+        "heddle actor spawn --no-thread --provider openai --model gpt-5.3-codex"
     );
     assert_eq!(
         parsed["recommended_action_template"]["argv_template"],
         heddle_argv_json([
             "actor",
             "spawn",
+            "--no-thread",
             "--provider",
             "openai",
             "--model",
@@ -10048,6 +10278,79 @@ fn actor_explain_json_detects_harness_without_active_actor() {
     assert!(
         parsed.get("verification").is_some(),
         "actor explain should prove repository verify for agents: {parsed}"
+    );
+}
+
+#[test]
+fn actor_explain_detached_head_recommends_minting_spawn_not_no_thread() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
+    heddle(&["capture", "-m", "base"], Some(temp.path())).unwrap();
+    let base = Repository::open(temp.path())
+        .unwrap()
+        .current_state()
+        .unwrap()
+        .unwrap()
+        .change_id
+        .to_string();
+    std::fs::write(temp.path().join("tracked.txt"), "next\n").unwrap();
+    heddle(&["capture", "-m", "next"], Some(temp.path())).unwrap();
+    // `goto` to an earlier state detaches HEAD — there is no current thread
+    // to attach an actor to, so `--no-thread` would fail.
+    heddle(&["goto", &base, "--force"], Some(temp.path())).unwrap();
+    assert!(
+        matches!(
+            Repository::open(temp.path()).unwrap().head_ref().unwrap(),
+            refs::Head::Detached { .. }
+        ),
+        "goto should leave HEAD detached for this test"
+    );
+
+    let output = heddle_output_with_env(
+        &["actor", "explain", "--output", "json"],
+        Some(temp.path()),
+        &[
+            ("CODEX_THREAD_ID", "thread-cold-agent"),
+            ("CODEX_MODEL", "gpt-5.3-codex"),
+            ("CODEX_REASONING_EFFORT", "high"),
+        ],
+    )
+    .expect("invoke actor explain");
+    assert!(
+        output.status.success(),
+        "actor explain should succeed on detached HEAD; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|err| panic!("actor explain JSON should parse: {err}: {stdout}"));
+    assert_eq!(parsed["attached"], false);
+    // Detached HEAD: recommend the minting form (mints a dedicated thread),
+    // NOT `--no-thread`, which cannot succeed without a current thread.
+    assert_eq!(
+        parsed["recommended_action"],
+        "heddle actor spawn --provider openai --model gpt-5.3-codex",
+        "detached HEAD should recommend the thread-minting spawn form: {parsed}"
+    );
+    assert!(
+        !parsed["recommended_action"]
+            .as_str()
+            .expect("recommended_action should be a string")
+            .contains("--no-thread"),
+        "detached HEAD must not recommend `--no-thread`: {parsed}"
+    );
+    assert_eq!(
+        parsed["recommended_action_template"]["argv_template"],
+        heddle_argv_json([
+            "actor",
+            "spawn",
+            "--provider",
+            "openai",
+            "--model",
+            "gpt-5.3-codex"
+        ]),
+        "actor explain should expose replayable argv for the minting spawn action: {parsed}"
     );
 }
 
@@ -10310,7 +10613,7 @@ fn tty_auto_mode_renders_text_and_explicit_json_stays_json() {
     let text_stdout = String::from_utf8_lossy(&text.stdout);
     assert!(
         text_stdout.contains("Heddle status")
-            && text_stdout.contains("Health:")
+            && text_stdout.contains("Verdict:")
             && !text_stdout.trim_start().starts_with('{')
             && !text_stdout.contains('\u{1b}'),
         "auto mode on a TTY should render no-color human text: {text_stdout:?}"
@@ -11257,8 +11560,8 @@ fn default_undo_text_hides_batches_and_checkpoint_ids_until_verbose() {
 
 #[test]
 fn blame_drops_email_when_attribution_overflows_column() {
-    // `Luke Thorne <the.thorne48@gmail.com>` blew the 20-char column,
-    // truncating to `Luke Thorne <the...` — keeping the noise and
+    // `Ada Lovelace <ada@really.long.example.com>` blew the 20-char column,
+    // truncating to `Ada Lovelace <ada...` — keeping the noise and
     // dropping the signal. The fit_author helper drops the email
     // entirely when the name alone fits the column.
     let temp = TempDir::new().unwrap();
@@ -11347,7 +11650,7 @@ fn freshly_initialized_repo_reports_clean_health() {
 
     let text = heddle(&["--output", "text", "status"], Some(temp.path())).unwrap();
     assert!(
-        text.contains("Health: clean"),
+        text.contains("Verdict: clean"),
         "a fresh init should be healthy, not 'needs_attention': {text}"
     );
     assert!(

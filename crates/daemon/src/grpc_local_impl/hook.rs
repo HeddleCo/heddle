@@ -174,11 +174,10 @@ impl HookService for LocalHookService {
         let req = request.into_inner();
         let body = req.encode_to_vec();
         let heddle_dir = self.inner.repo().heddle_dir().to_path_buf();
-        let dedup = self.inner.dedup();
         let client_op = req.client_operation_id.clone();
 
         let result = with_idempotency(
-            dedup,
+            &self.inner,
             &client_op,
             "hook.register_hook",
             &body,
@@ -224,10 +223,9 @@ impl HookService for LocalHookService {
         let req = request.into_inner();
         let body = req.encode_to_vec();
         let heddle_dir = self.inner.repo().heddle_dir().to_path_buf();
-        let dedup = self.inner.dedup();
         let client_op = req.client_operation_id.clone();
         let result = with_idempotency(
-            dedup,
+            &self.inner,
             &client_op,
             "hook.deregister_hook",
             &body,
@@ -317,11 +315,10 @@ impl HookService for LocalHookService {
     ) -> Result<Response<RespondToHookResponse>, Status> {
         let req = request.into_inner();
         let body = req.encode_to_vec();
-        let dedup = self.inner.dedup();
         let client_op = req.client_operation_id.clone();
         let broker = self.inner.hook_events.clone();
         let result = with_idempotency(
-            dedup,
+            &self.inner,
             &client_op,
             "hook.respond_to_hook",
             &body,

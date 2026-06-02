@@ -243,7 +243,31 @@ pub async fn cmd_retro(cli: &Cli, options: RetroCommandOptions) -> Result<()> {
                         timestamp: format_ts(entry.timestamp),
                     });
                 }
-                _ => {}
+                // Not surfaced in the retro summary (includes `Collapse` when
+                // `--include-merges` is off). Enumerated explicitly (no
+                // wildcard) so a new `OpRecord` variant must be considered for
+                // the retro rollup instead of silently vanishing from it
+                // (heddle#354 r9).
+                OpRecord::Goto { .. }
+                | OpRecord::ThreadCreate { .. }
+                | OpRecord::ThreadCreateV2 { .. }
+                | OpRecord::ThreadDelete { .. }
+                | OpRecord::ThreadUpdate { .. }
+                | OpRecord::Fork { .. }
+                | OpRecord::Collapse { .. }
+                | OpRecord::MarkerDelete { .. }
+                | OpRecord::TransactionAbort { .. }
+                | OpRecord::EphemeralThreadCollapse { .. }
+                | OpRecord::ConflictResolved { .. }
+                | OpRecord::TransactionCommit { .. }
+                | OpRecord::Redact { .. }
+                | OpRecord::Purge { .. }
+                | OpRecord::FastForward { .. }
+                | OpRecord::FastForwardV2 { .. }
+                | OpRecord::GitCheckpoint { .. }
+                | OpRecord::RemoteThreadUpdate { .. }
+                | OpRecord::RemoteThreadDelete { .. }
+                | OpRecord::UndoRecoveryUpdate { .. } => {}
             }
         }
     }
@@ -320,7 +344,30 @@ fn find_recent_turn_ts(repo: &Repository) -> Result<Option<DateTime<Utc>>> {
                 | OpRecord::Checkpoint {
                     state: new_state, ..
                 } => *new_state,
-                _ => continue,
+                // Only capture-style records carry a turn-boundary intent.
+                // Enumerated explicitly (no wildcard) so a future
+                // intent-carrying variant is considered here (heddle#354 r9).
+                OpRecord::Goto { .. }
+                | OpRecord::ThreadCreate { .. }
+                | OpRecord::ThreadCreateV2 { .. }
+                | OpRecord::ThreadDelete { .. }
+                | OpRecord::ThreadUpdate { .. }
+                | OpRecord::Fork { .. }
+                | OpRecord::Collapse { .. }
+                | OpRecord::MarkerCreate { .. }
+                | OpRecord::MarkerDelete { .. }
+                | OpRecord::TransactionAbort { .. }
+                | OpRecord::EphemeralThreadCollapse { .. }
+                | OpRecord::ConflictResolved { .. }
+                | OpRecord::TransactionCommit { .. }
+                | OpRecord::Redact { .. }
+                | OpRecord::Purge { .. }
+                | OpRecord::FastForward { .. }
+                | OpRecord::FastForwardV2 { .. }
+                | OpRecord::GitCheckpoint { .. }
+                | OpRecord::RemoteThreadUpdate { .. }
+                | OpRecord::RemoteThreadDelete { .. }
+                | OpRecord::UndoRecoveryUpdate { .. } => continue,
             };
             if let Some(state) = repo.store().get_state(&new_state)?
                 && let Some(intent) = state.intent.as_deref()

@@ -22,7 +22,7 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -33,6 +33,9 @@ use objects::{
     object::OperationId,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::Repository;
+use crate::atomic::{AtomicMutation, Compensator, EagerMutation, StagedCommit, Tx, execute};
 
 const DEDUP_FORMAT_VERSION: u8 = 1;
 const DEDUP_FILE_NAME: &str = "operation_dedup.bin";
@@ -118,6 +121,149 @@ pub struct DedupConflictMetadata {
     pub request_hash: [u8; 32],
     pub created_at_secs: i64,
     pub pending: bool,
+}
+
+#[derive(Clone)]
+pub struct ReserveOpIdClaim {
+    outcome: Arc<Mutex<Option<DedupOutcome>>>,
+}
+
+impl ReserveOpIdClaim {
+    fn new() -> Self {
+        Self {
+            outcome: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn set(&self, outcome: DedupOutcome) {
+        *self.outcome.lock().expect("reserve op-id outcome poisoned") = Some(outcome);
+    }
+
+    fn into_outcome(self) -> Result<DedupOutcome> {
+        self.outcome
+            .lock()
+            .expect("reserve op-id outcome poisoned")
+            .take()
+            .ok_or_else(|| HeddleError::Conflict("eager op-id reserve produced no outcome".into()))
+    }
+}
+
+/// Eager op-id reservation for use inside an existing [`Tx`].
+///
+/// The reservation is written in [`EagerMutation::commit_eager`], not
+/// [`AtomicMutation::apply`], so it is cross-process visible before the outer
+/// transaction can continue. The compensator is intentionally a no-op: once an
+/// op-id has been handed out, an unrelated outer abort must not make that
+/// unique reservation disappear.
+pub struct ReserveOpId {
+    store: Arc<OperationDedupStore>,
+    operation_id: OperationId,
+    verb: String,
+    request_hash: [u8; 32],
+    claim: ReserveOpIdClaim,
+}
+
+impl ReserveOpId {
+    pub fn new(
+        store: Arc<OperationDedupStore>,
+        operation_id: OperationId,
+        verb: impl Into<String>,
+        request_hash: [u8; 32],
+    ) -> Self {
+        Self {
+            store,
+            operation_id,
+            verb: verb.into(),
+            request_hash,
+            claim: ReserveOpIdClaim::new(),
+        }
+    }
+}
+
+impl AtomicMutation for ReserveOpId {
+    type Output = ReserveOpIdClaim;
+
+    fn transaction_id(&self) -> String {
+        reserve_transaction_id(self.operation_id, &self.verb, self.request_hash)
+    }
+
+    fn apply(&mut self, _tx: &mut Tx<'_>) -> Result<StagedCommit<Self::Output>> {
+        Ok(StagedCommit::pure(self.claim.clone()))
+    }
+}
+
+impl EagerMutation for ReserveOpId {
+    fn commit_eager(&mut self, _tx: &mut Tx<'_>) -> Result<Compensator> {
+        let outcome = self
+            .store
+            .reserve(self.operation_id, &self.verb, self.request_hash)?;
+        self.claim.set(outcome);
+        Ok(Compensator::new(|| Ok(())))
+    }
+}
+
+struct ReserveOpIdTransaction {
+    store: Arc<OperationDedupStore>,
+    operation_id: OperationId,
+    verb: String,
+    request_hash: [u8; 32],
+}
+
+impl ReserveOpIdTransaction {
+    fn new(
+        store: Arc<OperationDedupStore>,
+        operation_id: OperationId,
+        verb: impl Into<String>,
+        request_hash: [u8; 32],
+    ) -> Self {
+        Self {
+            store,
+            operation_id,
+            verb: verb.into(),
+            request_hash,
+        }
+    }
+}
+
+impl AtomicMutation for ReserveOpIdTransaction {
+    type Output = DedupOutcome;
+
+    fn transaction_id(&self) -> String {
+        reserve_transaction_id(self.operation_id, &self.verb, self.request_hash)
+    }
+
+    fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<Self::Output>> {
+        let claim = tx.enroll_eager(ReserveOpId::new(
+            Arc::clone(&self.store),
+            self.operation_id,
+            self.verb.clone(),
+            self.request_hash,
+        ))?;
+        Ok(StagedCommit::pure(claim.into_outcome()?))
+    }
+}
+
+pub fn reserve_operation_id_eager(
+    repo: &Repository,
+    store: Arc<OperationDedupStore>,
+    operation_id: OperationId,
+    verb: impl Into<String>,
+    request_hash: [u8; 32],
+) -> Result<DedupOutcome> {
+    execute(
+        repo,
+        ReserveOpIdTransaction::new(store, operation_id, verb, request_hash),
+    )
+}
+
+fn reserve_transaction_id(operation_id: OperationId, verb: &str, request_hash: [u8; 32]) -> String {
+    use std::fmt::Write as _;
+
+    let mut hash = String::with_capacity(64);
+    for byte in request_hash {
+        let _ = write!(&mut hash, "{byte:02x}");
+    }
+    format!("op-id-reserve/{verb}/{operation_id}/{hash}")
 }
 
 /// File-backed dedup store.
@@ -394,6 +540,12 @@ pub fn hash_request_body(bytes: &[u8]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use crate::Repository;
+    use crate::atomic::{AtomicMutation, StagedCommit, Tx, execute};
+    use crate::operation_dedup::{ReserveOpId, reserve_operation_id_eager};
+    use objects::error::{HeddleError, Result};
     use tempfile::TempDir;
 
     use super::*;
@@ -405,6 +557,85 @@ mod tests {
         std::fs::create_dir_all(&heddle).unwrap();
         let store = OperationDedupStore::open(&heddle).unwrap();
         (temp, store)
+    }
+
+    fn make_repo_store() -> (TempDir, Repository, Arc<OperationDedupStore>) {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let store = Arc::new(OperationDedupStore::open(repo.heddle_dir()).unwrap());
+        (temp, repo, store)
+    }
+
+    struct ReserveThenAbort {
+        store: Arc<OperationDedupStore>,
+        op: OperationId,
+        hash: [u8; 32],
+    }
+
+    impl AtomicMutation for ReserveThenAbort {
+        type Output = ();
+
+        fn transaction_id(&self) -> String {
+            format!("reserve-then-abort/{}", self.op)
+        }
+
+        fn apply(&mut self, tx: &mut Tx<'_>) -> Result<StagedCommit<()>> {
+            tx.enroll_eager(ReserveOpId::new(
+                Arc::clone(&self.store),
+                self.op,
+                "capture",
+                self.hash,
+            ))?;
+            Err(HeddleError::Config("outer transaction aborted".to_string()))
+        }
+    }
+
+    #[test]
+    fn eager_reserve_survives_outer_abort() {
+        let (_t, repo, store) = make_repo_store();
+        let op = OperationId::new();
+        let hash = hash_request_body(b"x");
+
+        let result = execute(
+            &repo,
+            ReserveThenAbort {
+                store: Arc::clone(&store),
+                op,
+                hash,
+            },
+        );
+
+        assert!(result.is_err(), "outer transaction must abort");
+        let reopened = OperationDedupStore::open(repo.heddle_dir()).unwrap();
+        assert_eq!(
+            reopened.reserve(op, "capture", hash).unwrap(),
+            DedupOutcome::InFlight,
+            "eager op-id reservation must remain durable after outer abort"
+        );
+    }
+
+    #[test]
+    fn eager_parallel_distinct_reserves_both_win() {
+        let (_t, repo, store) = make_repo_store();
+        let op_a = OperationId::new();
+        let op_b = OperationId::new();
+        let hash = hash_request_body(b"x");
+
+        std::thread::scope(|scope| {
+            let a = scope.spawn(|| {
+                reserve_operation_id_eager(&repo, Arc::clone(&store), op_a, "capture", hash)
+                    .unwrap()
+            });
+            let b = scope.spawn(|| {
+                reserve_operation_id_eager(&repo, Arc::clone(&store), op_b, "capture", hash)
+                    .unwrap()
+            });
+
+            assert_eq!(a.join().unwrap(), DedupOutcome::Reserved);
+            assert_eq!(b.join().unwrap(), DedupOutcome::Reserved);
+        });
+
+        assert_eq!(store.len(), 2);
     }
 
     #[test]
@@ -619,8 +850,7 @@ mod tests {
                 store.reserve(op, "capture", hash).unwrap()
             }));
         }
-        let outcomes: Vec<DedupOutcome> =
-            handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let outcomes: Vec<DedupOutcome> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
         let reserved = outcomes
             .iter()

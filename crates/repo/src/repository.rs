@@ -78,7 +78,7 @@ use objects::{
 };
 use oplog::{OpLog, OpLogBackend, OpRecord};
 pub use refs::RefSummaryIndexInspection;
-use refs::{Head, RefBackend, RefManager};
+use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
 
 use crate::git_worktree_status::GitWorktreeEntryState;
 pub use repo_config::{HostedConfig, OutputFormat, RedactConfig, RepoConfig, TrustedKey};
@@ -351,6 +351,16 @@ impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> Repository<R, O, S> {
 /// those are bound to the default `AnyStore` flavor and live in
 /// [`Repository::run_open_hooks`], which the config-driven [`Repository::open`]
 /// invokes after `open_raw`.
+/// The per-worktree checkout lane (heddle#330 §1.5). Free function so the
+/// reconciler can be wired at construction (before a `Repository` exists)
+/// using the same computation as [`Repository::op_scope`].
+pub(crate) fn compute_op_scope(root: &Path) -> String {
+    let local_head = root.join(".heddle").join("HEAD");
+    let canonical = local_head.canonicalize().unwrap_or(local_head);
+    let digest = blake3::hash(canonical.to_string_lossy().as_bytes());
+    format!("wt-{}", &digest.to_hex().as_str()[..16])
+}
+
 impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
     fn open_raw(
         root: PathBuf,
@@ -364,8 +374,23 @@ impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
             .as_ref()
             .map(|p| objects::object::Principal::new(&p.name, &p.email))
             .unwrap_or_else(|| objects::object::Principal::new("<unknown>", ""));
-        let oplog = OpLog::new(&heddle_dir, actor);
+        let oplog = OpLog::new(&heddle_dir, actor.clone());
         let shallow = ShallowInfo::load(&heddle_dir)?;
+        // Inject the oplog-backed read + write chokepoints (heddle#330 §2.2):
+        // every logical read reconciles against the committed oplog tail, and
+        // `commit_and_publish` appends a ref-carrying record before publishing.
+        let reconciler = std::sync::Arc::new(crate::atomic::OplogRefReconciler::new(
+            &heddle_dir,
+            compute_op_scope(&root),
+        ));
+        let committer =
+            std::sync::Arc::new(crate::atomic::OplogRefCommitter::new(&heddle_dir, actor));
+        let refs = refs.with_reconciler(reconciler).with_committer(committer);
+        // Seed the per-read watermark from the persisted last-clean point
+        // (heddle#354 r5, cid 3329631074) so a fresh handle folds — and recovers
+        // — a prior process's committed-but-unpublished crash tail on its next
+        // read, without re-deriving long-since-deleted refs from ancient records.
+        refs.init_reconcile_watermark()?;
         Ok(Self::from_parts(
             root, heddle_dir, store, refs, oplog, config, shallow,
         ))
@@ -526,6 +551,23 @@ impl Repository {
         refs.write_head(&Head::Attached {
             thread: ThreadName::from("main"),
         })?;
+
+        // Inject the oplog-backed read + write chokepoints (heddle#330 §2.2) —
+        // same as `open_raw`, so a freshly-init'd handle reconciles and
+        // record-commits too.
+        let reconciler = std::sync::Arc::new(crate::atomic::OplogRefReconciler::new(
+            &heddle_dir,
+            compute_op_scope(&root),
+        ));
+        let committer = std::sync::Arc::new(crate::atomic::OplogRefCommitter::new(
+            &heddle_dir,
+            objects::object::Principal::new("<unknown>", ""),
+        ));
+        let refs = refs.with_reconciler(reconciler).with_committer(committer);
+        // Establish the persisted reconcile watermark at init (heddle#354 r5,
+        // cid 3329631074) so subsequent processes seed from a real last-clean
+        // point — parity with `open_raw`.
+        refs.init_reconcile_watermark()?;
 
         let capability = repository_capability_for_root(&root);
         Ok(Self {
@@ -1647,10 +1689,80 @@ impl Repository {
         //     shared-oplog setups
         //   * opaque on disk — the user's home directory and username
         //     never end up serialized into oplog entries
-        let local_head = self.root.join(".heddle").join("HEAD");
-        let canonical = local_head.canonicalize().unwrap_or(local_head);
-        let digest = blake3::hash(canonical.to_string_lossy().as_bytes());
-        format!("wt-{}", &digest.to_hex().as_str()[..16])
+        compute_op_scope(&self.root)
+    }
+
+    /// The write chokepoint (heddle#330 §2.2): commit the ref-carrying
+    /// `OpRecord` batch (phase 4) **before** publishing the atomic `ref_updates`
+    /// batch (phase 5), record-before-publish. Encodes the records opaquely and
+    /// routes through [`RefBackend::commit_and_publish`] so the backend's seam
+    /// enforces the ordering — the file backend appends-then-publishes, a
+    /// Postgres backend would co-commit in one SQL transaction. Replaces the
+    /// publish-then-record order that left a reader-visible ref with no undo
+    /// record (the fork/collapse bug).
+    pub fn commit_and_publish(
+        &self,
+        records: Vec<OpRecord>,
+        ref_updates: &[RefUpdate],
+    ) -> Result<()> {
+        let encoded = records
+            .iter()
+            .map(|record| {
+                rmp_serde::to_vec(record).map_err(|e| HeddleError::Serialization(e.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let scope = self.op_scope();
+        let result = self.refs.commit_and_publish(&encoded, ref_updates, Some(&scope));
+        // The committer appended through a fresh `OpLog` handle (the `refs`→`repo`
+        // seam), so this repository's own cached oplog handle is now stale.
+        // Refresh it so a same-process read via `self.oplog()` observes the
+        // just-committed records — the long-lived mount/daemon handle would
+        // otherwise miss them (heddle#354 r8). Best-effort: a refresh failure
+        // only costs a stale cache until the next disk reload, never correctness.
+        let _ = self.oplog.refresh_cache();
+        result
+    }
+
+    /// Atomically commit a snapshot's `OpRecord::Snapshot` and its paired ref
+    /// publish through the write chokepoint, **record-first** (heddle#354 r8).
+    ///
+    /// The pre-r8 snapshot path published the ref FIRST (`refs.set_thread` /
+    /// `refs.write_head`) and recorded SECOND. Because the reconciler folds a
+    /// `Snapshot` record authoritatively (newest committed record wins), a late
+    /// snapshot record carrying a stale thread value could clobber a newer
+    /// concurrent write that had already recorded. Routing every snapshot ref
+    /// write through this single chokepoint makes the record the unit of
+    /// ordering: the newest committed record IS the newest write, so the
+    /// authoritative fold can no longer resurrect a stale snapshot.
+    ///
+    /// `thread = Some(name)` advances that thread (HEAD stays attached);
+    /// `thread = None` republishes a detached HEAD. The detached case is now
+    /// record-first too, so a phase-4-committed / phase-5-unpublished crash is
+    /// recovered by the reconciler reconstructing `Head::Detached{new_state}`
+    /// (see `atomic::reconciler`'s detached-`Snapshot` arm).
+    pub fn commit_snapshot_atomic(
+        &self,
+        new_state: &ChangeId,
+        prev_head: Option<ChangeId>,
+        thread: Option<&ThreadName>,
+    ) -> Result<()> {
+        let record = OpRecord::Snapshot {
+            new_state: *new_state,
+            prev_head,
+            thread: thread.map(|name| name.to_string()),
+        };
+        let ref_update = match thread {
+            Some(name) => RefUpdate::Thread {
+                name: name.clone(),
+                expected: RefExpectation::Any,
+                new: Some(*new_state),
+            },
+            None => RefUpdate::Head {
+                expected: RefExpectation::Any,
+                new: Head::Detached { state: *new_state },
+            },
+        };
+        self.commit_and_publish(vec![record], &[ref_update])
     }
 
     pub fn repo_config(&self) -> &RepoConfig {
@@ -1675,6 +1787,17 @@ impl Repository {
             patterns.push(".git".to_string());
             append_ignore_file_patterns(&mut patterns, &self.root.join(".gitignore"))?;
         }
+        // Worktree-local, never-captured excludes (heddle's analogue of
+        // `.git/info/exclude`). Lives under THIS worktree's own `.heddle/`
+        // (`root/.heddle`, which is local even for a shared-store checkout), so
+        // it is never captured. Lets `start --hydrate` ignore symlinked deps
+        // without dirtying a tracked `.heddleignore` (heddle#356 cid 3333881577).
+        // `append_ignore_file_patterns` no-ops when the file is absent — the
+        // common case for a plain repo.
+        append_ignore_file_patterns(
+            &mut patterns,
+            &self.root.join(".heddle").join("info").join("exclude"),
+        )?;
         let path = self.root.join(".heddleignore");
 
         if path.exists() {
