@@ -27,7 +27,7 @@ use std::rc::Rc;
 use tree_sitter::Node;
 
 pub(super) use super::language_rules::{ItemKind, UseIdentity};
-use super::language_rules::{rules_for, Classified, MetadataBinding};
+use super::language_rules::{rules_for, Classified, MetadataBinding, USE_POISON_KEY};
 use crate::parser::{Language, ParsedFile};
 
 /// Stable identifier for an item across the three sides. Two items match iff
@@ -207,25 +207,54 @@ fn collect_items(
 /// * disjoint leaf sets → distinct canonical keys → **union** (the r0
 ///   additive-re-export case stays clean).
 ///
-/// Un-normalizable forms (globs, `as` aliases, nested groups) all carry the
-/// single sentinel leaf, so they share one component and conflict-on-
-/// divergence only with each other — never with a real import path.
+/// The leaf union runs ONLY when every `use` item on every side is a
+/// fully-analyzable plain import ([`UseIdentity::Plain`]). A single
+/// unanalyzable form ([`UseIdentity::Unanalyzable`] — `self` in a group,
+/// nested group, glob, `as` alias, metavariable, malformed) anywhere
+/// **poisons** the use-region: we cannot extract its leaves, so it might
+/// overlap a plain import on a leaf we never saw, and the leaf partition
+/// can no longer be trusted. In that case every `use` item is rekeyed to
+/// the shared [`USE_POISON_KEY`] instead, collapsing the region into one
+/// component that [`super::reconstruct::resolve_use_component`] resolves
+/// as a single conservative whole-region 3-way merge (byte-identical →
+/// dedup, anything else → conflict). Capping the clever union to
+/// plain-imports-only makes the exotic-form drip class impossible
+/// (heddle#468 r6 on PR #477).
 ///
-/// This is a no-op for any `use` whose leaf set overlaps nothing: its
-/// component is itself and its canonical name equals its own minimum leaf,
-/// matching the pre-canonicalization seed key.
+/// This is a no-op for any `use` whose leaf set overlaps nothing in the
+/// un-poisoned path: its component is itself and its canonical name equals
+/// its own minimum leaf, matching the pre-canonicalization seed key.
 pub(crate) fn canonicalize_use_keys(
     base: &mut FileSegments,
     ours: &mut FileSegments,
     theirs: &mut FileSegments,
 ) {
+    // Poison gate: any unanalyzable `use` on any side disqualifies the
+    // whole region from the leaf union. Collapse every `use` item onto one
+    // key so the conservative whole-region merge runs instead.
+    let poisoned = [&*base, &*ours, &*theirs].iter().any(|seg| {
+        seg.items
+            .iter()
+            .any(|item| matches!(item.use_identity, Some(UseIdentity::Unanalyzable)))
+    });
+    if poisoned {
+        for seg in [base, ours, theirs] {
+            for item in &mut seg.items {
+                if item.use_identity.is_some() {
+                    item.key.name = USE_POISON_KEY.to_string();
+                }
+            }
+        }
+        return;
+    }
+
     let mut uf = LeafUnionFind::default();
     for seg in [&*base, &*ours, &*theirs] {
         for item in &seg.items {
-            let Some(identity) = &item.use_identity else {
+            let Some(UseIdentity::Plain(leaves)) = &item.use_identity else {
                 continue;
             };
-            let mut leaf_iter = identity.leaves.iter();
+            let mut leaf_iter = leaves.iter();
             let Some(first) = leaf_iter.next() else {
                 continue;
             };
@@ -240,10 +269,10 @@ pub(crate) fn canonicalize_use_keys(
     let canonical = uf.component_min_label();
     for seg in [base, ours, theirs] {
         for item in &mut seg.items {
-            let Some(identity) = &item.use_identity else {
+            let Some(UseIdentity::Plain(leaves)) = &item.use_identity else {
                 continue;
             };
-            if let Some(first) = identity.leaves.first()
+            if let Some(first) = leaves.first()
                 && let Some(name) = canonical.get(first)
             {
                 item.key.name = name.clone();

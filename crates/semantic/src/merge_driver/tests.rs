@@ -4662,8 +4662,9 @@ fn rust_same_leaf_divergent_cfg_attribute_conflicts_not_silent_drop() {
 // Same leaf path, DIFFERENT alias: `use crate::foo::Bar as B;` vs
 // `... as C;`. The alias is part of the binding's meaning but lives outside
 // the leaf path, so a partial-signal dedup would have dropped one. The
-// byte-identical-only rule conflicts. (Aliases also expand to the
-// un-normalizable sentinel, so the two share a key and collide.)
+// byte-identical-only rule conflicts. (Both aliases are unanalyzable, so the
+// region is poisoned and the whole-region merge conflicts the divergent
+// text — heddle#468 r6.)
 #[test]
 fn rust_same_leaf_divergent_alias_conflicts() {
     let base = "fn anchor() { 0 }\n";
@@ -4838,6 +4839,122 @@ fn rust_use_identical_multiline_component_dedups_clean() {
         merged.matches("crate::foo::Baz").count(),
         1,
         "Baz must appear exactly once after dedup: {merged}"
+    );
+    assert!(merged.contains("fn alpha() { 10 }"), "ours edit lost: {merged}");
+    assert!(merged.contains("fn beta() { 20 }"), "theirs edit lost: {merged}");
+}
+
+// heddle#468 r6 (Codex cid 3350239933): the clever leaf-component union is
+// capped to fully-analyzable PLAIN imports. Before this fix an unanalyzable
+// form (`self` in a group / nested group / glob / alias) carried a single
+// sentinel "leaf" that `canonicalize_use_keys` treated as a normal leaf —
+// but the sentinel is disjoint from every real import path, so an exotic
+// form that overlaps a plain import landed in a DIFFERENT union-find
+// component, both were emitted, and a duplicate import slipped through (the
+// exact bug this PR exists to prevent). Now: any use-region containing an
+// unanalyzable item on ANY side bypasses the leaf union entirely and merges
+// conservatively, so the overlap surfaces as a conflict. These tests pin
+// each exotic form against an overlapping plain import; the un-poisoned
+// plain-only cases above (r0/r5) must stay clean.
+
+// `self` in a group vs the plain leaf it hides: `use crate::foo::{self, Bar};`
+// expands to `foo` AND `foo::Bar`, overlapping theirs' `use crate::foo::Bar;`.
+// Pre-fix the `{self, Bar}` group keyed to the sentinel and `Bar` keyed to
+// `crate::foo::Bar` → distinct components → both emitted → duplicate `Bar`.
+// The poison path conflicts the whole region instead.
+#[test]
+fn rust_use_self_group_vs_plain_conflicts_not_duplicate() {
+    let base = "fn anchor() { 0 }\n";
+    let ours = "use crate::foo::{self, Bar};\nfn anchor() { 0 }\n";
+    let theirs = "use crate::foo::Bar;\nfn anchor() { 0 }\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(
+        count >= 1,
+        "self-group overlapping a plain import must conflict, not duplicate: {text}"
+    );
+    assert!(
+        text.contains("<<<<<<<"),
+        "expected a conflict region, not a silent union: {text}"
+    );
+}
+
+// Nested group vs the plain leaf it hides: `use crate::foo::{bar::{Baz}};`
+// (nested → unanalyzable) overlaps theirs' `use crate::foo::bar::Baz;`. The
+// poison path conflicts rather than mis-unioning into a duplicate `Baz`.
+#[test]
+fn rust_use_nested_group_vs_plain_conflicts() {
+    let base = "fn anchor() { 0 }\n";
+    let ours = "use crate::foo::{bar::{Baz}};\nfn anchor() { 0 }\n";
+    let theirs = "use crate::foo::bar::Baz;\nfn anchor() { 0 }\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(
+        count >= 1,
+        "nested group overlapping a plain import must conflict: {text}"
+    );
+    assert!(
+        text.contains("<<<<<<<"),
+        "expected a conflict region, not a silent union: {text}"
+    );
+}
+
+// Glob vs a plain import under the same path: `use crate::foo::*;` (glob →
+// unanalyzable) could re-export `Bar`, so it overlaps theirs'
+// `use crate::foo::Bar;`. We can't expand the glob's leaves, so the only
+// safe verdict is a conflict — never a clean union that duplicates `Bar`.
+#[test]
+fn rust_use_glob_vs_plain_overlap_conflicts() {
+    let base = "fn anchor() { 0 }\n";
+    let ours = "use crate::foo::*;\nfn anchor() { 0 }\n";
+    let theirs = "use crate::foo::Bar;\nfn anchor() { 0 }\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(
+        count >= 1,
+        "glob overlapping a plain import must conflict, not mis-union: {text}"
+    );
+    assert!(
+        text.contains("<<<<<<<"),
+        "expected a conflict region, not a silent union: {text}"
+    );
+}
+
+// Alias vs the plain leaf it renames: `use crate::foo::Bar as B;` (alias →
+// unanalyzable) and theirs' `use crate::foo::Bar;` share the leaf
+// `crate::foo::Bar`. The r4 alias test conflicts alias-vs-alias (both
+// unanalyzable, same sentinel component); this is the alias-vs-PLAIN case
+// the old sentinel keying mis-unioned — it must conflict via the new poison
+// path, not emit both lines.
+#[test]
+fn rust_use_alias_vs_plain_same_leaf_conflicts() {
+    let base = "fn anchor() { 0 }\n";
+    let ours = "use crate::foo::Bar as B;\nfn anchor() { 0 }\n";
+    let theirs = "use crate::foo::Bar;\nfn anchor() { 0 }\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(
+        count >= 1,
+        "alias overlapping the plain leaf it renames must conflict: {text}"
+    );
+    assert!(
+        text.contains("<<<<<<<"),
+        "expected a conflict region, not a silent union: {text}"
+    );
+}
+
+// Byte-identical exotic form on both sides → the dedup leg survives the
+// poison path. Both sides add the SAME `use crate::foo::*;` while editing a
+// disjoint function; the region is poisoned (glob is unanalyzable) but the
+// two component texts are byte-identical, so the conservative merge dedups
+// to one copy and stays clean. Pins that poisoning does NOT regress
+// identical-text dedup into a spurious conflict.
+#[test]
+fn rust_use_identical_glob_both_sides_dedups_clean() {
+    let base = "fn alpha() { 1 }\nfn beta() { 2 }\n";
+    let ours = "use crate::foo::*;\nfn alpha() { 10 }\nfn beta() { 2 }\n";
+    let theirs = "use crate::foo::*;\nfn alpha() { 1 }\nfn beta() { 20 }\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert_eq!(
+        merged.matches("crate::foo::*").count(),
+        1,
+        "byte-identical glob must dedup to one line, not conflict: {merged}"
     );
     assert!(merged.contains("fn alpha() { 10 }"), "ours edit lost: {merged}");
     assert!(merged.contains("fn beta() { 20 }"), "theirs edit lost: {merged}");

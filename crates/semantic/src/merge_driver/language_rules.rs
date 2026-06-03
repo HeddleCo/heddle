@@ -54,14 +54,20 @@ pub(super) enum ItemKind {
     Method,
     Impl,
     Module,
-    /// A `use` / `pub use` declaration. Its match key is the leaf-set
-    /// *component* canonical name assigned by
-    /// [`super::items::canonicalize_use_keys`]: two declarations collide iff
+    /// A `use` / `pub use` declaration. Its match key is assigned by
+    /// [`super::items::canonicalize_use_keys`]. When every `use` item on
+    /// every side is a fully-analyzable plain import, the key is the
+    /// leaf-set *component* canonical name: two declarations collide iff
     /// their expanded leaf sets intersect on ANY path, so additive
-    /// re-exports on disjoint paths union while any overlapping pair
-    /// dedups (identical) or conflicts (divergent) instead of duplicating
-    /// an import (HeddleCo/heddle#468; Codex r1+r2 on PR #477). See
-    /// [`rust_use_key`] (seed key) and [`use_leaves`] (the leaf set).
+    /// re-exports on disjoint paths union while any overlapping pair dedups
+    /// (identical) or conflicts (divergent) instead of duplicating an
+    /// import. If ANY side carries an unanalyzable form (`self` in a group,
+    /// a nested group, a glob, an `as` alias, …), the whole use-region is
+    /// instead collapsed onto one key ([`USE_POISON_KEY`]) and resolved
+    /// conservatively, so an exotic form can never be mis-unioned with a
+    /// plain import that shares a hidden leaf (HeddleCo/heddle#468; Codex
+    /// r1+r2, r6 on PR #477). See [`rust_use_key`] (seed key) and
+    /// [`UseIdentity`].
     Use,
     Struct,
     Enum,
@@ -71,20 +77,33 @@ pub(super) enum ItemKind {
     Static,
 }
 
-/// Cross-side identity metadata for a `use` / `pub use` item. Carried on
-/// [`super::items::Item`] (only for `Use`-kind items) and consumed by the
-/// reconstruction layer; see [`use_identity`].
+/// Cross-side identity for a `use` / `pub use` item. Carried on
+/// [`super::items::Item`] (only for `Use`-kind items) and consumed by
+/// [`super::items::canonicalize_use_keys`]; see [`use_identity`].
 #[derive(Clone, Debug)]
-pub(super) struct UseIdentity {
-    /// Expanded fully-qualified leaf import paths, or the single
-    /// [`USE_UNNORMALIZABLE_KEY`] sentinel for shapes we can't expand.
-    /// This is the ONLY signal the merge keys on: leaf-set intersection
-    /// drives cross-side collision in [`super::items::canonicalize_use_keys`]
-    /// (disjoint → distinct key → auto-combine; overlap → same key → dedup
-    /// if byte-identical, else conflict). No visibility / normalizable
-    /// partial-signal — every non-byte-identical difference conflicts, which
-    /// is what makes the rule non-drippable (heddle#468, Codex r4 on #477).
-    pub leaves: Vec<String>,
+pub(super) enum UseIdentity {
+    /// A fully-analyzable plain import: the expanded fully-qualified leaf
+    /// import paths (`a::{B, C}` → `["a::B", "a::C"]`). This is the ONLY
+    /// signal the leaf-component merge keys on — leaf-set intersection
+    /// drives cross-side collision in
+    /// [`super::items::canonicalize_use_keys`] (disjoint → distinct key →
+    /// auto-combine; overlap → same key → dedup if byte-identical, else
+    /// conflict). No visibility / partial-signal: every non-byte-identical
+    /// difference conflicts (heddle#468, Codex r4 on #477).
+    Plain(Vec<String>),
+    /// A form we cannot safely expand into discrete leaves — `self` in a
+    /// group, a nested group, a glob (`a::*`), an `as` alias, a
+    /// metavariable, or a malformed tree. Such an item could overlap a
+    /// plain import on a leaf we never extracted, so it **poisons** its
+    /// use-region: [`super::items::canonicalize_use_keys`] collapses every
+    /// `use` item in a region containing one of these (on ANY side) onto a
+    /// single key ([`USE_POISON_KEY`]) and lets the reconstruction layer
+    /// merge the whole region conservatively, rather than running the leaf
+    /// union. An exotic form can therefore never be mis-unioned with a
+    /// plain import that shares a hidden leaf — the clever path's surface
+    /// is capped to plain imports, the non-drippable boundary (heddle#468,
+    /// Codex r6 on PR #477).
+    Unanalyzable,
 }
 
 /// Classifier output: what kind of item, its name, an optional body to
@@ -372,53 +391,52 @@ fn rust_impl_name(source: &str, node: Node<'_>) -> Option<String> {
     Some(strip_whitespace(&key))
 }
 
-/// Shared key-name for `use` declarations we can't confidently expand
-/// into discrete leaf import paths — globs (`foo::*`), `as` aliases
-/// (`a::B as C`), nested groups (`a::{b::{c}}`), and `self`/comment
-/// group members. Every such declaration keys to this single name, so
-/// two un-normalizable `use`s on different sides COLLIDE: byte-identical
-/// ones dedup, divergent ones surface an add/add conflict. This is the
-/// SAFE fallback — a conflict is never a silent duplicate import,
-/// whereas keying these by raw text would let an un-expandable
-/// glob/alias union with an overlapping import and reintroduce the
-/// heddle#468 duplicate (Codex r1 on PR #477). Cost: two genuinely
-/// disjoint un-normalizable `use`s (e.g. `a::*` and `b::Foo as Bar`)
-/// also collide and conflict — intentionally conservative. The leading
-/// NUL keeps it disjoint from every real import path.
-const USE_UNNORMALIZABLE_KEY: &str = "\u{0}use::unnormalizable";
+/// Canonical [`super::items::ItemKey`] name stamped on EVERY `use` item in
+/// a *poisoned* use-region — a region containing at least one
+/// [`UseIdentity::Unanalyzable`] form (`self` in a group, nested group,
+/// glob, `as` alias, metavariable, malformed tree) on any side. Collapsing
+/// the whole region onto this one key routes it through a single
+/// conservative whole-region 3-way merge in the reconstruction layer
+/// ([`super::reconstruct::resolve_use_component`]): byte-identical text
+/// dedups, anything else conflicts. A conflict is never a silent duplicate
+/// import, so capping the leaf-component union to plain imports makes the
+/// exotic-form drip class impossible (heddle#468, Codex r6 on PR #477).
+/// Also serves as the (always-overwritten) seed name for an unanalyzable
+/// item at classification time. The leading NUL keeps it disjoint from
+/// every real import path / leaf-component name.
+pub(super) const USE_POISON_KEY: &str = "\u{0}use::poison";
 
 /// Derive the INITIAL cross-side identity key for a Rust `use` / `pub use`
 /// declaration from its `argument` use-tree: the lexicographically-smallest
 /// fully-qualified leaf import path.
 ///
-/// This representative leaf is only a seed. The authoritative `use` match
-/// key is assigned later by [`super::items::canonicalize_use_keys`], which
-/// rekeys every `use` item to its leaf-set *component* canonical name so
-/// declarations whose leaf sets intersect on ANY path collide — closing the
-/// representative-key partiality where overlap on a non-minimum leaf
-/// (`a::{Bar, Baz}` vs `a::Baz`) escaped collision and unioned into a
-/// duplicate import (the heddle#468 bug class; Codex r1+r2 on PR #477).
-/// Visibility (`pub`) is intentionally NOT part of the key.
+/// This representative leaf is only a seed — [`super::items::canonicalize_use_keys`]
+/// always overwrites it: plain imports are rekeyed to their leaf-set
+/// *component* canonical name (so declarations whose leaf sets intersect on
+/// ANY path collide; heddle#468 r1+r2), and a poisoned region is rekeyed to
+/// [`USE_POISON_KEY`] (heddle#468 r6). Visibility (`pub`) is intentionally
+/// NOT part of the key.
 ///
-/// Confidently-expandable shapes: a single path (`a::B`, `B`) and a
-/// single flat group whose members are all plain paths. Shapes we do NOT
-/// expand — globs (`foo::*`), `as` aliases, nested groups
-/// (`a::{b::{c}}`), and `self`/comment group members — fall back to
-/// [`USE_UNNORMALIZABLE_KEY`] so they conflict-on-overlap rather than
-/// risk a silent mis-union.
+/// Confidently-expandable shapes: a single path (`a::B`, `B`) and a single
+/// flat group whose members are all plain paths. Shapes we do NOT expand —
+/// globs (`foo::*`), `as` aliases, nested groups (`a::{b::{c}}`), and
+/// `self`/comment group members — seed [`USE_POISON_KEY`] and are marked
+/// [`UseIdentity::Unanalyzable`].
 fn rust_use_key(source: &str, argument: Node<'_>) -> String {
     rust_use_leaves(source, argument)
-        .into_iter()
-        .min()
-        .unwrap_or_else(|| USE_UNNORMALIZABLE_KEY.to_string())
+        .and_then(|leaves| leaves.into_iter().min())
+        .unwrap_or_else(|| USE_POISON_KEY.to_string())
 }
 
 /// Expand a Rust `use` `argument` use-tree into its fully-qualified leaf
-/// import paths (`crate::foo::{Bar, Baz}` → `["crate::foo::Bar",
-/// "crate::foo::Baz"]`). Shapes we can't confidently expand — globs, `as`
-/// aliases, nested groups, `self`/comment members, malformed trees — yield
-/// the single [`USE_UNNORMALIZABLE_KEY`] sentinel so they collide only with
-/// other un-normalizable forms. Never returns an empty vector.
+/// import paths (`crate::foo::{Bar, Baz}` → `Some(["crate::foo::Bar",
+/// "crate::foo::Baz"])`). Returns `None` for any shape we can't confidently
+/// expand — globs, `as` aliases, nested groups, `self`/comment members,
+/// malformed/empty trees — so the caller marks the item
+/// [`UseIdentity::Unanalyzable`] (poisoning its region) rather than
+/// assigning it a leaf that the leaf-component union would treat as
+/// disjoint from a real overlapping import (heddle#468 r6 on PR #477).
+/// Never returns `Some` of an empty vector.
 ///
 /// This is the full leaf SET (not a representative). It is consumed by
 /// [`super::items::canonicalize_use_keys`], which collides two declarations
@@ -426,42 +444,48 @@ fn rust_use_key(source: &str, argument: Node<'_>) -> String {
 /// leaf, the partiality that let `use a::{Bar, Baz}` and `use a::Baz` escape
 /// collision and union into a duplicate `Baz` import (heddle#468; Codex r2
 /// on PR #477).
-fn rust_use_leaves(source: &str, argument: Node<'_>) -> Vec<String> {
+fn rust_use_leaves(source: &str, argument: Node<'_>) -> Option<Vec<String>> {
     let mut leaves = Vec::new();
     if collect_use_leaves(source, argument, "", &mut leaves) && !leaves.is_empty() {
-        leaves
+        Some(leaves)
     } else {
-        vec![USE_UNNORMALIZABLE_KEY.to_string()]
+        None
     }
 }
 
-/// Cross-side identity for a Rust `use` / `pub use` item: its expanded leaf
-/// set. Returns `None` for non-Rust / non-`use` nodes (no other language
+/// Cross-side identity for a Rust `use` / `pub use` item:
+/// [`UseIdentity::Plain`] (its expanded leaf set) for a fully-analyzable
+/// flat import, or [`UseIdentity::Unanalyzable`] for any exotic form.
+/// Returns `None` for non-Rust / non-`use` nodes (no other language
 /// classifies a `use` item today).
 ///
-/// `leaves` is the sole keying signal — it drives leaf-set-intersection
-/// collision in [`super::items::canonicalize_use_keys`], which reduces every
-/// add/add `use` to exactly three cases: disjoint leaf sets auto-combine,
-/// overlapping-and-byte-identical dedups, and overlapping-with-any-other
-/// difference conflicts. There is deliberately no visibility / normalizable
-/// field: a non-byte difference of ANY dimension (visibility, alias,
-/// `cfg`/doc/attribute metadata, grouping) must conflict, never partial-signal
-/// dedup (heddle#468, Codex r4 on PR #477; same-leaf with divergent
-/// `#[cfg(...)]` was silently dropping one platform's import).
+/// A `Plain` leaf set is the sole keying signal for the leaf-component
+/// merge in [`super::items::canonicalize_use_keys`], which reduces an
+/// all-plain add/add `use` to exactly three cases: disjoint leaf sets
+/// auto-combine, overlapping-and-byte-identical dedups, and
+/// overlapping-with-any-other difference conflicts (no visibility /
+/// partial-signal field — any non-byte difference conflicts; heddle#468
+/// r4). An `Unanalyzable` item poisons its region so the leaf union never
+/// runs there at all (heddle#468 r6).
 pub(super) fn use_identity(language: Language, source: &str, node: Node<'_>) -> Option<UseIdentity> {
     if language != Language::Rust || node.kind() != "use_declaration" {
         return None;
     }
-    let leaves = match node.child_by_field_name("argument") {
-        Some(argument) => rust_use_leaves(source, argument),
-        None => vec![USE_UNNORMALIZABLE_KEY.to_string()],
+    let identity = match node.child_by_field_name("argument") {
+        Some(argument) => match rust_use_leaves(source, argument) {
+            Some(leaves) => UseIdentity::Plain(leaves),
+            None => UseIdentity::Unanalyzable,
+        },
+        // A `use` with no `argument` is malformed; treat it as unanalyzable
+        // so it poisons rather than keying to a leaf it does not have.
+        None => UseIdentity::Unanalyzable,
     };
-    Some(UseIdentity { leaves })
+    Some(identity)
 }
 
 /// Expand a `use` argument use-tree into leaf import paths, accumulating
 /// the `prefix` built from enclosing `path::{...}` segments. Returns
-/// `false` (caller falls back to [`USE_UNNORMALIZABLE_KEY`]) for any
+/// `false` (caller marks the item [`UseIdentity::Unanalyzable`]) for any
 /// shape we don't confidently expand. See [`rust_use_key`].
 fn collect_use_leaves(source: &str, node: Node<'_>, prefix: &str, out: &mut Vec<String>) -> bool {
     match node.kind() {
@@ -494,9 +518,9 @@ fn collect_use_leaves(source: &str, node: Node<'_>, prefix: &str, out: &mut Vec<
 
 /// Expand a FLAT `use_list` (`{A, B, C}`) whose members are all plain
 /// paths. Any non-path member — a nested group, glob, alias, `self`, or
-/// comment — makes the whole declaration un-normalizable (`false`), so
-/// it falls back to the conflict-on-overlap sentinel rather than being
-/// partially expanded into a mis-union. An empty list yields `false`.
+/// comment — makes the whole declaration unanalyzable (`false`), so the
+/// item poisons its region rather than being partially expanded into a
+/// mis-union. An empty list yields `false`.
 fn expand_flat_use_list(source: &str, list: Node<'_>, prefix: &str, out: &mut Vec<String>) -> bool {
     let mut cursor = list.walk();
     let mut any = false;
