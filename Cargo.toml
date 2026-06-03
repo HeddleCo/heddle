@@ -84,7 +84,7 @@ rustls-pki-types = "1"
 webpki = { package = "rustls-webpki", version = "0.103", features = ["std", "ring"] }
 s3s = "0.13.0"
 s3s-fs = "0.13.0"
-schemars = { version = "0.8", features = ["chrono"] }
+schemars = { version = "1.2", features = ["chrono04"] }
 sec1 = { version = "0.8", features = ["pem"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_cbor = "0.11"
