@@ -500,7 +500,7 @@ pub fn cmd_attempt(cli: &Cli, args: AttemptArgs) -> Result<()> {
 
     let next_action = recommended
         .as_deref()
-        .map(|name| format!("heddle merge {name} --preview --with-diff"));
+        .map(|name| format!("heddle ready --thread {name}"));
     let next_action = ActionFields::from_optional_action(next_action);
     let recommended_action = next_action.clone();
 

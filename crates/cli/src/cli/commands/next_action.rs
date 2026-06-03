@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Shared next-action selection for command surfaces.
+//! Shared next-action selection and validation for command surfaces.
 
+use anyhow::{Context, Result};
 use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, RepositoryOperationStatus};
+use serde::Serialize;
+use serde_json::Value;
 
+use crate::cli::render::write_stdout;
+
+use super::command_catalog::{split_recommended_action, validate_recommended_action};
 use super::git_overlay_health::{
     RepositoryVerificationState, import_hint_includes_active_branch, remote_tracking_next_action,
 };
@@ -22,6 +28,195 @@ pub(crate) struct NextActionInput<'a> {
     pub thread_health: Option<&'a str>,
     pub trust: Option<&'a RepositoryVerificationState>,
     pub scope: NextActionScope,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NextActionValidationContext<'a> {
+    pub(crate) emitting_command: &'a [&'a str],
+    pub(crate) repository_capability: Option<repo::RepositoryCapability>,
+}
+
+impl<'a> NextActionValidationContext<'a> {
+    pub(crate) fn new(
+        emitting_command: &'a [&'a str],
+        repository_capability: repo::RepositoryCapability,
+    ) -> Self {
+        Self {
+            emitting_command,
+            repository_capability: Some(repository_capability),
+        }
+    }
+
+    pub(crate) fn without_repo(emitting_command: &'a [&'a str]) -> Self {
+        Self {
+            emitting_command,
+            repository_capability: None,
+        }
+    }
+}
+
+pub(crate) fn validated_json_string<T: Serialize>(
+    output: &T,
+    context: NextActionValidationContext<'_>,
+) -> Result<String> {
+    let encoded = serde_json::to_string(output)?;
+    let value: Value = serde_json::from_str(&encoded)
+        .context("failed to re-read command JSON for next_action validation")?;
+    validate_next_actions_in_value(&value, context)?;
+    Ok(encoded)
+}
+
+pub(crate) fn write_validated_json_stdout<T: Serialize>(
+    output: &T,
+    context: NextActionValidationContext<'_>,
+) -> Result<()> {
+    let mut encoded = validated_json_string(output, context)?;
+    encoded.push('\n');
+    write_stdout(&encoded)
+}
+
+pub(crate) fn validate_next_actions_in_value(
+    value: &Value,
+    context: NextActionValidationContext<'_>,
+) -> Result<()> {
+    validate_next_actions_at_path(value, context, "$")
+}
+
+fn validate_next_actions_at_path(
+    value: &Value,
+    context: NextActionValidationContext<'_>,
+    path: &str,
+) -> Result<()> {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let child_path = format!("{path}.{key}");
+                if matches!(key.as_str(), "next_action" | "recommended_action")
+                    && let Some(action) = child.as_str()
+                {
+                    validate_next_action(action, context)
+                        .with_context(|| format!("invalid {key} at {child_path}"))?;
+                }
+                validate_next_actions_at_path(child, context, &child_path)?;
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                validate_next_actions_at_path(child, context, &format!("{path}[{index}]"))?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_next_action(
+    action: &str,
+    context: NextActionValidationContext<'_>,
+) -> Result<()> {
+    let action = action.trim();
+    if action.is_empty() {
+        return Ok(());
+    }
+    validate_recommended_action(action)
+        .map_err(|err| next_action_validation_error(format!("action is not a valid heddle command: {err}")))?;
+    let argv = split_recommended_action(action)
+        .map_err(|err| next_action_validation_error(format!("action cannot be tokenized: {err}")))?;
+    let Some(command_path) = next_action_command_path(&argv) else {
+        return Ok(());
+    };
+
+    reject_wrong_repo_type(action, &command_path, context)?;
+    reject_demoted_breadcrumbs(action, &command_path)?;
+    reject_self_loop(action, &command_path, context)?;
+    Ok(())
+}
+
+fn next_action_command_path(argv: &[String]) -> Option<Vec<&str>> {
+    if argv.first().map(String::as_str) != Some("heddle") {
+        return None;
+    }
+    let command_index = first_command_index(argv)?;
+    let command = argv.get(command_index)?.as_str();
+    if command == "thread" || command == "bridge" || command == "doctor" {
+        return argv
+            .get(command_index + 1)
+            .map(|subcommand| vec![command, subcommand.as_str()])
+            .or_else(|| Some(vec![command]));
+    }
+    Some(vec![command])
+}
+
+fn first_command_index(argv: &[String]) -> Option<usize> {
+    let mut index = 1;
+    while index < argv.len() {
+        match argv[index].as_str() {
+            "--repo" | "-C" | "--output" | "--color" | "--config" | "--config-file"
+            | "--config-env" => index += 2,
+            "--quiet" | "-q" | "--verbose" | "-v" | "--no-color" | "--profile" => index += 1,
+            token if token.starts_with("-C") && token.len() > 2 => index += 1,
+            token if token.starts_with('-') => index += 1,
+            _ => return Some(index),
+        }
+    }
+    None
+}
+
+fn reject_demoted_breadcrumbs(action: &str, command_path: &[&str]) -> Result<()> {
+    match command_path {
+        ["ship"] => Err(next_action_validation_error(format!(
+            "`ship` was renamed to `land`; next_action `{action}` is non-canonical"
+        ))),
+        ["checkpoint"] => Err(next_action_validation_error(format!(
+            "`checkpoint` is an advanced Git primitive; next_action `{action}` must use `commit`"
+        ))),
+        ["capture"] => Err(next_action_validation_error(format!(
+            "`capture` is an advanced savepoint primitive; next_action `{action}` must use `commit`"
+        ))),
+        ["merge"] => Err(next_action_validation_error(format!(
+            "`merge` is an advanced merge primitive; managed-thread next_action `{action}` must use `ready`, `sync`, or `land`"
+        ))),
+        ["thread", "refresh"] => Err(next_action_validation_error(format!(
+            "`thread refresh` is an implementation-shaped freshness primitive; next_action `{action}` must use `sync`"
+        ))),
+        ["thread", "resolve"] => Err(next_action_validation_error(format!(
+            "`thread resolve` is not a breadcrumb; next_action `{action}` must use `resolve`, `continue`, `sync`, or `land`"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+fn reject_wrong_repo_type(
+    action: &str,
+    command_path: &[&str],
+    context: NextActionValidationContext<'_>,
+) -> Result<()> {
+    if command_path == ["checkpoint"]
+        && context.repository_capability != Some(repo::RepositoryCapability::GitOverlay)
+    {
+        return Err(next_action_validation_error(format!(
+            "next_action `{action}` is not executable from this repository type"
+        )));
+    }
+    Ok(())
+}
+
+fn reject_self_loop(
+    action: &str,
+    command_path: &[&str],
+    context: NextActionValidationContext<'_>,
+) -> Result<()> {
+    if context.emitting_command == command_path {
+        return Err(next_action_validation_error(format!(
+            "next_action `{action}` is a self-loop for `{}`",
+            context.emitting_command.join(" ")
+        )));
+    }
+    Ok(())
+}
+
+fn next_action_validation_error(message: String) -> anyhow::Error {
+    anyhow::Error::msg(message)
 }
 
 impl<'a> NextActionInput<'a> {
@@ -156,12 +351,90 @@ pub(crate) fn thread_recovery_action_is_primary(
     matches!(
         thread_health.unwrap_or_default(),
         "blocked" | "dirty_worktree" | "uncaptured"
-    ) || thread_action == "heddle capture"
-        || thread_action.starts_with("heddle thread refresh ")
-        || thread_action.starts_with("heddle thread resolve ")
+    ) || thread_action == "heddle commit"
+        || thread_action.starts_with("heddle commit ")
+        || thread_action.starts_with("heddle sync ")
+        || thread_action.starts_with("heddle resolve ")
         || thread_action.starts_with("heddle thread promote ")
 }
 
 fn non_empty_action(action: Option<&str>) -> Option<&str> {
     action.filter(|action| !action.trim().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn ctx(command: &'static [&'static str]) -> NextActionValidationContext<'static> {
+        NextActionValidationContext::new(command, repo::RepositoryCapability::NativeHeddle)
+    }
+
+    #[test]
+    fn validator_accepts_canonical_everyday_actions() {
+        for action in [
+            "heddle commit -m \"...\"",
+            "heddle ready --thread feature",
+            "heddle land --thread feature --no-push",
+            "heddle sync --thread feature",
+            "heddle resolve --list",
+            "heddle continue",
+            "heddle abort",
+            "heddle push",
+        ] {
+            validate_next_action(action, ctx(&["status"]))
+                .unwrap_or_else(|err| panic!("expected `{action}` to validate: {err:#}"));
+        }
+    }
+
+    #[test]
+    fn validator_rejects_demoted_breadcrumbs() {
+        for action in [
+            "heddle ship --thread feature",
+            "heddle checkpoint -m \"...\"",
+            "heddle capture -m \"...\"",
+            "heddle merge feature --preview",
+            "heddle thread refresh feature",
+            "heddle thread resolve feature",
+        ] {
+            assert!(
+                validate_next_action(action, ctx(&["status"])).is_err(),
+                "`{action}` should be rejected as a next_action"
+            );
+        }
+    }
+
+    #[test]
+    fn validator_rejects_wrong_repo_type_checkpoint_before_demoted_class() {
+        let err = validate_next_action("heddle checkpoint -m \"...\"", ctx(&["status"]))
+            .expect_err("native repositories must not receive checkpoint breadcrumbs");
+        assert!(err.to_string().contains("not executable"));
+    }
+
+    #[test]
+    fn validator_rejects_self_loops() {
+        let err = validate_next_action(
+            "heddle ready --thread feature",
+            NextActionValidationContext::new(&["ready"], repo::RepositoryCapability::NativeHeddle),
+        )
+        .expect_err("ready must not point back to ready");
+        assert!(err.to_string().contains("self-loop"));
+    }
+
+    #[test]
+    fn recursive_validator_covers_nested_recommended_actions() {
+        let payload = json!({
+            "output_kind": "status",
+            "recommended_action": "heddle commit -m \"...\"",
+            "verification": {
+                "checks": [
+                    {"name": "Workflow", "recommended_action": "heddle thread resolve feature"}
+                ]
+            }
+        });
+        let err = validate_next_actions_in_value(&payload, ctx(&["status"]))
+            .expect_err("nested demoted breadcrumbs must fail validation");
+        assert!(err.to_string().contains("$.verification.checks[0].recommended_action"));
+    }
 }

@@ -1112,7 +1112,7 @@ fn test_stale_non_ff_merge_refuses_without_moving_threads() {
     let err = heddle(&["merge", "feature"], Some(temp.path()))
         .expect_err("stale divergent merge must refuse before mutation");
     assert!(
-        err.contains("Thread 'feature' is stale") && err.contains("heddle thread refresh feature"),
+        err.contains("Thread 'feature' is stale") && err.contains("heddle sync --thread feature"),
         "stale merge should explain the refresh path: {err}"
     );
     assert_eq!(
@@ -2143,7 +2143,7 @@ fn test_undo_preview_surfaces_worktree_refusal() {
 
 // ---------------------------------------------------------------------------
 // heddle#110 — Rule-7 sweep for the remaining `fast_forward_attached`
-// callers (rebase / pull / ship / merge-abort). Each daily-use command
+// callers (rebase / pull / land / merge-abort). Each daily-use command
 // recorded an implicit `OpRecord::Goto` for its FF, and the `Goto`
 // inverse only rewinds HEAD — silently stranding the attached thread
 // ref at the post-FF target. heddle#99 closed the bug for `merge` by
@@ -2404,22 +2404,22 @@ fn test_undo_resolve_abort_keeps_thread_ref_at_ours() {
     }
 }
 
-/// Ship (manual-resolution adopt path): `heddle ship` calls
+/// Land (manual-resolution adopt path): `heddle land` calls
 /// `adopt_manual_resolution`, which fast-forwards the current
 /// attached thread to a manually-resolved tip. Undo must restore
-/// the attached thread's ref to its pre-ship tip — pre-fix the
+/// the attached thread's ref to its pre-land tip — pre-fix the
 /// implicit `OpRecord::Goto` left the ref stranded at the adopted
 /// state.
 ///
-/// The ship-via-manual-resolution path requires a materialized
+/// The land-via-manual-resolution path requires a materialized
 /// thread workspace and `integration_policy.manual_resolution_state`
 /// set. We bootstrap that here by `heddle start --workspace
 /// materialized`, capturing work in the side worktree, then running
 /// `thread resolve` from main to flip the resolution flag. `heddle
-/// ship --thread <feature>` then enters `adopt_manual_resolution`,
+/// land --thread <feature>` then enters `adopt_manual_resolution`,
 /// whose `fast_forward_attached` call we're pinning.
 ///
-/// In environments where ship can't reach the adopt branch (no
+/// In environments where land can't reach the adopt branch (no
 /// git-overlay, no hosted config), we fall back to asserting that
 /// the migration didn't break the `thread resolve` flow itself.
 #[test]
@@ -2430,7 +2430,7 @@ fn test_undo_ship_manual_resolution_restores_thread_ref() {
     std::fs::write(temp.path().join("a.txt"), "base").unwrap();
     heddle_must_succeed(&["capture", "-m", "base"], temp.path());
 
-    // Create a materialized side worktree for feature so ship can
+    // Create a materialized side worktree for feature so land can
     // open the thread's checkout.
     let feature_wt = temp.path().join("feature-wt");
     heddle_must_succeed(
@@ -2452,27 +2452,27 @@ fn test_undo_ship_manual_resolution_restores_thread_ref() {
 
     // `thread resolve` flips manual_resolution_state on feature
     // when the thread merges cleanly. This is the trigger
-    // `adopt_manual_resolution` looks for during ship.
+    // `adopt_manual_resolution` looks for during land.
     let _ = heddle(&["thread", "resolve", "feature"], Some(temp.path()));
 
-    let ship = heddle(
-        &["--output", "json", "ship", "--thread", "feature"],
+    let land = heddle(
+        &["--output", "json", "land", "--thread", "feature"],
         Some(temp.path()),
     );
-    let ship_out = match ship {
+    let ship_out = match land {
         Ok(out) => out,
         Err(err) => {
-            panic!("ship failed: {err}");
+            panic!("land failed: {err}");
         }
     };
     assert!(
-        ship_out.contains("\"status\":\"shipped\"") || ship_out.contains("\"status\": \"shipped\""),
-        "ship must reach the manual-resolution adopt path: {ship_out}"
+        ship_out.contains("\"status\":\"landed\"") || ship_out.contains("\"status\": \"landed\""),
+        "land must reach the manual-resolution adopt path: {ship_out}"
     );
     let after_ship = head_short(temp.path());
     assert_ne!(
         after_ship, main_tip_before,
-        "ship must advance main; otherwise the FF is a no-op and there's nothing to undo: {ship_out}"
+        "land must advance main; otherwise the FF is a no-op and there's nothing to undo: {ship_out}"
     );
 
     heddle_must_succeed(&["undo"], temp.path());
@@ -2485,7 +2485,7 @@ fn test_undo_ship_manual_resolution_restores_thread_ref() {
         .short();
     assert_eq!(
         main_tip, main_tip_before,
-        "undo of ship must restore main thread ref to pre-ship tip \
+        "undo of land must restore main thread ref to pre-land tip \
          (heddle#110 — was stranded at the adopted state before the fix)"
     );
 }

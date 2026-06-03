@@ -12,7 +12,7 @@ fn git_overlay_guide_is_concise_and_actionable() {
         help.contains("Git-overlay quick start")
             && help.contains("heddle adopt")
             && help.contains("heddle commit -m")
-            && help.contains("heddle merge <name> --preview"),
+            && help.contains("heddle land --thread <name> --no-push"),
         "help git-overlay should render the actual guide, not only clap usage: {help}"
     );
 
@@ -37,8 +37,8 @@ fn git_overlay_guide_is_concise_and_actionable() {
         "guide should teach isolated threads with the real start argument name: {output}"
     );
     assert!(
-        output.contains("heddle merge <name> --preview"),
-        "guide should teach preview before landing: {output}"
+        output.contains("heddle land --thread <name> --no-push"),
+        "guide should teach landing after readiness: {output}"
     );
     assert!(
         output.contains("heddle undo"),
@@ -60,7 +60,7 @@ fn model_help_topic_gives_short_first_time_mental_model() {
             && help.contains("Capture:")
             && help.contains("Commit:")
             && help.contains("Verify:")
-            && help.contains("heddle merge <name> --preview")
+            && help.contains("heddle land --thread <name>")
             && help.contains("heddle adopt"),
         "model topic should explain the everyday concepts without the long thread manual: {help}"
     );
@@ -85,8 +85,7 @@ fn bridge_help_topic_teaches_adoption_before_export_notes() {
         "heddle verify",
         "heddle commit -m",
         "heddle push",
-        "heddle merge <name> --preview",
-        "heddle ship --thread <name> --no-push",
+        "heddle land --thread <name> --no-push",
         "heddle bridge git reconcile --ref <branch> --preview",
         "Export metadata for Git readers",
     ] {
@@ -100,8 +99,8 @@ fn bridge_help_topic_teaches_adoption_before_export_notes() {
         "bridge topic should put adoption before notes/export details: {help}"
     );
     assert!(
-        !help.contains("\n    heddle ship --push\n"),
-        "bridge topic should not teach a threadless ship from the main checkout: {help}"
+        !help.contains("\n    heddle land --push\n"),
+        "bridge topic should not teach a threadless land from the main checkout: {help}"
     );
 }
 
@@ -1077,7 +1076,7 @@ fn command_catalog_exposes_agent_metadata_for_options() {
     );
     for placeholder in [
         "heddle capture -m \"...\"",
-        "heddle checkpoint -m \"...\"",
+        "heddle commit -m \"...\"",
         "heddle commit -m \"...\"",
         "heddle stash push -m \"...\"",
         "heddle switch <branch>",
@@ -1508,7 +1507,7 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
             );
             assert!(
                 source.contains("assert_merge_preview_points_to_ship_json"),
-                "{} should prove merge preview points to the ship landing loop",
+                "{} should prove merge preview points to the land landing loop",
                 script.display()
             );
             assert!(
@@ -3117,7 +3116,7 @@ fn core_loop_schemas_are_discoverable() {
         "stash clear",
         "stash show",
         "revert",
-        "ship",
+        "land",
         "start",
         "thread create",
         "thread current",
@@ -3392,7 +3391,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     )
     .unwrap();
     assert!(
-        capture_text.contains("Next:") && capture_text.contains("heddle checkpoint -m \"...\""),
+        capture_text.contains("Next:") && capture_text.contains("heddle commit -m \"...\""),
         "Git-overlay capture should point to the concrete checkpoint step: {capture_text}"
     );
     assert!(
@@ -3415,7 +3414,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
         status["thread_state"], "blocked",
         "captured work that only needs a Git checkpoint should not rewrite lifecycle as blocked: {status}"
     );
-    assert_eq!(status["recommended_action"], "heddle checkpoint -m \"...\"");
+    assert_eq!(status["recommended_action"], "heddle commit -m \"...\"");
     assert!(
         status["verification"]["recommended_action_template"]["required_inputs"]
             .as_array()
@@ -3424,7 +3423,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     );
     assert_eq!(
         status["recovery_commands"],
-        serde_json::json!(["heddle checkpoint -m \"...\""])
+        serde_json::json!(["heddle commit -m \"...\""])
     );
     assert_eq!(
         status["recovery_action_templates"], status["verification"]["recovery_action_templates"],
@@ -3432,17 +3431,17 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     );
     assert_eq!(
         status["recovery_action_templates"][0]["argv_template"],
-        heddle_argv_json(["checkpoint", "-m", "<message>"]),
-        "templated checkpoint recovery should be machine-fillable at top level: {status}"
+        heddle_argv_json(["commit", "-m", "<message>"]),
+        "templated commit recovery should be machine-fillable at top level: {status}"
     );
     let thread_list = json_value(temp.path(), &["thread", "list", "--output", "json"]);
     assert_eq!(
-        thread_list["recommended_action"], "heddle checkpoint -m \"...\"",
+        thread_list["recommended_action"], "heddle commit -m \"...\"",
         "thread list should use the same verification blocker as status: {thread_list}"
     );
     assert_eq!(
         thread_list["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["checkpoint", "-m", "<message>"]),
+        heddle_argv_json(["commit", "-m", "<message>"]),
         "thread list top-level placeholder action should be machine-fillable: {thread_list}"
     );
     assert_eq!(
@@ -3451,12 +3450,12 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
     );
     let workspace = json_value(temp.path(), &["workspace", "show", "--output", "json"]);
     assert_eq!(
-        workspace["recommended_action"], "heddle checkpoint -m \"...\"",
+        workspace["recommended_action"], "heddle commit -m \"...\"",
         "workspace should use the same verification blocker as status: {workspace}"
     );
     assert_eq!(
         workspace["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["checkpoint", "-m", "<message>"]),
+        heddle_argv_json(["commit", "-m", "<message>"]),
         "workspace top-level placeholder action should be machine-fillable: {workspace}"
     );
     assert_eq!(status["verification"]["worktree_dirty"], true);
@@ -3487,7 +3486,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
 
     let verify = json_value(temp.path(), &["verify", "--output", "json"]);
     assert_eq!(verify["status"], "needs_checkpoint");
-    assert_eq!(verify["recommended_action"], "heddle checkpoint -m \"...\"");
+    assert_eq!(verify["recommended_action"], "heddle commit -m \"...\"");
     assert!(
         verify["recommended_action_template"]["required_inputs"]
             .as_array()
@@ -3925,7 +3924,7 @@ fn core_mutations_emit_post_verification_in_json() {
     );
     assert_eq!(
         capture["verification"]["recommended_action"],
-        "heddle checkpoint -m \"...\""
+        "heddle commit -m \"...\""
     );
     assert_eq!(
         capture["next_action"], capture["verification"]["recommended_action"],
@@ -6542,7 +6541,7 @@ feature
     assert_eq!(preview["would_merge"], true);
     assert_eq!(
         preview["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["ship", "--thread", "feature/a", "--no-push"])
+        heddle_argv_json(["land", "--thread", "feature/a", "--no-push"])
     );
     assert_schema_declares_runtime_top_level(&["merge", "--preview"], &preview);
     assert_eq!(
@@ -6814,10 +6813,10 @@ fn ready_refuses_dirty_capture_without_intent() {
     assert_eq!(ready["output_kind"], "ready");
     assert_eq!(ready["status"], "blocked");
     assert_eq!(ready["captured"], false);
-    assert_eq!(ready["recommended_action"], "heddle ready -m \"...\"");
+    assert_eq!(ready["recommended_action"], "heddle commit -m \"...\"");
     assert_eq!(
         ready["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["ready", "-m", "<message>"])
+        heddle_argv_json(["commit", "-m", "<message>"])
     );
     assert_eq!(
         ready["verification"]["status"], "uncaptured",
@@ -7851,7 +7850,7 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
         "default help should not frame Git adapter commands as compatibility: {stdout}"
     );
     for verb in [
-        "status", "diff", "commit", "start", "ready", "merge", "ship",
+        "status", "diff", "commit", "start", "ready", "land",
     ] {
         assert!(
             stdout.contains(&format!("\n  {verb}")),
@@ -7875,7 +7874,7 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
     assert!(
         stdout.contains("Existing Git: heddle status -> heddle adopt -> heddle verify -> heddle commit -m \"...\" -> heddle push")
             && stdout
-                .contains("Isolated work: heddle start <name> --path ../<name> -> heddle ready -> heddle merge --preview -> heddle ship"),
+                .contains("Isolated work: heddle start <name> --path ../<name> -> heddle commit -m \"...\" -> heddle ready -> heddle land"),
         "default help should connect first-run adoption and isolated work to the same product loop: {stdout}"
     );
     assert!(
@@ -7938,7 +7937,7 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
         !advanced.contains("see `heddle help advanced`"),
         "advanced help should not be self-referential: {advanced}"
     );
-    for verb in ["commit", "ship", "push"] {
+    for verb in ["commit", "land", "push"] {
         assert!(
             !advanced.contains(&format!("\n  {verb}")),
             "`{verb}` is an everyday path and should not be duplicated in advanced help: {advanced}"
@@ -8301,7 +8300,7 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
     assert!(
         ready.contains("Next:")
             && ready.contains("heddle --repo")
-            && ready.contains("merge feature/capture-next --preview"),
+            && ready.contains("land --thread feature/capture-next --no-push"),
         "ready should use a shared next-action label that runs from the isolated checkout: {ready}"
     );
     assert!(
@@ -8313,7 +8312,7 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
     assert_eq!(
         checkout_status["recommended_action"],
         format!(
-            "heddle --repo {} merge feature/capture-next --preview",
+            "heddle --repo {} land --thread feature/capture-next --no-push",
             temp.path().display()
         )
     );
@@ -8322,16 +8321,17 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
         heddle_argv_json([
             "--repo",
             temp.path().to_str().expect("repo path utf8"),
-            "merge",
+            "land",
+            "--thread",
             "feature/capture-next",
-            "--preview",
+            "--no-push",
         ]),
-        "status inside an isolated checkout should emit a runnable parent-repo merge action: {checkout_status}"
+        "status inside an isolated checkout should emit a runnable parent-repo land action: {checkout_status}"
     );
     assert_eq!(
         checkout_status["verification"]["recommended_action"],
         checkout_status["recommended_action"],
-        "status verification should not keep the parent-repo merge action in raw, non-contextual form: {checkout_status}"
+        "status verification should not keep the parent-repo land action in raw, non-contextual form: {checkout_status}"
     );
     assert_eq!(
         checkout_status["verification"]["recommended_action_template"]["argv_template"],
@@ -8344,27 +8344,27 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
     );
     assert_eq!(
         checkout_thread_show["recommended_action"], checkout_status["recommended_action"],
-        "thread show inside an isolated checkout should emit the same runnable parent-repo merge action: {checkout_thread_show}"
+        "thread show inside an isolated checkout should emit the same runnable parent-repo land action: {checkout_thread_show}"
     );
     assert_eq!(
         checkout_thread_show["verification"]["recommended_action"],
         checkout_thread_show["recommended_action"],
-        "thread show verification should match its contextual top-level merge action: {checkout_thread_show}"
+        "thread show verification should match its contextual top-level land action: {checkout_thread_show}"
     );
     let checkout_workspace = json_value(&checkout, &["workspace", "show", "--output", "json"]);
     assert_eq!(
         checkout_workspace["recommended_action"], checkout_status["recommended_action"],
-        "workspace show inside an isolated checkout should emit the same runnable parent-repo merge action: {checkout_workspace}"
+        "workspace show inside an isolated checkout should emit the same runnable parent-repo land action: {checkout_workspace}"
     );
     assert_eq!(
         checkout_workspace["verification"]["recommended_action"],
         checkout_workspace["recommended_action"],
-        "workspace verification should match its contextual top-level merge action: {checkout_workspace}"
+        "workspace verification should match its contextual top-level land action: {checkout_workspace}"
     );
     let checkout_status_text = heddle(&["status", "--output", "text"], Some(&checkout)).unwrap();
     assert!(
         checkout_status_text.contains("heddle --repo")
-            && checkout_status_text.contains("merge feature/capture-next --preview"),
+            && checkout_status_text.contains("land --thread feature/capture-next --no-push"),
         "status text inside an isolated checkout should point to the parent repo: {checkout_status_text}"
     );
 
@@ -8381,7 +8381,7 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
     .unwrap();
     assert!(
         preview.contains("Next:")
-            && preview.contains("heddle ship --thread feature/capture-next --no-push"),
+            && preview.contains("heddle land --thread feature/capture-next --no-push"),
         "merge preview should use the shared next-action label: {preview}"
     );
     assert!(
@@ -8404,7 +8404,7 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
     assert_eq!(
         contextual_preview["recommended_action"],
         format!(
-            "heddle --repo {} ship --thread feature/capture-next --no-push",
+            "heddle --repo {} land --thread feature/capture-next --no-push",
             temp.path().display()
         ),
         "merge preview invoked from an isolated checkout must preserve parent repo context: {contextual_preview}"
@@ -8414,7 +8414,7 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
         heddle_argv_json([
             "--repo",
             temp.path().to_str().expect("repo path utf8"),
-            "ship",
+            "land",
             "--thread",
             "feature/capture-next",
             "--no-push",
@@ -8426,7 +8426,7 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
     assert_eq!(
         checkout_after_preview["recommended_action"],
         format!(
-            "heddle --repo {} ship --thread feature/capture-next --no-push",
+            "heddle --repo {} land --thread feature/capture-next --no-push",
             temp.path().display()
         )
     );
@@ -8435,27 +8435,27 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
         heddle_argv_json([
             "--repo",
             temp.path().to_str().expect("repo path utf8"),
-            "ship",
+            "land",
             "--thread",
             "feature/capture-next",
             "--no-push",
         ]),
-        "status inside an isolated checkout should emit a runnable parent-repo ship action after preview: {checkout_after_preview}"
+        "status inside an isolated checkout should emit a runnable parent-repo land action after preview: {checkout_after_preview}"
     );
     assert_eq!(
         checkout_after_preview["verification"]["recommended_action"],
         checkout_after_preview["recommended_action"],
-        "status verification should match the contextual parent-repo ship action after preview: {checkout_after_preview}"
+        "status verification should match the contextual parent-repo land action after preview: {checkout_after_preview}"
     );
     assert_eq!(
         checkout_after_preview["verification"]["recommended_action_template"]["argv_template"],
         checkout_after_preview["recommended_action_template"]["argv_template"],
-        "status verification argv should match the contextual parent-repo ship action after preview: {checkout_after_preview}"
+        "status verification argv should match the contextual parent-repo land action after preview: {checkout_after_preview}"
     );
 
-    let ship = heddle(
+    let land = heddle(
         &[
-            "ship",
+            "land",
             "--thread",
             "feature/capture-next",
             "--no-push",
@@ -8466,18 +8466,18 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
     )
     .unwrap();
     assert!(
-        ship.contains("landed: on parent") && ship.contains("push: not pushed"),
-        "ship should report the landed value state and push state: {ship}"
+        land.contains("landed: on parent") && land.contains("push: not pushed"),
+        "land should report the landed value state and push state: {land}"
     );
     assert!(
-        !ship.contains("completed:")
-            && !ship.contains("up to date:")
-            && !ship.contains("integrated: yes"),
-        "ship should not render step accounting as the primary human output: {ship}"
+        !land.contains("completed:")
+            && !land.contains("up to date:")
+            && !land.contains("integrated: yes"),
+        "land should not render step accounting as the primary human output: {land}"
     );
     assert!(
-        ship.contains("Next:") && ship.contains("heddle thread cleanup --merged --dry-run"),
-        "ship should surface the safe cleanup path for merged isolated checkouts: {ship}"
+        land.contains("Next:") && land.contains("heddle thread cleanup --merged --dry-run"),
+        "land should surface the safe cleanup path for merged isolated checkouts: {land}"
     );
 
     let list = heddle(&["thread", "list", "--output", "text"], Some(temp.path())).unwrap();
@@ -9424,7 +9424,7 @@ fn everyday_commands_have_all_required_help_entrypoints() {
         .collect::<std::collections::BTreeSet<_>>();
 
     for verb in [
-        "status", "diff", "commit", "start", "ready", "merge", "ship", "undo", "verify", "doctor",
+        "status", "diff", "commit", "start", "ready", "land", "undo", "verify", "doctor",
     ] {
         assert!(
             everyday_set.contains(verb),

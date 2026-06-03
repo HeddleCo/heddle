@@ -743,32 +743,32 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn ship_push_remote_missing(thread: &str) -> Self {
-        let local_command = super::thread_landing::ship_local_command(thread);
+    pub(crate) fn land_push_remote_missing(thread: &str) -> Self {
+        let local_command = super::thread_landing::land_local_command(thread);
         Self::safety_refusal(
-            "ship_push_remote_missing",
-            format!("Refusing to ship thread `{thread}` with --push: no push remote is configured"),
+            "land_push_remote_missing",
+            format!("Refusing to land thread `{thread}` with --push: no push remote is configured"),
             format!(
                 "Run `{local_command}` to land locally, or configure a remote and retry with `--push`."
             ),
             "no default Git or Heddle remote is configured for push",
-            "shipping with --push would merge and checkpoint before discovering there is nowhere to push",
+            "landing with --push would merge and checkpoint before discovering there is nowhere to push",
             "repository state, refs, metadata, and worktree files were left unchanged",
             local_command.clone(),
             vec![local_command, "heddle remote add <name> <url>".to_string()],
         )
     }
 
-    pub(crate) fn ship_remote_requires_push(thread: &str, remote: &str) -> Self {
-        let push_command = super::thread_landing::ship_push_remote_command(thread, remote);
-        let local_command = super::thread_landing::ship_local_command(thread);
+    pub(crate) fn land_remote_requires_push(thread: &str, remote: &str) -> Self {
+        let push_command = super::thread_landing::land_push_remote_command(thread, remote);
+        let local_command = super::thread_landing::land_local_command(thread);
         Self::safety_refusal(
-            "ship_remote_requires_push",
-            format!("Ship remote `{remote}` was provided without --push"),
+            "land_remote_requires_push",
+            format!("Land remote `{remote}` was provided without --push"),
             format!(
                 "Run `{push_command}` to land and publish, or `{local_command}` to land locally."
             ),
-            "`--remote` names a push destination, but this ship invocation did not request a push",
+            "`--remote` names a push destination, but this land invocation did not request a push",
             "continuing would merge/checkpoint locally while leaving the named remote unchanged",
             "repository state, refs, metadata, remote refs, and worktree files were left unchanged",
             push_command.clone(),
@@ -776,12 +776,12 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn ship_push_option_conflict(thread: &str) -> Self {
-        let push_command = super::thread_landing::ship_push_command(thread);
-        let local_command = super::thread_landing::ship_local_command(thread);
+    pub(crate) fn land_push_option_conflict(thread: &str) -> Self {
+        let push_command = super::thread_landing::land_push_command(thread);
+        let local_command = super::thread_landing::land_local_command(thread);
         Self::safety_refusal(
-            "ship_push_option_conflict",
-            "Ship was asked to both push and not push",
+            "land_push_option_conflict",
+            "Land was asked to both push and not push",
             format!("Choose `{push_command}` or `{local_command}`."),
             "`--push` and `--no-push` are mutually exclusive publish choices",
             "continuing would make the publish side effect ambiguous",
@@ -791,7 +791,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn ship_push_partial_failure(
+    pub(crate) fn land_push_partial_failure(
         thread: &str,
         push_error: impl fmt::Display,
         performed_steps: Vec<String>,
@@ -811,12 +811,12 @@ impl RecoveryAdvice {
             .map(|remote| format!("heddle push {remote}"))
             .unwrap_or_else(|| "heddle push".to_string());
         Self::safety_refusal(
-            "ship_push_partial_failure",
-            format!("Ship partially completed for `{thread}`, but push failed: {push_error}"),
+            "land_push_partial_failure",
+            format!("Land partially completed for `{thread}`, but push failed: {push_error}"),
             format!(
-                "The thread was preserved locally. Run `heddle undo` to roll back the local ship, or fix the remote and run `{push_command}`."
+                "The thread was preserved locally. Run `heddle undo` to roll back the local land, or fix the remote and run `{push_command}`."
             ),
-            "push failed after Heddle had already completed local ship steps",
+            "push failed after Heddle had already completed local land steps",
             "retrying blindly could duplicate or obscure the already-landed local merge/checkpoint",
             format!("completed steps: {completed}.{checkpoint}"),
             "heddle undo",
@@ -824,7 +824,7 @@ impl RecoveryAdvice {
         )
     }
 
-    pub(crate) fn ship_checkpoint_partial_failure(
+    pub(crate) fn land_checkpoint_partial_failure(
         thread: &str,
         checkpoint_error: impl fmt::Display,
         performed_steps: Vec<String>,
@@ -835,18 +835,18 @@ impl RecoveryAdvice {
             performed_steps.join(", ")
         };
         Self::safety_refusal(
-            "ship_checkpoint_partial_failure",
+            "land_checkpoint_partial_failure",
             format!(
-                "Ship partially completed for `{thread}`, but Git checkpoint failed: {checkpoint_error}"
+                "Land partially completed for `{thread}`, but Git checkpoint failed: {checkpoint_error}"
             ),
-            "Run `heddle undo` to roll back the local ship, or resolve the checkpoint issue and run `heddle checkpoint -m \"...\"`.",
-            "Git checkpoint failed after Heddle had already completed local ship steps",
+            "Run `heddle undo` to roll back the local land, or resolve the checkpoint issue and run `heddle commit -m \"...\"`.",
+            "Git checkpoint failed after Heddle had already completed local land steps",
             "retrying blindly could obscure the already-landed local merge state",
             format!("completed steps: {completed}. No Git checkpoint was written."),
             "heddle undo",
             vec![
                 "heddle undo".to_string(),
-                "heddle checkpoint -m \"...\"".to_string(),
+                "heddle commit -m \"...\"".to_string(),
             ],
         )
     }

@@ -361,7 +361,7 @@ fn test_merge_no_commit() {
     assert_eq!(parsed["status"], "blocked");
     assert_eq!(
         parsed["recommended_action"],
-        "heddle thread refresh feature"
+        "heddle sync --thread feature"
     );
 }
 #[test]
@@ -1366,7 +1366,7 @@ fn test_merge_with_real_conflict_reports_blocked_with_null_merge_state() {
     );
     assert_eq!(
         parsed["recommended_action"],
-        "heddle thread refresh feature"
+        "heddle sync --thread feature"
     );
     refresh_thread_expect_conflict(&temp, "feature");
 }
@@ -2137,7 +2137,7 @@ fn test_merge_stale_thread_preview_and_git_commit_apply_refuse_consistently() {
     assert_eq!(preview_json["kind"], "merge_preview_blocked");
     assert_eq!(
         preview_json["primary_command"],
-        "heddle thread refresh feature"
+        "heddle sync --thread feature"
     );
 
     let apply = heddle_output(
@@ -2157,7 +2157,7 @@ fn test_merge_stale_thread_preview_and_git_commit_apply_refuse_consistently() {
         "stale apply must refuse just like preview: {apply_json}"
     );
     assert_eq!(
-        apply_json["recommended_action"], "heddle thread refresh feature",
+        apply_json["recommended_action"], "heddle sync --thread feature",
         "apply must use the same freshness recovery path as preview: {apply_json}"
     );
     assert_eq!(apply_json["merge_state"], Value::Null);
@@ -2228,8 +2228,8 @@ fn test_merge_git_commit_blocks_on_unrelated_uncommitted_git_changes() {
         "git_commit must be absent when blocked: {parsed}"
     );
     assert_eq!(
-        parsed["recommended_action"], "heddle merge feature --git-commit",
-        "blocked pre-snapshot git coordination should recommend a concrete Heddle retry, not prose: {parsed}"
+        parsed["recommended_action"], "heddle status",
+        "blocked pre-snapshot git coordination should recommend a concrete Heddle state reader, not a self-loop: {parsed}"
     );
     let action_tail = parsed["recommended_action_template"]["argv_template"]
         .as_array()
@@ -2240,11 +2240,7 @@ fn test_merge_git_commit_blocks_on_unrelated_uncommitted_git_changes() {
         .collect::<Vec<_>>();
     assert_eq!(
         action_tail,
-        vec![
-            Value::String("merge".to_string()),
-            Value::String("feature".to_string()),
-            Value::String("--git-commit".to_string()),
-        ]
+        vec![Value::String("status".to_string())]
     );
 }
 
@@ -2550,7 +2546,7 @@ fn test_merge_semantic_preview_summary_matches_semantic_plan_on_structural_resha
         "stale semantic preview must refuse before claiming merge semantics: {envelope}"
     );
     assert_eq!(
-        envelope["primary_command"], "heddle thread refresh feature",
+        envelope["primary_command"], "heddle sync --thread feature",
         "stale semantic preview should route through refresh: {envelope}"
     );
 }

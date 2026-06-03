@@ -18,7 +18,7 @@ use cli::{
         DaemonCommands, DiagnoseArgs, DiffArgs, LogArgs, MergeArgs, ResolveArgs, RetroArgs,
         RevertArgs, RunArgs, SessionCommands, SessionEndArgs, SessionListArgs, SessionSegmentArgs,
         SessionShowArgs, SessionStartArgs, UndoArgs,
-        cli_args::{DelegateArgs, ShipArgs, SyncArgs},
+        cli_args::{DelegateArgs, LandArgs, SyncArgs},
         commands::{
             LogCommandOptions, RetroCommandOptions, SnapshotAgentOverrides, build_command_catalog,
             cmd_abort, cmd_actor_done, cmd_actor_explain, cmd_actor_list, cmd_actor_show,
@@ -34,7 +34,7 @@ use cli::{
             cmd_maintenance, cmd_marker, cmd_merge, cmd_monitor, cmd_pull, cmd_push, cmd_query,
             cmd_ready, cmd_rebase, cmd_redo, cmd_remote, cmd_resolve, cmd_retro, cmd_revert,
             cmd_review, cmd_run, cmd_schemas, cmd_session_end, cmd_session_list,
-            cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell, cmd_ship,
+            cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell, cmd_land,
             cmd_show, cmd_snapshot, cmd_stack, cmd_start, cmd_stash, cmd_status, cmd_store,
             cmd_switch_compat, cmd_sync_smart, cmd_thread, cmd_thread_show, cmd_transaction,
             cmd_try, cmd_undo, cmd_verify, cmd_version, cmd_watch, cmd_workspace,
@@ -340,16 +340,16 @@ async fn async_main() -> Result<()> {
 
         Commands::Abort => cmd_abort(&cli),
 
-        Commands::Ship(ShipArgs {
+        Commands::Land(LandArgs {
             thread,
             message,
             push,
             no_push,
             remote,
         }) => {
-            cmd_ship(
+            cmd_land(
                 &cli,
-                ShipArgs {
+                LandArgs {
                     thread: thread.clone(),
                     message: message.clone(),
                     push: *push,

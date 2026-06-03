@@ -364,6 +364,7 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     "heddle capture -m \"...\" --confidence <confidence>",
     "heddle checkpoint -m \"...\"",
     "heddle commit -m \"...\"",
+    "heddle commit -m \"...\" --confidence <confidence>",
     "heddle init --principal-name <name> --principal-email <email>",
     "heddle ready -m \"...\"",
     "heddle context get --path <path>",
@@ -429,6 +430,19 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         "heddle commit -m \"...\"",
         &["heddle", "commit", "-m", "<message>"],
         &["message"],
+        true,
+    ),
+    (
+        "heddle commit -m \"...\" --confidence <confidence>",
+        &[
+            "heddle",
+            "commit",
+            "-m",
+            "<message>",
+            "--confidence",
+            "<confidence>",
+        ],
+        &["message", "confidence"],
         true,
     ),
     (
@@ -523,8 +537,8 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         true,
     ),
     (
-        "heddle ship --thread <name>",
-        &["heddle", "ship", "--thread", "<thread>"],
+        "heddle land --thread <name>",
+        &["heddle", "land", "--thread", "<thread>"],
         &["thread"],
         true,
     ),
@@ -1881,7 +1895,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["merge"],
         exits(
-            front_door(
+            surface(
                 advertised_action(
                     documented_schemas(WORKTREE_MUTATION, &["merge --preview"]),
                     "heddle merge <thread> --preview",
@@ -1890,7 +1904,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
                     true,
                     false,
                 ),
-                60,
+                "native",
             ),
             &[
                 (0, "ok"),
@@ -2232,7 +2246,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["shell"], READ_TEXT),
     entry(&["shell", "init"], READ_TEXT),
     entry(
-        &["ship"],
+        &["land"],
         front_door(
             documented_schemas(
                 CommandContract {
@@ -2240,7 +2254,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
                     network_io: true,
                     ..MUTATING
                 },
-                &["ship"],
+                &["land"],
             ),
             70,
         ),
@@ -3771,7 +3785,7 @@ fn is_display_only_template(action: &str) -> bool {
     action.contains("...") || action.contains('…') || (action.contains('<') && action.contains('>'))
 }
 
-fn split_recommended_action(action: &str) -> std::result::Result<Vec<String>, String> {
+pub(crate) fn split_recommended_action(action: &str) -> std::result::Result<Vec<String>, String> {
     let mut args = Vec::new();
     let mut current = String::new();
     let mut chars = action.chars().peekable();
@@ -3865,7 +3879,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Sync(_) => vec!["sync"],
         Commands::Continue => vec!["continue"],
         Commands::Abort => vec!["abort"],
-        Commands::Ship(_) => vec!["ship"],
+        Commands::Land(_) => vec!["land"],
         Commands::Delegate(_) => vec!["delegate"],
         Commands::Ready(_) => vec!["ready"],
         Commands::Capture(_) => vec!["capture"],
@@ -4411,7 +4425,7 @@ mod tests {
         sample(&["session", "show"], &["session", "show"]),
         sample(&["session", "list"], &["session", "list"]),
         sample(&["shell", "init"], &["shell", "init", "bash"]),
-        sample(&["ship"], &["ship"]),
+        sample(&["land"], &["land"]),
         sample(&["show"], &["show", "HEAD"]),
         sample(&["start"], &["start", "feature"]),
         sample(&["stash", "push"], &["stash", "push"]),
@@ -5436,7 +5450,7 @@ mod tests {
             (
                 "commit", "everyday", "native", "everyday", None, None, false,
             ),
-            ("ship", "everyday", "native", "everyday", None, None, false),
+            ("land", "everyday", "native", "everyday", None, None, false),
             ("push", "everyday", "native", "everyday", None, None, false),
             (
                 "capture", "advanced", "native", "advanced", None, None, false,

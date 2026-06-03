@@ -795,18 +795,19 @@ pub(crate) fn thread_not_found_advice(thread_id: &str, action: &str) -> Recovery
 }
 
 fn imported_git_ref_not_managed_thread_advice(thread_id: &str) -> RecoveryAdvice {
-    let merge_preview = super::thread_landing::merge_preview_command(thread_id);
+    let reconcile_preview =
+        super::git_overlay_health::canonical_bridge_reconcile_ref_preview_command(None, thread_id);
     RecoveryAdvice::safety_refusal(
         "imported_git_ref_not_managed_thread",
         format!("'{thread_id}' is an imported Git ref, not a managed Heddle thread"),
         format!(
-            "Preview it as an integration source with `{merge_preview}`. Use managed threads for `ready` and `ship`."
+            "Preview Git/Heddle reconciliation with `{reconcile_preview}`. Use managed threads for `ready` and `land`."
         ),
         format!("thread ref '{thread_id}' exists, but no managed thread metadata exists for it"),
-        "ready/ship require managed thread metadata and explicit integration authority; treating an imported Git ref as shippable would be ambiguous",
+        "ready/land require managed thread metadata and explicit integration authority; treating an imported Git ref as landable would be ambiguous",
         "thread refs, Git refs, checkout files, and thread metadata were left unchanged",
-        merge_preview.clone(),
-        vec![merge_preview, "heddle thread list".to_string()],
+        reconcile_preview.clone(),
+        vec![reconcile_preview, "heddle thread list".to_string()],
     )
 }
 

@@ -28,6 +28,7 @@ use super::{
         build_repository_verification_state, git_overlay_mutation_preflight_advice,
         plain_git_mutation_preflight_advice, unimported_git_history_advice,
     },
+    next_action::{NextActionValidationContext, write_validated_json_stdout},
     thread::find_active_thread_entry,
     thread_cmd::current_thread,
 };
@@ -193,7 +194,10 @@ pub async fn cmd_snapshot(
     }
 
     if as_json {
-        println!("{}", serde_json::to_string(&output)?);
+        write_validated_json_stdout(
+            &output,
+            NextActionValidationContext::new(&["capture"], repo.capability()),
+        )?;
     } else {
         // The bare `{message}` was `"Created state <id> (<hash>)"` —
         // we restyle the parts here rather than inside the message

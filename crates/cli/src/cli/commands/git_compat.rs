@@ -30,8 +30,10 @@ use super::{
     git_overlay_health::{
         GitOverlayMutationPreflight, RepositoryVerificationState,
         build_repository_verification_state, git_overlay_mutation_preflight_advice,
-        plain_git_mutation_preflight_advice, repository_verification_blocked_advice,
+        override_trust_recommended_action, plain_git_mutation_preflight_advice,
+        repository_verification_blocked_advice,
     },
+    next_action::{NextActionValidationContext, write_validated_json_stdout},
     snapshot::{
         SnapshotAgentOverrides, create_snapshot, create_snapshot_from_tree,
         preflight_large_capture_for_compat_commit, resolve_principal,
@@ -165,7 +167,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
                     Some(message.as_str()),
                     worktree_status_options(Some(repo.config())),
                 )?;
-                let trust = build_repository_verification_state(&repo);
+                let trust = commit_safe_trust(build_repository_verification_state(&repo));
                 let output = CommitCompatOutput {
                     output_kind: "commit",
                     status: "committed",
@@ -186,7 +188,11 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
                     trust,
                 };
                 let output = with_commit_action_metadata(output);
-                render_commit_compat(&output, should_output_json(cli, Some(repo.config())))?;
+                render_commit_compat(
+                    &output,
+                    should_output_json(cli, Some(repo.config())),
+                    repo.capability(),
+                )?;
                 return Ok(());
             }
             if !trust.verified {
@@ -214,7 +220,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
         let captured_state = repo
             .current_state()?
             .ok_or_else(|| anyhow!("capture succeeded but no current state was recorded"))?;
-        let trust = build_repository_verification_state(&repo);
+        let trust = commit_safe_trust(build_repository_verification_state(&repo));
         let output = CommitCompatOutput {
             output_kind: "commit",
             status: "committed",
@@ -239,7 +245,11 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
         };
         let output = with_commit_action_metadata(output);
 
-        render_commit_compat(&output, should_output_json(cli, Some(repo.config())))?;
+        render_commit_compat(
+            &output,
+            should_output_json(cli, Some(repo.config())),
+            repo.capability(),
+        )?;
         return Ok(());
     }
 
@@ -315,7 +325,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             "commit completed but failed to record capture and Git checkpoint as one undo batch",
         )?;
 
-    let trust = build_repository_verification_state(&repo);
+    let trust = commit_safe_trust(build_repository_verification_state(&repo));
     let output = CommitCompatOutput {
         output_kind: "commit",
         status: "committed",
@@ -340,7 +350,11 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
     };
     let output = with_commit_action_metadata(output);
 
-    render_commit_compat(&output, should_output_json(cli, Some(repo.config())))?;
+    render_commit_compat(
+        &output,
+        should_output_json(cli, Some(repo.config())),
+        repo.capability(),
+    )?;
 
     Ok(())
 }
@@ -395,7 +409,7 @@ fn commit_staged_index(
             "commit completed but failed to record capture and Git checkpoint as one undo batch",
         )?;
 
-    let trust = build_repository_verification_state(repo);
+    let trust = commit_safe_trust(build_repository_verification_state(repo));
     let output = CommitCompatOutput {
         output_kind: "commit",
         status: "committed",
@@ -419,7 +433,11 @@ fn commit_staged_index(
         trust,
     };
     let output = with_commit_action_metadata(output);
-    render_commit_compat(&output, should_output_json(cli, Some(repo.config())))?;
+    render_commit_compat(
+        &output,
+        should_output_json(cli, Some(repo.config())),
+        repo.capability(),
+    )?;
     Ok(())
 }
 
@@ -970,6 +988,32 @@ fn bstr_path(path: &BStr) -> String {
     path.to_str_lossy().into_owned()
 }
 
+fn commit_safe_trust(mut trust: RepositoryVerificationState) -> RepositoryVerificationState {
+    if is_commit_action(&trust.recommended_action) {
+        override_trust_recommended_action(&mut trust, "heddle status");
+    }
+    let status_action = "heddle status".to_string();
+    let status_template = ActionFields::from_action(&status_action).template;
+    for check in &mut trust.checks {
+        if check
+            .recommended_action
+            .as_deref()
+            .is_some_and(is_commit_action)
+        {
+            check.recommended_action = Some(status_action.clone());
+            check.recommended_action_template = status_template.clone();
+        }
+    }
+    trust
+}
+
+fn is_commit_action(action: &str) -> bool {
+    matches!(
+        action.trim(),
+        "heddle commit" | "heddle commit -m \"...\"" | "heddle commit -m \"...\" --confidence <confidence>"
+    ) || action.trim().starts_with("heddle commit ")
+}
+
 fn commit_next_action(trust: &RepositoryVerificationState) -> Option<String> {
     if !trust.recommended_action.trim().is_empty() {
         return Some(trust.recommended_action.clone());
@@ -1064,7 +1108,7 @@ fn commit_checkpoint_failed_advice(
         format!("capture {change_id} was preserved, but checkpoint failed: {err}"),
         format!("Resolve the checkpoint issue, then run `{recovery}`."),
         "the Heddle capture succeeded but the Git checkpoint step failed",
-        "retrying `heddle commit` could create a duplicate capture instead of checkpointing the preserved state",
+        "retrying through the canonical save path keeps the Git checkpoint repair on the supported surface",
         format!("captured Heddle state {change_id} was preserved"),
         recovery.clone(),
         vec![recovery],
@@ -1073,8 +1117,8 @@ fn commit_checkpoint_failed_advice(
 
 fn checkpoint_recovery_command(message: Option<&str>) -> String {
     format!(
-        "heddle checkpoint -m {}",
-        shell_double_quoted(message.unwrap_or("checkpoint"))
+        "heddle commit -m {}",
+        shell_double_quoted(message.unwrap_or("commit"))
     )
 }
 
@@ -1129,9 +1173,16 @@ fn git_head_oid(root: &Path) -> Option<String> {
     git.head_id().ok().map(|id| id.to_string())
 }
 
-fn render_commit_compat(output: &CommitCompatOutput, json: bool) -> Result<()> {
+fn render_commit_compat(
+    output: &CommitCompatOutput,
+    json: bool,
+    repository_capability: RepositoryCapability,
+) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string(&output)?);
+        write_validated_json_stdout(
+            output,
+            NextActionValidationContext::new(&["commit"], repository_capability),
+        )?;
     } else {
         println!(
             "{}",
@@ -1255,7 +1306,7 @@ pub async fn cmd_switch_compat(cli: &Cli, args: SwitchArgs) -> Result<()> {
             "git_checkout_create_branch",
             "`heddle switch -c` / `heddle checkout -b` are guided to Heddle's isolated thread flow",
             format!(
-                "Create a Heddle thread with `{primary}` so the new work has its own checkout, provenance, and ready/ship path."
+                "Create a Heddle thread with `{primary}` so the new work has its own checkout, provenance, and ready/land path."
             ),
             "Git-style branch creation would hide whether the user wants an in-place thread or an isolated checkout",
             "Heddle did not create a branch, move HEAD, or write the worktree",
@@ -1308,11 +1359,11 @@ mod tests {
         assert!(advice.error.contains("git write failed"));
         assert_eq!(
             advice.primary_command,
-            "heddle checkpoint -m \"say \\\"hello\\\"\""
+            "heddle commit -m \"say \\\"hello\\\"\""
         );
         assert_eq!(
             advice.recovery_commands,
-            vec!["heddle checkpoint -m \"say \\\"hello\\\"\""]
+            vec!["heddle commit -m \"say \\\"hello\\\"\""]
         );
         assert!(advice.preserved.contains("change-123"));
     }

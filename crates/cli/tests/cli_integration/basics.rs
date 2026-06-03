@@ -918,14 +918,14 @@ fn test_cli_ready_in_plain_git_repo_captures_mixed_git_state() {
     assert_eq!(ready["status"], "blocked");
     assert_eq!(ready["captured"], true);
     assert_eq!(ready["verification"]["status"], "needs_checkpoint");
-    assert_eq!(ready["recommended_action"], "heddle checkpoint -m \"...\"");
+    assert_eq!(ready["recommended_action"], "heddle commit -m \"...\"");
 
     let status: Value =
         serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
             .unwrap();
     assert!(status["state"]["change_id"].as_str().is_some());
     assert_eq!(status["verification"]["status"], "needs_checkpoint");
-    assert_eq!(status["recommended_action"], "heddle checkpoint -m \"...\"");
+    assert_eq!(status["recommended_action"], "heddle commit -m \"...\"");
 }
 
 #[test]
@@ -1673,7 +1673,7 @@ fn test_cli_ready_captures_current_git_branch_after_switch() {
     assert_eq!(ready["status"], "blocked");
     assert_eq!(ready["captured"], true);
     assert_eq!(ready["verification"]["status"], "needs_checkpoint");
-    assert_eq!(ready["recommended_action"], "heddle checkpoint -m \"...\"");
+    assert_eq!(ready["recommended_action"], "heddle commit -m \"...\"");
 
     let status: Value =
         serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
@@ -1681,7 +1681,7 @@ fn test_cli_ready_captures_current_git_branch_after_switch() {
     assert_eq!(status["thread"], "support/ready-switch");
     assert!(status["state"]["change_id"].as_str().is_some());
     assert_eq!(status["verification"]["status"], "needs_checkpoint");
-    assert_eq!(status["recommended_action"], "heddle checkpoint -m \"...\"");
+    assert_eq!(status["recommended_action"], "heddle commit -m \"...\"");
 }
 
 #[test]
@@ -1981,7 +1981,7 @@ fn test_cli_ready_in_git_overlay_auto_captures_initial_state() {
     assert_eq!(ready["status"], "blocked");
     assert_eq!(ready["captured"], true);
     assert_eq!(ready["verification"]["status"], "needs_checkpoint");
-    assert_eq!(ready["recommended_action"], "heddle checkpoint -m \"...\"");
+    assert_eq!(ready["recommended_action"], "heddle commit -m \"...\"");
 
     let status: Value =
         serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
@@ -1989,7 +1989,7 @@ fn test_cli_ready_in_git_overlay_auto_captures_initial_state() {
     assert!(status["state"]["change_id"].as_str().is_some());
     assert!(status["git_checkpoint"].is_null());
     assert_eq!(status["verification"]["status"], "needs_checkpoint");
-    assert_eq!(status["recommended_action"], "heddle checkpoint -m \"...\"");
+    assert_eq!(status["recommended_action"], "heddle commit -m \"...\"");
 }
 
 #[test]
@@ -2100,7 +2100,7 @@ fn test_cli_ship_in_git_overlay_auto_checkpoints() {
                 "--output",
                 "json",
                 "start",
-                "feature/ship-it",
+                "feature/land-it",
                 "--workspace",
                 "auto",
             ],
@@ -2110,20 +2110,20 @@ fn test_cli_ship_in_git_overlay_auto_checkpoints() {
     )
     .unwrap();
     let thread = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
-    std::fs::write(thread.join("ship.txt"), "ship me").unwrap();
+    std::fs::write(thread.join("land.txt"), "land me").unwrap();
 
-    let shipped: Value = serde_json::from_str(
+    let landed: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "ship", "--thread", "feature/ship-it"],
+            &["--output", "json", "land", "--thread", "feature/land-it"],
             Some(temp.path()),
         )
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(shipped["status"], "shipped");
-    assert_eq!(shipped["checkpointed"], true);
-    assert!(shipped["git_commit"].as_str().is_some());
-    assert!(temp.path().join("ship.txt").exists());
+    assert_eq!(landed["status"], "landed");
+    assert_eq!(landed["checkpointed"], true);
+    assert!(landed["git_commit"].as_str().is_some());
+    assert!(temp.path().join("land.txt").exists());
 
     let status: Value =
         serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
@@ -2243,13 +2243,13 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
 
     let auth_ship: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "ship", "--thread", "feature/auth"],
+            &["--output", "json", "land", "--thread", "feature/auth"],
             Some(temp.path()),
         )
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(auth_ship["status"], "shipped");
+    assert_eq!(auth_ship["status"], "landed");
     assert_eq!(auth_ship["checkpointed"], true);
     assert!(auth_ship["git_commit"].as_str().is_some());
 
@@ -2265,13 +2265,13 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
 
     let search_ship: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "ship", "--thread", "feature/search"],
+            &["--output", "json", "land", "--thread", "feature/search"],
             Some(temp.path()),
         )
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(search_ship["status"], "shipped");
+    assert_eq!(search_ship["status"], "landed");
     assert_eq!(search_ship["checkpointed"], true);
     assert!(search_ship["git_commit"].as_str().is_some());
 
@@ -2298,10 +2298,10 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
     );
     assert_ne!(
         auth_ship["git_commit"], search_ship["git_commit"],
-        "separate shipped threads should produce distinct git commits"
+        "separate landed threads should produce distinct git commits"
     );
 
-    // Each shipped thread should record a Heddle change id on the
+    // Each landed thread should record a Heddle change id on the
     // bridge mirror's `refs/notes/heddle` ref without publishing the
     // metadata notes ref into the user's ordinary `.git/refs`.
     for git_commit in [
@@ -2319,7 +2319,7 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
             .expect("git notes show should run");
         assert!(
             notes.status.success(),
-            "shipped commit {git_commit} should have a heddle note in the bridge mirror; stderr: {}",
+            "landed commit {git_commit} should have a heddle note in the bridge mirror; stderr: {}",
             String::from_utf8_lossy(&notes.stderr)
         );
         let note_body = String::from_utf8(notes.stdout).unwrap();
@@ -2400,13 +2400,13 @@ fn test_parallel_heddle_threads_ship_with_one_stale_refresh_path_and_checkpoint_
 
     let auth_ship: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "ship", "--thread", "feature/auth"],
+            &["--output", "json", "land", "--thread", "feature/auth"],
             Some(temp.path()),
         )
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(auth_ship["status"], "shipped");
+    assert_eq!(auth_ship["status"], "landed");
     assert_eq!(auth_ship["checkpointed"], true);
     assert!(auth_ship["git_commit"].as_str().is_some());
 
@@ -2422,13 +2422,13 @@ fn test_parallel_heddle_threads_ship_with_one_stale_refresh_path_and_checkpoint_
 
     let search_ship: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "ship", "--thread", "feature/search"],
+            &["--output", "json", "land", "--thread", "feature/search"],
             Some(temp.path()),
         )
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(search_ship["status"], "shipped");
+    assert_eq!(search_ship["status"], "landed");
     assert_eq!(search_ship["synced"], false);
     assert_eq!(search_ship["checkpointed"], true);
     assert!(search_ship["git_commit"].as_str().is_some());
@@ -2469,13 +2469,13 @@ fn test_parallel_heddle_threads_ship_with_one_stale_refresh_path_and_checkpoint_
         records
             .iter()
             .any(|record| record["summary"] == "auth work"),
-        "stale auth ship should record a git checkpoint: {checkpoint_records}"
+        "stale auth land should record a git checkpoint: {checkpoint_records}"
     );
     assert!(
         records
             .iter()
             .any(|record| record["summary"] == "search work"),
-        "clean search ship should record a git checkpoint: {checkpoint_records}"
+        "clean search land should record a git checkpoint: {checkpoint_records}"
     );
 }
 

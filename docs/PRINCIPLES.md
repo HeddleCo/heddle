@@ -63,7 +63,7 @@ enough to deserve a name.
 
 Less to remember. The everyday `heddle help` follows the core loop:
 inspect, adopt or clone, save work, isolate a thread, prove readiness,
-preview integration, ship or push, undo, inspect history, and recover.
+preview advanced integration, land or push, undo, inspect history, and recover.
 The exact verb list comes from the command contract table so human help
 and `heddle commands --output json` do not drift. Collaboration and
 annotation surfaces such as `review`, `discuss`, and `context` stay

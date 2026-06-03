@@ -8,11 +8,10 @@ use crate::{Thread, ThreadFreshness, ThreadState};
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecommendedAction {
-    Capture,
+    Commit,
     Ready,
-    Refresh,
-    MergePreview,
-    MergeApply,
+    Sync,
+    Land,
     Resolve,
     Review,
     Promote,
@@ -21,13 +20,12 @@ pub enum RecommendedAction {
 impl RecommendedAction {
     pub fn command(&self, thread_id: &str) -> Option<String> {
         match self {
-            Self::Capture => Some("heddle capture".to_string()),
+            Self::Commit => Some("heddle commit -m \"...\"".to_string()),
             Self::Ready => Some(format!("heddle ready --thread {thread_id}")),
-            Self::Refresh => Some(format!("heddle thread refresh {thread_id}")),
-            Self::MergePreview => Some(format!("heddle merge {thread_id} --preview")),
-            Self::MergeApply => Some(format!("heddle merge {thread_id}")),
-            Self::Resolve => Some(format!("heddle thread resolve {thread_id}")),
-            Self::Review => Some(format!("heddle thread resolve {thread_id}")),
+            Self::Sync => Some(format!("heddle sync --thread {thread_id}")),
+            Self::Land => Some(format!("heddle land --thread {thread_id} --no-push")),
+            Self::Resolve => Some("heddle resolve --list".to_string()),
+            Self::Review => None,
             Self::Promote => Some(format!("heddle thread promote {thread_id}")),
         }
     }
@@ -61,7 +59,7 @@ pub fn describe_thread_advice(
 ///
 /// When `initial_state` is true and the worktree is dirty, the thread
 /// is labeled `"uncaptured"` instead of `"dirty_worktree"`. The
-/// recommended action stays `heddle capture` — only the label
+/// recommended action stays `heddle commit` — only the label
 /// changes, so the user-facing first impression matches the actual
 /// situation (nothing has been captured yet) rather than implying
 /// that something has drifted. See heddle#160.
@@ -102,7 +100,7 @@ pub fn describe_thread_advice_with_initial(
 
     let mut blockers = Vec::new();
     let action = if worktree_dirty {
-        RecommendedAction::Capture
+        RecommendedAction::Commit
     } else if thread.freshness == ThreadFreshness::Stale {
         blockers.push(format!(
             "Thread '{}' is stale against '{}'",
@@ -118,7 +116,7 @@ pub fn describe_thread_advice_with_initial(
                 conflicts
             ));
         }
-        RecommendedAction::Refresh
+        RecommendedAction::Sync
     } else if thread.promotion_suggested && !thread.heavy_impact_paths.is_empty() {
         blockers.push(format!(
             "Heavy-impact change: {} — review broader impact before merging",
@@ -138,16 +136,13 @@ pub fn describe_thread_advice_with_initial(
     } else if thread.state == ThreadState::Ready
         && thread.integration_policy_result.status.as_deref() == Some("previewed")
     {
-        let thread_health = "ready".to_string();
         return ThreadAdvice {
-            thread_health,
+            thread_health: "ready".to_string(),
             blockers,
-            recommended_action: format!("heddle ship --thread {} --no-push", thread.id),
+            recommended_action: format!("heddle land --thread {} --no-push", thread.id),
         };
-    } else if clean_ready_merges_to_apply {
-        RecommendedAction::MergeApply
-    } else if thread.state == ThreadState::Ready {
-        RecommendedAction::MergePreview
+    } else if clean_ready_merges_to_apply || thread.state == ThreadState::Ready {
+        RecommendedAction::Land
     } else {
         RecommendedAction::Ready
     };

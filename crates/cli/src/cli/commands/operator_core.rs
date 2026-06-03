@@ -88,7 +88,7 @@ impl OperatorCommandOutput {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct VerificationClaimPolicy {
-    allow_ship_publish_followup: bool,
+    allow_land_publish_followup: bool,
     allow_matching_workflow_action: bool,
 }
 
@@ -97,8 +97,8 @@ impl VerificationClaimPolicy {
         Self::default()
     }
 
-    pub(crate) fn allow_ship_publish_followup(mut self) -> Self {
-        self.allow_ship_publish_followup = true;
+    pub(crate) fn allow_land_publish_followup(mut self) -> Self {
+        self.allow_land_publish_followup = true;
         self
     }
 
@@ -116,9 +116,9 @@ fn repository_verification_allows_success_claim(
     if trust.verified || matches!(output.status.as_str(), "blocked" | "failed") {
         return true;
     }
-    if policy.allow_ship_publish_followup
-        && output.action == "ship"
-        && output.status == "shipped"
+    if policy.allow_land_publish_followup
+        && output.action == "land"
+        && output.status == "landed"
         && trust.recommended_action == "heddle push"
         && matches!(
             trust.remote_drift.as_str(),
@@ -343,7 +343,7 @@ fn complete_current_thread_manual_resolution(repo: &Repository) -> Result<Option
     let target = thread.target_thread.clone();
     manager.save(&thread)?;
 
-    let action = super::thread_landing::ship_command_for_thread(repo, &thread_id);
+    let action = super::thread_landing::land_command_for_thread(repo, &thread_id);
     Ok(Some(super::thread::contextual_thread_action(
         repo,
         &thread_id,
@@ -367,8 +367,8 @@ fn continue_from_operation(
                             .to_string(),
                     blockers: Vec::new(),
                     warnings: Vec::new(),
-                    next_action: Some("heddle capture -m \"Manual resolution\"".to_string()),
-                    recommended_action: Some("heddle capture -m \"Manual resolution\"".to_string()),
+                    next_action: Some("heddle commit -m \"Manual resolution\"".to_string()),
+                    recommended_action: Some("heddle commit -m \"Manual resolution\"".to_string()),
                 },
                 OperatorContinueStatus::Continued => OperatorCommandOutput {
                     status: "continued".to_string(),
@@ -578,7 +578,7 @@ mod tests {
 
     #[test]
     fn verification_claim_gate_blocks_local_success_claims() {
-        let trust = verification_state(false, "needs_checkpoint", "heddle checkpoint -m \"...\"");
+        let trust = verification_state(false, "needs_checkpoint", "heddle commit -m \"...\"");
         let mut output = OperatorCommandOutput {
             status: "synced".to_string(),
             action: "sync".to_string(),
@@ -598,7 +598,7 @@ mod tests {
         assert_eq!(output.status, "blocked");
         assert_eq!(
             output.recommended_action.as_deref(),
-            Some("heddle checkpoint -m \"...\"")
+            Some("heddle commit -m \"...\"")
         );
         assert!(output
             .message
@@ -606,33 +606,33 @@ mod tests {
     }
 
     #[test]
-    fn verification_claim_gate_allows_ship_publish_followup_only_by_policy() {
+    fn verification_claim_gate_allows_land_publish_followup_only_by_policy() {
         let trust = verification_state(false, "remote_ahead", "heddle push");
-        let shipped = || OperatorCommandOutput {
-            status: "shipped".to_string(),
-            action: "ship".to_string(),
-            message: "Shipped thread 'feature'".to_string(),
+        let landed = || OperatorCommandOutput {
+            status: "landed".to_string(),
+            action: "land".to_string(),
+            message: "Landed thread 'feature'".to_string(),
             blockers: Vec::new(),
             warnings: Vec::new(),
             next_action: Some("heddle push".to_string()),
             recommended_action: Some("heddle push".to_string()),
         };
 
-        let mut strict = shipped();
+        let mut strict = landed();
         strict.block_success_claim_if_verification_blocked(
             &trust,
-            "ship",
+            "land",
             VerificationClaimPolicy::strict(),
         );
         assert_eq!(strict.status, "blocked");
 
-        let mut allowed = shipped();
+        let mut allowed = landed();
         allowed.block_success_claim_if_verification_blocked(
             &trust,
-            "ship",
-            VerificationClaimPolicy::strict().allow_ship_publish_followup(),
+            "land",
+            VerificationClaimPolicy::strict().allow_land_publish_followup(),
         );
-        assert_eq!(allowed.status, "shipped");
+        assert_eq!(allowed.status, "landed");
         assert_eq!(allowed.recommended_action.as_deref(), Some("heddle push"));
     }
 

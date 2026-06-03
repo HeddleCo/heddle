@@ -189,7 +189,7 @@ in-progress operation.
       "status": "available",
       "verified_scope": "everyday_and_agent",
       "advanced_scope": "advanced_internal_admin",
-      "summary": "211 command(s), 181 JSON command(s), 108 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 39 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 59 accepted opaque schema(s) outside clean verification",
+      "summary": "211 command(s), 181 JSON command(s), 108 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 38 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 59 accepted opaque schema(s) outside clean verification",
       "catalog_commands_total": 211,
       "catalog_mutating_commands_total": 108,
       "json_commands_total": 181,
@@ -197,21 +197,21 @@ in-progress operation.
       "json_commands_with_schema": 122,
       "json_commands_with_accepted_opaque_schema": 59,
       "json_commands_without_schema": 0,
-      "verified_scope_json_commands_total": 39,
-      "verified_scope_json_commands_with_schema": 39,
+      "verified_scope_json_commands_total": 38,
+      "verified_scope_json_commands_with_schema": 38,
       "verified_scope_json_commands_with_accepted_opaque_schema": 0,
       "verified_scope_json_commands_without_schema": 0,
-      "advanced_scope_json_commands_total": 142,
+      "advanced_scope_json_commands_total": 143,
       "advanced_scope_json_commands_with_accepted_opaque_schema": 59,
       "mutating_commands_total": 107,
       "mutating_commands_with_schema": 75,
       "mutating_commands_with_accepted_opaque_schema": 32,
       "mutating_commands_without_schema": 0,
-      "verified_scope_mutating_commands_total": 24,
-      "verified_scope_mutating_commands_with_schema": 24,
+      "verified_scope_mutating_commands_total": 23,
+      "verified_scope_mutating_commands_with_schema": 23,
       "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
       "verified_scope_mutating_commands_without_schema": 0,
-      "advanced_scope_mutating_commands_total": 83,
+      "advanced_scope_mutating_commands_total": 84,
       "advanced_scope_mutating_commands_with_accepted_opaque_schema": 32,
       "schema_verbs_total": 183,
       "documented_schema_verbs_total": 183,
@@ -525,8 +525,8 @@ saves a Heddle state without recommending a Git checkpoint.
   "message": "Thread 'feature/parser' is ready to integrate",
   "blockers": [],
   "warnings": [],
-  "next_action": "heddle merge feature/parser --preview",
-  "recommended_action": "heddle merge feature/parser --preview",
+  "next_action": "heddle land --thread feature/parser --no-push",
+  "recommended_action": "heddle land --thread feature/parser --no-push",
   "captured": true,
   "captured_state": "hd-sqr398dvx9ay",
   "thread_state": "ready",
@@ -534,13 +534,13 @@ saves a Heddle state without recommending a Git checkpoint.
 }
 ```
 
-`heddle ship --output json` emits:
+`heddle land --output json` emits:
 
 ```json
 {
-  "status": "shipped",
-  "action": "ship",
-  "message": "Shipped thread 'feature/parser'",
+  "status": "landed",
+  "action": "land",
+  "message": "Landed thread 'feature/parser'",
   "thread": "feature/parser",
   "captured": false,
   "checkpointed": true,
@@ -551,7 +551,7 @@ saves a Heddle state without recommending a Git checkpoint.
   "pushed_remote": null,
   "performed_steps": ["merge", "checkpoint"],
   "skipped_steps": ["capture(no changes)", "sync(current)", "push(not requested)"],
-  "merge_state": "hd-ship123",
+  "merge_state": "hd-land123",
   "chosen_path": "capture_sync_merge_checkpoint"
 }
 ```
@@ -572,12 +572,12 @@ saves a Heddle state without recommending a Git checkpoint.
 | `next_action_template`, `recommended_action_template` | object \| null | required | Fillable template metadata (`argv_template`, `required_inputs`, `agent_may_fill`) for the next/recommended command; present for every valid action, `null` when none. |
 | `git_commit` | string \| null | required for `checkpoint`/`commit` | Git commit OID produced by the checkpoint path; `null` for native Heddle commits. |
 | `capability`, `storage_model`, `committed_at` | string | required for `checkpoint` | Repository mode, storage model, and checkpoint timestamp. |
-| `status` | string | required for `capture`/`checkpoint`/`commit`/`ready`/`ship` | Machine-stable success status for the operation. |
-| `action` | string | required for `capture`/`checkpoint`/`commit`/`undo`/`redo`/`ship` | Logical operation name. |
+| `status` | string | required for `capture`/`checkpoint`/`commit`/`ready`/`land` | Machine-stable success status for the operation. |
+| `action` | string | required for `capture`/`checkpoint`/`commit`/`undo`/`redo`/`land` | Logical operation name. |
 | `batches` | array<object> | required for `undo`/`redo` | Oplog batches affected by the operation. Empty if none are reported. |
 | `thread_state`, `report` | string \| null / object | required for `ready` | Readiness result and structured readiness report. |
-| `thread`, `captured`, `checkpointed`, `synced`, `integrated`, `pushed`, `pushed_remote` | string / bool / string \| null | required for `ship` | Thread shipped, which local/publish steps completed, and the remote name pushed when publish ran. |
-| `performed_steps`, `skipped_steps`, `merge_state`, `chosen_path` | array<string> / string \| null / string | required for `ship` | Machine-readable path through the ship loop and the merge state landed, when one exists. |
+| `thread`, `captured`, `checkpointed`, `synced`, `integrated`, `pushed`, `pushed_remote` | string / bool / string \| null | required for `land` | Thread landed, which local/publish steps completed, and the remote name pushed when publish ran. |
+| `performed_steps`, `skipped_steps`, `merge_state`, `chosen_path` | array<string> / string \| null / string | required for `land` | Machine-readable path through the land loop and the merge state landed, when one exists. |
 | `verification` | object \| null | required | Post-operation verification proof. `null` only for undo/redo paths that cannot compute it. |
 
 ---
@@ -658,8 +658,8 @@ Preview a merge without changing the worktree.
   "thread_health": "ready",
   "blockers": [],
   "warnings": [],
-  "next_action": "heddle ship --thread feature/parser --push",
-  "recommended_action": "heddle ship --thread feature/parser --push",
+  "next_action": "heddle land --thread feature/parser --push",
+  "recommended_action": "heddle land --thread feature/parser --push",
   "diff": {}
 }
 ```
@@ -832,8 +832,8 @@ Report manual follow-up after a blocked or refreshed thread.
   "message": "Thread requires a manual follow-up",
   "blockers": [],
   "warnings": [],
-  "next_action": "heddle ship --thread feature/parser --no-push",
-  "recommended_action": "heddle ship --thread feature/parser --no-push",
+  "next_action": "heddle land --thread feature/parser --no-push",
+  "recommended_action": "heddle land --thread feature/parser --no-push",
   "thread": "feature/parser"
 }
 ```
@@ -1926,7 +1926,7 @@ Control-tower view across every active thread.
     "recovery_commands": [],
     "checks": []
   },
-  "recommended_action": "heddle capture",
+  "recommended_action": "heddle commit -m \"...\"",
   "current_thread": "feature/parser-fast",
   "groups": [
     {
@@ -2122,8 +2122,8 @@ instead of treating it as a global catalog option.
     }
   ],
   "recommended_action_placeholders": [
-    "heddle capture -m \"...\"",
-    "heddle checkpoint -m \"...\"",
+    "heddle commit -m \"...\"",
+    "heddle commit -m \"...\"",
     "heddle commit -m \"...\"",
     "heddle ready -m \"...\"",
     "heddle stash push -m \"...\"",
@@ -2464,7 +2464,7 @@ catalog-wide schema coverage.
   "output_kind": "doctor_schemas",
   "status": "available",
   "verified": true,
-  "summary": "211 command(s), 181 JSON command(s), 108 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 39 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 59 accepted opaque schema(s) outside clean verification",
+  "summary": "211 command(s), 181 JSON command(s), 108 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 38 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 59 accepted opaque schema(s) outside clean verification",
   "recommended_action": null,
   "recovery_commands": [],
   "registered_verbs": ["status", "verify", "try"],
@@ -2477,7 +2477,6 @@ catalog-wide schema coverage.
     "status": "available",
     "verified_scope": "everyday_and_agent",
     "advanced_scope": "advanced_internal_admin",
-    "summary": "211 command(s), 181 JSON command(s), 108 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 39 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 59 accepted opaque schema(s) outside clean verification",
     "catalog_commands_total": 211,
     "catalog_mutating_commands_total": 108,
     "json_commands_total": 181,
@@ -2485,21 +2484,19 @@ catalog-wide schema coverage.
     "json_commands_with_schema": 122,
     "json_commands_with_accepted_opaque_schema": 59,
     "json_commands_without_schema": 0,
-    "verified_scope_json_commands_total": 39,
-    "verified_scope_json_commands_with_schema": 39,
+    "verified_scope_json_commands_total": 38,
+    "verified_scope_json_commands_with_schema": 38,
     "verified_scope_json_commands_with_accepted_opaque_schema": 0,
     "verified_scope_json_commands_without_schema": 0,
-    "advanced_scope_json_commands_total": 142,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 59,
     "mutating_commands_total": 107,
     "mutating_commands_with_schema": 75,
     "mutating_commands_with_accepted_opaque_schema": 32,
     "mutating_commands_without_schema": 0,
-    "verified_scope_mutating_commands_total": 24,
-    "verified_scope_mutating_commands_with_schema": 24,
+    "verified_scope_mutating_commands_total": 23,
+    "verified_scope_mutating_commands_with_schema": 23,
     "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
     "verified_scope_mutating_commands_without_schema": 0,
-    "advanced_scope_mutating_commands_total": 83,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 32,
     "undocumented_schema_verbs_total": 0,
     "opaque_schema_verbs_total": 59,
@@ -2528,7 +2525,7 @@ surface, not repository state.
 ```json
 {
   "topic": "git-overlay",
-  "summary": "Use Heddle as the daily Git-overlay loop: status, diff, commit, start --path, ready, merge --preview, ship, undo, verification.",
+  "summary": "Use Heddle as the daily Git-overlay loop: status, diff, commit, start --path, ready, land, push, undo, verification.",
   "steps": [
     "heddle status",
     "heddle adopt --ref <branch>",
@@ -2536,8 +2533,7 @@ surface, not repository state.
     "heddle commit -m <message>",
     "heddle start <name> --path ../<name>",
     "heddle ready",
-    "heddle merge <name> --preview",
-    "heddle ship --thread <name> --no-push",
+    "heddle land --thread <name> --no-push",
     "heddle push",
     "heddle undo",
     "heddle verify"
@@ -2594,15 +2590,15 @@ lives in `recovery_commands`.
 {
   "status": "completed",
   "action": "try",
-  "message": "`cargo test` succeeded; thread 'try-1234abcd' ready (state hd-sqr398dvx9ay). Run `heddle merge try-1234abcd` to land.",
+  "message": "`cargo test` succeeded; thread 'try-1234abcd' ready (state hd-sqr398dvx9ay). Run `heddle ready --thread try-1234abcd` to land.",
   "thread": "try-1234abcd",
   "thread_dropped": false,
   "exit_code": 0,
   "duration_ms": 1420,
   "captured_state": "hd-sqr398dvx9ay",
   "merge_state": null,
-  "next_action": "heddle merge try-1234abcd",
-  "recommended_action": "heddle merge try-1234abcd",
+  "next_action": "heddle ready --thread try-1234abcd",
+  "recommended_action": "heddle ready --thread try-1234abcd",
   "recovery_commands": ["heddle thread drop try-1234abcd"]
 }
 ```
@@ -2639,7 +2635,7 @@ Run N isolated candidates and recommend the best thread to inspect or merge.
     }
   ],
   "recommended": "attempt-1",
-  "next_action": "heddle merge attempt-1 --with-diff"
+  "next_action": "heddle ready --thread attempt-1"
 }
 ```
 
@@ -2674,8 +2670,8 @@ Refresh the active or named thread, or report the verification/action blocker.
   "message": "Refreshed thread 'feature/parser'",
   "blockers": [],
   "warnings": [],
-  "next_action": "heddle ship",
-  "recommended_action": "heddle ship",
+  "next_action": "heddle land",
+  "recommended_action": "heddle land",
   "thread": "feature/parser",
   "current_state": "hd-sqr398dvx9ay",
   "chosen_path": "refresh"

@@ -566,7 +566,7 @@ pub async fn cmd_actor_done(cli: &Cli, session_id: Option<String>) -> Result<()>
 
 fn actor_done_recommended_action(thread: &str, coordination_status: &str) -> Option<String> {
     (coordination_status == "merge-ready")
-        .then(|| super::thread_landing::merge_preview_command(thread))
+        .then(|| super::thread_landing::land_local_command(thread))
 }
 
 pub async fn cmd_actor_explain(cli: &Cli, session_id: Option<String>) -> Result<()> {
@@ -850,7 +850,7 @@ fn no_active_actor_advice() -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "no_active_actor",
         "No active actor for this checkout",
-        "After a thread is shipped or an actor is marked done, it is no longer selected implicitly. Run `heddle actor list` to inspect completed actors, or pass a session id to `heddle actor show <session>`.",
+        "After a thread is landed or an actor is marked done, it is no longer selected implicitly. Run `heddle actor list` to inspect completed actors, or pass a session id to `heddle actor show <session>`.",
         "no active actor registry entry matches the current thread or checkout path",
         "choosing a completed actor implicitly could show the wrong session",
         "no actor registry entries, refs, repository objects, or worktree files were changed",

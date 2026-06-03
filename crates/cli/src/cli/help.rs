@@ -108,7 +108,7 @@ pub fn print_help(cmd: &clap::Command, topic: &[String]) -> std::io::Result<()> 
             )?;
             writeln!(
                 out,
-                "Isolated work: heddle start <name> --path ../<name> -> heddle ready -> heddle merge --preview -> heddle ship"
+                "Isolated work: heddle start <name> --path ../<name> -> heddle commit -m \"...\" -> heddle ready -> heddle land"
             )?;
             writeln!(out)?;
             writeln!(
@@ -370,7 +370,7 @@ pub fn topic_text(topic: &str) -> Option<&'static str> {
 const ADVANCED_HELP: &str = "Advanced commands for power users, agents, automation, Git interop, and recovery.\n\
 \n\
 The default `heddle help` curates the native loop: init/adopt/clone,\n\
-status/diff/commit/start, ready/merge/ship/push/pull, undo, log/show,\n\
+status/diff/commit/start, ready/land/push/pull, resolve/continue/abort,\n\
 doctor/verify. Power nouns such as thread/workspace/remote/bridge/agent and\n\
 Git adapter commands live behind this topic. Use `heddle help\n\
 <verb>` for curated topics or `heddle <verb> --help` for the full clap-derived\n\
@@ -451,8 +451,7 @@ Everyday loop:
     heddle commit -m "..."
     heddle start <name> --path ../<name>
     heddle ready
-    heddle merge <name> --preview
-    heddle ship --thread <name>
+    heddle land --thread <name>
     heddle undo
     heddle verify
 
@@ -473,7 +472,7 @@ history, and a target it eventually merges into. It is *not* a git branch:\n\
 the git-overlay branch is downstream plumbing (created at checkpoint),\n\
 not the primary object. You start work with `heddle start <name>`, switch\n\
 between threads with `heddle thread switch <name>`, and integrate with\n\
-`heddle ship` (or check readiness without merging via `heddle ready`).\n\
+`heddle land` (or check readiness without merging via `heddle ready`).\n\
 \n\
 # Threads vs. git branches\n\
 \n\
@@ -507,7 +506,7 @@ workflow states:\n\
   `virtualized` when a mount is available, otherwise `solid`.\n\
 \n\
 A `solid` thread and a `materialized` thread are interchangeable from\n\
-the workflow's point of view — `capture`, `ship`, `goto`, etc. behave\n\
+the workflow's point of view — `capture`, `land`, `goto`, etc. behave\n\
 identically. The mode only controls bytes-on-disk semantics.\n\
 \n\
 # Materialize vs. promote\n\
@@ -532,12 +531,10 @@ Resolution paths:\n\
 - `heddle sync` — refresh the current thread onto its target when\n\
   the replay is clean. The fast path for a stale thread with no\n\
   conflicts.\n\
-- `heddle thread refresh <name>` — the same refresh, addressed by\n\
-  thread name rather than the current checkout.\n\
 - If `sync` reports conflicts or other blockers, use\n\
-  `heddle thread resolve <name>` to walk through the next steps, or\n\
-  `heddle conflict` to handle the conflicts as structured data.\n\
-- `heddle ship` will refresh-then-merge for you when the replay is\n\
+  `heddle resolve`, `heddle continue`, or `heddle conflict` to handle\n\
+  the conflicts as structured data.\n\
+- `heddle land` will refresh-then-merge for you when the replay is\n\
   clean; it fails closed when manual resolution is required.\n\
 \n\
 # `goto` vs. `git checkout` vs. `thread switch`\n\
@@ -692,10 +689,10 @@ Isolate risky work:\n\
 \n\
     heddle start <name> --path ../<name>\n\
     cd ../<name>\n\
+    heddle commit -m \"...\"\n\
     heddle ready\n\
     cd -\n\
-    heddle merge <name> --preview\n\
-    heddle ship --thread <name> --no-push     # add --push when ready to publish\n\
+    heddle land --thread <name> --no-push     # add --push when ready to publish\n\
 \n\
 Recover or prove state:\n\
 \n\
@@ -705,7 +702,7 @@ Recover or prove state:\n\
 State-specific recovery:\n\
 \n\
     Worktree has unsaved edits: heddle commit -m \"...\"\n\
-    Captured in Heddle but not Git: heddle checkpoint -m \"...\"\n\
+    Captured in Heddle but not Git: heddle commit -m \"...\"\n\
     Git refs changed externally: heddle adopt --ref <branch>\n";
 
 const BRIDGE_TOPIC: &str = "Git bridge — adopt existing Git repos through an adapter.\n\
@@ -732,8 +729,7 @@ Daily loop:\n\
     heddle push                               # Git-overlay remotes use the top-level verb\n\
     heddle start <name> --path ../<name>\n\
     heddle ready --thread <name>              # or cd into ../<name> and run heddle ready\n\
-    heddle merge <name> --preview\n\
-    heddle ship --thread <name> --no-push     # add --push to land and push together\n\
+    heddle land --thread <name> --no-push     # add --push to land and push together\n\
 \n\
 Recovery and inspection:\n\
 \n\
@@ -869,7 +865,7 @@ mod tests {
     fn everyday_verbs_surface_the_core_loop() {
         let everyday: std::collections::HashSet<&str> = everyday_verbs().into_iter().collect();
         for verb in [
-            "init", "clone", "status", "start", "commit", "ready", "diff", "merge", "ship",
+            "init", "clone", "status", "start", "commit", "ready", "diff", "land",
             "resolve", "undo", "log", "show", "pull", "push", "doctor", "verify",
         ] {
             assert!(

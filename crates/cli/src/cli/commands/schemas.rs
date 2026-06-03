@@ -73,7 +73,7 @@ schema_registry! {
     (&["switch", "checkout"], SwitchCheckoutSchema),
     (&["merge --preview"], MergePreviewSchema),
     (&["ready"], ReadySchema),
-    (&["ship"], ShipSchema),
+    (&["land"], LandSchema),
     (&["sync"], SyncSchema),
     (&["continue", "abort"], OperatorCommandSchema),
     (&["delegate"], DelegateSchema),
@@ -1172,7 +1172,7 @@ pub struct SyncSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct ShipSchema {
+pub struct LandSchema {
     pub status: String,
     pub action: String,
     pub message: String,

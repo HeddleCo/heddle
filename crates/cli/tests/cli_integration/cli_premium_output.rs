@@ -57,15 +57,15 @@ fn merged_thread_list_reads_integrated_not_actionable() {
     let thread_path = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
     std::fs::write(thread_path.join("polish.txt"), "premium").unwrap();
 
-    let shipped: Value = serde_json::from_str(
+    let landed: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "ship", "--thread", "feature/polish"],
+            &["--output", "json", "land", "--thread", "feature/polish"],
             Some(temp.path()),
         )
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(shipped["status"], "shipped");
+    assert_eq!(landed["status"], "landed");
 
     heddle(&["thread", "refresh", "feature/polish"], Some(temp.path())).unwrap();
     let listed: Value = serde_json::from_str(
@@ -163,7 +163,7 @@ fn status_does_not_advertise_ready_thread_for_another_target() {
             .unwrap();
 
     assert_ne!(
-        status["recommended_action"], "heddle merge feature/ready-main --preview",
+        status["recommended_action"], "heddle land --thread feature/ready-main --no-push",
         "status on a non-target thread must not suggest merging target-main work into the active thread: {status}"
     );
     assert_eq!(

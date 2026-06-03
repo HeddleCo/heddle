@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Shared commands for the ready -> preview -> ship thread landing loop.
+//! Shared commands for the ready -> land thread landing loop.
 
 use repo::Repository;
 
@@ -9,32 +9,32 @@ pub(crate) fn merge_preview_command(thread_id: &str) -> String {
     heddle_action(["merge", thread_id, "--preview"])
 }
 
-pub(crate) fn ship_command_for_thread(repo: &Repository, thread_id: &str) -> String {
+pub(crate) fn land_command_for_thread(repo: &Repository, thread_id: &str) -> String {
     let has_push_target = super::remote::resolved_default_remote_name(repo)
         .ok()
         .flatten()
         .is_some();
-    ship_command_with_push_target(thread_id, has_push_target)
+    land_command_with_push_target(thread_id, has_push_target)
 }
 
-pub(crate) fn ship_command_with_push_target(thread_id: &str, has_push_target: bool) -> String {
+pub(crate) fn land_command_with_push_target(thread_id: &str, has_push_target: bool) -> String {
     if has_push_target {
-        ship_push_command(thread_id)
+        land_push_command(thread_id)
     } else {
-        ship_local_command(thread_id)
+        land_local_command(thread_id)
     }
 }
 
-pub(crate) fn ship_push_command(thread_id: &str) -> String {
-    heddle_action(["ship", "--thread", thread_id, "--push"])
+pub(crate) fn land_push_command(thread_id: &str) -> String {
+    heddle_action(["land", "--thread", thread_id, "--push"])
 }
 
-pub(crate) fn ship_push_remote_command(thread_id: &str, remote: &str) -> String {
-    heddle_action(["ship", "--thread", thread_id, "--push", "--remote", remote])
+pub(crate) fn land_push_remote_command(thread_id: &str, remote: &str) -> String {
+    heddle_action(["land", "--thread", thread_id, "--push", "--remote", remote])
 }
 
-pub(crate) fn ship_local_command(thread_id: &str) -> String {
-    heddle_action(["ship", "--thread", thread_id, "--no-push"])
+pub(crate) fn land_local_command(thread_id: &str) -> String {
+    heddle_action(["land", "--thread", thread_id, "--no-push"])
 }
 
 pub(crate) fn contextual_thread_action(
@@ -58,21 +58,21 @@ pub(crate) fn contextual_thread_action(
             "--preview".to_string(),
         ]);
     }
-    if action == ship_local_command(thread_id) {
+    if action == land_local_command(thread_id) {
         return heddle_action(vec![
             "--repo".to_string(),
             main_root.display().to_string(),
-            "ship".to_string(),
+            "land".to_string(),
             "--thread".to_string(),
             thread_id.to_string(),
             "--no-push".to_string(),
         ]);
     }
-    if action == ship_push_command(thread_id) {
+    if action == land_push_command(thread_id) {
         return heddle_action(vec![
             "--repo".to_string(),
             main_root.display().to_string(),
-            "ship".to_string(),
+            "land".to_string(),
             "--thread".to_string(),
             thread_id.to_string(),
             "--push".to_string(),
@@ -92,16 +92,16 @@ mod tests {
             "heddle merge feature/demo --preview"
         );
         assert_eq!(
-            ship_local_command("feature/demo"),
-            "heddle ship --thread feature/demo --no-push"
+            land_local_command("feature/demo"),
+            "heddle land --thread feature/demo --no-push"
         );
         assert_eq!(
-            ship_command_with_push_target("feature/demo", true),
-            "heddle ship --thread feature/demo --push"
+            land_command_with_push_target("feature/demo", true),
+            "heddle land --thread feature/demo --push"
         );
         assert_eq!(
-            ship_push_remote_command("feature/demo", "origin"),
-            "heddle ship --thread feature/demo --push --remote origin"
+            land_push_remote_command("feature/demo", "origin"),
+            "heddle land --thread feature/demo --push --remote origin"
         );
         assert_eq!(
             merge_preview_command("feature with spaces"),

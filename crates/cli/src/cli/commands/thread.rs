@@ -36,8 +36,9 @@ use super::{
     },
     mount_lifecycle,
     next_action::{
-        NextActionInput, effective_next_action,
+        NextActionInput, NextActionValidationContext, effective_next_action,
         thread_recovery_action_is_primary as shared_thread_recovery_action_is_primary,
+        write_validated_json_stdout,
     },
     operator_loop::{primary_next_action, primary_next_action_with_verification},
     snapshot::{ensure_current_state, summarize_confidence, summarize_verification},
@@ -629,7 +630,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
             summary.coordination_status = CoordinationStatus::Clean;
             summary.blockers.clear();
             summary.recommended_action =
-                super::thread_landing::merge_preview_command(&summary.name);
+                canonical_bridge_reconcile_ref_preview_command(None, &summary.name);
         }
         if summary.is_current {
             enrich_current_summary_with_dirty_paths(repo, &mut summary)?;
@@ -1304,7 +1305,10 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
     };
 
     if as_json {
-        println!("{}", serde_json::to_string(&output)?);
+        write_validated_json_stdout(
+            &output,
+            NextActionValidationContext::new(&["thread", "list"], repo.capability()),
+        )?;
     } else if output.threads.is_empty() && output.available_git_refs.is_empty() {
         println!("No threads");
     } else {
@@ -2321,7 +2325,7 @@ pub(crate) fn cmd_thread_create(
         .set_thread_cas(&ThreadName::new(&name), RefExpectation::Missing, &current)?;
 
     // Persist a Thread record so subsequent commands that go through
-    // `ThreadManager::load` (delegate, ship, integration policy,
+    // `ThreadManager::load` (delegate, land, integration policy,
     // `thread show`'s record path) can find it. Without this the ref
     // exists but the record file is missing and any `manager.load(name)`
     // returns `None`, surfacing as `Thread '<name>' not found` even
@@ -2615,7 +2619,7 @@ pub(crate) fn cmd_thread_switch(
     // private|virtualized` recorded under `.run-heddle-threads/<name>/`)
     // is a metadata-only operation. The on-disk worktree at the
     // recorded path is already X's worktree — it was set up by `start`
-    // and is kept in sync by the metadata-driven merge/rebase/goto/ship
+    // and is kept in sync by the metadata-driven merge/rebase/goto/land
     // dispatcher (see `Repository::active_worktree_path`). The operator's
     // CWD must stay untouched so `thread switch X` from `$ROOT` does NOT
     // overwrite `$ROOT`'s files with X's tree.
@@ -2865,22 +2869,21 @@ pub(crate) fn show_thread_summary(
         summary.parent_thread.as_deref(),
     );
     if should_output_json(cli, Some(repo.config())) {
-        println!(
-            "{}",
-            serde_json::to_string(&ThreadShowOutput {
-                output_kind: "thread_show",
-                repository_label: presentation.label,
-                repository_context: presentation.context,
-                next_action: summary.recommended_action.clone(),
-                next_action_template: recommended_action_template(&summary.recommended_action),
-                recommended_action_template: recommended_action_template(
-                    &summary.recommended_action
-                ),
-                summary,
-                recovery_commands: trust.recovery_commands.clone(),
-                trust,
-            })?
-        );
+        let output = ThreadShowOutput {
+            output_kind: "thread_show",
+            repository_label: presentation.label,
+            repository_context: presentation.context,
+            next_action: summary.recommended_action.clone(),
+            next_action_template: recommended_action_template(&summary.recommended_action),
+            recommended_action_template: recommended_action_template(&summary.recommended_action),
+            summary,
+            recovery_commands: trust.recovery_commands.clone(),
+            trust,
+        };
+        write_validated_json_stdout(
+            &output,
+            NextActionValidationContext::new(&["thread", "show"], repo.capability()),
+        )?;
     } else {
         println!("Repository: {}", presentation.label);
         render_repository_context_lines(presentation.context.as_ref());

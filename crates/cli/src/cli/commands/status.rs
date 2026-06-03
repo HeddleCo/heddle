@@ -37,6 +37,7 @@ use super::{
         remote_tracking_with_verification_action, repository_setup_guidance,
         serialize_empty_action_as_null,
     },
+    next_action::{NextActionValidationContext, write_validated_json_stdout},
     operator_loop::primary_next_action_with_verification,
     snapshot::resolve_principal,
     thread::{
@@ -63,6 +64,8 @@ pub(crate) struct StatusOutput {
     hosted_enabled: bool,
     #[serde(skip)]
     render_json: bool,
+    #[serde(skip)]
+    validation_capability: RepositoryCapability,
     operation: Option<RepositoryOperationStatus>,
     remote_tracking: Option<GitRemoteTrackingStatus>,
     #[serde(rename = "verification")]
@@ -379,7 +382,10 @@ fn build_plain_git_status_probe(cli: &Cli) -> Result<Option<PlainGitStatusOutput
 
 fn render_plain_git_status(cli: &Cli, output: &PlainGitStatusOutput, short: bool) -> Result<()> {
     if should_output_json(cli, None) {
-        crate::cli::render::write_json_stdout(output)?;
+        write_validated_json_stdout(
+            output,
+            NextActionValidationContext::without_repo(&["status"]),
+        )?;
         return Ok(());
     }
     if short {
@@ -545,6 +551,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
             storage_model: repo.storage_model_label().to_string(),
             hosted_enabled: repo.hosted_enabled(),
             render_json: as_json,
+            validation_capability: repo.capability(),
             git_overlay_import_hint: import_hint.clone().map(|hint| GitOverlayImportHintOutput {
                 current_branch: hint.current_branch,
                 missing_branch_count: hint.missing_branch_count,
@@ -722,6 +729,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         storage_model: repo.storage_model_label().to_string(),
         hosted_enabled: repo.hosted_enabled(),
         render_json: as_json,
+        validation_capability: repo.capability(),
         git_overlay_import_hint: import_hint.clone().map(|hint| GitOverlayImportHintOutput {
             current_branch: hint.current_branch,
             missing_branch_count: hint.missing_branch_count,
@@ -1073,7 +1081,10 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
 pub(crate) fn render_status(cli: &Cli, output: &StatusOutput, short: bool) -> Result<()> {
     let render_start = Instant::now();
     if output.render_json {
-        crate::cli::render::write_json_stdout(output)?;
+        write_validated_json_stdout(
+            output,
+            NextActionValidationContext::new(&["status"], output.validation_capability),
+        )?;
     } else if short {
         render_short_status(output);
     } else {
@@ -1754,9 +1765,6 @@ fn status_next_reason(output: &StatusOutput) -> &'static str {
     if output.operation.is_some() {
         return "an operation is in progress; finish or abort it before starting another workflow";
     }
-    if output.recommended_action.contains("checkpoint") {
-        return "the work is saved in Heddle; checkpoint writes the Git commit for this saved state";
-    }
     if output.recommended_action.contains("adopt --ref")
         || output.git_overlay_import_hint.as_ref().is_some_and(|hint| {
             hint.missing_branches
@@ -1770,10 +1778,10 @@ fn status_next_reason(output: &StatusOutput) -> &'static str {
         if output.repository_capability != "git-overlay" {
             return "there are uncommitted worktree changes; commit captures them as a Heddle state";
         }
-        return "there are uncommitted worktree changes; commit captures them and writes the Git checkpoint";
+        return "there are uncommitted worktree changes; commit captures them and writes the matching Git commit";
     }
-    if output.changed_path_count > 0 && output.recommended_action.contains("capture") {
-        return "there are uncaptured worktree changes; capture records a recoverable state";
+    if output.repository_capability == "git-overlay" && output.recommended_action.contains("commit") {
+        return "the work is saved in Heddle; commit writes the matching Git commit";
     }
     if !output.blockers.is_empty() {
         return "the current thread has blockers that must be cleared before integration";
@@ -1787,8 +1795,8 @@ fn status_next_reason(output: &StatusOutput) -> &'static str {
     if output.recommended_action.contains("ready") {
         return "the work is captured; readiness checks merge blockers without landing changes";
     }
-    if output.recommended_action.contains("merge") {
-        return "the thread is ready to integrate into its target";
+    if output.recommended_action.contains("land") {
+        return "the thread is ready to land into its target";
     }
     "this is the safest command for the current repository and thread state"
 }
@@ -1796,17 +1804,11 @@ fn status_next_reason(output: &StatusOutput) -> &'static str {
 fn status_next_follow_up(output: &StatusOutput) -> Option<&'static str> {
     let action = output.recommended_action.as_str();
     if action.contains("commit") && status_has_publish_target(output) {
-        Some("run `heddle push` when the checkpoint is ready to publish")
-    } else if action.contains("checkpoint") && status_has_publish_target(output) {
-        Some("run `heddle push` when the Git checkpoint is ready to publish")
-    } else if action.contains("capture") {
-        Some("run `heddle ready` when the captured work should be checked for merge")
+        Some("run `heddle push` when the Git commit is ready to publish")
     } else if action.contains("ready") {
-        Some("preview integration with `heddle merge <thread> --preview` before landing it")
-    } else if action.contains("merge") && action.contains("--preview") {
-        Some(
-            "land the previewed thread with `heddle ship --thread <thread> --no-push`; add `--push` only when a remote is configured",
-        )
+        Some("run `heddle land --thread <thread> --no-push` after readiness passes")
+    } else if action.contains("land") {
+        Some("add `--push` only when a remote is configured and the thread should be published")
     } else if action.contains("resolve") || action.contains("continue") || action.contains("abort")
     {
         Some("check `heddle status` again after the operation state changes")
