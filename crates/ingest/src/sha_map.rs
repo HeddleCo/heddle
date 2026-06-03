@@ -13,14 +13,15 @@
 //!
 //! # Storage
 //!
-//! SQLite at `<heddle_dir>/ingest/sha_map.sqlite` (WAL mode). Two columns
+//! SQLite at `<heddle_dir>/ingest/sha_map.sqlite` (WAL mode). A compact row
 //! plus one secondary index cover every query the importer makes:
 //!
 //! ```sql
 //! CREATE TABLE sha_map (
 //!     git_sha   TEXT PRIMARY KEY NOT NULL,
 //!     kind      INTEGER NOT NULL,
-//!     heddle_repr TEXT NOT NULL
+//!     heddle_repr TEXT NOT NULL,
+//!     lossy_entries TEXT
 //! );
 //! CREATE INDEX sha_map_heddle_repr ON sha_map(heddle_repr);
 //! ```
@@ -58,6 +59,8 @@ use std::path::Path;
 use objects::object::{ChangeId, ContentHash};
 use rusqlite::{Connection, OptionalExtension, params};
 use tracing::{debug, warn};
+
+use crate::import_options::LossyImportEntry;
 
 /// What kind of object the mapping is for.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -116,6 +119,8 @@ pub enum ShaMapError {
         existing: String,
         incoming: String,
     },
+    #[error("serialize lossy tree entries: {0}")]
+    LossySerialize(#[from] serde_json::Error),
 }
 
 impl Default for ShaMap {
@@ -277,7 +282,22 @@ impl ShaMap {
 
     /// Insert a tree mapping.
     pub fn insert_tree(&mut self, git_sha: &str, heddle: ContentHash) -> Result<(), ShaMapError> {
-        self.insert_raw(MapKind::Tree, git_sha, heddle.to_hex())
+        self.insert_tree_with_lossy_entries(git_sha, heddle, &[])
+    }
+
+    /// Insert a tree mapping and persist any lossy conversions that produced it.
+    pub fn insert_tree_with_lossy_entries(
+        &mut self,
+        git_sha: &str,
+        heddle: ContentHash,
+        lossy_entries: &[LossyImportEntry],
+    ) -> Result<(), ShaMapError> {
+        let lossy_json = if lossy_entries.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(lossy_entries)?)
+        };
+        self.insert_raw_with_lossy(MapKind::Tree, git_sha, heddle.to_hex(), lossy_json)
     }
 
     /// Insert a blob mapping.
@@ -292,14 +312,37 @@ impl ShaMap {
         heddle_repr: String,
     ) -> Result<(), ShaMapError> {
         let git_sha = normalize_git_sha(git_sha)?;
+        self.insert_raw_normalized(kind, git_sha, heddle_repr, None)
+    }
+
+    fn insert_raw_with_lossy(
+        &mut self,
+        kind: MapKind,
+        git_sha: &str,
+        heddle_repr: String,
+        lossy_json: Option<String>,
+    ) -> Result<(), ShaMapError> {
+        let git_sha = normalize_git_sha(git_sha)?;
+        self.insert_raw_normalized(kind, git_sha, heddle_repr, lossy_json)
+    }
+
+    fn insert_raw_normalized(
+        &mut self,
+        kind: MapKind,
+        git_sha: String,
+        heddle_repr: String,
+        lossy_json: Option<String>,
+    ) -> Result<(), ShaMapError> {
         // Try the INSERT first — happy path is one prepared statement.
         // On primary-key conflict we fall back to a SELECT so we can
         // distinguish idempotent re-inserts (same `heddle_repr`) from
         // genuine conflicts.
         let mut stmt = self
             .conn
-            .prepare_cached("INSERT INTO sha_map (git_sha, kind, heddle_repr) VALUES (?, ?, ?)")?;
-        match stmt.execute(params![git_sha, kind.as_i64(), heddle_repr]) {
+            .prepare_cached(
+                "INSERT INTO sha_map (git_sha, kind, heddle_repr, lossy_entries) VALUES (?, ?, ?, ?)",
+            )?;
+        match stmt.execute(params![git_sha, kind.as_i64(), heddle_repr, lossy_json]) {
             Ok(_) => Ok(()),
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
@@ -316,7 +359,15 @@ impl ShaMap {
                     )
                     .optional()?;
                 match existing {
-                    Some(s) if s == heddle_repr => Ok(()), // idempotent re-insert
+                    Some(s) if s == heddle_repr => {
+                        if kind == MapKind::Tree && lossy_json.is_some() {
+                            self.conn.execute(
+                                "UPDATE sha_map SET lossy_entries = ? WHERE git_sha = ? AND kind = ? AND lossy_entries IS NULL",
+                                params![lossy_json, git_sha, kind.as_i64()],
+                            )?;
+                        }
+                        Ok(())
+                    }
                     Some(s) => Err(ShaMapError::Conflict {
                         git: git_sha,
                         existing: s,
@@ -341,6 +392,32 @@ impl ShaMap {
     pub fn get_tree(&self, git_sha: &str) -> Option<ContentHash> {
         let heddle = self.get_for_kind(git_sha, MapKind::Tree)?;
         ContentHash::from_hex(&heddle).ok()
+    }
+
+    /// Look up persisted lossy entries for a git tree SHA.
+    ///
+    /// Returns `Ok(None)` when there is no tree mapping. Returns an empty
+    /// vector when the mapped tree was lossless.
+    pub fn get_tree_lossy_entries(
+        &self,
+        git_sha: &str,
+    ) -> Result<Option<Vec<LossyImportEntry>>, ShaMapError> {
+        let git_sha = normalize_git_sha(git_sha)?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT lossy_entries FROM sha_map WHERE git_sha = ? AND kind = ?")?;
+        let Some(json) = stmt
+            .query_row(params![git_sha, MapKind::Tree.as_i64()], |r| {
+                r.get::<_, Option<String>>(0)
+            })
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let Some(json) = json else {
+            return Ok(Some(Vec::new()));
+        };
+        Ok(Some(serde_json::from_str(&json)?))
     }
 
     /// Look up the Heddle `ContentHash` for a git blob SHA.
@@ -414,12 +491,27 @@ fn initialize_schema(conn: &Connection) -> Result<(), ShaMapError> {
         CREATE TABLE IF NOT EXISTS sha_map (
             git_sha   TEXT PRIMARY KEY NOT NULL,
             kind      INTEGER NOT NULL,
-            heddle_repr TEXT NOT NULL
+            heddle_repr TEXT NOT NULL,
+            lossy_entries TEXT
         );
         CREATE INDEX IF NOT EXISTS sha_map_heddle_repr ON sha_map(heddle_repr);
         "#,
     )?;
+    if !sha_map_has_column(conn, "lossy_entries")? {
+        conn.execute_batch("ALTER TABLE sha_map ADD COLUMN lossy_entries TEXT;")?;
+    }
     Ok(())
+}
+
+fn sha_map_has_column(conn: &Connection, column: &str) -> Result<bool, ShaMapError> {
+    let mut stmt = conn.prepare("PRAGMA table_info(sha_map)")?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for existing in columns {
+        if existing? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Lowercase a 40-char git SHA-1. Returns an error for anything else.
@@ -446,6 +538,8 @@ fn normalize_git_sha(sha: &str) -> Result<String, ShaMapError> {
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
+
+    use crate::import_options::LossyImportEntry;
 
     use super::*;
 
@@ -544,6 +638,65 @@ mod tests {
         assert_eq!(reloaded.get_commit(sha1), Some(cid));
         assert_eq!(reloaded.get_tree(sha2), Some(tree_h));
         assert_eq!(reloaded.get_blob(sha3), Some(blob_h));
+    }
+
+    #[test]
+    fn lossy_tree_entries_round_trip_through_disk() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("sha_map.sqlite");
+        let sha = "ca1af22000000000000000000000000000000000";
+        let tree_h = deterministic_content_hash("lossy-tree");
+        let entries = vec![LossyImportEntry::dropped(
+            "vendor".to_string(),
+            Some("0707070707070707070707070707070707070707".to_string()),
+            "gitlink/submodule entries have no Heddle tree equivalent",
+        )];
+
+        {
+            let mut m = ShaMap::open(&path).unwrap();
+            m.insert_tree_with_lossy_entries(sha, tree_h, &entries)
+                .unwrap();
+        }
+
+        let reloaded = ShaMap::open(&path).unwrap();
+        assert_eq!(reloaded.get_tree(sha), Some(tree_h));
+        assert_eq!(
+            reloaded.get_tree_lossy_entries(sha).unwrap().unwrap(),
+            entries
+        );
+    }
+
+    #[test]
+    fn open_adds_lossy_entries_column_to_existing_db() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("sha_map.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE sha_map (
+                    git_sha TEXT PRIMARY KEY NOT NULL,
+                    kind INTEGER NOT NULL,
+                    heddle_repr TEXT NOT NULL
+                );
+                CREATE INDEX sha_map_heddle_repr ON sha_map(heddle_repr);
+                "#,
+            )
+            .unwrap();
+        }
+
+        let mut m = ShaMap::open(&path).unwrap();
+        let sha = "ca1af22000000000000000000000000000000000";
+        let tree_h = deterministic_content_hash("migrated-tree");
+        let entries = vec![LossyImportEntry::converted(
+            "bad\u{fffd}name".to_string(),
+            Some("0808080808080808080808080808080808080808".to_string()),
+            "tree entry name is not valid UTF-8",
+        )];
+        m.insert_tree_with_lossy_entries(sha, tree_h, &entries)
+            .unwrap();
+
+        assert_eq!(m.get_tree_lossy_entries(sha).unwrap().unwrap(), entries);
     }
 
     #[test]

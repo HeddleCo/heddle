@@ -12,9 +12,11 @@ pub struct ImportOptions {
     pub lossy: bool,
 }
 
+use serde::{Deserialize, Serialize};
+
 /// One git tree entry that was dropped or converted because Heddle cannot
 /// represent it losslessly yet.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LossyImportEntry {
     pub path: String,
     pub git_object: Option<String>,
@@ -22,7 +24,7 @@ pub struct LossyImportEntry {
     pub reason: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum LossyImportAction {
     Dropped,
     Converted,
@@ -105,4 +107,11 @@ pub(crate) fn entry_relative_to_prefix(prefix: &str, entry: &LossyImportEntry) -
         relative.path = stripped.trim_start_matches('/').to_string();
     }
     relative
+}
+
+pub(crate) fn fail_lossy_entry(entry: &LossyImportEntry) -> crate::IngestError {
+    crate::IngestError::Other(format!(
+        "git import cannot represent tree entry losslessly: {}. Retry with --lossy to accept dropping or converting unrepresentable entries.",
+        entry.summary_line()
+    ))
 }

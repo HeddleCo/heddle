@@ -36,8 +36,8 @@ use crate::{
     IngestError,
     git_walk::{GitSource, TreeChild, TreeChildKind},
     import_options::{
-        ImportOptions, LossyImportEntry, entry_relative_to_prefix, join_tree_path,
-        rebase_lossy_entry,
+        ImportOptions, LossyImportEntry, entry_relative_to_prefix, fail_lossy_entry,
+        join_tree_path, rebase_lossy_entry,
     },
     sha_map::ShaMap,
 };
@@ -95,7 +95,15 @@ impl<'a, S: ObjectStore> TreeTranslator<'a, S> {
         path_prefix: &str,
     ) -> crate::Result<ContentHash> {
         if let Some(hash) = self.map.get_tree(git_tree_sha) {
-            if let Some(entries) = self.lossy_by_tree.get(git_tree_sha) {
+            let entries = self
+                .map
+                .get_tree_lossy_entries(git_tree_sha)
+                .map_err(IngestError::from)?
+                .unwrap_or_default();
+            if !entries.is_empty() {
+                if !self.options.lossy {
+                    return Err(fail_lossy_entry(&rebase_lossy_entry(path_prefix, &entries[0])));
+                }
                 self.lossy_entries.extend(
                     entries
                         .iter()
@@ -122,7 +130,7 @@ impl<'a, S: ObjectStore> TreeTranslator<'a, S> {
         let hash = self.store.put_tree(&tree).map_err(IngestError::from)?;
 
         self.map
-            .insert_tree(git_tree_sha, hash)
+            .insert_tree_with_lossy_entries(git_tree_sha, hash, &tree_lossy_entries)
             .map_err(IngestError::from)?;
         self.lossy_by_tree
             .insert(git_tree_sha.to_string(), tree_lossy_entries);
@@ -192,10 +200,7 @@ impl<'a, S: ObjectStore> TreeTranslator<'a, S> {
 
     fn record_lossy(&mut self, entry: LossyImportEntry) -> crate::Result<()> {
         if !self.options.lossy {
-            return Err(IngestError::Other(format!(
-                "git import cannot represent tree entry losslessly: {}. Retry with --lossy to accept dropping or converting unrepresentable entries.",
-                entry.summary_line()
-            )));
+            return Err(fail_lossy_entry(&entry));
         }
         warn!(entry = %entry.summary_line(), "lossy git import accepted");
         self.lossy_entries.push(entry);
@@ -361,6 +366,35 @@ mod tests {
         commit
     }
 
+    fn seed_nested_gitlink_repo(path: &Path, dir: &str, parent: Option<&str>) -> String {
+        if parent.is_none() {
+            let status = Command::new("git")
+                .args(["init", "-q", "--initial-branch=main"])
+                .current_dir(path)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .status()
+                .expect("git init");
+            assert!(status.success(), "git init failed");
+        }
+
+        let mut subtree_input = Vec::new();
+        subtree_input
+            .extend_from_slice(b"160000 commit 0707070707070707070707070707070707070707\tvendor\0");
+        let subtree = git_output(path, &["mktree", "--missing", "-z"], Some(&subtree_input));
+        let mut root_input = Vec::new();
+        write!(&mut root_input, "040000 tree {subtree}\t{dir}\0").expect("root tree record");
+        let root = git_output(path, &["mktree", "--missing", "-z"], Some(&root_input));
+
+        let mut args = vec!["commit-tree", root.as_str(), "-m", "nested gitlink"];
+        if let Some(parent) = parent {
+            args.extend(["-p", parent]);
+        }
+        let commit = git_output(path, &args, None);
+        git_output(path, &["update-ref", "refs/heads/main", &commit], None);
+        commit
+    }
+
     #[test]
     fn translates_tree_round_trip() {
         let tmp = TempDir::new().unwrap();
@@ -511,6 +545,37 @@ mod tests {
         assert_eq!(lossy_entries.len(), 1);
         assert_eq!(lossy_entries[0].path, converted_name);
         assert!(lossy_entries[0].summary_line().contains("converted"));
+    }
+
+    #[test]
+    fn cached_lossy_subtree_reports_with_new_path_prefix() {
+        let gitdir = TempDir::new().unwrap();
+        let mapdir = TempDir::new().unwrap();
+        let map_path = mapdir.path().join("sha_map.sqlite");
+        let first_commit = seed_nested_gitlink_repo(gitdir.path(), "dir1", None);
+        let git = GitSource::open(gitdir.path()).unwrap();
+        let store = InMemoryStore::new();
+
+        {
+            let mut map = ShaMap::open(&map_path).unwrap();
+            let commit = git.read_commit(&first_commit).unwrap();
+            let mut tx =
+                TreeTranslator::with_options(&git, &store, &mut map, ImportOptions { lossy: true });
+            tx.translate_tree(&commit.tree_sha).unwrap();
+            assert_eq!(tx.lossy_entries()[0].path, "dir1/vendor");
+        }
+
+        let second_commit = seed_nested_gitlink_repo(gitdir.path(), "dir2", Some(&first_commit));
+        let mut map = ShaMap::open(&map_path).unwrap();
+        let commit = git.read_commit(&second_commit).unwrap();
+        let mut tx =
+            TreeTranslator::with_options(&git, &store, &mut map, ImportOptions { lossy: true });
+        tx.translate_tree(&commit.tree_sha).unwrap();
+        let lossy_entries = tx.lossy_entries().to_vec();
+
+        assert_eq!(lossy_entries.len(), 1);
+        assert_eq!(lossy_entries[0].path, "dir2/vendor");
+        assert!(lossy_entries[0].summary_line().contains("dropped"));
     }
 
     #[test]

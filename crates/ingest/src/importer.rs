@@ -34,8 +34,8 @@ use crate::{
     IngestError,
     git_walk::{CommitEntry, GitSource, RefDiscoveryStats, TreeChild, TreeChildKind},
     import_options::{
-        ImportOptions, LossyImportEntry, entry_relative_to_prefix, join_tree_path,
-        rebase_lossy_entry,
+        ImportOptions, LossyImportEntry, entry_relative_to_prefix, fail_lossy_entry,
+        join_tree_path, rebase_lossy_entry,
     },
     oplog_emit::{OplogEmitStats, OplogEmitter},
     ref_emit::{RefEmitStats, RefEmitter},
@@ -374,7 +374,15 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
         path_prefix: &str,
     ) -> crate::Result<ContentHash> {
         if let Some(hash) = self.map.get_tree(git_tree_sha) {
-            if let Some(entries) = self.lossy_by_tree.get(git_tree_sha) {
+            let entries = self
+                .map
+                .get_tree_lossy_entries(git_tree_sha)
+                .map_err(IngestError::from)?
+                .unwrap_or_default();
+            if !entries.is_empty() {
+                if !self.options.lossy {
+                    return Err(fail_lossy_entry(&rebase_lossy_entry(path_prefix, &entries[0])));
+                }
                 self.stats.lossy_entries.extend(
                     entries
                         .iter()
@@ -412,7 +420,7 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
         self.stats.trees += 1;
 
         self.map
-            .insert_tree(git_tree_sha, hash)
+            .insert_tree_with_lossy_entries(git_tree_sha, hash, &tree_lossy_entries)
             .map_err(IngestError::from)?;
         self.lossy_by_tree
             .insert(git_tree_sha.to_string(), tree_lossy_entries);
@@ -479,10 +487,7 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
 
     fn record_lossy(&mut self, entry: LossyImportEntry) -> crate::Result<()> {
         if !self.options.lossy {
-            return Err(IngestError::Other(format!(
-                "git import cannot represent tree entry losslessly: {}. Retry with --lossy to accept dropping or converting unrepresentable entries.",
-                entry.summary_line()
-            )));
+            return Err(fail_lossy_entry(&entry));
         }
         tracing::warn!(entry = %entry.summary_line(), "lossy git import accepted");
         self.stats.lossy_entries.push(entry);
@@ -848,6 +853,63 @@ mod tests {
         assert_eq!(stats.lossy_entries.len(), 1);
         assert_eq!(stats.lossy_entries[0].path, converted_name);
         assert!(stats.lossy_entries[0].summary_line().contains("converted"));
+    }
+
+    #[test]
+    fn default_import_fails_on_cached_lossy_tree_from_prior_run() {
+        let gitdir = TempDir::new().unwrap();
+        let heddledir = TempDir::new().unwrap();
+        seed_invalid_utf8_name_repo(gitdir.path());
+
+        let (first, map) = import_git_into_with_options(
+            gitdir.path(),
+            heddledir.path(),
+            ImportOptions { lossy: true },
+        )
+        .expect("initial lossy import succeeds");
+        drop(map);
+        assert_eq!(first.lossy_entries.len(), 1);
+
+        let err = import_git_into(gitdir.path(), heddledir.path())
+            .expect_err("default import must not reuse cached lossy tree silently");
+        let message = err.to_string();
+
+        assert!(message.contains("bad"), "error names cached entry: {message}");
+        assert!(
+            message.contains("not valid UTF-8"),
+            "error explains cached conversion: {message}"
+        );
+        assert!(message.contains("--lossy"), "error names opt-in: {message}");
+    }
+
+    #[test]
+    fn lossy_import_reports_cached_lossy_tree_from_prior_run() {
+        let gitdir = TempDir::new().unwrap();
+        let heddledir = TempDir::new().unwrap();
+        seed_invalid_utf8_name_repo(gitdir.path());
+
+        let (_first, map) = import_git_into_with_options(
+            gitdir.path(),
+            heddledir.path(),
+            ImportOptions { lossy: true },
+        )
+        .expect("initial lossy import succeeds");
+        drop(map);
+
+        let (second, _map) = import_git_into_with_options(
+            gitdir.path(),
+            heddledir.path(),
+            ImportOptions { lossy: true },
+        )
+        .expect("lossy rerun reports persisted lossy entries");
+
+        assert_eq!(second.lossy_entries.len(), 1);
+        assert_eq!(second.lossy_entries[0].path, "bad\u{fffd}name");
+        assert!(
+            second.lossy_entries[0]
+                .summary_line()
+                .contains("converted")
+        );
     }
 
     #[test]
