@@ -54,9 +54,11 @@ pub(super) enum ItemKind {
     Method,
     Impl,
     Module,
-    /// A `use` / `pub use` declaration, keyed by its import path so additive
-    /// re-exports on disjoint paths union and same-path divergence conflicts
-    /// (HeddleCo/heddle#468).
+    /// A `use` / `pub use` declaration, keyed by a representative leaf
+    /// import path (groups expanded to leaves) so additive re-exports on
+    /// disjoint paths union while a grouped-vs-ungrouped form that shares
+    /// a leaf dedups-or-conflicts instead of duplicating the import
+    /// (HeddleCo/heddle#468; Codex r1 on PR #477). See [`rust_use_key`].
     Use,
     Struct,
     Enum,
@@ -288,19 +290,23 @@ impl LanguageRules for RustRules {
             "type_item" => leaf_item(ItemKind::TypeAlias, source, node, "name"),
             "const_item" => leaf_item(ItemKind::Const, source, node, "name"),
             "static_item" => leaf_item(ItemKind::Static, source, node, "name"),
-            // Key a `use` / `pub use` by its import-path `argument` (the use
-            // tree: `crate::x::Y`, `a::{B, C}`, `a::*`, `a::B as C`, …),
-            // whitespace-stripped so cosmetic reformatting doesn't split
-            // identity. Visibility is intentionally NOT part of the key: two
-            // sides adding the same path with divergent visibility
-            // (`pub use a::B` vs `use a::B`) share a key and surface as an
-            // add/add conflict, while disjoint paths get distinct keys and
-            // union cleanly (HeddleCo/heddle#468). A missing `argument`
-            // (malformed) falls through to the unclassified walker, leaving
-            // the `use` in inter-item content as before.
+            // Key a `use` / `pub use` by a representative leaf import path
+            // derived from its `argument` use-tree (`crate::x::Y`,
+            // `a::{B, C}`, `a::*`, `a::B as C`, …). Expanding `{...}` groups
+            // to leaves and keying by the smallest leaf makes a grouped form
+            // and an ungrouped form that share that leaf COLLIDE — so they
+            // dedup or conflict rather than unioning into a duplicate import.
+            // Visibility is intentionally NOT part of the key: two sides
+            // adding the same path with divergent visibility (`pub use a::B`
+            // vs `use a::B`) share a key and surface as an add/add conflict,
+            // while disjoint paths get distinct keys and union cleanly
+            // (HeddleCo/heddle#468; Codex r1 on PR #477). A missing
+            // `argument` (malformed) falls through to the unclassified
+            // walker, leaving the `use` in inter-item content as before. See
+            // [`rust_use_key`] for the leaf expansion and its fallback.
             "use_declaration" => {
                 let argument = node.child_by_field_name("argument")?;
-                let name = strip_whitespace(&source[argument.byte_range()]);
+                let name = rust_use_key(source, argument);
                 Some(Classified {
                     kind: ItemKind::Use,
                     name,
@@ -343,6 +349,118 @@ fn rust_impl_name(source: &str, node: Node<'_>) -> Option<String> {
     // `::`, `<>`, etc. doesn't turn into a "different impl"
     // misclassification (r3 fix `021ed8e`).
     Some(strip_whitespace(&key))
+}
+
+/// Shared key-name for `use` declarations we can't confidently expand
+/// into discrete leaf import paths — globs (`foo::*`), `as` aliases
+/// (`a::B as C`), nested groups (`a::{b::{c}}`), and `self`/comment
+/// group members. Every such declaration keys to this single name, so
+/// two un-normalizable `use`s on different sides COLLIDE: byte-identical
+/// ones dedup, divergent ones surface an add/add conflict. This is the
+/// SAFE fallback — a conflict is never a silent duplicate import,
+/// whereas keying these by raw text would let an un-expandable
+/// glob/alias union with an overlapping import and reintroduce the
+/// heddle#468 duplicate (Codex r1 on PR #477). Cost: two genuinely
+/// disjoint un-normalizable `use`s (e.g. `a::*` and `b::Foo as Bar`)
+/// also collide and conflict — intentionally conservative. The leading
+/// NUL keeps it disjoint from every real import path.
+const USE_UNNORMALIZABLE_KEY: &str = "\u{0}use::unnormalizable";
+
+/// Derive the cross-side identity key for a Rust `use` / `pub use`
+/// declaration from its `argument` use-tree.
+///
+/// Flat groups are expanded into their fully-qualified leaf import paths
+/// (`crate::foo::{Bar, Baz}` → `["crate::foo::Bar", "crate::foo::Baz"]`)
+/// and the declaration is keyed by the lexicographically-smallest leaf.
+/// Keying by a representative leaf — rather than the whole `{...}` text —
+/// is what makes a grouped form and an ungrouped form that share that
+/// leaf COLLIDE: `use crate::foo::{Bar, Baz};` and `use crate::foo::Bar;`
+/// both key to `crate::foo::Bar`, so the merger dedups (identical bytes)
+/// or surfaces an add/add conflict (divergent bytes) instead of unioning
+/// the two lines into a duplicate `Bar` import (the heddle#468 bug class;
+/// Codex r1 on PR #477). Visibility (`pub`) is intentionally NOT part of
+/// the key.
+///
+/// Confidently-expandable shapes: a single path (`a::B`, `B`) and a
+/// single flat group whose members are all plain paths. Shapes we do NOT
+/// expand — globs (`foo::*`), `as` aliases, nested groups
+/// (`a::{b::{c}}`), and `self`/comment group members — fall back to
+/// [`USE_UNNORMALIZABLE_KEY`] so they conflict-on-overlap rather than
+/// risk a silent mis-union.
+///
+/// NOTE (residual): representative-leaf keying catches overlap only on
+/// the minimum leaf. Two declarations that overlap ONLY on a
+/// non-minimum leaf — `a::{Bar, Baz}` vs `a::Baz` — still get distinct
+/// keys and union. Fully closing this needs one extracted item per leaf
+/// (a larger change to the one-node-one-item extractor in
+/// [`super::items`]); representative-leaf keying is the in-architecture
+/// fix for the common min-aligned re-export merge.
+fn rust_use_key(source: &str, argument: Node<'_>) -> String {
+    let mut leaves = Vec::new();
+    if collect_use_leaves(source, argument, "", &mut leaves) && !leaves.is_empty() {
+        leaves
+            .into_iter()
+            .min()
+            .unwrap_or_else(|| USE_UNNORMALIZABLE_KEY.to_string())
+    } else {
+        USE_UNNORMALIZABLE_KEY.to_string()
+    }
+}
+
+/// Expand a `use` argument use-tree into leaf import paths, accumulating
+/// the `prefix` built from enclosing `path::{...}` segments. Returns
+/// `false` (caller falls back to [`USE_UNNORMALIZABLE_KEY`]) for any
+/// shape we don't confidently expand. See [`rust_use_key`].
+fn collect_use_leaves(source: &str, node: Node<'_>, prefix: &str, out: &mut Vec<String>) -> bool {
+    match node.kind() {
+        // A single fully-qualified path: `crate::foo::Bar` or `Bar`.
+        "identifier" | "scoped_identifier" => {
+            out.push(format!(
+                "{prefix}{}",
+                strip_whitespace(&source[node.byte_range()])
+            ));
+            true
+        }
+        // `path::{ ... }` — extend the prefix by the path, expand the list.
+        "scoped_use_list" => {
+            let new_prefix = match node.child_by_field_name("path") {
+                Some(p) => format!("{prefix}{}::", strip_whitespace(&source[p.byte_range()])),
+                None => prefix.to_string(),
+            };
+            let Some(list) = node.child_by_field_name("list") else {
+                return false;
+            };
+            expand_flat_use_list(source, list, &new_prefix, out)
+        }
+        // A bare `{ ... }` group with no leading path (rare at top level).
+        "use_list" => expand_flat_use_list(source, node, prefix, out),
+        // Globs, `as` aliases, `self`/`crate`/`super`, metavariables — not
+        // confidently expandable.
+        _ => false,
+    }
+}
+
+/// Expand a FLAT `use_list` (`{A, B, C}`) whose members are all plain
+/// paths. Any non-path member — a nested group, glob, alias, `self`, or
+/// comment — makes the whole declaration un-normalizable (`false`), so
+/// it falls back to the conflict-on-overlap sentinel rather than being
+/// partially expanded into a mis-union. An empty list yields `false`.
+fn expand_flat_use_list(source: &str, list: Node<'_>, prefix: &str, out: &mut Vec<String>) -> bool {
+    let mut cursor = list.walk();
+    let mut any = false;
+    for child in list.named_children(&mut cursor) {
+        match child.kind() {
+            "identifier" | "scoped_identifier" => {
+                out.push(format!(
+                    "{prefix}{}",
+                    strip_whitespace(&source[child.byte_range()])
+                ));
+                any = true;
+            }
+            _ => return false,
+        }
+    }
+    any
 }
 
 // ---------------------------------------------------------------------------

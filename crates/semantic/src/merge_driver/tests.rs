@@ -4481,3 +4481,78 @@ fn rust_identical_use_addition_dedups_clean() {
     assert!(merged.contains("fn alpha() { 10 }"), "ours edit lost: {merged}");
     assert!(merged.contains("fn beta() { 20 }"), "theirs edit lost: {merged}");
 }
+
+// heddle#468 r1 (Codex P2): grouped-vs-ungrouped imports must be normalized
+// to per-leaf paths before keying, or an overlapping group/single pair
+// unions into a duplicate import (a Rust "name defined multiple times"
+// error) instead of dedup/conflict.
+
+// One side adds the grouped form `{Bar, Baz}`, the other adds the single
+// `Bar`. They share the leaf `crate::foo::Bar`, so they must NOT union into
+// two lines that both import `Bar`. A conflict (or a dedup) is correct; a
+// clean union containing a duplicate `Bar` is the bug.
+#[test]
+fn rust_grouped_vs_ungrouped_overlap_does_not_duplicate() {
+    let base = "fn anchor() { 0 }\n";
+    let ours = "use crate::foo::{Bar, Baz};\nfn anchor() { 0 }\n";
+    let theirs = "use crate::foo::Bar;\nfn anchor() { 0 }\n";
+    let outcome = merge_rust(base, ours, theirs);
+    // Pre-fix this resolved Clean with two separate `use` lines importing
+    // `Bar`. Representative-leaf keying collides them into an add/add
+    // conflict instead.
+    let (text, count) = assert_conflicts(outcome);
+    assert!(
+        count >= 1,
+        "overlapping grouped/ungrouped imports must conflict, not union: {text}"
+    );
+}
+
+// Both sides add the SAME grouped re-export while editing a disjoint
+// function — the group is keyed and dedups to a single occurrence, clean.
+#[test]
+fn rust_identical_grouped_use_dedups_clean() {
+    let base = "fn alpha() { 1 }\nfn beta() { 2 }\n";
+    let ours = "pub use crate::foo::{Bar, Baz};\nfn alpha() { 10 }\nfn beta() { 2 }\n";
+    let theirs = "pub use crate::foo::{Bar, Baz};\nfn alpha() { 1 }\nfn beta() { 20 }\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert_eq!(
+        merged.matches("crate::foo::{Bar, Baz}").count(),
+        1,
+        "identical grouped re-export must appear exactly once: {merged}"
+    );
+    assert!(merged.contains("fn alpha() { 10 }"), "ours edit lost: {merged}");
+    assert!(merged.contains("fn beta() { 20 }"), "theirs edit lost: {merged}");
+}
+
+// Distinct single re-exports on different leaf paths still auto-combine —
+// the leaf-keying change must not regress the r0 union case.
+#[test]
+fn rust_distinct_reexports_still_auto_combine() {
+    let base = "fn anchor() { 0 }\n";
+    let ours = "pub use crate::a::X;\nfn anchor() { 0 }\n";
+    let theirs = "pub use crate::b::Y;\nfn anchor() { 0 }\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(merged.contains("crate::a::X"), "ours re-export lost: {merged}");
+    assert!(merged.contains("crate::b::Y"), "theirs re-export lost: {merged}");
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "distinct re-exports must merge cleanly: {merged}"
+    );
+}
+
+// Un-normalizable forms (glob, `as` alias) can't be expanded into discrete
+// leaves, so they take the safe fallback: an overlapping add/add of two
+// such forms conflicts rather than silently unioning into a possible
+// duplicate import.
+#[test]
+fn rust_glob_alias_unnormalizable_conflicts_not_misunion() {
+    let base = "fn anchor() { 0 }\n";
+    let ours = "use crate::foo::*;\nfn anchor() { 0 }\n";
+    let theirs = "use crate::foo::Bar as Renamed;\nfn anchor() { 0 }\n";
+    let outcome = merge_rust(base, ours, theirs);
+    let (text, count) = assert_conflicts(outcome);
+    assert!(
+        count >= 1,
+        "un-normalizable glob/alias adds must conflict, not mis-union: {text}"
+    );
+}
