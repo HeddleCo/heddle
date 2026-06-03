@@ -4731,3 +4731,114 @@ fn rust_empty_base_overlap_on_nonmin_leaf_conflicts() {
         "empty-base overlap on non-min leaf must conflict, not duplicate: {text}"
     );
 }
+
+// heddle#468 r5 (Codex / maintainer): the use-merge is lifted off positional
+// occurrence-matching onto whole leaf-component (leaf-SET) comparison. The
+// representative bug: base has a single `use crate::foo::Bar;`; ours ADDS a
+// separate `use crate::foo::Baz;` line; theirs WIDENS the base item to
+// `use crate::foo::{Bar, Baz};`. All three canonicalize into one component
+// (`Bar`/`Baz` unioned). Under occurrence-matching, base's `Bar`@occ0 paired
+// with ours's `Bar`@occ0 (unchanged) / theirs's `{Bar,Baz}`@occ0 (modify) →
+// clean take-theirs, while ours's `Baz`@occ1 (add) had no theirs partner →
+// clean take-ours. The merge emitted BOTH `{Bar, Baz}` and a standalone
+// `Baz` — a duplicate import (Rust E0252), no conflict. Set comparison sees
+// ours-text != base, theirs-text != base, ours-text != theirs → CONFLICT.
+
+// The repro itself: a clean union of the widened group + the standalone leaf
+// is the bug. The whole component must conflict instead.
+#[test]
+fn rust_use_base_widened_vs_separate_add_conflicts_not_duplicate() {
+    let base = "use crate::foo::Bar;\nfn anchor() { 0 }\n";
+    let ours = "use crate::foo::Bar;\nuse crate::foo::Baz;\nfn anchor() { 0 }\n";
+    let theirs = "use crate::foo::{Bar, Baz};\nfn anchor() { 0 }\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(
+        count >= 1,
+        "base-widened group vs separate-leaf add must conflict, not silently \
+         emit both (a duplicate `Baz` import): {text}"
+    );
+    // The defining invariant: never a clean union. A duplicate import would
+    // resolve Clean; the conflict region proves we did not.
+    assert!(
+        text.contains("<<<<<<<"),
+        "expected a conflict region, not a silent union: {text}"
+    );
+}
+
+// Mirror: swap ours/theirs roles (ours widens the base item, theirs adds the
+// separate leaf). The set comparison is symmetric, so this must also
+// conflict — guards against an asymmetry in which side is treated as "base".
+#[test]
+fn rust_use_base_widened_vs_separate_add_conflicts_mirror() {
+    let base = "use crate::foo::Bar;\nfn anchor() { 0 }\n";
+    let ours = "use crate::foo::{Bar, Baz};\nfn anchor() { 0 }\n";
+    let theirs = "use crate::foo::Bar;\nuse crate::foo::Baz;\nfn anchor() { 0 }\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(
+        count >= 1,
+        "mirror of the base-widened case must also conflict: {text}"
+    );
+    assert!(
+        text.contains("<<<<<<<"),
+        "expected a conflict region, not a silent union: {text}"
+    );
+}
+
+// Both sides widen the SAME base item, differently: base `use crate::foo::Bar;`;
+// ours → `{Bar, Baz}`; theirs → `{Bar, Qux}`. Each side modified the base
+// item, divergently, so the whole component conflicts (no auto-combine of two
+// incompatible regroupings into a triple-import line).
+#[test]
+fn rust_use_both_widen_base_differently_conflicts() {
+    let base = "use crate::foo::Bar;\nfn anchor() { 0 }\n";
+    let ours = "use crate::foo::{Bar, Baz};\nfn anchor() { 0 }\n";
+    let theirs = "use crate::foo::{Bar, Qux};\nfn anchor() { 0 }\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(
+        count >= 1,
+        "both sides widening the same base item differently must conflict: {text}"
+    );
+}
+
+// Pure-additive disjoint still combines under the set-valued path: base has
+// no related import; ours adds `use a::X;`, theirs adds `use b::Y;`. Disjoint
+// leaves → distinct components → each is a one-side add → both land cleanly.
+// Guards that lifting onto leaf-SET comparison did not regress the r0 union.
+#[test]
+fn rust_use_disjoint_additions_still_combine_set_path() {
+    let base = "fn anchor() { 0 }\n";
+    let ours = "use crate::a::X;\nfn anchor() { 0 }\n";
+    let theirs = "use crate::b::Y;\nfn anchor() { 0 }\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(merged.contains("crate::a::X"), "ours add lost: {merged}");
+    assert!(merged.contains("crate::b::Y"), "theirs add lost: {merged}");
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "disjoint additions must combine cleanly: {merged}"
+    );
+}
+
+// Exact-identical multi-line component on both sides dedups to one copy.
+// Base has the grouped `use crate::foo::{Bar, Baz};`; BOTH sides rewrite it
+// to the same two standalone lines (so each side contributes TWO items to the
+// component — the multi-occurrence shape) while editing a disjoint function.
+// Byte-identical component texts → dedup, clean, no duplicate leaves.
+#[test]
+fn rust_use_identical_multiline_component_dedups_clean() {
+    let base = "use crate::foo::{Bar, Baz};\nfn alpha() { 1 }\nfn beta() { 2 }\n";
+    let ours = "use crate::foo::Bar;\nuse crate::foo::Baz;\nfn alpha() { 10 }\nfn beta() { 2 }\n";
+    let theirs = "use crate::foo::Bar;\nuse crate::foo::Baz;\nfn alpha() { 1 }\nfn beta() { 20 }\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert_eq!(
+        merged.matches("crate::foo::Bar").count(),
+        1,
+        "Bar must appear exactly once after dedup: {merged}"
+    );
+    assert_eq!(
+        merged.matches("crate::foo::Baz").count(),
+        1,
+        "Baz must appear exactly once after dedup: {merged}"
+    );
+    assert!(merged.contains("fn alpha() { 10 }"), "ours edit lost: {merged}");
+    assert!(merged.contains("fn beta() { 20 }"), "theirs edit lost: {merged}");
+}
