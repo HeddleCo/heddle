@@ -1,7 +1,6 @@
 {
   "AgentReservationEnvelope": {
-    "$schema": "http://json-schema.org/draft-07/schema#",
-    "definitions": {
+    "$defs": {
       "ActionTemplate": {
         "properties": {
           "action": {
@@ -25,9 +24,9 @@
         },
         "required": [
           "action",
-          "agent_may_fill",
           "argv_template",
-          "required_inputs"
+          "required_inputs",
+          "agent_may_fill"
         ],
         "type": "object"
       },
@@ -92,7 +91,7 @@
             "type": "string"
           },
           "status": {
-            "description": "Lifecycle status as a stable kebab-case string (`active|abandoned|complete|merged`). Mirrors `objects::store::AgentStatus` but kept as a `String` here so the schema lives entirely in the CLI crate.",
+            "description": "Lifecycle status as a stable kebab-case string\n(`active|abandoned|complete|merged`). Mirrors\n`objects::store::AgentStatus` but kept as a `String` here so\nthe schema lives entirely in the CLI crate.",
             "type": "string"
           },
           "task": {
@@ -113,8 +112,8 @@
         },
         "required": [
           "session_id",
-          "status",
-          "thread"
+          "thread",
+          "status"
         ],
         "type": "object"
       },
@@ -128,7 +127,7 @@
           },
           "accepted_opaque_schema_verbs_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "advanced_scope": {
@@ -142,67 +141,67 @@
           },
           "advanced_scope_json_commands_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "advanced_scope_json_commands_with_accepted_opaque_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "advanced_scope_mutating_commands_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "advanced_scope_mutating_commands_with_accepted_opaque_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "catalog_commands_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "catalog_mutating_commands_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "documented_schema_verbs_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "json_commands_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "json_commands_with_accepted_opaque_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "json_commands_with_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "json_commands_without_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "json_mutating_commands_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "jsonl_commands_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "missing_mutating_schema_examples": {
@@ -219,32 +218,32 @@
           },
           "mutating_commands_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "mutating_commands_with_accepted_opaque_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "mutating_commands_with_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "mutating_commands_without_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "opaque_schema_verbs_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "schema_verbs_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "status": {
@@ -255,7 +254,7 @@
           },
           "supports_op_id_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "unaccepted_opaque_schema_examples": {
@@ -266,7 +265,7 @@
           },
           "unaccepted_opaque_schema_verbs_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "undocumented_schema_examples": {
@@ -277,7 +276,7 @@
           },
           "undocumented_schema_verbs_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "verified_scope": {
@@ -291,22 +290,22 @@
           },
           "verified_scope_json_commands_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "verified_scope_json_commands_with_accepted_opaque_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "verified_scope_json_commands_with_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "verified_scope_json_commands_without_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "verified_scope_missing_schema_examples": {
@@ -317,69 +316,69 @@
           },
           "verified_scope_mutating_commands_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "verified_scope_mutating_commands_with_accepted_opaque_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "verified_scope_mutating_commands_with_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "verified_scope_mutating_commands_without_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           }
         },
         "required": [
-          "accepted_opaque_schema_examples",
-          "accepted_opaque_schema_verbs_total",
+          "status",
+          "verified_scope",
           "advanced_scope",
-          "advanced_scope_accepted_opaque_schema_examples",
-          "advanced_scope_json_commands_total",
-          "advanced_scope_json_commands_with_accepted_opaque_schema",
-          "advanced_scope_mutating_commands_total",
-          "advanced_scope_mutating_commands_with_accepted_opaque_schema",
+          "summary",
           "catalog_commands_total",
           "catalog_mutating_commands_total",
-          "documented_schema_verbs_total",
           "json_commands_total",
-          "json_commands_with_accepted_opaque_schema",
-          "json_commands_with_schema",
-          "json_commands_without_schema",
           "json_mutating_commands_total",
-          "jsonl_commands_total",
-          "missing_mutating_schema_examples",
-          "missing_schema_examples",
-          "mutating_commands_total",
-          "mutating_commands_with_accepted_opaque_schema",
-          "mutating_commands_with_schema",
-          "mutating_commands_without_schema",
-          "opaque_schema_verbs_total",
-          "schema_verbs_total",
-          "status",
-          "summary",
-          "supports_op_id_total",
-          "unaccepted_opaque_schema_examples",
-          "unaccepted_opaque_schema_verbs_total",
-          "undocumented_schema_examples",
-          "undocumented_schema_verbs_total",
-          "verified_scope",
-          "verified_scope_accepted_opaque_schema_examples",
+          "json_commands_with_schema",
+          "json_commands_with_accepted_opaque_schema",
+          "json_commands_without_schema",
           "verified_scope_json_commands_total",
-          "verified_scope_json_commands_with_accepted_opaque_schema",
           "verified_scope_json_commands_with_schema",
+          "verified_scope_json_commands_with_accepted_opaque_schema",
           "verified_scope_json_commands_without_schema",
-          "verified_scope_missing_schema_examples",
+          "advanced_scope_json_commands_total",
+          "advanced_scope_json_commands_with_accepted_opaque_schema",
+          "mutating_commands_total",
+          "mutating_commands_with_schema",
+          "mutating_commands_with_accepted_opaque_schema",
+          "mutating_commands_without_schema",
           "verified_scope_mutating_commands_total",
-          "verified_scope_mutating_commands_with_accepted_opaque_schema",
           "verified_scope_mutating_commands_with_schema",
-          "verified_scope_mutating_commands_without_schema"
+          "verified_scope_mutating_commands_with_accepted_opaque_schema",
+          "verified_scope_mutating_commands_without_schema",
+          "advanced_scope_mutating_commands_total",
+          "advanced_scope_mutating_commands_with_accepted_opaque_schema",
+          "schema_verbs_total",
+          "documented_schema_verbs_total",
+          "undocumented_schema_verbs_total",
+          "opaque_schema_verbs_total",
+          "accepted_opaque_schema_verbs_total",
+          "unaccepted_opaque_schema_verbs_total",
+          "supports_op_id_total",
+          "jsonl_commands_total",
+          "missing_schema_examples",
+          "missing_mutating_schema_examples",
+          "verified_scope_missing_schema_examples",
+          "verified_scope_accepted_opaque_schema_examples",
+          "advanced_scope_accepted_opaque_schema_examples",
+          "accepted_opaque_schema_examples",
+          "unaccepted_opaque_schema_examples",
+          "undocumented_schema_examples"
         ],
         "type": "object"
       },
@@ -393,7 +392,7 @@
           },
           "checks": {
             "items": {
-              "$ref": "#/definitions/VerificationCheck"
+              "$ref": "#/$defs/VerificationCheck"
             },
             "type": "array"
           },
@@ -428,7 +427,7 @@
             "type": "string"
           },
           "machine_contract_coverage": {
-            "$ref": "#/definitions/MachineContractCoverage"
+            "$ref": "#/$defs/MachineContractCoverage"
           },
           "mapping_state": {
             "type": "string"
@@ -442,7 +441,7 @@
           "recommended_action_template": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ActionTemplate"
+                "$ref": "#/$defs/ActionTemplate"
               },
               {
                 "type": "null"
@@ -451,7 +450,7 @@
           },
           "recovery_action_templates": {
             "items": {
-              "$ref": "#/definitions/ActionTemplate"
+              "$ref": "#/$defs/ActionTemplate"
             },
             "type": "array"
           },
@@ -490,24 +489,24 @@
           }
         },
         "required": [
-          "checks",
-          "clone_verification",
+          "verified",
+          "status",
+          "repository_mode",
           "heddle_initialized",
+          "worktree_dirty",
+          "worktree_state",
           "import_state",
+          "mapping_state",
+          "remote_drift",
+          "clone_verification",
           "machine_contract",
           "machine_contract_coverage",
-          "mapping_state",
-          "recovery_action_templates",
-          "recovery_commands",
-          "remote_drift",
-          "repository_mode",
-          "status",
-          "summary",
-          "verified",
           "workflow_status",
           "workflow_summary",
-          "worktree_dirty",
-          "worktree_state"
+          "summary",
+          "recovery_commands",
+          "recovery_action_templates",
+          "checks"
         ],
         "type": "object"
       },
@@ -535,7 +534,7 @@
           "recommended_action_template": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ActionTemplate"
+                "$ref": "#/$defs/ActionTemplate"
               },
               {
                 "type": "null"
@@ -544,7 +543,7 @@
           },
           "recovery_action_templates": {
             "items": {
-              "$ref": "#/definitions/ActionTemplate"
+              "$ref": "#/$defs/ActionTemplate"
             },
             "type": "array"
           },
@@ -562,26 +561,23 @@
           }
         },
         "required": [
-          "clean",
           "name",
-          "recovery_action_templates",
-          "recovery_commands",
           "status",
-          "summary"
+          "clean",
+          "summary",
+          "recovery_commands",
+          "recovery_action_templates"
         ],
         "type": "object"
       }
     },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
       "reservation": {
-        "$ref": "#/definitions/AgentReservationOutput"
+        "$ref": "#/$defs/AgentReservationOutput"
       },
       "verification": {
-        "allOf": [
-          {
-            "$ref": "#/definitions/RepositoryVerificationState"
-          }
-        ],
+        "$ref": "#/$defs/RepositoryVerificationState",
         "writeOnly": true
       }
     },
@@ -593,8 +589,7 @@
     "type": "object"
   },
   "AgentReservationListOutput": {
-    "$schema": "http://json-schema.org/draft-07/schema#",
-    "definitions": {
+    "$defs": {
       "ActionTemplate": {
         "properties": {
           "action": {
@@ -618,9 +613,9 @@
         },
         "required": [
           "action",
-          "agent_may_fill",
           "argv_template",
-          "required_inputs"
+          "required_inputs",
+          "agent_may_fill"
         ],
         "type": "object"
       },
@@ -685,7 +680,7 @@
             "type": "string"
           },
           "status": {
-            "description": "Lifecycle status as a stable kebab-case string (`active|abandoned|complete|merged`). Mirrors `objects::store::AgentStatus` but kept as a `String` here so the schema lives entirely in the CLI crate.",
+            "description": "Lifecycle status as a stable kebab-case string\n(`active|abandoned|complete|merged`). Mirrors\n`objects::store::AgentStatus` but kept as a `String` here so\nthe schema lives entirely in the CLI crate.",
             "type": "string"
           },
           "task": {
@@ -706,8 +701,8 @@
         },
         "required": [
           "session_id",
-          "status",
-          "thread"
+          "thread",
+          "status"
         ],
         "type": "object"
       },
@@ -721,7 +716,7 @@
           },
           "accepted_opaque_schema_verbs_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "advanced_scope": {
@@ -735,67 +730,67 @@
           },
           "advanced_scope_json_commands_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "advanced_scope_json_commands_with_accepted_opaque_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "advanced_scope_mutating_commands_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "advanced_scope_mutating_commands_with_accepted_opaque_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "catalog_commands_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "catalog_mutating_commands_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "documented_schema_verbs_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "json_commands_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "json_commands_with_accepted_opaque_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "json_commands_with_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "json_commands_without_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "json_mutating_commands_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "jsonl_commands_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "missing_mutating_schema_examples": {
@@ -812,32 +807,32 @@
           },
           "mutating_commands_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "mutating_commands_with_accepted_opaque_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "mutating_commands_with_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "mutating_commands_without_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "opaque_schema_verbs_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "schema_verbs_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "status": {
@@ -848,7 +843,7 @@
           },
           "supports_op_id_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "unaccepted_opaque_schema_examples": {
@@ -859,7 +854,7 @@
           },
           "unaccepted_opaque_schema_verbs_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "undocumented_schema_examples": {
@@ -870,7 +865,7 @@
           },
           "undocumented_schema_verbs_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "verified_scope": {
@@ -884,22 +879,22 @@
           },
           "verified_scope_json_commands_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "verified_scope_json_commands_with_accepted_opaque_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "verified_scope_json_commands_with_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "verified_scope_json_commands_without_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "verified_scope_missing_schema_examples": {
@@ -910,69 +905,69 @@
           },
           "verified_scope_mutating_commands_total": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "verified_scope_mutating_commands_with_accepted_opaque_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "verified_scope_mutating_commands_with_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           },
           "verified_scope_mutating_commands_without_schema": {
             "format": "uint",
-            "minimum": 0.0,
+            "minimum": 0,
             "type": "integer"
           }
         },
         "required": [
-          "accepted_opaque_schema_examples",
-          "accepted_opaque_schema_verbs_total",
+          "status",
+          "verified_scope",
           "advanced_scope",
-          "advanced_scope_accepted_opaque_schema_examples",
-          "advanced_scope_json_commands_total",
-          "advanced_scope_json_commands_with_accepted_opaque_schema",
-          "advanced_scope_mutating_commands_total",
-          "advanced_scope_mutating_commands_with_accepted_opaque_schema",
+          "summary",
           "catalog_commands_total",
           "catalog_mutating_commands_total",
-          "documented_schema_verbs_total",
           "json_commands_total",
-          "json_commands_with_accepted_opaque_schema",
-          "json_commands_with_schema",
-          "json_commands_without_schema",
           "json_mutating_commands_total",
-          "jsonl_commands_total",
-          "missing_mutating_schema_examples",
-          "missing_schema_examples",
-          "mutating_commands_total",
-          "mutating_commands_with_accepted_opaque_schema",
-          "mutating_commands_with_schema",
-          "mutating_commands_without_schema",
-          "opaque_schema_verbs_total",
-          "schema_verbs_total",
-          "status",
-          "summary",
-          "supports_op_id_total",
-          "unaccepted_opaque_schema_examples",
-          "unaccepted_opaque_schema_verbs_total",
-          "undocumented_schema_examples",
-          "undocumented_schema_verbs_total",
-          "verified_scope",
-          "verified_scope_accepted_opaque_schema_examples",
+          "json_commands_with_schema",
+          "json_commands_with_accepted_opaque_schema",
+          "json_commands_without_schema",
           "verified_scope_json_commands_total",
-          "verified_scope_json_commands_with_accepted_opaque_schema",
           "verified_scope_json_commands_with_schema",
+          "verified_scope_json_commands_with_accepted_opaque_schema",
           "verified_scope_json_commands_without_schema",
-          "verified_scope_missing_schema_examples",
+          "advanced_scope_json_commands_total",
+          "advanced_scope_json_commands_with_accepted_opaque_schema",
+          "mutating_commands_total",
+          "mutating_commands_with_schema",
+          "mutating_commands_with_accepted_opaque_schema",
+          "mutating_commands_without_schema",
           "verified_scope_mutating_commands_total",
-          "verified_scope_mutating_commands_with_accepted_opaque_schema",
           "verified_scope_mutating_commands_with_schema",
-          "verified_scope_mutating_commands_without_schema"
+          "verified_scope_mutating_commands_with_accepted_opaque_schema",
+          "verified_scope_mutating_commands_without_schema",
+          "advanced_scope_mutating_commands_total",
+          "advanced_scope_mutating_commands_with_accepted_opaque_schema",
+          "schema_verbs_total",
+          "documented_schema_verbs_total",
+          "undocumented_schema_verbs_total",
+          "opaque_schema_verbs_total",
+          "accepted_opaque_schema_verbs_total",
+          "unaccepted_opaque_schema_verbs_total",
+          "supports_op_id_total",
+          "jsonl_commands_total",
+          "missing_schema_examples",
+          "missing_mutating_schema_examples",
+          "verified_scope_missing_schema_examples",
+          "verified_scope_accepted_opaque_schema_examples",
+          "advanced_scope_accepted_opaque_schema_examples",
+          "accepted_opaque_schema_examples",
+          "unaccepted_opaque_schema_examples",
+          "undocumented_schema_examples"
         ],
         "type": "object"
       },
@@ -986,7 +981,7 @@
           },
           "checks": {
             "items": {
-              "$ref": "#/definitions/VerificationCheck"
+              "$ref": "#/$defs/VerificationCheck"
             },
             "type": "array"
           },
@@ -1021,7 +1016,7 @@
             "type": "string"
           },
           "machine_contract_coverage": {
-            "$ref": "#/definitions/MachineContractCoverage"
+            "$ref": "#/$defs/MachineContractCoverage"
           },
           "mapping_state": {
             "type": "string"
@@ -1035,7 +1030,7 @@
           "recommended_action_template": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ActionTemplate"
+                "$ref": "#/$defs/ActionTemplate"
               },
               {
                 "type": "null"
@@ -1044,7 +1039,7 @@
           },
           "recovery_action_templates": {
             "items": {
-              "$ref": "#/definitions/ActionTemplate"
+              "$ref": "#/$defs/ActionTemplate"
             },
             "type": "array"
           },
@@ -1083,24 +1078,24 @@
           }
         },
         "required": [
-          "checks",
-          "clone_verification",
+          "verified",
+          "status",
+          "repository_mode",
           "heddle_initialized",
+          "worktree_dirty",
+          "worktree_state",
           "import_state",
+          "mapping_state",
+          "remote_drift",
+          "clone_verification",
           "machine_contract",
           "machine_contract_coverage",
-          "mapping_state",
-          "recovery_action_templates",
-          "recovery_commands",
-          "remote_drift",
-          "repository_mode",
-          "status",
-          "summary",
-          "verified",
           "workflow_status",
           "workflow_summary",
-          "worktree_dirty",
-          "worktree_state"
+          "summary",
+          "recovery_commands",
+          "recovery_action_templates",
+          "checks"
         ],
         "type": "object"
       },
@@ -1128,7 +1123,7 @@
           "recommended_action_template": {
             "anyOf": [
               {
-                "$ref": "#/definitions/ActionTemplate"
+                "$ref": "#/$defs/ActionTemplate"
               },
               {
                 "type": "null"
@@ -1137,7 +1132,7 @@
           },
           "recovery_action_templates": {
             "items": {
-              "$ref": "#/definitions/ActionTemplate"
+              "$ref": "#/$defs/ActionTemplate"
             },
             "type": "array"
           },
@@ -1155,23 +1150,24 @@
           }
         },
         "required": [
-          "clean",
           "name",
-          "recovery_action_templates",
-          "recovery_commands",
           "status",
-          "summary"
+          "clean",
+          "summary",
+          "recovery_commands",
+          "recovery_action_templates"
         ],
         "type": "object"
       }
     },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
       "alive_only": {
         "type": "boolean"
       },
       "reservations": {
         "items": {
-          "$ref": "#/definitions/AgentReservationOutput"
+          "$ref": "#/$defs/AgentReservationOutput"
         },
         "type": "array"
       },
@@ -1182,19 +1178,19 @@
         ]
       },
       "verification": {
-        "$ref": "#/definitions/RepositoryVerificationState"
+        "$ref": "#/$defs/RepositoryVerificationState"
       }
     },
     "required": [
-      "alive_only",
       "reservations",
+      "alive_only",
       "verification"
     ],
     "title": "AgentReservationListOutput",
     "type": "object"
   },
   "AgentReservationOutput": {
-    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {
       "anchor_root": {
         "type": [
@@ -1255,7 +1251,7 @@
         "type": "string"
       },
       "status": {
-        "description": "Lifecycle status as a stable kebab-case string (`active|abandoned|complete|merged`). Mirrors `objects::store::AgentStatus` but kept as a `String` here so the schema lives entirely in the CLI crate.",
+        "description": "Lifecycle status as a stable kebab-case string\n(`active|abandoned|complete|merged`). Mirrors\n`objects::store::AgentStatus` but kept as a `String` here so\nthe schema lives entirely in the CLI crate.",
         "type": "string"
       },
       "task": {
@@ -1276,8 +1272,8 @@
     },
     "required": [
       "session_id",
-      "status",
-      "thread"
+      "thread",
+      "status"
     ],
     "title": "AgentReservationOutput",
     "type": "object"

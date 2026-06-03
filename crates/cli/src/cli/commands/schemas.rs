@@ -2779,8 +2779,13 @@ mod tests {
     fn schema_allows_null(root: &Value, schema: &Value) -> bool {
         if let Some(reference) = schema.get("$ref").and_then(|value| value.as_str()) {
             let definition = reference
-                .strip_prefix("#/definitions/")
-                .and_then(|name| root.get("definitions").and_then(|defs| defs.get(name)))
+                .strip_prefix("#/$defs/")
+                .or_else(|| reference.strip_prefix("#/definitions/"))
+                .and_then(|name| {
+                    root.get("$defs")
+                        .or_else(|| root.get("definitions"))
+                        .and_then(|defs| defs.get(name))
+                })
                 .unwrap_or_else(|| panic!("schema reference `{reference}` resolves"));
             return schema_allows_null(root, definition);
         }
@@ -2811,8 +2816,13 @@ mod tests {
     fn collect_string_enums<'a>(root: &'a Value, schema: &'a Value, values: &mut Vec<&'a str>) {
         if let Some(reference) = schema.get("$ref").and_then(|value| value.as_str()) {
             let definition = reference
-                .strip_prefix("#/definitions/")
-                .and_then(|name| root.get("definitions").and_then(|defs| defs.get(name)))
+                .strip_prefix("#/$defs/")
+                .or_else(|| reference.strip_prefix("#/definitions/"))
+                .and_then(|name| {
+                    root.get("$defs")
+                        .or_else(|| root.get("definitions"))
+                        .and_then(|defs| defs.get(name))
+                })
                 .unwrap_or_else(|| panic!("schema reference `{reference}` resolves"));
             collect_string_enums(root, definition, values);
         }
