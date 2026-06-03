@@ -2286,7 +2286,7 @@ impl HostedPresenceWatch {
             subscribe: vec![namespace.to_string()],
         })
         .ok()?;
-        stream.send(Message::Text(hello)).await.ok()?;
+        stream.send(Message::Text(hello.into())).await.ok()?;
         Some(Self { stream })
     }
 
