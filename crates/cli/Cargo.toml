@@ -23,21 +23,16 @@ exclude = [
 # consumer; the version range matches what `cargo tree` resolves.
 anstyle = "1"
 anyhow.workspace = true
-async-stream.workspace = true
-base32.workspace = true
 base64.workspace = true
 blake3.workspace = true
-bytes.workspace = true
 chrono.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
-ed25519-dalek.workspace = true
-fs2.workspace = true
 futures.workspace = true
-gix-config = "0.53"
-gix-index = "0.48"
-gix-pack = "0.67"
-gix-protocol = { version = "0.58", features = ["blocking-client"] }
+gix-config = "0.57"
+gix-index = "0.52"
+gix-pack = "0.71"
+gix-protocol = { version = "0.62", features = ["blocking-client"] }
 gix-transport.workspace = true
 gix.workspace = true
 hex.workspace = true
@@ -67,13 +62,11 @@ proto = { path = "../proto", package = "heddle-proto", version = "0.2", default-
 refs = { path = "../refs", package = "heddle-refs", version = "0.2" }
 repo = { path = "../repo", package = "heddle-repo", version = "0.2", default-features = false }
 semantic = { path = "../semantic", package = "heddle-semantic", version = "0.2", optional = true }
-memmap2.workspace = true
 notify.workspace = true
 opentelemetry = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 prost-types.workspace = true
-rand.workspace = true
 rmp-serde.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -81,9 +74,7 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokio-stream.workspace = true
 tokio-tungstenite = { workspace = true, optional = true }
-tokio-util.workspace = true
 toml.workspace = true
 tonic.workspace = true
 # `uuid::Uuid::new_v4().simple()` suffixes rebase transaction ids
@@ -110,7 +101,6 @@ tracing.workspace = true
 tracing-opentelemetry = { workspace = true, optional = true }
 tracing-subscriber.workspace = true
 walkdir.workspace = true
-zstd = { workspace = true, optional = true }
 
 # Mount is platform-agnostic in source, but each adapter only
 # compiles for one OS — FUSE on Linux (`fuse`), FSKit on macOS
@@ -181,7 +171,6 @@ observability = [
 # when the dep itself is enabled (`ingest` is gated behind
 # the `ingest` feature).
 zstd = [
-    "dep:zstd",
     "objects/zstd",
     "proto/zstd",
     "repo/zstd",
@@ -222,7 +211,6 @@ proptest.workspace = true
 tokio-tungstenite.workspace = true
 serial_test.workspace = true
 tempfile.workspace = true
-tokio-test.workspace = true
 uuid.workspace = true
 
 [[bin]]

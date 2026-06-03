@@ -10,14 +10,9 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-chrono.workspace = true
 objects = { path = "../objects", package = "heddle-objects", version = "0.2" }
 semantic = { path = "../semantic", package = "heddle-semantic", version = "0.2" }
 serde.workspace = true
-thiserror.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
 
 [lib]
 path = "src/lib.rs"

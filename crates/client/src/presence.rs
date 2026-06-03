@@ -483,7 +483,7 @@ async fn connect_and_stream(
             let _ = tx
                 .send(Message::Close(Some(CloseFrame {
                     code: CloseCode::Normal,
-                    reason: std::borrow::Cow::Borrowed("agent_done"),
+                    reason: "agent_done".into(),
                 })))
                 .await;
             return Ok(LoopExit::Cancelled);
@@ -550,7 +550,7 @@ where
     <S as futures::Sink<Message>>::Error: std::fmt::Display,
 {
     let payload = serde_json::to_string(frame).context("serialise client frame")?;
-    tx.send(Message::Text(payload))
+    tx.send(Message::Text(payload.into()))
         .await
         .map_err(|e| anyhow!("ws send: {e}"))?;
     Ok(())

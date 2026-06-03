@@ -16,13 +16,13 @@
 
 use std::{collections::BTreeMap, sync::OnceLock};
 
-use anyhow::{Result, anyhow};
-use schemars::{JsonSchema, schema_for};
+use anyhow::{anyhow, Result};
+use schemars::{schema_for, JsonSchema};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{CommandCatalogOutput, RecoveryAdvice, command_catalog, command_runtime_contract};
-use crate::cli::{Cli, should_output_json};
+use super::{command_catalog, command_runtime_contract, CommandCatalogOutput, RecoveryAdvice};
+use crate::cli::{should_output_json, Cli};
 
 static SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
 static DOCUMENTED_SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
@@ -1832,11 +1832,9 @@ pub struct PushSchema {
     #[schemars(required)]
     pub next_action: Option<String>,
     #[schemars(required)]
-    #[schemars(required)]
     pub next_action_template: Option<ActionTemplateSchema>,
     #[schemars(required)]
     pub recommended_action: Option<String>,
-    #[schemars(required)]
     #[schemars(required)]
     pub recommended_action_template: Option<ActionTemplateSchema>,
 }
@@ -2314,11 +2312,11 @@ pub struct ReviewNextSchema {
 pub struct RequiredNullableNextState(pub Option<ReviewNextStateSchema>);
 
 impl JsonSchema for RequiredNullableNextState {
-    fn schema_name() -> String {
-        "RequiredNullableNextState".to_owned()
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("RequiredNullableNextState")
     }
 
-    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         <Option<ReviewNextStateSchema> as JsonSchema>::json_schema(generator)
     }
 }
@@ -2781,8 +2779,13 @@ mod tests {
     fn schema_allows_null(root: &Value, schema: &Value) -> bool {
         if let Some(reference) = schema.get("$ref").and_then(|value| value.as_str()) {
             let definition = reference
-                .strip_prefix("#/definitions/")
-                .and_then(|name| root.get("definitions").and_then(|defs| defs.get(name)))
+                .strip_prefix("#/$defs/")
+                .or_else(|| reference.strip_prefix("#/definitions/"))
+                .and_then(|name| {
+                    root.get("$defs")
+                        .or_else(|| root.get("definitions"))
+                        .and_then(|defs| defs.get(name))
+                })
                 .unwrap_or_else(|| panic!("schema reference `{reference}` resolves"));
             return schema_allows_null(root, definition);
         }
@@ -2813,8 +2816,13 @@ mod tests {
     fn collect_string_enums<'a>(root: &'a Value, schema: &'a Value, values: &mut Vec<&'a str>) {
         if let Some(reference) = schema.get("$ref").and_then(|value| value.as_str()) {
             let definition = reference
-                .strip_prefix("#/definitions/")
-                .and_then(|name| root.get("definitions").and_then(|defs| defs.get(name)))
+                .strip_prefix("#/$defs/")
+                .or_else(|| reference.strip_prefix("#/definitions/"))
+                .and_then(|name| {
+                    root.get("$defs")
+                        .or_else(|| root.get("definitions"))
+                        .and_then(|defs| defs.get(name))
+                })
                 .unwrap_or_else(|| panic!("schema reference `{reference}` resolves"));
             collect_string_enums(root, definition, values);
         }

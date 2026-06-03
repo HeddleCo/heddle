@@ -36,9 +36,7 @@ categories = ["development-tools"]
 
 [workspace.dependencies]
 anyhow = "1"
-async-stream = "0.3"
 async-trait = "0.1"
-atty = "0.2"
 aws-sdk-s3 = { version = "1.129", default-features = false, features = ["behavior-version-latest", "rustls"] }
 aws-smithy-async = { version = "1", features = ["rt-tokio"] }
 base32 = "0.5"
@@ -52,12 +50,12 @@ clap_complete = "4"
 ed25519-dalek = { version = "2", features = ["pem", "rand_core"] }
 fs2 = "0.4.3"
 futures = "0.3"
-gix = { version = "=0.80.0", default-features = false, features = ["revision", "tree-editor", "blocking-network-client", "blocking-http-transport-reqwest-rust-tls"] }
+gix = { version = "=0.84.0", default-features = false, features = ["sha1", "revision", "tree-editor", "blocking-network-client", "blocking-http-transport-reqwest-rust-tls"] }
 hex = "0.4"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 ignore = "0.4"
 libc = "0.2"
-lru = "0.16"
+lru = "0.18"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 memmap2 = "0.9"
 notify = "8"
@@ -67,31 +65,25 @@ p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 pkcs8 = { version = "0.10", features = ["pem", "encryption"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 prost = "0.14"
-prost-build = "0.14"
 prost-types = "0.14"
 protoc-bin-vendored = "3"
-opentelemetry = "0.31"
-opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "trace", "metrics"] }
-opentelemetry_sdk = "0.31"
+opentelemetry = "0.32"
+opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic", "trace", "metrics"] }
+opentelemetry_sdk = "0.32"
 rand = "0.10"
 regex-lite = "0.1"
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls-no-provider"] }
 rmp-serde = "1"
 rsa = { version = "0.9", features = ["pem"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
-rustls-pemfile = "2"
-rustls-pki-types = "1"
-webpki = { package = "rustls-webpki", version = "0.103", features = ["std", "ring"] }
 s3s = "0.13.0"
 s3s-fs = "0.13.0"
-schemars = { version = "0.8", features = ["chrono"] }
+schemars = { version = "1.2", features = ["chrono04"] }
 sec1 = { version = "0.8", features = ["pem"] }
 serde = { version = "1", features = ["derive", "rc"] }
-serde_cbor = "0.11"
 serde_json = "1"
 serial_test = "3"
 sha2 = { version = "0.10", features = ["oid"] }
-signature = "2"
 similar = "3"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json"] }
 syn = { version = "2", features = ["full", "visit", "extra-traits"] }
@@ -109,22 +101,15 @@ tokio = { version = "1", default-features = false, features = [
     "fs",          # async filesystem ops in some daemons
     "rt-multi-thread", # hosted daemon binary uses multi-thread runtime
 ] }
-tokio-rustls = "0.26"
 tokio-stream = { version = "0.1", features = ["sync"] }
-tokio-test = "0.4"
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
-tokio-util = { version = "0.7", features = ["codec"] }
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 toml = "1.1"
 tonic = { version = "0.14", features = ["transport", "tls-webpki-roots"] }
-tonic-build = "0.14"
 tonic-health = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
-tonic-reflection = "0.14"
-tonic-web = "0.14"
-tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
-tracing-opentelemetry = "0.32"
+tracing-opentelemetry = "0.33"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tree-sitter = "0.26"
 tree-sitter-c = "0.24"
@@ -139,7 +124,7 @@ uuid = { version = "1", features = ["v4", "v7", "serde"] }
 walkdir = "2"
 windows-sys = "0.61"
 zstd = "0.13"
-gix-transport = { version = "0.55", features = ["http-client-insecure-credentials"] }
+gix-transport = { version = "0.57", features = ["http-client-insecure-credentials"] }
 
 [profile.dev]
 debug = "line-tables-only"

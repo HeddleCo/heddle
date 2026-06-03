@@ -2814,7 +2814,8 @@ pub(crate) fn copy_reachable_objects(
     for oid in collect_reachable_object_ids(source, roots)? {
         let object = source.find_object(oid).map_err(git_err)?;
         let object_ref =
-            gix::objs::ObjectRef::from_bytes(object.kind, &object.data).map_err(git_err)?;
+            gix::objs::ObjectRef::from_bytes(&object.data, object.kind, source.object_hash())
+                .map_err(git_err)?;
         target.write_object(object_ref).map_err(git_err)?;
     }
 
@@ -3040,6 +3041,7 @@ fn pack_reachable_objects(
         let data = gix::objs::Data {
             kind: object.kind,
             data: &object.data,
+            object_hash: repo.object_hash(),
         };
         let count = gix_pack::data::output::Count::from_data(*oid, None);
         let entry = gix_pack::data::output::Entry::from_data(&count, &data).map_err(git_err)?;

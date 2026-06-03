@@ -17,7 +17,6 @@ categories.workspace = true
 # preserves the historical behavior; downstream can disable with
 # `--no-default-features` cleanly.
 objects = { path = "../objects", package = "heddle-objects", version = "0.2" }
-blake3.workspace = true
 rmp-serde.workspace = true
 serde.workspace = true
 thiserror.workspace = true

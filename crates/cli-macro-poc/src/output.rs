@@ -35,7 +35,7 @@ use serde::Serialize;
 /// `.heddle` sidecar and updates the local `.git/info/exclude` file for Heddle
 /// metadata only; it does not import Git history or write Git-tracked files.
 #[derive(Debug, Serialize, JsonSchema)]
-#[schemars(example = "init_example")]
+#[schemars(example = init_example())]
 pub struct InitOutput {
     /// Stable output discriminator. Always `"init"`.
     pub output_kind: &'static str,

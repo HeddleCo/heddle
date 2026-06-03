@@ -34,7 +34,6 @@ serde = { workspace = true }
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tracing-subscriber = { workspace = true }
 
 # NFS fallback adapter — only built when the `nfs` feature is on.
 # Unlike `fuse`/`fskit`/`projfs` (which target one OS each), the
@@ -43,7 +42,7 @@ tracing-subscriber = { workspace = true }
 # NFS client to mount it. Works wherever the kernel ships an NFS
 # client (Linux, macOS, Windows w/ NFS client feature).
 async-trait = { workspace = true, optional = true }
-nfsserve = { version = "0.10", optional = true }
+nfsserve = { version = "0.11", optional = true }
 tokio = { workspace = true, optional = true }
 
 # `fuser` provides the FUSE bindings on Linux. Gated behind the
@@ -61,7 +60,7 @@ fuser = { version = "0.17", optional = true }
 # Windows so non-Windows builds with `projfs` accidentally enabled
 # get a no-op rather than a download.
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.58", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Storage_ProjectedFileSystem",
     "Win32_System_Com",
@@ -151,6 +150,10 @@ nfs = ["dep:nfsserve", "dep:tokio", "dep:async-trait"]
 # entirely, and `--all-features` on Linux still compiles cleanly
 # because the build-script no-ops on non-macOS targets.
 cbindgen = { version = "0.29", default-features = false, optional = true }
+
+# cbindgen is consumed by build.rs (FSKit Swift header regen).
+[package.metadata.cargo-machete]
+ignored = ["cbindgen"]
 
 # The `heddle-fuse-worker` binary lives in `crates/cli` (see
 # `crates/cli/Cargo.toml`'s `[[bin]]` for it). The mount crate exposes

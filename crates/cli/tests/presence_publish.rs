@@ -37,7 +37,9 @@ async fn spawn_stub_server() -> (SocketAddr, mpsc::UnboundedReceiver<Value>, Joi
 
         // Send a benign ready so the publisher proceeds.
         ws.send(Message::Text(
-            serde_json::json!({"type":"ready","subscribed":[]}).to_string(),
+            serde_json::json!({"type":"ready","subscribed":[]})
+                .to_string()
+                .into(),
         ))
         .await
         .ok();

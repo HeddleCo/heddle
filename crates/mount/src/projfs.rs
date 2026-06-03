@@ -1060,7 +1060,7 @@ fn emit_entry_slice(
 
 unsafe extern "system" fn notification_trampoline(
     callback_data: *const PRJ_CALLBACK_DATA,
-    _is_directory: windows::Win32::Foundation::BOOLEAN,
+    _is_directory: bool,
     notification: PRJ_NOTIFICATION,
     destination_file_name: PCWSTR,
     _operation_parameters: *mut windows::Win32::Storage::ProjectedFileSystem::PRJ_NOTIFICATION_PARAMETERS,
