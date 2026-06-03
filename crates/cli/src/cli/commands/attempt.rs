@@ -42,7 +42,7 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use objects::worktree::{WorktreeIgnoreMatcher, build_worktree_ignore};
-use repo::Repository;
+use repo::{Repository, shell_quote};
 use serde::Serialize;
 
 use super::{
@@ -500,7 +500,10 @@ pub fn cmd_attempt(cli: &Cli, args: AttemptArgs) -> Result<()> {
 
     let next_action = recommended
         .as_deref()
-        .map(|name| format!("heddle ready --thread {name}"));
+        // Quote defensively at construction (heddle#464 defense-in-depth): the
+        // thread id flows into the validated next_action / recommended_action
+        // fields, so an unsafe one renders as a single shell token, never bare.
+        .map(|name| format!("heddle ready --thread {}", shell_quote(name)));
     let next_action = ActionFields::from_optional_action(next_action);
     let recommended_action = next_action.clone();
 

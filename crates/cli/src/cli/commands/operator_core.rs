@@ -594,6 +594,60 @@ mod tests {
         );
     }
 
+    // heddle#464 defense-in-depth — the exact P1 scenario. A blocked `land`
+    // emits its `OperatorCommandOutput` (flattened into `LandOutput`) with both
+    // `next_action` and `recommended_action` carrying a `heddle sync --thread
+    // <id>` breadcrumb. The `<id>` is NOT guaranteed to be a freshly-validated
+    // `ThreadId`: `new_unchecked` (Deserialize / `ThreadRecord::thread_id`),
+    // historical records, and `heddle agent reserve --thread` all bypass
+    // `validate_thread_id`. An unsafe id here (`bad;echo pwn`) would tokenize
+    // into extra positionals and fail the next_action validator — the render
+    // failure Codex flagged. Quoting at construction makes it a single token, so
+    // the JSON validates regardless of where the id came from. This asserts the
+    // P1 cannot recur.
+    #[test]
+    fn blocked_land_with_unvalidated_thread_id_passes_only_when_quoted() {
+        use crate::cli::commands::next_action::{
+            validated_json_string, NextActionValidationContext,
+        };
+        use repo::shell_quote;
+
+        // Simulates a `new_unchecked` / historical / `agent reserve` id that
+        // never went through `ThreadId::new`.
+        let unsafe_id = "bad;echo pwn";
+        let context = NextActionValidationContext::without_repo(&["land"]);
+
+        let quoted = OperatorCommandOutput {
+            status: "blocked".to_string(),
+            action: "land".to_string(),
+            message: format!("Thread '{unsafe_id}' must be synced manually"),
+            blockers: vec!["thread is stale".to_string()],
+            warnings: Vec::new(),
+            next_action: Some(format!("heddle sync --thread {}", shell_quote(unsafe_id))),
+            recommended_action: Some(format!("heddle sync --thread {}", shell_quote(unsafe_id))),
+        };
+        let json = validated_json_string(&quoted, context).expect(
+            "a shell-quoted unvalidated thread id must pass next_action validation (the P1 fix)",
+        );
+        assert!(
+            json.contains("heddle sync --thread 'bad;echo pwn'"),
+            "both action fields must carry the quoted, single-token thread id: {json}"
+        );
+
+        // Guard: the BARE interpolation is exactly the P1 bug — the id tokenizes
+        // into extra positionals (`echo`, `pwn`) and fails the validator, so the
+        // JSON output would never render.
+        let bare = OperatorCommandOutput {
+            next_action: Some(format!("heddle sync --thread {unsafe_id}")),
+            recommended_action: Some(format!("heddle sync --thread {unsafe_id}")),
+            ..quoted.clone()
+        };
+        assert!(
+            validated_json_string(&bare, context).is_err(),
+            "a bare unvalidated thread id must fail validation — proving quoting is what closes the hole"
+        );
+    }
+
     #[test]
     fn raw_git_operation_handoff_recommends_heddle_preservation_not_git_cli() {
         let operation = RepositoryOperationStatus {

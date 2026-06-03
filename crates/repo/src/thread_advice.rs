@@ -9,11 +9,15 @@ use crate::{Thread, ThreadFreshness, ThreadState};
 /// value containing whitespace or shell metacharacters yields a runnable
 /// command (and tokenizes correctly through the CLI's next_action validator).
 ///
-/// Thread ids no longer need this — they are validated to the safe slug set at
-/// creation ([`crate::validate_thread_id`]) and so are single tokens by
-/// construction. It is kept for the values that legitimately CAN contain
-/// spaces and cannot be disallowed: file PATHS interpolated into breadcrumbs
-/// (e.g. `heddle resolve <conflict path>`).
+/// Applied defensively at EVERY breadcrumb construction site — to thread ids
+/// as well as file paths — because not every id reaching a breadcrumb is a
+/// freshly-validated [`crate::ThreadId`]. [`ThreadId::new_unchecked`] (used for
+/// `Deserialize` and `ThreadRecord::thread_id`), historical/persisted records,
+/// and `heddle agent reserve --thread` all bypass [`crate::validate_thread_id`].
+/// Creation-time validation stays as a UX / early-reject layer, but the SAFETY
+/// guarantee is the emit-quoting here: a clean slug (`feature/x`) passes through
+/// bare and renders unchanged, while an unsafe id is single-quoted into one
+/// token so it can never split into extra args and break the breadcrumb.
 pub fn shell_quote(arg: &str) -> String {
     let safe = !arg.is_empty()
         && arg.bytes().all(|b| {
@@ -41,18 +45,25 @@ pub enum RecommendedAction {
 
 impl RecommendedAction {
     pub fn command(&self, thread_id: &str) -> Option<String> {
-        // `thread_id` is validated to the safe slug set at creation, so it is a
-        // single shell token by construction — interpolate it bare. (heddle#464
-        // close-the-class: the invariant lives at the ThreadId boundary, not at
-        // each breadcrumb site.)
+        // Quote `thread_id` defensively: not every id reaching this function is
+        // a freshly-validated `ThreadId`. `new_unchecked` (Deserialize /
+        // `ThreadRecord::thread_id`), historical/persisted records, and
+        // `heddle agent reserve --thread` all bypass `validate_thread_id`, so an
+        // unsafe id (whitespace / shell metacharacter) can reach here. A clean
+        // slug passes through bare (unchanged); an unsafe one becomes a single
+        // quoted token so the breadcrumb stays runnable and survives the CLI's
+        // next_action validator. (heddle#464 — defense-in-depth: quote at the
+        // emit boundary; creation-time validation stays as a UX/early-reject
+        // layer, but safety does not depend on it being covered everywhere.)
+        let tid = shell_quote(thread_id);
         match self {
             Self::Commit => Some("heddle commit -m \"...\"".to_string()),
-            Self::Ready => Some(format!("heddle ready --thread {thread_id}")),
-            Self::Sync => Some(format!("heddle sync --thread {thread_id}")),
-            Self::Land => Some(format!("heddle land --thread {thread_id} --no-push")),
+            Self::Ready => Some(format!("heddle ready --thread {tid}")),
+            Self::Sync => Some(format!("heddle sync --thread {tid}")),
+            Self::Land => Some(format!("heddle land --thread {tid} --no-push")),
             Self::Resolve => Some("heddle resolve --list".to_string()),
             Self::Review => None,
-            Self::Promote => Some(format!("heddle thread promote {thread_id}")),
+            Self::Promote => Some(format!("heddle thread promote {tid}")),
         }
     }
 }
@@ -173,7 +184,10 @@ pub fn describe_thread_advice_with_initial(
         return ThreadAdvice {
             thread_health: "ready".to_string(),
             blockers,
-            recommended_action: format!("heddle land --thread {} --no-push", thread.id),
+            recommended_action: format!(
+                "heddle land --thread {} --no-push",
+                shell_quote(&thread.id)
+            ),
         };
     } else if clean_ready_merges_to_apply || thread.state == ThreadState::Ready {
         RecommendedAction::Land
@@ -269,26 +283,62 @@ mod tests {
         );
     }
 
-    // Thread ids are validated to the safe slug set at creation, so breadcrumbs
-    // interpolate them bare — no quoting in `command()`.
+    // A clean slug renders bare in every breadcrumb (no regression): quoting is
+    // a no-op for the safe set, so existing copy-pasteable commands are
+    // unchanged.
     #[test]
-    fn command_interpolates_validated_thread_id_bare() {
+    fn command_interpolates_safe_slug_bare() {
         assert_eq!(
             RecommendedAction::Sync.command("feature/x").as_deref(),
             Some("heddle sync --thread feature/x")
         );
+        assert_eq!(
+            RecommendedAction::Land.command("feature/x").as_deref(),
+            Some("heddle land --thread feature/x --no-push")
+        );
+        assert_eq!(
+            RecommendedAction::Promote.command("team@scope").as_deref(),
+            Some("heddle thread promote team@scope")
+        );
     }
 
-    // `shell_quote` survives for the values that legitimately CAN contain
-    // spaces and cannot be disallowed: file PATHS interpolated into breadcrumbs.
+    // heddle#464 defense-in-depth: an UNVALIDATED id that bypassed
+    // `ThreadId::new` — exactly what `ThreadId::new_unchecked` models for a
+    // deserialized / historical record or a `heddle agent reserve --thread`
+    // value — must still render as a single quoted shell token through
+    // `command()`, never bare. This is the close-the-class proof: safety does
+    // not depend on the creation boundary being covered.
     #[test]
-    fn shell_quote_quotes_paths_with_whitespace_and_metacharacters() {
+    fn command_quotes_unsafe_unvalidated_thread_id() {
+        for unsafe_id in ["bad;echo pwn", "my feature", "a$(x)"] {
+            // Construct the id the way a persisted/historical record does —
+            // straight through `new_unchecked`, skipping validation.
+            let historical = crate::ThreadId::new_unchecked(unsafe_id);
+            let rendered = RecommendedAction::Sync
+                .command(historical.as_str())
+                .expect("sync breadcrumb");
+            assert_eq!(rendered, format!("heddle sync --thread '{unsafe_id}'"));
+            // Guard: the offending id must not appear bare (the P1 bug).
+            assert!(
+                !rendered.contains(&format!("--thread {unsafe_id}")),
+                "the unsafe id must be quoted, not interpolated bare: {rendered}"
+            );
+        }
+    }
+
+    // `shell_quote` leaves the safe slug set bare and single-quotes anything
+    // else — thread ids AND the file PATHS that legitimately CAN contain spaces.
+    #[test]
+    fn shell_quote_quotes_whitespace_and_metacharacters() {
         // Safe slugs / ordinary paths pass through bare...
         assert_eq!(shell_quote("src/lib.rs"), "src/lib.rs");
-        // ...but a path with a space is single-quoted so the recommended
-        // command is runnable and tokenizes correctly in the next_action
-        // validator (e.g. `heddle resolve 'my file.txt'`).
+        assert_eq!(shell_quote("feature/x"), "feature/x");
+        assert_eq!(shell_quote("team@scope"), "team@scope");
+        // ...but whitespace / shell metacharacters are single-quoted so the
+        // recommended command is runnable and tokenizes correctly in the
+        // next_action validator (e.g. `heddle resolve 'my file.txt'`).
         assert_eq!(shell_quote("my file.txt"), "'my file.txt'");
+        assert_eq!(shell_quote("bad;echo pwn"), "'bad;echo pwn'");
         assert_eq!(shell_quote("a'b"), r"'a'\''b'");
     }
 }
