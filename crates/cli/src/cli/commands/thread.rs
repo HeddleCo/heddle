@@ -1649,7 +1649,7 @@ pub(crate) fn resolve_start_epoch(repo: &Repository, name: &str) -> Result<DateT
 /// Centralized "invalid thread name" advice (text + JSON error envelope) built
 /// from a [`ThreadIdError`]. The error's `Display` already names the offending
 /// input and suggests a valid rename; this wraps it as a usage refusal.
-fn thread_name_invalid_advice(err: &ThreadIdError) -> RecoveryAdvice {
+pub(crate) fn thread_name_invalid_advice(err: &ThreadIdError) -> RecoveryAdvice {
     RecoveryAdvice::invalid_usage(
         "thread_name_invalid",
         err.to_string(),
@@ -2324,6 +2324,12 @@ pub(crate) fn cmd_thread_create(
     ephemeral: bool,
     ttl_secs: Option<u32>,
 ) -> Result<()> {
+    // Same user/external creation boundary guard as `start_thread`: reject a
+    // name that isn't a safe single shell token before any ref/record is
+    // persisted, so `heddle thread create` can't slip an unsafe id past the
+    // early-reject layer. (heddle#464 close-the-class.)
+    ThreadId::new(name.as_str()).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
+
     // `ephemeral` / `ttl_secs` are part of main's evolved
     // ephemeral-threads API; not yet plumbed into the Thread record
     // here. TODO: thread these through to a ThreadLifecycle field

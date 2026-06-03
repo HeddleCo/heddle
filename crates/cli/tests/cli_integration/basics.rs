@@ -4318,3 +4318,58 @@ fn start_rejects_thread_name_with_space_in_text_and_json() {
         "the rejected name must never have been persisted: {list}"
     );
 }
+
+/// heddle#464 close-the-class (round 6): the SAME early-reject rule must guard
+/// every user/external thread-creation boundary, not just `start`. `heddle
+/// thread create` with a shell-metacharacter name is rejected before any ref or
+/// record is persisted.
+#[test]
+fn thread_create_rejects_thread_name_with_metachar() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    let out = heddle_output(&["thread", "create", "bad;id"], Some(temp.path())).unwrap();
+    assert!(
+        !out.status.success(),
+        "thread create must reject an unsafe name: stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("is invalid"),
+        "thread create must explain the name is invalid: {stderr}"
+    );
+
+    let list = heddle(&["thread", "list", "--output", "json"], Some(temp.path())).unwrap();
+    assert!(
+        !list.contains("bad;id"),
+        "the rejected name must never have been persisted: {list}"
+    );
+}
+
+/// heddle#464 close-the-class (round 6): `heddle agent reserve` also persists a
+/// thread record, so it must reject an unsafe thread name at the same boundary.
+#[test]
+fn agent_reserve_rejects_thread_name_with_metachar() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    let out =
+        heddle_output(&["agent", "reserve", "--thread", "bad;id"], Some(temp.path())).unwrap();
+    assert!(
+        !out.status.success(),
+        "agent reserve must reject an unsafe name: stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("is invalid"),
+        "agent reserve must explain the name is invalid: {stderr}"
+    );
+
+    let list = heddle(&["thread", "list", "--output", "json"], Some(temp.path())).unwrap();
+    assert!(
+        !list.contains("bad;id"),
+        "the rejected name must never have been persisted: {list}"
+    );
+}
