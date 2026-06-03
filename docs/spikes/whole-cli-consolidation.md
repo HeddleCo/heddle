@@ -1,6 +1,6 @@
 # Whole-CLI Consolidation Decision
 
-Status: proposed (spike). Supersedes nothing already merged; extends the accepted `#461` save/land core and the filed `#466`/`#467` decisions to the **entire** top-level surface.
+Status: **ACCEPTED** (maintainer sign-off 2026-06-03 — see Maintainer Decisions below). Extends the accepted `#461` save/land core and the filed `#466`/`#467` decisions to the **entire** top-level surface.
 
 Directive: AGGRESSIVE. The default verdict for every verb is remove / merge / demote. A verb earns a distinct top-level canonical slot only if it is the single irreducible path to a capability nothing else covers.
 
@@ -9,6 +9,19 @@ Directive: AGGRESSIVE. The default verdict for every verb is remove / merge / de
 **85 true top-level verbs -> 28 canonical (+ ~24 demoted to advanced/admin/help).**
 
 (The "~115" figure in the brief counts deep subcommand leaves; the `Commands` enum in `crates/cli/src/cli/cli_args/commands_main.rs` defines 85 top-level variants, several `#[cfg(feature=...)]`-gated. All 85 are accounted for below.)
+
+## Maintainer decisions (2026-06-03)
+
+Direction **ACCEPTED**. Resolutions to the open questions (these override the proposed dispositions where they differ):
+
+1. **`switch` — KEEP canonical.** One git-muscle-memory porcelain is worth keeping to ease git users in. (`checkout`/`goto` still fold into it.)
+2. **`blame` — REMOVE from the canonical surface.** Per-line attribution data is surfaced via `query` instead; if `query` lacks an attribution/per-line mode today, add one later. `blame` is not a standalone top-level verb.
+3. **`auth` and `presence` — BOTH KEEP canonical, as SEPARATE verbs.** The OSS CLI is the *client*: `auth` manages the locally-owned biscuit; `presence` broadcasts agent actions to listeners — distinct concerns, not one cluster. **No `admin` namespace in heddle** (the admin surface lives in weft). `support` (hosted staff grants) is an admin concern → **removed from the heddle surface**.
+4. **Two daemons — KEEP SEPARATE.** The FUSE-mount daemon and the agent `serve`/`status`/`stop` control plane stay as separate sub-namespaces (correct long-term; do NOT unify under one `daemon <which>`).
+5. **`discuss` — KEEP distinct canonical.** Not folded under `context`; it has its own dedup/anchor lifecycle.
+6. **`marker` — MERGE into the `thread`/ref naming surface** (a name-pointing-at-a-state), not a standalone advanced primitive.
+
+Net effect on the canonical set vs the proposal: `presence` and `discuss` are canonical; `blame`, `support`, and any `admin` namespace are dropped from heddle; `marker` folds into `thread`; `switch` stays. Implementation proceeds in the phased plan below; `#464` is the save/land (phase-0) slice already in flight.
 
 ## Completeness check
 
