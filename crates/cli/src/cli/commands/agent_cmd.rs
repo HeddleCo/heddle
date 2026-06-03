@@ -216,9 +216,9 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
     let reservation_path = existing_thread_execution_path(&repo, &thread_name)?;
     let probe = crate::harness::probe_current_process_harness(
         &repo,
-        std::env::var("HEDDLE_AGENT_PROVIDER").ok(),
-        std::env::var("HEDDLE_AGENT_MODEL").ok(),
-        std::env::var("HEDDLE_AGENT_POLICY").ok(),
+        std::env::var("HEDDLE_AGENT_PROVIDER").ok().and_then(crate::attribution::clean_attribution_value),
+        std::env::var("HEDDLE_AGENT_MODEL").ok().and_then(crate::attribution::clean_attribution_value),
+        std::env::var("HEDDLE_AGENT_POLICY").ok().and_then(crate::attribution::clean_attribution_value),
     )?;
     // `--hold-for-pid PID` binds the reservation to an external
     // process (typically the orchestrator that wraps the heddle

@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use proto::{TranscriptAttachmentRef, UsageTotals};
 
+use crate::attribution::clean_attribution_value;
+
 mod claude_code;
 mod codex;
 mod opencode;
@@ -177,10 +179,16 @@ fn fingerprint_from_hints(
         fingerprint.harness = Some("aider".to_string());
     }
 
-    fingerprint.provider = env_hints.get("HEDDLE_AGENT_PROVIDER").cloned();
+    fingerprint.provider = fingerprint.provider.or_else(|| {
+        env_hints
+            .get("HEDDLE_AGENT_PROVIDER")
+            .cloned()
+            .and_then(clean_attribution_value)
+    });
     fingerprint.model = env_hints
         .get("HEDDLE_AGENT_MODEL")
         .cloned()
+        .and_then(clean_attribution_value)
         .or_else(|| env_hints.get("CODEX_MODEL").cloned())
         .or_else(|| env_hints.get("CLAUDE_MODEL").cloned())
         .or_else(|| env_hints.get("ANTHROPIC_MODEL").cloned())
@@ -197,8 +205,19 @@ fn fingerprint_from_hints(
     fingerprint.policy = env_hints
         .get("HEDDLE_AGENT_POLICY")
         .cloned()
+        .and_then(clean_attribution_value)
         .or_else(|| env_hints.get("PROMPT_POLICY").cloned());
     fingerprint
+}
+
+pub(crate) fn attribution_env_hint(
+    env_hints: &BTreeMap<String, String>,
+    key: &str,
+) -> Option<String> {
+    env_hints
+        .get(key)
+        .cloned()
+        .and_then(clean_attribution_value)
 }
 
 pub(crate) fn argv_value(argv: &[String], flag: &str) -> Option<String> {
@@ -292,6 +311,56 @@ mod tests {
         assert_eq!(result.harness, None);
         assert_eq!(result.provider.as_deref(), Some("custom-ai"));
         assert_eq!(result.model.as_deref(), Some("custom-model"));
+    }
+
+    #[test]
+    fn explicit_heddle_agent_env_wins_over_detected_claude_identity() {
+        let mut env_hints = BTreeMap::new();
+        env_hints.insert("CLAUDECODE".to_string(), "1".to_string());
+        env_hints.insert("HEDDLE_AGENT_PROVIDER".to_string(), "openai".to_string());
+        env_hints.insert("HEDDLE_AGENT_MODEL".to_string(), "gpt-5-codex".to_string());
+
+        let result = probe_harness_actor(&HarnessProbeInput {
+            env_hints,
+            probe_metadata: BTreeMap::from([(
+                "model".to_string(),
+                "claude-opus-4-8[1m]".to_string(),
+            )]),
+            repo_root: "/tmp/repo".to_string(),
+            ..HarnessProbeInput::default()
+        })
+        .expect("probe should succeed");
+
+        assert_eq!(result.harness.as_deref(), Some("claude-code"));
+        assert_eq!(result.provider.as_deref(), Some("openai"));
+        assert_eq!(result.model.as_deref(), Some("gpt-5-codex"));
+    }
+
+    #[test]
+    fn blank_heddle_agent_env_falls_through_to_detected_claude_identity() {
+        let mut env_hints = BTreeMap::new();
+        env_hints.insert("CLAUDECODE".to_string(), "1".to_string());
+        env_hints.insert("HEDDLE_AGENT_PROVIDER".to_string(), "anthropic".to_string());
+        env_hints.insert("HEDDLE_AGENT_MODEL".to_string(), String::new());
+        env_hints.insert("HEDDLE_AGENT_POLICY".to_string(), "unknown".to_string());
+
+        let result = probe_harness_actor(&HarnessProbeInput {
+            env_hints,
+            explicit_harness: Some("claude-code".to_string()),
+            probe_metadata: BTreeMap::from([
+                ("model".to_string(), "claude-opus-4-8[1m]".to_string()),
+                ("session_id".to_string(), "claude-sess-1".to_string()),
+            ]),
+            current_policy: Some("detected-policy".to_string()),
+            repo_root: "/tmp/repo".to_string(),
+            ..HarnessProbeInput::default()
+        })
+        .expect("probe should succeed");
+
+        assert_eq!(result.harness.as_deref(), Some("claude-code"));
+        assert_eq!(result.provider.as_deref(), Some("anthropic"));
+        assert_eq!(result.model.as_deref(), Some("claude-opus-4-8[1m]"));
+        assert_eq!(result.policy.as_deref(), Some("detected-policy"));
     }
 
     #[test]

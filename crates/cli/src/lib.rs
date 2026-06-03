@@ -11,6 +11,7 @@ compile_error!(
 );
 
 pub mod bench;
+pub(crate) mod attribution;
 // The bridge module stays always-compiled so light consumers (fsck,
 // clone, fetch, remote, checkpoint, operator_loop, gc) keep working in
 // native-only builds without fanning #[cfg] through their use blocks.
