@@ -32,6 +32,7 @@ use super::{
     thread_cmd::current_thread,
 };
 use crate::{
+    attribution::clean_attribution_value,
     bridge::GitBridge,
     cli::{Cli, should_output_json, style},
     config::UserConfig,
@@ -908,18 +909,6 @@ fn build_attribution_with_env(
             Ok(Attribution::with_agent(principal, agent))
         }
         _ => Ok(Attribution::human(principal)),
-    }
-}
-
-/// Treat the `"unknown"` harness placeholder and empty/whitespace
-/// strings as absent so they don't beat real env-var or config
-/// values in the attribution precedence chain.
-fn clean_attribution_value(value: String) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("unknown") {
-        None
-    } else {
-        Some(value)
     }
 }
 

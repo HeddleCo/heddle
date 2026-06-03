@@ -3,7 +3,7 @@ use anyhow::Result;
 
 use super::{
     HarnessActorProbe, HarnessAttachHints, HarnessProbeInput, HarnessProbeResult, ProbeSource,
-    argv_value, csv_paths, parse_u64,
+    attribution_env_hint, argv_value, csv_paths, parse_u64,
 };
 
 pub(crate) struct ClaudeCodeProbe;
@@ -51,13 +51,13 @@ impl HarnessActorProbe for ClaudeCodeProbe {
             provider: input
                 .explicit_provider
                 .clone()
-                .or_else(|| input.env_hints.get("HEDDLE_AGENT_PROVIDER").cloned())
+                .or_else(|| attribution_env_hint(&input.env_hints, "HEDDLE_AGENT_PROVIDER"))
                 .or_else(|| input.current_provider.clone())
                 .or(Some("anthropic".to_string())),
             model: input
                 .explicit_model
                 .clone()
-                .or_else(|| input.env_hints.get("HEDDLE_AGENT_MODEL").cloned())
+                .or_else(|| attribution_env_hint(&input.env_hints, "HEDDLE_AGENT_MODEL"))
                 .or_else(|| metadata.get("model").cloned())
                 .or_else(|| argv_value(argv, "--model"))
                 .or_else(|| input.env_hints.get("CLAUDE_MODEL").cloned())
@@ -96,7 +96,7 @@ impl HarnessActorProbe for ClaudeCodeProbe {
             policy: input
                 .explicit_policy
                 .clone()
-                .or_else(|| input.env_hints.get("HEDDLE_AGENT_POLICY").cloned())
+                .or_else(|| attribution_env_hint(&input.env_hints, "HEDDLE_AGENT_POLICY"))
                 .or_else(|| input.current_policy.clone()),
             touched_paths: csv_paths(metadata.get("touched_paths")),
             transcript_refs: transcript_path
