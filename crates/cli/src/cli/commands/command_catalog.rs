@@ -205,6 +205,20 @@ where
     checked_action_from_argv(argv)
 }
 
+/// Build the `--thread <id>` argv fragment for splicing into a [`heddle_action`]
+/// argv. A historical / `new_unchecked` thread id that starts with `-` is
+/// rendered as the combined `--thread=<id>` token, which clap binds as the
+/// flag's value; the plain `--thread`, `<id>` pair would otherwise be re-parsed
+/// (after `split_recommended_action`) with `-foo` as another option, and
+/// `checked_action_from_argv` would panic. (heddle#464 close-the-class.)
+pub(crate) fn thread_flag_args(thread_id: &str) -> Vec<String> {
+    if thread_id.starts_with('-') {
+        vec![format!("--thread={thread_id}")]
+    } else {
+        vec!["--thread".to_string(), thread_id.to_string()]
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct CommandJsonDiscriminator {
     pub path: Vec<String>,

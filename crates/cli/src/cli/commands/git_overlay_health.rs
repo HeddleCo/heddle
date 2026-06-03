@@ -1556,7 +1556,14 @@ pub(crate) fn detached_git_head_mutation_advice(repo: &Repository, action: &str)
 fn detached_head_primary_recovery(repo: &Repository) -> String {
     match repo.refs().read_head() {
         Ok(Head::Attached { thread }) if !thread.trim().is_empty() => {
-            return heddle_action(["switch", thread.as_str()]);
+            // `switch` takes the thread as a positional; a leading-dash id needs
+            // the `--` separator so clap binds it as a value, not a flag.
+            // (heddle#464 close-the-class.)
+            return if thread.starts_with('-') {
+                heddle_action(["switch", "--", thread.as_str()])
+            } else {
+                heddle_action(["switch", thread.as_str()])
+            };
         }
         _ => {}
     }

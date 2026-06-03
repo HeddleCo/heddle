@@ -3,10 +3,22 @@
 
 use repo::Repository;
 
-use super::command_catalog::heddle_action;
+use super::command_catalog::{heddle_action, thread_flag_args};
 
 pub(crate) fn merge_preview_command(thread_id: &str) -> String {
-    heddle_action(["merge", thread_id, "--preview"])
+    // `merge` takes the thread as a POSITIONAL. A leading-dash id needs the `--`
+    // end-of-options separator (positionals can't use the `=` form), so the
+    // flags move ahead of it. (heddle#464 close-the-class.)
+    if thread_id.starts_with('-') {
+        heddle_action(vec![
+            "merge".to_string(),
+            "--preview".to_string(),
+            "--".to_string(),
+            thread_id.to_string(),
+        ])
+    } else {
+        heddle_action(["merge", thread_id, "--preview"])
+    }
 }
 
 pub(crate) fn land_command_for_thread(repo: &Repository, thread_id: &str) -> String {
@@ -26,15 +38,24 @@ pub(crate) fn land_command_with_push_target(thread_id: &str, has_push_target: bo
 }
 
 pub(crate) fn land_push_command(thread_id: &str) -> String {
-    heddle_action(["land", "--thread", thread_id, "--push"])
+    let mut argv = vec!["land".to_string()];
+    argv.extend(thread_flag_args(thread_id));
+    argv.push("--push".to_string());
+    heddle_action(argv)
 }
 
 pub(crate) fn land_push_remote_command(thread_id: &str, remote: &str) -> String {
-    heddle_action(["land", "--thread", thread_id, "--push", "--remote", remote])
+    let mut argv = vec!["land".to_string()];
+    argv.extend(thread_flag_args(thread_id));
+    argv.extend(["--push".to_string(), "--remote".to_string(), remote.to_string()]);
+    heddle_action(argv)
 }
 
 pub(crate) fn land_local_command(thread_id: &str) -> String {
-    heddle_action(["land", "--thread", thread_id, "--no-push"])
+    let mut argv = vec!["land".to_string()];
+    argv.extend(thread_flag_args(thread_id));
+    argv.push("--no-push".to_string());
+    heddle_action(argv)
 }
 
 pub(crate) fn contextual_thread_action(
@@ -50,33 +71,42 @@ pub(crate) fn contextual_thread_action(
         return action.to_string();
     }
     if action == merge_preview_command(thread_id) {
-        return heddle_action(vec![
-            "--repo".to_string(),
-            main_root.display().to_string(),
-            "merge".to_string(),
-            thread_id.to_string(),
-            "--preview".to_string(),
-        ]);
+        let mut argv = vec!["--repo".to_string(), main_root.display().to_string()];
+        if thread_id.starts_with('-') {
+            argv.extend([
+                "merge".to_string(),
+                "--preview".to_string(),
+                "--".to_string(),
+                thread_id.to_string(),
+            ]);
+        } else {
+            argv.extend([
+                "merge".to_string(),
+                thread_id.to_string(),
+                "--preview".to_string(),
+            ]);
+        }
+        return heddle_action(argv);
     }
     if action == land_local_command(thread_id) {
-        return heddle_action(vec![
+        let mut argv = vec![
             "--repo".to_string(),
             main_root.display().to_string(),
             "land".to_string(),
-            "--thread".to_string(),
-            thread_id.to_string(),
-            "--no-push".to_string(),
-        ]);
+        ];
+        argv.extend(thread_flag_args(thread_id));
+        argv.push("--no-push".to_string());
+        return heddle_action(argv);
     }
     if action == land_push_command(thread_id) {
-        return heddle_action(vec![
+        let mut argv = vec![
             "--repo".to_string(),
             main_root.display().to_string(),
             "land".to_string(),
-            "--thread".to_string(),
-            thread_id.to_string(),
-            "--push".to_string(),
-        ]);
+        ];
+        argv.extend(thread_flag_args(thread_id));
+        argv.push("--push".to_string());
+        return heddle_action(argv);
     }
     action.to_string()
 }
@@ -107,5 +137,39 @@ mod tests {
             merge_preview_command("feature with spaces"),
             "heddle merge 'feature with spaces' --preview"
         );
+    }
+
+    // heddle#464 close-the-class (r9): a historical `-foo` thread id (un-creatable
+    // now, but reachable via `new_unchecked` deserialization) must yield a
+    // clap-valid command from EVERY land/merge breadcrumb builder. `heddle_action`
+    // validates through clap and panics on an invalid action, so a builder still
+    // emitting the bare `--thread -foo` (or positional `-foo`) form would panic
+    // here — this test is the conformance gate against the next sibling.
+    #[test]
+    fn land_breadcrumbs_handle_leading_dash_thread_ids() {
+        use super::super::command_catalog::validate_recommended_action;
+        let id = "-foo";
+        let cmds = [
+            land_local_command(id),
+            land_push_command(id),
+            land_push_remote_command(id, "origin"),
+            merge_preview_command(id),
+        ];
+        for cmd in &cmds {
+            validate_recommended_action(cmd).unwrap_or_else(|e| {
+                panic!("breadcrumb `{cmd}` must validate for a leading-dash id: {e}")
+            });
+        }
+        // `cli::render::shell_quote` (used by checked_action_from_argv) treats
+        // `=` as unsafe, so `--thread=-foo` renders single-quoted — still
+        // runnable (the shell strips the quotes, clap binds the value) and, as
+        // the loop above asserts, accepted by the validator.
+        assert_eq!(land_local_command(id), "heddle land '--thread=-foo' --no-push");
+        assert_eq!(land_push_command(id), "heddle land '--thread=-foo' --push");
+        assert_eq!(
+            land_push_remote_command(id, "origin"),
+            "heddle land '--thread=-foo' --push --remote origin"
+        );
+        assert_eq!(merge_preview_command(id), "heddle merge --preview -- -foo");
     }
 }
