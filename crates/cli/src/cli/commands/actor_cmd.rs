@@ -643,9 +643,9 @@ pub async fn cmd_actor_explain(cli: &Cli, session_id: Option<String>) -> Result<
 fn explain_detected_actor_identity(cli: &Cli, repo: &Repository) -> Result<()> {
     let probe = crate::harness::probe_current_process_harness(
         repo,
-        std::env::var("HEDDLE_AGENT_PROVIDER").ok(),
-        std::env::var("HEDDLE_AGENT_MODEL").ok(),
-        std::env::var("HEDDLE_AGENT_POLICY").ok(),
+        std::env::var("HEDDLE_AGENT_PROVIDER").ok().and_then(crate::attribution::clean_attribution_value),
+        std::env::var("HEDDLE_AGENT_MODEL").ok().and_then(crate::attribution::clean_attribution_value),
+        std::env::var("HEDDLE_AGENT_POLICY").ok().and_then(crate::attribution::clean_attribution_value),
     )?;
     let env_signals = actor_identity_env_signals();
     // Route through the same "is there a current lane?" predicate that
