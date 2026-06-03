@@ -315,7 +315,8 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
         anyhow!(commit_checkpoint_failed_advice(
             &snapshot.change_id,
             Some(message.as_str()),
-            &err
+            &err,
+            false,
         ))
     })?;
     let checkpoint_batch = find_recent_git_checkpoint_batch(&repo, &record.git_commit)?;
@@ -399,7 +400,8 @@ fn commit_staged_index(
         anyhow!(commit_checkpoint_failed_advice(
             &snapshot.change_id,
             Some(message),
-            &err
+            &err,
+            true,
         ))
     })?;
     let checkpoint_batch = find_recent_git_checkpoint_batch(repo, &record.git_commit)?;
@@ -1101,8 +1103,9 @@ fn commit_checkpoint_failed_advice(
     change_id: &str,
     message: Option<&str>,
     err: &anyhow::Error,
+    index_only: bool,
 ) -> RecoveryAdvice {
-    let recovery = checkpoint_recovery_command(message);
+    let recovery = checkpoint_recovery_command(message, index_only);
     RecoveryAdvice::safety_refusal(
         "commit_checkpoint_failed",
         format!("capture {change_id} was preserved, but checkpoint failed: {err}"),
@@ -1115,9 +1118,13 @@ fn commit_checkpoint_failed_advice(
     )
 }
 
-fn checkpoint_recovery_command(message: Option<&str>) -> String {
+fn checkpoint_recovery_command(message: Option<&str>, index_only: bool) -> String {
+    // Preserve the index-only (`--no-all`) intent on the staged-index path: a
+    // plain `heddle commit` retry would sweep unstaged worktree changes into a
+    // new capture and lose the staged-only state the user committed.
+    let scope = if index_only { " --no-all" } else { "" };
     format!(
-        "heddle commit -m {}",
+        "heddle commit{scope} -m {}",
         shell_double_quoted(message.unwrap_or("commit"))
     )
 }
@@ -1352,7 +1359,8 @@ mod tests {
     #[test]
     fn commit_checkpoint_failure_advice_preserves_capture_and_exact_recovery() {
         let error = anyhow!("git write failed");
-        let advice = commit_checkpoint_failed_advice("change-123", Some("say \"hello\""), &error);
+        let advice =
+            commit_checkpoint_failed_advice("change-123", Some("say \"hello\""), &error, false);
 
         assert_eq!(advice.kind, "commit_checkpoint_failed");
         assert!(advice.error.contains("capture change-123 was preserved"));
@@ -1366,6 +1374,23 @@ mod tests {
             vec!["heddle commit -m \"say \\\"hello\\\"\""]
         );
         assert!(advice.preserved.contains("change-123"));
+    }
+
+    // heddle#464: the staged-index (`--no-all`) checkpoint-failure recovery must
+    // keep the index-only intent, otherwise a plain `heddle commit` retry would
+    // sweep unstaged worktree changes into a new capture and lose the staged-only
+    // state the user committed.
+    #[test]
+    fn commit_checkpoint_failure_advice_preserves_index_only_intent() {
+        let error = anyhow!("git write failed");
+        let advice =
+            commit_checkpoint_failed_advice("change-456", Some("index only"), &error, true);
+
+        assert_eq!(advice.primary_command, "heddle commit --no-all -m \"index only\"");
+        assert_eq!(
+            advice.recovery_commands,
+            vec!["heddle commit --no-all -m \"index only\""]
+        );
     }
 
     #[test]
