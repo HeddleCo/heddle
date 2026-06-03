@@ -29,27 +29,22 @@ thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-walkdir.workspace = true
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 zstd = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 
 aws-sdk-s3 = { workspace = true, optional = true }
 aws-smithy-async = { workspace = true, optional = true }
-async-trait = { workspace = true, optional = true }
 runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.2", optional = true }
 
 [features]
-s3 = ["dep:aws-sdk-s3", "dep:aws-smithy-async", "dep:async-trait", "dep:tokio", "dep:runtime-bridge"]
+s3 = ["dep:aws-sdk-s3", "dep:aws-smithy-async", "dep:tokio", "dep:runtime-bridge"]
 memory-backend = []
 zstd = ["dep:zstd"]
 
 [dev-dependencies]
 criterion = "0.8"
 tempfile.workspace = true
-tokio-test.workspace = true
-serial_test.workspace = true
-ntest.workspace = true
 tokio = { workspace = true, features = ["full"] }
 s3s.workspace = true
 s3s-fs.workspace = true

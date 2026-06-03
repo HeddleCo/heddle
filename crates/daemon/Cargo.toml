@@ -10,10 +10,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-async-stream.workspace = true
 chrono.workspace = true
 crypto = { path = "../crypto", package = "heddle-crypto", version = "0.2" }
-fs2.workspace = true
 futures.workspace = true
 grpc = { path = "../grpc", package = "heddle-grpc", version = "0.7" }
 hex.workspace = true
@@ -27,7 +25,6 @@ repo = { path = "../repo", package = "heddle-repo", version = "0.2", default-fea
 serde.workspace = true
 serde_json.workspace = true
 state_review = { path = "../state_review", package = "heddle-state-review", version = "0.2" }
-thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true

@@ -20,6 +20,12 @@ tonic-prost.workspace = true
 protoc-bin-vendored.workspace = true
 tonic-prost-build.workspace = true
 
+# prost, prost-types, and tonic-prost are consumed by code emitted via
+# `tonic::include_proto!` so they don't appear in source. protoc-bin-vendored
+# and tonic-prost-build are used by build.rs above.
+[package.metadata.cargo-machete]
+ignored = ["prost", "prost-types", "tonic-prost", "protoc-bin-vendored", "tonic-prost-build"]
+
 [lib]
 path = "src/lib.rs"
 name = "grpc"

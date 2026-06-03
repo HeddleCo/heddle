@@ -12,9 +12,18 @@ categories.workspace = true
 [dependencies]
 anyhow.workspace = true
 libc.workspace = true
+# Needed for the `span-locations` feature; syn alone pulls proc-macro2
+# without it, and `Span::start()` (used by every static-analysis bin
+# below) is gated behind that feature.
 proc-macro2.workspace = true
 protoc-bin-vendored.workspace = true
 serde_json.workspace = true
 syn.workspace = true
 tempfile.workspace = true
 walkdir.workspace = true
+
+# proc-macro2 is needed for the `span-locations` cargo feature so
+# `Span::start()` is available; syn alone re-exports the type but not
+# the feature.
+[package.metadata.cargo-machete]
+ignored = ["proc-macro2"]

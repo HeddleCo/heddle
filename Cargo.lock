@@ -167,28 +167,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
-name = "async-stream"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b5a71a6f37880a80d1d7f19efd781e4b5de42c88f0722cc13bcb6cc2cfe8476"
-dependencies = [
- "async-stream-impl",
- "futures-core",
- "pin-project-lite",
-]
-
-[[package]]
-name = "async-stream-impl"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "async-trait"
 version = "0.1.89"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2810,18 +2788,13 @@ version = "0.2.4"
 dependencies = [
  "anstyle",
  "anyhow",
- "async-stream",
  "async-trait",
- "base32",
  "base64 0.22.1",
  "blake3",
- "bytes",
  "chrono",
  "clap",
  "clap_complete",
  "criterion",
- "ed25519-dalek",
- "fs2",
  "futures",
  "gix",
  "gix-config",
@@ -2848,7 +2821,6 @@ dependencies = [
  "hyper-util",
  "ignore",
  "libc",
- "memmap2",
  "notify",
  "ntest",
  "opentelemetry",
@@ -2856,7 +2828,6 @@ dependencies = [
  "opentelemetry_sdk",
  "proptest",
  "prost-types 0.14.3",
- "rand 0.10.1",
  "rmp-serde",
  "rustls 0.23.40",
  "schemars",
@@ -2867,10 +2838,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-stream",
- "tokio-test",
  "tokio-tungstenite",
- "tokio-util",
  "toml 1.1.2+spec-1.1.0",
  "tonic",
  "tonic-health",
@@ -2881,7 +2849,6 @@ dependencies = [
  "uuid",
  "walkdir",
  "weft-client-shim",
- "zstd",
 ]
 
 [[package]]
@@ -2899,17 +2866,12 @@ name = "heddle-cli-shared"
 version = "0.2.4"
 dependencies = [
  "anyhow",
- "chrono",
  "heddle-objects",
  "heddle-proto",
  "heddle-repo",
- "rustls 0.23.40",
- "rustls-webpki 0.103.13",
  "serde",
- "serde_json",
  "thiserror 2.0.18",
  "toml 1.1.2+spec-1.1.0",
- "tracing",
 ]
 
 [[package]]
@@ -2917,11 +2879,8 @@ name = "heddle-client"
 version = "0.2.4"
 dependencies = [
  "anyhow",
- "async-stream",
- "async-trait",
  "base64 0.22.1",
  "biscuit-auth",
- "blake3",
  "chrono",
  "clap",
  "futures",
@@ -2932,30 +2891,16 @@ dependencies = [
  "heddle-proto",
  "heddle-refs",
  "heddle-repo",
- "hex",
- "hyper-util",
- "ignore",
- "jsonwebtoken",
- "libc",
- "prost 0.14.3",
  "prost-types 0.14.3",
- "reqwest",
- "rmp-serde",
- "rustls 0.23.40",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tokio-tungstenite",
  "toml 1.1.2+spec-1.1.0",
  "tonic",
- "tonic-health",
- "tower",
  "tracing",
- "walkdir",
  "weft-client-shim",
 ]
 
@@ -2980,9 +2925,7 @@ dependencies = [
 name = "heddle-daemon"
 version = "0.2.4"
 dependencies = [
- "async-stream",
  "chrono",
- "fs2",
  "futures",
  "heddle-crypto",
  "heddle-grpc",
@@ -3001,7 +2944,6 @@ dependencies = [
  "serde_json",
  "serial_test",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "toml 1.1.2+spec-1.1.0",
@@ -3093,7 +3035,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "windows",
 ]
 
@@ -3102,7 +3043,6 @@ name = "heddle-objects"
 version = "0.2.4"
 dependencies = [
  "anyhow",
- "async-trait",
  "aws-sdk-s3",
  "aws-smithy-async",
  "base32",
@@ -3117,7 +3057,6 @@ dependencies = [
  "ignore",
  "libc",
  "memmap2",
- "ntest",
  "proptest",
  "rand 0.10.1",
  "rmp-serde",
@@ -3125,16 +3064,13 @@ dependencies = [
  "s3s-fs",
  "serde",
  "serde_json",
- "serial_test",
  "similar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-test",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
  "uuid",
- "walkdir",
  "windows-sys 0.61.2",
  "zstd",
 ]
@@ -3145,17 +3081,14 @@ version = "0.2.4"
 dependencies = [
  "chrono",
  "criterion",
- "fs2",
  "heddle-objects",
  "heddle-runtime-bridge",
  "pollster",
- "rand 0.10.1",
  "rmp-serde",
  "serde",
  "serde_json",
  "sqlx",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
  "uuid",
 ]
@@ -3164,7 +3097,6 @@ dependencies = [
 name = "heddle-proto"
 version = "0.2.4"
 dependencies = [
- "blake3",
  "chrono",
  "heddle-objects",
  "heddle-repo",
@@ -3217,7 +3149,6 @@ dependencies = [
  "rmp-serde",
  "serde",
  "serde_json",
- "similar",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -3241,7 +3172,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "tracing",
  "uuid",
 ]
 
@@ -3261,7 +3191,6 @@ dependencies = [
  "heddle-merge",
  "heddle-objects",
  "pprof",
- "similar",
  "thiserror 2.0.18",
  "tree-sitter",
  "tree-sitter-c",
@@ -3278,12 +3207,9 @@ dependencies = [
 name = "heddle-state-review"
 version = "0.2.4"
 dependencies = [
- "chrono",
  "heddle-objects",
  "heddle-semantic",
  "serde",
- "tempfile",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -6733,17 +6659,6 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tokio-util",
-]
-
-[[package]]
-name = "tokio-test"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f6d24790a10a7af737693a3e8f1d03faef7e6ca0cc99aae5066f533766de545"
-dependencies = [
- "futures-core",
- "tokio",
- "tokio-stream",
 ]
 
 [[package]]

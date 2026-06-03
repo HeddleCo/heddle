@@ -34,7 +34,6 @@ serde = { workspace = true }
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tracing-subscriber = { workspace = true }
 
 # NFS fallback adapter — only built when the `nfs` feature is on.
 # Unlike `fuse`/`fskit`/`projfs` (which target one OS each), the
@@ -151,6 +150,10 @@ nfs = ["dep:nfsserve", "dep:tokio", "dep:async-trait"]
 # entirely, and `--all-features` on Linux still compiles cleanly
 # because the build-script no-ops on non-macOS targets.
 cbindgen = { version = "0.29", default-features = false, optional = true }
+
+# cbindgen is consumed by build.rs (FSKit Swift header regen).
+[package.metadata.cargo-machete]
+ignored = ["cbindgen"]
 
 # The `heddle-fuse-worker` binary lives in `crates/cli` (see
 # `crates/cli/Cargo.toml`'s `[[bin]]` for it). The mount crate exposes
