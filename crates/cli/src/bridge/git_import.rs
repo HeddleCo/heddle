@@ -9,7 +9,7 @@ use objects::object::{
     Agent, Attribution, ChangeId, MarkerName, Principal, State, Status, ThreadName,
 };
 use refs::{Head, RefExpectation};
-use repo::Repository as HeddleRepository;
+use repo::{Repository as HeddleRepository, ThreadId};
 use tracing::warn;
 
 pub use super::git_import_tree::{GitTreeImporter, import_git_tree};
@@ -578,6 +578,18 @@ fn import_with_ref_filter(
             continue;
         }
         if let Some(change_id) = bridge.mapping.get_heddle(plan.peeled_commit_oid) {
+            // A git branch name becomes a Heddle thread id here. Reject one that
+            // isn't a valid thread id (e.g. contains a shell metacharacter git
+            // permits in a ref) rather than silently slugifying it — a silent
+            // rewrite would violate the no-silent-default stance, and an unsafe
+            // id breaks recommended-command breadcrumbs. Pre-1.0: the operator
+            // renames the branch and re-imports. (heddle#464 close-the-class.)
+            if let Err(err) = ThreadId::new(name.as_str()) {
+                return Err(GitBridgeError::InvalidThreadName {
+                    branch: name.to_string(),
+                    message: err.to_string(),
+                });
+            }
             let existing = bridge
                 .heddle_repo
                 .refs()

@@ -5,9 +5,15 @@ use serde::Serialize;
 
 use crate::{Thread, ThreadFreshness, ThreadState};
 
-/// Shell-quote an argument for inclusion in a recommended-command string, so a
-/// thread id containing whitespace or shell metacharacters yields a runnable
+/// Shell-quote an argument for inclusion in a recommended-command string so a
+/// value containing whitespace or shell metacharacters yields a runnable
 /// command (and tokenizes correctly through the CLI's next_action validator).
+///
+/// Thread ids no longer need this — they are validated to the safe slug set at
+/// creation ([`crate::validate_thread_id`]) and so are single tokens by
+/// construction. It is kept for the values that legitimately CAN contain
+/// spaces and cannot be disallowed: file PATHS interpolated into breadcrumbs
+/// (e.g. `heddle resolve <conflict path>`).
 pub fn shell_quote(arg: &str) -> String {
     let safe = !arg.is_empty()
         && arg.bytes().all(|b| {
@@ -35,15 +41,18 @@ pub enum RecommendedAction {
 
 impl RecommendedAction {
     pub fn command(&self, thread_id: &str) -> Option<String> {
-        let tid = shell_quote(thread_id);
+        // `thread_id` is validated to the safe slug set at creation, so it is a
+        // single shell token by construction — interpolate it bare. (heddle#464
+        // close-the-class: the invariant lives at the ThreadId boundary, not at
+        // each breadcrumb site.)
         match self {
             Self::Commit => Some("heddle commit -m \"...\"".to_string()),
-            Self::Ready => Some(format!("heddle ready --thread {tid}")),
-            Self::Sync => Some(format!("heddle sync --thread {tid}")),
-            Self::Land => Some(format!("heddle land --thread {tid} --no-push")),
+            Self::Ready => Some(format!("heddle ready --thread {thread_id}")),
+            Self::Sync => Some(format!("heddle sync --thread {thread_id}")),
+            Self::Land => Some(format!("heddle land --thread {thread_id} --no-push")),
             Self::Resolve => Some("heddle resolve --list".to_string()),
             Self::Review => None,
-            Self::Promote => Some(format!("heddle thread promote {tid}")),
+            Self::Promote => Some(format!("heddle thread promote {thread_id}")),
         }
     }
 }
@@ -164,10 +173,7 @@ pub fn describe_thread_advice_with_initial(
         return ThreadAdvice {
             thread_health: "ready".to_string(),
             blockers,
-            recommended_action: format!(
-                "heddle land --thread {} --no-push",
-                shell_quote(&thread.id)
-            ),
+            recommended_action: format!("heddle land --thread {} --no-push", thread.id),
         };
     } else if clean_ready_merges_to_apply || thread.state == ThreadState::Ready {
         RecommendedAction::Land
@@ -263,17 +269,26 @@ mod tests {
         );
     }
 
+    // Thread ids are validated to the safe slug set at creation, so breadcrumbs
+    // interpolate them bare — no quoting in `command()`.
     #[test]
-    fn breadcrumbs_shell_quote_thread_ids_with_whitespace() {
-        // Safe slugs pass through bare (so existing breadcrumbs are unchanged)...
-        assert_eq!(shell_quote("feature/x"), "feature/x");
-        // ...but whitespace / shell metacharacters are single-quoted so the
-        // command is runnable and tokenizes correctly in the next_action validator.
-        assert_eq!(shell_quote("my feature"), "'my feature'");
-        assert_eq!(shell_quote("a'b"), r"'a'\''b'");
+    fn command_interpolates_validated_thread_id_bare() {
         assert_eq!(
-            RecommendedAction::Sync.command("my feature").as_deref(),
-            Some("heddle sync --thread 'my feature'")
+            RecommendedAction::Sync.command("feature/x").as_deref(),
+            Some("heddle sync --thread feature/x")
         );
+    }
+
+    // `shell_quote` survives for the values that legitimately CAN contain
+    // spaces and cannot be disallowed: file PATHS interpolated into breadcrumbs.
+    #[test]
+    fn shell_quote_quotes_paths_with_whitespace_and_metacharacters() {
+        // Safe slugs / ordinary paths pass through bare...
+        assert_eq!(shell_quote("src/lib.rs"), "src/lib.rs");
+        // ...but a path with a space is single-quoted so the recommended
+        // command is runnable and tokenizes correctly in the next_action
+        // validator (e.g. `heddle resolve 'my file.txt'`).
+        assert_eq!(shell_quote("my file.txt"), "'my file.txt'");
+        assert_eq!(shell_quote("a'b"), r"'a'\''b'");
     }
 }

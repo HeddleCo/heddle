@@ -7,8 +7,8 @@ use chrono::Utc;
 use gix::bstr::ByteSlice;
 use objects::object::ThreadName;
 use repo::{
-    update_thread_state_from_state, GitOverlayImportHint, GitRemoteTrackingStatus, OperationKind,
-    OperationScope, Repository, RepositoryOperationStatus, ThreadFreshness,
+    shell_quote, update_thread_state_from_state, GitOverlayImportHint, GitRemoteTrackingStatus,
+    OperationKind, OperationScope, Repository, RepositoryOperationStatus, ThreadFreshness,
     ThreadIntegrationPolicy, ThreadManager, ThreadState,
 };
 use serde::{ser::SerializeStruct, Serialize, Serializer};
@@ -204,7 +204,11 @@ pub(crate) fn continue_operator(repo: &Repository) -> Result<OperatorCommandOutp
     if repo.merge_state_manager().is_merge_in_progress() {
         let unresolved = repo.merge_state_manager().unresolved()?;
         if !unresolved.is_empty() {
-            let recommended_action = format!("heddle resolve {}", unresolved[0]);
+            // A conflict path can legitimately contain spaces, so shell-quote
+            // it: this is a *validated* recommended_action (write_validated_json_stdout
+            // tokenizes it), and an unquoted space would split into extra args
+            // and fail the next_action validator. (heddle#464 close-the-class.)
+            let recommended_action = format!("heddle resolve {}", shell_quote(&unresolved[0]));
             return Ok(OperatorCommandOutput {
                 status: "blocked".to_string(),
                 action: "continue".to_string(),
@@ -546,6 +550,49 @@ mod tests {
 
     use super::*;
     use crate::cli::commands::git_overlay_health::{machine_contract_coverage, VerificationCheck};
+
+    // heddle#464 close-the-class (paths): a conflict path can contain spaces.
+    // `continue` builds `recommended_action = heddle resolve <path>`, a VALIDATED
+    // action. Shell-quoting the path keeps it a single token, so it survives the
+    // next_action validator; leaving it bare would split into extra positionals
+    // and fail validation (the render failure Codex flagged for thread ids).
+    #[test]
+    fn validated_resolve_action_with_spaced_path_passes_only_when_quoted() {
+        use crate::cli::commands::next_action::{
+            validated_json_string, NextActionValidationContext,
+        };
+        use repo::shell_quote;
+
+        let path = "my conflicted file.txt";
+        let context = NextActionValidationContext::without_repo(&["continue"]);
+
+        let quoted = OperatorCommandOutput {
+            status: "blocked".to_string(),
+            action: "continue".to_string(),
+            message: "conflicts remain".to_string(),
+            blockers: vec![path.to_string()],
+            warnings: Vec::new(),
+            next_action: Some("heddle resolve --list".to_string()),
+            recommended_action: Some(format!("heddle resolve {}", shell_quote(path))),
+        };
+        let json = validated_json_string(&quoted, context)
+            .expect("a shell-quoted conflict path must pass next_action validation");
+        assert!(
+            json.contains("heddle resolve 'my conflicted file.txt'"),
+            "the serialized recommended_action must carry the quoted path: {json}"
+        );
+
+        // Guard: the UNQUOTED interpolation is exactly the bug — it tokenizes
+        // into extra positionals and fails the validator.
+        let bare = OperatorCommandOutput {
+            recommended_action: Some(format!("heddle resolve {path}")),
+            ..quoted.clone()
+        };
+        assert!(
+            validated_json_string(&bare, context).is_err(),
+            "an unquoted spaced path must fail validation"
+        );
+    }
 
     #[test]
     fn raw_git_operation_handoff_recommends_heddle_preservation_not_git_cli() {

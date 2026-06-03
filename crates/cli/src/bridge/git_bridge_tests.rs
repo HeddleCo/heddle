@@ -1381,6 +1381,46 @@ fn import_handles_merge_history_without_missing_parent_mappings() {
     assert!(bridge.mapping.get_heddle(merge).is_some());
 }
 
+// heddle#464 close-the-class (import boundary): a git branch name becomes a
+// Heddle thread id on import. Git permits ref names containing shell
+// metacharacters (e.g. `;`) that are NOT safe thread ids — interpolating one
+// into a recommended-command breadcrumb would be unrunnable. Reject such an
+// import with an actionable rename hint rather than silently slugifying it.
+#[test]
+fn import_rejects_branch_name_that_is_not_a_valid_thread_id() {
+    use crate::bridge::git_core::GitBridgeError;
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_git_temp, git_repo) = init_git_repo();
+
+    let tree_oid = empty_tree_oid(&git_repo);
+    let base = commit_with_tree(&git_repo, Some("refs/heads/main"), tree_oid, "base", &[]);
+    // Git accepts `;` in a branch name; a Heddle thread id must not.
+    commit_with_tree(
+        &git_repo,
+        Some("refs/heads/evil;rm"),
+        tree_oid,
+        "evil",
+        &[base],
+    );
+
+    let mut bridge = GitBridge::new(&repo);
+    let err = import_all(&mut bridge, Some(git_repo.workdir().expect("workdir")))
+        .expect_err("import must reject a branch whose name is not a valid thread id");
+
+    match err {
+        GitBridgeError::InvalidThreadName { branch, message } => {
+            assert_eq!(branch, "evil;rm");
+            assert!(
+                message.contains("evil;rm") && message.contains("try 'evil-rm'"),
+                "the rejection must name the branch and suggest a valid rename, got: {message}"
+            );
+        }
+        other => panic!("expected InvalidThreadName, got: {other:?}"),
+    }
+}
+
 #[test]
 fn push_exports_local_branches_and_tags_to_path_remote() {
     let heddle_temp = TempDir::new().expect("heddle temp");

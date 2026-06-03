@@ -19,9 +19,9 @@ use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
     AgentUsageSummary, GitOverlayBranchTip, GitOverlayImportHint, GitRemoteTrackingStatus,
     Repository, RepositoryOperationStatus, Thread, ThreadCaptureOutcome, ThreadConfidenceSummary,
-    ThreadFreshness, ThreadImpactCategory, ThreadIntegrationPolicy, ThreadManager, ThreadMode,
-    ThreadRuntimeOverlay, ThreadState, ThreadVerificationSummary, ThreadView,
-    describe_thread_advice,
+    ThreadFreshness, ThreadId, ThreadIdError, ThreadImpactCategory, ThreadIntegrationPolicy,
+    ThreadManager, ThreadMode, ThreadRuntimeOverlay, ThreadState, ThreadVerificationSummary,
+    ThreadView, describe_thread_advice,
 };
 use serde::Serialize;
 
@@ -1646,7 +1646,27 @@ pub(crate) fn resolve_start_epoch(repo: &Repository, name: &str) -> Result<DateT
     Ok(prior_active.map_or_else(Utc::now, |thread| thread.created_at))
 }
 
+/// Centralized "invalid thread name" advice (text + JSON error envelope) built
+/// from a [`ThreadIdError`]. The error's `Display` already names the offending
+/// input and suggests a valid rename; this wraps it as a usage refusal.
+fn thread_name_invalid_advice(err: &ThreadIdError) -> RecoveryAdvice {
+    RecoveryAdvice::invalid_usage(
+        "thread_name_invalid",
+        err.to_string(),
+        "Choose a thread name using only letters, digits, and _ - . / @ : + = \
+         (no spaces or shell metacharacters).",
+        "heddle start <name>",
+    )
+}
+
 pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<ThreadOpOutput> {
+    // The single user/external creation boundary for every thread start
+    // (`heddle start`, `heddle thread start`, `try`, `attempt`, workflow). Reject
+    // a name that isn't a safe single shell token here so a thread id with a
+    // space or shell metacharacter can never be persisted — and so every
+    // downstream breadcrumb can interpolate it bare. (heddle#464 close-the-class.)
+    ThreadId::new(args.name.as_str()).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
+
     let existing = find_active_thread_entry(repo, &args.name)?;
     if let Some(entry) = existing {
         if let Some(ref requested_path) = args.path {

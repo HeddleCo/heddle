@@ -4270,3 +4270,51 @@ fn test_cli_diff_patch_plain_git_delete_executable_and_symlink_modes() {
         "applying the delete patch must unlink both special files:\n{patch}"
     );
 }
+
+/// heddle#464 close-the-class: `heddle start` validates the thread name at the
+/// creation boundary. A name with a space (or any shell metacharacter) is
+/// rejected with the centralized `thread_name_invalid` advice — in BOTH text
+/// and JSON-error modes — and never persisted, so no downstream breadcrumb can
+/// interpolate an unsafe thread id. The CLI exits non-zero; it does not panic.
+#[test]
+fn start_rejects_thread_name_with_space_in_text_and_json() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    // Text mode: non-zero exit, actionable rename hint on stderr.
+    let text = heddle_output(&["start", "my feature"], Some(temp.path())).unwrap();
+    assert!(
+        !text.status.success(),
+        "an invalid thread name must be rejected: stdout={}",
+        String::from_utf8_lossy(&text.stdout)
+    );
+    let text_stderr = String::from_utf8_lossy(&text.stderr);
+    assert!(
+        text_stderr.contains("is invalid"),
+        "text mode must explain the name is invalid: {text_stderr}"
+    );
+    assert!(
+        text_stderr.contains("try 'my-feature'"),
+        "the rename hint must suggest a valid name: {text_stderr}"
+    );
+
+    // JSON mode: still rejected with the same kind, no panic.
+    let json_out =
+        heddle_output(&["start", "my feature", "--output", "json"], Some(temp.path())).unwrap();
+    assert!(
+        !json_out.status.success(),
+        "an invalid thread name must be rejected in JSON mode too"
+    );
+    let json_stderr = String::from_utf8_lossy(&json_out.stderr);
+    assert!(
+        json_stderr.contains("thread_name_invalid"),
+        "JSON-error mode must carry the thread_name_invalid kind: {json_stderr}"
+    );
+
+    // The invalid name was rejected before any thread was created.
+    let list = heddle(&["thread", "list", "--output", "json"], Some(temp.path())).unwrap();
+    assert!(
+        !list.contains("my feature"),
+        "the rejected name must never have been persisted: {list}"
+    );
+}
