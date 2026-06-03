@@ -78,11 +78,13 @@ pub(super) enum ItemKind {
 pub(super) struct UseIdentity {
     /// Expanded fully-qualified leaf import paths, or the single
     /// [`USE_UNNORMALIZABLE_KEY`] sentinel for shapes we can't expand.
+    /// This is the ONLY signal the merge keys on: leaf-set intersection
+    /// drives cross-side collision in [`super::items::canonicalize_use_keys`]
+    /// (disjoint → distinct key → auto-combine; overlap → same key → dedup
+    /// if byte-identical, else conflict). No visibility / normalizable
+    /// partial-signal — every non-byte-identical difference conflicts, which
+    /// is what makes the rule non-drippable (heddle#468, Codex r4 on #477).
     pub leaves: Vec<String>,
-    /// `true` iff `leaves` is the exact expansion (not the sentinel).
-    pub normalizable: bool,
-    /// Whitespace-stripped `visibility_modifier` text, or `""` for private.
-    pub visibility: String,
 }
 
 /// Classifier output: what kind of item, its name, an optional body to
@@ -406,7 +408,6 @@ const USE_UNNORMALIZABLE_KEY: &str = "\u{0}use::unnormalizable";
 /// risk a silent mis-union.
 fn rust_use_key(source: &str, argument: Node<'_>) -> String {
     rust_use_leaves(source, argument)
-        .0
         .into_iter()
         .min()
         .unwrap_or_else(|| USE_UNNORMALIZABLE_KEY.to_string())
@@ -414,11 +415,10 @@ fn rust_use_key(source: &str, argument: Node<'_>) -> String {
 
 /// Expand a Rust `use` `argument` use-tree into its fully-qualified leaf
 /// import paths (`crate::foo::{Bar, Baz}` → `["crate::foo::Bar",
-/// "crate::foo::Baz"]`). The bool is `true` when the tree expanded cleanly.
-/// Shapes we can't confidently expand — globs, `as` aliases, nested groups,
-/// `self`/comment members, malformed trees — yield `false` with the single
-/// [`USE_UNNORMALIZABLE_KEY`] sentinel so they collide only with other
-/// un-normalizable forms. Never returns an empty vector.
+/// "crate::foo::Baz"]`). Shapes we can't confidently expand — globs, `as`
+/// aliases, nested groups, `self`/comment members, malformed trees — yield
+/// the single [`USE_UNNORMALIZABLE_KEY`] sentinel so they collide only with
+/// other un-normalizable forms. Never returns an empty vector.
 ///
 /// This is the full leaf SET (not a representative). It is consumed by
 /// [`super::items::canonicalize_use_keys`], which collides two declarations
@@ -426,57 +426,37 @@ fn rust_use_key(source: &str, argument: Node<'_>) -> String {
 /// leaf, the partiality that let `use a::{Bar, Baz}` and `use a::Baz` escape
 /// collision and union into a duplicate `Baz` import (heddle#468; Codex r2
 /// on PR #477).
-fn rust_use_leaves(source: &str, argument: Node<'_>) -> (Vec<String>, bool) {
+fn rust_use_leaves(source: &str, argument: Node<'_>) -> Vec<String> {
     let mut leaves = Vec::new();
     if collect_use_leaves(source, argument, "", &mut leaves) && !leaves.is_empty() {
-        (leaves, true)
+        leaves
     } else {
-        (vec![USE_UNNORMALIZABLE_KEY.to_string()], false)
+        vec![USE_UNNORMALIZABLE_KEY.to_string()]
     }
-}
-
-/// The text of a `use` declaration's `visibility_modifier` child
-/// (`pub`, `pub(crate)`, `pub(in path)`, …), whitespace-stripped, or the
-/// empty string for a private `use`. Used so a same-leaf-set add/add that
-/// differs only in visibility still conflicts (`pub use a::B` vs
-/// `use a::B`) while a difference of pure spelling (`use a::{B}` vs
-/// `use a::B`) can dedup. Read from the AST node, NOT the item byte range,
-/// so leading attributes / doc comments don't contaminate it.
-fn use_visibility(source: &str, node: Node<'_>) -> String {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        if child.kind() == "visibility_modifier" {
-            return strip_whitespace(&source[child.byte_range()]);
-        }
-    }
-    String::new()
 }
 
 /// Cross-side identity for a Rust `use` / `pub use` item: its expanded leaf
-/// set, whether that set is exact (vs the un-normalizable sentinel), and its
-/// visibility modifier. Returns `None` for non-Rust / non-`use` nodes (no
-/// other language classifies a `use` item today).
+/// set. Returns `None` for non-Rust / non-`use` nodes (no other language
+/// classifies a `use` item today).
 ///
-/// `leaves` drives leaf-set-intersection collision in
-/// [`super::items::canonicalize_use_keys`]. `normalizable` + `visibility`
-/// drive the semantic add/add dedup in [`super::reconstruct`]: two
-/// declarations that import the SAME normalizable leaf set with the SAME
-/// visibility are one import spelled two ways and dedup; un-normalizable
-/// forms never dedup on anything but exact bytes (so `use a::*` vs `use b::*`
-/// still conflicts).
+/// `leaves` is the sole keying signal — it drives leaf-set-intersection
+/// collision in [`super::items::canonicalize_use_keys`], which reduces every
+/// add/add `use` to exactly three cases: disjoint leaf sets auto-combine,
+/// overlapping-and-byte-identical dedups, and overlapping-with-any-other
+/// difference conflicts. There is deliberately no visibility / normalizable
+/// field: a non-byte difference of ANY dimension (visibility, alias,
+/// `cfg`/doc/attribute metadata, grouping) must conflict, never partial-signal
+/// dedup (heddle#468, Codex r4 on PR #477; same-leaf with divergent
+/// `#[cfg(...)]` was silently dropping one platform's import).
 pub(super) fn use_identity(language: Language, source: &str, node: Node<'_>) -> Option<UseIdentity> {
     if language != Language::Rust || node.kind() != "use_declaration" {
         return None;
     }
-    let (leaves, normalizable) = match node.child_by_field_name("argument") {
+    let leaves = match node.child_by_field_name("argument") {
         Some(argument) => rust_use_leaves(source, argument),
-        None => (vec![USE_UNNORMALIZABLE_KEY.to_string()], false),
+        None => vec![USE_UNNORMALIZABLE_KEY.to_string()],
     };
-    Some(UseIdentity {
-        leaves,
-        normalizable,
-        visibility: use_visibility(source, node),
-    })
+    Some(UseIdentity { leaves })
 }
 
 /// Expand a `use` argument use-tree into leaf import paths, accumulating

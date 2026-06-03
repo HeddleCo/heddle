@@ -4608,28 +4608,102 @@ fn rust_three_leaf_group_overlap_on_nonmin_leaf_collides() {
     );
 }
 
-// Identical IMPORT spelled two ways: `use a::{Baz}` (single-element group)
-// vs `use a::Baz`. Same leaf set, same (private) visibility — semantically
-// one import — so it dedups to a single line and stays clean, rather than
-// conflicting on cosmetic bracketing.
+// heddle#468 r4 (Codex / maintainer): the partial-signal dedup is removed.
+// The `use`-merge reduces to EXACTLY three cases — leaf-disjoint →
+// auto-combine, byte-identical (incl. all leading metadata) → dedup,
+// everything else → conflict. No leaves+visibility-only dedup remains, so
+// any difference that survives normalization (grouping, alias, `cfg` /
+// doc / attribute metadata) conflicts instead of silently dropping a side.
+
+// Same leaf, same visibility, but spelled differently: `use a::{Baz}`
+// (single-element group) vs `use a::Baz`. Under the OLD partial-signal dedup
+// this collapsed to one line; under the byte-identical-only rule the two are
+// not byte-equal, so they CONFLICT. This is the formatting-that-survives-
+// normalization leg of case 3 — conflict, never a cosmetic dedup.
 #[test]
-fn rust_single_element_group_vs_plain_same_visibility_dedups_clean() {
+fn rust_single_element_group_vs_plain_same_visibility_conflicts() {
     let base = "fn alpha() { 1 }\nfn beta() { 2 }\n";
     let ours = "use crate::foo::{Baz};\nfn alpha() { 10 }\nfn beta() { 2 }\n";
     let theirs = "use crate::foo::Baz;\nfn alpha() { 1 }\nfn beta() { 20 }\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(
+        count >= 1,
+        "same leaf spelled two ways is not byte-identical → must conflict, \
+         not partial-signal dedup: {text}"
+    );
+}
+
+// Round-4 repro: same leaf, same visibility, DIFFERENT leading metadata —
+// `#[cfg(unix)] use crate::foo::Bar;` vs `#[cfg(windows)] use crate::foo::Bar;`.
+// The old leaves+visibility dedup returned "clean" and emitted only ours,
+// SILENTLY DROPPING theirs and changing which platforms get the import — a
+// correctness bug. The byte-identical-only rule sees the differing `#[cfg]`
+// attribute and conflicts instead.
+#[test]
+fn rust_same_leaf_divergent_cfg_attribute_conflicts_not_silent_drop() {
+    let base = "fn anchor() { 0 }\n";
+    let ours = "#[cfg(unix)]\nuse crate::foo::Bar;\nfn anchor() { 0 }\n";
+    let theirs = "#[cfg(windows)]\nuse crate::foo::Bar;\nfn anchor() { 0 }\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(
+        count >= 1,
+        "same leaf with divergent #[cfg] must conflict, not silently drop a \
+         platform's import: {text}"
+    );
+    // The dropped-platform bug: a silent dedup would emit `unix` and lose
+    // `windows` (or vice-versa). A real conflict surfaces BOTH attributes.
+    assert!(
+        text.contains("cfg(unix)") && text.contains("cfg(windows)"),
+        "both platform attributes must survive in the conflict region — \
+         neither side may be silently dropped: {text}"
+    );
+}
+
+// Same leaf path, DIFFERENT alias: `use crate::foo::Bar as B;` vs
+// `... as C;`. The alias is part of the binding's meaning but lives outside
+// the leaf path, so a partial-signal dedup would have dropped one. The
+// byte-identical-only rule conflicts. (Aliases also expand to the
+// un-normalizable sentinel, so the two share a key and collide.)
+#[test]
+fn rust_same_leaf_divergent_alias_conflicts() {
+    let base = "fn anchor() { 0 }\n";
+    let ours = "use crate::foo::Bar as B;\nfn anchor() { 0 }\n";
+    let theirs = "use crate::foo::Bar as C;\nfn anchor() { 0 }\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(
+        count >= 1,
+        "same leaf with divergent alias must conflict, not dedup: {text}"
+    );
+}
+
+// Byte-identical including leading metadata → the ONE dedup leg of case 2.
+// Both sides add the exact same `#[cfg(unix)] use ...;` while editing a
+// disjoint function; the attributed import dedups to a single occurrence and
+// the merge stays clean. Guards that adding the metadata dimension to the
+// "identical" check didn't break true byte-identical dedup.
+#[test]
+fn rust_identical_attributed_use_addition_dedups_clean() {
+    let base = "fn alpha() { 1 }\nfn beta() { 2 }\n";
+    let ours = "#[cfg(unix)]\nuse crate::shared::Thing;\nfn alpha() { 10 }\nfn beta() { 2 }\n";
+    let theirs = "#[cfg(unix)]\nuse crate::shared::Thing;\nfn alpha() { 1 }\nfn beta() { 20 }\n";
     let merged = assert_clean(merge_rust(base, ours, theirs));
     assert_eq!(
-        merged.matches("Baz").count(),
+        merged.matches("crate::shared::Thing").count(),
         1,
-        "the same import spelled two ways must dedup to one line: {merged}"
+        "byte-identical attributed re-export must dedup to one line: {merged}"
+    );
+    assert_eq!(
+        merged.matches("cfg(unix)").count(),
+        1,
+        "the shared attribute must appear exactly once: {merged}"
     );
     assert!(merged.contains("fn alpha() { 10 }"), "ours edit lost: {merged}");
     assert!(merged.contains("fn beta() { 20 }"), "theirs edit lost: {merged}");
 }
 
-// Guard the dedup's visibility gate: SAME leaf set spelled differently but
-// DIVERGENT visibility (`pub use a::{Baz}` vs `use a::Baz`) must still
-// conflict — visibility is a real semantic difference, not cosmetic.
+// SAME leaf set spelled differently AND with divergent visibility
+// (`pub use a::{Baz}` vs `use a::Baz`) — two independent non-byte
+// differences, both landing in case 3. Must conflict.
 #[test]
 fn rust_single_element_group_vs_plain_divergent_visibility_conflicts() {
     let base = "fn anchor() { 0 }\n";

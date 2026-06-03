@@ -413,15 +413,19 @@ fn resolve_item(
         // syntactically invalid file when both sides added a function /
         // method with the same name. heddle#68 calls this out as a conflict.
         (None, Some(o), Some(t)) => {
-            if o == t || use_items_import_identically(ours_item, theirs_item) {
-                // Byte-identical, OR (for `use` items) the same normalizable
-                // leaf set with the same visibility spelled differently
-                // (`use a::{B}` vs `use a::B`) — one import, two spellings.
-                // Dedup to ours rather than conflicting on cosmetic
-                // bracketing. Divergent visibility (`pub use` vs `use`) or
-                // a non-identical leaf set fails the check and conflicts
-                // below; un-normalizable forms (glob / alias) only dedup on
-                // exact bytes, so `use a::*` vs `use b::*` still conflicts.
+            // The ONLY clean add/add is byte-identical. For `use` items this
+            // is one leg of the non-drippable 3-case rule (heddle#468, Codex
+            // r4 on PR #477): leaf-DISJOINT `use`s never reach this arm —
+            // `canonicalize_use_keys` gives them distinct match keys, so each
+            // is emitted on its own one-side-added path (auto-combine). What
+            // reaches here is two `use`s whose leaf sets OVERLAP (same
+            // canonical key). Byte-identical → dedup; ANYTHING else — a
+            // differing leaf set, alias, `cfg`/doc/attribute metadata, or
+            // visibility — is `o != t` and conflicts. No partial-signal
+            // (leaves+visibility-only) dedup: a same-leaf pair with divergent
+            // leading `#[cfg(...)]` used to dedup and silently drop one
+            // platform's import (r4); now it conflicts.
+            if o == t {
                 (Some(o.to_vec()), 0)
             } else {
                 (Some(emit_addadd_conflict(o, t, markers, sides)), 1)
@@ -461,31 +465,6 @@ fn resolve_item(
             }
         }
     }
-}
-
-/// Whether two add/add `use` items import exactly the same thing — the
-/// same normalizable leaf SET with the same visibility — and so should
-/// dedup to one line instead of conflicting on cosmetic spelling
-/// (`use a::{B}` vs `use a::B`). Returns `false` unless BOTH items are
-/// normalizable `use` items: divergent visibility (`pub use` vs `use`),
-/// a differing leaf set, or any un-normalizable form (glob / alias /
-/// nested group) falls through to the conflict path. Leaf sets are
-/// compared order-insensitively; a single declaration never repeats a leaf.
-fn use_items_import_identically(ours: Option<&Item>, theirs: Option<&Item>) -> bool {
-    let (Some(a), Some(b)) = (
-        ours.and_then(|i| i.use_identity.as_ref()),
-        theirs.and_then(|i| i.use_identity.as_ref()),
-    ) else {
-        return false;
-    };
-    if !a.normalizable || !b.normalizable || a.visibility != b.visibility {
-        return false;
-    }
-    let mut ours_leaves = a.leaves.clone();
-    let mut theirs_leaves = b.leaves.clone();
-    ours_leaves.sort();
-    theirs_leaves.sort();
-    ours_leaves == theirs_leaves
 }
 
 fn materialize_outcome(outcome: MergeOutcome) -> (Option<Vec<u8>>, usize) {

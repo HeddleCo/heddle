@@ -53,11 +53,12 @@ pub(crate) struct Item {
     pub key: ItemKey,
     pub start_byte: usize,
     pub end_byte: usize,
-    /// For `use` / `pub use` items only: leaf set + visibility used for
-    /// cross-side matching and semantic dedup. `None` for every other item
-    /// kind. Never used for byte emission, so the original grouped
-    /// declaration text is preserved. Consumed by [`canonicalize_use_keys`]
-    /// (leaf-set collision) and [`super::reconstruct`] (semantic dedup).
+    /// For `use` / `pub use` items only: the expanded leaf set used for
+    /// cross-side matching. `None` for every other item kind. Never used for
+    /// byte emission, so the original grouped declaration text is preserved.
+    /// Consumed by [`canonicalize_use_keys`] (leaf-set collision keying); the
+    /// add/add resolution in [`super::reconstruct`] then dedups only on exact
+    /// bytes and conflicts on every other difference.
     pub use_identity: Option<UseIdentity>,
 }
 
