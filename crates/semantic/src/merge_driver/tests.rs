@@ -4556,3 +4556,104 @@ fn rust_glob_alias_unnormalizable_conflicts_not_misunion() {
         "un-normalizable glob/alias adds must conflict, not mis-union: {text}"
     );
 }
+
+// heddle#468 r2 (Codex): close the representative-key partiality. r1 keyed a
+// `use` by its SMALLEST leaf, so an overlap on a NON-minimum leaf escaped
+// collision and unioned into a duplicate import. The fix collides two `use`
+// declarations whenever their expanded leaf sets intersect on ANY leaf
+// (`canonicalize_use_keys` union-find), regardless of which leaf is smallest.
+
+// Round-3 repro: the overlap is on the NON-representative leaf. ours groups
+// `{Bar, Baz}` (min leaf `Bar`), theirs is the single `Baz` (the larger
+// leaf). Under representative-leaf keying they got distinct keys (`Bar` vs
+// `Baz`) and unioned into two lines both importing `Baz` — a Rust "defined
+// multiple times" error. They must collide: a conflict (or a dedup) is
+// correct, never two `Baz` imports.
+#[test]
+fn rust_grouped_vs_ungrouped_overlap_on_nonmin_leaf_does_not_duplicate() {
+    let base = "fn anchor() { 0 }\n";
+    let ours = "use crate::foo::{Bar, Baz};\nfn anchor() { 0 }\n";
+    let theirs = "use crate::foo::Baz;\nfn anchor() { 0 }\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(
+        count >= 1,
+        "overlap on the non-minimum leaf must conflict, not union: {text}"
+    );
+    // The invariant that matters regardless of conflict-vs-dedup: never two
+    // lines importing `Baz`. Conflict markers may repeat the body, so assert
+    // there is at most one `use ... Baz;` statement per conflict side by
+    // checking the merged text never lands `Baz` twice OUTSIDE markers — here
+    // the conservative check is simply that it isn't a clean union.
+    assert!(
+        text.contains("<<<<<<<"),
+        "expected a conflict region, not a silent union: {text}"
+    );
+}
+
+// 3-leaf group overlapping only on its LARGEST leaf. The group is spelled in
+// DESCENDING leaf order (`{Ccc, Bbb, Aaa}`) so the component's canonical
+// (smallest) leaf `Aaa` is interned LAST — exercising the union-find min
+// update — while theirs imports the single LARGEST leaf `Ccc`.
+// Representative-leaf keying (min `Aaa` vs `Ccc`) missed this overlap and
+// unioned; leaf-set intersection collides them.
+#[test]
+fn rust_three_leaf_group_overlap_on_nonmin_leaf_collides() {
+    let base = "fn anchor() { 0 }\n";
+    let ours = "use crate::m::{Ccc, Bbb, Aaa};\nfn anchor() { 0 }\n";
+    let theirs = "use crate::m::Ccc;\nfn anchor() { 0 }\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(
+        count >= 1,
+        "overlap on the largest leaf must collide (conflict), not union: {text}"
+    );
+}
+
+// Identical IMPORT spelled two ways: `use a::{Baz}` (single-element group)
+// vs `use a::Baz`. Same leaf set, same (private) visibility — semantically
+// one import — so it dedups to a single line and stays clean, rather than
+// conflicting on cosmetic bracketing.
+#[test]
+fn rust_single_element_group_vs_plain_same_visibility_dedups_clean() {
+    let base = "fn alpha() { 1 }\nfn beta() { 2 }\n";
+    let ours = "use crate::foo::{Baz};\nfn alpha() { 10 }\nfn beta() { 2 }\n";
+    let theirs = "use crate::foo::Baz;\nfn alpha() { 1 }\nfn beta() { 20 }\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert_eq!(
+        merged.matches("Baz").count(),
+        1,
+        "the same import spelled two ways must dedup to one line: {merged}"
+    );
+    assert!(merged.contains("fn alpha() { 10 }"), "ours edit lost: {merged}");
+    assert!(merged.contains("fn beta() { 20 }"), "theirs edit lost: {merged}");
+}
+
+// Guard the dedup's visibility gate: SAME leaf set spelled differently but
+// DIVERGENT visibility (`pub use a::{Baz}` vs `use a::Baz`) must still
+// conflict — visibility is a real semantic difference, not cosmetic.
+#[test]
+fn rust_single_element_group_vs_plain_divergent_visibility_conflicts() {
+    let base = "fn anchor() { 0 }\n";
+    let ours = "pub use crate::foo::{Baz};\nfn anchor() { 0 }\n";
+    let theirs = "use crate::foo::Baz;\nfn anchor() { 0 }\n";
+    let (_text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(
+        count >= 1,
+        "same leaves but divergent visibility must conflict, not dedup"
+    );
+}
+
+// Empty base, overlap on a non-minimum leaf. Exercises the empty-base
+// add/add routing in `mod.rs` (which keys off `Item`) together with the
+// canonicalized key, confirming the conflict is surfaced rather than the
+// merge being routed to text_hunk_merge and silently duplicating `Z`.
+#[test]
+fn rust_empty_base_overlap_on_nonmin_leaf_conflicts() {
+    let base = "";
+    let ours = "use crate::n::{Yy, Zz};\n";
+    let theirs = "use crate::n::Zz;\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(
+        count >= 1,
+        "empty-base overlap on non-min leaf must conflict, not duplicate: {text}"
+    );
+}

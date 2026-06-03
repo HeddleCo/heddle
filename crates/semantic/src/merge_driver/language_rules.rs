@@ -54,11 +54,14 @@ pub(super) enum ItemKind {
     Method,
     Impl,
     Module,
-    /// A `use` / `pub use` declaration, keyed by a representative leaf
-    /// import path (groups expanded to leaves) so additive re-exports on
-    /// disjoint paths union while a grouped-vs-ungrouped form that shares
-    /// a leaf dedups-or-conflicts instead of duplicating the import
-    /// (HeddleCo/heddle#468; Codex r1 on PR #477). See [`rust_use_key`].
+    /// A `use` / `pub use` declaration. Its match key is the leaf-set
+    /// *component* canonical name assigned by
+    /// [`super::items::canonicalize_use_keys`]: two declarations collide iff
+    /// their expanded leaf sets intersect on ANY path, so additive
+    /// re-exports on disjoint paths union while any overlapping pair
+    /// dedups (identical) or conflicts (divergent) instead of duplicating
+    /// an import (HeddleCo/heddle#468; Codex r1+r2 on PR #477). See
+    /// [`rust_use_key`] (seed key) and [`use_leaves`] (the leaf set).
     Use,
     Struct,
     Enum,
@@ -66,6 +69,20 @@ pub(super) enum ItemKind {
     TypeAlias,
     Const,
     Static,
+}
+
+/// Cross-side identity metadata for a `use` / `pub use` item. Carried on
+/// [`super::items::Item`] (only for `Use`-kind items) and consumed by the
+/// reconstruction layer; see [`use_identity`].
+#[derive(Clone, Debug)]
+pub(super) struct UseIdentity {
+    /// Expanded fully-qualified leaf import paths, or the single
+    /// [`USE_UNNORMALIZABLE_KEY`] sentinel for shapes we can't expand.
+    pub leaves: Vec<String>,
+    /// `true` iff `leaves` is the exact expansion (not the sentinel).
+    pub normalizable: bool,
+    /// Whitespace-stripped `visibility_modifier` text, or `""` for private.
+    pub visibility: String,
 }
 
 /// Classifier output: what kind of item, its name, an optional body to
@@ -290,20 +307,22 @@ impl LanguageRules for RustRules {
             "type_item" => leaf_item(ItemKind::TypeAlias, source, node, "name"),
             "const_item" => leaf_item(ItemKind::Const, source, node, "name"),
             "static_item" => leaf_item(ItemKind::Static, source, node, "name"),
-            // Key a `use` / `pub use` by a representative leaf import path
-            // derived from its `argument` use-tree (`crate::x::Y`,
-            // `a::{B, C}`, `a::*`, `a::B as C`, …). Expanding `{...}` groups
-            // to leaves and keying by the smallest leaf makes a grouped form
-            // and an ungrouped form that share that leaf COLLIDE — so they
-            // dedup or conflict rather than unioning into a duplicate import.
-            // Visibility is intentionally NOT part of the key: two sides
-            // adding the same path with divergent visibility (`pub use a::B`
-            // vs `use a::B`) share a key and surface as an add/add conflict,
-            // while disjoint paths get distinct keys and union cleanly
-            // (HeddleCo/heddle#468; Codex r1 on PR #477). A missing
-            // `argument` (malformed) falls through to the unclassified
-            // walker, leaving the `use` in inter-item content as before. See
-            // [`rust_use_key`] for the leaf expansion and its fallback.
+            // Seed a `use` / `pub use` with a representative leaf import
+            // path from its `argument` use-tree (`crate::x::Y`, `a::{B, C}`,
+            // `a::*`, `a::B as C`, …). The authoritative match key is then
+            // assigned by `canonicalize_use_keys`, which collides two
+            // declarations whenever their expanded leaf sets intersect on
+            // ANY leaf, so a grouped form and an ungrouped form that share
+            // even a non-minimum leaf dedup or conflict rather than union
+            // into a duplicate import. Visibility is intentionally NOT part
+            // of the key: two sides adding the same path with divergent
+            // visibility (`pub use a::B` vs `use a::B`) share a key and
+            // surface as an add/add conflict, while disjoint paths get
+            // distinct keys and union cleanly (HeddleCo/heddle#468; Codex
+            // r1+r2 on PR #477). A missing `argument` (malformed) falls
+            // through to the unclassified walker, leaving the `use` in
+            // inter-item content as before. See [`rust_use_key`] (seed) and
+            // [`use_leaves`] (full leaf set).
             "use_declaration" => {
                 let argument = node.child_by_field_name("argument")?;
                 let name = rust_use_key(source, argument);
@@ -366,20 +385,18 @@ fn rust_impl_name(source: &str, node: Node<'_>) -> Option<String> {
 /// NUL keeps it disjoint from every real import path.
 const USE_UNNORMALIZABLE_KEY: &str = "\u{0}use::unnormalizable";
 
-/// Derive the cross-side identity key for a Rust `use` / `pub use`
-/// declaration from its `argument` use-tree.
+/// Derive the INITIAL cross-side identity key for a Rust `use` / `pub use`
+/// declaration from its `argument` use-tree: the lexicographically-smallest
+/// fully-qualified leaf import path.
 ///
-/// Flat groups are expanded into their fully-qualified leaf import paths
-/// (`crate::foo::{Bar, Baz}` → `["crate::foo::Bar", "crate::foo::Baz"]`)
-/// and the declaration is keyed by the lexicographically-smallest leaf.
-/// Keying by a representative leaf — rather than the whole `{...}` text —
-/// is what makes a grouped form and an ungrouped form that share that
-/// leaf COLLIDE: `use crate::foo::{Bar, Baz};` and `use crate::foo::Bar;`
-/// both key to `crate::foo::Bar`, so the merger dedups (identical bytes)
-/// or surfaces an add/add conflict (divergent bytes) instead of unioning
-/// the two lines into a duplicate `Bar` import (the heddle#468 bug class;
-/// Codex r1 on PR #477). Visibility (`pub`) is intentionally NOT part of
-/// the key.
+/// This representative leaf is only a seed. The authoritative `use` match
+/// key is assigned later by [`super::items::canonicalize_use_keys`], which
+/// rekeys every `use` item to its leaf-set *component* canonical name so
+/// declarations whose leaf sets intersect on ANY path collide — closing the
+/// representative-key partiality where overlap on a non-minimum leaf
+/// (`a::{Bar, Baz}` vs `a::Baz`) escaped collision and unioned into a
+/// duplicate import (the heddle#468 bug class; Codex r1+r2 on PR #477).
+/// Visibility (`pub`) is intentionally NOT part of the key.
 ///
 /// Confidently-expandable shapes: a single path (`a::B`, `B`) and a
 /// single flat group whose members are all plain paths. Shapes we do NOT
@@ -387,24 +404,79 @@ const USE_UNNORMALIZABLE_KEY: &str = "\u{0}use::unnormalizable";
 /// (`a::{b::{c}}`), and `self`/comment group members — fall back to
 /// [`USE_UNNORMALIZABLE_KEY`] so they conflict-on-overlap rather than
 /// risk a silent mis-union.
-///
-/// NOTE (residual): representative-leaf keying catches overlap only on
-/// the minimum leaf. Two declarations that overlap ONLY on a
-/// non-minimum leaf — `a::{Bar, Baz}` vs `a::Baz` — still get distinct
-/// keys and union. Fully closing this needs one extracted item per leaf
-/// (a larger change to the one-node-one-item extractor in
-/// [`super::items`]); representative-leaf keying is the in-architecture
-/// fix for the common min-aligned re-export merge.
 fn rust_use_key(source: &str, argument: Node<'_>) -> String {
+    rust_use_leaves(source, argument)
+        .0
+        .into_iter()
+        .min()
+        .unwrap_or_else(|| USE_UNNORMALIZABLE_KEY.to_string())
+}
+
+/// Expand a Rust `use` `argument` use-tree into its fully-qualified leaf
+/// import paths (`crate::foo::{Bar, Baz}` → `["crate::foo::Bar",
+/// "crate::foo::Baz"]`). The bool is `true` when the tree expanded cleanly.
+/// Shapes we can't confidently expand — globs, `as` aliases, nested groups,
+/// `self`/comment members, malformed trees — yield `false` with the single
+/// [`USE_UNNORMALIZABLE_KEY`] sentinel so they collide only with other
+/// un-normalizable forms. Never returns an empty vector.
+///
+/// This is the full leaf SET (not a representative). It is consumed by
+/// [`super::items::canonicalize_use_keys`], which collides two declarations
+/// whenever their leaf sets intersect on ANY path — not just the minimum
+/// leaf, the partiality that let `use a::{Bar, Baz}` and `use a::Baz` escape
+/// collision and union into a duplicate `Baz` import (heddle#468; Codex r2
+/// on PR #477).
+fn rust_use_leaves(source: &str, argument: Node<'_>) -> (Vec<String>, bool) {
     let mut leaves = Vec::new();
     if collect_use_leaves(source, argument, "", &mut leaves) && !leaves.is_empty() {
-        leaves
-            .into_iter()
-            .min()
-            .unwrap_or_else(|| USE_UNNORMALIZABLE_KEY.to_string())
+        (leaves, true)
     } else {
-        USE_UNNORMALIZABLE_KEY.to_string()
+        (vec![USE_UNNORMALIZABLE_KEY.to_string()], false)
     }
+}
+
+/// The text of a `use` declaration's `visibility_modifier` child
+/// (`pub`, `pub(crate)`, `pub(in path)`, …), whitespace-stripped, or the
+/// empty string for a private `use`. Used so a same-leaf-set add/add that
+/// differs only in visibility still conflicts (`pub use a::B` vs
+/// `use a::B`) while a difference of pure spelling (`use a::{B}` vs
+/// `use a::B`) can dedup. Read from the AST node, NOT the item byte range,
+/// so leading attributes / doc comments don't contaminate it.
+fn use_visibility(source: &str, node: Node<'_>) -> String {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "visibility_modifier" {
+            return strip_whitespace(&source[child.byte_range()]);
+        }
+    }
+    String::new()
+}
+
+/// Cross-side identity for a Rust `use` / `pub use` item: its expanded leaf
+/// set, whether that set is exact (vs the un-normalizable sentinel), and its
+/// visibility modifier. Returns `None` for non-Rust / non-`use` nodes (no
+/// other language classifies a `use` item today).
+///
+/// `leaves` drives leaf-set-intersection collision in
+/// [`super::items::canonicalize_use_keys`]. `normalizable` + `visibility`
+/// drive the semantic add/add dedup in [`super::reconstruct`]: two
+/// declarations that import the SAME normalizable leaf set with the SAME
+/// visibility are one import spelled two ways and dedup; un-normalizable
+/// forms never dedup on anything but exact bytes (so `use a::*` vs `use b::*`
+/// still conflicts).
+pub(super) fn use_identity(language: Language, source: &str, node: Node<'_>) -> Option<UseIdentity> {
+    if language != Language::Rust || node.kind() != "use_declaration" {
+        return None;
+    }
+    let (leaves, normalizable) = match node.child_by_field_name("argument") {
+        Some(argument) => rust_use_leaves(source, argument),
+        None => (vec![USE_UNNORMALIZABLE_KEY.to_string()], false),
+    };
+    Some(UseIdentity {
+        leaves,
+        normalizable,
+        visibility: use_visibility(source, node),
+    })
 }
 
 /// Expand a `use` argument use-tree into leaf import paths, accumulating

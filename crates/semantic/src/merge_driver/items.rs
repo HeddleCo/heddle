@@ -21,11 +21,12 @@
 //!
 //! See HeddleCo/heddle#133 for the audit motivation.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use tree_sitter::Node;
 
-pub(super) use super::language_rules::ItemKind;
+pub(super) use super::language_rules::{ItemKind, UseIdentity};
 use super::language_rules::{rules_for, Classified, MetadataBinding};
 use crate::parser::{Language, ParsedFile};
 
@@ -52,6 +53,12 @@ pub(crate) struct Item {
     pub key: ItemKey,
     pub start_byte: usize,
     pub end_byte: usize,
+    /// For `use` / `pub use` items only: leaf set + visibility used for
+    /// cross-side matching and semantic dedup. `None` for every other item
+    /// kind. Never used for byte emission, so the original grouped
+    /// declaration text is preserved. Consumed by [`canonicalize_use_keys`]
+    /// (leaf-set collision) and [`super::reconstruct`] (semantic dedup).
+    pub use_identity: Option<UseIdentity>,
 }
 
 /// The result of segmenting a file: items in source order, exposed via the
@@ -147,6 +154,11 @@ fn collect_items(
                 } else {
                     let mut item_scope = (*scope).clone();
                     item_scope.extend(extra_scope);
+                    let use_identity = if matches!(kind, ItemKind::Use) {
+                        super::language_rules::use_identity(language, source, child)
+                    } else {
+                        None
+                    };
                     let item_key = ItemKey {
                         kind,
                         name,
@@ -158,12 +170,146 @@ fn collect_items(
                         key: item_key,
                         start_byte,
                         end_byte: child.end_byte(),
+                        use_identity,
                     });
                 }
             } else {
                 stack.push((child, Rc::clone(&scope), depth + 1));
             }
         }
+    }
+}
+
+/// Rekey every `use` item across the three sides so two declarations
+/// collide for cross-side matching iff their expanded leaf sets intersect
+/// on ANY import path — not just the lexicographically-smallest leaf.
+///
+/// Why this is necessary: items match across sides by exact [`ItemKey`]
+/// equality, but leaf-set *intersection* is not transitive, so no
+/// per-declaration single key can capture it (`a::{Bar, Baz}` overlaps
+/// `a::Baz` but their minimum leaves differ → distinct keys → both emitted
+/// → duplicate `Baz`, a Rust "defined multiple times" error — the
+/// heddle#468 bug class, Codex r1's representative-key fix only caught
+/// overlap on the minimum leaf). Equality-based matching CAN model
+/// intersection if every declaration in one connected component (linked by
+/// shared leaves) is rekeyed to one canonical name. That is exactly a
+/// union-find over leaves: union all leaves within each declaration, then
+/// rekey each declaration to its component's smallest leaf.
+///
+/// The result for the existing add/add resolution in
+/// [`super::reconstruct`]:
+/// * identical leaf sets → same canonical key, byte-identical → **dedup**
+///   (the original grouped text is preserved — bytes are untouched);
+/// * overlapping but not identical → same canonical key, divergent bytes →
+///   **conflict** (the conservative resolution; we never silently rewrite
+///   or combine import statements);
+/// * disjoint leaf sets → distinct canonical keys → **union** (the r0
+///   additive-re-export case stays clean).
+///
+/// Un-normalizable forms (globs, `as` aliases, nested groups) all carry the
+/// single sentinel leaf, so they share one component and conflict-on-
+/// divergence only with each other — never with a real import path.
+///
+/// This is a no-op for any `use` whose leaf set overlaps nothing: its
+/// component is itself and its canonical name equals its own minimum leaf,
+/// matching the pre-canonicalization seed key.
+pub(crate) fn canonicalize_use_keys(
+    base: &mut FileSegments,
+    ours: &mut FileSegments,
+    theirs: &mut FileSegments,
+) {
+    let mut uf = LeafUnionFind::default();
+    for seg in [&*base, &*ours, &*theirs] {
+        for item in &seg.items {
+            let Some(identity) = &item.use_identity else {
+                continue;
+            };
+            let mut leaf_iter = identity.leaves.iter();
+            let Some(first) = leaf_iter.next() else {
+                continue;
+            };
+            let anchor = uf.intern(first);
+            for leaf in leaf_iter {
+                let node = uf.intern(leaf);
+                uf.union(anchor, node);
+            }
+        }
+    }
+
+    let canonical = uf.component_min_label();
+    for seg in [base, ours, theirs] {
+        for item in &mut seg.items {
+            let Some(identity) = &item.use_identity else {
+                continue;
+            };
+            if let Some(first) = identity.leaves.first()
+                && let Some(name) = canonical.get(first)
+            {
+                item.key.name = name.clone();
+            }
+        }
+    }
+}
+
+/// Union-find over leaf import-path strings. Leaves are interned to dense
+/// indices on first sight; `union` links the components two leaves belong
+/// to; [`component_min_label`] returns, for every interned leaf, the
+/// lexicographically-smallest leaf in its component (the canonical name).
+#[derive(Default)]
+struct LeafUnionFind {
+    index: HashMap<String, usize>,
+    labels: Vec<String>,
+    parent: Vec<usize>,
+}
+
+impl LeafUnionFind {
+    fn intern(&mut self, leaf: &str) -> usize {
+        if let Some(&i) = self.index.get(leaf) {
+            return i;
+        }
+        let i = self.labels.len();
+        self.index.insert(leaf.to_string(), i);
+        self.labels.push(leaf.to_string());
+        self.parent.push(i);
+        i
+    }
+
+    fn find(&mut self, mut x: usize) -> usize {
+        while self.parent[x] != x {
+            self.parent[x] = self.parent[self.parent[x]];
+            x = self.parent[x];
+        }
+        x
+    }
+
+    fn union(&mut self, a: usize, b: usize) {
+        let ra = self.find(a);
+        let rb = self.find(b);
+        if ra != rb {
+            self.parent[ra] = rb;
+        }
+    }
+
+    fn component_min_label(&mut self) -> HashMap<String, String> {
+        let mut root_min: HashMap<usize, String> = HashMap::new();
+        for i in 0..self.labels.len() {
+            let root = self.find(i);
+            let label = self.labels[i].clone();
+            root_min
+                .entry(root)
+                .and_modify(|m| {
+                    if label < *m {
+                        *m = label.clone();
+                    }
+                })
+                .or_insert(label);
+        }
+        let mut out = HashMap::with_capacity(self.labels.len());
+        for i in 0..self.labels.len() {
+            let root = self.find(i);
+            out.insert(self.labels[i].clone(), root_min[&root].clone());
+        }
+        out
     }
 }
 
