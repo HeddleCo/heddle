@@ -22,7 +22,7 @@ fn test_merge_json_output_includes_renames() {
     let err = result.expect_err("stale JSON merge should refuse before producing rename output");
     assert!(
         err.contains("\"status\":\"blocked\"")
-            && err.contains("\"recommended_action\":\"heddle thread refresh feature\""),
+            && err.contains("\"recommended_action\":\"heddle sync --thread feature\""),
         "stale JSON merge should recommend thread refresh: {err}"
     );
 
@@ -51,7 +51,7 @@ fn test_merge_text_output_shows_rename_lines() {
     let result = heddle(&["merge", "feature", "--output", "text"], Some(temp.path()));
     let err = result.expect_err("stale text merge should refuse before producing rename lines");
     assert!(
-        err.contains("Thread 'feature' is stale") && err.contains("heddle thread refresh feature"),
+        err.contains("Thread 'feature' is stale") && err.contains("heddle sync --thread feature"),
         "stale text merge should recommend thread refresh: {err}"
     );
 
@@ -101,7 +101,7 @@ fn test_merge_json_output_includes_directory_renames() {
     let err = result.expect_err("stale directory rename merge should refuse before metadata");
     assert!(
         err.contains("\"status\":\"blocked\"")
-            && err.contains("\"recommended_action\":\"heddle thread refresh feature\""),
+            && err.contains("\"recommended_action\":\"heddle sync --thread feature\""),
         "stale JSON merge should recommend thread refresh: {err}"
     );
 

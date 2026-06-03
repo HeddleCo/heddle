@@ -24,7 +24,7 @@ pub fn cmd_git_overlay_guide(cli: &Cli) -> Result<()> {
             "{}",
             serde_json::json!({
                 "topic": "git-overlay",
-                "summary": "Use Heddle as the daily loop with Git compatibility through the bridge: status, diff, commit, start --path, ready, merge --preview, ship, undo, verify.",
+                "summary": "Use Heddle as the daily loop with Git compatibility through the bridge: status, diff, commit, start --path, ready, land, push, undo, verify.",
                 "steps": [
                     "heddle status",
                     "heddle adopt --ref <branch>",
@@ -32,8 +32,7 @@ pub fn cmd_git_overlay_guide(cli: &Cli) -> Result<()> {
                     "heddle commit -m <message>",
                     "heddle start <name> --path ../<name>",
                     "heddle ready",
-                    "heddle merge <name> --preview",
-                    "heddle ship --thread <name> --no-push",
+                    "heddle land --thread <name> --no-push",
                     "heddle push",
                     "heddle undo",
                     "heddle verify"
@@ -68,10 +67,9 @@ pub fn cmd_git_overlay_guide(cli: &Cli) -> Result<()> {
     println!("   {}", style::bold("heddle start <name> --path ../<name>"));
     println!("5. Integrate");
     println!("   {}", style::bold("heddle ready"));
-    println!("   {}", style::bold("heddle merge <name> --preview"));
     println!(
         "   {}",
-        style::bold("heddle ship --thread <name> --no-push")
+        style::bold("heddle land --thread <name> --no-push")
     );
     println!("6. Sync with remotes");
     println!("   {}", style::bold("heddle pull"));
@@ -87,7 +85,7 @@ pub fn cmd_git_overlay_guide(cli: &Cli) -> Result<()> {
     );
     println!(
         "  Captured in Heddle but not Git: {}",
-        style::bold("heddle checkpoint -m '<message>'")
+        style::bold("heddle commit -m '<message>'")
     );
     println!(
         "  Git refs changed externally: {}",

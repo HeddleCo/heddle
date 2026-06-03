@@ -90,7 +90,7 @@ fn try_succeeds_creates_thread_and_preserves_parent_head() {
     );
     assert_eq!(
         value["next_action"],
-        format!("heddle merge {thread_name} --preview"),
+        format!("heddle ready --thread {thread_name}"),
         "try should emit one parseable primary action, not a combined choice: {raw}"
     );
     assert_eq!(
@@ -99,12 +99,12 @@ fn try_succeeds_creates_thread_and_preserves_parent_head() {
     );
     assert_eq!(
         value["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["merge", thread_name, "--preview"]),
+        heddle_argv_json(["ready", "--thread", thread_name]),
         "try should provide argv for the primary action: {raw}"
     );
     assert_eq!(
         value["next_action_template"]["argv_template"],
-        heddle_argv_json(["merge", thread_name, "--preview"]),
+        heddle_argv_json(["ready", "--thread", thread_name]),
         "try should provide argv for the next action too: {raw}"
     );
     assert_eq!(

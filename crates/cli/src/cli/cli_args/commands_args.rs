@@ -867,14 +867,14 @@ pub struct SyncArgs {
     pub thread: Option<String>,
 }
 
-/// Arguments for the `ship` command.
+/// Arguments for the `land` command.
 #[derive(Clone, Debug, clap::Args)]
-pub struct ShipArgs {
+pub struct LandArgs {
     /// Thread to capture, integrate, and optionally push (default: current thread).
     #[arg(long = "thread")]
     pub thread: Option<String>,
 
-    /// Intent/message to use if ship needs to capture outstanding work first.
+    /// Intent/message to use if land needs to capture outstanding work first.
     #[arg(short = 'm', long)]
     pub message: Option<String>,
 

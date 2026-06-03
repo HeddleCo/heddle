@@ -3,7 +3,7 @@ use objects::store::ObjectStore;
 use anyhow::{Context, Result, anyhow};
 use objects::object::{ChangeId, ThreadName};
 use oplog::{OpBatch, OpRecord};
-use repo::{Repository, Thread, ThreadIntegrationPolicy};
+use repo::{Repository, Thread, ThreadIntegrationPolicy, thread_flag};
 use serde::Serialize;
 
 use super::{
@@ -22,12 +22,13 @@ use super::{
     thread_cmd::{
         current_thread, load_thread, refresh_thread, thread_manager, thread_not_found_advice,
     },
-    thread_landing::{merge_preview_command, ship_local_command},
+    next_action::{NextActionValidationContext, write_validated_json_stdout},
+    thread_landing::{land_local_command, switch_thread_command},
 };
 use crate::{
     cli::{
         Cli, ThreadStartArgs, WorkspaceModeArg,
-        cli_args::{DelegateArgs, ShipArgs, SyncArgs},
+        cli_args::{DelegateArgs, LandArgs, SyncArgs},
         should_output_json, style, worktree_status_options,
     },
     config::UserConfig,
@@ -46,7 +47,7 @@ struct SyncOutput {
 }
 
 #[derive(Serialize)]
-struct ShipOutput {
+struct LandOutput {
     #[serde(flatten)]
     operator: OperatorCommandOutput,
     thread: String,
@@ -100,7 +101,7 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
             operation.as_ref(),
             remote_tracking.as_ref(),
             import_hint.as_ref(),
-            Some("heddle ship"),
+            Some(&land_local_command(&thread.id)),
         );
         let trust = build_repository_verification_state(&repo);
         SyncOutput {
@@ -118,13 +119,23 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
             current_state: thread.current_state.clone(),
             chosen_path: "no_op".to_string(),
         }
-    } else if stale_report.conflict_count > 0 || !stale_blockers.is_empty() {
-        let recommended_action = primary_next_action(
-            operation.as_ref(),
-            remote_tracking.as_ref(),
-            import_hint.as_ref(),
-            Some(&stale_report.recommended_action),
-        );
+    } else if stale_report.conflict_count == 0 && !stale_blockers.is_empty() {
+        // Genuine non-conflict blockers (e.g. failing verification) cannot be
+        // auto-refreshed away. Surface the blocker without a refresh. (The
+        // conflict case carries a "path conflict(s)" blocker too, but it is
+        // routed to the refresh attempt below so the breadcrumb materializes.)
+        let recommended_action = if stale_report.recommended_action.trim().is_empty()
+            || stale_report.recommended_action.starts_with("heddle sync")
+        {
+            String::new()
+        } else {
+            primary_next_action(
+                operation.as_ref(),
+                remote_tracking.as_ref(),
+                import_hint.as_ref(),
+                Some(&stale_report.recommended_action),
+            )
+        };
         update_integration_policy(
             &repo,
             &thread.id,
@@ -139,11 +150,11 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
             operator: OperatorCommandOutput {
                 status: "blocked".to_string(),
                 action: "sync".to_string(),
-                message: format!("Thread '{}' needs manual refresh", thread.id),
+                message: format!("Thread '{}' needs manual sync", thread.id),
                 blockers: stale_report.blockers.clone(),
                 warnings: Vec::new(),
-                next_action: Some(recommended_action.clone()),
-                recommended_action: Some(recommended_action),
+                next_action: non_empty_next_action(&recommended_action),
+                recommended_action: non_empty_next_action(&recommended_action),
             },
             trust,
             thread: thread.id.clone(),
@@ -151,29 +162,78 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
             chosen_path: "blocked".to_string(),
         }
     } else {
-        let refreshed = refresh_thread(&repo, &thread.id, cli)?;
-        update_integration_policy(&repo, &refreshed.id, "current", "thread refreshed cleanly")?;
-        let recommended_action = primary_next_action(
-            operation.as_ref(),
-            remote_tracking.as_ref(),
-            import_hint.as_ref(),
-            Some("heddle ship"),
-        );
-        let trust = build_repository_verification_state(&repo);
-        SyncOutput {
-            operator: OperatorCommandOutput {
-                status: "refreshed".to_string(),
-                action: "sync".to_string(),
-                message: format!("Refreshed thread '{}'", refreshed.id),
-                blockers: vec![],
-                warnings: Vec::new(),
-                next_action: Some(recommended_action.clone()),
-                recommended_action: Some(recommended_action),
-            },
-            trust,
-            thread: refreshed.id.clone(),
-            current_state: refreshed.current_state.clone(),
-            chosen_path: "refresh".to_string(),
+        // Either a clean stale thread or one whose replay genuinely conflicts
+        // (conflict_count > 0). Attempt the refresh in both cases.
+        // `refresh_thread` persists the merge state + worktree conflict
+        // markers in the thread's checkout *before* returning the conflict
+        // advice, so the `resolve` breadcrumb below points at real state.
+        // heddle#464 r2: the old conflict branch returned here early and
+        // emitted `heddle resolve --list` with no merge in progress — a dead
+        // breadcrumb that failed with `no_merge_in_progress`. A previewed
+        // conflict that the 3-way merge resolves cleanly also completes here
+        // and recommends `land`.
+        match refresh_thread(&repo, &thread.id, cli) {
+            Ok(refreshed) => {
+                update_integration_policy(
+                    &repo,
+                    &refreshed.id,
+                    "current",
+                    "thread refreshed cleanly",
+                )?;
+                let recommended_action = primary_next_action(
+                    operation.as_ref(),
+                    remote_tracking.as_ref(),
+                    import_hint.as_ref(),
+                    Some(&land_local_command(&refreshed.id)),
+                );
+                let trust = build_repository_verification_state(&repo);
+                SyncOutput {
+                    operator: OperatorCommandOutput {
+                        status: "refreshed".to_string(),
+                        action: "sync".to_string(),
+                        message: format!("Refreshed thread '{}'", refreshed.id),
+                        blockers: vec![],
+                        warnings: Vec::new(),
+                        next_action: Some(recommended_action.clone()),
+                        recommended_action: Some(recommended_action),
+                    },
+                    trust,
+                    thread: refreshed.id.clone(),
+                    current_state: refreshed.current_state.clone(),
+                    chosen_path: "refresh".to_string(),
+                }
+            }
+            Err(error) => {
+                // refresh_thread materializes the conflict before returning;
+                // only then is `resolve` a live breadcrumb. If no merge was
+                // materialized the failure is genuine — propagate it.
+                if !sync_conflict_merge_in_progress(&repo, &thread) {
+                    return Err(error);
+                }
+                update_integration_policy(
+                    &repo,
+                    &thread.id,
+                    "blocked",
+                    "refresh produced conflicts requiring manual resolution",
+                )?;
+                let recommended_action = scoped_resolve_list_command(&thread);
+                let trust = build_repository_verification_state(&repo);
+                SyncOutput {
+                    operator: OperatorCommandOutput {
+                        status: "blocked".to_string(),
+                        action: "sync".to_string(),
+                        message: format!("Thread '{}' has merge conflicts to resolve", thread.id),
+                        blockers: stale_report.blockers.clone(),
+                        warnings: Vec::new(),
+                        next_action: Some(recommended_action.clone()),
+                        recommended_action: Some(recommended_action),
+                    },
+                    trust,
+                    thread: thread.id.clone(),
+                    current_state: thread.current_state.clone(),
+                    chosen_path: "blocked".to_string(),
+                }
+            }
         }
     };
     output.operator.block_success_claim_if_verification_blocked(
@@ -182,14 +242,14 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
         VerificationClaimPolicy::strict(),
     );
 
-    emit(cli, &output)
+    emit_with_next_action_validation(cli, &repo, &output, &["sync"])
 }
 
-pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
+pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     // Open at CWD only to discover the active thread, then re-open at
-    // its metadata-recorded worktree. This makes `heddle ship` work
+    // its metadata-recorded worktree. This makes `heddle land` work
     // from anywhere — operators don't need to `cd` into a lightweight
-    // thread directory before shipping. The capture/merge below run
+    // thread directory before landing. The capture/merge below run
     // against `repo`, so they all see the same checkout. See
     // `Repository::active_worktree_path`.
     let cwd_repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
@@ -203,8 +263,8 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
     let thread = resolve_thread(
         &repo,
         args.thread.as_deref(),
-        "ship",
-        "heddle ship --thread <name>",
+        "land",
+        "heddle land --thread <name>",
     )?;
     let thread_repo = if thread.execution_path.as_os_str().is_empty() {
         None
@@ -217,33 +277,39 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
             )
         })?)
     } else {
-        let merge_preview = merge_preview_command(&thread.id);
+        let land_command = land_local_command(&thread.id);
+        // `heddle start` would refuse here — the thread still holds an active
+        // reservation, so it returns `active_reservation_advice` and the
+        // operator is stuck. `heddle switch` rebuilds the dedicated worktree at
+        // the recorded `execution_path` from the thread's current state (see
+        // `cmd_thread_switch`), which is exactly the path this `land` reads, so
+        // the rebuild clears the blocker and the follow-up `land` succeeds.
+        let switch_command = switch_thread_command(&thread.id);
         return Err(anyhow!(RecoveryAdvice::safety_refusal(
             "thread_worktree_missing",
             format!("Thread '{}' worktree is missing", thread.id),
             format!(
-                "Materialize the thread again with `heddle start {} --path <path>` or merge it by ref with `{merge_preview}`.",
-                thread.id
+                "Rebuild the thread's checkout with `{switch_command}` (it re-materializes the recorded worktree from the thread's current state), then retry `{land_command}`.",
             ),
             format!(
                 "recorded execution path does not exist: {}",
                 thread.execution_path.display()
             ),
-            "ship would need to inspect that checkout for unsaved work before merging",
+            "land would need to inspect that checkout for unsaved work before merging",
             "repository state, refs, metadata, and worktree files were left unchanged",
-            merge_preview.clone(),
-            vec![merge_preview],
+            switch_command.clone(),
+            vec![switch_command, land_command],
         )));
     };
     if args.push && args.no_push {
-        return Err(anyhow!(RecoveryAdvice::ship_push_option_conflict(
+        return Err(anyhow!(RecoveryAdvice::land_push_option_conflict(
             &thread.id
         )));
     }
     if let Some(remote) = args.remote.as_deref()
         && !args.push
     {
-        return Err(anyhow!(RecoveryAdvice::ship_remote_requires_push(
+        return Err(anyhow!(RecoveryAdvice::land_remote_requires_push(
             &thread.id, remote,
         )));
     }
@@ -256,7 +322,7 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
         {
             Some(remote) => Some(remote),
             None => {
-                return Err(anyhow!(RecoveryAdvice::ship_push_remote_missing(
+                return Err(anyhow!(RecoveryAdvice::land_push_remote_missing(
                     &thread.id
                 )));
             }
@@ -264,7 +330,7 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
     } else {
         None
     };
-    if let Some(advice) = ship_checkpoint_preflight_advice(&repo, &thread.id) {
+    if let Some(advice) = land_checkpoint_preflight_advice(&repo, &thread.id) {
         return Err(anyhow!(advice));
     }
 
@@ -275,7 +341,7 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
             let capture_message = args
                 .message
                 .clone()
-                .or_else(|| Some(format!("Ship {}", thread.id)));
+                .or_else(|| Some(format!("Land {}", thread.id)));
             create_snapshot(
                 thread_repo,
                 &user_config,
@@ -299,8 +365,8 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
     let mut refreshed_thread = resolve_thread(
         &repo,
         Some(&thread.id),
-        "ship",
-        "heddle ship --thread <name>",
+        "land",
+        "heddle land --thread <name>",
     )?;
     if refreshed_thread.freshness == repo::ThreadFreshness::Stale {
         let preview = build_thread_preview_report(&repo, &mut refreshed_thread, true)?;
@@ -313,22 +379,29 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
                 stale_blockers
                     .first()
                     .cloned()
-                    .unwrap_or_else(|| "refresh requires manual resolution".to_string()),
+                    .unwrap_or_else(|| "sync requires manual resolution".to_string()),
             )?;
-            return write_ship_output(
+            return write_land_output(
                 cli,
-                &ShipOutput {
+                &repo,
+                &LandOutput {
                     operator: OperatorCommandOutput {
                         status: "blocked".to_string(),
-                        action: "ship".to_string(),
+                        action: "land".to_string(),
                         message: format!(
-                            "Thread '{}' must be refreshed manually",
+                            "Thread '{}' must be synced manually",
                             refreshed_thread.id
                         ),
-                        blockers: ship_blockers_for_preview(&preview, &stale_blockers),
+                        blockers: land_blockers_for_preview(&preview, &stale_blockers),
                         warnings: Vec::new(),
-                        next_action: Some(preview.recommended_action.clone()),
-                        recommended_action: Some(preview.recommended_action),
+                        next_action: Some(format!(
+                            "heddle sync {}",
+                            thread_flag(&refreshed_thread.id)
+                        )),
+                        recommended_action: Some(format!(
+                            "heddle sync {}",
+                            thread_flag(&refreshed_thread.id)
+                        )),
                     },
                     thread: refreshed_thread.id.clone(),
                     captured,
@@ -341,8 +414,8 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
                     merge_state: None,
                     trust: build_repository_verification_state(&repo),
                     chosen_path: "blocked".to_string(),
-                    performed_steps: ship_performed_steps(captured, false, false, false, false),
-                    skipped_steps: ship_skipped_steps(captured, false, false, false, false),
+                    performed_steps: land_performed_steps(captured, false, false, false, false),
+                    skipped_steps: land_skipped_steps(captured, false, false, false, false),
                 },
             );
         }
@@ -354,8 +427,8 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
     let mut merge_thread = resolve_thread(
         &repo,
         Some(&refreshed_thread.id),
-        "ship",
-        "heddle ship --thread <name>",
+        "land",
+        "heddle land --thread <name>",
     )?;
     let preview = build_thread_preview_report(&repo, &mut merge_thread, true)?;
     let integration_blockers = integration_blockers(&repo, &merge_thread, &preview);
@@ -372,34 +445,34 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
         )?;
         if repo.capability() == repo::RepositoryCapability::GitOverlay {
             let checkpoint_message =
-                ship_checkpoint_message(&repo, &merge_thread, args.message.as_deref());
+                land_checkpoint_message(&repo, &merge_thread, args.message.as_deref());
             let record = create_git_checkpoint(
                 &repo,
                 Some(&checkpoint_message),
                 worktree_status_options(Some(repo.config())),
             )
             .map_err(|error| {
-                anyhow!(RecoveryAdvice::ship_checkpoint_partial_failure(
+                anyhow!(RecoveryAdvice::land_checkpoint_partial_failure(
                     &merge_thread.id,
                     error,
-                    ship_performed_steps(captured, synced, true, false, false),
+                    land_performed_steps(captured, synced, true, false, false),
                 ))
             })?;
             checkpointed = true;
             git_commit = Some(record.git_commit);
         }
-        coalesce_ship_integration_and_checkpoint(
+        coalesce_land_integration_and_checkpoint(
             &repo,
             Some(&merge_state),
             git_commit.as_deref(),
         )
         .context(
-            "ship completed but failed to record manual integration and Git checkpoint as one undo batch",
+            "land completed but failed to record manual integration and Git checkpoint as one undo batch",
         )?;
         let mut pushed = false;
         let mut pushed_remote = None;
         if should_push {
-            let remote_name = push_after_ship(
+            let remote_name = push_after_land(
                 cli,
                 &repo,
                 planned_push_remote.clone(),
@@ -407,10 +480,10 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
             )
             .await
             .map_err(|error| {
-                anyhow!(RecoveryAdvice::ship_push_partial_failure(
+                anyhow!(RecoveryAdvice::land_push_partial_failure(
                     &merge_thread.id,
                     error,
-                    ship_performed_steps(captured, synced, true, checkpointed, false),
+                    land_performed_steps(captured, synced, true, checkpointed, false),
                     git_commit.as_deref(),
                     planned_push_remote.as_deref(),
                 ))
@@ -420,27 +493,28 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
         }
         clear_manual_resolution_state(&repo, &merge_thread.id)?;
         let trust = build_repository_verification_state(&repo);
-        let post_ship_action = integrated_ship_next_action(true, pushed, &trust);
+        let post_land_action = integrated_land_next_action(true, pushed, &trust);
         let mut operator = OperatorCommandOutput {
-            status: "shipped".to_string(),
-            action: "ship".to_string(),
+            status: "landed".to_string(),
+            action: "land".to_string(),
             message: format!(
-                "Shipped thread '{}' from a manually resolved integration state",
+                "Landed thread '{}' from a manually resolved integration state",
                 merge_thread.id
             ),
             blockers: Vec::new(),
             warnings: Vec::new(),
-            next_action: post_ship_action.clone(),
-            recommended_action: post_ship_action,
+            next_action: post_land_action.clone(),
+            recommended_action: post_land_action,
         };
         operator.block_success_claim_if_verification_blocked(
             &trust,
-            "ship",
-            VerificationClaimPolicy::strict().allow_ship_publish_followup(),
+            "land",
+            VerificationClaimPolicy::strict().allow_land_publish_followup(),
         );
-        return write_ship_output(
+        return write_land_output(
             cli,
-            &ShipOutput {
+            &repo,
+            &LandOutput {
                 operator,
                 thread: merge_thread.id.clone(),
                 captured,
@@ -452,8 +526,8 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
                 pushed_remote,
                 merge_state: Some(merge_state),
                 trust,
-                performed_steps: ship_performed_steps(captured, synced, true, checkpointed, pushed),
-                skipped_steps: ship_skipped_steps(captured, synced, true, checkpointed, pushed),
+                performed_steps: land_performed_steps(captured, synced, true, checkpointed, pushed),
+                skipped_steps: land_skipped_steps(captured, synced, true, checkpointed, pushed),
                 chosen_path: if checkpointed {
                     if pushed {
                         "capture_sync_manual_resolution_checkpoint_push".to_string()
@@ -471,17 +545,26 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
             .first()
             .cloned()
             .unwrap_or_else(|| "integration requires manual review".to_string());
-        let recommended_action = integration_blocker_recommended_action(&integration_blockers)
-            .unwrap_or_else(|| preview.recommended_action.clone());
+        // Never fall back to `preview.recommended_action` here: this is the
+        // pre-merge bail, so no merge state is materialized (a `resolve`
+        // breadcrumb would die with `no_merge_in_progress`) and the preview's
+        // own land recommendation would self-loop this very command. Drive the
+        // operator through `sync`, which materializes and resolves a genuine
+        // conflict before a land retry. (heddle#464 close-the-class.)
+        let recovery_scope = recovery_scope_checkout(&merge_thread, repo.root());
+        let recommended_action =
+            integration_blocker_recommended_action(&integration_blockers, recovery_scope.as_deref())
+                .unwrap_or_else(|| format!("heddle sync {}", thread_flag(&merge_thread.id)));
         update_integration_policy(&repo, &merge_thread.id, "blocked", &reason)?;
-        return write_ship_output(
+        return write_land_output(
             cli,
-            &ShipOutput {
+            &repo,
+            &LandOutput {
                 operator: OperatorCommandOutput {
                     status: "blocked".to_string(),
-                    action: "ship".to_string(),
-                    message: format!("Thread '{}' is not eligible for auto-ship", merge_thread.id),
-                    blockers: ship_blockers_for_preview(&preview, &integration_blockers),
+                    action: "land".to_string(),
+                    message: format!("Thread '{}' is not eligible for auto-land", merge_thread.id),
+                    blockers: land_blockers_for_preview(&preview, &integration_blockers),
                     warnings: Vec::new(),
                     next_action: Some(recommended_action.clone()),
                     recommended_action: Some(recommended_action),
@@ -497,8 +580,8 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
                 merge_state: None,
                 trust: build_repository_verification_state(&repo),
                 chosen_path: "blocked".to_string(),
-                performed_steps: ship_performed_steps(captured, synced, false, false, false),
-                skipped_steps: ship_skipped_steps(captured, synced, false, false, false),
+                performed_steps: land_performed_steps(captured, synced, false, false, false),
+                skipped_steps: land_skipped_steps(captured, synced, false, false, false),
             },
         );
     }
@@ -533,33 +616,33 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
 
     if integrated && repo.capability() == repo::RepositoryCapability::GitOverlay {
         let checkpoint_message =
-            ship_checkpoint_message(&repo, &merge_thread, args.message.as_deref());
+            land_checkpoint_message(&repo, &merge_thread, args.message.as_deref());
         let record = create_git_checkpoint(
             &repo,
             Some(&checkpoint_message),
             worktree_status_options(Some(repo.config())),
         )
         .map_err(|error| {
-            anyhow!(RecoveryAdvice::ship_checkpoint_partial_failure(
+            anyhow!(RecoveryAdvice::land_checkpoint_partial_failure(
                 &merge_thread.id,
                 error,
-                ship_performed_steps(captured, synced, integrated, false, false),
+                land_performed_steps(captured, synced, integrated, false, false),
             ))
         })?;
         checkpointed = true;
         git_commit = Some(record.git_commit);
     }
-    coalesce_ship_integration_and_checkpoint(
+    coalesce_land_integration_and_checkpoint(
         &repo,
         merge_output.merge_state.as_deref(),
         git_commit.as_deref(),
     )
-    .context("ship completed but failed to record merge and Git checkpoint as one undo batch")?;
+    .context("land completed but failed to record merge and Git checkpoint as one undo batch")?;
 
     let mut pushed = false;
     let mut pushed_remote = None;
     if integrated && should_push {
-        let remote_name = push_after_ship(
+        let remote_name = push_after_land(
             cli,
             &repo,
             planned_push_remote.clone(),
@@ -567,10 +650,10 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
         )
         .await
         .map_err(|error| {
-            anyhow!(RecoveryAdvice::ship_push_partial_failure(
+            anyhow!(RecoveryAdvice::land_push_partial_failure(
                 &merge_thread.id,
                 error,
-                ship_performed_steps(captured, synced, integrated, checkpointed, false),
+                land_performed_steps(captured, synced, integrated, checkpointed, false),
                 git_commit.as_deref(),
                 planned_push_remote.as_deref(),
             ))
@@ -584,14 +667,14 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
     }
 
     let trust = build_repository_verification_state(&repo);
-    let integrated_next_action = integrated_ship_next_action(integrated, pushed, &trust);
+    let integrated_next_action = integrated_land_next_action(integrated, pushed, &trust);
     let mut operator = OperatorCommandOutput {
-        status: if integrated { "shipped" } else { "blocked" }.to_string(),
-        action: "ship".to_string(),
+        status: if integrated { "landed" } else { "blocked" }.to_string(),
+        action: "land".to_string(),
         message: if integrated {
-            format!("Shipped thread '{}'", merge_thread.id)
+            format!("Landed thread '{}'", merge_thread.id)
         } else {
-            format!("Thread '{}' could not be shipped cleanly", merge_thread.id)
+            format!("Thread '{}' could not be landed cleanly", merge_thread.id)
         },
         blockers: merge_output.operator.blockers.clone(),
         warnings: Vec::new(),
@@ -608,13 +691,14 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
     };
     operator.block_success_claim_if_verification_blocked(
         &trust,
-        "ship",
-        VerificationClaimPolicy::strict().allow_ship_publish_followup(),
+        "land",
+        VerificationClaimPolicy::strict().allow_land_publish_followup(),
     );
 
-    write_ship_output(
+    write_land_output(
         cli,
-        &ShipOutput {
+        &repo,
+        &LandOutput {
             operator,
             thread: merge_thread.id.clone(),
             captured,
@@ -626,14 +710,14 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
             pushed_remote,
             merge_state: merge_output.merge_state.clone(),
             trust,
-            performed_steps: ship_performed_steps(
+            performed_steps: land_performed_steps(
                 captured,
                 synced,
                 integrated,
                 checkpointed,
                 pushed,
             ),
-            skipped_steps: ship_skipped_steps(captured, synced, integrated, checkpointed, pushed),
+            skipped_steps: land_skipped_steps(captured, synced, integrated, checkpointed, pushed),
             chosen_path: if integrated {
                 if pushed {
                     "capture_sync_merge_checkpoint_push"
@@ -650,7 +734,7 @@ pub async fn cmd_ship(cli: &Cli, args: ShipArgs) -> Result<()> {
     )
 }
 
-async fn push_after_ship(
+async fn push_after_land(
     cli: &Cli,
     repo: &Repository,
     remote: Option<String>,
@@ -670,7 +754,7 @@ async fn push_after_ship(
     }
 }
 
-fn ship_performed_steps(
+fn land_performed_steps(
     captured: bool,
     synced: bool,
     integrated: bool,
@@ -689,7 +773,7 @@ fn ship_performed_steps(
     .collect()
 }
 
-fn ship_skipped_steps(
+fn land_skipped_steps(
     captured: bool,
     synced: bool,
     integrated: bool,
@@ -710,7 +794,7 @@ fn ship_skipped_steps(
     .collect()
 }
 
-fn integrated_ship_next_action(
+fn integrated_land_next_action(
     integrated: bool,
     pushed: bool,
     trust: &RepositoryVerificationState,
@@ -725,7 +809,7 @@ fn integrated_ship_next_action(
     }
 }
 
-fn ship_checkpoint_preflight_advice(repo: &Repository, thread_id: &str) -> Option<RecoveryAdvice> {
+fn land_checkpoint_preflight_advice(repo: &Repository, thread_id: &str) -> Option<RecoveryAdvice> {
     if repo.capability() != repo::RepositoryCapability::GitOverlay {
         return None;
     }
@@ -753,21 +837,21 @@ fn ship_checkpoint_preflight_advice(repo: &Repository, thread_id: &str) -> Optio
             let mut commands = remote_decision
                 .map(|decision| decision.recovery_commands)
                 .unwrap_or_else(|| vec![primary_command.clone()]);
-            commands.push(merge_preview_command(thread_id));
-            commands.push(ship_local_command(thread_id));
+            commands.push(format!("heddle sync {}", thread_flag(thread_id)));
+            commands.push(land_local_command(thread_id));
             commands
         } else {
             trust.recovery_commands.clone()
         };
         return Some(RecoveryAdvice::safety_refusal(
-            "ship_requires_current_upstream",
-            format!("Refusing to ship '{thread_id}': upstream work must be integrated first"),
-            format!("Run `{primary_command}`, then preview and retry the ship."),
+            "land_requires_current_upstream",
+            format!("Refusing to land '{thread_id}': upstream work must be integrated first"),
+            format!("Run `{primary_command}`, then retry the land."),
             format!(
                 "repository verification reports {}: {}",
                 trust.remote_drift, trust.summary
             ),
-            "ship would first land Heddle state locally, then fail while writing the Git checkpoint because the checkout branch is behind its upstream",
+            "land would first integrate Heddle state locally, then fail while writing the Git checkpoint because the checkout branch is behind its upstream",
             "thread refs, Heddle refs, Git refs, index, and worktree files were left unchanged",
             primary_command,
             recovery_commands,
@@ -775,11 +859,11 @@ fn ship_checkpoint_preflight_advice(repo: &Repository, thread_id: &str) -> Optio
     }
     if repo.root().join(".git/index.lock").exists() {
         return Some(RecoveryAdvice::safety_refusal(
-            "ship_checkpoint_preflight_blocked",
-            format!("Refusing to ship '{thread_id}': Git index is locked"),
-            "Remove the stale Git index lock or wait for the active Git operation to finish, then retry the ship.",
+            "land_checkpoint_preflight_blocked",
+            format!("Refusing to land '{thread_id}': Git index is locked"),
+            "Remove the stale Git index lock or wait for the active Git operation to finish, then retry the land.",
             ".git/index.lock exists in the parent checkout",
-            "ship would first land Heddle state locally, then fail while writing the Git checkpoint because the Git index is locked",
+            "land would first integrate Heddle state locally, then fail while writing the Git checkpoint because the Git index is locked",
             "thread refs, Heddle refs, Git refs, index, and worktree files were left unchanged",
             "heddle status",
             vec!["heddle status".to_string()],
@@ -788,7 +872,7 @@ fn ship_checkpoint_preflight_advice(repo: &Repository, thread_id: &str) -> Optio
     None
 }
 
-fn ship_checkpoint_message(repo: &Repository, thread: &Thread, explicit: Option<&str>) -> String {
+fn land_checkpoint_message(repo: &Repository, thread: &Thread, explicit: Option<&str>) -> String {
     if let Some(message) = explicit.filter(|message| !message.trim().is_empty()) {
         return message.to_string();
     }
@@ -809,7 +893,7 @@ fn ship_checkpoint_message(repo: &Repository, thread: &Thread, explicit: Option<
     {
         return task.to_string();
     }
-    format!("Ship {}", thread.id)
+    format!("Land {}", thread.id)
 }
 
 pub fn cmd_delegate(cli: &Cli, args: DelegateArgs) -> Result<()> {
@@ -953,13 +1037,15 @@ pub fn cmd_delegate(cli: &Cli, args: DelegateArgs) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    emit(
+    emit_with_next_action_validation(
         cli,
+        &repo,
         &DelegateOutput {
             parent_thread: parent.id,
             delegated,
             message: "Delegated child threads created".to_string(),
         },
+        &["delegate"],
     )
 }
 
@@ -1054,7 +1140,7 @@ fn update_integration_policy(
     let keep_previewed = status == "blocked" && prior_status.as_deref() == Some("previewed");
     let next_status = if keep_previewed { "previewed" } else { status };
     let next_reason = if keep_previewed {
-        format!("auto-ship blocked: {reason}")
+        format!("auto-land blocked: {reason}")
     } else {
         reason
     };
@@ -1079,7 +1165,7 @@ fn clear_manual_resolution_state(repo: &Repository, thread_id: &str) -> Result<(
     Ok(manager.save(&thread)?)
 }
 
-fn coalesce_ship_integration_and_checkpoint(
+fn coalesce_land_integration_and_checkpoint(
     repo: &Repository,
     merge_state: Option<&str>,
     git_commit: Option<&str>,
@@ -1091,14 +1177,14 @@ fn coalesce_ship_integration_and_checkpoint(
         return Ok(());
     };
 
-    let integration_batch = find_recent_ship_integration_batch(repo, merge_state)?;
-    let checkpoint_batch = find_recent_ship_git_checkpoint_batch(repo, git_commit)?;
+    let integration_batch = find_recent_land_integration_batch(repo, merge_state)?;
+    let checkpoint_batch = find_recent_land_git_checkpoint_batch(repo, git_commit)?;
     repo.oplog()
         .coalesce_batches(integration_batch.id, checkpoint_batch.id)?;
     Ok(())
 }
 
-fn find_recent_ship_integration_batch(repo: &Repository, merge_state: &str) -> Result<OpBatch> {
+fn find_recent_land_integration_batch(repo: &Repository, merge_state: &str) -> Result<OpBatch> {
     repo.oplog()
         .recent_batches_scoped(12, Some(&repo.op_scope()))?
         .into_iter()
@@ -1108,10 +1194,10 @@ fn find_recent_ship_integration_batch(repo: &Repository, merge_state: &str) -> R
                 .iter()
                 .any(|entry| op_targets_merge_state(&entry.operation, merge_state))
         })
-        .ok_or_else(|| anyhow!("ship merge succeeded but its oplog batch was not found"))
+        .ok_or_else(|| anyhow!("land merge succeeded but its oplog batch was not found"))
 }
 
-fn find_recent_ship_git_checkpoint_batch(repo: &Repository, git_commit: &str) -> Result<OpBatch> {
+fn find_recent_land_git_checkpoint_batch(repo: &Repository, git_commit: &str) -> Result<OpBatch> {
     repo.oplog()
         .recent_batches_scoped(12, Some(&repo.op_scope()))?
         .into_iter()
@@ -1123,7 +1209,7 @@ fn find_recent_ship_git_checkpoint_batch(repo: &Repository, git_commit: &str) ->
                 )
             })
         })
-        .ok_or_else(|| anyhow!("ship Git checkpoint succeeded but its oplog batch was not found"))
+        .ok_or_else(|| anyhow!("land Git checkpoint succeeded but its oplog batch was not found"))
 }
 
 fn op_targets_merge_state(op: &OpRecord, merge_state: &str) -> bool {
@@ -1134,7 +1220,7 @@ fn op_targets_merge_state(op: &OpRecord, merge_state: &str) -> bool {
         OpRecord::FastForwardV2 { post_target_id, .. } => {
             change_id_matches_display(post_target_id, merge_state)
         }
-        // These records don't advance HEAD/thread to a merge target the ship
+        // These records don't advance HEAD/thread to a merge target the land
         // flow tracks (legacy V1 `FastForward` re-resolves at apply time and
         // carries no post-target id). Enumerated explicitly (no wildcard) so a
         // new state-advancing variant must be considered as a possible merge
@@ -1189,9 +1275,9 @@ fn adopt_manual_resolution(repo: &Repository, thread_id: &str) -> Result<String>
     Ok(target.short())
 }
 
-const AUTO_SHIP_CONFIDENCE_THRESHOLD: f32 = 0.75;
-const AUTO_SHIP_CONFIDENCE_RECOVERY_ACTION: &str =
-    "heddle capture -m \"...\" --confidence <confidence>";
+const AUTO_LAND_CONFIDENCE_THRESHOLD: f32 = 0.75;
+const AUTO_LAND_CONFIDENCE_RECOVERY_ACTION: &str =
+    "heddle commit -m \"...\" --confidence <confidence>";
 
 pub(crate) fn integration_blockers(
     repo: &Repository,
@@ -1204,19 +1290,19 @@ pub(crate) fn integration_blockers(
     } else {
         non_staleness_blockers(&preview.blockers)
     };
-    blockers.extend(auto_ship_policy_blockers(repo, thread));
+    blockers.extend(auto_land_policy_blockers(repo, thread));
     blockers
 }
 
-pub(crate) fn auto_ship_policy_blockers(repo: &Repository, thread: &Thread) -> Vec<String> {
+pub(crate) fn auto_land_policy_blockers(repo: &Repository, thread: &Thread) -> Vec<String> {
     let mut blockers = Vec::new();
     let agent_authored = thread_is_agent_authored(repo, thread);
     if agent_authored
         && let Some(confidence) = thread.confidence_summary.value
-            && confidence < AUTO_SHIP_CONFIDENCE_THRESHOLD
+            && confidence < AUTO_LAND_CONFIDENCE_THRESHOLD
         {
             blockers.push(format!(
-                "confidence {:.2} is below the auto-ship threshold of 0.75",
+                "confidence {:.2} is below the auto-land threshold of 0.75",
                 confidence
             ));
         }
@@ -1226,17 +1312,58 @@ pub(crate) fn auto_ship_policy_blockers(repo: &Repository, thread: &Thread) -> V
     blockers
 }
 
-pub(crate) fn integration_blocker_recommended_action(blockers: &[String]) -> Option<String> {
+pub(crate) fn integration_blocker_recommended_action(
+    blockers: &[String],
+    scope_to_checkout: Option<&std::path::Path>,
+) -> Option<String> {
     blockers
         .iter()
         .any(|blocker| {
             blocker.starts_with("confidence ")
                 || blocker == "verification summary reports failing tests"
         })
-        .then(|| AUTO_SHIP_CONFIDENCE_RECOVERY_ACTION.to_string())
+        .then(|| auto_land_confidence_recovery_action(scope_to_checkout))
 }
 
-fn ship_blockers_for_preview(
+/// The `confidence`/`verification` policy blocker is cleared by re-capturing the
+/// thread's state with a fresh confidence. That capture must land in the
+/// *thread's* checkout, not whatever checkout `ready`/`land` was invoked from —
+/// running an unscoped `heddle commit` from the parent of an isolated
+/// agent-authored thread commits the parent and never updates the blocked
+/// thread. When the thread's checkout differs from the current one, scope the
+/// recovery with the global `--repo` flag so the capture targets the thread.
+/// (heddle#464.)
+fn auto_land_confidence_recovery_action(scope_to_checkout: Option<&std::path::Path>) -> String {
+    match scope_to_checkout {
+        Some(path) => format!(
+            "heddle --repo {} {}",
+            crate::cli::render::shell_quote(&path.display().to_string()),
+            AUTO_LAND_CONFIDENCE_RECOVERY_ACTION
+                .strip_prefix("heddle ")
+                .expect("recovery action is a heddle command"),
+        ),
+        None => AUTO_LAND_CONFIDENCE_RECOVERY_ACTION.to_string(),
+    }
+}
+
+/// Returns the thread's recorded checkout iff it is a real, distinct path from
+/// `current_checkout` — i.e. when a recovery breadcrumb that mutates thread
+/// state must be re-scoped away from the current checkout. Canonicalizes both
+/// sides (falling back to the raw path) so a symlinked worktree doesn't read as
+/// "different" and over-scope the in-thread case.
+pub(crate) fn recovery_scope_checkout(
+    thread: &Thread,
+    current_checkout: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let execution_path = &thread.execution_path;
+    if execution_path.as_os_str().is_empty() {
+        return None;
+    }
+    let canonical = |path: &std::path::Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    (canonical(execution_path) != canonical(current_checkout)).then(|| execution_path.clone())
+}
+
+fn land_blockers_for_preview(
     preview: &super::merge::ThreadPreviewReport,
     blockers: &[String],
 ) -> Vec<String> {
@@ -1309,21 +1436,68 @@ fn slugify(input: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
-fn emit<T: Serialize>(cli: &Cli, output: &T) -> Result<()> {
+fn emit_with_next_action_validation<T: Serialize>(
+    cli: &Cli,
+    repo: &Repository,
+    output: &T,
+    emitting_command: &[&str],
+) -> Result<()> {
     if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(output)?);
+        write_validated_json_stdout(
+            output,
+            NextActionValidationContext::new(emitting_command, repo.capability()),
+        )
     } else {
         println!("{}", serde_json::to_string_pretty(output)?);
+        Ok(())
     }
-    Ok(())
 }
 
-fn write_ship_output(cli: &Cli, output: &ShipOutput) -> Result<()> {
+fn non_empty_next_action(action: &str) -> Option<String> {
+    (!action.trim().is_empty()).then(|| action.to_string())
+}
+
+/// True when `refresh_thread` materialized a conflicted merge for `thread`
+/// (so `heddle resolve` has state to read). The merge state lives in the
+/// thread's own checkout, which may differ from the repo `sync` ran against.
+fn sync_conflict_merge_in_progress(repo: &Repository, thread: &Thread) -> bool {
+    if thread.execution_path.as_os_str().is_empty() {
+        repo.merge_state_manager().is_merge_in_progress()
+    } else if thread.execution_path.exists() {
+        Repository::open(&thread.execution_path)
+            .map(|worktree| worktree.merge_state_manager().is_merge_in_progress())
+            .unwrap_or(false)
+    } else {
+        false
+    }
+}
+
+/// `heddle resolve --list` scoped to wherever the conflict was materialized.
+/// When the thread has its own checkout the breadcrumb must carry `--repo` so
+/// it reads the merge state in that checkout rather than the repo `sync` ran
+/// against (where no merge is in progress).
+fn scoped_resolve_list_command(thread: &Thread) -> String {
+    if thread.execution_path.as_os_str().is_empty() {
+        super::command_catalog::heddle_action(["resolve", "--list"])
+    } else {
+        super::command_catalog::heddle_action(vec![
+            "--repo".to_string(),
+            thread.execution_path.display().to_string(),
+            "resolve".to_string(),
+            "--list".to_string(),
+        ])
+    }
+}
+
+fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Result<()> {
     if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(output)?);
+        write_validated_json_stdout(
+            output,
+            NextActionValidationContext::new(&["land"], repo.capability()),
+        )?;
     } else {
         let marker = match output.operator.status.as_str() {
-            "shipped" => style::ok_marker(),
+            "landed" => style::ok_marker(),
             "blocked" => style::warn_marker(),
             _ => style::working_marker(),
         };
@@ -1350,7 +1524,7 @@ fn write_ship_output(cli: &Cli, output: &ShipOutput) -> Result<()> {
                         &output
                             .performed_steps
                             .iter()
-                            .map(|step| ship_text_step(step))
+                            .map(|step| land_text_step(step))
                             .collect::<Vec<_>>()
                             .join(", ")
                     )
@@ -1364,7 +1538,7 @@ fn write_ship_output(cli: &Cli, output: &ShipOutput) -> Result<()> {
                         &output
                             .skipped_steps
                             .iter()
-                            .map(|step| ship_text_step(step))
+                            .map(|step| land_text_step(step))
                             .collect::<Vec<_>>()
                             .join(", ")
                     )
@@ -1404,7 +1578,7 @@ fn write_ship_output(cli: &Cli, output: &ShipOutput) -> Result<()> {
     Ok(())
 }
 
-fn ship_text_step(step: &str) -> String {
+fn land_text_step(step: &str) -> String {
     match step {
         "capture" => "saved".to_string(),
         "sync" => "refreshed".to_string(),
@@ -1419,5 +1593,123 @@ fn ship_text_step(step: &str) -> String {
         "push(not requested)" => "push not requested".to_string(),
         "push(not reached)" => "push not reached".to_string(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::commands::command_catalog::validate_recommended_action;
+    use std::path::{Path, PathBuf};
+
+    fn thread_with_execution_path(execution_path: PathBuf) -> Thread {
+        Thread {
+            id: "agent-thread".to_string(),
+            thread: "agent-thread".to_string(),
+            target_thread: None,
+            parent_thread: None,
+            mode: repo::ThreadMode::Solid,
+            state: repo::ThreadState::Active,
+            base_state: "base".to_string(),
+            base_root: "root".to_string(),
+            current_state: Some("base".to_string()),
+            merged_state: None,
+            task: None,
+            execution_path,
+            materialized_path: None,
+            changed_paths: vec![],
+            impact_categories: vec![],
+            heavy_impact_paths: vec![],
+            promotion_suggested: false,
+            freshness: repo::ThreadFreshness::Current,
+            verification_summary: repo::ThreadVerificationSummary::default(),
+            confidence_summary: repo::ThreadConfidenceSummary::default(),
+            integration_policy_result: ThreadIntegrationPolicy::default(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            ephemeral: None,
+            auto: false,
+            shared_target_dir: None,
+        }
+    }
+
+    // heddle#464 bug 2: the confidence/verification policy-blocker recovery used
+    // to be a bare `heddle commit ... --confidence`, which commits the CURRENT
+    // checkout. Run from the parent of an isolated thread, that never updates the
+    // blocked thread's state. Scope it to the thread's checkout via `--repo`.
+    #[test]
+    fn confidence_blocker_recovery_scopes_to_thread_checkout() {
+        let blockers = vec!["confidence 0.40 is below the auto-land threshold of 0.75".to_string()];
+        let action = integration_blocker_recommended_action(
+            &blockers,
+            Some(Path::new("/work/threads/agent-thread")),
+        )
+        .expect("a confidence blocker must yield a recovery action");
+        assert_eq!(
+            action,
+            "heddle --repo /work/threads/agent-thread commit -m \"...\" --confidence <confidence>"
+        );
+        validate_recommended_action(&action)
+            .unwrap_or_else(|e| panic!("scoped recovery must validate: {e}"));
+    }
+
+    #[test]
+    fn verification_blocker_recovery_scopes_to_thread_checkout() {
+        let blockers = vec!["verification summary reports failing tests".to_string()];
+        let action = integration_blocker_recommended_action(
+            &blockers,
+            Some(Path::new("/work/threads/agent-thread")),
+        )
+        .expect("a verification blocker must yield a recovery action");
+        assert_eq!(
+            action,
+            "heddle --repo /work/threads/agent-thread commit -m \"...\" --confidence <confidence>"
+        );
+        validate_recommended_action(&action)
+            .unwrap_or_else(|e| panic!("scoped recovery must validate: {e}"));
+    }
+
+    // The in-thread case (recovery run from inside the thread's own checkout)
+    // must stay unscoped — a `--repo` pointing back at the current checkout is
+    // noise, and the bare command already targets the right state.
+    #[test]
+    fn confidence_blocker_recovery_stays_unscoped_in_thread() {
+        let blockers = vec!["confidence 0.40 is below the auto-land threshold of 0.75".to_string()];
+        let action = integration_blocker_recommended_action(&blockers, None)
+            .expect("a confidence blocker must yield a recovery action");
+        assert_eq!(action, AUTO_LAND_CONFIDENCE_RECOVERY_ACTION);
+        validate_recommended_action(&action)
+            .unwrap_or_else(|e| panic!("unscoped recovery must validate: {e}"));
+    }
+
+    #[test]
+    fn non_policy_blockers_yield_no_recovery_action() {
+        let blockers = vec!["3 path conflict(s) need manual resolution".to_string()];
+        assert!(integration_blocker_recommended_action(&blockers, None).is_none());
+    }
+
+    // `recovery_scope_checkout` is the gate that decides whether to scope: an
+    // isolated thread (execution_path differs from the current checkout) scopes;
+    // the in-thread case (paths equal) and a worktree-less thread (empty path)
+    // do not.
+    #[test]
+    fn recovery_scope_checkout_distinguishes_isolated_from_in_thread() {
+        let isolated = thread_with_execution_path(PathBuf::from("/work/threads/agent-thread"));
+        assert_eq!(
+            recovery_scope_checkout(&isolated, Path::new("/work/parent")),
+            Some(PathBuf::from("/work/threads/agent-thread")),
+        );
+
+        let in_thread = thread_with_execution_path(PathBuf::from("/work/threads/agent-thread"));
+        assert_eq!(
+            recovery_scope_checkout(&in_thread, Path::new("/work/threads/agent-thread")),
+            None,
+        );
+
+        let no_worktree = thread_with_execution_path(PathBuf::new());
+        assert_eq!(
+            recovery_scope_checkout(&no_worktree, Path::new("/work/parent")),
+            None,
+        );
     }
 }

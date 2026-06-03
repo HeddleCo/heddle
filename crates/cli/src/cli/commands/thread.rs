@@ -19,9 +19,9 @@ use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
     AgentUsageSummary, GitOverlayBranchTip, GitOverlayImportHint, GitRemoteTrackingStatus,
     Repository, RepositoryOperationStatus, Thread, ThreadCaptureOutcome, ThreadConfidenceSummary,
-    ThreadFreshness, ThreadImpactCategory, ThreadIntegrationPolicy, ThreadManager, ThreadMode,
-    ThreadRuntimeOverlay, ThreadState, ThreadVerificationSummary, ThreadView,
-    describe_thread_advice,
+    ThreadFreshness, ThreadId, ThreadIdError, ThreadImpactCategory, ThreadIntegrationPolicy,
+    ThreadManager, ThreadMode, ThreadRuntimeOverlay, ThreadState, ThreadVerificationSummary,
+    ThreadView, describe_thread_advice,
 };
 use serde::Serialize;
 
@@ -36,8 +36,9 @@ use super::{
     },
     mount_lifecycle,
     next_action::{
-        NextActionInput, effective_next_action,
+        NextActionInput, NextActionValidationContext, effective_next_action,
         thread_recovery_action_is_primary as shared_thread_recovery_action_is_primary,
+        write_validated_json_stdout,
     },
     operator_loop::{primary_next_action, primary_next_action_with_verification},
     snapshot::{ensure_current_state, summarize_confidence, summarize_verification},
@@ -629,7 +630,7 @@ pub fn collect_thread_summaries(repo: &Repository) -> Result<Vec<ThreadSummary>>
             summary.coordination_status = CoordinationStatus::Clean;
             summary.blockers.clear();
             summary.recommended_action =
-                super::thread_landing::merge_preview_command(&summary.name);
+                canonical_bridge_reconcile_ref_preview_command(None, &summary.name);
         }
         if summary.is_current {
             enrich_current_summary_with_dirty_paths(repo, &mut summary)?;
@@ -1304,7 +1305,10 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
     };
 
     if as_json {
-        println!("{}", serde_json::to_string(&output)?);
+        write_validated_json_stdout(
+            &output,
+            NextActionValidationContext::new(&["thread", "list"], repo.capability()),
+        )?;
     } else if output.threads.is_empty() && output.available_git_refs.is_empty() {
         println!("No threads");
     } else {
@@ -1642,7 +1646,27 @@ pub(crate) fn resolve_start_epoch(repo: &Repository, name: &str) -> Result<DateT
     Ok(prior_active.map_or_else(Utc::now, |thread| thread.created_at))
 }
 
+/// Centralized "invalid thread name" advice (text + JSON error envelope) built
+/// from a [`ThreadIdError`]. The error's `Display` already names the offending
+/// input and suggests a valid rename; this wraps it as a usage refusal.
+pub(crate) fn thread_name_invalid_advice(err: &ThreadIdError) -> RecoveryAdvice {
+    RecoveryAdvice::invalid_usage(
+        "thread_name_invalid",
+        err.to_string(),
+        "Choose a thread name using only letters, digits, and _ - . / @ : + = \
+         (no spaces or shell metacharacters).",
+        "heddle start <name>",
+    )
+}
+
 pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<ThreadOpOutput> {
+    // The single user/external creation boundary for every thread start
+    // (`heddle start`, `heddle thread start`, `try`, `attempt`, workflow). Reject
+    // a name that isn't a safe single shell token here so a thread id with a
+    // space or shell metacharacter can never be persisted — and so every
+    // downstream breadcrumb can interpolate it bare. (heddle#464 close-the-class.)
+    ThreadId::new(args.name.as_str()).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
+
     let existing = find_active_thread_entry(repo, &args.name)?;
     if let Some(entry) = existing {
         if let Some(ref requested_path) = args.path {
@@ -2300,6 +2324,12 @@ pub(crate) fn cmd_thread_create(
     ephemeral: bool,
     ttl_secs: Option<u32>,
 ) -> Result<()> {
+    // Same user/external creation boundary guard as `start_thread`: reject a
+    // name that isn't a safe single shell token before any ref/record is
+    // persisted, so `heddle thread create` can't slip an unsafe id past the
+    // early-reject layer. (heddle#464 close-the-class.)
+    ThreadId::new(name.as_str()).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
+
     // `ephemeral` / `ttl_secs` are part of main's evolved
     // ephemeral-threads API; not yet plumbed into the Thread record
     // here. TODO: thread these through to a ThreadLifecycle field
@@ -2321,7 +2351,7 @@ pub(crate) fn cmd_thread_create(
         .set_thread_cas(&ThreadName::new(&name), RefExpectation::Missing, &current)?;
 
     // Persist a Thread record so subsequent commands that go through
-    // `ThreadManager::load` (delegate, ship, integration policy,
+    // `ThreadManager::load` (delegate, land, integration policy,
     // `thread show`'s record path) can find it. Without this the ref
     // exists but the record file is missing and any `manager.load(name)`
     // returns `None`, surfacing as `Thread '<name>' not found` even
@@ -2615,7 +2645,7 @@ pub(crate) fn cmd_thread_switch(
     // private|virtualized` recorded under `.run-heddle-threads/<name>/`)
     // is a metadata-only operation. The on-disk worktree at the
     // recorded path is already X's worktree — it was set up by `start`
-    // and is kept in sync by the metadata-driven merge/rebase/goto/ship
+    // and is kept in sync by the metadata-driven merge/rebase/goto/land
     // dispatcher (see `Repository::active_worktree_path`). The operator's
     // CWD must stay untouched so `thread switch X` from `$ROOT` does NOT
     // overwrite `$ROOT`'s files with X's tree.
@@ -2865,22 +2895,21 @@ pub(crate) fn show_thread_summary(
         summary.parent_thread.as_deref(),
     );
     if should_output_json(cli, Some(repo.config())) {
-        println!(
-            "{}",
-            serde_json::to_string(&ThreadShowOutput {
-                output_kind: "thread_show",
-                repository_label: presentation.label,
-                repository_context: presentation.context,
-                next_action: summary.recommended_action.clone(),
-                next_action_template: recommended_action_template(&summary.recommended_action),
-                recommended_action_template: recommended_action_template(
-                    &summary.recommended_action
-                ),
-                summary,
-                recovery_commands: trust.recovery_commands.clone(),
-                trust,
-            })?
-        );
+        let output = ThreadShowOutput {
+            output_kind: "thread_show",
+            repository_label: presentation.label,
+            repository_context: presentation.context,
+            next_action: summary.recommended_action.clone(),
+            next_action_template: recommended_action_template(&summary.recommended_action),
+            recommended_action_template: recommended_action_template(&summary.recommended_action),
+            summary,
+            recovery_commands: trust.recovery_commands.clone(),
+            trust,
+        };
+        write_validated_json_stdout(
+            &output,
+            NextActionValidationContext::new(&["thread", "show"], repo.capability()),
+        )?;
     } else {
         println!("Repository: {}", presentation.label);
         render_repository_context_lines(presentation.context.as_ref());
@@ -3221,6 +3250,10 @@ pub(crate) fn cmd_thread_rename(
     old: String,
     new: String,
 ) -> Result<()> {
+    // Renaming persists a new thread id, so the destination name is a
+    // user/external creation boundary too — reject an unsafe name here.
+    // (heddle#464 close-the-class.)
+    ThreadId::new(new.as_str()).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
     let old_tn = ThreadName::new(&old);
     let new_tn = ThreadName::new(&new);
     let state = repo

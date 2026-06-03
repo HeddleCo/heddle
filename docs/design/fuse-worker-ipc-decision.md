@@ -228,7 +228,7 @@ action) and the gRPC latency is invisible.
 
 **Why `Ship` is not here.** The worker is the state-owner (it captures
 pending overlay → CAS object). The daemon is the network-talker (it takes
-a CAS hash and pushes to the remote). `heddle ship` is therefore a
+a CAS hash and pushes to the remote). `heddle land` is therefore a
 two-step CLI flow: (1) CLI → `FuseWorkerService.Capture` returning a CAS
 hash; (2) CLI → daemon's ship RPC with that hash. The daemon side does
 not currently expose a `Ship` RPC — `grep -r "Ship" crates/daemon/` is
@@ -325,7 +325,7 @@ time the worker is running.
 |---|---|
 | `heddle start` / mount registration | daemon (then daemon spawns the worker) |
 | `heddle capture` (mount-bound) | fuse-worker (per-mount socket; CLI looks up via daemon's registry) |
-| `heddle ship` | two-step: (1) `FuseWorkerService.Capture` on fuse-worker → CAS hash; (2) daemon's `Ship` RPC with that hash for the network push |
+| `heddle land` | two-step: (1) `FuseWorkerService.Capture` on fuse-worker → CAS hash; (2) daemon's `Ship` RPC with that hash for the network push |
 | Mount status (`heddle status` mount fields) | fuse-worker (per-mount socket); daemon aggregates if multi-mount |
 | `heddle agent serve` and any agent-loop RPC | daemon |
 | `heddle log` / `heddle review` / state-review RPCs | daemon |

@@ -117,7 +117,7 @@ fn assert_stale_merge_refuses(path: &std::path::Path, thread: &str) {
     let err = result.expect_err("stale direct merge should refuse before mutation");
     assert!(
         err.contains(&format!("Thread '{thread}' is stale"))
-            && err.contains(&format!("heddle thread refresh {thread}")),
+            && err.contains(&format!("heddle sync --thread {thread}")),
         "stale merge should explain the refresh path: {err}"
     );
     assert!(

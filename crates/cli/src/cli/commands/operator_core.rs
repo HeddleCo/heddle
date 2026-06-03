@@ -7,8 +7,8 @@ use chrono::Utc;
 use gix::bstr::ByteSlice;
 use objects::object::ThreadName;
 use repo::{
-    update_thread_state_from_state, GitOverlayImportHint, GitRemoteTrackingStatus, OperationKind,
-    OperationScope, Repository, RepositoryOperationStatus, ThreadFreshness,
+    shell_quote, update_thread_state_from_state, GitOverlayImportHint, GitRemoteTrackingStatus,
+    OperationKind, OperationScope, Repository, RepositoryOperationStatus, ThreadFreshness,
     ThreadIntegrationPolicy, ThreadManager, ThreadState,
 };
 use serde::{ser::SerializeStruct, Serialize, Serializer};
@@ -88,7 +88,7 @@ impl OperatorCommandOutput {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct VerificationClaimPolicy {
-    allow_ship_publish_followup: bool,
+    allow_land_publish_followup: bool,
     allow_matching_workflow_action: bool,
 }
 
@@ -97,8 +97,8 @@ impl VerificationClaimPolicy {
         Self::default()
     }
 
-    pub(crate) fn allow_ship_publish_followup(mut self) -> Self {
-        self.allow_ship_publish_followup = true;
+    pub(crate) fn allow_land_publish_followup(mut self) -> Self {
+        self.allow_land_publish_followup = true;
         self
     }
 
@@ -116,9 +116,9 @@ fn repository_verification_allows_success_claim(
     if trust.verified || matches!(output.status.as_str(), "blocked" | "failed") {
         return true;
     }
-    if policy.allow_ship_publish_followup
-        && output.action == "ship"
-        && output.status == "shipped"
+    if policy.allow_land_publish_followup
+        && output.action == "land"
+        && output.status == "landed"
         && trust.recommended_action == "heddle push"
         && matches!(
             trust.remote_drift.as_str(),
@@ -204,7 +204,11 @@ pub(crate) fn continue_operator(repo: &Repository) -> Result<OperatorCommandOutp
     if repo.merge_state_manager().is_merge_in_progress() {
         let unresolved = repo.merge_state_manager().unresolved()?;
         if !unresolved.is_empty() {
-            let recommended_action = format!("heddle resolve {}", unresolved[0]);
+            // A conflict path can legitimately contain spaces, so shell-quote
+            // it: this is a *validated* recommended_action (write_validated_json_stdout
+            // tokenizes it), and an unquoted space would split into extra args
+            // and fail the next_action validator. (heddle#464 close-the-class.)
+            let recommended_action = format!("heddle resolve {}", shell_quote(&unresolved[0]));
             return Ok(OperatorCommandOutput {
                 status: "blocked".to_string(),
                 action: "continue".to_string(),
@@ -343,7 +347,7 @@ fn complete_current_thread_manual_resolution(repo: &Repository) -> Result<Option
     let target = thread.target_thread.clone();
     manager.save(&thread)?;
 
-    let action = super::thread_landing::ship_command_for_thread(repo, &thread_id);
+    let action = super::thread_landing::land_command_for_thread(repo, &thread_id);
     Ok(Some(super::thread::contextual_thread_action(
         repo,
         &thread_id,
@@ -367,8 +371,8 @@ fn continue_from_operation(
                             .to_string(),
                     blockers: Vec::new(),
                     warnings: Vec::new(),
-                    next_action: Some("heddle capture -m \"Manual resolution\"".to_string()),
-                    recommended_action: Some("heddle capture -m \"Manual resolution\"".to_string()),
+                    next_action: Some("heddle commit -m \"Manual resolution\"".to_string()),
+                    recommended_action: Some("heddle commit -m \"Manual resolution\"".to_string()),
                 },
                 OperatorContinueStatus::Continued => OperatorCommandOutput {
                     status: "continued".to_string(),
@@ -547,6 +551,103 @@ mod tests {
     use super::*;
     use crate::cli::commands::git_overlay_health::{machine_contract_coverage, VerificationCheck};
 
+    // heddle#464 close-the-class (paths): a conflict path can contain spaces.
+    // `continue` builds `recommended_action = heddle resolve <path>`, a VALIDATED
+    // action. Shell-quoting the path keeps it a single token, so it survives the
+    // next_action validator; leaving it bare would split into extra positionals
+    // and fail validation (the render failure Codex flagged for thread ids).
+    #[test]
+    fn validated_resolve_action_with_spaced_path_passes_only_when_quoted() {
+        use crate::cli::commands::next_action::{
+            validated_json_string, NextActionValidationContext,
+        };
+        use repo::shell_quote;
+
+        let path = "my conflicted file.txt";
+        let context = NextActionValidationContext::without_repo(&["continue"]);
+
+        let quoted = OperatorCommandOutput {
+            status: "blocked".to_string(),
+            action: "continue".to_string(),
+            message: "conflicts remain".to_string(),
+            blockers: vec![path.to_string()],
+            warnings: Vec::new(),
+            next_action: Some("heddle resolve --list".to_string()),
+            recommended_action: Some(format!("heddle resolve {}", shell_quote(path))),
+        };
+        let json = validated_json_string(&quoted, context)
+            .expect("a shell-quoted conflict path must pass next_action validation");
+        assert!(
+            json.contains("heddle resolve 'my conflicted file.txt'"),
+            "the serialized recommended_action must carry the quoted path: {json}"
+        );
+
+        // Guard: the UNQUOTED interpolation is exactly the bug — it tokenizes
+        // into extra positionals and fails the validator.
+        let bare = OperatorCommandOutput {
+            recommended_action: Some(format!("heddle resolve {path}")),
+            ..quoted.clone()
+        };
+        assert!(
+            validated_json_string(&bare, context).is_err(),
+            "an unquoted spaced path must fail validation"
+        );
+    }
+
+    // heddle#464 defense-in-depth — the exact P1 scenario. A blocked `land`
+    // emits its `OperatorCommandOutput` (flattened into `LandOutput`) with both
+    // `next_action` and `recommended_action` carrying a `heddle sync --thread
+    // <id>` breadcrumb. The `<id>` is NOT guaranteed to be a freshly-validated
+    // `ThreadId`: `new_unchecked` (Deserialize / `ThreadRecord::thread_id`),
+    // historical records, and `heddle agent reserve --thread` all bypass
+    // `validate_thread_id`. An unsafe id here (`bad;echo pwn`) would tokenize
+    // into extra positionals and fail the next_action validator — the render
+    // failure Codex flagged. Quoting at construction makes it a single token, so
+    // the JSON validates regardless of where the id came from. This asserts the
+    // P1 cannot recur.
+    #[test]
+    fn blocked_land_with_unvalidated_thread_id_passes_only_when_quoted() {
+        use crate::cli::commands::next_action::{
+            validated_json_string, NextActionValidationContext,
+        };
+        use repo::shell_quote;
+
+        // Simulates a `new_unchecked` / historical / `agent reserve` id that
+        // never went through `ThreadId::new`.
+        let unsafe_id = "bad;echo pwn";
+        let context = NextActionValidationContext::without_repo(&["land"]);
+
+        let quoted = OperatorCommandOutput {
+            status: "blocked".to_string(),
+            action: "land".to_string(),
+            message: format!("Thread '{unsafe_id}' must be synced manually"),
+            blockers: vec!["thread is stale".to_string()],
+            warnings: Vec::new(),
+            next_action: Some(format!("heddle sync --thread {}", shell_quote(unsafe_id))),
+            recommended_action: Some(format!("heddle sync --thread {}", shell_quote(unsafe_id))),
+        };
+        let json = validated_json_string(&quoted, context).expect(
+            "a shell-quoted unvalidated thread id must pass next_action validation (the P1 fix)",
+        );
+        assert!(
+            json.contains("heddle sync --thread 'bad;echo pwn'"),
+            "both action fields must carry the quoted, single-token thread id: {json}"
+        );
+
+        // Guard: the BARE interpolation is exactly the P1 bug — the id tokenizes
+        // into extra positionals (`echo`, `pwn`) and fails the validator, so the
+        // JSON output would never render.
+        let bare = OperatorCommandOutput {
+            next_action: Some(format!("heddle sync --thread {unsafe_id}")),
+            recommended_action: Some(format!("heddle sync --thread {unsafe_id}")),
+            ..quoted.clone()
+        };
+        assert!(
+            validated_json_string(&bare, context).is_err(),
+            "a bare unvalidated thread id must fail validation — proving quoting is what closes the hole"
+        );
+    }
+
     #[test]
     fn raw_git_operation_handoff_recommends_heddle_preservation_not_git_cli() {
         let operation = RepositoryOperationStatus {
@@ -578,7 +679,7 @@ mod tests {
 
     #[test]
     fn verification_claim_gate_blocks_local_success_claims() {
-        let trust = verification_state(false, "needs_checkpoint", "heddle checkpoint -m \"...\"");
+        let trust = verification_state(false, "needs_checkpoint", "heddle commit -m \"...\"");
         let mut output = OperatorCommandOutput {
             status: "synced".to_string(),
             action: "sync".to_string(),
@@ -598,7 +699,7 @@ mod tests {
         assert_eq!(output.status, "blocked");
         assert_eq!(
             output.recommended_action.as_deref(),
-            Some("heddle checkpoint -m \"...\"")
+            Some("heddle commit -m \"...\"")
         );
         assert!(output
             .message
@@ -606,33 +707,33 @@ mod tests {
     }
 
     #[test]
-    fn verification_claim_gate_allows_ship_publish_followup_only_by_policy() {
+    fn verification_claim_gate_allows_land_publish_followup_only_by_policy() {
         let trust = verification_state(false, "remote_ahead", "heddle push");
-        let shipped = || OperatorCommandOutput {
-            status: "shipped".to_string(),
-            action: "ship".to_string(),
-            message: "Shipped thread 'feature'".to_string(),
+        let landed = || OperatorCommandOutput {
+            status: "landed".to_string(),
+            action: "land".to_string(),
+            message: "Landed thread 'feature'".to_string(),
             blockers: Vec::new(),
             warnings: Vec::new(),
             next_action: Some("heddle push".to_string()),
             recommended_action: Some("heddle push".to_string()),
         };
 
-        let mut strict = shipped();
+        let mut strict = landed();
         strict.block_success_claim_if_verification_blocked(
             &trust,
-            "ship",
+            "land",
             VerificationClaimPolicy::strict(),
         );
         assert_eq!(strict.status, "blocked");
 
-        let mut allowed = shipped();
+        let mut allowed = landed();
         allowed.block_success_claim_if_verification_blocked(
             &trust,
-            "ship",
-            VerificationClaimPolicy::strict().allow_ship_publish_followup(),
+            "land",
+            VerificationClaimPolicy::strict().allow_land_publish_followup(),
         );
-        assert_eq!(allowed.status, "shipped");
+        assert_eq!(allowed.status, "landed");
         assert_eq!(allowed.recommended_action.as_deref(), Some("heddle push"));
     }
 

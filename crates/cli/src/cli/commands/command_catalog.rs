@@ -205,6 +205,20 @@ where
     checked_action_from_argv(argv)
 }
 
+/// Build the `--thread <id>` argv fragment for splicing into a [`heddle_action`]
+/// argv. A historical / `new_unchecked` thread id that starts with `-` is
+/// rendered as the combined `--thread=<id>` token, which clap binds as the
+/// flag's value; the plain `--thread`, `<id>` pair would otherwise be re-parsed
+/// (after `split_recommended_action`) with `-foo` as another option, and
+/// `checked_action_from_argv` would panic. (heddle#464 close-the-class.)
+pub(crate) fn thread_flag_args(thread_id: &str) -> Vec<String> {
+    if thread_id.starts_with('-') {
+        vec![format!("--thread={thread_id}")]
+    } else {
+        vec!["--thread".to_string(), thread_id.to_string()]
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct CommandJsonDiscriminator {
     pub path: Vec<String>,
@@ -364,6 +378,7 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     "heddle capture -m \"...\" --confidence <confidence>",
     "heddle checkpoint -m \"...\"",
     "heddle commit -m \"...\"",
+    "heddle commit -m \"...\" --confidence <confidence>",
     "heddle init --principal-name <name> --principal-email <email>",
     "heddle ready -m \"...\"",
     "heddle context get --path <path>",
@@ -429,6 +444,19 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         "heddle commit -m \"...\"",
         &["heddle", "commit", "-m", "<message>"],
         &["message"],
+        true,
+    ),
+    (
+        "heddle commit -m \"...\" --confidence <confidence>",
+        &[
+            "heddle",
+            "commit",
+            "-m",
+            "<message>",
+            "--confidence",
+            "<confidence>",
+        ],
+        &["message", "confidence"],
         true,
     ),
     (
@@ -523,8 +551,8 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         true,
     ),
     (
-        "heddle ship --thread <name>",
-        &["heddle", "ship", "--thread", "<thread>"],
+        "heddle land --thread <name>",
+        &["heddle", "land", "--thread", "<thread>"],
         &["thread"],
         true,
     ),
@@ -1881,7 +1909,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["merge"],
         exits(
-            front_door(
+            surface(
                 advertised_action(
                     documented_schemas(WORKTREE_MUTATION, &["merge --preview"]),
                     "heddle merge <thread> --preview",
@@ -1890,7 +1918,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
                     true,
                     false,
                 ),
-                60,
+                "native",
             ),
             &[
                 (0, "ok"),
@@ -2232,7 +2260,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["shell"], READ_TEXT),
     entry(&["shell", "init"], READ_TEXT),
     entry(
-        &["ship"],
+        &["land"],
         front_door(
             documented_schemas(
                 CommandContract {
@@ -2240,7 +2268,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
                     network_io: true,
                     ..MUTATING
                 },
-                &["ship"],
+                &["land"],
             ),
             70,
         ),
@@ -3661,6 +3689,43 @@ fn dynamic_message_recommended_action_template(
                 true,
             ))
         }
+        // The confidence/verification policy-blocker recovery scopes itself to
+        // the thread's checkout via the global `--repo <path>` flag (heddle#464).
+        // `<path>` is a concrete worktree path, not a placeholder, so the only
+        // fillable inputs remain the message and confidence.
+        [
+            heddle,
+            repo_flag,
+            repo_path,
+            command,
+            message_flag,
+            message,
+            confidence_flag,
+            confidence,
+        ] if heddle == "heddle"
+            && repo_flag == "--repo"
+            && matches!(command.as_str(), "capture" | "commit")
+            && is_message_flag(message_flag)
+            && is_message_placeholder_arg(message)
+            && confidence_flag == "--confidence"
+            && is_placeholder_arg(confidence) =>
+        {
+            Some(action_template_from_owned(
+                action.to_string(),
+                vec![
+                    "heddle".to_string(),
+                    "--repo".to_string(),
+                    repo_path.clone(),
+                    command.clone(),
+                    "-m".to_string(),
+                    "<message>".to_string(),
+                    "--confidence".to_string(),
+                    confidence.clone(),
+                ],
+                vec!["message".to_string(), placeholder_input_name(confidence)],
+                true,
+            ))
+        }
         [heddle, stash, push, message_flag, message]
             if heddle == "heddle"
                 && stash == "stash"
@@ -3771,7 +3836,7 @@ fn is_display_only_template(action: &str) -> bool {
     action.contains("...") || action.contains('…') || (action.contains('<') && action.contains('>'))
 }
 
-fn split_recommended_action(action: &str) -> std::result::Result<Vec<String>, String> {
+pub(crate) fn split_recommended_action(action: &str) -> std::result::Result<Vec<String>, String> {
     let mut args = Vec::new();
     let mut current = String::new();
     let mut chars = action.chars().peekable();
@@ -3865,7 +3930,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Sync(_) => vec!["sync"],
         Commands::Continue => vec!["continue"],
         Commands::Abort => vec!["abort"],
-        Commands::Ship(_) => vec!["ship"],
+        Commands::Land(_) => vec!["land"],
         Commands::Delegate(_) => vec!["delegate"],
         Commands::Ready(_) => vec!["ready"],
         Commands::Capture(_) => vec!["capture"],
@@ -4411,7 +4476,7 @@ mod tests {
         sample(&["session", "show"], &["session", "show"]),
         sample(&["session", "list"], &["session", "list"]),
         sample(&["shell", "init"], &["shell", "init", "bash"]),
-        sample(&["ship"], &["ship"]),
+        sample(&["land"], &["land"]),
         sample(&["show"], &["show", "HEAD"]),
         sample(&["start"], &["start", "feature"]),
         sample(&["stash", "push"], &["stash", "push"]),
@@ -4720,6 +4785,26 @@ mod tests {
             err.contains("registered as a placeholder"),
             "error should explain placeholder registration: {err}"
         );
+    }
+
+    #[test]
+    fn leading_dash_thread_breadcrumbs_pass_validation() {
+        // A historical / `new_unchecked` thread id literally named `-foo` renders
+        // breadcrumbs via the `=` (flag) and `--` (positional) forms; the
+        // validator splits to argv and runs clap, which would reject the bare
+        // `--thread -foo` form as an unknown flag. (heddle#464 round 8.)
+        for action in [
+            repo::RecommendedAction::Sync,
+            repo::RecommendedAction::Ready,
+            repo::RecommendedAction::Land,
+            repo::RecommendedAction::Promote,
+        ] {
+            if let Some(cmd) = action.command("-foo") {
+                validate_recommended_action(&cmd).unwrap_or_else(|err| {
+                    panic!("breadcrumb `{cmd}` must validate for a leading-dash id: {err}")
+                });
+            }
+        }
     }
 
     #[test]
@@ -5436,7 +5521,7 @@ mod tests {
             (
                 "commit", "everyday", "native", "everyday", None, None, false,
             ),
-            ("ship", "everyday", "native", "everyday", None, None, false),
+            ("land", "everyday", "native", "everyday", None, None, false),
             ("push", "everyday", "native", "everyday", None, None, false),
             (
                 "capture", "advanced", "native", "advanced", None, None, false,

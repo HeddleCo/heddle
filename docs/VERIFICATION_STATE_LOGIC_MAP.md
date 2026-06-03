@@ -44,7 +44,7 @@ A clean verification report means all applicable dimensions agree:
 | Worktree | Git index/worktree and Heddle worktree compare cleanly. Native Heddle worktrees compare cleanly against the current state. | `dirty_worktree`, `needs_checkpoint`, native `uncaptured`, or worktree inspection `degraded`. |
 | Remote tracking | No upstream work must be integrated before local mutation. `remote_ahead` and `remote_untracked` are verified-clean publish guidance. | `remote_behind`, `remote_diverged`, `remote_contains_undone_checkpoint`, or remote check `degraded`. |
 | Operation | No Git or Heddle operation is in progress. | Rebase, cherry-pick, merge, bisect, or bridge operation needs continue, abort, resolve, or raw-Git handoff. |
-| Workflow | Ready work is reported as workflow guidance after repository safety is known, and merged-thread metadata agrees with target history. | `workflow_status: blocked` when ready work exists but a repository blocker prevents preview or ship; `stale_integration_metadata` when merged-thread records no longer match target history. |
+| Workflow | Ready work is reported as workflow guidance after repository safety is known, and merged-thread metadata agrees with target history. | `workflow_status: blocked` when ready work exists but a repository blocker prevents landing; `stale_integration_metadata` when merged-thread records no longer match target history. |
 | Machine contract | Command catalog, JSON error envelopes, op-id metadata, schema introspection, docs drift, and schema coverage agree. `available_with_doc_gaps` is currently non-blocking. | `machine_contract_gaps` / `schema_gaps`, command contract drift, schema validation failures. |
 | Generated and ignored artifacts | Heddle auto-ignores only its own `.heddle/` metadata. Everything else is ignored only when the repo explicitly says so. In Git-overlay mode, `.gitignore` is the preferred source of ignored-worktree truth; `.heddleignore` is reserved for Heddle-specific or native-Heddle excludes. | Unignored generated output is ordinary worktree dirt; large captures/deletions require explicit force; redaction/purge flows must name the ignore file that Heddle will actually consult. |
 | Persona/output contract | TTY text is human-facing, piped/explicit JSON is machine-facing, and both carry the same next action semantics. | Prose on JSON stdout, missing error envelopes, stale help/schema metadata, narrow/no-color output that hides the action. |
@@ -87,7 +87,7 @@ flowchart TD
     U -- no --> Y["machine_contract_gaps / schema_gaps"]
     U -- yes --> Z["repository verified clean"]
     Z --> AA{"Actionable ready threads waiting?"}
-    AA -- yes --> AB["workflow_status: ready; merge --preview or ship next"]
+    AA -- yes --> AB["workflow_status: ready; land next"]
     AA -- no --> AC{"Local commits ahead or branch untracked?"}
     AC -- yes --> AD["verified clean; recommended_action: heddle push"]
     AC -- no --> AE["workflow_status: clean; no action"]
@@ -104,7 +104,7 @@ flowchart TD
 | Tag import and marker agreement | Git tags visible to the checkout must map to Heddle markers. Missing markers report `tags_need_import`; disagreeing or unmapped markers report `tag_marker_mismatch`. Both are current hard blockers because tag names are user-facing refs, not optional side-branch hints. |
 | Dirty materialization | `switch`, `checkout`, `goto`, `pull`, `thread drop`, `branch -d/-D`, `thread promote`, `start --path`, `merge`, `rebase`, `cherry-pick`, and `undo` must refuse dirty work unless a command has an explicit safe preview or force path. |
 | Commit/checkpoint | Git-compatible `commit` is one logical operation: capture Heddle state, checkpoint Git, return one verification proof, and make one safe `undo` restore both when possible. A commit may not create a Heddle-only state if Git checkpoint preflight is blocked by remote divergence or import repair. |
-| Ready/preview/ship | `ready` preflights active-branch import before auto-capture and then points to `merge --preview`. `merge --preview` is non-mutating and proves the integration decision from verified state. A previewed ready thread can advance the next action to `ship --thread ... --no-push` or `--push`. Ready workflow guidance takes priority over local-ahead or untracked-branch push guidance. |
+| Ready/land | `ready` preflights active-branch import before auto-capture and then points to `land`. `merge --preview` remains an advanced non-mutating proof surface, but it is not the everyday breadcrumb. Ready workflow guidance takes priority over local-ahead or untracked-branch push guidance. |
 | Resolve | `resolve` and `thread resolve` must distinguish no operation, no conflicts, conflict resolution, and thread-review resolution. No-op resolve failures use typed errors and should point back to `status` rather than leaking object lookup internals. |
 | Undo | `undo --preview` and real `undo` share safety refusals. Both refuse dirty worktree and active-operation states before moving refs or worktree bytes. Post-undo text must report the current verification state and next action instead of claiming clean by default. |
 | Remote push/pull | Transfer commands refresh tracking and return post-transfer verification. `remote_ahead` and `remote_untracked` are verified clean publish guidance and recommend `push`; behind and diverged states are blockers. If upstream still points at the exact Git checkpoint just undone locally, verification reports `remote_contains_undone_checkpoint` and recommends `heddle push --force` with `heddle redo` as the restore-work option, never `heddle pull` as the primary action. A command may not claim synced while blocking remote drift remains. |
@@ -143,7 +143,7 @@ the new behavior.
 | No command claims up to date while verification is blocked | `git_overlay_matrix_local_ahead_noop_merge_preserves_semantic_result`; `git_overlay_matrix_rebase_noop_defers_up_to_date_claim_to_verification` |
 | Operation continue/abort advice is consistent | `git_overlay_matrix_in_progress_operations_surface_consistently`; `git_overlay_matrix_continue_and_abort_unify_operator_flow`; `git_overlay_matrix_operator_states_survive_reopen_and_keep_guidance_consistent`; `git_overlay_matrix_continue_retry_loops_block_then_succeed_after_resolution` |
 | Stale integration metadata blocks workflow verification | `git_overlay_matrix_ship_undo_restores_git_and_heddle_together` |
-| Ready/preview/ship/resolve/undo workflow is explicit | `start_merge_undo_json_workflow_keeps_machine_streams_clean`; `ready_text_names_ready_and_already_ready_noop_states`; `resolve_without_merge_emits_actionable_json_error`; `git_overlay_matrix_undo_preview_refuses_active_operation_like_real_undo` |
+| Ready/land/resolve/undo workflow is explicit | `start_merge_undo_json_workflow_keeps_machine_streams_clean`; `ready_text_names_ready_and_already_ready_noop_states`; `resolve_without_merge_emits_actionable_json_error`; `git_overlay_matrix_undo_preview_refuses_active_operation_like_real_undo` |
 | Generated and ignored artifacts are safe | `git_overlay_matrix_commit_ignores_gitignored_noise_and_refuses_noop`; `git_overlay_matrix_commit_requires_explicit_ignore_for_python_generated_noise`; `git_overlay_matrix_init_excludes_only_heddle_metadata`; `test_cli_capture_blocks_large_git_overlay_deletion_without_force`; `.heddleignore` file-operation tests |
 | Persona/output contracts stay coherent | `piped_status_with_no_output_flag_renders_text`; `output_auto_flag_errors_at_parse_with_helpful_message`; `tty_auto_mode_renders_text_and_explicit_json_stays_json`; `quiet_no_color_and_narrow_text_outputs_preserve_global_contract`; `narrow_no_color_text_outputs_cover_everyday_read_surfaces` |
 | Machine contracts stay single-sourced | `op_id_coverage`; `doctor_schemas_reports_runtime_and_documented_coverage`; `public_command_paths_have_command_contract_metadata`; `target/debug/heddle doctor schemas --output json`; `target/debug/heddle doctor docs --all --output json` |
@@ -158,7 +158,7 @@ the new behavior.
 - Machine-contract repair and ready workflow guidance outrank publish guidance.
 - Ready threads are workflow guidance, not repository disverification. They keep
   `verified: true` and `status: clean`, while `workflow_status: ready` and the
-  recommended action points to preview or ship the waiting work.
+  recommended action points to land the waiting work.
 - `import.status: available` is an informational side-branch hint. It must not
   block verification for the active checkout.
 - Every concrete `recommended_action` emitted by verification must parse through

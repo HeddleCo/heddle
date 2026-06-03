@@ -5,7 +5,10 @@ use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, RepositoryOperationSta
 use super::{
     action_line::print_next_step,
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
-    next_action::{NextActionInput, effective_next_action},
+    next_action::{
+        NextActionInput, NextActionValidationContext, effective_next_action,
+        write_validated_json_stdout,
+    },
     operator_core::{
         OperatorCommandOutput, abort_operator, exit_if_blocked_operator_status,
         open_operator_repo_from_path, recommend_next_action,
@@ -25,7 +28,7 @@ pub async fn cmd_continue(cli: &Cli) -> Result<()> {
     let repo = open_operator_repo_from_path(cwd)?;
     let output = super::operator_core::continue_operator(&repo)?;
     let status = output.status.clone();
-    emit(cli, output)?;
+    emit(cli, &repo, output, &["continue"])?;
     exit_if_blocked_operator_status(&status);
     Ok(())
 }
@@ -35,7 +38,7 @@ pub fn cmd_abort(cli: &Cli) -> Result<()> {
     let cwd = cli.repo.as_ref().unwrap_or(&current_dir);
     let repo = open_operator_repo_from_path(cwd)?;
     let output = abort_operator(&repo)?;
-    emit(cli, output)
+    emit(cli, &repo, output, &["abort"])
 }
 
 pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
@@ -45,6 +48,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
     if repo.operation_status()?.is_some() || repo.merge_state_manager().is_merge_in_progress() {
         return emit(
             cli,
+            &repo,
             OperatorCommandOutput {
                 status: "blocked".to_string(),
                 action: "sync".to_string(),
@@ -54,6 +58,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
                 next_action: Some("heddle continue".to_string()),
                 recommended_action: Some("heddle continue".to_string()),
             },
+            &["sync"],
         );
     }
 
@@ -66,6 +71,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
                 .unwrap_or_else(|| "heddle verify".to_string());
             return emit(
                 cli,
+                &repo,
                 OperatorCommandOutput {
                     status: "blocked".to_string(),
                     action: "sync".to_string(),
@@ -78,6 +84,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
                     next_action: Some(recommended_action.clone()),
                     recommended_action: Some(recommended_action),
                 },
+                &["sync"],
             );
         }
         if remote_decision.status == "remote_behind" {
@@ -87,10 +94,11 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
             let outcome = bridge.pull(&remote_name)?;
             let verification = build_repository_verification_state(&repo);
             if !verification.verified {
-                return emit(cli, sync_blocked_by_trust(verification));
+                return emit(cli, &repo, sync_blocked_by_trust(verification), &["sync"]);
             }
             return emit(
                 cli,
+                &repo,
                 OperatorCommandOutput {
                     status: "synced".to_string(),
                     action: "sync".to_string(),
@@ -103,11 +111,13 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
                     next_action: None,
                     recommended_action: None,
                 },
+                &["sync"],
             );
         }
         if remote_decision.status == "remote_ahead" {
             return emit(
                 cli,
+                &repo,
                 OperatorCommandOutput {
                     status: "ahead".to_string(),
                     action: "sync".to_string(),
@@ -117,6 +127,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
                     next_action: Some("heddle push".to_string()),
                     recommended_action: Some("heddle push".to_string()),
                 },
+                &["sync"],
             );
         }
     }
@@ -135,9 +146,17 @@ fn sync_blocked_by_trust(trust: RepositoryVerificationState) -> OperatorCommandO
     )
 }
 
-fn emit(cli: &Cli, output: OperatorCommandOutput) -> Result<()> {
+fn emit(
+    cli: &Cli,
+    repo: &repo::Repository,
+    output: OperatorCommandOutput,
+    emitting_command: &[&str],
+) -> Result<()> {
     if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_validated_json_stdout(
+            &output,
+            NextActionValidationContext::new(emitting_command, repo.capability()),
+        )?;
     } else {
         let message = match output.status.as_str() {
             "blocked" => style::warn(&output.message),

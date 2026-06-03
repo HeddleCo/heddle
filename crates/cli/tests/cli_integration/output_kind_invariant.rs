@@ -204,7 +204,7 @@ const UNSWEPT_TODO: &[&str] = &[
     "session segment",
     "session show",
     "session start",
-    "ship",
+    "land",
     "show",
     "stash apply",
     "stash clear",

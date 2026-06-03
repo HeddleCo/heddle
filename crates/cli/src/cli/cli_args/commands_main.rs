@@ -17,7 +17,7 @@ use super::{
         AttemptArgs, BranchArgs, CloneArgs, CollapseArgs, CommandCatalogArgs, CommitArgs,
         DelegateArgs, DiagnoseArgs, DiffArgs, DoctorArgs, InitArgs, LogArgs, MergeArgs, PullArgs,
         PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionEndArgs,
-        SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, ShipArgs,
+        SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, LandArgs,
         SnapshotArgs, SwitchArgs, SyncArgs, ThreadStartArgs, TryArgs, UndoArgs, WatchArgs,
     },
 };
@@ -196,12 +196,12 @@ Examples:
 
     /// Land a ready thread and optionally publish it.
     ///
-    /// `ship` is the do-it verb: capture outstanding work if needed,
+    /// `land` is the local integration verb: capture outstanding work if needed,
     /// refresh against the target when safe, land the thread, write the
     /// Git checkpoint, and optionally push. It fails closed when
     /// conflicts or other blockers exist. Pair it with `ready` when you
     /// want the verdict and next action before landing anything.
-    Ship(ShipArgs),
+    Land(LandArgs),
 
     /// Automation/workflow command: fan a parent thread into one or
     /// more delegated child threads.

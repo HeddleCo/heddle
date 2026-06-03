@@ -918,14 +918,14 @@ fn test_cli_ready_in_plain_git_repo_captures_mixed_git_state() {
     assert_eq!(ready["status"], "blocked");
     assert_eq!(ready["captured"], true);
     assert_eq!(ready["verification"]["status"], "needs_checkpoint");
-    assert_eq!(ready["recommended_action"], "heddle checkpoint -m \"...\"");
+    assert_eq!(ready["recommended_action"], "heddle commit -m \"...\"");
 
     let status: Value =
         serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
             .unwrap();
     assert!(status["state"]["change_id"].as_str().is_some());
     assert_eq!(status["verification"]["status"], "needs_checkpoint");
-    assert_eq!(status["recommended_action"], "heddle checkpoint -m \"...\"");
+    assert_eq!(status["recommended_action"], "heddle commit -m \"...\"");
 }
 
 #[test]
@@ -1673,7 +1673,7 @@ fn test_cli_ready_captures_current_git_branch_after_switch() {
     assert_eq!(ready["status"], "blocked");
     assert_eq!(ready["captured"], true);
     assert_eq!(ready["verification"]["status"], "needs_checkpoint");
-    assert_eq!(ready["recommended_action"], "heddle checkpoint -m \"...\"");
+    assert_eq!(ready["recommended_action"], "heddle commit -m \"...\"");
 
     let status: Value =
         serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
@@ -1681,7 +1681,7 @@ fn test_cli_ready_captures_current_git_branch_after_switch() {
     assert_eq!(status["thread"], "support/ready-switch");
     assert!(status["state"]["change_id"].as_str().is_some());
     assert_eq!(status["verification"]["status"], "needs_checkpoint");
-    assert_eq!(status["recommended_action"], "heddle checkpoint -m \"...\"");
+    assert_eq!(status["recommended_action"], "heddle commit -m \"...\"");
 }
 
 #[test]
@@ -1981,7 +1981,7 @@ fn test_cli_ready_in_git_overlay_auto_captures_initial_state() {
     assert_eq!(ready["status"], "blocked");
     assert_eq!(ready["captured"], true);
     assert_eq!(ready["verification"]["status"], "needs_checkpoint");
-    assert_eq!(ready["recommended_action"], "heddle checkpoint -m \"...\"");
+    assert_eq!(ready["recommended_action"], "heddle commit -m \"...\"");
 
     let status: Value =
         serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
@@ -1989,7 +1989,7 @@ fn test_cli_ready_in_git_overlay_auto_captures_initial_state() {
     assert!(status["state"]["change_id"].as_str().is_some());
     assert!(status["git_checkpoint"].is_null());
     assert_eq!(status["verification"]["status"], "needs_checkpoint");
-    assert_eq!(status["recommended_action"], "heddle checkpoint -m \"...\"");
+    assert_eq!(status["recommended_action"], "heddle commit -m \"...\"");
 }
 
 #[test]
@@ -2100,7 +2100,7 @@ fn test_cli_ship_in_git_overlay_auto_checkpoints() {
                 "--output",
                 "json",
                 "start",
-                "feature/ship-it",
+                "feature/land-it",
                 "--workspace",
                 "auto",
             ],
@@ -2110,20 +2110,20 @@ fn test_cli_ship_in_git_overlay_auto_checkpoints() {
     )
     .unwrap();
     let thread = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
-    std::fs::write(thread.join("ship.txt"), "ship me").unwrap();
+    std::fs::write(thread.join("land.txt"), "land me").unwrap();
 
-    let shipped: Value = serde_json::from_str(
+    let landed: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "ship", "--thread", "feature/ship-it"],
+            &["--output", "json", "land", "--thread", "feature/land-it"],
             Some(temp.path()),
         )
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(shipped["status"], "shipped");
-    assert_eq!(shipped["checkpointed"], true);
-    assert!(shipped["git_commit"].as_str().is_some());
-    assert!(temp.path().join("ship.txt").exists());
+    assert_eq!(landed["status"], "landed");
+    assert_eq!(landed["checkpointed"], true);
+    assert!(landed["git_commit"].as_str().is_some());
+    assert!(temp.path().join("land.txt").exists());
 
     let status: Value =
         serde_json::from_str(&heddle(&["status", "--output", "json"], Some(temp.path())).unwrap())
@@ -2243,13 +2243,13 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
 
     let auth_ship: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "ship", "--thread", "feature/auth"],
+            &["--output", "json", "land", "--thread", "feature/auth"],
             Some(temp.path()),
         )
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(auth_ship["status"], "shipped");
+    assert_eq!(auth_ship["status"], "landed");
     assert_eq!(auth_ship["checkpointed"], true);
     assert!(auth_ship["git_commit"].as_str().is_some());
 
@@ -2265,13 +2265,13 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
 
     let search_ship: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "ship", "--thread", "feature/search"],
+            &["--output", "json", "land", "--thread", "feature/search"],
             Some(temp.path()),
         )
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(search_ship["status"], "shipped");
+    assert_eq!(search_ship["status"], "landed");
     assert_eq!(search_ship["checkpointed"], true);
     assert!(search_ship["git_commit"].as_str().is_some());
 
@@ -2298,10 +2298,10 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
     );
     assert_ne!(
         auth_ship["git_commit"], search_ship["git_commit"],
-        "separate shipped threads should produce distinct git commits"
+        "separate landed threads should produce distinct git commits"
     );
 
-    // Each shipped thread should record a Heddle change id on the
+    // Each landed thread should record a Heddle change id on the
     // bridge mirror's `refs/notes/heddle` ref without publishing the
     // metadata notes ref into the user's ordinary `.git/refs`.
     for git_commit in [
@@ -2319,7 +2319,7 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
             .expect("git notes show should run");
         assert!(
             notes.status.success(),
-            "shipped commit {git_commit} should have a heddle note in the bridge mirror; stderr: {}",
+            "landed commit {git_commit} should have a heddle note in the bridge mirror; stderr: {}",
             String::from_utf8_lossy(&notes.stderr)
         );
         let note_body = String::from_utf8(notes.stdout).unwrap();
@@ -2400,13 +2400,13 @@ fn test_parallel_heddle_threads_ship_with_one_stale_refresh_path_and_checkpoint_
 
     let auth_ship: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "ship", "--thread", "feature/auth"],
+            &["--output", "json", "land", "--thread", "feature/auth"],
             Some(temp.path()),
         )
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(auth_ship["status"], "shipped");
+    assert_eq!(auth_ship["status"], "landed");
     assert_eq!(auth_ship["checkpointed"], true);
     assert!(auth_ship["git_commit"].as_str().is_some());
 
@@ -2422,13 +2422,13 @@ fn test_parallel_heddle_threads_ship_with_one_stale_refresh_path_and_checkpoint_
 
     let search_ship: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "ship", "--thread", "feature/search"],
+            &["--output", "json", "land", "--thread", "feature/search"],
             Some(temp.path()),
         )
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(search_ship["status"], "shipped");
+    assert_eq!(search_ship["status"], "landed");
     assert_eq!(search_ship["synced"], false);
     assert_eq!(search_ship["checkpointed"], true);
     assert!(search_ship["git_commit"].as_str().is_some());
@@ -2469,13 +2469,13 @@ fn test_parallel_heddle_threads_ship_with_one_stale_refresh_path_and_checkpoint_
         records
             .iter()
             .any(|record| record["summary"] == "auth work"),
-        "stale auth ship should record a git checkpoint: {checkpoint_records}"
+        "stale auth land should record a git checkpoint: {checkpoint_records}"
     );
     assert!(
         records
             .iter()
             .any(|record| record["summary"] == "search work"),
-        "clean search ship should record a git checkpoint: {checkpoint_records}"
+        "clean search land should record a git checkpoint: {checkpoint_records}"
     );
 }
 
@@ -4268,5 +4268,172 @@ fn test_cli_diff_patch_plain_git_delete_executable_and_symlink_modes() {
         !apply_dir.path().join("oldlink").exists()
             && !apply_dir.path().join("old.sh").exists(),
         "applying the delete patch must unlink both special files:\n{patch}"
+    );
+}
+
+/// heddle#464 close-the-class: `heddle start` validates the thread name at the
+/// creation boundary. A name with a space (or any shell metacharacter) is
+/// rejected with the centralized `thread_name_invalid` advice — in BOTH text
+/// and JSON-error modes — and never persisted, so no downstream breadcrumb can
+/// interpolate an unsafe thread id. The CLI exits non-zero; it does not panic.
+#[test]
+fn start_rejects_thread_name_with_space_in_text_and_json() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    // Text mode: non-zero exit, actionable rename hint on stderr.
+    let text = heddle_output(&["start", "my feature"], Some(temp.path())).unwrap();
+    assert!(
+        !text.status.success(),
+        "an invalid thread name must be rejected: stdout={}",
+        String::from_utf8_lossy(&text.stdout)
+    );
+    let text_stderr = String::from_utf8_lossy(&text.stderr);
+    assert!(
+        text_stderr.contains("is invalid"),
+        "text mode must explain the name is invalid: {text_stderr}"
+    );
+    assert!(
+        text_stderr.contains("try 'my-feature'"),
+        "the rename hint must suggest a valid name: {text_stderr}"
+    );
+
+    // JSON mode: still rejected with the same kind, no panic.
+    let json_out =
+        heddle_output(&["start", "my feature", "--output", "json"], Some(temp.path())).unwrap();
+    assert!(
+        !json_out.status.success(),
+        "an invalid thread name must be rejected in JSON mode too"
+    );
+    let json_stderr = String::from_utf8_lossy(&json_out.stderr);
+    assert!(
+        json_stderr.contains("thread_name_invalid"),
+        "JSON-error mode must carry the thread_name_invalid kind: {json_stderr}"
+    );
+
+    // The invalid name was rejected before any thread was created.
+    let list = heddle(&["thread", "list", "--output", "json"], Some(temp.path())).unwrap();
+    assert!(
+        !list.contains("my feature"),
+        "the rejected name must never have been persisted: {list}"
+    );
+}
+
+/// heddle#464 close-the-class (round 6): the SAME early-reject rule must guard
+/// every user/external thread-creation boundary, not just `start`. `heddle
+/// thread create` with a shell-metacharacter name is rejected before any ref or
+/// record is persisted.
+#[test]
+fn thread_create_rejects_thread_name_with_metachar() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    let out = heddle_output(&["thread", "create", "bad;id"], Some(temp.path())).unwrap();
+    assert!(
+        !out.status.success(),
+        "thread create must reject an unsafe name: stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("is invalid"),
+        "thread create must explain the name is invalid: {stderr}"
+    );
+
+    let list = heddle(&["thread", "list", "--output", "json"], Some(temp.path())).unwrap();
+    assert!(
+        !list.contains("bad;id"),
+        "the rejected name must never have been persisted: {list}"
+    );
+}
+
+/// heddle#464 close-the-class: `thread rename` writes a NEW thread id, so the
+/// destination name is a creation boundary too — an unsafe new name is rejected
+/// and the original thread is left untouched.
+#[test]
+fn thread_rename_rejects_unsafe_new_name() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    heddle(&["thread", "create", "safe-thread"], Some(temp.path())).unwrap();
+
+    let out = heddle_output(
+        &["thread", "rename", "safe-thread", "bad;id"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    assert!(
+        !out.status.success(),
+        "rename to an unsafe name must be rejected: stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("is invalid"),
+        "rename must explain the name is invalid: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let list = heddle(&["thread", "list", "--output", "json"], Some(temp.path())).unwrap();
+    assert!(
+        !list.contains("bad;id"),
+        "the rejected name must never have been persisted: {list}"
+    );
+    assert!(
+        list.contains("safe-thread"),
+        "a rejected rename must leave the original thread intact: {list}"
+    );
+}
+
+/// heddle#464 close-the-class: `actor spawn --thread <name>` mints/attaches the
+/// named thread, so a user-supplied unsafe name is rejected before any ref is
+/// written. (The generated `actor/<session>` fallback is safe by construction.)
+#[test]
+fn actor_spawn_rejects_unsafe_thread_name() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    let out =
+        heddle_output(&["actor", "spawn", "--thread", "bad;id"], Some(temp.path())).unwrap();
+    assert!(
+        !out.status.success(),
+        "actor spawn with an unsafe thread name must be rejected: stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("is invalid"),
+        "actor spawn must explain the name is invalid: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let list = heddle(&["thread", "list", "--output", "json"], Some(temp.path())).unwrap();
+    assert!(
+        !list.contains("bad;id"),
+        "the rejected name must never have been persisted: {list}"
+    );
+}
+
+/// heddle#464 close-the-class (round 6): `heddle agent reserve` also persists a
+/// thread record, so it must reject an unsafe thread name at the same boundary.
+#[test]
+fn agent_reserve_rejects_thread_name_with_metachar() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    let out =
+        heddle_output(&["agent", "reserve", "--thread", "bad;id"], Some(temp.path())).unwrap();
+    assert!(
+        !out.status.success(),
+        "agent reserve must reject an unsafe name: stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("is invalid"),
+        "agent reserve must explain the name is invalid: {stderr}"
+    );
+
+    let list = heddle(&["thread", "list", "--output", "json"], Some(temp.path())).unwrap();
+    assert!(
+        !list.contains("bad;id"),
+        "the rejected name must never have been persisted: {list}"
     );
 }

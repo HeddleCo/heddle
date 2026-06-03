@@ -8,8 +8,8 @@ use std::{
 
 use anyhow::{Result, bail};
 use objects::object::{Principal, ThreadName, Tree};
-use refs::{Head, validate_ref_name};
-use repo::{Repository, RepositoryCapability};
+use refs::Head;
+use repo::{Repository, RepositoryCapability, ThreadId};
 use serde::Serialize;
 use tracing::{debug, info};
 
@@ -631,17 +631,19 @@ fn quickstart_preflight(
         bail!(quickstart_shallow_clone_advice());
     }
 
-    // Validate the requested thread name BEFORE any write, using the same
-    // ref-name rules the thread machinery enforces when the ref is actually
-    // created. A bad name (`.bad`, `a..b`, …) must fail here rather than
-    // after init/bootstrap/import have already written `.heddle/` data,
+    // Validate the requested thread name BEFORE any write, using the SAME
+    // centralized rule every thread-creation boundary enforces ([`ThreadId::new`]
+    // / `validate_thread_id`) — one rule, not an ad-hoc copy. A bad name
+    // (`a..b`, `my feature`, a shell metacharacter, …) must fail here rather
+    // than after init/bootstrap/import have already written `.heddle/` data,
     // leaving a half-initialized repo for a pure argument error.
     let thread = args.quickstart_thread.as_deref().unwrap_or("quickstart");
-    if validate_ref_name(thread).is_err() {
+    if let Err(err) = ThreadId::new(thread) {
         bail!(RecoveryAdvice::invalid_usage(
             "quickstart_thread_name_invalid",
-            format!("'{thread}' is not a valid thread name"),
-            "Choose a thread name without '..', a leading '.', a trailing '/' or '.lock', backslashes, or control characters.",
+            err.to_string(),
+            "Choose a thread name using only letters, digits, and _ - . / @ : + = \
+             (no spaces or shell metacharacters).",
             "heddle init --quickstart --quickstart-thread <name>",
         ));
     }

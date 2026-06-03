@@ -216,5 +216,5 @@ pub use try_cmd::cmd_try;
 pub use undo::{cmd_redo, cmd_undo};
 pub use verify::cmd_verify;
 pub use watch::cmd_watch;
-pub use workflow::{cmd_delegate, cmd_ship, cmd_sync};
+pub use workflow::{cmd_delegate, cmd_land, cmd_sync};
 pub use workspace::{cmd_workspace, cmd_workspace_show};

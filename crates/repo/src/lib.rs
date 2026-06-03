@@ -88,6 +88,7 @@ pub use stack_snapshot::{
 };
 pub use thread_advice::{
     RecommendedAction, ThreadAdvice, describe_thread_advice, describe_thread_advice_with_initial,
+    shell_quote, thread_flag,
 };
 pub use thread_stack::{
     PlanRebaseError, StackNode, StackRebasePlan, StackRebaseStep, ThreadStack, compute_stacks,
@@ -95,8 +96,9 @@ pub use thread_stack::{
 };
 pub use thread_model::{
     ConfidenceBand, EphemeralMarker, ThreadConfidenceSummary, ThreadFreshness, ThreadId,
-    ThreadImpactCategory, ThreadIntegrationPolicy, ThreadLifecycleState, ThreadMode, ThreadRecord,
-    ThreadRuntimeOverlay, ThreadState, ThreadVerificationSummary, ThreadView,
+    ThreadIdError, ThreadImpactCategory, ThreadIntegrationPolicy, ThreadLifecycleState, ThreadMode,
+    ThreadRecord, ThreadRuntimeOverlay, ThreadState, ThreadVerificationSummary, ThreadView,
+    validate_thread_id,
 };
 pub use thread_record_store::{FilesystemThreadRecordStore, ThreadRecordStore};
 pub use thread_storage::{SyncedThreadMetadata, SyncedThreadMetadataStore, Thread, ThreadManager};

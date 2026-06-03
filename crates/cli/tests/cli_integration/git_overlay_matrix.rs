@@ -401,7 +401,7 @@ fn git_overlay_imported_ref_ready_and_ship_fail_closed() {
         vec![
             "--output",
             "json",
-            "ship",
+            "land",
             "--thread",
             "feature",
             "--no-push",
@@ -424,7 +424,7 @@ fn git_overlay_imported_ref_ready_and_ship_fail_closed() {
             "{envelope}"
         );
         assert_eq!(
-            envelope["primary_command"], "heddle merge feature --preview",
+            envelope["primary_command"], "heddle bridge git reconcile --ref feature --preview",
             "{envelope}"
         );
     }
@@ -1482,12 +1482,12 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
         &["--output", "json", "ready", "-m", "ready thread work"],
     );
     assert_eq!(ready["status"], "completed");
-    let parent_preview_action = format!(
-        "heddle --repo {} merge feature/ready-verify --preview",
+    let parent_land_action = format!(
+        "heddle --repo {} land --thread feature/ready-verify --no-push",
         temp.path().display()
     );
     assert_eq!(
-        ready["recommended_action"], parent_preview_action,
+        ready["recommended_action"], parent_land_action,
         "ready from an isolated checkout should print a command that works from that checkout: {ready}"
     );
     assert_eq!(ready["verification"]["verified"], true);
@@ -1509,7 +1509,7 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
     // proof (grafted from a separate verify call) carries a plain
     // recommendation without the original `--repo` prefix, which is
     // expected: the separate verify call has no caller context.
-    let _ = parent_preview_action;
+    let _ = parent_land_action;
     assert_eq!(
         ready["verification"]["recovery_commands"],
         serde_json::json!([])
@@ -1519,29 +1519,29 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
     let parent_status_before_preview = json(temp.path(), &["--output", "json", "status"]);
     assert_eq!(
         parent_status_before_preview["recommended_action"],
-        "heddle merge feature/ready-verify --preview",
+        "heddle land --thread feature/ready-verify --no-push",
         "parent status should keep ready workflow actionable: {parent_status_before_preview}"
     );
     let thread_list_before_preview = json(temp.path(), &["--output", "json", "thread", "list"]);
     assert_eq!(
         thread_list_before_preview["recommended_action"],
-        "heddle merge feature/ready-verify --preview",
+        "heddle land --thread feature/ready-verify --no-push",
         "thread list top-level action should match verify after ready: {thread_list_before_preview}"
     );
     assert_eq!(
         thread_list_before_preview["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["merge", "feature/ready-verify", "--preview"]),
+        heddle_argv_json(["land", "--thread", "feature/ready-verify", "--no-push"]),
         "thread list top-level action should be directly executable: {thread_list_before_preview}"
     );
     let workspace_before_preview = json(temp.path(), &["--output", "json", "workspace", "show"]);
     assert_eq!(
         workspace_before_preview["recommended_action"],
-        "heddle merge feature/ready-verify --preview",
+        "heddle land --thread feature/ready-verify --no-push",
         "workspace top-level action should match verify after ready: {workspace_before_preview}"
     );
     assert_eq!(
         workspace_before_preview["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["merge", "feature/ready-verify", "--preview"]),
+        heddle_argv_json(["land", "--thread", "feature/ready-verify", "--no-push"]),
         "workspace top-level action should be directly executable: {workspace_before_preview}"
     );
 
@@ -1571,8 +1571,8 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
     );
     assert_eq!(
         thread_show_before_preview["recommended_action"],
-        "heddle merge feature/ready-verify --preview",
-        "thread show should not skip preview and jump straight to ship: {thread_show_before_preview}"
+        "heddle land --thread feature/ready-verify --no-push",
+        "thread show should follow the canonical land path after ready: {thread_show_before_preview}"
     );
     let preview = json(
         temp.path(),
@@ -1586,7 +1586,7 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
     );
     assert_eq!(
         preview["recommended_action"],
-        "heddle ship --thread feature/ready-verify --no-push"
+        "heddle land --thread feature/ready-verify --no-push"
     );
     let thread_show_after_preview = json(
         temp.path(),
@@ -1594,12 +1594,12 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
     );
     assert_eq!(
         thread_show_after_preview["recommended_action"],
-        "heddle ship --thread feature/ready-verify --no-push",
-        "thread show should keep the established ship path after merge preview: {thread_show_after_preview}"
+        "heddle land --thread feature/ready-verify --no-push",
+        "thread show should keep the established land path after merge preview: {thread_show_after_preview}"
     );
     assert_eq!(
         thread_show_after_preview["verification"]["recommended_action"],
-        "heddle ship --thread feature/ready-verify --no-push",
+        "heddle land --thread feature/ready-verify --no-push",
         "nested verify should not send agents back to preview after preview already succeeded: {thread_show_after_preview}"
     );
     assert!(
@@ -1609,32 +1609,32 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
             .iter()
             .any(|check| check["name"] == "Workflow"
                 && check["recommended_action"]
-                    == "heddle ship --thread feature/ready-verify --no-push"),
-        "Workflow check should match the established ship path: {thread_show_after_preview}"
+                    == "heddle land --thread feature/ready-verify --no-push"),
+        "Workflow check should match the established land path: {thread_show_after_preview}"
     );
     let ready_after_preview = json(&thread_path, &["--output", "json", "ready"]);
-    let parent_ship_action = format!(
-        "heddle --repo {} ship --thread feature/ready-verify --no-push",
+    let parent_land_action = format!(
+        "heddle --repo {} land --thread feature/ready-verify --no-push",
         temp.path().display()
     );
     assert_eq!(
-        ready_after_preview["recommended_action"], parent_ship_action,
-        "ready rerun after preview should preserve the ship path: {ready_after_preview}"
+        ready_after_preview["recommended_action"], parent_land_action,
+        "ready rerun after preview should preserve the land path: {ready_after_preview}"
     );
     // Mutation reply no longer carries verification on the wire; the
     // injected verify is rooted in `thread_path` without --repo, so
     // its recommendation lacks the parent --repo prefix the original
     // ready built. The top-level assertion above already proves the
-    // ship path is preserved end-to-end.
+    // land path is preserved end-to-end.
     let parent_status_after_preview = json(temp.path(), &["--output", "json", "status"]);
     assert_eq!(
         parent_status_after_preview["recommended_action"],
-        "heddle ship --thread feature/ready-verify --no-push",
+        "heddle land --thread feature/ready-verify --no-push",
         "parent status should keep previewed workflow actionable: {parent_status_after_preview}"
     );
     let thread_list = json(temp.path(), &["--output", "json", "thread", "list"]);
     assert_eq!(
-        thread_list["recommended_action"], "heddle ship --thread feature/ready-verify --no-push",
+        thread_list["recommended_action"], "heddle land --thread feature/ready-verify --no-push",
         "thread list top-level action should match verify after preview: {thread_list}"
     );
     let listed = thread_list["threads"]
@@ -1644,17 +1644,17 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
         .find(|thread| thread["name"] == "feature/ready-verify")
         .expect("ready thread should be listed");
     assert_eq!(
-        listed["recommended_action"], "heddle ship --thread feature/ready-verify --no-push",
+        listed["recommended_action"], "heddle land --thread feature/ready-verify --no-push",
         "thread list should match ready/verify next action: {thread_list}"
     );
     assert_eq!(
         listed["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["ship", "--thread", "feature/ready-verify", "--no-push"]),
+        heddle_argv_json(["land", "--thread", "feature/ready-verify", "--no-push"]),
         "thread list item actions should be directly executable: {thread_list}"
     );
     let workspace = json(temp.path(), &["--output", "json", "workspace", "show"]);
     assert_eq!(
-        workspace["recommended_action"], "heddle ship --thread feature/ready-verify --no-push",
+        workspace["recommended_action"], "heddle land --thread feature/ready-verify --no-push",
         "workspace top-level action should match verify after preview: {workspace}"
     );
     let workspace_thread = workspace["groups"]
@@ -1666,12 +1666,12 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
         .expect("ready thread should appear in workspace");
     assert_eq!(
         workspace_thread["recommended_action"],
-        "heddle ship --thread feature/ready-verify --no-push",
+        "heddle land --thread feature/ready-verify --no-push",
         "workspace should match ready/verify next action: {workspace}"
     );
     assert_eq!(
         workspace_thread["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["ship", "--thread", "feature/ready-verify", "--no-push"]),
+        heddle_argv_json(["land", "--thread", "feature/ready-verify", "--no-push"]),
         "workspace item actions should be directly executable: {workspace}"
     );
 }
@@ -1690,7 +1690,7 @@ fn git_overlay_matrix_agent_ship_allows_absent_confidence() {
             "--output",
             "json",
             "start",
-            "feature/ship-absent-confidence",
+            "feature/land-absent-confidence",
             "--workspace",
             "materialized",
         ],
@@ -1715,7 +1715,7 @@ fn git_overlay_matrix_agent_ship_allows_absent_confidence() {
     let ready = json(&thread_path, &["--output", "json", "ready"]);
     assert_eq!(
         ready["status"], "completed",
-        "absent confidence should not make ready and ship disagree: {ready}"
+        "absent confidence should not make ready and land disagree: {ready}"
     );
     let preview = json(
         temp.path(),
@@ -1723,36 +1723,36 @@ fn git_overlay_matrix_agent_ship_allows_absent_confidence() {
             "--output",
             "json",
             "merge",
-            "feature/ship-absent-confidence",
+            "feature/land-absent-confidence",
             "--preview",
         ],
     );
     assert_eq!(
         preview["recommended_action"],
-        "heddle ship --thread feature/ship-absent-confidence --no-push"
+        "heddle land --thread feature/land-absent-confidence --no-push"
     );
 
-    let ship = json(
+    let land = json(
         temp.path(),
         &[
             "--output",
             "json",
-            "ship",
+            "land",
             "--thread",
-            "feature/ship-absent-confidence",
+            "feature/land-absent-confidence",
             "--no-push",
         ],
     );
     assert_eq!(
-        ship["status"], "shipped",
-        "ship should not block on absent confidence after ready completed: {ship}"
+        land["status"], "landed",
+        "land should not block on absent confidence after ready completed: {land}"
     );
-    assert_eq!(ship["integrated"], true);
+    assert_eq!(land["integrated"], true);
     assert!(
-        ship["blockers"]
+        land["blockers"]
             .as_array()
             .is_none_or(|blockers| blockers.is_empty()),
-        "successful ship should have no blockers: {ship}"
+        "successful land should have no blockers: {land}"
     );
 }
 
@@ -1770,7 +1770,7 @@ fn git_overlay_matrix_low_confidence_blocks_ready_and_ship_with_recapture_action
             "--output",
             "json",
             "start",
-            "feature/ship-low-confidence",
+            "feature/land-low-confidence",
             "--workspace",
             "materialized",
         ],
@@ -1803,7 +1803,7 @@ fn git_overlay_matrix_low_confidence_blocks_ready_and_ship_with_recapture_action
     let ready = json(&thread_path, &["--output", "json", "ready"]);
     assert_eq!(ready["status"], "blocked", "{ready}");
     assert_eq!(
-        ready["recommended_action"], "heddle capture -m \"...\" --confidence <confidence>",
+        ready["recommended_action"], "heddle commit -m \"...\" --confidence <confidence>",
         "ready should give the corrective action before marking the thread ready: {ready}"
     );
     assert!(
@@ -1823,65 +1823,75 @@ fn git_overlay_matrix_low_confidence_blocks_ready_and_ship_with_recapture_action
             "--output",
             "json",
             "merge",
-            "feature/ship-low-confidence",
+            "feature/land-low-confidence",
             "--preview",
         ],
     );
     assert_eq!(
         preview["recommended_action"],
-        "heddle ship --thread feature/ship-low-confidence --no-push"
+        "heddle land --thread feature/land-low-confidence --no-push"
     );
 
     let ship_output = heddle_output(
         &[
             "--output",
             "json",
-            "ship",
+            "land",
             "--thread",
-            "feature/ship-low-confidence",
+            "feature/land-low-confidence",
             "--no-push",
         ],
         Some(temp.path()),
     )
-    .expect("invoke blocked low-confidence ship");
+    .expect("invoke blocked low-confidence land");
     assert!(
         !ship_output.status.success(),
-        "blocked policy ship should exit nonzero"
+        "blocked policy land should exit nonzero"
     );
-    let ship: Value = serde_json::from_slice(&ship_output.stdout)
-        .unwrap_or_else(|err| panic!("blocked ship should emit JSON on stdout: {err}"));
-    assert_eq!(ship["status"], "blocked");
-    assert_eq!(ship["integrated"], false);
-    assert_eq!(ship["checkpointed"], false);
+    let land: Value = serde_json::from_slice(&ship_output.stdout)
+        .unwrap_or_else(|err| panic!("blocked land should emit JSON on stdout: {err}"));
+    assert_eq!(land["status"], "blocked");
+    assert_eq!(land["integrated"], false);
+    assert_eq!(land["checkpointed"], false);
+    // heddle#464 bug 2: this land runs from the PARENT checkout (`temp.path()`)
+    // against an isolated thread whose checkout is `thread_path`. An unscoped
+    // `heddle commit` would commit the parent and never update the blocked
+    // thread's confidence, so the recovery must scope the recapture to the
+    // thread via the global `--repo` flag. (Contrast the in-thread `ready`
+    // recovery above, which stays unscoped.)
+    let expected_scoped_recapture = format!(
+        "heddle --repo {} commit -m \"...\" --confidence <confidence>",
+        thread_path.display()
+    );
     assert_eq!(
-        ship["recommended_action"], "heddle capture -m \"...\" --confidence <confidence>",
-        "blocked policy ship should recommend recovery, not ship again: {ship}"
+        land["recommended_action"], expected_scoped_recapture,
+        "blocked policy land from the parent must scope the recapture to the thread's checkout, not land again or commit the parent: {land}"
     );
     assert!(
-        ship["blockers"]
+        land["blockers"]
             .as_array()
             .unwrap()
             .iter()
             .any(|blocker| blocker
                 .as_str()
                 .is_some_and(|text| text.contains("confidence 0.60 is below"))),
-        "ship should explain the policy blocker: {ship}"
+        "land should explain the policy blocker: {land}"
     );
     assert!(
-        ship["skipped_steps"]
+        land["skipped_steps"]
             .as_array()
             .unwrap()
             .iter()
             .any(|step| step == "checkpoint(not reached)"),
-        "blocked ship should not claim checkpoint was unnecessary: {ship}"
+        "blocked land should not claim checkpoint was unnecessary: {land}"
     );
     assert!(
-        !ship["skipped_steps"]
+        !land["skipped_steps"]
             .as_array()
             .unwrap()
             .iter()
             .any(|step| step == "checkpoint(not needed)"),
-        "blocked ship should reserve checkpoint(not needed) for paths that reached merge: {ship}"
+        "blocked land should reserve checkpoint(not needed) for paths that reached merge: {land}"
     );
 }
 
@@ -1939,11 +1949,11 @@ fn git_overlay_matrix_ready_thread_action_not_overridden_by_remote_push() {
     );
     assert_eq!(ready["status"], "blocked", "{ready}");
     assert_eq!(
-        ready["recommended_action"], "heddle thread refresh feature/stale-ready",
+        ready["recommended_action"], "heddle sync --thread feature/stale-ready",
         "thread-scoped ready should keep the stale-thread recovery primary, not global push: {ready}"
     );
     assert_eq!(
-        ready["report"]["recommended_action"], "heddle thread refresh feature/stale-ready",
+        ready["report"]["recommended_action"], "heddle sync --thread feature/stale-ready",
         "nested report should match the top-level ready action: {ready}"
     );
     assert!(
@@ -2024,7 +2034,7 @@ fn git_overlay_matrix_current_thread_recovery_not_overridden_by_remote_push() {
     ] {
         let output = json(&thread_path, &args);
         assert_eq!(
-            output["recommended_action"], "heddle thread refresh feature/stale-current",
+            output["recommended_action"], "heddle sync --thread feature/stale-current",
             "{label} should keep current-thread recovery primary, not global push: {output}"
         );
         assert_eq!(
@@ -3687,7 +3697,7 @@ fn git_overlay_matrix_checkpoint_closes_imported_remote_divergence_after_merge()
         "{needs_checkpoint}"
     );
     assert_eq!(
-        needs_checkpoint["recommended_action"], "heddle checkpoint -m \"...\"",
+        needs_checkpoint["recommended_action"], "heddle commit -m \"...\"",
         "after integrating upstream into Heddle, checkpoint must remain the primary way out: {needs_checkpoint}"
     );
 
@@ -3753,8 +3763,15 @@ fn git_overlay_matrix_imported_remote_divergence_surfaces_agree_on_next_action()
         ],
     );
 
-    let merge_action = "heddle merge origin/main --preview";
-    let merge_argv = Some(heddle_argv_json(["merge", "origin/main", "--preview"]));
+    let merge_action = "heddle bridge git reconcile --ref origin/main --preview";
+    let merge_argv = Some(heddle_argv_json([
+        "bridge",
+        "git",
+        "reconcile",
+        "--ref",
+        "origin/main",
+        "--preview",
+    ]));
     for (label, output) in [
         ("status", json(temp.path(), &["--output", "json", "status"])),
         ("verify", json(temp.path(), &["--output", "json", "verify"])),
@@ -3776,8 +3793,8 @@ fn git_overlay_matrix_imported_remote_divergence_surfaces_agree_on_next_action()
             merge_argv.clone(),
         );
         assert_ne!(
-            output["recommended_action"], "heddle ship",
-            "{label} must not recommend ship for imported remote divergence: {output}"
+            output["recommended_action"], "heddle land",
+            "{label} must not recommend land for imported remote divergence: {output}"
         );
     }
 
@@ -3798,7 +3815,7 @@ fn git_overlay_matrix_imported_remote_divergence_surfaces_agree_on_next_action()
     );
     json(temp.path(), &["--output", "json", "merge", "origin/main"]);
 
-    let checkpoint_action = "heddle checkpoint -m \"...\"";
+    let checkpoint_action = "heddle commit -m \"...\"";
     for (label, output) in [
         ("status", json(temp.path(), &["--output", "json", "status"])),
         ("verify", json(temp.path(), &["--output", "json", "verify"])),
@@ -5232,29 +5249,25 @@ fn git_overlay_matrix_stale_conflict_ship_blocks_with_guidance() {
     assert_eq!(before_ship["freshness"], "stale");
 
     let ship_output = heddle_output(
-        &["--output", "json", "ship", "--thread", "feature/conflict"],
+        &["--output", "json", "land", "--thread", "feature/conflict"],
         Some(temp.path()),
     )
-    .expect("invoke blocked conflict ship");
+    .expect("invoke blocked conflict land");
     assert!(
         !ship_output.status.success(),
-        "blocked conflict ship should exit nonzero"
+        "blocked conflict land should exit nonzero"
     );
-    let ship: Value = serde_json::from_slice(&ship_output.stdout)
-        .unwrap_or_else(|err| panic!("blocked conflict ship should emit JSON on stdout: {err}"));
-    assert_eq!(ship["status"], "blocked");
-    assert_eq!(ship["checkpointed"], false);
-    assert_eq!(ship["integrated"], false);
+    let land: Value = serde_json::from_slice(&ship_output.stdout)
+        .unwrap_or_else(|err| panic!("blocked conflict land should emit JSON on stdout: {err}"));
+    assert_eq!(land["status"], "blocked");
+    assert_eq!(land["checkpointed"], false);
+    assert_eq!(land["integrated"], false);
     assert!(
-        ship["next_action"]
+        land["next_action"]
             .as_str()
             .unwrap_or("")
-            .contains("refresh")
-            || ship["next_action"]
-                .as_str()
-                .unwrap_or("")
-                .contains("resolve"),
-        "blocked ship should surface the next operator step: {ship}"
+            .contains("sync --thread feature/conflict"),
+        "blocked land should surface the next operator step: {land}"
     );
 
     let thread_show = json(
@@ -5266,11 +5279,7 @@ fn git_overlay_matrix_stale_conflict_ship_blocks_with_guidance() {
         thread_show["recommended_action"]
             .as_str()
             .unwrap_or("")
-            .contains("refresh")
-            || thread_show["recommended_action"]
-                .as_str()
-                .unwrap_or("")
-                .contains("resolve")
+            .contains("sync --thread feature/conflict")
     );
 }
 
@@ -5315,7 +5324,7 @@ fn git_overlay_matrix_conflicted_merge_exits_nonzero_after_writing_markers() {
     assert!(
         parsed["recommended_action"]
             .as_str()
-            .is_some_and(|action| action == "heddle thread refresh feature/conflict-merge"),
+            .is_some_and(|action| action == "heddle sync --thread feature/conflict-merge"),
         "stale conflicted merge should refresh before materializing conflict markers: {parsed}"
     );
     let conflict_file = std::fs::read_to_string(temp.path().join("conflict.txt")).unwrap();
@@ -5380,7 +5389,7 @@ fn git_overlay_matrix_stale_conflict_thread_resolve_enters_conflict_recovery() {
     assert_eq!(preview["kind"], "merge_preview_blocked", "{preview}");
     assert_eq!(
         preview["primary_command"],
-        "heddle thread refresh feature/resolve-conflict"
+        "heddle sync --thread feature/resolve-conflict"
     );
     assert_eq!(preview["conflict_count"], 1, "{preview}");
     assert_eq!(preview["conflicts"], serde_json::json!(["conflict.txt"]));
@@ -5798,19 +5807,19 @@ fn git_overlay_matrix_stale_thread_can_recover_via_sync_then_ship() {
     );
     assert_eq!(after_sync["freshness"], "current");
 
-    let ship = json(
+    let land = json(
         temp.path(),
-        &["--output", "json", "ship", "--thread", "feature/recover"],
+        &["--output", "json", "land", "--thread", "feature/recover"],
     );
-    assert_eq!(ship["status"], "shipped");
-    assert_eq!(ship["checkpointed"], true);
-    assert!(ship["git_commit"].as_str().is_some());
+    assert_eq!(land["status"], "landed");
+    assert_eq!(land["checkpointed"], true);
+    assert!(land["git_commit"].as_str().is_some());
     assert_eq!(
-        ship["performed_steps"],
+        land["performed_steps"],
         serde_json::json!(["merge", "checkpoint"])
     );
     assert_eq!(
-        ship["skipped_steps"],
+        land["skipped_steps"],
         serde_json::json!([
             "capture(no changes)",
             "sync(current)",
@@ -5869,11 +5878,12 @@ fn git_overlay_matrix_stale_merge_preview_blocks_ship_recommendation_and_diff() 
 
     let parent_status = json(temp.path(), &["--output", "json", "status"]);
     assert_eq!(
-        parent_status["recommended_action"], "heddle thread refresh feature/stale-preview",
+        parent_status["recommended_action"], "heddle sync --thread feature/stale-preview",
         "parent status must refresh a stale ready thread before merge preview is actionable: {parent_status}"
     );
     assert_ne!(
-        parent_status["recommended_action"], "heddle merge feature/stale-preview --preview",
+        parent_status["recommended_action"],
+        "heddle merge feature/stale-preview --preview",
         "parent status must not recommend merge preview for a stale ready thread: {parent_status}"
     );
 
@@ -5902,7 +5912,7 @@ fn git_overlay_matrix_stale_merge_preview_blocks_ship_recommendation_and_diff() 
     assert_eq!(no_diff_preview["kind"], "merge_preview_blocked");
     assert_eq!(
         no_diff_preview["primary_command"],
-        "heddle thread refresh feature/stale-preview"
+        "heddle sync --thread feature/stale-preview"
     );
 
     let preview_output = heddle_output(
@@ -5932,11 +5942,11 @@ fn git_overlay_matrix_stale_merge_preview_blocks_ship_recommendation_and_diff() 
     assert_eq!(preview["kind"], "merge_preview_blocked");
     assert_eq!(
         preview["primary_command"],
-        "heddle thread refresh feature/stale-preview"
+        "heddle sync --thread feature/stale-preview"
     );
     assert_eq!(
         preview["recovery_commands"],
-        serde_json::json!(["heddle thread refresh feature/stale-preview"])
+        serde_json::json!(["heddle sync --thread feature/stale-preview"])
     );
     assert!(
         preview["unsafe_condition"]
@@ -5949,8 +5959,8 @@ fn git_overlay_matrix_stale_merge_preview_blocks_ship_recommendation_and_diff() 
         !preview["primary_command"]
             .as_str()
             .unwrap_or("")
-            .contains("ship"),
-        "stale preview must not recommend ship: {preview}"
+            .contains("land"),
+        "stale preview must not recommend land: {preview}"
     );
 }
 
@@ -6020,14 +6030,14 @@ fn git_overlay_matrix_ship_uses_thread_intent_for_git_checkpoint_subject() {
     git_commit_all(temp.path(), "base");
     heddle_adopt(temp.path());
 
-    let feature_path = temp.path().with_extension("feature-ship-message");
+    let feature_path = temp.path().with_extension("feature-land-message");
     json(
         temp.path(),
         &[
             "--output",
             "json",
             "start",
-            "feature/ship-message",
+            "feature/land-message",
             "--path",
             feature_path.to_str().unwrap(),
         ],
@@ -6039,20 +6049,20 @@ fn git_overlay_matrix_ship_uses_thread_intent_for_git_checkpoint_subject() {
     );
     assert_eq!(ready["status"], "completed");
 
-    let ship = json(
+    let land = json(
         temp.path(),
         &[
             "--output",
             "json",
-            "ship",
+            "land",
             "--thread",
-            "feature/ship-message",
+            "feature/land-message",
             "--no-push",
         ],
     );
-    assert_eq!(ship["status"], "shipped");
-    assert_eq!(ship["checkpointed"], true);
-    assert!(ship["git_commit"].as_str().is_some());
+    assert_eq!(land["status"], "landed");
+    assert_eq!(land["checkpointed"], true);
+    assert!(land["git_commit"].as_str().is_some());
     assert_eq!(
         git_stdout(temp.path(), &["log", "-1", "--pretty=%s"]),
         "Add evaluation tags"
@@ -6067,7 +6077,7 @@ fn git_overlay_matrix_ship_uses_thread_intent_for_git_checkpoint_subject() {
             .unwrap()
             .iter()
             .any(|record| record["summary"] == "Add evaluation tags"),
-        "ship should record the meaningful thread intent as the Git checkpoint summary: {checkpoint_records}"
+        "land should record the meaningful thread intent as the Git checkpoint summary: {checkpoint_records}"
     );
 }
 
@@ -6084,19 +6094,19 @@ fn git_overlay_matrix_ship_undo_restores_git_and_heddle_together() {
     git(&["push", "-u", "origin", "main"], temp.path());
     heddle_adopt(temp.path());
 
-    let feature_path = temp.path().with_extension("feature-ship-undo");
+    let feature_path = temp.path().with_extension("feature-land-undo");
     let started = json(
         temp.path(),
         &[
             "--output",
             "json",
             "start",
-            "feature/ship-undo",
+            "feature/land-undo",
             "--path",
             feature_path.to_str().unwrap(),
         ],
     );
-    assert_eq!(started["thread"]["name"], "feature/ship-undo");
+    assert_eq!(started["thread"]["name"], "feature/land-undo");
 
     std::fs::write(feature_path.join("README.md"), "base\nfeature\n").unwrap();
     std::fs::write(feature_path.join("feature.txt"), "feature\n").unwrap();
@@ -6107,7 +6117,7 @@ fn git_overlay_matrix_ship_undo_restores_git_and_heddle_together() {
             "json",
             "ready",
             "-m",
-            "feature ready for ship undo",
+            "feature ready for land undo",
         ],
     );
     assert_eq!(ready["status"], "completed");
@@ -6117,28 +6127,28 @@ fn git_overlay_matrix_ship_undo_restores_git_and_heddle_together() {
     assert_eq!(base_verify["status"], "clean");
     assert_eq!(
         base_verify["recommended_action"],
-        "heddle merge feature/ship-undo --preview"
+        "heddle land --thread feature/land-undo --no-push"
     );
 
-    let ship = json(
+    let land = json(
         temp.path(),
         &[
             "--output",
             "json",
-            "ship",
+            "land",
             "--thread",
-            "feature/ship-undo",
+            "feature/land-undo",
             "--no-push",
         ],
     );
-    assert_eq!(ship["status"], "shipped");
-    assert_eq!(ship["checkpointed"], true);
-    assert_eq!(ship["verification"]["verified"], true);
-    assert_eq!(ship["verification"]["status"], "clean");
-    assert_eq!(ship["verification"]["recommended_action"], "heddle push");
-    assert_eq!(ship["recommended_action"], "heddle push");
-    assert_eq!(ship["next_action"], "heddle push");
-    assert!(ship["git_commit"].as_str().is_some());
+    assert_eq!(land["status"], "landed");
+    assert_eq!(land["checkpointed"], true);
+    assert_eq!(land["verification"]["verified"], true);
+    assert_eq!(land["verification"]["status"], "clean");
+    assert_eq!(land["verification"]["recommended_action"], "heddle push");
+    assert_eq!(land["recommended_action"], "heddle push");
+    assert_eq!(land["next_action"], "heddle push");
+    assert!(land["git_commit"].as_str().is_some());
 
     let after_ship = json(temp.path(), &["--output", "json", "verify"]);
     assert_eq!(after_ship["verified"], true);
@@ -6146,7 +6156,7 @@ fn git_overlay_matrix_ship_undo_restores_git_and_heddle_together() {
     assert_eq!(after_ship["recommended_action"], "heddle push");
     let thread_after_ship = json(
         temp.path(),
-        &["--output", "json", "thread", "show", "feature/ship-undo"],
+        &["--output", "json", "thread", "show", "feature/land-undo"],
     );
     assert_eq!(thread_after_ship["thread_state"], "merged");
     assert_eq!(
@@ -6160,27 +6170,27 @@ fn git_overlay_matrix_ship_undo_restores_git_and_heddle_together() {
     let after_undo = json(temp.path(), &["--output", "json", "verify"]);
     assert_eq!(
         after_undo["verified"], true,
-        "ship undo should not leave Git/Heddle mapping blocked: {after_undo}"
+        "land undo should not leave Git/Heddle mapping blocked: {after_undo}"
     );
     assert_eq!(after_undo["status"], "clean");
     assert_eq!(
         after_undo["recommended_action"],
-        "heddle merge feature/ship-undo --preview"
+        "heddle land --thread feature/land-undo --no-push"
     );
     let status_after_undo = json(temp.path(), &["--output", "json", "status"]);
     assert_eq!(
-        status_after_undo["recommended_action"], "heddle merge feature/ship-undo --preview",
-        "status should restore the ready workflow action after ship undo: {status_after_undo}"
+        status_after_undo["recommended_action"], "heddle land --thread feature/land-undo --no-push",
+        "status should restore the ready workflow action after land undo: {status_after_undo}"
     );
     let thread_list_after_undo = json(temp.path(), &["--output", "json", "thread", "list"]);
     assert_eq!(
-        thread_list_after_undo["recommended_action"], "heddle merge feature/ship-undo --preview",
-        "thread list should restore the ready workflow action after ship undo: {thread_list_after_undo}"
+        thread_list_after_undo["recommended_action"], "heddle land --thread feature/land-undo --no-push",
+        "thread list should restore the ready workflow action after land undo: {thread_list_after_undo}"
     );
     let workspace_after_undo = json(temp.path(), &["--output", "json", "workspace", "show"]);
     assert_eq!(
-        workspace_after_undo["recommended_action"], "heddle merge feature/ship-undo --preview",
-        "workspace should restore the ready workflow action after ship undo: {workspace_after_undo}"
+        workspace_after_undo["recommended_action"], "heddle land --thread feature/land-undo --no-push",
+        "workspace should restore the ready workflow action after land undo: {workspace_after_undo}"
     );
     assert_eq!(git_status_short(temp.path()), "");
     assert!(
@@ -6190,16 +6200,16 @@ fn git_overlay_matrix_ship_undo_restores_git_and_heddle_together() {
 
     let thread_after_undo = json(
         temp.path(),
-        &["--output", "json", "thread", "show", "feature/ship-undo"],
+        &["--output", "json", "thread", "show", "feature/land-undo"],
     );
     assert_eq!(
         thread_after_undo["thread_state"], "ready",
-        "undoing the ship should unmark the source thread as merged: {thread_after_undo}"
+        "undoing the land should unmark the source thread as merged: {thread_after_undo}"
     );
     assert_eq!(
         thread_after_undo["integration_policy_result"]["status"],
         Value::Null,
-        "undoing the ship should clear stale auto-integrated metadata: {thread_after_undo}"
+        "undoing the land should clear stale auto-integrated metadata: {thread_after_undo}"
     );
 
     let thread_record_path = std::fs::read_dir(temp.path().join(".heddle/thread_records"))
@@ -6208,7 +6218,7 @@ fn git_overlay_matrix_ship_undo_restores_git_and_heddle_together() {
         .map(|entry| entry.path())
         .find(|path| {
             std::fs::read_to_string(path)
-                .map(|content| content.contains(r#"thread = "feature/ship-undo""#))
+                .map(|content| content.contains(r#"thread = "feature/land-undo""#))
                 .unwrap_or(false)
         })
         .expect("feature thread record should exist");
@@ -6252,12 +6262,12 @@ fn git_overlay_matrix_ship_undo_restores_git_and_heddle_together() {
     assert_eq!(git_status_short(temp.path()), "");
     assert!(
         temp.path().join("feature.txt").exists(),
-        "redo should restore the shipped feature file once preflights pass"
+        "redo should restore the landed feature file once preflights pass"
     );
 
     let thread_after_redo = json(
         temp.path(),
-        &["--output", "json", "thread", "show", "feature/ship-undo"],
+        &["--output", "json", "thread", "show", "feature/land-undo"],
     );
     assert_eq!(thread_after_redo["thread_state"], "merged");
     assert_eq!(
@@ -6311,15 +6321,15 @@ fn git_overlay_matrix_ship_push_without_remote_refuses_before_mutation() {
     );
     assert_eq!(
         preview["recommended_action"],
-        "heddle ship --thread feature/no-remote-push --no-push"
+        "heddle land --thread feature/no-remote-push --no-push"
     );
     assert_eq!(
         preview["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["ship", "--thread", "feature/no-remote-push", "--no-push"])
+        heddle_argv_json(["land", "--thread", "feature/no-remote-push", "--no-push"])
     );
     assert_eq!(
         preview["verification"]["recommended_action"],
-        "heddle ship --thread feature/no-remote-push --no-push"
+        "heddle land --thread feature/no-remote-push --no-push"
     );
 
     let before_state = json(temp.path(), &["--output", "json", "status"])["current_state"].clone();
@@ -6329,17 +6339,17 @@ fn git_overlay_matrix_ship_push_without_remote_refuses_before_mutation() {
         &[
             "--output",
             "json",
-            "ship",
+            "land",
             "--thread",
             "feature/no-remote-push",
             "--push",
         ],
         Some(temp.path()),
     )
-    .expect("invoke ship --push");
+    .expect("invoke land --push");
     assert!(
         !push.status.success(),
-        "ship --push should refuse without a remote"
+        "land --push should refuse without a remote"
     );
     assert!(
         push.stdout.is_empty(),
@@ -6349,15 +6359,15 @@ fn git_overlay_matrix_ship_push_without_remote_refuses_before_mutation() {
     let stderr = std::str::from_utf8(&push.stderr).unwrap();
     let envelope: Value =
         serde_json::from_str(stderr).unwrap_or_else(|err| panic!("stderr JSON: {err}: {stderr}"));
-    assert_eq!(envelope["kind"], "ship_push_remote_missing");
+    assert_eq!(envelope["kind"], "land_push_remote_missing");
     assert_json_recovery_advice_fields(&envelope, &envelope.to_string());
     assert!(
         envelope["preserved"]
             .as_str()
             .is_some_and(|preserved| preserved.contains("repository state"))
             && envelope["primary_command"]
-                == "heddle ship --thread feature/no-remote-push --no-push",
-        "refusal should explain preservation and local ship recovery: {envelope}"
+                == "heddle land --thread feature/no-remote-push --no-push",
+        "refusal should explain preservation and local land recovery: {envelope}"
     );
     assert_eq!(
         json(temp.path(), &["--output", "json", "status"])["current_state"],
@@ -6408,11 +6418,11 @@ fn git_overlay_matrix_ship_remote_without_push_refuses_before_mutation() {
     let before_state = json(temp.path(), &["--output", "json", "status"])["current_state"].clone();
     let before_git = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
     let before_refs = git_ref_snapshot(temp.path());
-    let ship = heddle_output(
+    let land = heddle_output(
         &[
             "--output",
             "json",
-            "ship",
+            "land",
             "--thread",
             "feature/remote-without-push",
             "--remote",
@@ -6420,23 +6430,23 @@ fn git_overlay_matrix_ship_remote_without_push_refuses_before_mutation() {
         ],
         Some(temp.path()),
     )
-    .expect("invoke ship --remote");
+    .expect("invoke land --remote");
     assert!(
-        !ship.status.success(),
-        "ship --remote without --push should refuse"
+        !land.status.success(),
+        "land --remote without --push should refuse"
     );
     assert!(
-        ship.stdout.is_empty(),
+        land.stdout.is_empty(),
         "JSON refusal should not emit partial stdout: {}",
-        String::from_utf8_lossy(&ship.stdout)
+        String::from_utf8_lossy(&land.stdout)
     );
-    let stderr = std::str::from_utf8(&ship.stderr).unwrap();
+    let stderr = std::str::from_utf8(&land.stderr).unwrap();
     let envelope: Value =
         serde_json::from_str(stderr).unwrap_or_else(|err| panic!("stderr JSON: {err}: {stderr}"));
-    assert_eq!(envelope["kind"], "ship_remote_requires_push");
+    assert_eq!(envelope["kind"], "land_remote_requires_push");
     assert_eq!(
         envelope["primary_command"],
-        "heddle ship --thread feature/remote-without-push --push --remote origin"
+        "heddle land --thread feature/remote-without-push --push --remote origin"
     );
     assert_json_recovery_advice_fields(&envelope, &envelope.to_string());
     assert_eq!(
@@ -6491,15 +6501,15 @@ fn git_overlay_matrix_ship_push_failure_reports_partial_local_ship() {
     );
     assert_eq!(
         preview["recommended_action"],
-        "heddle ship --thread feature/partial-push --no-push"
+        "heddle land --thread feature/partial-push --no-push"
     );
     assert_eq!(
         preview["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["ship", "--thread", "feature/partial-push", "--no-push"])
+        heddle_argv_json(["land", "--thread", "feature/partial-push", "--no-push"])
     );
     assert_eq!(
         preview["verification"]["recommended_action"],
-        "heddle ship --thread feature/partial-push --no-push"
+        "heddle land --thread feature/partial-push --no-push"
     );
 
     let text_preview = heddle(
@@ -6515,8 +6525,8 @@ fn git_overlay_matrix_ship_push_failure_reports_partial_local_ship() {
     )
     .expect("text merge preview with diff should succeed");
     assert!(
-        text_preview.contains("Next: heddle ship --thread feature/partial-push --no-push"),
-        "text merge preview should recommend local ship first: {text_preview}"
+        text_preview.contains("Next: heddle land --thread feature/partial-push --no-push"),
+        "text merge preview should recommend local land first: {text_preview}"
     );
     assert!(
         !text_preview.contains("--push"),
@@ -6529,7 +6539,7 @@ fn git_overlay_matrix_ship_push_failure_reports_partial_local_ship() {
         &[
             "--output",
             "json",
-            "ship",
+            "land",
             "--thread",
             "feature/partial-push",
             "--push",
@@ -6538,7 +6548,7 @@ fn git_overlay_matrix_ship_push_failure_reports_partial_local_ship() {
         ],
         Some(temp.path()),
     )
-    .expect("invoke ship --push");
+    .expect("invoke land --push");
     assert!(!push.status.success(), "push to missing remote should fail");
     assert!(
         push.stdout.is_empty(),
@@ -6548,7 +6558,7 @@ fn git_overlay_matrix_ship_push_failure_reports_partial_local_ship() {
     let stderr = std::str::from_utf8(&push.stderr).unwrap();
     let envelope: Value =
         serde_json::from_str(stderr).unwrap_or_else(|err| panic!("stderr JSON: {err}: {stderr}"));
-    assert_eq!(envelope["kind"], "ship_push_partial_failure");
+    assert_eq!(envelope["kind"], "land_push_partial_failure");
     assert_json_recovery_advice_fields(&envelope, &envelope.to_string());
     assert!(
         envelope["preserved"]
@@ -6646,56 +6656,56 @@ fn git_overlay_matrix_ship_no_push_refuses_known_upstream_drift_before_mutation(
     let before_git = git_stdout(&local, &["rev-parse", "HEAD"]);
     let before_refs = git_ref_snapshot(&local);
 
-    let ship = heddle_output(
+    let land = heddle_output(
         &[
             "--output",
             "json",
-            "ship",
+            "land",
             "--thread",
             "isolated",
             "--no-push",
         ],
         Some(&local),
     )
-    .expect("invoke ship --no-push with known upstream drift");
+    .expect("invoke land --no-push with known upstream drift");
     assert!(
-        !ship.status.success(),
-        "ship should fail before landing when checkpoint cannot move Git safely"
+        !land.status.success(),
+        "land should fail before landing when checkpoint cannot move Git safely"
     );
     assert!(
-        ship.stdout.is_empty(),
+        land.stdout.is_empty(),
         "JSON refusal should not emit partial stdout: {}",
-        String::from_utf8_lossy(&ship.stdout)
+        String::from_utf8_lossy(&land.stdout)
     );
-    let stderr = std::str::from_utf8(&ship.stderr).unwrap();
+    let stderr = std::str::from_utf8(&land.stderr).unwrap();
     let envelope: Value =
         serde_json::from_str(stderr).unwrap_or_else(|err| panic!("stderr JSON: {err}: {stderr}"));
-    assert_eq!(envelope["kind"], "ship_requires_current_upstream");
+    assert_eq!(envelope["kind"], "land_requires_current_upstream");
     assert_eq!(envelope["primary_command"], "heddle pull");
     assert!(
         envelope["preserved"]
             .as_str()
             .is_some_and(|preserved| preserved.contains("left unchanged")),
-        "refusal should clearly promise no local ship occurred: {envelope}"
+        "refusal should clearly promise no local land occurred: {envelope}"
     );
 
     let after_status = json(&local, &["--output", "json", "status"]);
     assert_eq!(
         after_status["current_state"], before_state,
-        "failed ship must not fast-forward the parent Heddle thread"
+        "failed land must not fast-forward the parent Heddle thread"
     );
     assert_eq!(git_stdout(&local, &["rev-parse", "HEAD"]), before_git);
     assert_eq!(
         git_ref_snapshot(&local),
         before_refs,
-        "failed ship must not move visible Git refs"
+        "failed land must not move visible Git refs"
     );
     let undo_list = json(&local, &["--output", "json", "undo", "--list"]);
     assert!(
         !undo_list
             .to_string()
             .contains("fast-forward isolated into main"),
-        "failed ship must not leave an undo batch for a merge that should not have happened: {undo_list}"
+        "failed land must not leave an undo batch for a merge that should not have happened: {undo_list}"
     );
 }
 
@@ -6730,32 +6740,32 @@ fn git_overlay_matrix_ship_refuses_index_lock_before_mutation() {
     let before_refs = git_ref_snapshot(temp.path());
     std::fs::write(temp.path().join(".git/index.lock"), "stale lock").unwrap();
 
-    let ship = heddle_output(
+    let land = heddle_output(
         &[
             "--output",
             "json",
-            "ship",
+            "land",
             "--thread",
             "feature/index-lock",
             "--no-push",
         ],
         Some(temp.path()),
     )
-    .expect("invoke ship with index lock");
+    .expect("invoke land with index lock");
     assert!(
-        !ship.status.success(),
-        "ship should fail before landing when checkpoint preflight sees index lock"
+        !land.status.success(),
+        "land should fail before landing when checkpoint preflight sees index lock"
     );
-    assert!(ship.stdout.is_empty());
-    let stderr = std::str::from_utf8(&ship.stderr).unwrap();
+    assert!(land.stdout.is_empty());
+    let stderr = std::str::from_utf8(&land.stderr).unwrap();
     let envelope: Value =
         serde_json::from_str(stderr).unwrap_or_else(|err| panic!("stderr JSON: {err}: {stderr}"));
-    assert_eq!(envelope["kind"], "ship_checkpoint_preflight_blocked");
+    assert_eq!(envelope["kind"], "land_checkpoint_preflight_blocked");
     assert_eq!(envelope["primary_command"], "heddle status");
     assert_eq!(
         json(temp.path(), &["--output", "json", "status"])["current_state"],
         before_state,
-        "failed ship must not fast-forward Heddle state"
+        "failed land must not fast-forward Heddle state"
     );
     assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), before_git);
     assert_eq!(git_ref_snapshot(temp.path()), before_refs);
@@ -7314,13 +7324,13 @@ fn git_overlay_matrix_stale_ship_manual_resolution_then_retry_ships() {
         &[
             "--output",
             "json",
-            "ship",
+            "land",
             "--thread",
             "feature/manual-recover",
         ],
     );
     assert_eq!(blocked["status"], "blocked");
-    assert_operator_json_contract(&blocked, "ship");
+    assert_operator_json_contract(&blocked, "land");
 
     let refresh_error = heddle(
         &[
@@ -7350,8 +7360,8 @@ fn git_overlay_matrix_stale_ship_manual_resolution_then_retry_ships() {
     assert!(
         continued["recommended_action"]
             .as_str()
-            .is_some_and(|action| action.contains("ship")),
-        "continue should hand the operator back to the parent ship flow: {continued}"
+            .is_some_and(|action| action.contains("land")),
+        "continue should hand the operator back to the parent land flow: {continued}"
     );
 
     let after_continue = json(
@@ -7401,13 +7411,13 @@ fn git_overlay_matrix_stale_ship_manual_resolution_then_retry_ships() {
         &[
             "--output",
             "json",
-            "ship",
+            "land",
             "--thread",
             "feature/manual-recover",
         ],
     );
-    assert_eq!(retry_ship["status"], "shipped");
-    assert_operator_json_contract(&retry_ship, "ship");
+    assert_eq!(retry_ship["status"], "landed");
+    assert_operator_json_contract(&retry_ship, "land");
     assert_eq!(retry_ship["checkpointed"], true);
     assert!(retry_ship["git_commit"].as_str().is_some());
     let expected_next_action = if retry_ship["verification"]["recommended_action"] == "heddle push"
@@ -7460,13 +7470,13 @@ fn git_overlay_matrix_stale_ship_manual_resolution_pushes_when_requested() {
         &[
             "--output",
             "json",
-            "ship",
+            "land",
             "--thread",
             "feature/manual-push",
         ],
     );
     assert_eq!(blocked["status"], "blocked");
-    assert_operator_json_contract(&blocked, "ship");
+    assert_operator_json_contract(&blocked, "land");
 
     let refresh_error = heddle(
         &[
@@ -7504,7 +7514,7 @@ fn git_overlay_matrix_stale_ship_manual_resolution_pushes_when_requested() {
         &[
             "--output",
             "json",
-            "ship",
+            "land",
             "--thread",
             "feature/manual-push",
             "--push",
@@ -7512,8 +7522,8 @@ fn git_overlay_matrix_stale_ship_manual_resolution_pushes_when_requested() {
             "origin",
         ],
     );
-    assert_eq!(retry_ship["status"], "shipped");
-    assert_operator_json_contract(&retry_ship, "ship");
+    assert_eq!(retry_ship["status"], "landed");
+    assert_operator_json_contract(&retry_ship, "land");
     assert_eq!(retry_ship["checkpointed"], true);
     assert_eq!(retry_ship["pushed"], true);
     assert_eq!(retry_ship["pushed_remote"], "origin");
@@ -7527,7 +7537,7 @@ fn git_overlay_matrix_stale_ship_manual_resolution_pushes_when_requested() {
             .expect("performed_steps array")
             .iter()
             .any(|step| step == "push"),
-        "manual-resolution ship --push should record the push step: {retry_ship}"
+        "manual-resolution land --push should record the push step: {retry_ship}"
     );
     assert!(
         !retry_ship["skipped_steps"]
@@ -7535,7 +7545,7 @@ fn git_overlay_matrix_stale_ship_manual_resolution_pushes_when_requested() {
             .expect("skipped_steps array")
             .iter()
             .any(|step| step == "push(not requested)"),
-        "manual-resolution ship --push must not claim the push was not requested: {retry_ship}"
+        "manual-resolution land --push must not claim the push was not requested: {retry_ship}"
     );
     assert_eq!(
         retry_ship["recommended_action"],
@@ -7544,7 +7554,7 @@ fn git_overlay_matrix_stale_ship_manual_resolution_pushes_when_requested() {
     assert_eq!(
         git_stdout(origin.path(), &["rev-parse", "refs/heads/feature/drop-in"]),
         git_stdout(temp.path(), &["rev-parse", "HEAD"]),
-        "explicit ship --push --remote origin should update the remote branch"
+        "explicit land --push --remote origin should update the remote branch"
     );
     let verify = json(temp.path(), &["--output", "json", "verify"]);
     assert_eq!(verify["verified"], true);

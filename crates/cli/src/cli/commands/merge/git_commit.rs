@@ -334,12 +334,12 @@ fn merge_git_commit_empty_advice() -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "merge_git_commit_empty",
         "Merge produced no changed paths; refusing to write an empty Git commit",
-        "Inspect the merge with `heddle merge --preview`; rerun without `--git-commit` if no Git commit is needed.",
+        "Inspect repository state with `heddle status`; rerun without `--git-commit` if no Git commit is needed.",
         "the merge result has no paths to stage for Git",
         "--git-commit would create an empty Git commit that does not correspond to landed Heddle paths",
         "Heddle and Git state were left unchanged by the Git commit writer",
-        "heddle merge --preview",
-        vec!["heddle merge --preview".to_string()],
+        "heddle status",
+        vec!["heddle status".to_string()],
     )
 }
 
@@ -352,13 +352,13 @@ fn merge_git_commit_failed_advice(stage: &'static str, detail: String) -> Recove
     RecoveryAdvice::safety_refusal(
         "merge_git_commit_failed",
         format!("{stage} failed while finalizing merge --git-commit: {detail}"),
-        "Resolve the Git checkout issue, then run `heddle checkpoint -m \"...\"`; do not rerun `heddle merge`.",
+        "Resolve the Git checkout issue, then run `heddle commit -m \"...\"`; do not rerun `heddle merge`.",
         format!("{stage} failed after Heddle merge commit coordination started"),
         "retrying the Heddle merge could duplicate or obscure the already-landed Heddle merge state",
         "the Heddle merge state is preserved; the Git commit writer did not report a completed commit",
-        "heddle checkpoint -m \"...\"",
+        "heddle commit -m \"...\"",
         vec![
-            "heddle checkpoint -m \"...\"".to_string(),
+            "heddle commit -m \"...\"".to_string(),
             "heddle verify".to_string(),
         ],
     )
@@ -398,7 +398,7 @@ mod tests {
         let advice = merge_git_commit_empty_advice();
 
         assert_eq!(advice.kind, "merge_git_commit_empty");
-        assert_eq!(advice.primary_command, "heddle merge --preview");
+        assert_eq!(advice.primary_command, "heddle status");
         assert!(advice.error.contains("no changed paths"));
         assert!(advice.would_change.contains("empty Git commit"));
     }
@@ -411,7 +411,7 @@ mod tests {
         assert_eq!(advice.kind, "merge_git_commit_failed");
         assert!(advice.error.contains("writing Git index failed"));
         assert!(advice.error.contains("index locked"));
-        assert!(advice.primary_command.contains("heddle checkpoint"));
+        assert!(advice.primary_command.contains("heddle commit"));
         assert!(advice.preserved.contains("Heddle merge state is preserved"));
     }
 }

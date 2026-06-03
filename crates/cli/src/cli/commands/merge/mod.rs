@@ -27,11 +27,12 @@ use super::{
         override_trust_recommended_action,
         repository_verification_blocked_advice,
     },
+    next_action::{NextActionValidationContext, write_validated_json_stdout},
     operator_core::{OperatorCommandOutput, blocked_operator_exit_code},
     ready_cmd::{worktree_dirty, worktree_dirty_paths},
     snapshot::ensure_current_state,
     thread_cmd::{refresh_thread_freshness, thread_not_found_advice},
-    thread_landing::{ship_command_for_thread, ship_local_command},
+    thread_landing::{land_command_for_thread, land_local_command},
     worktree_safety::ensure_worktree_clean,
 };
 use crate::{
@@ -253,7 +254,7 @@ pub fn cmd_merge(
     }
 
     let exit_code = merge_output_exit_code(&output);
-    render_merge_output(cli, output)?;
+    render_merge_output(cli, &repo, output)?;
     if let Some(code) = exit_code {
         std::process::exit(code);
     }
@@ -720,8 +721,13 @@ pub(crate) fn merge_thread_into_current(
                         .any(|blocker| is_real_merge_blocker(blocker))
                 {
                     Some(report.recommended_action.clone())
+                } else if preview_report
+                    .as_ref()
+                    .is_some_and(preview_needs_readiness_review)
+                {
+                    None
                 } else {
-                    Some(ship_local_command(&thread.id))
+                    Some(land_local_command(&thread.id))
                 }
             } else {
                 None
@@ -1180,7 +1186,7 @@ pub(crate) fn merge_thread_into_current(
                 ));
                 post_snapshot_git_blockers.push(format!(
                     "recovery: heddle merge state {} is intact; resolve the Git checkout issue \
-                     (identity, locks, or filesystem errors) and run `heddle checkpoint -m \"{}\"` — do NOT re-run `heddle merge`",
+                     (identity, locks, or filesystem errors) and run `heddle commit -m \"{}\"` — do NOT re-run `heddle merge`",
                     new_state.change_id.short(),
                     merge_message
                 ));
@@ -1243,7 +1249,7 @@ fn mark_merge_previewed(repo: &Repository, thread_id: &str) -> Result<()> {
         .ok_or_else(|| anyhow!(thread_not_found_advice(thread_id, "mark merge previewed")))?;
     thread.integration_policy_result = ThreadIntegrationPolicy {
         status: Some("previewed".to_string()),
-        reason: Some("clean merge preview established ship path".to_string()),
+        reason: Some("clean merge preview established land path".to_string()),
         manual_resolution_state: thread.integration_policy_result.manual_resolution_state,
     };
     manager.save(&thread)?;
@@ -1766,7 +1772,7 @@ pub(crate) fn build_thread_preview_report(
     prefer_apply_recommendation: bool,
 ) -> Result<ThreadPreviewReport> {
     let mut graph = CommitGraphIndex::new(repo);
-    // External callers (`heddle sync`, `heddle ship`, `heddle ready`)
+    // External callers (`heddle sync`, `heddle land`, `heddle ready`)
     // don't have a `--semantic` flag today; preserve the historic
     // hunk-only preview behaviour. The merge command path threads its
     // own strategy by calling `_with_graph` directly.
@@ -1806,7 +1812,7 @@ fn build_thread_preview_report_with_graph(
     // Resolve the destination side. Prefer the caller's override (the
     // merge command supplies the actual current HEAD); otherwise fall
     // back to `thread.target_thread` for callers like `ready` / `sync` /
-    // `ship` that don't carry an explicit merge destination.
+    // `land` that don't carry an explicit merge destination.
     let resolved_target: Option<(String, ChangeId)> = if let Some(ovr) = target_override {
         Some((ovr.label.to_string(), ovr.change_id))
     } else if let Some(name) = thread.target_thread.as_deref() {
@@ -1877,7 +1883,7 @@ fn build_thread_preview_report_with_graph(
     };
     if manual_resolution_current {
         advice.blockers.clear();
-        advice.recommended_action = ship_command_for_thread(repo, &thread.id);
+        advice.recommended_action = land_command_for_thread(repo, &thread.id);
         advice.thread_health = "ready".to_string();
     }
 
@@ -1967,7 +1973,7 @@ fn merge_output_from_report(input: MergeOutputInput<'_>) -> MergeOutput {
     let stale_refresh_action = input.preview_report.and_then(|report| {
         (report.freshness == ThreadFreshness::Stale.to_string()).then(|| {
             if report.recommended_action.trim().is_empty() {
-                format!("heddle thread refresh {}", report.thread)
+                format!("heddle sync --thread {}", recommended_action_quote(&report.thread))
             } else {
                 report.recommended_action.clone()
             }
@@ -1985,16 +1991,14 @@ fn merge_output_from_report(input: MergeOutputInput<'_>) -> MergeOutput {
     } else if !input.extra_blockers.is_empty() {
         // Coordination blocker. Two shapes:
         //   1. Pre-snapshot (`merge_state` is None): typical
-        //      `--git-commit` precondition failure. Nothing landed, so
-        //      the safe retry is the same Heddle merge after the Git
-        //      checkout issue is fixed.
+        //      `--git-commit` precondition failure. Nothing landed; surface
+        //      status rather than a self-loop back into this merge command.
         //   2. Post-snapshot (`merge_state` is Some): `git commit`
         //      itself failed AFTER heddle advanced. Re-running
         //      `heddle merge` would noop; the safe recovery is the
         //      shared checkpoint template, which records the landed
         //      Heddle state in Git after the checkout issue is fixed.
         Some(coordination_blocker_recommended_action(
-            input.thread.as_ref(),
             input.merge_state.as_ref(),
         ))
     } else if input.preview_only
@@ -2004,10 +2008,17 @@ fn merge_output_from_report(input: MergeOutputInput<'_>) -> MergeOutput {
         stale_refresh_action
     } else if input.preview_only && input.message != "Already up to date" {
         // Clean preview: the actionable next step is the human landing
-        // command. `ship` keeps capture, merge, checkpoint, push, and
+        // command. `land` keeps capture, merge, checkpoint, push, and
         // verification in one loop, so the preview does not bounce users back
         // to the lower-level merge apply command.
-        input.thread.as_ref().map(|t| ship_local_command(&t.id))
+        if input
+            .preview_report
+            .is_some_and(preview_needs_readiness_review)
+        {
+            None
+        } else {
+            input.thread.as_ref().map(|t| land_local_command(&t.id))
+        }
     } else {
         // Clean apply: nothing to do.
         None
@@ -2134,19 +2145,11 @@ fn merge_output_thread_health(
     }
 }
 
-fn coordination_blocker_recommended_action(
-    thread: Option<&Thread>,
-    merge_state: Option<&String>,
-) -> String {
+fn coordination_blocker_recommended_action(merge_state: Option<&String>) -> String {
     if merge_state.is_some() {
-        "heddle checkpoint -m \"...\"".to_string()
-    } else if let Some(thread) = thread {
-        format!(
-            "heddle merge {} --git-commit",
-            recommended_action_quote(&thread.id)
-        )
+        "heddle commit -m \"...\"".to_string()
     } else {
-        "heddle merge <thread> --git-commit".to_string()
+        "heddle status".to_string()
     }
 }
 
@@ -2323,7 +2326,7 @@ fn stale_thread_merge_blocked_output(
     preview_only: bool,
 ) -> MergeOutput {
     let recommended_action = if preview_report.recommended_action.trim().is_empty() {
-        format!("heddle thread refresh {}", preview_report.thread)
+        format!("heddle sync --thread {}", recommended_action_quote(&preview_report.thread))
     } else {
         preview_report.recommended_action.clone()
     };
@@ -2478,9 +2481,12 @@ fn merge_preview_blocked_advice(output: &MergeOutput) -> RecoveryAdvice {
     advice
 }
 
-fn render_merge_output(cli: &Cli, output: MergeOutput) -> Result<()> {
+fn render_merge_output(cli: &Cli, repo: &Repository, output: MergeOutput) -> Result<()> {
     if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(&output)?);
+        write_validated_json_stdout(
+            &output,
+            NextActionValidationContext::new(&["merge"], repo.capability()),
+        )?;
     } else {
         // Fast-forward is the happy-path success message; colour the
         // verb (`Fast-forwarded`) accent-green and dim the change-id
@@ -2556,6 +2562,10 @@ fn render_merge_output(cli: &Cli, output: MergeOutput) -> Result<()> {
 /// every "needs attention" string as a blocker causes the "merge
 /// succeeded but status:blocked" contradiction that this helper exists
 /// to prevent.
+fn preview_needs_readiness_review(report: &ThreadPreviewReport) -> bool {
+    report.thread_state != ThreadState::Ready.to_string() && !report.heavy_impact_paths.is_empty()
+}
+
 fn is_real_merge_blocker(advisory: &str) -> bool {
     let lower = advisory.to_lowercase();
     lower.contains("path conflict") || lower.contains("heavy-impact change")
@@ -2871,18 +2881,18 @@ mod tests {
     #[test]
     fn coordination_blocker_recommendations_are_machine_actions() {
         let merge_state = "hd-landed123".to_string();
-        let post_snapshot = coordination_blocker_recommended_action(None, Some(&merge_state));
-        assert_eq!(post_snapshot, "heddle checkpoint -m \"...\"");
+        let post_snapshot = coordination_blocker_recommended_action(Some(&merge_state));
+        assert_eq!(post_snapshot, "heddle commit -m \"...\"");
         assert!(
             action_template(&post_snapshot).is_some(),
-            "checkpoint placeholder should carry a fillable template"
+            "commit placeholder should carry a fillable template"
         );
 
-        let pre_snapshot = coordination_blocker_recommended_action(None, None);
-        assert_eq!(pre_snapshot, "heddle merge <thread> --git-commit");
+        let pre_snapshot = coordination_blocker_recommended_action(None);
+        assert_eq!(pre_snapshot, "heddle status");
         assert!(
             action_template(&pre_snapshot).is_some(),
-            "thread placeholder should carry a fillable template"
+            "status action should carry a template"
         );
         for action in [post_snapshot, pre_snapshot] {
             assert!(
