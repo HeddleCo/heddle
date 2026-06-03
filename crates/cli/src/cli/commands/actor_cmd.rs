@@ -9,7 +9,7 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 use objects::object::ThreadName;
 use objects::store::{ActorChainNode, AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary};
-use repo::Repository;
+use repo::{Repository, ThreadId};
 use serde::Serialize;
 
 use super::{
@@ -19,7 +19,7 @@ use super::{
     git_overlay_health::{
         RepositoryVerificationState, action_template, build_repository_verification_state,
     },
-    thread::find_thread_summary,
+    thread::{find_thread_summary, thread_name_invalid_advice},
 };
 use crate::cli::{Cli, should_output_json};
 
@@ -265,6 +265,13 @@ pub async fn cmd_actor_spawn(
     provider: Option<String>,
     model: Option<String>,
 ) -> Result<()> {
+    // A user-supplied `--thread` name is a creation boundary (spawn mints or
+    // attaches the named thread), so reject an unsafe name before any ref is
+    // written. The generated `actor/<session>` fallback is safe by construction.
+    // (heddle#464 close-the-class.)
+    if let Some(name) = thread.as_deref() {
+        ThreadId::new(name).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
+    }
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
 
     let base_state = repo.head()?.ok_or_else(|| {

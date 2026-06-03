@@ -3250,6 +3250,10 @@ pub(crate) fn cmd_thread_rename(
     old: String,
     new: String,
 ) -> Result<()> {
+    // Renaming persists a new thread id, so the destination name is a
+    // user/external creation boundary too — reject an unsafe name here.
+    // (heddle#464 close-the-class.)
+    ThreadId::new(new.as_str()).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
     let old_tn = ThreadName::new(&old);
     let new_tn = ThreadName::new(&new);
     let state = repo

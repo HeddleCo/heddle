@@ -4347,6 +4347,70 @@ fn thread_create_rejects_thread_name_with_metachar() {
     );
 }
 
+/// heddle#464 close-the-class: `thread rename` writes a NEW thread id, so the
+/// destination name is a creation boundary too — an unsafe new name is rejected
+/// and the original thread is left untouched.
+#[test]
+fn thread_rename_rejects_unsafe_new_name() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    heddle(&["thread", "create", "safe-thread"], Some(temp.path())).unwrap();
+
+    let out = heddle_output(
+        &["thread", "rename", "safe-thread", "bad;id"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    assert!(
+        !out.status.success(),
+        "rename to an unsafe name must be rejected: stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("is invalid"),
+        "rename must explain the name is invalid: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let list = heddle(&["thread", "list", "--output", "json"], Some(temp.path())).unwrap();
+    assert!(
+        !list.contains("bad;id"),
+        "the rejected name must never have been persisted: {list}"
+    );
+    assert!(
+        list.contains("safe-thread"),
+        "a rejected rename must leave the original thread intact: {list}"
+    );
+}
+
+/// heddle#464 close-the-class: `actor spawn --thread <name>` mints/attaches the
+/// named thread, so a user-supplied unsafe name is rejected before any ref is
+/// written. (The generated `actor/<session>` fallback is safe by construction.)
+#[test]
+fn actor_spawn_rejects_unsafe_thread_name() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    let out =
+        heddle_output(&["actor", "spawn", "--thread", "bad;id"], Some(temp.path())).unwrap();
+    assert!(
+        !out.status.success(),
+        "actor spawn with an unsafe thread name must be rejected: stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("is invalid"),
+        "actor spawn must explain the name is invalid: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let list = heddle(&["thread", "list", "--output", "json"], Some(temp.path())).unwrap();
+    assert!(
+        !list.contains("bad;id"),
+        "the rejected name must never have been persisted: {list}"
+    );
+}
+
 /// heddle#464 close-the-class (round 6): `heddle agent reserve` also persists a
 /// thread record, so it must reject an unsafe thread name at the same boundary.
 #[test]

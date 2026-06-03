@@ -73,7 +73,7 @@ impl std::fmt::Display for ThreadIdError {
             write!(
                 f,
                 "thread name '{}' is invalid: use only letters, digits, and _ - . / @ : + = \
-                 (no spaces, shell metacharacters, '..' path segments, or a leading '/') — try '{}'",
+                 (no spaces, shell metacharacters, '..' path segments, or a leading '/' or '-') — try '{}'",
                 self.input, self.suggestion
             )
         }
@@ -89,7 +89,9 @@ impl std::error::Error for ThreadIdError {}
 /// thread id is always a single shell token: `feature/x`, `v1.2`, `my-thread`,
 /// and `team@scope` are accepted; spaces, quotes, `;`, `|`, `$`, `&`, `*`,
 /// backticks, and newlines are rejected. Thread ids flow into worktree paths,
-/// so `..` and a leading `/` are rejected to keep them in-tree.
+/// so `..` and a leading `/` are rejected to keep them in-tree. A leading `-`
+/// is also rejected: it is in the safe set (for `my-thread`) but a breadcrumb
+/// like `heddle land --thread -foo` parses `-foo` as a flag, not the value.
 pub fn validate_thread_id(value: &str) -> Result<(), ThreadIdError> {
     let safe_charset = value.bytes().all(|b| {
         b.is_ascii_alphanumeric()
@@ -98,7 +100,11 @@ pub fn validate_thread_id(value: &str) -> Result<(), ThreadIdError> {
     let ok = !value.is_empty()
         && safe_charset
         && !value.contains("..")
-        && !value.starts_with('/');
+        && !value.starts_with('/')
+        // A leading '-' is in the safe set (for `my-thread`) but makes the id
+        // look like a CLI flag: `heddle land --thread -foo` parses `-foo` as an
+        // option, and argv-template construction panics. Reject it at the source.
+        && !value.starts_with('-');
     if ok {
         Ok(())
     } else {
@@ -528,6 +534,8 @@ mod thread_id_tests {
             "..",         // bare traversal
             "a/../b",     // traversal segment
             "/abs",       // leading slash
+            "-foo",       // leading dash — parses as a CLI flag in breadcrumbs
+            "--bar",      // leading double-dash
             "",           // empty
         ] {
             assert!(
