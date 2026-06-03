@@ -1,8 +1,21 @@
 # Emergent Stacked Changes
 
-Status: proposed decision
+Status: **ACCEPTED** (maintainer sign-off 2026-06-03 — see Maintainer Decisions)
 Date: 2026-06-03
 Issue: heddle#474
+
+## Maintainer decisions (2026-06-03)
+
+Direction ACCEPTED (emergent from threads; no new `stack` noun). Resolutions to the six open questions:
+
+1. **Parent edge:** accept either a thread-name OR a thread-id from the user, but store/reference it internally as a **stable thread-id** (survives renames). Existing name-based stack readers get a name→id resolution shim.
+2. **Post-land edge:** **keep** the `parent_thread` edge (do not collapse it on land). A stack is meant to land as a cohesive unit, so the edge stays meaningful through the cascading landing.
+3. **Land:** `land` **always auto-restacks** descendants (no "mark dirty-for-sync" fallback).
+4. **Branched-stack conflict (maintainer-delegated → orchestrator call):** `sync` **continues independent sibling branches**; it halts only the conflicted thread and its downstream descendants (which depend on it), and reports per-branch status (restacked / needs-resolution / blocked-on-ancestor). Maximizes progress + isolates the conflict, vs a stop-the-whole-stack default.
+5. **Restack provenance:** **add an explicit restack `OpRecord` op** recording old/new base + parent change. Cheap — one variant + its undo inverse; the #449 versioned codec already accommodates new record types, and it gives #469 (undo `base_state`) a purpose-built inverse instead of overloading `ThreadUpdate{old,new}` (which captures state, not base).
+6. **Fields (maintainer-delegated → orchestrator call):** **keep `target_thread` and `parent_thread` separate.** They encode destination vs structure; reusing one would conflate "where I'm going" with "what I'm stacked on", force an implicit re-point on land, and lose the "→ target, via stack" display intent. Records already persist both, so separate costs nothing new.
+
+Implementation note: the read-only `crates/repo/src/thread_stack.rs` planner already projects bottom-up rebase steps — the impl mostly wires it into `sync`/`land` as a mutation + adds `start --on`.
 
 ## Decision
 
