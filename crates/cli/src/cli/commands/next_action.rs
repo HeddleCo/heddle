@@ -110,6 +110,24 @@ fn validate_next_actions_at_path(
     Ok(())
 }
 
+// heddle#464 close-the-class note. This validator rejects *non-canonical*
+// breadcrumbs (demoted verbs, wrong repo type, self-loops) but deliberately
+// does NOT generically reject state-gated verbs (`resolve`/`continue`/`abort`)
+// when the emitting repo lacks merge/operation state. A sound generic check is
+// impractical here for two reasons:
+//   1. Thread-scoped breadcrumbs carry their state in a *different* repository
+//      than the one being validated — e.g. `sync` emits
+//      `heddle --repo <thread-worktree> resolve --list` after materializing the
+//      conflict in that worktree, while validation runs against the repo `sync`
+//      ran from (where no merge is in progress). The validator cannot see the
+//      worktree's state, so a state-gate would false-positive exactly the
+//      correct scoped breadcrumbs.
+//   2. The validator operates on the serialized JSON with only repository
+//      *capability* in context; plumbing live merge/operation state through
+//      every emit site is a broad change beyond this fix-round's blast radius.
+// The class is instead closed at the *source* (see the audit: `cmd_sync`,
+// `cmd_land`, and `describe_thread_advice` no longer emit a `resolve` breadcrumb
+// from an unmaterialized state) and guarded by the regression tests.
 pub(crate) fn validate_next_action(
     action: &str,
     context: NextActionValidationContext<'_>,

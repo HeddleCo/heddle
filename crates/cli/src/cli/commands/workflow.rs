@@ -119,10 +119,12 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
             current_state: thread.current_state.clone(),
             chosen_path: "no_op".to_string(),
         }
-    } else if stale_report.conflict_count > 0 || !stale_blockers.is_empty() {
-        let recommended_action = if stale_report.conflict_count > 0 {
-            "heddle resolve --list".to_string()
-        } else if stale_report.recommended_action.trim().is_empty()
+    } else if stale_report.conflict_count == 0 && !stale_blockers.is_empty() {
+        // Genuine non-conflict blockers (e.g. failing verification) cannot be
+        // auto-refreshed away. Surface the blocker without a refresh. (The
+        // conflict case carries a "path conflict(s)" blocker too, but it is
+        // routed to the refresh attempt below so the breadcrumb materializes.)
+        let recommended_action = if stale_report.recommended_action.trim().is_empty()
             || stale_report.recommended_action.starts_with("heddle sync")
         {
             String::new()
@@ -160,29 +162,78 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
             chosen_path: "blocked".to_string(),
         }
     } else {
-        let refreshed = refresh_thread(&repo, &thread.id, cli)?;
-        update_integration_policy(&repo, &refreshed.id, "current", "thread refreshed cleanly")?;
-        let recommended_action = primary_next_action(
-            operation.as_ref(),
-            remote_tracking.as_ref(),
-            import_hint.as_ref(),
-            Some(&land_local_command(&refreshed.id)),
-        );
-        let trust = build_repository_verification_state(&repo);
-        SyncOutput {
-            operator: OperatorCommandOutput {
-                status: "refreshed".to_string(),
-                action: "sync".to_string(),
-                message: format!("Refreshed thread '{}'", refreshed.id),
-                blockers: vec![],
-                warnings: Vec::new(),
-                next_action: Some(recommended_action.clone()),
-                recommended_action: Some(recommended_action),
-            },
-            trust,
-            thread: refreshed.id.clone(),
-            current_state: refreshed.current_state.clone(),
-            chosen_path: "refresh".to_string(),
+        // Either a clean stale thread or one whose replay genuinely conflicts
+        // (conflict_count > 0). Attempt the refresh in both cases.
+        // `refresh_thread` persists the merge state + worktree conflict
+        // markers in the thread's checkout *before* returning the conflict
+        // advice, so the `resolve` breadcrumb below points at real state.
+        // heddle#464 r2: the old conflict branch returned here early and
+        // emitted `heddle resolve --list` with no merge in progress — a dead
+        // breadcrumb that failed with `no_merge_in_progress`. A previewed
+        // conflict that the 3-way merge resolves cleanly also completes here
+        // and recommends `land`.
+        match refresh_thread(&repo, &thread.id, cli) {
+            Ok(refreshed) => {
+                update_integration_policy(
+                    &repo,
+                    &refreshed.id,
+                    "current",
+                    "thread refreshed cleanly",
+                )?;
+                let recommended_action = primary_next_action(
+                    operation.as_ref(),
+                    remote_tracking.as_ref(),
+                    import_hint.as_ref(),
+                    Some(&land_local_command(&refreshed.id)),
+                );
+                let trust = build_repository_verification_state(&repo);
+                SyncOutput {
+                    operator: OperatorCommandOutput {
+                        status: "refreshed".to_string(),
+                        action: "sync".to_string(),
+                        message: format!("Refreshed thread '{}'", refreshed.id),
+                        blockers: vec![],
+                        warnings: Vec::new(),
+                        next_action: Some(recommended_action.clone()),
+                        recommended_action: Some(recommended_action),
+                    },
+                    trust,
+                    thread: refreshed.id.clone(),
+                    current_state: refreshed.current_state.clone(),
+                    chosen_path: "refresh".to_string(),
+                }
+            }
+            Err(error) => {
+                // refresh_thread materializes the conflict before returning;
+                // only then is `resolve` a live breadcrumb. If no merge was
+                // materialized the failure is genuine — propagate it.
+                if !sync_conflict_merge_in_progress(&repo, &thread) {
+                    return Err(error);
+                }
+                update_integration_policy(
+                    &repo,
+                    &thread.id,
+                    "blocked",
+                    "refresh produced conflicts requiring manual resolution",
+                )?;
+                let recommended_action = scoped_resolve_list_command(&thread);
+                let trust = build_repository_verification_state(&repo);
+                SyncOutput {
+                    operator: OperatorCommandOutput {
+                        status: "blocked".to_string(),
+                        action: "sync".to_string(),
+                        message: format!("Thread '{}' has merge conflicts to resolve", thread.id),
+                        blockers: stale_report.blockers.clone(),
+                        warnings: Vec::new(),
+                        next_action: Some(recommended_action.clone()),
+                        recommended_action: Some(recommended_action),
+                    },
+                    trust,
+                    thread: thread.id.clone(),
+                    current_state: thread.current_state.clone(),
+                    chosen_path: "blocked".to_string(),
+                }
+            }
         }
     };
     output.operator.block_success_claim_if_verification_blocked(
@@ -485,8 +536,14 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             .first()
             .cloned()
             .unwrap_or_else(|| "integration requires manual review".to_string());
+        // Never fall back to `preview.recommended_action` here: this is the
+        // pre-merge bail, so no merge state is materialized (a `resolve`
+        // breadcrumb would die with `no_merge_in_progress`) and the preview's
+        // own land recommendation would self-loop this very command. Drive the
+        // operator through `sync`, which materializes and resolves a genuine
+        // conflict before a land retry. (heddle#464 close-the-class.)
         let recommended_action = integration_blocker_recommended_action(&integration_blockers)
-            .unwrap_or_else(|| preview.recommended_action.clone());
+            .unwrap_or_else(|| format!("heddle sync --thread {}", merge_thread.id));
         update_integration_policy(&repo, &merge_thread.id, "blocked", &reason)?;
         return write_land_output(
             cli,
@@ -1346,6 +1403,38 @@ fn emit_with_next_action_validation<T: Serialize>(
 
 fn non_empty_next_action(action: &str) -> Option<String> {
     (!action.trim().is_empty()).then(|| action.to_string())
+}
+
+/// True when `refresh_thread` materialized a conflicted merge for `thread`
+/// (so `heddle resolve` has state to read). The merge state lives in the
+/// thread's own checkout, which may differ from the repo `sync` ran against.
+fn sync_conflict_merge_in_progress(repo: &Repository, thread: &Thread) -> bool {
+    if thread.execution_path.as_os_str().is_empty() {
+        repo.merge_state_manager().is_merge_in_progress()
+    } else if thread.execution_path.exists() {
+        Repository::open(&thread.execution_path)
+            .map(|worktree| worktree.merge_state_manager().is_merge_in_progress())
+            .unwrap_or(false)
+    } else {
+        false
+    }
+}
+
+/// `heddle resolve --list` scoped to wherever the conflict was materialized.
+/// When the thread has its own checkout the breadcrumb must carry `--repo` so
+/// it reads the merge state in that checkout rather than the repo `sync` ran
+/// against (where no merge is in progress).
+fn scoped_resolve_list_command(thread: &Thread) -> String {
+    if thread.execution_path.as_os_str().is_empty() {
+        super::command_catalog::heddle_action(["resolve", "--list"])
+    } else {
+        super::command_catalog::heddle_action(vec![
+            "--repo".to_string(),
+            thread.execution_path.display().to_string(),
+            "resolve".to_string(),
+            "--list".to_string(),
+        ])
+    }
 }
 
 fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Result<()> {

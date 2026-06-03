@@ -132,7 +132,15 @@ pub fn describe_thread_advice_with_initial(
         } else if blockers.is_empty() {
             blockers.push("Thread needs attention before integration".to_string());
         }
-        RecommendedAction::Resolve
+        // `land` — not `resolve --list`. This is a metadata-only function; it
+        // is always called from non-materialized contexts (status passes
+        // conflicts=0, the only conflicts>0 caller is the merge dry-run
+        // preview), so no merge state exists for `resolve` to read here and a
+        // `resolve --list` breadcrumb dies with `no_merge_in_progress`. `land`
+        // re-drives the thread: it materializes a real conflict (then surfaces
+        // `continue`) or re-reports the specific blocker with its own
+        // recommendation. (heddle#464 close-the-class.)
+        RecommendedAction::Land
     } else if thread.state == ThreadState::Ready
         && thread.integration_policy_result.status.as_deref() == Some("previewed")
     {
@@ -184,4 +192,54 @@ fn preview_paths(paths: &[String]) -> String {
         String::new()
     };
     format!("{}{suffix}", visible.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn thread_json(state: &str) -> Thread {
+        serde_json::from_value(serde_json::json!({
+            "id": "feature/x",
+            "thread": "feature/x",
+            "target_thread": "main",
+            "mode": "materialized",
+            "state": state,
+            "base_state": "aaaa",
+            "base_root": "bbbb",
+            "freshness": "current",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+        }))
+        .expect("thread fixture should deserialize")
+    }
+
+    // heddle#464 close-the-class: `describe_thread_advice` is metadata-only —
+    // it is never called from a context that has materialized a merge (status
+    // passes conflicts=0; the lone conflicts>0 caller is the dry-run merge
+    // preview). So it must never emit `heddle resolve --list`, which would die
+    // with `no_merge_in_progress`. A blocked thread re-drives through `land`.
+    #[test]
+    fn blocked_thread_recommends_land_not_dead_resolve_breadcrumb() {
+        let advice = describe_thread_advice(&thread_json("blocked"), false, 0, false);
+        assert_eq!(advice.thread_health, "blocked");
+        assert_ne!(advice.recommended_action, "heddle resolve --list");
+        assert_eq!(
+            advice.recommended_action,
+            "heddle land --thread feature/x --no-push"
+        );
+    }
+
+    // Even when a preview reports conflicts, the merge is a dry run with no
+    // materialized state, so the breadcrumb must drive materialization (land),
+    // never a dead `resolve --list`.
+    #[test]
+    fn previewed_conflicts_recommend_land_not_dead_resolve_breadcrumb() {
+        let advice = describe_thread_advice(&thread_json("active"), false, 2, false);
+        assert_ne!(advice.recommended_action, "heddle resolve --list");
+        assert_eq!(
+            advice.recommended_action,
+            "heddle land --thread feature/x --no-push"
+        );
+    }
 }

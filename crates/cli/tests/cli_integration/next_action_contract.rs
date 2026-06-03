@@ -194,3 +194,51 @@ fn stale_managed_thread_suggests_sync_not_refresh_or_merge_preview() {
 
     drop(checkout_owner);
 }
+
+// heddle#464 r2: `sync --thread` on a stale thread whose replay genuinely
+// conflicts used to emit `heddle resolve --list` *before* refreshing — a dead
+// breadcrumb, because no merge state existed yet and the top-level `resolve`
+// failed with `no_merge_in_progress`. sync must now materialize the conflict
+// (merge state + worktree markers) so the emitted breadcrumb actually runs.
+#[test]
+fn sync_conflicting_stale_thread_emits_runnable_resolve_breadcrumb() {
+    let (main, checkout_owner, execution_path) = setup_managed_thread("feature/conflict-sync");
+    let checkout = std::path::Path::new(&execution_path);
+
+    // Both sides edit the SAME file divergently so the refresh genuinely
+    // conflicts. (Disjoint-file edits 3-way merge cleanly — that path is
+    // covered by `stale_managed_thread_suggests_sync_not_refresh_or_merge_preview`.)
+    std::fs::write(checkout.join("base.txt"), "thread change\n").unwrap();
+    heddle(&["commit", "-m", "thread edit"], Some(checkout)).unwrap();
+
+    std::fs::write(main.path().join("base.txt"), "main change\n").unwrap();
+    heddle(&["commit", "-m", "advance main"], Some(main.path())).unwrap();
+
+    let sync = json(
+        &["--output", "json", "sync", "--thread", "feature/conflict-sync"],
+        main.path(),
+    );
+    assert_eq!(sync["status"], "blocked", "conflicting sync must block: {sync}");
+    let next_action = sync["next_action"]
+        .as_str()
+        .unwrap_or_else(|| panic!("sync conflict must carry a next_action: {sync}"));
+    assert!(
+        next_action.contains("resolve --list"),
+        "sync conflict breadcrumb should drive the resolve flow: {sync}"
+    );
+    assert_no_banned_next_actions(&sync);
+
+    // The breadcrumb must actually run: the conflict was materialized in the
+    // thread's checkout, so `resolve --list` there reads real merge state
+    // instead of failing with `no_merge_in_progress`.
+    let resolve = heddle_output(&["--output", "json", "resolve", "--list"], Some(checkout))
+        .expect("resolve --list should spawn");
+    assert!(
+        resolve.status.success(),
+        "materialized resolve --list must succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&resolve.stdout),
+        String::from_utf8_lossy(&resolve.stderr),
+    );
+
+    drop(checkout_owner);
+}
