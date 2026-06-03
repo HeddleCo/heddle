@@ -71,9 +71,15 @@ pub fn semantic_three_way_merge(
         return text_hunk_merge_with_markers(base, ours, theirs, markers);
     };
 
-    let base_segments = segment_file(&base_parsed);
-    let ours_segments = segment_file(&ours_parsed);
-    let theirs_segments = segment_file(&theirs_parsed);
+    let mut base_segments = segment_file(&base_parsed);
+    let mut ours_segments = segment_file(&ours_parsed);
+    let mut theirs_segments = segment_file(&theirs_parsed);
+
+    // Rekey `use` items so declarations whose expanded leaf sets intersect
+    // on ANY path collide for cross-side matching (heddle#468; Codex r2 on
+    // PR #477). Must run before the empty-base add/add guard below and
+    // before reconstruction, both of which key off `Item`/`ItemKey`.
+    items::canonicalize_use_keys(&mut base_segments, &mut ours_segments, &mut theirs_segments);
 
     // When a side has zero parseable items but the others do, the
     // per-item alignment has nothing to anchor on for that side and
