@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use merge::{text_hunk_merge_with_markers, ConflictMarkers, MergeOutcome};
 
-use super::items::{FileSegments, Item, ItemKey};
+use super::items::{FileSegments, Item, ItemKey, ItemKind};
 
 /// Three sides of the merge: `[base, ours, theirs]`. Each per-iteration
 /// segment contribution is indexed by [`Side`] so emission tracking can
@@ -36,6 +36,13 @@ const N_SIDES: usize = 3;
 /// the second, …) so each duplicate gets a distinct slot. Matching
 /// across sides pairs same-key items positionally — base's first `foo`
 /// pairs with ours's first `foo` pairs with theirs's first `foo`.
+///
+/// Positional occurrence governs only NON-`use` items. `use` items are
+/// resolved as whole leaf-components by [`resolve_use_component`] (a set
+/// comparison over every declaration each side contributes), so no `use`
+/// item's content is ever decided by its occurrence index — the occurrence
+/// slot survives for them only to anchor inter-item whitespace weaving
+/// (heddle#468 r5: the duplicate-import class the positional path produced).
 type MatchKey = (ItemKey, usize);
 
 /// Stitch three sides together via per-item resolution + inter-item hunk merge.
@@ -95,7 +102,14 @@ pub(crate) fn reconstruct_merged_file(
     // CRLF markers (Codex r2 P2 on PR #193, cid 3291860840).
     let sides = SideSources::new(base, ours, theirs);
 
+    // Non-`use` items: per-item positional resolution, matched by
+    // (key, occurrence). `use` items are skipped here — their content is
+    // NEVER decided by positional occurrence index (the heddle#468 r5 bug
+    // class). They are resolved below as whole leaf-components.
     for key in &all_keys {
+        if key.0.kind == ItemKind::Use {
+            continue;
+        }
         let resolution = resolve_item(
             sides,
             base_map.get(*key).copied(),
@@ -105,6 +119,45 @@ pub(crate) fn reconstruct_merged_file(
         );
         total_conflicts += resolution.1;
         resolved.insert((*key).clone(), resolution);
+    }
+
+    // `use` items: resolve each canonical leaf-component as ONE set-valued
+    // unit. After `canonicalize_use_keys`, every declaration in a component
+    // shares one `ItemKey`, so a side may contribute SEVERAL items to it
+    // (e.g. base `use a::Bar;` widened by theirs to `use a::{Bar, Baz};`
+    // while ours adds a separate `use a::Baz;`). Occurrence-matching those
+    // items positionally emitted both the widened group AND the standalone
+    // leaf — a duplicate import, no conflict (heddle#468, Codex r5 on PR
+    // #477). Comparing full component leaf-SETS instead makes the whole
+    // class impossible: the verdict lands on the component's first slot and
+    // every later slot emits nothing, so the component is resolved exactly
+    // once regardless of how many declarations each side spells it across.
+    let mut use_components: BTreeMap<ItemKey, [Vec<&Item>; 3]> = BTreeMap::new();
+    for (side, seg) in [base_segments, ours_segments, theirs_segments]
+        .iter()
+        .enumerate()
+    {
+        for item in &seg.items {
+            if item.key.kind == ItemKind::Use {
+                use_components
+                    .entry(item.key.clone())
+                    .or_insert_with(|| [Vec::new(), Vec::new(), Vec::new()])[side]
+                    .push(item);
+            }
+        }
+    }
+    for (key, [base_items, ours_items, theirs_items]) in &use_components {
+        let (bytes, conflicts) =
+            resolve_use_component(sides, base_items, ours_items, theirs_items, markers);
+        total_conflicts += conflicts;
+        resolved.insert((key.clone(), 0), (bytes, conflicts));
+        // Higher-occurrence slots of this component exist only so the
+        // inter-item segment weaver can place the surrounding whitespace;
+        // they carry no item bytes (the verdict above is the whole unit).
+        let slots = base_items.len().max(ours_items.len()).max(theirs_items.len());
+        for occ in 1..slots {
+            resolved.insert((key.clone(), occ), (None, 0));
+        }
     }
 
     let item_emit_order = compute_item_emit_order(&base_mks, &ours_mks, &theirs_mks, &all_keys);
@@ -413,6 +466,12 @@ fn resolve_item(
         // syntactically invalid file when both sides added a function /
         // method with the same name. heddle#68 calls this out as a conflict.
         (None, Some(o), Some(t)) => {
+            // The ONLY clean add/add is byte-identical. `use` items never
+            // reach this arm — they are resolved as whole leaf-components by
+            // `resolve_use_component` (set-valued, not positional). This arm
+            // now governs only non-`use` items (e.g. two top-level functions
+            // with the same name added on both sides): byte-identical → dedup,
+            // anything else → conflict (heddle#68).
             if o == t {
                 (Some(o.to_vec()), 0)
             } else {
@@ -466,6 +525,79 @@ fn materialize_outcome(outcome: MergeOutcome) -> (Option<Vec<u8>>, usize) {
         // parsed, but carry through safely.
         MergeOutcome::Binary | MergeOutcome::DeleteVsModify => (None, 1),
     }
+}
+
+/// Resolve one canonical leaf-component of `use` items as a single
+/// set-valued unit. `base_items` / `ours_items` / `theirs_items` are every
+/// declaration each side contributes to the component, in source order;
+/// any of them may be empty (component absent on that side) or hold more
+/// than one declaration (the heddle#468 r5 base-widened-grouped shape).
+///
+/// The component's text on a side is the byte-exact concatenation of its
+/// declarations (one EOL between consecutive lines). The 3-way verdict is
+/// taken over those WHOLE-component texts — never per declaration by
+/// positional occurrence — and reduces to exactly three outcomes:
+///
+/// * **one side left the component byte-identical to base** → take the
+///   other side (the standard "unchanged side defers" rule, generalized
+///   from [`resolve_item`]'s 3-way-modify arm to the set);
+/// * **both sides produced byte-identical text** → dedup to one copy;
+/// * **everything else** — a widened/regrouped base item, divergent
+///   additions, alias / `cfg` / visibility drift, or any multi-occurrence
+///   ambiguity within the component → **conflict** the whole component as
+///   one `<<<<<<< / ======= / >>>>>>>` block.
+///
+/// Because the comparison is over complete leaf-SETS rather than
+/// occurrence positions, the r5 class (base `use a::Bar;`; ours adds a
+/// separate `use a::Baz;`; theirs widens to `use a::{Bar, Baz};`) lands in
+/// the conflict outcome instead of silently emitting both `{Bar, Baz}` and
+/// `Baz` — a duplicate import (Rust E0252). No future regroup / widen /
+/// multi-occurrence shape can drip the same way.
+fn resolve_use_component(
+    sides: SideSources<'_>,
+    base_items: &[&Item],
+    ours_items: &[&Item],
+    theirs_items: &[&Item],
+    markers: ConflictMarkers<'_>,
+) -> (Option<Vec<u8>>, usize) {
+    let eol = sides.eol_policy.eol();
+    let base_bytes = join_component(base_items, sides.base, eol);
+    let ours_bytes = join_component(ours_items, sides.ours, eol);
+    let theirs_bytes = join_component(theirs_items, sides.theirs, eol);
+
+    let non_empty = |v: Vec<u8>| if v.is_empty() { None } else { Some(v) };
+
+    if ours_bytes == base_bytes {
+        // ours left the component untouched → take theirs (which may be a
+        // clean delete when theirs is empty).
+        return (non_empty(theirs_bytes), 0);
+    }
+    if theirs_bytes == base_bytes || ours_bytes == theirs_bytes {
+        // theirs left it untouched → take ours; or both sides made the
+        // byte-identical change → dedup to a single copy.
+        return (non_empty(ours_bytes), 0);
+    }
+    // Both sides changed the component, differently. Conflict the whole
+    // unit — see the outcome list above.
+    (
+        Some(emit_addadd_conflict(&ours_bytes, &theirs_bytes, markers, sides)),
+        1,
+    )
+}
+
+/// Concatenate a `use` component's declarations into one byte-exact text,
+/// separating consecutive lines with `eol`. A single declaration yields its
+/// own bytes verbatim (so single-occurrence components compare and emit
+/// exactly as [`resolve_item`] did before the set-valued path existed).
+fn join_component(items: &[&Item], source: &str, eol: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            out.extend_from_slice(eol);
+        }
+        out.extend_from_slice(&source.as_bytes()[item.start_byte..item.end_byte]);
+    }
+    out
 }
 
 /// Determine the order items should appear in the output. Strategy:

@@ -345,8 +345,8 @@ fn human_clean_summary(output: &VerifyOutput) -> &str {
             "Nothing to do. Workspace verified."
         } else if output.trust.recommended_action.contains("push") {
             "Local work is ready to publish."
-        } else if output.trust.recommended_action.contains("ship") {
-            "Thread is ready to ship."
+        } else if output.trust.recommended_action.contains("land") {
+            "Thread is ready to land."
         } else {
             "Workspace verified."
         }

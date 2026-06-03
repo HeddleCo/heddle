@@ -78,6 +78,9 @@ pub enum GitBridgeError {
     #[error("conflict during sync: {0}")]
     Conflict(String),
 
+    #[error("Git branch '{branch}' cannot be imported as a Heddle thread: {message}")]
+    InvalidThreadName { branch: String, message: String },
+
     #[error(
         "Git branch {branch} and Heddle thread {thread} diverged: thread {thread_change}, branch {branch_change}"
     )]

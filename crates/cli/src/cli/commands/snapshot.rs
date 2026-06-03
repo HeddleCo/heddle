@@ -28,10 +28,12 @@ use super::{
         build_repository_verification_state, git_overlay_mutation_preflight_advice,
         plain_git_mutation_preflight_advice, unimported_git_history_advice,
     },
+    next_action::{NextActionValidationContext, write_validated_json_stdout},
     thread::find_active_thread_entry,
     thread_cmd::current_thread,
 };
 use crate::{
+    attribution::clean_attribution_value,
     bridge::GitBridge,
     cli::{Cli, should_output_json, style},
     config::UserConfig,
@@ -119,6 +121,15 @@ pub struct SnapshotAgentOverrides {
     pub no_agent: bool,
 }
 
+#[derive(Clone, Debug, Default)]
+struct AgentEnv {
+    provider: Option<String>,
+    model: Option<String>,
+    policy: Option<String>,
+    session: Option<String>,
+    segment: Option<String>,
+}
+
 /// Stable exit code emitted when capture aborts because the filesystem
 /// is out of space. Mirrors the POSIX ENOSPC value (28) so shell users
 /// and supervisors that already classify "disk full" by OS code see a
@@ -193,7 +204,10 @@ pub async fn cmd_snapshot(
     }
 
     if as_json {
-        println!("{}", serde_json::to_string(&output)?);
+        write_validated_json_stdout(
+            &output,
+            NextActionValidationContext::new(&["capture"], repo.capability()),
+        )?;
     } else {
         // The bare `{message}` was `"Created state <id> (<hash>)"` —
         // we restyle the parts here rather than inside the message
@@ -711,6 +725,31 @@ fn build_attribution(
     user_config: &UserConfig,
     agent: &SnapshotAgentOverrides,
 ) -> Result<Attribution> {
+    build_attribution_with_env(repo, user_config, agent, current_agent_env())
+}
+
+fn current_agent_env() -> AgentEnv {
+    AgentEnv {
+        provider: std::env::var("HEDDLE_AGENT_PROVIDER")
+            .ok()
+            .and_then(clean_attribution_value),
+        model: std::env::var("HEDDLE_AGENT_MODEL")
+            .ok()
+            .and_then(clean_attribution_value),
+        policy: std::env::var("HEDDLE_AGENT_POLICY")
+            .ok()
+            .and_then(clean_attribution_value),
+        session: std::env::var("HEDDLE_SESSION_ID").ok(),
+        segment: std::env::var("HEDDLE_SESSION_SEGMENT").ok(),
+    }
+}
+
+fn build_attribution_with_env(
+    repo: &Repository,
+    user_config: &UserConfig,
+    agent: &SnapshotAgentOverrides,
+    env: AgentEnv,
+) -> Result<Attribution> {
     let principal = resolve_principal(repo, user_config)?;
     if is_default_unknown_principal(&principal) {
         return Err(anyhow!(missing_capture_identity_advice()));
@@ -732,11 +771,11 @@ fn build_attribution(
     // thread would show `Principal: Unknown`, which broke the
     // provenance demo and the `heddle blame --context` story.
     //
-    // Precedence: this slots in *after* explicit CLI overrides but
-    // *before* the ambient HEDDLE_AGENT_* env (those reflect whoever
-    // happens to be running heddle right now; the thread's actor is
-    // the user's stated intent for *this* thread, which is more
-    // specific). Falls back to the rest of the cascade unchanged.
+    // Precedence: explicit CLI overrides and `HEDDLE_AGENT_*` env are
+    // user-supplied attribution for this capture, so they must not be
+    // silently masked by a detected harness actor. The active thread
+    // actor remains the zero-config fallback for agent threads when no
+    // explicit attribution is present.
     let thread_actor = current_thread(repo)
         .ok()
         .flatten()
@@ -796,12 +835,8 @@ fn build_attribution(
     let provider = agent
         .provider
         .clone()
+        .or(env.provider)
         .or(thread_provider)
-        .or_else(|| {
-            std::env::var("HEDDLE_AGENT_PROVIDER")
-                .ok()
-                .and_then(clean_attribution_value)
-        })
         .or(harness_provider)
         .or(session_provider)
         .or_else(|| {
@@ -821,12 +856,8 @@ fn build_attribution(
     let model = agent
         .model
         .clone()
+        .or(env.model)
         .or(thread_model)
-        .or_else(|| {
-            std::env::var("HEDDLE_AGENT_MODEL")
-                .ok()
-                .and_then(clean_attribution_value)
-        })
         .or(harness_model)
         .or(session_model)
         .or_else(|| {
@@ -846,12 +877,12 @@ fn build_attribution(
     let session_id = agent
         .session
         .clone()
-        .or_else(|| std::env::var("HEDDLE_SESSION_ID").ok())
+        .or(env.session)
         .or_else(|| current_session.as_ref().map(|session| session.id.clone()));
     let segment_id = agent
         .segment
         .clone()
-        .or_else(|| std::env::var("HEDDLE_SESSION_SEGMENT").ok())
+        .or(env.segment)
         .or_else(|| {
             current_session
                 .as_ref()
@@ -863,11 +894,7 @@ fn build_attribution(
         agent
             .policy
             .clone()
-            .or_else(|| {
-                std::env::var("HEDDLE_AGENT_POLICY")
-                    .ok()
-                    .and_then(clean_attribution_value)
-            })
+            .or(env.policy)
             .or(harness_policy)
             .or(session_policy)
             .or_else(|| user_config.agent.default_policy.clone())
@@ -886,18 +913,6 @@ fn build_attribution(
             Ok(Attribution::with_agent(principal, agent))
         }
         _ => Ok(Attribution::human(principal)),
-    }
-}
-
-/// Treat the `"unknown"` harness placeholder and empty/whitespace
-/// strings as absent so they don't beat real env-var or config
-/// values in the attribution precedence chain.
-fn clean_attribution_value(value: String) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("unknown") {
-        None
-    } else {
-        Some(value)
     }
 }
 
@@ -1023,6 +1038,118 @@ fn is_disk_full_anyhow(err: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn user_config_with_principal() -> UserConfig {
+        UserConfig {
+            principal: Some(crate::config::UserPrincipalConfig {
+                name: "Ada Lovelace".to_string(),
+                email: "ada@example.com".to_string(),
+            }),
+            ..UserConfig::default()
+        }
+    }
+
+    fn save_active_harness_entry(
+        repo: &Repository,
+        provider: &str,
+        model: &str,
+    ) -> objects::store::AgentEntry {
+        let thread = current_thread(repo)
+            .unwrap()
+            .expect("initialized repository has a current thread");
+        let registry = objects::store::AgentRegistry::new(repo.heddle_dir());
+        let entry = objects::store::AgentEntry {
+            session_id: objects::store::generate_agent_id(),
+            client_instance_id: None,
+            native_actor_key: Some("claude-code:session:session-457".to_string()),
+            native_parent_actor_key: None,
+            native_instance_key: Some("claude-code:transcript:/tmp/claude/457.jsonl".to_string()),
+            heddle_session_id: None,
+            thread_id: Some(thread.id.clone()),
+            thread: thread.id,
+            pid: Some(std::process::id()),
+            boot_id: None,
+            liveness_path: None,
+            heartbeat_at: Some(chrono::Utc::now()),
+            anchor_state: None,
+            anchor_root: None,
+            reservation_token: Some(objects::store::generate_agent_id()),
+            path: Some(repo.root().to_path_buf()),
+            base_state: String::new(),
+            started_at: chrono::Utc::now(),
+            provider: Some(provider.to_string()),
+            model: Some(model.to_string()),
+            harness: Some("claude-code".to_string()),
+            thinking_level: None,
+            usage_summary: objects::store::AgentUsageSummary::default(),
+            last_progress_at: None,
+            report_flush_state: Some("pending-local".to_string()),
+            attach_reason: Some("test detected harness actor".to_string()),
+            attach_precedence: Vec::new(),
+            winning_attach_rule: Some("test".to_string()),
+            probe_source: Some("hook_payload".to_string()),
+            probe_confidence: Some(0.99),
+            status: objects::store::AgentStatus::Active,
+            completed_at: None,
+            context_queries: Vec::new(),
+        };
+        registry.save(&entry).unwrap();
+        entry
+    }
+
+    fn empty_agent_overrides() -> SnapshotAgentOverrides {
+        SnapshotAgentOverrides {
+            provider: None,
+            model: None,
+            session: None,
+            segment: None,
+            policy: None,
+            no_policy: false,
+            no_agent: false,
+        }
+    }
+
+    #[test]
+    fn build_attribution_explicit_env_wins_over_active_harness_actor() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        save_active_harness_entry(&repo, "anthropic", "claude-opus-4-8[1m]");
+
+        let attribution = build_attribution_with_env(
+            &repo,
+            &user_config_with_principal(),
+            &empty_agent_overrides(),
+            AgentEnv {
+                provider: Some("openai".to_string()),
+                model: Some("gpt-5-codex".to_string()),
+                ..AgentEnv::default()
+            },
+        )
+        .unwrap();
+
+        let agent = attribution.agent.expect("explicit env should set agent");
+        assert_eq!(agent.provider, "openai");
+        assert_eq!(agent.model, "gpt-5-codex");
+    }
+
+    #[test]
+    fn build_attribution_uses_detected_harness_actor_when_env_absent() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        save_active_harness_entry(&repo, "anthropic", "claude-opus-4-8[1m]");
+
+        let attribution = build_attribution_with_env(
+            &repo,
+            &user_config_with_principal(),
+            &empty_agent_overrides(),
+            AgentEnv::default(),
+        )
+        .unwrap();
+
+        let agent = attribution.agent.expect("detected harness actor should set agent");
+        assert_eq!(agent.provider, "anthropic");
+        assert_eq!(agent.model, "claude-opus-4-8[1m]");
+    }
 
     #[test]
     fn is_disk_full_anyhow_detects_direct_io_error() {

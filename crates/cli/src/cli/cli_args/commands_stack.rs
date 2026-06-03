@@ -36,7 +36,7 @@ pub enum StackCommands {
     /// thread, by default) and emits one of three verdicts:
     ///
     /// * `ready` — every member of the stack is Ready / Merged /
-    ///   Promoted; you can ship the bottom.
+    ///   Promoted; you can land the bottom.
     /// * `blocked` — at least one member is Blocked; that thread is
     ///   named in the output so you know where to look.
     /// * `waiting-on-review` — the stack is otherwise clean but the

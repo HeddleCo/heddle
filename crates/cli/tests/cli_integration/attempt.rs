@@ -89,8 +89,8 @@ fn attempt_n_one_is_degenerate_try() {
         .expect("attempt should recommend a winning thread");
     assert_eq!(
         value["next_action"],
-        format!("heddle merge {recommended} --preview --with-diff"),
-        "attempt should preview the winning thread before landing it: {raw}"
+        format!("heddle ready --thread {recommended}"),
+        "attempt should check readiness for the winning thread before landing it: {raw}"
     );
     assert_eq!(
         value["recommended_action"], value["next_action"],
@@ -98,14 +98,14 @@ fn attempt_n_one_is_degenerate_try() {
     );
     assert_eq!(
         value["next_action_template"]["argv_template"],
-        heddle_argv_json(["merge", recommended, "--preview", "--with-diff"]),
-        "attempt should expose replayable argv_template for the preview action: {raw}"
+        heddle_argv_json(["ready", "--thread", recommended]),
+        "attempt should expose replayable argv_template for the readiness action: {raw}"
     );
     assert!(
         value["next_action_template"]["required_inputs"]
             .as_array()
             .is_some_and(|inputs| inputs.is_empty()),
-        "attempt's concrete preview action template should need no inputs to run: {raw}"
+        "attempt's concrete readiness action template should need no inputs to run: {raw}"
     );
     assert_eq!(
         value["recommended_action_template"]["argv_template"], value["next_action_template"]["argv_template"],

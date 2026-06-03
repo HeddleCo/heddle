@@ -328,7 +328,7 @@ Today's call sites that emit `FastForwardV2` (via the shared
 | `commands/rebase/mod.rs` (empty-replay) | `heddle rebase` (no commits to replay) | rebase target thread | heddle#110; same `flush_rebase_batch` envelope as the is_ancestor arm |
 | `commands/rebase/rebase_ops.rs:apply_commit` | `heddle rebase` (replay step) | `"<rebase>"` synthetic | heddle#110; one op per replayed commit, **buffered in `RebaseState.pending_advances` and flushed as one batch on completion** (heddle#198) so `heddle undo` rewinds the whole rebase atomically |
 | `commands/rebase/rebase_ops.rs:apply_tree_to_worktree` | `heddle rebase` (parentless replay) | `"<rebase>"` synthetic | heddle#110; rare parentless-commit replay; same buffering as `apply_commit` |
-| `commands/workflow.rs:adopt_manual_resolution` | `heddle ship` (manual-resolution adopt) | shipped thread name | heddle#110 |
+| `commands/workflow.rs:adopt_manual_resolution` | `heddle land` (manual-resolution adopt) | landed thread name | heddle#110 |
 | `commands/remote/remote_ops.rs:pull_local` | `heddle pull` (local sync, repeat pull) | remote thread name | heddle#110; first-time pull falls back to `Goto` because there's no pre-target tip to restore |
 | `commands/resolve.rs:abort_merge_state` | `heddle resolve --abort` | `"<abort>"` synthetic | heddle#110; today this is a pre-target = post-target no-op record (HEAD doesn't move during a 3-way conflict merge), kept on the same code path so a future merge variant that does move HEAD before abort gets correct undo semantics for free |
 

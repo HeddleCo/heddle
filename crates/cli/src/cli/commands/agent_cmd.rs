@@ -10,8 +10,8 @@ use objects::store::{
 };
 use refs::{Head, RefExpectation};
 use repo::{
-    Repository, Thread, ThreadConfidenceSummary, ThreadFreshness, ThreadIntegrationPolicy,
-    ThreadManager, ThreadMode, ThreadState, ThreadVerificationSummary,
+    Repository, Thread, ThreadConfidenceSummary, ThreadFreshness, ThreadId,
+    ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadState, ThreadVerificationSummary,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -19,6 +19,7 @@ use serde::Serialize;
 use super::{
     advice::RecoveryAdvice,
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
+    thread::thread_name_invalid_advice,
 };
 use crate::cli::{
     Cli,
@@ -160,6 +161,10 @@ fn anchor_drift_no_owner_advice(
 }
 
 pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
+    // User/external creation boundary: `agent reserve` persists a thread
+    // record, so reject an unsafe thread name here too (same early-reject
+    // rule as `start_thread` / `thread create`). (heddle#464 close-the-class.)
+    ThreadId::new(args.thread.as_str()).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
     let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
     let anchor = match &args.anchor {
         Some(spec) => repo
@@ -216,9 +221,9 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
     let reservation_path = existing_thread_execution_path(&repo, &thread_name)?;
     let probe = crate::harness::probe_current_process_harness(
         &repo,
-        std::env::var("HEDDLE_AGENT_PROVIDER").ok(),
-        std::env::var("HEDDLE_AGENT_MODEL").ok(),
-        std::env::var("HEDDLE_AGENT_POLICY").ok(),
+        std::env::var("HEDDLE_AGENT_PROVIDER").ok().and_then(crate::attribution::clean_attribution_value),
+        std::env::var("HEDDLE_AGENT_MODEL").ok().and_then(crate::attribution::clean_attribution_value),
+        std::env::var("HEDDLE_AGENT_POLICY").ok().and_then(crate::attribution::clean_attribution_value),
     )?;
     // `--hold-for-pid PID` binds the reservation to an external
     // process (typically the orchestrator that wraps the heddle

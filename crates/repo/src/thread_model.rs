@@ -5,11 +5,30 @@ use chrono::{DateTime, Utc};
 use objects::store::AgentUsageSummary;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// A validated thread id. Construction from user- or externally-supplied
+/// input goes through [`ThreadId::new`], which rejects anything that is not a
+/// safe single shell token (see [`validate_thread_id`]). That invariant is what
+/// lets recommended-command breadcrumbs interpolate a thread id *bare* — there
+/// is no whitespace or shell metacharacter to quote, by construction.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct ThreadId(String);
 
 impl ThreadId {
-    pub fn new(value: impl Into<String>) -> Self {
+    /// Construct a thread id from user/external input, validating it against
+    /// the safe slug rule. Returns a [`ThreadIdError`] carrying an actionable
+    /// rename hint when the input is empty or contains a space, a shell
+    /// metacharacter, a `..` path segment, or a leading `/`.
+    pub fn new(value: impl Into<String>) -> Result<Self, ThreadIdError> {
+        let value = value.into();
+        validate_thread_id(&value)?;
+        Ok(Self(value))
+    }
+
+    /// Wrap a value WITHOUT validation. Reserved for inputs that are
+    /// safe-by-construction: deserialization of thread records already on disk
+    /// (validate at creation, trust thereafter) and internally-generated slug
+    /// ids. Never call this on user/external input — use [`ThreadId::new`].
+    pub(crate) fn new_unchecked(value: impl Into<String>) -> Self {
         Self(value.into())
     }
 
@@ -24,15 +43,101 @@ impl std::fmt::Display for ThreadId {
     }
 }
 
-impl From<String> for ThreadId {
-    fn from(value: String) -> Self {
-        Self(value)
+impl<'de> Deserialize<'de> for ThreadId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Persisted thread ids were validated when the thread was created; a
+        // record on disk is trusted, so deserialize through `new_unchecked`
+        // rather than re-running validation (and rejecting historical data).
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::new_unchecked(value))
     }
 }
 
-impl From<&str> for ThreadId {
-    fn from(value: &str) -> Self {
-        Self(value.to_string())
+/// Rejection from [`ThreadId::new`] / [`validate_thread_id`]. Its `Display` is
+/// a clear, actionable CLI message naming the offending input and suggesting a
+/// valid rename.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadIdError {
+    input: String,
+    suggestion: String,
+}
+
+impl std::fmt::Display for ThreadIdError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.input.is_empty() {
+            write!(f, "thread name must not be empty")
+        } else {
+            write!(
+                f,
+                "thread name '{}' is invalid: use only letters, digits, and _ - . / @ : + = \
+                 (no spaces, shell metacharacters, '..' path segments, or a leading '/' or '-') — try '{}'",
+                self.input, self.suggestion
+            )
+        }
+    }
+}
+
+impl std::error::Error for ThreadIdError {}
+
+/// The single rule for thread-id validity. A valid id is non-empty, made up
+/// only of the safe slug set (ASCII alphanumerics plus `_ - . / @ : + =`), has
+/// no `..` segment, and does not begin with `/`. This is deliberately the same
+/// safe set [`crate::shell_quote`] treats as needing no quoting, so a valid
+/// thread id is always a single shell token: `feature/x`, `v1.2`, `my-thread`,
+/// and `team@scope` are accepted; spaces, quotes, `;`, `|`, `$`, `&`, `*`,
+/// backticks, and newlines are rejected. Thread ids flow into worktree paths,
+/// so `..` and a leading `/` are rejected to keep them in-tree. A leading `-`
+/// is also rejected: it is in the safe set (for `my-thread`) but a breadcrumb
+/// like `heddle land --thread -foo` parses `-foo` as a flag, not the value.
+pub fn validate_thread_id(value: &str) -> Result<(), ThreadIdError> {
+    let safe_charset = value.bytes().all(|b| {
+        b.is_ascii_alphanumeric()
+            || matches!(b, b'_' | b'-' | b'.' | b'/' | b'@' | b':' | b'+' | b'=')
+    });
+    let ok = !value.is_empty()
+        && safe_charset
+        && !value.contains("..")
+        && !value.starts_with('/')
+        // A leading '-' is in the safe set (for `my-thread`) but makes the id
+        // look like a CLI flag: `heddle land --thread -foo` parses `-foo` as an
+        // option, and argv-template construction panics. Reject it at the source.
+        && !value.starts_with('-');
+    if ok {
+        Ok(())
+    } else {
+        Err(ThreadIdError {
+            input: value.to_string(),
+            suggestion: suggest_thread_id(value),
+        })
+    }
+}
+
+/// Best-effort slugify for the rename hint: map every disallowed character to
+/// `-`, collapse runs, drop `..`, and trim. Always returns a non-empty,
+/// [`validate_thread_id`]-valid string.
+fn suggest_thread_id(value: &str) -> String {
+    let mut slug = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
+            slug.push(ch);
+        } else {
+            slug.push('-');
+        }
+    }
+    while slug.contains("--") {
+        slug = slug.replace("--", "-");
+    }
+    while slug.contains("..") {
+        slug = slug.replace("..", "-");
+    }
+    let trimmed = slug.trim_matches(|c| c == '-' || c == '.');
+    if trimmed.is_empty() {
+        "thread".to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -313,7 +418,8 @@ impl EphemeralMarker {
 
 impl ThreadRecord {
     pub fn thread_id(&self) -> ThreadId {
-        ThreadId::new(self.id.clone())
+        // A persisted record's id was validated at creation — trust it.
+        ThreadId::new_unchecked(self.id.clone())
     }
 
     pub fn ref_name(&self) -> &str {
@@ -399,4 +505,61 @@ fn path_present(path: Option<&PathBuf>) -> bool {
 
 fn default_freshness() -> ThreadFreshness {
     ThreadFreshness::Unknown
+}
+
+#[cfg(test)]
+mod thread_id_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_safe_slugs() {
+        for ok in ["feature/x", "v1.2", "a_b-c.d", "team@scope", "main", "wip+1=2"] {
+            assert!(
+                ThreadId::new(ok).is_ok(),
+                "expected '{ok}' to be a valid thread id"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_whitespace_metachars_traversal_and_empty() {
+        for bad in [
+            "my feature", // space
+            "a;b",        // shell separator
+            "a|b",        // pipe
+            "a$(x)",      // command substitution
+            "a\nb",       // newline
+            "a&b",        // background
+            "`x`",        // backtick
+            "..",         // bare traversal
+            "a/../b",     // traversal segment
+            "/abs",       // leading slash
+            "-foo",       // leading dash — parses as a CLI flag in breadcrumbs
+            "--bar",      // leading double-dash
+            "",           // empty
+        ] {
+            assert!(
+                ThreadId::new(bad).is_err(),
+                "expected '{bad}' to be rejected as an invalid thread id"
+            );
+        }
+    }
+
+    #[test]
+    fn error_message_carries_a_valid_rename_hint() {
+        let err = ThreadId::new("my feature").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("my feature"), "names the offending input: {msg}");
+        assert!(msg.contains("try 'my-feature'"), "suggests a rename: {msg}");
+        // The suggestion itself must be a valid thread id.
+        assert!(ThreadId::new(err.suggestion.as_str()).is_ok());
+    }
+
+    #[test]
+    fn deserialize_trusts_persisted_ids_without_revalidating() {
+        // A record written before this rule existed (or by a future version)
+        // must still deserialize — validation is at creation, not on read.
+        let id: ThreadId = serde_json::from_str("\"legacy id\"").unwrap();
+        assert_eq!(id.as_str(), "legacy id");
+    }
 }

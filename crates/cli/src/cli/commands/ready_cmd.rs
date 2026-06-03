@@ -18,14 +18,17 @@ use super::{
         build_repository_verification_state, override_trust_recommended_action,
     },
     merge::{ThreadPreviewReport, build_thread_preview_report},
-    next_action::{NextActionInput, effective_next_action},
+    next_action::{
+        NextActionInput, NextActionValidationContext, effective_next_action,
+        write_validated_json_stdout,
+    },
     operator_core::{
         OperatorCommandOutput, VerificationClaimPolicy, exit_if_blocked_operator_status,
     },
     snapshot::{SnapshotAgentOverrides, create_snapshot, ensure_current_state},
     thread::contextual_thread_action,
     thread_cmd::{current_thread, load_thread, thread_manager, thread_not_found_advice},
-    thread_landing::{merge_preview_command, ship_local_command},
+    thread_landing::land_local_command,
 };
 use crate::{
     cli::{Cli, ReadyArgs, should_output_json, style, worktree_status_options},
@@ -191,16 +194,19 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     let mut report = build_thread_preview_report(&repo, &mut thread, true)?;
     let has_integration_target = report.semantic_result != "no_target";
     if has_integration_target {
-        let policy_blockers = super::workflow::auto_ship_policy_blockers(&repo, &thread);
+        let policy_blockers = super::workflow::auto_land_policy_blockers(&repo, &thread);
         if !policy_blockers.is_empty() {
             for blocker in policy_blockers {
                 if !report.blockers.contains(&blocker) {
                     report.blockers.push(blocker);
                 }
             }
-            if let Some(action) =
-                super::workflow::integration_blocker_recommended_action(&report.blockers)
-            {
+            let recovery_scope =
+                super::workflow::recovery_scope_checkout(&thread, repo.root());
+            if let Some(action) = super::workflow::integration_blocker_recommended_action(
+                &report.blockers,
+                recovery_scope.as_deref(),
+            ) {
                 report.recommended_action = action;
                 report.refresh_recommended_action_metadata();
             }
@@ -237,12 +243,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
         && report.blockers.is_empty()
     {
         report.thread_health = "ready".to_string();
-        report.recommended_action =
-            if thread.integration_policy_result.status.as_deref() == Some("previewed") {
-                ship_local_command(&thread.id)
-            } else {
-                merge_preview_command(&thread.id)
-            };
+        report.recommended_action = land_local_command(&thread.id);
         report.refresh_recommended_action_metadata();
     }
 
@@ -349,16 +350,28 @@ fn ready_verification_preflight_blocks(trust: &RepositoryVerificationState) -> b
 }
 
 fn write_ready_output(cli: &Cli, repo: &Repository, output: &ReadyOutput) -> Result<()> {
-    write_ready_output_inner(output, should_output_json(cli, Some(repo.config())))
+    write_ready_output_inner(
+        output,
+        should_output_json(cli, Some(repo.config())),
+        NextActionValidationContext::new(&["ready"], repo.capability()),
+    )
 }
 
 fn write_ready_output_without_repo(cli: &Cli, output: &ReadyOutput) -> Result<()> {
-    write_ready_output_inner(output, should_output_json(cli, None))
+    write_ready_output_inner(
+        output,
+        should_output_json(cli, None),
+        NextActionValidationContext::without_repo(&["ready"]),
+    )
 }
 
-fn write_ready_output_inner(output: &ReadyOutput, json: bool) -> Result<()> {
+fn write_ready_output_inner(
+    output: &ReadyOutput,
+    json: bool,
+    context: NextActionValidationContext<'_>,
+) -> Result<()> {
     if json {
-        println!("{}", serde_json::to_string(output)?);
+        write_validated_json_stdout(output, context)?;
     } else {
         let missing_intent = ready_blocked_by_missing_intent(output);
         if !missing_intent {
@@ -402,7 +415,7 @@ fn ready_blocked_by_missing_intent(output: &ReadyOutput) -> bool {
             .operator
             .recommended_action
             .as_deref()
-            .is_some_and(|action| action == "heddle ready -m \"...\"")
+            .is_some_and(|action| action == "heddle commit -m \"...\"")
 }
 
 fn write_trust_blocked_setup(recommended_action: Option<&str>) {
@@ -521,7 +534,7 @@ fn missing_ready_capture_intent_output(
             format!("uncaptured path(s): {shown}, and {overflow} more")
         }
     };
-    let recommended_action = "heddle ready -m \"...\"".to_string();
+    let recommended_action = "heddle commit -m \"...\"".to_string();
     Ok(ReadyOutput {
         operator: OperatorCommandOutput {
             status: "blocked".to_string(),
@@ -530,7 +543,7 @@ fn missing_ready_capture_intent_output(
                 "Thread '{thread}' has uncaptured work; provide an intent before readiness checks"
             ),
             blockers: vec![format!(
-                "{path_summary}; readiness capture needs -m/--message/--intent"
+                "{path_summary}; commit the work with -m/--message/--intent before readiness checks"
             )],
             warnings: Vec::new(),
             next_action: Some(recommended_action.clone()),
@@ -563,7 +576,7 @@ fn missing_ready_capture_intent_report_for(
         semantic_result: "not_checked".to_string(),
         conflicts: Vec::new(),
         conflict_count: 0,
-        blockers: vec!["provide -m/--message/--intent before ready captures work".to_string()],
+        blockers: vec!["commit the work with -m/--message/--intent before readiness checks".to_string()],
         recommended_action: recommended_action.to_string(),
         recommended_action_template: super::git_overlay_health::action_template(recommended_action),
         thread_health: "blocked".to_string(),
@@ -708,13 +721,13 @@ mod tests {
     }
 
     #[test]
-    fn ready_keeps_merge_action_for_targeted_threads() {
+    fn ready_keeps_land_action_for_targeted_threads() {
         assert_eq!(
             ready_report_recommended_action(&report(
                 "fast_forward",
-                "heddle merge feature --preview"
+                "heddle land --thread feature --no-push"
             )),
-            Some("heddle merge feature --preview".to_string())
+            Some("heddle land --thread feature --no-push".to_string())
         );
     }
 }

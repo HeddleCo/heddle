@@ -2,7 +2,7 @@
 //! Crash-mid-write integration tests (R7 + R9 from the OSS-launch
 //! plan).
 //!
-//! W2b shipped the rollback machinery — atomic mapping persistence,
+//! W2b landed the rollback machinery — atomic mapping persistence,
 //! mirror Drop guard, HEAD/index restore on failure, snapshot
 //! state-then-ref ordering. These tests crash the heddle process at
 //! the load-bearing transition points (via `HEDDLE_FAULT_INJECT`)

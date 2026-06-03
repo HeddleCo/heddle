@@ -488,7 +488,7 @@ fn ready_thread_actions(repo: &Repository) -> Vec<WorkflowThreadAction> {
                 .map(|mut thread| {
                     // Ready manifests can go stale when their target advances.
                     let _ = refresh_thread_freshness(repo, &mut thread);
-                    let fallback = super::thread_landing::merge_preview_command(&thread.id);
+                    let fallback = super::thread_landing::land_local_command(&thread.id);
                     let advice = describe_thread_advice(&thread, false, 0, false);
                     // A dedicated checkout can safely print a parent-repo
                     // merge command; the main checkout must be on the
@@ -1556,7 +1556,14 @@ pub(crate) fn detached_git_head_mutation_advice(repo: &Repository, action: &str)
 fn detached_head_primary_recovery(repo: &Repository) -> String {
     match repo.refs().read_head() {
         Ok(Head::Attached { thread }) if !thread.trim().is_empty() => {
-            return heddle_action(["switch", thread.as_str()]);
+            // `switch` takes the thread as a positional; a leading-dash id needs
+            // the `--` separator so clap binds it as a value, not a flag.
+            // (heddle#464 close-the-class.)
+            return if thread.starts_with('-') {
+                heddle_action(["switch", "--", thread.as_str()])
+            } else {
+                heddle_action(["switch", thread.as_str()])
+            };
         }
         _ => {}
     }
@@ -2450,20 +2457,20 @@ pub(crate) fn remote_drift_decision(
                 };
             }
             let import = canonical_bridge_import_ref_command(upstream);
-            let merge_preview = super::thread_landing::merge_preview_command(upstream);
+            let reconcile = canonical_bridge_reconcile_ref_preview_command(None, upstream);
             let imported = repo.refs().get_thread(&ThreadName::new(upstream)).ok().flatten().is_some();
             RemoteDriftDecision {
                 status,
                 verified_as_clean: false,
                 primary_action: Some(if imported {
-                    merge_preview.clone()
+                    reconcile.clone()
                 } else {
                     import.clone()
                 }),
                 recovery_commands: if imported {
-                    vec![merge_preview]
+                    vec![reconcile]
                 } else {
-                    vec![import, merge_preview]
+                    vec![import, reconcile]
                 },
                 requires_clean_worktree: false,
             }
@@ -2732,7 +2739,7 @@ pub(crate) fn build_git_overlay_health(repo: &Repository) -> GitOverlayHealth {
                     summary: format!(
                         "{changed} Git worktree path(s) are captured in Heddle but not checkpointed to Git"
                     ),
-                    recovery_commands: vec!["heddle checkpoint -m \"...\"".to_string()],
+                    recovery_commands: vec!["heddle commit -m \"...\"".to_string()],
                     checks,
                 };
             }
@@ -2748,7 +2755,6 @@ pub(crate) fn build_git_overlay_health(repo: &Repository) -> GitOverlayHealth {
                 summary: format!("{changed} Git worktree path(s) have uncommitted changes"),
                 recovery_commands: vec![
                     "heddle commit -m \"...\"".to_string(),
-                    "heddle capture -m \"...\"".to_string(),
                     "heddle stash push -m \"...\"".to_string(),
                 ],
                 checks,
@@ -2788,7 +2794,7 @@ pub(crate) fn build_git_overlay_health(repo: &Repository) -> GitOverlayHealth {
                 .cloned()
                 .unwrap_or_else(|| "<branch>".to_string());
             let recovery = if status == "needs_checkpoint" {
-                "heddle checkpoint -m \"...\"".to_string()
+                "heddle commit -m \"...\"".to_string()
             } else {
                 canonical_bridge_reconcile_ref_preview_command(None, &ref_name)
             };
@@ -2834,7 +2840,6 @@ pub(crate) fn build_git_overlay_health(repo: &Repository) -> GitOverlayHealth {
             summary: format!("{changed} Heddle worktree path(s) differ from the current state"),
             recovery_commands: vec![
                 "heddle commit -m \"...\"".to_string(),
-                "heddle capture -m \"...\"".to_string(),
                 "heddle stash push -m \"...\"".to_string(),
             ],
             checks,
@@ -3154,7 +3159,6 @@ fn build_native_heddle_health(repo: &Repository) -> GitOverlayHealth {
                 ),
                 recovery_commands: vec![
                     "heddle commit -m \"...\"".to_string(),
-                    "heddle capture -m \"...\"".to_string(),
                     "heddle stash push -m \"...\"".to_string(),
                 ],
                 checks,
@@ -3612,7 +3616,7 @@ mod tests {
         let machine_gap = VerificationActionPlan::from_parts(
             &clean_health,
             Some("heddle push".to_string()),
-            Some("heddle merge feature --preview".to_string()),
+            Some("heddle land --thread feature --no-push".to_string()),
             Some("heddle doctor schemas --output json".to_string()),
         );
         assert_eq!(
@@ -3626,18 +3630,18 @@ mod tests {
         assert_eq!(machine_gap.remote_action.as_deref(), Some("heddle push"));
         assert_eq!(
             machine_gap.workflow_action.as_deref(),
-            Some("heddle merge feature --preview")
+            Some("heddle land --thread feature --no-push")
         );
 
         let workflow_waiting = VerificationActionPlan::from_parts(
             &clean_health,
             Some("heddle push".to_string()),
-            Some("heddle merge feature --preview".to_string()),
+            Some("heddle land --thread feature --no-push".to_string()),
             None,
         );
         assert_eq!(
             workflow_waiting.primary_action,
-            "heddle merge feature --preview"
+            "heddle land --thread feature --no-push"
         );
 
         let publish_guidance = VerificationActionPlan::from_parts(
@@ -3687,7 +3691,7 @@ mod tests {
             unimported.recovery_commands,
             vec![
                 "heddle bridge git import --ref origin/main",
-                "heddle merge origin/main --preview"
+                "heddle bridge git reconcile --ref origin/main --preview"
             ]
         );
 
@@ -3696,11 +3700,11 @@ mod tests {
         let imported = remote_drift_decision(&repo, &diverged);
         assert_eq!(
             imported.primary_action.as_deref(),
-            Some("heddle merge origin/main --preview")
+            Some("heddle bridge git reconcile --ref origin/main --preview")
         );
         assert_eq!(
             imported.recovery_commands,
-            vec!["heddle merge origin/main --preview"]
+            vec!["heddle bridge git reconcile --ref origin/main --preview"]
         );
     }
 

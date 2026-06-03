@@ -40,7 +40,7 @@ pub use commands_args::{
     DiagnoseArgs, DiffArgs, DoctorArgs, DoctorCommands, DoctorDocsArgs, InitArgs, LogArgs,
     MergeArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs,
     SessionEndArgs, SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs,
-    ShipArgs, SnapshotArgs, SwitchArgs, SyncArgs, ThreadAbsorbArgs, ThreadApprovalsArgs,
+    LandArgs, SnapshotArgs, SwitchArgs, SyncArgs, ThreadAbsorbArgs, ThreadApprovalsArgs,
     ThreadApproveArgs, ThreadCapturesArgs, ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs,
     ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs, ThreadResolveArgs,
     ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs, TryArgs, UndoArgs, WatchArgs,

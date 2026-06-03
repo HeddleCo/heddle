@@ -1256,7 +1256,7 @@ fn git_replacement_matrix_branch_like_thread_refresh_without_git_on_path() {
     let verify = assert_verify_failed_json_without_git(&["--output", "json", "verify"], &work);
     assert_eq!(verify["status"], "needs_checkpoint", "{verify}");
     assert_eq!(
-        verify["recommended_action"], "heddle checkpoint -m \"...\"",
+        verify["recommended_action"], "heddle commit -m \"...\"",
         "{verify}"
     );
 }

@@ -74,14 +74,14 @@ fn ready_without_current_thread_uses_typed_advice() {
 fn ship_without_current_thread_uses_typed_advice() {
     let temp = setup_detached_repo_without_current_thread();
 
-    let envelope = json_failure(&["--output", "json", "ship"], temp.path());
+    let envelope = json_failure(&["--output", "json", "land"], temp.path());
     assert_eq!(envelope["kind"], "no_current_thread");
-    assert_eq!(envelope["primary_command"], "heddle ship --thread <name>");
+    assert_eq!(envelope["primary_command"], "heddle land --thread <name>");
     assert_eq!(envelope["primary_command_argv"], Value::Null);
     assert_action_template(
         &envelope["primary_command_template"],
-        "heddle ship --thread <name>",
-        heddle_argv_json(["ship", "--thread", "<thread>"]),
+        "heddle land --thread <name>",
+        heddle_argv_json(["land", "--thread", "<thread>"]),
         &["thread"],
         true,
     );
@@ -89,7 +89,7 @@ fn ship_without_current_thread_uses_typed_advice() {
         envelope["hint"]
             .as_str()
             .is_some_and(|hint| hint.contains("--thread")),
-        "ship advice should name the explicit selector: {envelope}"
+        "land advice should name the explicit selector: {envelope}"
     );
 }
 

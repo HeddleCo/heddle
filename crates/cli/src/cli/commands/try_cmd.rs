@@ -37,7 +37,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-use repo::{Repository, ThreadManager};
+use repo::{Repository, ThreadManager, shell_quote};
 use serde::Serialize;
 
 use super::{
@@ -357,7 +357,11 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
     }
 
     let next_action = if !args.auto_merge {
-        Some(super::thread_landing::merge_preview_command(&thread_name))
+        // Quote defensively at construction (heddle#464 defense-in-depth): a
+        // thread id flows into the validated next_action / recommended_action
+        // fields, so an unsafe one must render as a single shell token, never
+        // bare. A clean slug passes through unchanged.
+        Some(format!("heddle ready --thread {}", shell_quote(&thread_name)))
     } else {
         None
     };
@@ -392,11 +396,11 @@ pub fn cmd_try(cli: &Cli, args: TryArgs) -> Result<()> {
     } else {
         match &captured_state {
             Some(state) => format!(
-                "`{}` succeeded; thread '{}' ready (state {}). Preview with `{}` before landing.",
+                "`{}` succeeded; thread '{}' ready (state {}). Check readiness with `heddle ready --thread {}` before landing.",
                 display_cmd(&args.command),
                 thread_name,
                 state,
-                super::thread_landing::merge_preview_command(&thread_name)
+                thread_name
             ),
             None => format!(
                 "`{}` succeeded; thread '{}' ready (no capture).",

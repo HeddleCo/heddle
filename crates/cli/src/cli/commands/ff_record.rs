@@ -2,7 +2,7 @@
 //! Shared helper for fast-forward call sites that need to record an
 //! `OpRecord::FastForwardV2` instead of the implicit `OpRecord::Goto`.
 //!
-//! See heddle#99 (merge FF) and heddle#110 (rebase / ship /
+//! See heddle#99 (merge FF) and heddle#110 (rebase / land /
 //! merge-abort): recording a thread-advancing fast-forward as a plain
 //! `OpRecord::Goto` strands the target thread ref on undo, because the
 //! `Goto` inverse only rewinds HEAD. The fix is to perform the FF
@@ -31,7 +31,7 @@ use super::advice::RecoveryAdvice;
 /// Reads the pre-FF tip from the attached thread's ref (or from HEAD
 /// for detached). Use this overload at call sites where the thread
 /// ref has *not* been mutated since whatever you want undo to restore
-/// — e.g. merge / rebase / ship. Callers that also materialize a
+/// — e.g. merge / rebase / land. Callers that also materialize a
 /// worktree must not publish the ref first: a dirty refusal must never
 /// leave a ref advanced without the matching worktree materialization.
 ///

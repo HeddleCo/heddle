@@ -116,9 +116,8 @@ cd ../feature-auth
 heddle commit -m "add auth validation"
 heddle ready
 
-# Preview a merge, then merge and push
-heddle merge feature/auth --preview
-heddle ship --thread feature/auth --push
+# Land and push
+heddle land --thread feature/auth --push
 
 # Inspect history and provenance
 heddle log

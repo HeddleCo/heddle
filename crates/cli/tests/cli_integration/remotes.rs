@@ -759,7 +759,7 @@ fn git_overlay_push_all_threads_skips_threads_pruned_by_cleanup() {
     )
     .unwrap();
     heddle(
-        &["ship", "--thread", "feature/cleaned", "--no-push"],
+        &["land", "--thread", "feature/cleaned", "--no-push"],
         Some(work.path()),
     )
     .unwrap();
@@ -2677,7 +2677,7 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
     assert_eq!(import_remote["branches_synced"], 1, "{import_remote}");
     let after_import = verify_json(&local);
     assert_eq!(
-        after_import["recommended_action"], "heddle merge origin/main --preview",
+        after_import["recommended_action"], "heddle bridge git reconcile --ref origin/main --preview",
         "after importing the upstream tip, verify should recommend upstream integration, not local Git/Heddle reconcile: {after_import}"
     );
     let thread_list_json = heddle(&["thread", "list", "--output", "json"], Some(&local))
@@ -2697,14 +2697,15 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
         "{thread_list}"
     );
     assert_eq!(
-        origin_main["recommended_action"], "heddle merge origin/main --preview",
+        origin_main["recommended_action"], "heddle bridge git reconcile --ref origin/main --preview",
         "remote-tracking refs should be presented as upstream integration previews: {thread_list}"
     );
     assert!(
         origin_main["recommended_action"]
             .as_str()
-            .is_some_and(|action| !action.contains("ship") && action.contains("merge origin/main")),
-        "remote-tracking refs must avoid dead-end ship/reconcile advice: {thread_list}"
+            .is_some_and(|action| !action.contains("land")
+                && action.contains("bridge git reconcile --ref origin/main --preview")),
+        "remote-tracking refs must avoid dead-end land advice: {thread_list}"
     );
     let merge_preview = heddle(
         &["merge", "origin/main", "--preview", "--output", "text"],

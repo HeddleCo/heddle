@@ -2963,6 +2963,51 @@ mod tests {
     }
 
     #[test]
+    fn blank_agent_model_hint_falls_through_to_detected_model_without_segment_rotation() {
+        let (_temp, repo) = init_repo();
+        let user_config = UserConfig::default();
+        let mut runtime = HarnessBridgeRuntime::new(repo, user_config);
+        let blank_model_env = BTreeMap::from([
+            ("HEDDLE_AGENT_PROVIDER".to_string(), "anthropic".to_string()),
+            ("HEDDLE_AGENT_MODEL".to_string(), String::new()),
+        ]);
+
+        let opened = runtime
+            .open_session(OpenSessionParams {
+                harness: Some("claude-code".to_string()),
+                env_hints: blank_model_env.clone(),
+                probe_metadata: BTreeMap::from([
+                    ("session_id".to_string(), "claude-sess-blank".to_string()),
+                    ("model".to_string(), "claude-opus-4-8[1m]".to_string()),
+                ]),
+                ..OpenSessionParams::default()
+            })
+            .unwrap();
+        assert_eq!(opened.model.as_deref(), Some("claude-opus-4-8[1m]"));
+
+        let original_segment = opened.heddle_segment_id.clone();
+        runtime
+            .update_progress(UpdateProgressParams {
+                heddle_session_id: opened.heddle_session_id.clone(),
+                env_hints: blank_model_env,
+                probe_metadata: BTreeMap::from([
+                    ("session_id".to_string(), "claude-sess-blank".to_string()),
+                    ("model".to_string(), "claude-opus-4-8[1m]".to_string()),
+                ]),
+                ..UpdateProgressParams::default()
+            })
+            .unwrap();
+
+        let report = runtime
+            .reports
+            .load(&opened.heddle_session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.harness.model.as_deref(), Some("claude-opus-4-8[1m]"));
+        assert_eq!(report.heddle_segment_id, original_segment);
+    }
+
+    #[test]
     fn close_session_captures_changed_paths_from_status_and_hints() {
         let (temp, repo) = init_repo();
         let config = UserConfig::default();

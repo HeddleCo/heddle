@@ -16,12 +16,11 @@ use super::{
     merge::merge_thread_into_current,
     operator_core::OperatorCommandOutput,
     operator_loop::primary_next_action,
+    next_action::{NextActionValidationContext, write_validated_json_stdout},
     ready_cmd::worktree_dirty,
     snapshot::{SnapshotAgentOverrides, create_snapshot},
     thread_cmd::{load_thread, refresh_thread, refresh_thread_freshness, thread_not_found_advice},
-    thread_landing::{
-        merge_preview_command, ship_command_for_thread, ship_command_with_push_target,
-    },
+    thread_landing::{land_command_for_thread, land_command_with_push_target},
 };
 use crate::{
     cli::{Cli, render::shell_quote, should_output_json, style, worktree_status_options},
@@ -297,6 +296,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                 };
                 return emit_thread_resolve(
                     cli,
+                    &repo,
                     &ThreadResolveOutput {
                         operator,
                         thread: thread_id,
@@ -312,6 +312,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                     )?;
                     return emit_thread_resolve(
                         cli,
+                        &repo,
                         &ThreadResolveOutput {
                             operator,
                             thread: thread_id,
@@ -323,6 +324,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                 {
                     return emit_thread_resolve(
                         cli,
+                        &repo,
                         &ThreadResolveOutput {
                             operator,
                             thread: thread_id,
@@ -382,7 +384,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                 thread.id,
                 preview.conflicts.join(", ")
             ));
-            recommended_action = merge_preview_command(&thread.id);
+            recommended_action = "heddle resolve --list".to_string();
         }
     }
     if blockers.is_empty() {
@@ -398,7 +400,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
         if rebase_state_path.exists() {
             recommended_action
         } else {
-            ship_command_for_thread(&repo, &summary.name)
+            land_command_for_thread(&repo, &summary.name)
         }
     } else {
         recommended_action
@@ -415,6 +417,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
     );
     emit_thread_resolve(
         cli,
+        &repo,
         &ThreadResolveOutput {
             operator: OperatorCommandOutput {
                 status: if blockers.is_empty() {
@@ -540,7 +543,7 @@ fn thread_resolve_refresh_operator(
     thread_id: &str,
     trust: &RepositoryVerificationState,
 ) -> OperatorCommandOutput {
-    let ship_command = ship_command_with_push_target(thread_id, trust.default_remote.is_some());
+    let land_command = land_command_with_push_target(thread_id, trust.default_remote.is_some());
     if trust.verified {
         return OperatorCommandOutput {
             status: "synced".to_string(),
@@ -548,8 +551,8 @@ fn thread_resolve_refresh_operator(
             message: "Thread refreshed cleanly".to_string(),
             blockers: Vec::new(),
             warnings: Vec::new(),
-            next_action: Some(ship_command.clone()),
-            recommended_action: Some(ship_command),
+            next_action: Some(land_command.clone()),
+            recommended_action: Some(land_command),
         };
     }
 
@@ -753,9 +756,16 @@ fn emit<T: Serialize>(cli: &Cli, output: &T) -> Result<()> {
     Ok(())
 }
 
-fn emit_thread_resolve(cli: &Cli, output: &ThreadResolveOutput) -> Result<()> {
+fn emit_thread_resolve(
+    cli: &Cli,
+    repo: &Repository,
+    output: &ThreadResolveOutput,
+) -> Result<()> {
     if should_output_json(cli, None) {
-        println!("{}", serde_json::to_string(output)?);
+        write_validated_json_stdout(
+            output,
+            NextActionValidationContext::new(&["thread", "resolve"], repo.capability()),
+        )?;
     } else {
         println!("{}", output.operator.message);
         println!("Thread: {}", style::bold(&output.thread));
@@ -848,7 +858,7 @@ mod tests {
         assert_eq!(clean.status, "synced");
         assert_eq!(
             clean.recommended_action.as_deref(),
-            Some("heddle ship --thread feature/clean --no-push")
+            Some("heddle land --thread feature/clean --no-push")
         );
 
         let blocked = thread_resolve_refresh_operator("feature/blocked", &trust_state(false));
@@ -894,13 +904,10 @@ mod tests {
             None,
             Some(&remote),
             None,
-            "heddle merge feature/conflict --preview",
+            "heddle resolve --list",
         );
 
-        assert_eq!(
-            action.as_deref(),
-            Some("heddle merge feature/conflict --preview")
-        );
+        assert_eq!(action.as_deref(), Some("heddle resolve --list"));
     }
 
     #[test]
@@ -918,7 +925,7 @@ mod tests {
         };
 
         let action =
-            thread_resolve_next_action(&[], None, Some(&remote), None, "heddle ship --thread x");
+            thread_resolve_next_action(&[], None, Some(&remote), None, "heddle land --thread x");
 
         assert_eq!(action.as_deref(), Some("heddle push"));
     }
