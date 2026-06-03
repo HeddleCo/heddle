@@ -337,8 +337,11 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                         ),
                         blockers: land_blockers_for_preview(&preview, &stale_blockers),
                         warnings: Vec::new(),
-                        next_action: Some("heddle sync".to_string()),
-                        recommended_action: Some("heddle sync".to_string()),
+                        next_action: Some(format!("heddle sync --thread {}", refreshed_thread.id)),
+                        recommended_action: Some(format!(
+                            "heddle sync --thread {}",
+                            refreshed_thread.id
+                        )),
                     },
                     thread: refreshed_thread.id.clone(),
                     captured,
@@ -766,7 +769,7 @@ fn land_checkpoint_preflight_advice(repo: &Repository, thread_id: &str) -> Optio
             let mut commands = remote_decision
                 .map(|decision| decision.recovery_commands)
                 .unwrap_or_else(|| vec![primary_command.clone()]);
-            commands.push("heddle sync".to_string());
+            commands.push(format!("heddle sync --thread {}", thread_id));
             commands.push(land_local_command(thread_id));
             commands
         } else {
