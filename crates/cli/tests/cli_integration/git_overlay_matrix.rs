@@ -1853,9 +1853,19 @@ fn git_overlay_matrix_low_confidence_blocks_ready_and_ship_with_recapture_action
     assert_eq!(land["status"], "blocked");
     assert_eq!(land["integrated"], false);
     assert_eq!(land["checkpointed"], false);
+    // heddle#464 bug 2: this land runs from the PARENT checkout (`temp.path()`)
+    // against an isolated thread whose checkout is `thread_path`. An unscoped
+    // `heddle commit` would commit the parent and never update the blocked
+    // thread's confidence, so the recovery must scope the recapture to the
+    // thread via the global `--repo` flag. (Contrast the in-thread `ready`
+    // recovery above, which stays unscoped.)
+    let expected_scoped_recapture = format!(
+        "heddle --repo {} commit -m \"...\" --confidence <confidence>",
+        thread_path.display()
+    );
     assert_eq!(
-        land["recommended_action"], "heddle commit -m \"...\" --confidence <confidence>",
-        "blocked policy land should recommend recovery, not land again: {land}"
+        land["recommended_action"], expected_scoped_recapture,
+        "blocked policy land from the parent must scope the recapture to the thread's checkout, not land again or commit the parent: {land}"
     );
     assert!(
         land["blockers"]

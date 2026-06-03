@@ -21,6 +21,21 @@ pub(crate) fn merge_preview_command(thread_id: &str) -> String {
     }
 }
 
+pub(crate) fn switch_thread_command(thread_id: &str) -> String {
+    // `switch` takes the thread as a POSITIONAL, so a leading-dash id needs the
+    // `--` end-of-options separator (the `=` form is flag-only). (heddle#464
+    // close-the-class.)
+    if thread_id.starts_with('-') {
+        heddle_action(vec![
+            "switch".to_string(),
+            "--".to_string(),
+            thread_id.to_string(),
+        ])
+    } else {
+        heddle_action(["switch", thread_id])
+    }
+}
+
 pub(crate) fn land_command_for_thread(repo: &Repository, thread_id: &str) -> String {
     let has_push_target = super::remote::resolved_default_remote_name(repo)
         .ok()
@@ -154,6 +169,7 @@ mod tests {
             land_push_command(id),
             land_push_remote_command(id, "origin"),
             merge_preview_command(id),
+            switch_thread_command(id),
         ];
         for cmd in &cmds {
             validate_recommended_action(cmd).unwrap_or_else(|e| {
@@ -171,5 +187,15 @@ mod tests {
             "heddle land '--thread=-foo' --push --remote origin"
         );
         assert_eq!(merge_preview_command(id), "heddle merge --preview -- -foo");
+        assert_eq!(switch_thread_command(id), "heddle switch -- -foo");
+    }
+
+    #[test]
+    fn switch_thread_command_is_stable_and_copy_pasteable() {
+        assert_eq!(switch_thread_command("feature/demo"), "heddle switch feature/demo");
+        assert_eq!(
+            switch_thread_command("feature with spaces"),
+            "heddle switch 'feature with spaces'"
+        );
     }
 }

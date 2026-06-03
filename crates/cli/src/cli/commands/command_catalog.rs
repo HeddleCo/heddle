@@ -3689,6 +3689,43 @@ fn dynamic_message_recommended_action_template(
                 true,
             ))
         }
+        // The confidence/verification policy-blocker recovery scopes itself to
+        // the thread's checkout via the global `--repo <path>` flag (heddle#464).
+        // `<path>` is a concrete worktree path, not a placeholder, so the only
+        // fillable inputs remain the message and confidence.
+        [
+            heddle,
+            repo_flag,
+            repo_path,
+            command,
+            message_flag,
+            message,
+            confidence_flag,
+            confidence,
+        ] if heddle == "heddle"
+            && repo_flag == "--repo"
+            && matches!(command.as_str(), "capture" | "commit")
+            && is_message_flag(message_flag)
+            && is_message_placeholder_arg(message)
+            && confidence_flag == "--confidence"
+            && is_placeholder_arg(confidence) =>
+        {
+            Some(action_template_from_owned(
+                action.to_string(),
+                vec![
+                    "heddle".to_string(),
+                    "--repo".to_string(),
+                    repo_path.clone(),
+                    command.clone(),
+                    "-m".to_string(),
+                    "<message>".to_string(),
+                    "--confidence".to_string(),
+                    confidence.clone(),
+                ],
+                vec!["message".to_string(), placeholder_input_name(confidence)],
+                true,
+            ))
+        }
         [heddle, stash, push, message_flag, message]
             if heddle == "heddle"
                 && stash == "stash"

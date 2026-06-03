@@ -23,7 +23,7 @@ use super::{
         current_thread, load_thread, refresh_thread, thread_manager, thread_not_found_advice,
     },
     next_action::{NextActionValidationContext, write_validated_json_stdout},
-    thread_landing::land_local_command,
+    thread_landing::{land_local_command, switch_thread_command},
 };
 use crate::{
     cli::{
@@ -278,12 +278,18 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         })?)
     } else {
         let land_command = land_local_command(&thread.id);
+        // `heddle start` would refuse here — the thread still holds an active
+        // reservation, so it returns `active_reservation_advice` and the
+        // operator is stuck. `heddle switch` rebuilds the dedicated worktree at
+        // the recorded `execution_path` from the thread's current state (see
+        // `cmd_thread_switch`), which is exactly the path this `land` reads, so
+        // the rebuild clears the blocker and the follow-up `land` succeeds.
+        let switch_command = switch_thread_command(&thread.id);
         return Err(anyhow!(RecoveryAdvice::safety_refusal(
             "thread_worktree_missing",
             format!("Thread '{}' worktree is missing", thread.id),
             format!(
-                "Materialize the thread again with `heddle start {} --path <path>`, then retry `{land_command}`.",
-                thread.id
+                "Rebuild the thread's checkout with `{switch_command}` (it re-materializes the recorded worktree from the thread's current state), then retry `{land_command}`.",
             ),
             format!(
                 "recorded execution path does not exist: {}",
@@ -291,8 +297,8 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             ),
             "land would need to inspect that checkout for unsaved work before merging",
             "repository state, refs, metadata, and worktree files were left unchanged",
-            land_command.clone(),
-            vec![land_command],
+            switch_command.clone(),
+            vec![switch_command, land_command],
         )));
     };
     if args.push && args.no_push {
@@ -545,8 +551,10 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         // own land recommendation would self-loop this very command. Drive the
         // operator through `sync`, which materializes and resolves a genuine
         // conflict before a land retry. (heddle#464 close-the-class.)
-        let recommended_action = integration_blocker_recommended_action(&integration_blockers)
-            .unwrap_or_else(|| format!("heddle sync {}", thread_flag(&merge_thread.id)));
+        let recovery_scope = recovery_scope_checkout(&merge_thread, repo.root());
+        let recommended_action =
+            integration_blocker_recommended_action(&integration_blockers, recovery_scope.as_deref())
+                .unwrap_or_else(|| format!("heddle sync {}", thread_flag(&merge_thread.id)));
         update_integration_policy(&repo, &merge_thread.id, "blocked", &reason)?;
         return write_land_output(
             cli,
@@ -1304,14 +1312,55 @@ pub(crate) fn auto_land_policy_blockers(repo: &Repository, thread: &Thread) -> V
     blockers
 }
 
-pub(crate) fn integration_blocker_recommended_action(blockers: &[String]) -> Option<String> {
+pub(crate) fn integration_blocker_recommended_action(
+    blockers: &[String],
+    scope_to_checkout: Option<&std::path::Path>,
+) -> Option<String> {
     blockers
         .iter()
         .any(|blocker| {
             blocker.starts_with("confidence ")
                 || blocker == "verification summary reports failing tests"
         })
-        .then(|| AUTO_LAND_CONFIDENCE_RECOVERY_ACTION.to_string())
+        .then(|| auto_land_confidence_recovery_action(scope_to_checkout))
+}
+
+/// The `confidence`/`verification` policy blocker is cleared by re-capturing the
+/// thread's state with a fresh confidence. That capture must land in the
+/// *thread's* checkout, not whatever checkout `ready`/`land` was invoked from —
+/// running an unscoped `heddle commit` from the parent of an isolated
+/// agent-authored thread commits the parent and never updates the blocked
+/// thread. When the thread's checkout differs from the current one, scope the
+/// recovery with the global `--repo` flag so the capture targets the thread.
+/// (heddle#464.)
+fn auto_land_confidence_recovery_action(scope_to_checkout: Option<&std::path::Path>) -> String {
+    match scope_to_checkout {
+        Some(path) => format!(
+            "heddle --repo {} {}",
+            crate::cli::render::shell_quote(&path.display().to_string()),
+            AUTO_LAND_CONFIDENCE_RECOVERY_ACTION
+                .strip_prefix("heddle ")
+                .expect("recovery action is a heddle command"),
+        ),
+        None => AUTO_LAND_CONFIDENCE_RECOVERY_ACTION.to_string(),
+    }
+}
+
+/// Returns the thread's recorded checkout iff it is a real, distinct path from
+/// `current_checkout` — i.e. when a recovery breadcrumb that mutates thread
+/// state must be re-scoped away from the current checkout. Canonicalizes both
+/// sides (falling back to the raw path) so a symlinked worktree doesn't read as
+/// "different" and over-scope the in-thread case.
+pub(crate) fn recovery_scope_checkout(
+    thread: &Thread,
+    current_checkout: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let execution_path = &thread.execution_path;
+    if execution_path.as_os_str().is_empty() {
+        return None;
+    }
+    let canonical = |path: &std::path::Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    (canonical(execution_path) != canonical(current_checkout)).then(|| execution_path.clone())
 }
 
 fn land_blockers_for_preview(
@@ -1544,5 +1593,123 @@ fn land_text_step(step: &str) -> String {
         "push(not requested)" => "push not requested".to_string(),
         "push(not reached)" => "push not reached".to_string(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::commands::command_catalog::validate_recommended_action;
+    use std::path::{Path, PathBuf};
+
+    fn thread_with_execution_path(execution_path: PathBuf) -> Thread {
+        Thread {
+            id: "agent-thread".to_string(),
+            thread: "agent-thread".to_string(),
+            target_thread: None,
+            parent_thread: None,
+            mode: repo::ThreadMode::Solid,
+            state: repo::ThreadState::Active,
+            base_state: "base".to_string(),
+            base_root: "root".to_string(),
+            current_state: Some("base".to_string()),
+            merged_state: None,
+            task: None,
+            execution_path,
+            materialized_path: None,
+            changed_paths: vec![],
+            impact_categories: vec![],
+            heavy_impact_paths: vec![],
+            promotion_suggested: false,
+            freshness: repo::ThreadFreshness::Current,
+            verification_summary: repo::ThreadVerificationSummary::default(),
+            confidence_summary: repo::ThreadConfidenceSummary::default(),
+            integration_policy_result: ThreadIntegrationPolicy::default(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            ephemeral: None,
+            auto: false,
+            shared_target_dir: None,
+        }
+    }
+
+    // heddle#464 bug 2: the confidence/verification policy-blocker recovery used
+    // to be a bare `heddle commit ... --confidence`, which commits the CURRENT
+    // checkout. Run from the parent of an isolated thread, that never updates the
+    // blocked thread's state. Scope it to the thread's checkout via `--repo`.
+    #[test]
+    fn confidence_blocker_recovery_scopes_to_thread_checkout() {
+        let blockers = vec!["confidence 0.40 is below the auto-land threshold of 0.75".to_string()];
+        let action = integration_blocker_recommended_action(
+            &blockers,
+            Some(Path::new("/work/threads/agent-thread")),
+        )
+        .expect("a confidence blocker must yield a recovery action");
+        assert_eq!(
+            action,
+            "heddle --repo /work/threads/agent-thread commit -m \"...\" --confidence <confidence>"
+        );
+        validate_recommended_action(&action)
+            .unwrap_or_else(|e| panic!("scoped recovery must validate: {e}"));
+    }
+
+    #[test]
+    fn verification_blocker_recovery_scopes_to_thread_checkout() {
+        let blockers = vec!["verification summary reports failing tests".to_string()];
+        let action = integration_blocker_recommended_action(
+            &blockers,
+            Some(Path::new("/work/threads/agent-thread")),
+        )
+        .expect("a verification blocker must yield a recovery action");
+        assert_eq!(
+            action,
+            "heddle --repo /work/threads/agent-thread commit -m \"...\" --confidence <confidence>"
+        );
+        validate_recommended_action(&action)
+            .unwrap_or_else(|e| panic!("scoped recovery must validate: {e}"));
+    }
+
+    // The in-thread case (recovery run from inside the thread's own checkout)
+    // must stay unscoped — a `--repo` pointing back at the current checkout is
+    // noise, and the bare command already targets the right state.
+    #[test]
+    fn confidence_blocker_recovery_stays_unscoped_in_thread() {
+        let blockers = vec!["confidence 0.40 is below the auto-land threshold of 0.75".to_string()];
+        let action = integration_blocker_recommended_action(&blockers, None)
+            .expect("a confidence blocker must yield a recovery action");
+        assert_eq!(action, AUTO_LAND_CONFIDENCE_RECOVERY_ACTION);
+        validate_recommended_action(&action)
+            .unwrap_or_else(|e| panic!("unscoped recovery must validate: {e}"));
+    }
+
+    #[test]
+    fn non_policy_blockers_yield_no_recovery_action() {
+        let blockers = vec!["3 path conflict(s) need manual resolution".to_string()];
+        assert!(integration_blocker_recommended_action(&blockers, None).is_none());
+    }
+
+    // `recovery_scope_checkout` is the gate that decides whether to scope: an
+    // isolated thread (execution_path differs from the current checkout) scopes;
+    // the in-thread case (paths equal) and a worktree-less thread (empty path)
+    // do not.
+    #[test]
+    fn recovery_scope_checkout_distinguishes_isolated_from_in_thread() {
+        let isolated = thread_with_execution_path(PathBuf::from("/work/threads/agent-thread"));
+        assert_eq!(
+            recovery_scope_checkout(&isolated, Path::new("/work/parent")),
+            Some(PathBuf::from("/work/threads/agent-thread")),
+        );
+
+        let in_thread = thread_with_execution_path(PathBuf::from("/work/threads/agent-thread"));
+        assert_eq!(
+            recovery_scope_checkout(&in_thread, Path::new("/work/threads/agent-thread")),
+            None,
+        );
+
+        let no_worktree = thread_with_execution_path(PathBuf::new());
+        assert_eq!(
+            recovery_scope_checkout(&no_worktree, Path::new("/work/parent")),
+            None,
+        );
     }
 }

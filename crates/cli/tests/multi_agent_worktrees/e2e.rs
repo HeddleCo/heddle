@@ -2201,3 +2201,90 @@ fn log_never_surfaces_unknown_principal_after_init() {
         }
     }
 }
+
+// heddle#464 bug 1: when a materialized thread's recorded worktree dir is
+// deleted out of band, `land --thread` refuses with `thread_worktree_missing`.
+// The recovery used to point at `heddle start <thread> --path <path>`, which
+// can never succeed (the thread still holds an active reservation, so `start`
+// returns `active_thread_reservation`), and the JSON `recovery_commands` list
+// was only the same `land` that just failed — a dead loop. The fix points the
+// recovery at `heddle switch <thread>`, which rebuilds the dedicated worktree at
+// the recorded path so the follow-up `land` succeeds.
+#[test]
+fn land_worktree_missing_recovery_points_at_switch_not_failing_loop() {
+    let main = setup_repo("hello.txt", "hello world");
+
+    let thread_dir = TempDir::new().unwrap();
+    let thread_path = thread_dir.path();
+
+    heddle(
+        &[
+            "start",
+            "feature/gone",
+            "--workspace",
+            "materialized",
+            "--path",
+            thread_path.to_str().unwrap(),
+        ],
+        Some(main.path()),
+    )
+    .expect("start materialized thread");
+
+    // Capture some work inside the thread so it has a landable state.
+    fs::write(thread_path.join("hello.txt"), "agent edits").unwrap();
+    heddle(&["capture", "-m", "agent work"], Some(thread_path)).expect("capture in thread");
+
+    // Delete the worktree out of band — the ref + record survive, only the
+    // checkout dir is gone.
+    fs::remove_dir_all(thread_path).expect("remove thread worktree dir");
+
+    let output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/gone",
+            "--no-push",
+        ],
+        Some(main.path()),
+    )
+    .expect("land invocation runs");
+    assert!(
+        !output.status.success(),
+        "land must refuse when the thread worktree is missing"
+    );
+    let stderr = str::from_utf8(&output.stderr).unwrap_or("");
+    let envelope: Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|e| panic!("worktree-missing refusal must emit a JSON envelope: {e}\n{stderr}"));
+
+    assert_eq!(envelope["kind"], "thread_worktree_missing");
+    let primary = envelope["primary_command"].as_str().unwrap_or_default();
+    assert_eq!(
+        primary, "heddle switch feature/gone",
+        "primary recovery must rematerialize the existing thread via switch"
+    );
+
+    let recovery: Vec<String> = envelope["recovery_commands"]
+        .as_array()
+        .expect("recovery_commands array present")
+        .iter()
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        recovery.contains(&"heddle switch feature/gone".to_string()),
+        "recovery_commands must include the rematerialize command: {recovery:?}"
+    );
+    let land_command = "heddle land --thread feature/gone --no-push".to_string();
+    assert!(
+        recovery != vec![land_command.clone()],
+        "recovery_commands must not be just the failing land command (the old dead loop): {recovery:?}"
+    );
+    // The switch must come before the land retry so the operator rebuilds the
+    // checkout first.
+    let switch_idx = recovery.iter().position(|c| c == "heddle switch feature/gone");
+    let land_idx = recovery.iter().position(|c| c == &land_command);
+    if let (Some(s), Some(l)) = (switch_idx, land_idx) {
+        assert!(s < l, "switch must precede the land retry: {recovery:?}");
+    }
+}

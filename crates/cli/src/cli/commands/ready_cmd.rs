@@ -201,9 +201,12 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
                     report.blockers.push(blocker);
                 }
             }
-            if let Some(action) =
-                super::workflow::integration_blocker_recommended_action(&report.blockers)
-            {
+            let recovery_scope =
+                super::workflow::recovery_scope_checkout(&thread, repo.root());
+            if let Some(action) = super::workflow::integration_blocker_recommended_action(
+                &report.blockers,
+                recovery_scope.as_deref(),
+            ) {
                 report.recommended_action = action;
                 report.refresh_recommended_action_metadata();
             }
