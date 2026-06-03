@@ -295,6 +295,29 @@ mod tests {
     }
 
     #[test]
+    fn explicit_heddle_agent_env_wins_over_detected_claude_identity() {
+        let mut env_hints = BTreeMap::new();
+        env_hints.insert("CLAUDECODE".to_string(), "1".to_string());
+        env_hints.insert("HEDDLE_AGENT_PROVIDER".to_string(), "openai".to_string());
+        env_hints.insert("HEDDLE_AGENT_MODEL".to_string(), "gpt-5-codex".to_string());
+
+        let result = probe_harness_actor(&HarnessProbeInput {
+            env_hints,
+            probe_metadata: BTreeMap::from([(
+                "model".to_string(),
+                "claude-opus-4-8[1m]".to_string(),
+            )]),
+            repo_root: "/tmp/repo".to_string(),
+            ..HarnessProbeInput::default()
+        })
+        .expect("probe should succeed");
+
+        assert_eq!(result.harness.as_deref(), Some("claude-code"));
+        assert_eq!(result.provider.as_deref(), Some("openai"));
+        assert_eq!(result.model.as_deref(), Some("gpt-5-codex"));
+    }
+
+    #[test]
     fn argv_parent_hint_identifies_claude_code_actor() {
         let result = probe_harness_actor(&HarnessProbeInput {
             argv: Some(vec![

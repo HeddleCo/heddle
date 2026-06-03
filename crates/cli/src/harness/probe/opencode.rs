@@ -42,20 +42,20 @@ impl HarnessActorProbe for OpenCodeProbe {
             Some(origin) => format!("opencode:client:{client_name}@{origin}"),
             None => format!("opencode:client:{client_name}"),
         });
-        let provider = metadata
-            .get("provider")
-            .cloned()
-            .or_else(|| input.explicit_provider.clone())
+        let provider = input
+            .explicit_provider
+            .clone()
             .or_else(|| input.env_hints.get("HEDDLE_AGENT_PROVIDER").cloned())
+            .or_else(|| metadata.get("provider").cloned())
             .or_else(|| input.env_hints.get("OPENCODE_PROVIDER").cloned())
             .or_else(|| input.current_provider.clone());
-        let model = metadata
-            .get("model")
-            .cloned()
+        let model = input
+            .explicit_model
+            .clone()
+            .or_else(|| input.env_hints.get("HEDDLE_AGENT_MODEL").cloned())
+            .or_else(|| metadata.get("model").cloned())
             .or_else(|| metadata.get("agent_model").cloned())
             .or_else(|| argv_value(argv, "--model"))
-            .or_else(|| input.explicit_model.clone())
-            .or_else(|| input.env_hints.get("HEDDLE_AGENT_MODEL").cloned())
             .or_else(|| input.env_hints.get("OPENCODE_MODEL").cloned())
             .or_else(|| input.env_hints.get("MODEL").cloned())
             .or_else(|| input.current_model.clone());
@@ -70,6 +70,11 @@ impl HarnessActorProbe for OpenCodeProbe {
             harness: Some("opencode".to_string()),
             provider,
             model,
+            policy: input
+                .explicit_policy
+                .clone()
+                .or_else(|| input.env_hints.get("HEDDLE_AGENT_POLICY").cloned())
+                .or_else(|| input.current_policy.clone()),
             native_actor_key: session_id
                 .clone()
                 .map(|id| format!("opencode:session:{id}")),

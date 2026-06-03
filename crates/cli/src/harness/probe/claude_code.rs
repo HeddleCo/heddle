@@ -54,11 +54,12 @@ impl HarnessActorProbe for ClaudeCodeProbe {
                 .or_else(|| input.env_hints.get("HEDDLE_AGENT_PROVIDER").cloned())
                 .or_else(|| input.current_provider.clone())
                 .or(Some("anthropic".to_string())),
-            model: metadata
-                .get("model")
-                .cloned()
-                .or_else(|| argv_value(argv, "--model"))
+            model: input
+                .explicit_model
+                .clone()
                 .or_else(|| input.env_hints.get("HEDDLE_AGENT_MODEL").cloned())
+                .or_else(|| metadata.get("model").cloned())
+                .or_else(|| argv_value(argv, "--model"))
                 .or_else(|| input.env_hints.get("CLAUDE_MODEL").cloned())
                 .or_else(|| input.env_hints.get("ANTHROPIC_MODEL").cloned())
                 .or_else(|| input.env_hints.get("MODEL").cloned())
@@ -92,6 +93,11 @@ impl HarnessActorProbe for ClaudeCodeProbe {
                 tool_calls: metadata.get("tool_calls").and_then(|v| v.parse().ok()),
                 cost_micros_usd: parse_u64(metadata.get("cost_micros_usd")),
             },
+            policy: input
+                .explicit_policy
+                .clone()
+                .or_else(|| input.env_hints.get("HEDDLE_AGENT_POLICY").cloned())
+                .or_else(|| input.current_policy.clone()),
             touched_paths: csv_paths(metadata.get("touched_paths")),
             transcript_refs: transcript_path
                 .map(|path| {

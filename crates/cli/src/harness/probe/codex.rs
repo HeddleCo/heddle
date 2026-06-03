@@ -44,18 +44,20 @@ impl HarnessActorProbe for CodexProbe {
                     .get("CODEX_INTERNAL_ORIGINATOR_OVERRIDE")
                     .cloned()
             });
-        let model = metadata
-            .get("model")
-            .cloned()
+        let model = input
+            .explicit_model
+            .clone()
+            .or_else(|| input.env_hints.get("HEDDLE_AGENT_MODEL").cloned())
+            .or_else(|| metadata.get("model").cloned())
             .or_else(|| argv_value(argv, "--model"))
             .or_else(|| input.env_hints.get("CODEX_MODEL").cloned())
             .or_else(|| input.env_hints.get("OPENAI_MODEL").cloned())
             .or_else(|| input.current_model.clone());
-        let provider = metadata
-            .get("model_provider")
-            .cloned()
-            .or_else(|| input.explicit_provider.clone())
+        let provider = input
+            .explicit_provider
+            .clone()
             .or_else(|| input.env_hints.get("HEDDLE_AGENT_PROVIDER").cloned())
+            .or_else(|| metadata.get("model_provider").cloned())
             .or_else(|| input.current_provider.clone())
             .or(Some("openai".to_string()));
         let thinking_level = metadata
@@ -79,6 +81,7 @@ impl HarnessActorProbe for CodexProbe {
             policy: input
                 .explicit_policy
                 .clone()
+                .or_else(|| input.env_hints.get("HEDDLE_AGENT_POLICY").cloned())
                 .or_else(|| input.current_policy.clone()),
             native_actor_key: thread_id.map(|id| format!("codex:thread:{id}")),
             native_parent_actor_key: None,
