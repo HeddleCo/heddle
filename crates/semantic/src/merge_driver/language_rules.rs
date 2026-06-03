@@ -54,6 +54,10 @@ pub(super) enum ItemKind {
     Method,
     Impl,
     Module,
+    /// A `use` / `pub use` declaration, keyed by its import path so additive
+    /// re-exports on disjoint paths union and same-path divergence conflicts
+    /// (HeddleCo/heddle#468).
+    Use,
     Struct,
     Enum,
     Trait,
@@ -284,6 +288,27 @@ impl LanguageRules for RustRules {
             "type_item" => leaf_item(ItemKind::TypeAlias, source, node, "name"),
             "const_item" => leaf_item(ItemKind::Const, source, node, "name"),
             "static_item" => leaf_item(ItemKind::Static, source, node, "name"),
+            // Key a `use` / `pub use` by its import-path `argument` (the use
+            // tree: `crate::x::Y`, `a::{B, C}`, `a::*`, `a::B as C`, …),
+            // whitespace-stripped so cosmetic reformatting doesn't split
+            // identity. Visibility is intentionally NOT part of the key: two
+            // sides adding the same path with divergent visibility
+            // (`pub use a::B` vs `use a::B`) share a key and surface as an
+            // add/add conflict, while disjoint paths get distinct keys and
+            // union cleanly (HeddleCo/heddle#468). A missing `argument`
+            // (malformed) falls through to the unclassified walker, leaving
+            // the `use` in inter-item content as before.
+            "use_declaration" => {
+                let argument = node.child_by_field_name("argument")?;
+                let name = strip_whitespace(&source[argument.byte_range()]);
+                Some(Classified {
+                    kind: ItemKind::Use,
+                    name,
+                    container_body: None,
+                    signature_hash: 0,
+                    extra_scope: Vec::new(),
+                })
+            }
             _ => None,
         }
     }

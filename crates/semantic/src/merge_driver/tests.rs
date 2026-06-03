@@ -1255,25 +1255,26 @@ class C {
 
 #[test]
 fn preamble_diverging_edits_surface_conflict_in_inter_item_merge() {
-    // Both sides modify the same line of the preamble (between items
-    // there are no items — only `use` lines at the top). This forces
-    // text_hunk_merge on the inter-item concatenation to produce
-    // Conflicts, exercising the Conflicts arm of the inter-item match.
+    // Both sides modify the same line of the preamble. The comment block is
+    // separated from `fn f` by a blank line so it is NOT absorbed as the
+    // item's leading metadata — it stays in the preamble (inter-item
+    // segment 0). `use` lines can no longer serve here: they are now
+    // path-keyed items (heddle#468), so divergent `use` edits would union
+    // instead of conflicting. Diverging comment edits force text_hunk_merge
+    // on the preamble to produce Conflicts, exercising the Conflicts arm of
+    // the inter-item match.
     let base = "\
-use std::a;
-use std::b;
+// header note: base
 
 fn f() { 1 }
 ";
     let ours = "\
-use std::a;
-use std::OURS;
+// header note: OURS
 
 fn f() { 1 }
 ";
     let theirs = "\
-use std::a;
-use std::THEIRS;
+// header note: THEIRS
 
 fn f() { 1 }
 ";
@@ -1868,9 +1869,9 @@ func (a *A) M() int {
 // =====================================================================
 #[test]
 fn no_base_items_both_sides_add_different_items_preamble_not_duplicated() {
-    // base has only a top-level comment; both sides add their own
-    // function with their own preamble (a use statement). The shared
-    // `// top header` line must appear exactly once in the output.
+    // base has only a top-level comment; both sides add their own items
+    // (a `use` re-export plus a function) under a shared `// top header`
+    // preamble. That shared header line must appear exactly once.
     let base = "// top header\n";
     let ours = "\
 // top header
@@ -1911,13 +1912,14 @@ fn beta() { 2 }
 // =====================================================================
 #[test]
 fn zero_items_side_postamble_does_not_duplicate_bridging_segment() {
-    // ours has no parseable items (only a top-level `use`), base and
-    // theirs each have one function. Pre-fix, ours's "use std::io;\n"
+    // ours has no parseable items (only a top-level comment), base and
+    // theirs each have one function. Pre-fix, ours's "// lone comment\n"
     // is consumed by the first iteration's preamble fallback AND
     // re-emitted by the postamble merge — appearing twice in the
-    // output.
+    // output. (A `use` line can no longer stand in for the zero-items
+    // side: `use` is now a path-keyed item — heddle#468.)
     let base = "fn a() { 1 }\n";
-    let ours = "use std::io;\n";
+    let ours = "// lone comment\n";
     let theirs = "fn a() { 2 }\n";
     let outcome = merge_rust(base, ours, theirs);
     let text = match outcome {
@@ -1928,10 +1930,10 @@ fn zero_items_side_postamble_does_not_duplicate_bridging_segment() {
         } => String::from_utf8(merged_bytes_with_markers).unwrap(),
         other => panic!("unexpected: {other:?}"),
     };
-    let use_count = text.matches("use std::io").count();
+    let use_count = text.matches("// lone comment").count();
     assert_eq!(
         use_count, 1,
-        "expected ours's `use std::io` exactly once, got {use_count}: {text}"
+        "expected ours's `// lone comment` exactly once, got {use_count}: {text}"
     );
 }
 
