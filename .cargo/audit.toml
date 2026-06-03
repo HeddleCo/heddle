@@ -1,0 +1,30 @@
+# cargo-audit configuration — companion to deny.toml.
+#
+# Heddle's authoritative supply-chain gate is `cargo deny check` (run by
+# .github/workflows/audit.yml). Both tools read the same RustSec advisory
+# database; this file mirrors the `[advisories].ignore` list from deny.toml
+# so `cargo audit` runs clean locally AND in CI (the cargo-audit job in
+# audit.yml relies on this file's auto-discovery rather than inline
+# --ignore flags).
+#
+# When you ignore an advisory here you MUST also ignore it in deny.toml
+# (with the same rationale). The deny.toml entry is canonical; treat this
+# file as a derived mirror.
+
+[advisories]
+ignore = [
+    # rsa 0.9.x Marvin timing sidechannel. Heddle's path is signature
+    # verification, not RSA decryption, so the attack precondition does not
+    # apply. Revisit when rsa 0.10 (constant-time) ships.
+    "RUSTSEC-2023-0071",
+
+    # The next three are all the same transitive chain:
+    #   aws-sdk-s3 → aws-smithy-http-client → hyper-rustls 0.24 → rustls 0.21
+    #     → rustls-webpki 0.101 / rustls-pemfile 2
+    # Unblocks when aws-sdk-s3 1.135 can land, which is itself gated on
+    # s3s cutting a release that uses stable sha2/sha1 (currently pinned to
+    # 0.11.0-rc.5 in s3s 0.13.0). Tracked in the deps-upgrade follow-up.
+    "RUSTSEC-2026-0098", # rustls-webpki: URI name constraint accepted
+    "RUSTSEC-2026-0099", # rustls-webpki: wildcard SAN constraint bypass
+    "RUSTSEC-2026-0104", # rustls-webpki: reachable panic on malformed CRL
+]

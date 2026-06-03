@@ -72,14 +72,9 @@ jobs:
 
       - name: Run cargo-audit
         # --deny warnings escalates yanked / unmaintained / notice advisories
-        # to errors. The --ignore list below MUST mirror deny.toml's
-        # [advisories].ignore — cargo-audit doesn't read deny.toml. If you add
-        # an ignore there, add it here too (and update CONTRIBUTING's Security
-        # section so the rationale stays discoverable).
-        run: |
-          cargo audit \
-            --deny warnings \
-            --ignore RUSTSEC-2023-0071 \
-            --ignore RUSTSEC-2026-0098 \
-            --ignore RUSTSEC-2026-0099 \
-            --ignore RUSTSEC-2026-0104
+        # to errors. The ignore list lives in .cargo/audit.toml (auto-
+        # discovered by cargo-audit). That file mirrors deny.toml's
+        # [advisories].ignore — cargo-audit doesn't read deny.toml directly.
+        # To accept a new advisory: add it to BOTH deny.toml and audit.toml
+        # with matching rationale, and update CONTRIBUTING's Security section.
+        run: cargo audit --deny warnings

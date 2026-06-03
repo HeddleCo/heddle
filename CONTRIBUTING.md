@@ -274,15 +274,10 @@ cargo install --locked cargo-audit # once
 
 cargo deny check                   # full policy run
 
-# advisory check — flags MUST mirror .github/workflows/audit.yml so a green
-# local run means a green CI run. If you add/remove an --ignore here, also
-# update the workflow (cargo-audit doesn't read deny.toml's ignore list).
-cargo audit \
-  --deny warnings \
-  --ignore RUSTSEC-2023-0071 \
-  --ignore RUSTSEC-2026-0098 \
-  --ignore RUSTSEC-2026-0099 \
-  --ignore RUSTSEC-2026-0104
+# advisory check — reads .cargo/audit.toml for the ignore list (same set
+# as deny.toml, mirrored). Both local and CI invoke the bare command;
+# the file is the single source for cargo-audit's ignores.
+cargo audit --deny warnings
 ```
 
 Both should be green before you push. CI runs them on every PR (no
@@ -294,19 +289,18 @@ unchanged dependency surfaces without anyone having to push code.
 
 If a RustSec advisory cannot be fixed by a version bump (upstream
 hasn't released; advisory doesn't apply to our usage; etc.), add an
-entry to **all three** of:
+entry to **both** of:
 
 1. `deny.toml` — `[advisories].ignore` with `{ id, reason }`. The
    `reason` must explain *why* it's safe to ignore in Heddle's context,
-   not just acknowledge the advisory exists.
-2. `.github/workflows/audit.yml` — `cargo audit --ignore <ID>` in the
-   `cargo-audit` step. cargo-audit doesn't read `deny.toml`, so the
-   two lists must be kept in sync by hand.
-3. The local-run command in this file (above) — so contributors running
-   `cargo audit` locally see the same advisories pass that CI does.
+   not just acknowledge the advisory exists. This is the canonical entry.
+2. `.cargo/audit.toml` — `[advisories].ignore = [...]`. cargo-audit
+   doesn't read `deny.toml`, so this mirror keeps the two tools in sync.
+   Both local `cargo audit` and the CI `cargo-audit` job auto-discover
+   this file; no third place to update.
 
-When upstream ships a fix, remove the entry from all three places in
-the same PR that bumps the dependency.
+When upstream ships a fix, remove the entry from both places in the
+same PR that bumps the dependency.
 
 ### Adding a license to the allow-list
 
