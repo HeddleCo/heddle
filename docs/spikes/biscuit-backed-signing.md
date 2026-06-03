@@ -1,7 +1,21 @@
 # Spike: automatic state/change signing via the biscuit local keypair
 
-**Issue:** heddle#480 · **Status:** design / decision doc · **Audience:** maintainer sign-off
+**Issue:** heddle#480 · **Status:** ACCEPTED (maintainer sign-off 2026-06-03) · **Audience:** maintainer sign-off
 **Scope:** design + analysis only. No production behavior change; this PR adds only this file.
+
+---
+
+## Maintainer decisions (2026-06-03)
+
+Direction ACCEPTED:
+
+1. **Reuse the device-binding ed25519 keypair** (minted by `heddle auth login`) as the state-signing key — no new keys for authenticated users.
+2. **Auto-sign on capture/commit/merge** — shape (a): a direct ed25519 detached signature over `state.compute_hash()`, stored in the existing `state.signature` field. The primitives + `repo.sign_state()` already exist; the work is wiring.
+3. **Biscuit attestation (shape b) is a future opt-in layer**, not the v1 substrate.
+4. **`review sign` stays separate** — it is the multi-party third-party-review attestation surface, not the author auto-signature flow.
+5. **Local-only repos → universal signing via an auto-minted local identity key.** On first capture in a key-less (pre-auth) repo, transparently mint a local ed25519 identity keypair and sign with it; reconcile/link it to the device key when the user later runs `heddle auth login`. Signing works everywhere (offline + hosted) with zero user-managed keys. So **every change is signed, always** — this is the claim tapestry marketing can make truthfully and the moat vs Mesa (which has no signing).
+
+Implementation tracked in the follow-up issue.
 
 ---
 
