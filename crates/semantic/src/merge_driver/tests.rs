@@ -4375,3 +4375,107 @@ void foo() {
         "template-template inline-to-out-of-class refactor + disjoint body edit must merge cleanly: {text}"
     );
 }
+
+// =====================================================================
+// heddle#468: additive `use` / `pub use` re-exports are order-insensitive
+// items keyed by their import path.
+//
+// Before this change `use_declaration` fell to the `_ => None` arm in the
+// Rust classifier, so re-exports lived in preamble / inter-item segments
+// merged by plain `text_hunk_merge`. Keying each `use` by its import path
+// routes them through identity-based item resolution: disjoint paths union
+// cleanly, while a same-path add/add divergence surfaces a conflict instead
+// of silently concatenating both lines into a duplicate import (the AC2
+// case below — pre-fix it resolved Clean with `Bar` imported twice).
+// =====================================================================
+
+// AC1: two threads each adding a distinct `pub use` at the top of the same
+// file auto-combine — no manual resolution. Guards that promoting `use` to
+// an item keyed by import path keeps disjoint additions unioning cleanly.
+#[test]
+fn rust_disjoint_use_additions_auto_combine() {
+    let base = "\
+pub use crate::existing::Thing;
+
+fn anchor() { 0 }
+";
+    // ours prepends a distinct re-export; theirs prepends a different one.
+    let ours = "\
+pub use crate::aaa::Alpha;
+pub use crate::existing::Thing;
+
+fn anchor() { 0 }
+";
+    let theirs = "\
+pub use crate::bbb::Beta;
+pub use crate::existing::Thing;
+
+fn anchor() { 0 }
+";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(
+        merged.contains("crate::aaa::Alpha"),
+        "ours re-export lost: {merged}"
+    );
+    assert!(
+        merged.contains("crate::bbb::Beta"),
+        "theirs re-export lost: {merged}"
+    );
+    assert!(
+        merged.contains("crate::existing::Thing"),
+        "base re-export lost: {merged}"
+    );
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "additive disjoint re-exports must merge cleanly: {merged}"
+    );
+}
+
+// AC1 variant: a plain `use` added on one side and a different one on the
+// other, with no shared base `use`, still union cleanly.
+#[test]
+fn rust_disjoint_use_additions_from_empty_base_combine() {
+    let base = "fn anchor() { 0 }\n";
+    let ours = "use std::collections::HashMap;\nfn anchor() { 0 }\n";
+    let theirs = "use std::fmt::Display;\nfn anchor() { 0 }\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(merged.contains("HashMap"), "ours use lost: {merged}");
+    assert!(merged.contains("Display"), "theirs use lost: {merged}");
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "disjoint use additions must merge cleanly: {merged}"
+    );
+}
+
+// AC2: same-path add/add of a divergent re-export still conflicts. Both
+// sides add `crate::foo::Bar` (same import-path key) but disagree on
+// visibility — one re-exports (`pub use`), one imports (`use`). The
+// add/add divergence must surface a conflict rather than silently
+// picking one or emitting both (a duplicate-name compile error).
+#[test]
+fn rust_same_path_divergent_use_addadd_conflicts() {
+    let base = "fn anchor() { 0 }\n";
+    let ours = "pub use crate::foo::Bar;\nfn anchor() { 0 }\n";
+    let theirs = "use crate::foo::Bar;\nfn anchor() { 0 }\n";
+    let (_text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(count >= 1, "expected a conflict on same-path divergence");
+}
+
+// Regression: both sides add the SAME `pub use` identically while making a
+// disjoint function edit elsewhere — the re-export dedups to a single line
+// and the merge stays clean (exercises resolve_item's add/add o==t arm for
+// `use` items).
+#[test]
+fn rust_identical_use_addition_dedups_clean() {
+    let base = "fn alpha() { 1 }\nfn beta() { 2 }\n";
+    let ours = "pub use crate::shared::Thing;\nfn alpha() { 10 }\nfn beta() { 2 }\n";
+    let theirs = "pub use crate::shared::Thing;\nfn alpha() { 1 }\nfn beta() { 20 }\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert_eq!(
+        merged.matches("crate::shared::Thing").count(),
+        1,
+        "identical re-export must appear exactly once: {merged}"
+    );
+    assert!(merged.contains("fn alpha() { 10 }"), "ours edit lost: {merged}");
+    assert!(merged.contains("fn beta() { 20 }"), "theirs edit lost: {merged}");
+}
