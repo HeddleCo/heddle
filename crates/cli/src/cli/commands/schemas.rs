@@ -2551,10 +2551,19 @@ pub struct BridgeImportSchema {
     pub tags_synced: u64,
     pub skipped_non_commit_refs: u64,
     pub partial_mirror_refs: u64,
+    pub lossy_entries: Vec<LossyGitImportEntrySchema>,
     pub already_in_sync: bool,
     pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct LossyGitImportEntrySchema {
+    pub path: String,
+    pub action: String,
+    pub reason: String,
+    pub git_object: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

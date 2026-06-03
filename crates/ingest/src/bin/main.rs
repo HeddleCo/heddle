@@ -29,8 +29,8 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use ingest::{
-    GitSource, ReasoningPipeline, ReasoningPipelineParams, Result, ShaMap, TranscriptRoots,
-    import_git_into, load_transcripts, pipeline_default_commits,
+    GitSource, ImportOptions, ReasoningPipeline, ReasoningPipelineParams, Result, ShaMap,
+    TranscriptRoots, import_git_into_with_options, load_transcripts, pipeline_default_commits,
 };
 use tracing::info;
 
@@ -68,6 +68,13 @@ enum Command {
         /// backwards compatibility with older help text.
         #[arg(long)]
         heddle: PathBuf,
+        /// Accept git tree entries Heddle cannot represent losslessly.
+        ///
+        /// By default import fails on the first unrepresentable tree entry.
+        /// With this flag, import restores the historical drop behavior and
+        /// prints an end-of-run summary of every affected entry.
+        #[arg(long)]
+        lossy: bool,
     },
     /// Mine agent chat transcripts for reasoning annotations and attach
     /// them to the matching imported states. Requires `import` to have
@@ -158,7 +165,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Map { path, action } => run_map(&path, action),
-        Command::Import { git, heddle } => run_import(&git, &heddle),
+        Command::Import { git, heddle, lossy } => run_import(&git, &heddle, lossy),
         Command::Reason {
             git,
             heddle,
@@ -189,10 +196,15 @@ fn main() -> Result<()> {
     }
 }
 
-fn run_import(git_path: &std::path::Path, heddle_path: &std::path::Path) -> Result<()> {
+fn run_import(
+    git_path: &std::path::Path,
+    heddle_path: &std::path::Path,
+    lossy: bool,
+) -> Result<()> {
     // `import_git_into` handles init-vs-open, the sha-map sidecar, and
     // every walker/writer in the right order. We just surface the stats.
-    let (stats, _map) = import_git_into(git_path, heddle_path)?;
+    let (stats, _map) =
+        import_git_into_with_options(git_path, heddle_path, ImportOptions { lossy })?;
     let r = &stats.refs_seen;
     let walked = r.local_branches
         + r.tags
@@ -233,6 +245,15 @@ fn run_import(git_path: &std::path::Path, heddle_path: &std::path::Path) -> Resu
     println!("blobs:  {}", stats.blobs_imported);
     println!("threads written:  {}", stats.refs.threads_written);
     println!("markers written:  {}", stats.refs.markers_written);
+    if !stats.lossy_entries.is_empty() {
+        println!(
+            "lossy import accepted for {} tree entries:",
+            stats.lossy_entries.len()
+        );
+        for entry in &stats.lossy_entries {
+            println!("  {}", entry.summary_line());
+        }
+    }
     // Oplog block: only rendered when the honest-history pass actually
     // ran (all counters zero ⇒ either disabled or no-op repo). Shows up
     // below the refs because it's a downstream derivative of them.

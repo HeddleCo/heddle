@@ -99,6 +99,7 @@ pub struct GitSignature {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TreeChild {
     pub name: String,
+    pub raw_name: Vec<u8>,
     pub sha: String,
     pub kind: TreeChildKind,
 }
@@ -458,8 +459,10 @@ impl GitSource {
                 gix::object::tree::EntryKind::Link => TreeChildKind::Symlink,
                 gix::object::tree::EntryKind::Commit => TreeChildKind::Gitlink,
             };
+            let raw_name = entry.filename().to_vec();
             out.push(TreeChild {
-                name: entry.filename().to_string(),
+                name: String::from_utf8_lossy(&raw_name).into_owned(),
+                raw_name,
                 sha: entry.object_id().to_string(),
                 kind,
             });

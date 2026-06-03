@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use objects::object::ThreadName;
 use refs::Head;
 use repo::Repository;
@@ -16,24 +16,27 @@ use super::{
     action_line::{print_next, print_next_step, print_optional},
     advice::RecoveryAdvice,
     git_overlay_health::{
-        action_template, build_git_overlay_health, build_plain_git_verification_probe,
+        GitOverlayHealth, GitOverlayHealthCheck, RepositoryVerificationState, action_template,
+        build_git_overlay_health, build_plain_git_verification_probe,
         build_repository_verification_state, canonical_adopt_ref_command,
         canonical_bridge_import_ref_command, canonical_bridge_reconcile_ref_command,
         canonical_bridge_reconcile_ref_preview_command, serialize_empty_action_as_null,
-        GitOverlayHealth, GitOverlayHealthCheck, RepositoryVerificationState,
     },
     import_progress::ImportProgress,
     remote::resolve_default_remote_name,
 };
 use crate::{
     bridge::{
+        GitBridge,
         git_core::clone_url_to_bare,
         git_export::export_all,
-        git_import::{import_all, import_selected_refs},
-        git_util::ExportedRef,
-        GitBridge,
+        git_import::{
+            import_all, import_all_with_options, import_selected_refs,
+            import_selected_refs_with_options,
+        },
+        git_util::{ExportedRef, GitImportOptions, LossyGitImportEntry},
     },
-    cli::{cli_args::GitSource, should_output_json, style, Cli, GitCommands},
+    cli::{Cli, GitCommands, cli_args::GitSource, should_output_json, style},
 };
 
 /// A `GitSource` resolved to an on-disk path. For URL sources we own a
@@ -218,6 +221,7 @@ struct BridgeGitImportOutput {
     tags_synced: usize,
     skipped_non_commit_refs: usize,
     partial_mirror_refs: usize,
+    lossy_entries: Vec<BridgeLossyGitImportEntryOutput>,
     already_in_sync: bool,
     #[serde(serialize_with = "serialize_empty_action_as_null")]
     recommended_action: String,
@@ -226,6 +230,14 @@ struct BridgeGitImportOutput {
     #[serde(skip_serializing)]
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
+}
+
+#[derive(Serialize)]
+struct BridgeLossyGitImportEntryOutput {
+    path: String,
+    action: String,
+    reason: String,
+    git_object: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -498,6 +510,24 @@ fn render_bridge_git_import(
             style::bold(&output.partial_mirror_refs.to_string())
         );
     }
+    if !output.lossy_entries.is_empty() {
+        println!(
+            "{} lossy import accepted for {} tree entries",
+            style::warn_marker(),
+            style::bold(&output.lossy_entries.len().to_string())
+        );
+        for entry in &output.lossy_entries {
+            let object = entry
+                .git_object
+                .as_deref()
+                .map(|value| format!(" ({value})"))
+                .unwrap_or_default();
+            println!(
+                "  {} {}{}: {}",
+                entry.action, entry.path, object, entry.reason
+            );
+        }
+    }
     println!();
     println!("{}", style::section("Verification"));
     println!(
@@ -510,6 +540,20 @@ fn render_bridge_git_import(
         print_next(&output.recommended_action);
     }
     Ok(())
+}
+
+fn bridge_lossy_import_entries(
+    entries: &[LossyGitImportEntry],
+) -> Vec<BridgeLossyGitImportEntryOutput> {
+    entries
+        .iter()
+        .map(|entry| BridgeLossyGitImportEntryOutput {
+            path: entry.path.clone(),
+            action: entry.action.as_str().to_string(),
+            reason: entry.reason.clone(),
+            git_object: entry.git_object.clone(),
+        })
+        .collect()
 }
 
 fn render_bridge_git_reconcile(
@@ -684,7 +728,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
             }
         }
 
-        GitCommands::Import { path, refs } => {
+        GitCommands::Import { path, refs, lossy } => {
             let resolved = match path {
                 Some(source) => Some(resolve_source(&repo, source)?),
                 None => None,
@@ -701,11 +745,26 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
             };
             let mut progress = ImportProgress::start(cli, &repo, &scope, &source_label);
             progress.advance("importing commits");
+            let import_options = GitImportOptions { lossy };
             let stats = match &resolved {
-                Some(r) if refs.is_empty() => import_all(&mut bridge, Some(r.path()))?,
-                Some(r) => import_selected_refs(&mut bridge, Some(r.path()), &refs)?,
-                None if refs.is_empty() => import_all(&mut bridge, Some(default_source))?,
-                None => import_selected_refs(&mut bridge, Some(default_source), &refs)?,
+                Some(r) if refs.is_empty() => {
+                    import_all_with_options(&mut bridge, Some(r.path()), import_options)?
+                }
+                Some(r) => import_selected_refs_with_options(
+                    &mut bridge,
+                    Some(r.path()),
+                    &refs,
+                    import_options,
+                )?,
+                None if refs.is_empty() => {
+                    import_all_with_options(&mut bridge, Some(default_source), import_options)?
+                }
+                None => import_selected_refs_with_options(
+                    &mut bridge,
+                    Some(default_source),
+                    &refs,
+                    import_options,
+                )?,
             };
             progress.advance("writing refs");
             progress.finish();
@@ -748,6 +807,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                 tags_synced: stats.tags_synced,
                 skipped_non_commit_refs: stats.skipped_non_commit_refs.len(),
                 partial_mirror_refs: stats.partial_mirror_refs.len(),
+                lossy_entries: bridge_lossy_import_entries(&stats.lossy_entries),
                 already_in_sync,
                 recommended_action: trust.recommended_action.clone(),
                 recommended_action_template: trust.recommended_action_template.clone(),
@@ -1059,9 +1119,9 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
         }
 
         #[cfg(feature = "ingest")]
-        GitCommands::Ingest { path } => {
+        GitCommands::Ingest { path, lossy } => {
             let resolved = resolve_source(&repo, path)?;
-            run_ingest(cli, &repo, resolved.path())?;
+            run_ingest(cli, &repo, resolved.path(), lossy)?;
         }
 
         #[cfg(feature = "ingest")]
@@ -1164,11 +1224,24 @@ fn reconcile_write_through_skipped_advice(ref_name: &str, reason: String) -> Rec
 }
 
 #[cfg(feature = "ingest")]
-fn run_ingest(cli: &Cli, repo: &Repository, git_path: &std::path::Path) -> Result<()> {
-    use ingest::import_git_into;
+fn run_ingest(cli: &Cli, repo: &Repository, git_path: &std::path::Path, lossy: bool) -> Result<()> {
+    use ingest::{ImportOptions, import_git_into_with_options};
 
-    let (stats, _map) = import_git_into(git_path, repo.root())?;
+    let (stats, _map) =
+        import_git_into_with_options(git_path, repo.root(), ImportOptions { lossy })?;
     if should_output_json(cli, Some(repo.config())) {
+        let lossy_entries = stats
+            .lossy_entries
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "path": entry.path,
+                    "action": entry.action.as_str(),
+                    "reason": entry.reason,
+                    "git_object": entry.git_object,
+                })
+            })
+            .collect::<Vec<_>>();
         let out = serde_json::json!({
             "commits_imported": stats.commits_imported,
             "trees_imported": stats.trees_imported,
@@ -1180,6 +1253,7 @@ fn run_ingest(cli: &Cli, repo: &Repository, git_path: &std::path::Path) -> Resul
             "peel_failed": stats.refs_seen.peel_failed,
             "non_commit_skipped": stats.refs_seen.non_commit_skipped,
             "reflog_only_commits": stats.reflog_only_commits,
+            "lossy_entries": lossy_entries,
         });
         println!("{out}");
     } else {
@@ -1217,6 +1291,15 @@ fn run_ingest(cli: &Cli, repo: &Repository, git_path: &std::path::Path) -> Resul
         println!("blobs:    {}", stats.blobs_imported);
         println!("threads written:  {}", stats.refs.threads_written);
         println!("markers written:  {}", stats.refs.markers_written);
+        if !stats.lossy_entries.is_empty() {
+            println!(
+                "lossy import accepted for {} tree entries:",
+                stats.lossy_entries.len()
+            );
+            for entry in &stats.lossy_entries {
+                println!("  {}", entry.summary_line());
+            }
+        }
         println!();
         println!(
             "Next: `heddle bridge reason --path {}` to attach AI-session reasoning.",
@@ -1243,8 +1326,8 @@ fn run_reason(
     use std::path::PathBuf;
 
     use ingest::{
-        load_transcripts, pipeline_default_commits, GitSource, ReasoningPipeline,
-        ReasoningPipelineParams, ShaMap, TranscriptRoots,
+        GitSource, ReasoningPipeline, ReasoningPipelineParams, ShaMap, TranscriptRoots,
+        load_transcripts, pipeline_default_commits,
     };
 
     let map_path = repo.heddle_dir().join("ingest").join("sha_map.sqlite");

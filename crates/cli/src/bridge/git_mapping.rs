@@ -11,12 +11,17 @@ use std::{
 use objects::object::ChangeId;
 use serde::{Deserialize, Serialize};
 
-use super::git_core::{GitBridge, GitBridgeError, GitResult, git_err};
+use super::{
+    git_core::{GitBridge, GitBridgeError, GitResult, git_err},
+    git_util::LossyGitImportEntry,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct MappingEntry {
     change_id: String,
     git_oid: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    lossy_entries: Vec<LossyGitImportEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -92,6 +97,8 @@ impl<'a> GitBridge<'a> {
                 .parse::<gix::hash::ObjectId>()
                 .map_err(|err| GitBridgeError::InvalidMapping(err.to_string()))?;
             self.mapping.insert_checked(change_id, git_oid)?;
+            self.mapping
+                .set_git_lossy_entries(git_oid, entry.lossy_entries);
         }
 
         Ok(())
@@ -118,6 +125,11 @@ impl<'a> GitBridge<'a> {
             .map(|(change_id, git_oid)| MappingEntry {
                 change_id: change_id.to_string_full(),
                 git_oid: git_oid.to_string(),
+                lossy_entries: self
+                    .mapping
+                    .get_git_lossy_entries(*git_oid)
+                    .map(|entries| entries.to_vec())
+                    .unwrap_or_default(),
             })
             .collect();
 

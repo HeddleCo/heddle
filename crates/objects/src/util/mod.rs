@@ -10,6 +10,10 @@ pub mod async_retry;
 #[cfg(feature = "s3")]
 pub use async_retry::{RetryDecision, RetryPolicy, classify_transient_io, retry_with};
 
+pub mod git_tree_name;
 pub mod symlink;
 
+pub use git_tree_name::{
+    GitTreeNameClassification, GitTreeNameLossy, GitTreeNameLossyAction, classify_git_tree_name,
+};
 pub use symlink::symlink_target_bytes;

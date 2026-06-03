@@ -103,6 +103,15 @@ pub enum GitCommands {
         /// import all branches and tags.
         #[arg(long = "ref", value_name = "REF")]
         refs: Vec<String>,
+
+        /// Accept git tree entries Heddle cannot represent losslessly.
+        ///
+        /// By default import fails on the first unrepresentable tree entry
+        /// and names the offending path. With this flag, import restores the
+        /// historical drop/convert behavior and prints an end-of-run summary
+        /// of every affected entry.
+        #[arg(long)]
+        lossy: bool,
     },
 
     /// Bidirectional sync with Git (export + import).
@@ -150,6 +159,13 @@ pub enum GitCommands {
         /// Source git repository (local path or URL) to import from.
         #[arg(long, value_parser = parse_git_source)]
         path: GitSource,
+        /// Accept git tree entries Heddle cannot represent losslessly.
+        ///
+        /// By default ingest fails on the first unrepresentable tree entry.
+        /// With this flag, ingest restores the historical drop behavior and
+        /// prints an end-of-run summary of every affected entry.
+        #[arg(long)]
+        lossy: bool,
     },
 
     /// Mine local AI-coding-agent sessions (Claude / Codex / OpenCode)

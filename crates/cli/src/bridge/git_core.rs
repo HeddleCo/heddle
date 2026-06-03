@@ -34,7 +34,7 @@ use repo::Repository as HeddleRepository;
 use super::{
     git_export::{export_all, export_current_thread},
     git_import::import_all,
-    git_util::ImportStats,
+    git_util::{ImportStats, LossyGitImportEntry},
 };
 
 /// Errors specific to Git bridge operations.
@@ -266,7 +266,11 @@ impl RefSpec {
 
     /// Render in `git` refspec syntax without the leading `+`, even when forced.
     pub fn to_git_format_not_forced(&self) -> String {
-        format!("{}:{}", self.source.as_deref().unwrap_or(""), self.destination)
+        format!(
+            "{}:{}",
+            self.source.as_deref().unwrap_or(""),
+            self.destination
+        )
     }
 }
 
@@ -429,6 +433,9 @@ pub struct SyncMapping {
     heddle_to_git: HashMap<ChangeId, ObjectId>,
     /// Maps Git object id -> Heddle ChangeId
     git_to_heddle: HashMap<ObjectId, ChangeId>,
+    /// Git commits whose imported Heddle states were produced under
+    /// `bridge git import --lossy`, with root-relative lossy entries.
+    git_lossy_entries: HashMap<ObjectId, Vec<LossyGitImportEntry>>,
 }
 
 impl SyncMapping {
@@ -441,6 +448,9 @@ impl SyncMapping {
     pub fn insert(&mut self, change_id: ChangeId, git_oid: ObjectId) {
         if let Some(previous_git) = self.heddle_to_git.remove(&change_id) {
             self.git_to_heddle.remove(&previous_git);
+            if previous_git != git_oid {
+                self.git_lossy_entries.remove(&previous_git);
+            }
         }
         if let Some(previous_change) = self.git_to_heddle.remove(&git_oid) {
             self.heddle_to_git.remove(&previous_change);
@@ -497,46 +507,82 @@ impl SyncMapping {
         self.git_to_heddle.contains_key(&git_oid)
     }
 
+    pub(crate) fn set_git_lossy_entries(
+        &mut self,
+        git_oid: ObjectId,
+        entries: Vec<LossyGitImportEntry>,
+    ) {
+        if entries.is_empty() {
+            self.git_lossy_entries.remove(&git_oid);
+        } else {
+            self.git_lossy_entries.insert(git_oid, entries);
+        }
+    }
+
+    pub(crate) fn get_git_lossy_entries(
+        &self,
+        git_oid: ObjectId,
+    ) -> Option<&[LossyGitImportEntry]> {
+        self.git_lossy_entries.get(&git_oid).map(Vec::as_slice)
+    }
+
     /// Iterate over mappings.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&ChangeId, &ObjectId)> {
         self.heddle_to_git.iter()
     }
 
     pub(crate) fn retain_git_objects(&mut self, repo: &gix::Repository) {
-        let retained: Vec<(ChangeId, ObjectId)> = self
+        let retained: Vec<(ChangeId, ObjectId, Option<Vec<LossyGitImportEntry>>)> = self
             .heddle_to_git
             .iter()
             .filter_map(|(change_id, git_oid)| {
                 repo.find_object(*git_oid)
                     .ok()
-                    .map(|_| (*change_id, *git_oid))
+                    .map(|_| {
+                        (
+                            *change_id,
+                            *git_oid,
+                            self.git_lossy_entries.get(git_oid).cloned(),
+                        )
+                    })
             })
             .collect();
 
         self.heddle_to_git.clear();
         self.git_to_heddle.clear();
-        for (change_id, git_oid) in retained {
+        self.git_lossy_entries.clear();
+        for (change_id, git_oid, lossy_entries) in retained {
             self.insert(change_id, git_oid);
+            if let Some(lossy_entries) = lossy_entries {
+                self.set_git_lossy_entries(git_oid, lossy_entries);
+            }
         }
     }
 
     #[cfg_attr(not(feature = "git-overlay"), allow(dead_code))]
     pub(crate) fn retain_git_object_set(&mut self, reachable: &HashSet<ObjectId>) -> usize {
         let before = self.heddle_to_git.len();
-        let retained: Vec<(ChangeId, ObjectId)> = self
+        let retained: Vec<(ChangeId, ObjectId, Option<Vec<LossyGitImportEntry>>)> = self
             .heddle_to_git
             .iter()
-            .filter_map(|(change_id, git_oid)| {
-                reachable
-                    .contains(git_oid)
-                    .then_some((*change_id, *git_oid))
+            .filter(|(_, git_oid)| reachable.contains(*git_oid))
+            .map(|(change_id, git_oid)| {
+                (
+                    *change_id,
+                    *git_oid,
+                    self.git_lossy_entries.get(git_oid).cloned(),
+                )
             })
             .collect();
 
         self.heddle_to_git.clear();
         self.git_to_heddle.clear();
-        for (change_id, git_oid) in retained {
+        self.git_lossy_entries.clear();
+        for (change_id, git_oid, lossy_entries) in retained {
             self.insert(change_id, git_oid);
+            if let Some(lossy_entries) = lossy_entries {
+                self.set_git_lossy_entries(git_oid, lossy_entries);
+            }
         }
         before.saturating_sub(self.heddle_to_git.len())
     }
@@ -981,19 +1027,26 @@ impl<'a> GitBridge<'a> {
 
         let mut materialized_attached_thread = false;
         if let Some((thread, old_state)) = attached_before
-            && let Some(new_state) = self.heddle_repo.refs().get_thread(&ThreadName::new(&thread))?
+            && let Some(new_state) = self
+                .heddle_repo
+                .refs()
+                .get_thread(&ThreadName::new(&thread))?
             && new_state != old_state
         {
-            self.heddle_repo.refs().set_thread(&ThreadName::new(&thread), &old_state)?;
+            self.heddle_repo
+                .refs()
+                .set_thread(&ThreadName::new(&thread), &old_state)?;
             self.heddle_repo.refs().write_head(&Head::Attached {
                 thread: ThreadName::new(&thread),
             })?;
             self.heddle_repo
                 .goto_verified_clean_without_record(&new_state)?;
-            self.heddle_repo.refs().set_thread(&ThreadName::new(&thread), &new_state)?;
             self.heddle_repo
                 .refs()
-                .write_head(&Head::Attached { thread: ThreadName::new(&thread) })?;
+                .set_thread(&ThreadName::new(&thread), &new_state)?;
+            self.heddle_repo.refs().write_head(&Head::Attached {
+                thread: ThreadName::new(&thread),
+            })?;
             materialized_attached_thread = true;
         }
 
@@ -1228,7 +1281,10 @@ impl<'a> GitBridge<'a> {
         let mut real_tracked: HashSet<String> = HashSet::new();
         let mut existing_ita: HashSet<String> = HashSet::new();
         for entry in index.entries() {
-            let path = entry.path_in(index.path_backing()).to_str_lossy().into_owned();
+            let path = entry
+                .path_in(index.path_backing())
+                .to_str_lossy()
+                .into_owned();
             if entry.flags.contains(gix_index::entry::Flags::INTENT_TO_ADD) {
                 existing_ita.insert(path);
             } else {
@@ -1345,7 +1401,11 @@ impl<'a> GitBridge<'a> {
         &mut self,
         thread: &str,
     ) -> GitResult<WriteThroughOutcome> {
-        let Some(state_id) = self.heddle_repo.refs().get_thread(&ThreadName::new(thread))? else {
+        let Some(state_id) = self
+            .heddle_repo
+            .refs()
+            .get_thread(&ThreadName::new(thread))?
+        else {
             return Ok(WriteThroughOutcome::Skipped(
                 WriteThroughSkipReason::NoAttachedThread,
             ));
@@ -1771,9 +1831,10 @@ fn parse_configured_remote_url(value: &str, relative_base: &Path) -> GitResult<g
 
 fn configured_remote_local_path(value: &str, relative_base: &Path) -> PathBuf {
     if value == "~"
-        && let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home);
-        }
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home);
+    }
     if let Some(rest) = value.strip_prefix("~/")
         && let Some(home) = std::env::var_os("HOME")
     {
@@ -3068,8 +3129,7 @@ mod tests {
 
     #[test]
     fn parse_git_ref_remote_branch_keeps_nested_name() {
-        let parsed =
-            parse_git_ref("refs/remotes/origin/feature/x").expect("remote branch parses");
+        let parsed = parse_git_ref("refs/remotes/origin/feature/x").expect("remote branch parses");
         assert_eq!(parsed.kind, GitRefKind::Branch);
         assert_eq!(parsed.name, "feature/x");
         assert_eq!(parsed.remote, "origin");
