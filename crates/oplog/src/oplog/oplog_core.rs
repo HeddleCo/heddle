@@ -19,7 +19,7 @@ use super::{
         ConditionalCommitOutcome, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
         isolation_keys_for_record,
     },
-    packed_oplog::{Latest, OplogFormat, PackedOpLog, PackedOpLogIndex, V2},
+    packed_oplog::{PackedOpLog, PackedOpLogIndex},
 };
 
 /// A `TransactionCommit` marker carries no user-facing operation: it is the
@@ -112,19 +112,12 @@ impl OpLog {
         if !path.exists() {
             return Ok(());
         }
-        match PackedOpLog::on_disk_version(&path)? {
-            version if version == u32::from(Latest::VERSION) => {
-                let _ = PackedOpLogIndex::open(&path)?;
-                Ok(())
-            }
-            version if version == u32::from(V2::VERSION) => {
-                let _lock = self.write_lock()?;
-                PackedOpLog::ensure_latest(&path)
-            }
-            version => Err(HeddleError::InvalidObject(format!(
-                "unsupported oplog version {version}"
-            ))),
+        if PackedOpLog::is_latest(&path)? {
+            let _ = PackedOpLogIndex::open(&path)?;
+            return Ok(());
         }
+        let _lock = self.write_lock()?;
+        PackedOpLog::ensure_latest(&path)
     }
 
     /// Load from disk, bypassing cache (used after acquiring write lock).
