@@ -5,6 +5,22 @@ use serde::Serialize;
 
 use crate::{Thread, ThreadFreshness, ThreadState};
 
+/// Shell-quote an argument for inclusion in a recommended-command string, so a
+/// thread id containing whitespace or shell metacharacters yields a runnable
+/// command (and tokenizes correctly through the CLI's next_action validator).
+pub fn shell_quote(arg: &str) -> String {
+    let safe = !arg.is_empty()
+        && arg.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(b, b'_' | b'-' | b'.' | b'/' | b'@' | b':' | b'+' | b'=')
+        });
+    if safe {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', r"'\''"))
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecommendedAction {
@@ -19,14 +35,15 @@ pub enum RecommendedAction {
 
 impl RecommendedAction {
     pub fn command(&self, thread_id: &str) -> Option<String> {
+        let tid = shell_quote(thread_id);
         match self {
             Self::Commit => Some("heddle commit -m \"...\"".to_string()),
-            Self::Ready => Some(format!("heddle ready --thread {thread_id}")),
-            Self::Sync => Some(format!("heddle sync --thread {thread_id}")),
-            Self::Land => Some(format!("heddle land --thread {thread_id} --no-push")),
+            Self::Ready => Some(format!("heddle ready --thread {tid}")),
+            Self::Sync => Some(format!("heddle sync --thread {tid}")),
+            Self::Land => Some(format!("heddle land --thread {tid} --no-push")),
             Self::Resolve => Some("heddle resolve --list".to_string()),
             Self::Review => None,
-            Self::Promote => Some(format!("heddle thread promote {thread_id}")),
+            Self::Promote => Some(format!("heddle thread promote {tid}")),
         }
     }
 }
@@ -147,7 +164,10 @@ pub fn describe_thread_advice_with_initial(
         return ThreadAdvice {
             thread_health: "ready".to_string(),
             blockers,
-            recommended_action: format!("heddle land --thread {} --no-push", thread.id),
+            recommended_action: format!(
+                "heddle land --thread {} --no-push",
+                shell_quote(&thread.id)
+            ),
         };
     } else if clean_ready_merges_to_apply || thread.state == ThreadState::Ready {
         RecommendedAction::Land
@@ -240,6 +260,20 @@ mod tests {
         assert_eq!(
             advice.recommended_action,
             "heddle land --thread feature/x --no-push"
+        );
+    }
+
+    #[test]
+    fn breadcrumbs_shell_quote_thread_ids_with_whitespace() {
+        // Safe slugs pass through bare (so existing breadcrumbs are unchanged)...
+        assert_eq!(shell_quote("feature/x"), "feature/x");
+        // ...but whitespace / shell metacharacters are single-quoted so the
+        // command is runnable and tokenizes correctly in the next_action validator.
+        assert_eq!(shell_quote("my feature"), "'my feature'");
+        assert_eq!(shell_quote("a'b"), r"'a'\''b'");
+        assert_eq!(
+            RecommendedAction::Sync.command("my feature").as_deref(),
+            Some("heddle sync --thread 'my feature'")
         );
     }
 }
