@@ -15,7 +15,6 @@
 //! in downstream modules; [`Importer::run`] leaves their seams wired but
 //! stubbed behind TODOs so we can land milestones independently.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use objects::{
@@ -344,7 +343,6 @@ struct PackedImport<'a, W: std::io::Write + std::io::Read + std::io::Seek> {
     builder: StreamingPackBuilder<W>,
     stats: PackedImportStats,
     options: ImportOptions,
-    lossy_by_tree: HashMap<String, Vec<LossyImportEntry>>,
 }
 
 impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> {
@@ -360,7 +358,6 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
             builder,
             stats: PackedImportStats::default(),
             options,
-            lossy_by_tree: HashMap::new(),
         }
     }
 
@@ -422,8 +419,6 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
         self.map
             .insert_tree_with_lossy_entries(git_tree_sha, hash, &tree_lossy_entries)
             .map_err(IngestError::from)?;
-        self.lossy_by_tree
-            .insert(git_tree_sha.to_string(), tree_lossy_entries);
         Ok(hash)
     }
 

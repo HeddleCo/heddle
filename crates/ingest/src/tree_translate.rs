@@ -41,7 +41,6 @@ use crate::{
     },
     sha_map::ShaMap,
 };
-use std::collections::HashMap;
 
 /// Translates one git tree (recursively) into Heddle blobs and trees.
 ///
@@ -54,7 +53,6 @@ pub struct TreeTranslator<'a, S: ObjectStore> {
     map: &'a mut ShaMap,
     options: ImportOptions,
     lossy_entries: Vec<LossyImportEntry>,
-    lossy_by_tree: HashMap<String, Vec<LossyImportEntry>>,
 }
 
 impl<'a, S: ObjectStore> TreeTranslator<'a, S> {
@@ -74,7 +72,6 @@ impl<'a, S: ObjectStore> TreeTranslator<'a, S> {
             map,
             options,
             lossy_entries: Vec::new(),
-            lossy_by_tree: HashMap::new(),
         }
     }
 
@@ -132,8 +129,6 @@ impl<'a, S: ObjectStore> TreeTranslator<'a, S> {
         self.map
             .insert_tree_with_lossy_entries(git_tree_sha, hash, &tree_lossy_entries)
             .map_err(IngestError::from)?;
-        self.lossy_by_tree
-            .insert(git_tree_sha.to_string(), tree_lossy_entries);
         Ok(hash)
     }
 
