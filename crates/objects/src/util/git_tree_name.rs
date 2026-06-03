@@ -23,23 +23,26 @@ pub enum GitTreeNameLossyAction {
 }
 
 pub fn classify_git_tree_name(raw_name: &[u8]) -> GitTreeNameClassification {
-    let name = match std::str::from_utf8(raw_name) {
-        Ok(name) => name.to_string(),
-        Err(_) => {
-            return GitTreeNameClassification::NeedsLossy(GitTreeNameLossy {
-                name: String::from_utf8_lossy(raw_name).into_owned(),
-                action: GitTreeNameLossyAction::Converted,
-                reason: "tree entry name is not valid UTF-8 and was converted with replacement characters",
-            });
-        }
+    let (name, utf8_lossy) = match std::str::from_utf8(raw_name) {
+        Ok(name) => (name.to_string(), false),
+        Err(_) => (String::from_utf8_lossy(raw_name).into_owned(), true),
     };
 
-    // Defer to the canonical tree-name validator so this classifier's
-    // "representable" set can never drift from what Heddle will actually
-    // store (path separators '/' and '\', '.'/'..', control bytes, empty).
-    match validate_tree_entry_name(&name) {
-        Ok(()) => GitTreeNameClassification::Representable(name),
-        Err(_) => GitTreeNameClassification::NeedsLossy(GitTreeNameLossy {
+    // Validate the FINAL name (after any UTF-8 replacement) against the
+    // canonical tree-name validator, so this classifier's representable set
+    // can never drift from what Heddle will actually store (path separators
+    // '/' and '\', '.'/'..', control bytes, empty). Critically, a name that
+    // is invalid UTF-8 AND otherwise unrepresentable (e.g. `bad\<0xff>` ->
+    // lossy `bad\<U+FFFD>` still containing a backslash) must be Dropped, not
+    // silently persisted as Converted.
+    match (validate_tree_entry_name(&name), utf8_lossy) {
+        (Ok(()), false) => GitTreeNameClassification::Representable(name),
+        (Ok(()), true) => GitTreeNameClassification::NeedsLossy(GitTreeNameLossy {
+            name,
+            action: GitTreeNameLossyAction::Converted,
+            reason: "tree entry name is not valid UTF-8 and was converted with replacement characters",
+        }),
+        (Err(_), _) => GitTreeNameClassification::NeedsLossy(GitTreeNameLossy {
             name,
             action: GitTreeNameLossyAction::Dropped,
             reason: "tree entry name is not representable in Heddle",
@@ -96,6 +99,20 @@ mod tests {
                 assert_eq!(lossy.action, GitTreeNameLossyAction::Converted);
             }
             other => panic!("expected NeedsLossy/Converted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_utf8_that_stays_unrepresentable_after_conversion_is_dropped() {
+        // `bad\<0xff>`: invalid UTF-8 AND contains a backslash. Lossy UTF-8
+        // conversion replaces the 0xff but the backslash survives, so the
+        // converted name is still rejected by validate_tree_entry_name and
+        // must be Dropped — never silently persisted as Converted.
+        match classify_git_tree_name(b"bad\\\xff") {
+            GitTreeNameClassification::NeedsLossy(lossy) => {
+                assert_eq!(lossy.action, GitTreeNameLossyAction::Dropped);
+            }
+            other => panic!("expected NeedsLossy/Dropped, got {other:?}"),
         }
     }
 }
