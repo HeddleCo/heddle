@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use objects::object::{State, Status};
+use serde::{Deserialize, Serialize};
 
 use super::git_core::GitBridge;
 
@@ -233,7 +234,7 @@ pub struct GitImportOptions {
 }
 
 /// One git tree entry that bridge import could not represent losslessly.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LossyGitImportEntry {
     pub path: String,
     pub git_object: Option<String>,
@@ -241,7 +242,7 @@ pub struct LossyGitImportEntry {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 pub enum LossyGitImportAction {
     Dropped,
     Converted,

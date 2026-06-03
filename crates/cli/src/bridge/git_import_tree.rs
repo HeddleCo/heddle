@@ -48,6 +48,10 @@ impl<'a> GitTreeImporter<'a> {
         &self.lossy_entries
     }
 
+    pub(crate) fn lossy_enabled(&self) -> bool {
+        self.options.lossy
+    }
+
     pub fn import_tree(&mut self, tree_oid: gix::hash::ObjectId) -> GitResult<ContentHash> {
         self.import_tree_at(tree_oid, "")
     }
@@ -193,10 +197,7 @@ impl<'a> GitTreeImporter<'a> {
 
     fn record_lossy(&mut self, entry: LossyGitImportEntry) -> GitResult<()> {
         if !self.options.lossy {
-            return Err(GitBridgeError::InvalidMapping(format!(
-                "git import cannot represent tree entry losslessly: {}. Retry with --lossy to accept dropping or converting unrepresentable entries.",
-                entry.summary_line()
-            )));
+            return Err(fail_lossy_entry(&entry));
         }
         tracing::warn!(entry = %entry.summary_line(), "lossy git import accepted");
         self.lossy_entries.push(entry);
@@ -238,6 +239,13 @@ pub fn import_git_tree(
     tree_oid: gix::hash::ObjectId,
 ) -> GitResult<ContentHash> {
     GitTreeImporter::new(heddle_repo, repo).import_tree(tree_oid)
+}
+
+pub(crate) fn fail_lossy_entry(entry: &LossyGitImportEntry) -> GitBridgeError {
+    GitBridgeError::InvalidMapping(format!(
+        "git import cannot represent tree entry losslessly: {}. Retry with --lossy to accept dropping or converting unrepresentable entries.",
+        entry.summary_line()
+    ))
 }
 
 fn join_tree_path(prefix: &str, name: &str) -> String {

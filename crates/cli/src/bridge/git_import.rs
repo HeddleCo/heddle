@@ -13,6 +13,7 @@ use repo::Repository as HeddleRepository;
 use tracing::warn;
 
 pub use super::git_import_tree::{GitTreeImporter, import_git_tree};
+use super::git_import_tree::fail_lossy_entry;
 use crate::bridge::{
     git_core::{
         GitBridge, GitBridgeError, GitResult, RefNamespace, RefUpdate, SyncMapping,
@@ -840,6 +841,7 @@ fn import_commit_ancestry(
                     None => true,
                 };
                 if needs_state {
+                    let before_lossy = tree_importer.lossy_entries().len();
                     let change_id = import_commit(
                         &mut bridge.mapping,
                         bridge.heddle_repo,
@@ -848,7 +850,17 @@ fn import_commit_ancestry(
                         oid,
                     )?;
                     bridge.mapping.insert(change_id, oid);
+                    let commit_lossy_entries =
+                        tree_importer.lossy_entries()[before_lossy..].to_vec();
+                    bridge
+                        .mapping
+                        .set_git_lossy_entries(oid, commit_lossy_entries);
                     stats.states_created += 1;
+                } else if let Some(lossy_entries) = bridge.mapping.get_git_lossy_entries(oid) {
+                    if !tree_importer.lossy_enabled() {
+                        return Err(fail_lossy_entry(&lossy_entries[0]));
+                    }
+                    stats.lossy_entries.extend(lossy_entries.iter().cloned());
                 }
                 // Counted regardless of `needs_state`: `commits_imported`
                 // reports commits **walked from the source**, mirroring

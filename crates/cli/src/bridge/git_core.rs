@@ -34,7 +34,7 @@ use repo::Repository as HeddleRepository;
 use super::{
     git_export::{export_all, export_current_thread},
     git_import::import_all,
-    git_util::ImportStats,
+    git_util::{ImportStats, LossyGitImportEntry},
 };
 
 /// Errors specific to Git bridge operations.
@@ -433,6 +433,9 @@ pub struct SyncMapping {
     heddle_to_git: HashMap<ChangeId, ObjectId>,
     /// Maps Git object id -> Heddle ChangeId
     git_to_heddle: HashMap<ObjectId, ChangeId>,
+    /// Git commits whose imported Heddle states were produced under
+    /// `bridge git import --lossy`, with root-relative lossy entries.
+    git_lossy_entries: HashMap<ObjectId, Vec<LossyGitImportEntry>>,
 }
 
 impl SyncMapping {
@@ -445,6 +448,9 @@ impl SyncMapping {
     pub fn insert(&mut self, change_id: ChangeId, git_oid: ObjectId) {
         if let Some(previous_git) = self.heddle_to_git.remove(&change_id) {
             self.git_to_heddle.remove(&previous_git);
+            if previous_git != git_oid {
+                self.git_lossy_entries.remove(&previous_git);
+            }
         }
         if let Some(previous_change) = self.git_to_heddle.remove(&git_oid) {
             self.heddle_to_git.remove(&previous_change);
@@ -501,46 +507,82 @@ impl SyncMapping {
         self.git_to_heddle.contains_key(&git_oid)
     }
 
+    pub(crate) fn set_git_lossy_entries(
+        &mut self,
+        git_oid: ObjectId,
+        entries: Vec<LossyGitImportEntry>,
+    ) {
+        if entries.is_empty() {
+            self.git_lossy_entries.remove(&git_oid);
+        } else {
+            self.git_lossy_entries.insert(git_oid, entries);
+        }
+    }
+
+    pub(crate) fn get_git_lossy_entries(
+        &self,
+        git_oid: ObjectId,
+    ) -> Option<&[LossyGitImportEntry]> {
+        self.git_lossy_entries.get(&git_oid).map(Vec::as_slice)
+    }
+
     /// Iterate over mappings.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&ChangeId, &ObjectId)> {
         self.heddle_to_git.iter()
     }
 
     pub(crate) fn retain_git_objects(&mut self, repo: &gix::Repository) {
-        let retained: Vec<(ChangeId, ObjectId)> = self
+        let retained: Vec<(ChangeId, ObjectId, Option<Vec<LossyGitImportEntry>>)> = self
             .heddle_to_git
             .iter()
             .filter_map(|(change_id, git_oid)| {
                 repo.find_object(*git_oid)
                     .ok()
-                    .map(|_| (*change_id, *git_oid))
+                    .map(|_| {
+                        (
+                            *change_id,
+                            *git_oid,
+                            self.git_lossy_entries.get(git_oid).cloned(),
+                        )
+                    })
             })
             .collect();
 
         self.heddle_to_git.clear();
         self.git_to_heddle.clear();
-        for (change_id, git_oid) in retained {
+        self.git_lossy_entries.clear();
+        for (change_id, git_oid, lossy_entries) in retained {
             self.insert(change_id, git_oid);
+            if let Some(lossy_entries) = lossy_entries {
+                self.set_git_lossy_entries(git_oid, lossy_entries);
+            }
         }
     }
 
     #[cfg_attr(not(feature = "git-overlay"), allow(dead_code))]
     pub(crate) fn retain_git_object_set(&mut self, reachable: &HashSet<ObjectId>) -> usize {
         let before = self.heddle_to_git.len();
-        let retained: Vec<(ChangeId, ObjectId)> = self
+        let retained: Vec<(ChangeId, ObjectId, Option<Vec<LossyGitImportEntry>>)> = self
             .heddle_to_git
             .iter()
-            .filter_map(|(change_id, git_oid)| {
-                reachable
-                    .contains(git_oid)
-                    .then_some((*change_id, *git_oid))
+            .filter(|(_, git_oid)| reachable.contains(*git_oid))
+            .map(|(change_id, git_oid)| {
+                (
+                    *change_id,
+                    *git_oid,
+                    self.git_lossy_entries.get(git_oid).cloned(),
+                )
             })
             .collect();
 
         self.heddle_to_git.clear();
         self.git_to_heddle.clear();
-        for (change_id, git_oid) in retained {
+        self.git_lossy_entries.clear();
+        for (change_id, git_oid, lossy_entries) in retained {
             self.insert(change_id, git_oid);
+            if let Some(lossy_entries) = lossy_entries {
+                self.set_git_lossy_entries(git_oid, lossy_entries);
+            }
         }
         before.saturating_sub(self.heddle_to_git.len())
     }
