@@ -88,7 +88,7 @@ pub use stack_snapshot::{
 };
 pub use thread_advice::{
     RecommendedAction, ThreadAdvice, describe_thread_advice, describe_thread_advice_with_initial,
-    shell_quote,
+    shell_quote, thread_flag,
 };
 pub use thread_stack::{
     PlanRebaseError, StackNode, StackRebasePlan, StackRebaseStep, ThreadStack, compute_stacks,

@@ -55,16 +55,44 @@ impl RecommendedAction {
         // next_action validator. (heddle#464 — defense-in-depth: quote at the
         // emit boundary; creation-time validation stays as a UX/early-reject
         // layer, but safety does not depend on it being covered everywhere.)
-        let tid = shell_quote(thread_id);
         match self {
             Self::Commit => Some("heddle commit -m \"...\"".to_string()),
-            Self::Ready => Some(format!("heddle ready --thread {tid}")),
-            Self::Sync => Some(format!("heddle sync --thread {tid}")),
-            Self::Land => Some(format!("heddle land --thread {tid} --no-push")),
+            Self::Ready => Some(format!("heddle ready {}", thread_flag(thread_id))),
+            Self::Sync => Some(format!("heddle sync {}", thread_flag(thread_id))),
+            Self::Land => Some(format!("heddle land {} --no-push", thread_flag(thread_id))),
             Self::Resolve => Some("heddle resolve --list".to_string()),
             Self::Review => None,
-            Self::Promote => Some(format!("heddle thread promote {tid}")),
+            Self::Promote => Some(format!(
+                "heddle thread promote {}",
+                positional_value(thread_id)
+            )),
         }
+    }
+}
+
+/// Render `--thread <id>` so a leading-dash id (e.g. a historical/`new_unchecked`
+/// thread literally named `-foo`) is bound via the `=` form. clap parses
+/// `--thread=-foo` as the flag's value, whereas `--thread -foo` parses `-foo` as
+/// another option and breaks the breadcrumb (clap has no `allow_hyphen_values`
+/// here). Shell-quoting still applies for whitespace/metacharacters.
+pub fn thread_flag(thread_id: &str) -> String {
+    let q = shell_quote(thread_id);
+    if thread_id.starts_with('-') {
+        format!("--thread={q}")
+    } else {
+        format!("--thread {q}")
+    }
+}
+
+/// Render a trailing POSITIONAL value. A leading-dash value needs the `--`
+/// end-of-options separator (positionals can't use the `=` form), so
+/// `heddle thread promote -foo` becomes `heddle thread promote -- -foo`.
+fn positional_value(value: &str) -> String {
+    let q = shell_quote(value);
+    if value.starts_with('-') {
+        format!("-- {q}")
+    } else {
+        q
     }
 }
 
@@ -185,8 +213,8 @@ pub fn describe_thread_advice_with_initial(
             thread_health: "ready".to_string(),
             blockers,
             recommended_action: format!(
-                "heddle land --thread {} --no-push",
-                shell_quote(&thread.id)
+                "heddle land {} --no-push",
+                thread_flag(&thread.id)
             ),
         };
     } else if clean_ready_merges_to_apply || thread.state == ThreadState::Ready {
@@ -340,5 +368,36 @@ mod tests {
         assert_eq!(shell_quote("my file.txt"), "'my file.txt'");
         assert_eq!(shell_quote("bad;echo pwn"), "'bad;echo pwn'");
         assert_eq!(shell_quote("a'b"), r"'a'\''b'");
+    }
+
+    // heddle#464 round 8: a leading-dash id (e.g. a historical `-foo` that
+    // `validate_thread_id` now rejects, but that can still arrive via
+    // `new_unchecked`) is in `shell_quote`'s safe set, so quoting alone leaves it
+    // bare and clap parses `-foo` as a flag. The flag form must use `=` (clap
+    // binds the value); the positional form needs the `--` end-of-options marker.
+    #[test]
+    fn leading_dash_thread_ids_use_equals_and_separator_forms() {
+        let id = crate::ThreadId::new_unchecked("-foo");
+        assert_eq!(
+            RecommendedAction::Sync.command(id.as_str()).as_deref(),
+            Some("heddle sync --thread=-foo")
+        );
+        assert_eq!(
+            RecommendedAction::Ready.command(id.as_str()).as_deref(),
+            Some("heddle ready --thread=-foo")
+        );
+        assert_eq!(
+            RecommendedAction::Land.command(id.as_str()).as_deref(),
+            Some("heddle land --thread=-foo --no-push")
+        );
+        assert_eq!(
+            RecommendedAction::Promote.command(id.as_str()).as_deref(),
+            Some("heddle thread promote -- -foo")
+        );
+        // Clean slugs are unchanged (space form, bare).
+        assert_eq!(
+            RecommendedAction::Sync.command("feature/x").as_deref(),
+            Some("heddle sync --thread feature/x")
+        );
     }
 }

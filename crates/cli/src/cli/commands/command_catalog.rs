@@ -4737,6 +4737,26 @@ mod tests {
     }
 
     #[test]
+    fn leading_dash_thread_breadcrumbs_pass_validation() {
+        // A historical / `new_unchecked` thread id literally named `-foo` renders
+        // breadcrumbs via the `=` (flag) and `--` (positional) forms; the
+        // validator splits to argv and runs clap, which would reject the bare
+        // `--thread -foo` form as an unknown flag. (heddle#464 round 8.)
+        for action in [
+            repo::RecommendedAction::Sync,
+            repo::RecommendedAction::Ready,
+            repo::RecommendedAction::Land,
+            repo::RecommendedAction::Promote,
+        ] {
+            if let Some(cmd) = action.command("-foo") {
+                validate_recommended_action(&cmd).unwrap_or_else(|err| {
+                    panic!("breadcrumb `{cmd}` must validate for a leading-dash id: {err}")
+                });
+            }
+        }
+    }
+
+    #[test]
     fn action_fields_fail_loudly_for_invalid_recommendations() {
         let panic = std::panic::catch_unwind(|| ActionFields::from_action("git status"));
         assert!(

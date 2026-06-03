@@ -3,7 +3,7 @@ use objects::store::ObjectStore;
 use anyhow::{Context, Result, anyhow};
 use objects::object::{ChangeId, ThreadName};
 use oplog::{OpBatch, OpRecord};
-use repo::{Repository, Thread, ThreadIntegrationPolicy, shell_quote};
+use repo::{Repository, Thread, ThreadIntegrationPolicy, thread_flag};
 use serde::Serialize;
 
 use super::{
@@ -389,12 +389,12 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                         blockers: land_blockers_for_preview(&preview, &stale_blockers),
                         warnings: Vec::new(),
                         next_action: Some(format!(
-                            "heddle sync --thread {}",
-                            shell_quote(&refreshed_thread.id)
+                            "heddle sync {}",
+                            thread_flag(&refreshed_thread.id)
                         )),
                         recommended_action: Some(format!(
-                            "heddle sync --thread {}",
-                            shell_quote(&refreshed_thread.id)
+                            "heddle sync {}",
+                            thread_flag(&refreshed_thread.id)
                         )),
                     },
                     thread: refreshed_thread.id.clone(),
@@ -546,7 +546,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         // operator through `sync`, which materializes and resolves a genuine
         // conflict before a land retry. (heddle#464 close-the-class.)
         let recommended_action = integration_blocker_recommended_action(&integration_blockers)
-            .unwrap_or_else(|| format!("heddle sync --thread {}", shell_quote(&merge_thread.id)));
+            .unwrap_or_else(|| format!("heddle sync {}", thread_flag(&merge_thread.id)));
         update_integration_policy(&repo, &merge_thread.id, "blocked", &reason)?;
         return write_land_output(
             cli,
@@ -829,7 +829,7 @@ fn land_checkpoint_preflight_advice(repo: &Repository, thread_id: &str) -> Optio
             let mut commands = remote_decision
                 .map(|decision| decision.recovery_commands)
                 .unwrap_or_else(|| vec![primary_command.clone()]);
-            commands.push(format!("heddle sync --thread {}", shell_quote(thread_id)));
+            commands.push(format!("heddle sync {}", thread_flag(thread_id)));
             commands.push(land_local_command(thread_id));
             commands
         } else {
