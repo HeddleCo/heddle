@@ -43,7 +43,7 @@ tracing-subscriber = { workspace = true }
 # NFS client to mount it. Works wherever the kernel ships an NFS
 # client (Linux, macOS, Windows w/ NFS client feature).
 async-trait = { workspace = true, optional = true }
-nfsserve = { version = "0.10", optional = true }
+nfsserve = { version = "0.11", optional = true }
 tokio = { workspace = true, optional = true }
 
 # `fuser` provides the FUSE bindings on Linux. Gated behind the
@@ -61,7 +61,7 @@ fuser = { version = "0.17", optional = true }
 # Windows so non-Windows builds with `projfs` accidentally enabled
 # get a no-op rather than a download.
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.58", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Storage_ProjectedFileSystem",
     "Win32_System_Com",
