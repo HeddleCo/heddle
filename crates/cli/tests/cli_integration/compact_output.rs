@@ -76,12 +76,54 @@ fn compact_json_output(args: &[&str], temp: &TempDir) -> Value {
         .unwrap_or_else(|err| panic!("heddle {args:?} stdout not JSON: {err}\n  line: {line}"))
 }
 
+fn assert_compact_op_id_error_envelope(args: &[&str], temp: &TempDir, context: &str) -> Value {
+    let out =
+        heddle_output(args, Some(temp.path())).unwrap_or_else(|err| panic!("spawn failed: {err}"));
+    assert!(
+        !out.status.success(),
+        "{context}: heddle {args:?} should fail; stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.stdout.is_empty(),
+        "{context}: failed compact op-id command should not emit stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = str::from_utf8(&out.stderr).expect("stderr utf8");
+    let envelope: Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|err| panic!("{context}: stderr not JSON: {err}\n  stderr: {stderr}"));
+    for key in ["code", "error", "exit_code", "hint"] {
+        assert!(
+            envelope.get(key).is_some(),
+            "{context}: compact op-id failure stripped `{key}` from error envelope: {envelope}"
+        );
+    }
+    envelope
+}
+
 fn full_json(args: &[&str], temp: &TempDir) -> Value {
     let mut argv: Vec<&str> = vec!["--output", "json"];
     argv.extend(args.iter().copied());
     let stdout = heddle(&argv, Some(temp.path())).unwrap_or_else(|err| panic!("heddle {argv:?} failed: {err}"));
     let line = stdout.lines().next().expect("full json stdout");
     serde_json::from_str(line).expect("full json parses")
+}
+
+#[test]
+fn capture_op_id_compact_failure_preserves_error_envelope() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).expect("init");
+    let op_id = "550e8400-e29b-41d4-a716-446655440471";
+    let args = ["--output", "json-compact", "--op-id", op_id, "capture"];
+
+    let first = assert_compact_op_id_error_envelope(&args, &temp, "capture op-id failure");
+    let replayed =
+        assert_compact_op_id_error_envelope(&args, &temp, "capture op-id failure replay");
+    assert_eq!(
+        replayed, first,
+        "compact op-id replay should preserve the cached error envelope verbatim"
+    );
 }
 
 #[test]

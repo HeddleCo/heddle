@@ -139,6 +139,7 @@ pub fn run_local_idempotency_if_requested(
                     command_name,
                     status: "replayed",
                     replayed: true,
+                    child_succeeded: replay.status_code == 0,
                     mode,
                 }),
             )?;
@@ -184,6 +185,7 @@ pub fn run_local_idempotency_if_requested(
                     command_name,
                     status: "executed",
                     replayed: false,
+                    child_succeeded: response.status_code == 0,
                     mode,
                 }),
             )?;
@@ -201,6 +203,7 @@ struct OpIdDisplayContext<'a> {
     command_name: &'a str,
     status: &'a str,
     replayed: bool,
+    child_succeeded: bool,
     mode: JsonDisplayMode,
 }
 
@@ -238,6 +241,9 @@ fn json_display_mode(cli: &Cli) -> Option<JsonDisplayMode> {
 fn decorate_json_stream(bytes: &[u8], context: OpIdDisplayContext) -> Result<Vec<u8>> {
     if bytes.is_empty() {
         return Ok(Vec::new());
+    }
+    if matches!(context.mode, JsonDisplayMode::Compact) && !context.child_succeeded {
+        return Ok(bytes.to_vec());
     }
     let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
         return Ok(bytes.to_vec());
