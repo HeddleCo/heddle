@@ -4984,9 +4984,11 @@ fn rust_use_identical_glob_both_sides_dedups_clean() {
 /// (structural-scope, kind, name) identity of every item in `source`,
 /// taken from the raw segmentation (no `use` canonicalization, so output
 /// and inputs are compared on the same footing).
-fn item_identities(source: &str) -> std::collections::BTreeSet<(Vec<String>, String, String)> {
-    let parsed = crate::parser::ParsedFile::parse(source, crate::parser::Language::Rust)
-        .expect("input must parse");
+fn item_identities(
+    source: &str,
+    language: crate::parser::Language,
+) -> std::collections::BTreeSet<(Vec<String>, String, String)> {
+    let parsed = crate::parser::ParsedFile::parse(source, language).expect("input must parse");
     let segs = super::items::segment_file(&parsed);
     segs.items
         .iter()
@@ -5013,13 +5015,26 @@ fn line_counts(source: &str) -> std::collections::HashMap<String, usize> {
 }
 
 /// Run the three close-the-class conformance checks against a clean
-/// semantic merge of `base`/`ours`/`theirs` (all additive — no deletions).
+/// semantic merge of a Rust `base`/`ours`/`theirs` (all additive — no
+/// deletions).
 fn assert_conformant(base: &str, ours: &str, theirs: &str) -> String {
-    let out = assert_clean(merge_rust(base, ours, theirs));
+    assert_conformant_at(base, ours, theirs, "a.rs", crate::parser::Language::Rust)
+}
+
+/// Language-parameterized form of [`assert_conformant`]: merge under `path`
+/// (which selects the parser) and run all three checks parsing as `language`.
+fn assert_conformant_at(
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    path: &str,
+    language: crate::parser::Language,
+) -> String {
+    let out = assert_clean(merge_at(base, ours, theirs, path));
 
     // Check 3: the merged file must re-parse.
     assert!(
-        crate::parser::ParsedFile::parse(&out, crate::parser::Language::Rust).is_some(),
+        crate::parser::ParsedFile::parse(&out, language).is_some(),
         "clean merge produced an unparseable file:\n{out}"
     );
 
@@ -5027,10 +5042,10 @@ fn assert_conformant(base: &str, ours: &str, theirs: &str) -> String {
     // merged item set is exactly the union across the three sides, and each
     // item keeps the structural scope (its tuple's first element) a
     // contributing side gave it.
-    let mut expected = item_identities(base);
-    expected.extend(item_identities(ours));
-    expected.extend(item_identities(theirs));
-    let got = item_identities(&out);
+    let mut expected = item_identities(base, language);
+    expected.extend(item_identities(ours, language));
+    expected.extend(item_identities(theirs, language));
+    let got = item_identities(&out, language);
     assert_eq!(
         got, expected,
         "item-set / nesting not conserved\n got: {got:?}\n want: {expected:?}\n output:\n{out}"
@@ -5184,4 +5199,241 @@ fn repro_484_bug3_nested_pub_use_stays_inside_module() {
     );
     assert_eq!(merged.matches("pub mod prelude").count(), 1);
     assert!(crate::parser::ParsedFile::parse(&merged, crate::parser::Language::Rust).is_some());
+}
+
+// =====================================================================
+// heddle#484 P1 (Codex regression on the P0 fix) — REOPENED same-name
+// scopes. The P0 fix grouped emit order by the struct-scope NAME, which
+// collapsed two *non-contiguous* blocks of the same scope — e.g. a
+// namespace/impl closed, a top-level item, then the same scope reopened —
+// into a single group. Even an unrelated clean merge then reordered the
+// second block's items ahead of the intervening top-level item and wove
+// the surrounding text from the wrong gap. The fix keys grouping by
+// `(scope, instance)`, so each reopened block is its own group and source
+// order is preserved.
+//
+// These corruptions are a pure REORDER: item-set / nesting / line-count /
+// re-parse can all still hold, so the guard here pins the relative order
+// (the intervening top-level item stays between the two blocks) on top of
+// the standard conformance invariants.
+// =====================================================================
+
+// C++ parsing is gated behind the non-default `lang-cpp` feature, so this
+// case only runs under `--features lang-cpp` (extended-languages). The
+// grouping fix it exercises is language-agnostic and is also covered by the
+// Rust `impl`-reopen tests below, which run under the default feature set.
+#[cfg(feature = "lang-cpp")]
+#[test]
+fn repro_484_reopened_cpp_namespace_keeps_top_level_between_blocks() {
+    // Two `namespace N { … }` blocks separated by a top-level function.
+    // ours adds to the FIRST block, theirs adds to the SECOND — disjoint,
+    // clean. Pre-fix the two blocks collapsed into one and the second's
+    // items jumped ahead of `top_level_thing`.
+    let base = "\
+namespace N {
+void a() {}
+}
+
+int top_level_thing() { return 0; }
+
+namespace N {
+void b() {}
+}
+";
+    let ours = "\
+namespace N {
+void a() {}
+void a2() {}
+}
+
+int top_level_thing() { return 0; }
+
+namespace N {
+void b() {}
+}
+";
+    let theirs = "\
+namespace N {
+void a() {}
+}
+
+int top_level_thing() { return 0; }
+
+namespace N {
+void b() {}
+void b2() {}
+}
+";
+    let merged =
+        assert_conformant_at(base, ours, theirs, "f.cpp", crate::parser::Language::Cpp);
+    // Both additions landed in their own block.
+    assert!(merged.contains("void a2() {}"), "ours add lost:\n{merged}");
+    assert!(merged.contains("void b2() {}"), "theirs add lost:\n{merged}");
+    // The two reopened blocks stay distinct (NOT collapsed to one).
+    assert_eq!(
+        merged.matches("namespace N").count(),
+        2,
+        "reopened blocks collapsed:\n{merged}"
+    );
+    // The top-level item stays BETWEEN the two blocks — the core invariant
+    // the reorder bug violated.
+    let first = merged.find("namespace N").unwrap();
+    let top = merged.find("int top_level_thing").unwrap();
+    let last = merged.rfind("namespace N").unwrap();
+    assert!(
+        first < top && top < last,
+        "top-level item must sit between the two namespace blocks:\n{merged}"
+    );
+    // a2 belongs to the first block (before top); b2 to the second (after).
+    assert!(
+        merged.find("void a2() {}").unwrap() < top,
+        "a2 escaped the first block:\n{merged}"
+    );
+    assert!(
+        merged.find("void b2() {}").unwrap() > top,
+        "b2 escaped the second block:\n{merged}"
+    );
+}
+
+#[test]
+fn repro_484_reopened_rust_impl_keeps_top_level_between_blocks() {
+    // Rust analogue: two inherent `impl Foo { … }` blocks (legal, unlike
+    // duplicate `mod m`) separated by a top-level fn. ours adds a method to
+    // the first impl; theirs to the second. Pre-fix the impls collapsed and
+    // the second impl's method reordered ahead of `top_level`.
+    let base = "\
+struct Foo;
+
+impl Foo {
+    fn a(&self) {}
+}
+
+fn top_level() {}
+
+impl Foo {
+    fn b(&self) {}
+}
+";
+    let ours = "\
+struct Foo;
+
+impl Foo {
+    fn a(&self) {}
+    fn a2(&self) {}
+}
+
+fn top_level() {}
+
+impl Foo {
+    fn b(&self) {}
+}
+";
+    let theirs = "\
+struct Foo;
+
+impl Foo {
+    fn a(&self) {}
+}
+
+fn top_level() {}
+
+impl Foo {
+    fn b(&self) {}
+    fn b2(&self) {}
+}
+";
+    let merged = assert_conformant(base, ours, theirs);
+    assert!(merged.contains("fn a2(&self) {}"), "ours add lost:\n{merged}");
+    assert!(
+        merged.contains("fn b2(&self) {}"),
+        "theirs add lost:\n{merged}"
+    );
+    // Two distinct impl blocks survive.
+    assert_eq!(
+        merged.matches("impl Foo").count(),
+        2,
+        "reopened impls collapsed:\n{merged}"
+    );
+    let first = merged.find("impl Foo").unwrap();
+    let top = merged.find("fn top_level()").unwrap();
+    let last = merged.rfind("impl Foo").unwrap();
+    assert!(
+        first < top && top < last,
+        "top-level fn must sit between the two impl blocks:\n{merged}"
+    );
+    assert!(
+        merged.find("fn a2(&self) {}").unwrap() < top,
+        "a2 escaped the first impl:\n{merged}"
+    );
+    assert!(
+        merged.find("fn b2(&self) {}").unwrap() > top,
+        "b2 escaped the second impl:\n{merged}"
+    );
+}
+
+#[test]
+fn repro_484_reopened_rust_impl_add_first_modify_second_keeps_order() {
+    // ours adds a method to the FIRST impl; theirs modifies the existing
+    // method body in the SECOND impl. Both sides differ from base (so the
+    // file-level short-circuits don't fire and reconstruction actually runs),
+    // but neither touches the other's block. The intervening `top_level` must
+    // stay between the two impls and theirs's body edit must survive.
+    let base = "\
+struct Foo;
+
+impl Foo {
+    fn a(&self) {}
+}
+
+fn top_level() {}
+
+impl Foo {
+    fn b(&self) {}
+}
+";
+    let ours = "\
+struct Foo;
+
+impl Foo {
+    fn a(&self) {}
+    fn a2(&self) {}
+}
+
+fn top_level() {}
+
+impl Foo {
+    fn b(&self) {}
+}
+";
+    let theirs = "\
+struct Foo;
+
+impl Foo {
+    fn a(&self) {}
+}
+
+fn top_level() {}
+
+impl Foo {
+    fn b(&self) { let _ = 1; }
+}
+";
+    let merged = assert_conformant(base, ours, theirs);
+    assert!(merged.contains("fn a2(&self) {}"), "ours add lost:\n{merged}");
+    assert!(
+        merged.contains("fn b(&self) { let _ = 1; }"),
+        "theirs body edit lost:\n{merged}"
+    );
+    assert_eq!(
+        merged.matches("impl Foo").count(),
+        2,
+        "reopened impls collapsed:\n{merged}"
+    );
+    let first = merged.find("impl Foo").unwrap();
+    let top = merged.find("fn top_level()").unwrap();
+    let last = merged.rfind("impl Foo").unwrap();
+    assert!(
+        first < top && top < last,
+        "top-level fn must sit between the two impl blocks:\n{merged}"
+    );
 }

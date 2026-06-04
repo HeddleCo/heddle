@@ -166,24 +166,39 @@ pub(crate) fn reconstruct_merged_file(
     // matched items keep a stable placement; otherwise the adding side's
     // nesting is used.
     let mut struct_scope_of: BTreeMap<MatchKey, &[String]> = BTreeMap::new();
+    // Instance-annotated structural scope: the same path with each level
+    // tagged by a per-prefix occurrence index that distinguishes a scope
+    // closed and *reopened* around an intervening item. Built per side in
+    // source order (see `scope_instances`); base wins for matched keys — the
+    // same priority as `struct_scope_of` — so a matched block keeps a stable
+    // instance and an added block gets its own. The grouping below keys on
+    // this, not the bare name, so two reopened `namespace N {}` (or `mod m`)
+    // blocks separated by a top-level item are NOT collapsed into one group
+    // and reordered across that item (heddle#484 P1).
+    let mut struct_scope_inst_of: BTreeMap<MatchKey, Vec<(String, usize)>> = BTreeMap::new();
     for (mks, seg) in [
         (&theirs_mks, theirs_segments),
         (&ours_mks, ours_segments),
         (&base_mks, base_segments),
     ] {
-        for (mk, item) in mks.iter().zip(seg.items.iter()) {
+        let instances = scope_instances(seg);
+        for ((mk, item), instance) in mks.iter().zip(seg.items.iter()).zip(instances) {
             struct_scope_of.insert(mk.clone(), item.struct_scope.as_slice());
+            struct_scope_inst_of.insert(mk.clone(), instance);
         }
     }
 
     let flat_order = compute_item_emit_order(&base_mks, &ours_mks, &theirs_mks, &all_keys);
-    // Re-group so items physically inside the same container stay
+    // Re-group so items physically inside the same container *instance* stay
     // contiguous (a valid pre-order over the scope tree). The positional
     // splice in `compute_item_emit_order` can otherwise drop a top-level
     // added item between two children of a module added on the other side,
     // stranding a later child outside the module's `}` (heddle#484 Bug 3).
-    // For files with no cross-scope interleaving this is the identity.
-    let item_emit_order = group_by_struct_scope(&flat_order, &struct_scope_of);
+    // Grouping is keyed by `(scope, instance)` so a scope reopened around an
+    // intervening item stays a distinct group — a clean merge never reorders
+    // a reopened block across that item (heddle#484 P1). For files with no
+    // cross-scope interleaving this is the identity.
+    let item_emit_order = group_by_struct_scope(&flat_order, &struct_scope_inst_of);
 
     // For each side, record each item's index so we can look up the
     // inter-item segment that preceded it in source.
@@ -418,50 +433,103 @@ fn trim_redundant_structure<'a>(
     &source[start..end]
 }
 
+/// Annotate every item on one side with its *instance-tagged* structural
+/// scope: the physical scope path, but each level paired with a per-prefix
+/// occurrence index that counts how many times that exact scope-prefix has
+/// been entered, in source order, on this side.
+///
+/// A prefix is "entered" whenever the previous item did not already sit
+/// inside it at the same depth — i.e. the first item of a block, or the
+/// first item after the scope was left and reopened. So in
+/// `namespace N { a } top(); namespace N { b }` the `a` gets `[("N", 0)]`
+/// and the `b` gets `[("N", 1)]`: the intervening top-level `top()` ends the
+/// first run, and the second `namespace N` opens a new instance. Two items
+/// that share an instance at every level are physically in the same block;
+/// grouping on this distinguishes reopened blocks the bare name would
+/// collapse (heddle#484 P1). Returned in `seg.items` order.
+fn scope_instances(seg: &FileSegments) -> Vec<Vec<(String, usize)>> {
+    let mut run_index: BTreeMap<Vec<String>, usize> = BTreeMap::new();
+    let mut prev: &[String] = &[];
+    let mut out = Vec::with_capacity(seg.items.len());
+    for item in &seg.items {
+        let scope = item.struct_scope.as_slice();
+        let mut annotated = Vec::with_capacity(scope.len());
+        for d in 0..scope.len() {
+            let prefix = &scope[..=d];
+            // Same block we were already in at this depth → reuse its index;
+            // otherwise this is a fresh entry into the prefix, so bump it.
+            let same_as_prev = prev.len() > d && &prev[..=d] == prefix;
+            if !same_as_prev {
+                let slot = run_index.entry(prefix.to_vec()).or_insert(usize::MAX);
+                *slot = slot.wrapping_add(1);
+            }
+            let idx = run_index.get(prefix).copied().unwrap_or(0);
+            annotated.push((scope[d].clone(), idx));
+        }
+        prev = scope;
+        out.push(annotated);
+    }
+    out
+}
+
 /// Re-order a flat emit order so items physically nested in the same
-/// container are contiguous, yielding a valid pre-order over the structural
-/// scope tree. Items are grouped by their structural scope path one level at
-/// a time, preserving first-appearance order of groups and of items within a
-/// group, then each group recurses one level deeper. For an order whose
-/// scopes are already contiguous (every file with no cross-side
-/// scope-interleaving) this is the identity.
+/// container *instance* are contiguous, yielding a valid pre-order over the
+/// structural scope tree. Items are grouped one level at a time by their
+/// instance-tagged scope (see [`scope_instances`]), preserving
+/// first-appearance order of groups and of items within a group, then each
+/// group recurses one level deeper. Keying on `(name, instance)` rather than
+/// the bare name keeps a reopened scope a distinct group, so a clean merge
+/// never reorders one reopened block across the item that separates it from
+/// the other (heddle#484 P1). For an order whose scopes are already
+/// contiguous (every file with no cross-side scope-interleaving) this is the
+/// identity.
 fn group_by_struct_scope(
     order: &[MatchKey],
-    struct_scope_of: &BTreeMap<MatchKey, &[String]>,
+    struct_scope_inst_of: &BTreeMap<MatchKey, Vec<(String, usize)>>,
 ) -> Vec<MatchKey> {
-    let empty: &[String] = &[];
-    let annotated: Vec<(MatchKey, &[String])> = order
+    let empty: &[(String, usize)] = &[];
+    let annotated: Vec<(MatchKey, &[(String, usize)])> = order
         .iter()
-        .map(|k| (k.clone(), struct_scope_of.get(k).copied().unwrap_or(empty)))
+        .map(|k| {
+            (
+                k.clone(),
+                struct_scope_inst_of
+                    .get(k)
+                    .map(Vec::as_slice)
+                    .unwrap_or(empty),
+            )
+        })
         .collect();
     group_by_struct_scope_depth(annotated, 0)
 }
 
 fn group_by_struct_scope_depth(
-    items: Vec<(MatchKey, &[String])>,
+    items: Vec<(MatchKey, &[(String, usize)])>,
     depth: usize,
 ) -> Vec<MatchKey> {
     // A unit at this depth is either a leaf (scope length == depth) or a
-    // module group keyed by `scope[depth]`. Units are kept in
-    // first-appearance order; a module group gathers every item that shares
-    // `scope[depth]` regardless of interleaving, then recurses.
+    // module group keyed by `scope[depth]` — the `(name, instance)` pair.
+    // Units are kept in first-appearance order; a group gathers every item
+    // that shares that exact `(name, instance)` regardless of interleaving,
+    // then recurses. A different instance of the same name starts a fresh
+    // group, so reopened scopes never merge (heddle#484 P1).
     enum Unit<'a> {
         Leaf(MatchKey),
-        Group(Vec<(MatchKey, &'a [String])>),
+        Group(Vec<(MatchKey, &'a [(String, usize)])>),
     }
     let mut units: Vec<Unit> = Vec::new();
-    let mut group_at: BTreeMap<String, usize> = BTreeMap::new();
+    let mut group_at: BTreeMap<(String, usize), usize> = BTreeMap::new();
     for (key, scope) in items {
         if scope.len() <= depth {
             units.push(Unit::Leaf(key));
         } else {
-            let name = scope[depth].clone();
-            if let Some(&idx) = group_at.get(&name) {
+            let level = scope[depth].clone();
+            if let Some(&idx) = group_at.get(&level) {
                 if let Unit::Group(v) = &mut units[idx] {
                     v.push((key, scope));
                 }
             } else {
-                group_at.insert(name, units.len());
+                group_at.insert(level, units.len());
                 units.push(Unit::Group(vec![(key, scope)]));
             }
         }
