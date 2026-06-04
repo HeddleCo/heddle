@@ -60,7 +60,7 @@ pub fn cmd_capture_split(
     prefixes: Vec<String>,
     intent: Option<String>,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let current = super::thread_cmd::current_thread(&repo)?.ok_or_else(|| {
         anyhow!(RecoveryAdvice::no_current_thread(
             "capture --split",
@@ -119,7 +119,7 @@ pub fn cmd_thread_move(
     prefixes: Vec<String>,
     message: Option<String>,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let source = load_thread(&repo, &from)?;
     let target = load_thread(&repo, &to)?;
     let source_repo = Repository::open(&source.execution_path)?;
@@ -204,7 +204,7 @@ pub fn cmd_thread_absorb(
     message: Option<String>,
     preview: bool,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let child = load_thread(&repo, &thread)?;
     let parent_id = into
         .or(child.parent_thread.clone())
@@ -254,7 +254,7 @@ pub fn cmd_thread_absorb(
 }
 
 pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let mut thread = load_thread(&repo, &thread_id)?;
     refresh_thread_freshness(&repo, &mut thread)?;
     let source_root = if thread.execution_path.as_os_str().is_empty() {

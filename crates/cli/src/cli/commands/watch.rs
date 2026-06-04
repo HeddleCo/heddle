@@ -97,8 +97,7 @@ fn valid_filter_kinds() -> Vec<&'static str> {
 ///    sends events into the main loop, which drains pending entries
 ///    (id > watermark) on each modify and exits cleanly on SIGINT.
 pub async fn cmd_watch(cli: &Cli, args: WatchArgs) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))
-        .context("opening repository for watch")?;
+    let repo = cli.open_repo().context("opening repository for watch")?;
     let heddle_dir = repo.heddle_dir().to_path_buf();
     let oplog_path = oplog_file_path(&heddle_dir);
 

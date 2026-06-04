@@ -16,7 +16,7 @@ struct MonitorOutput {
 }
 
 pub fn cmd_monitor(cli: &Cli, paths: bool, serve: bool) -> Result<()> {
-    let repo = repo::Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     if serve {
         return repo::run_local_monitor_helper(repo.root()).map_err(Into::into);
     }

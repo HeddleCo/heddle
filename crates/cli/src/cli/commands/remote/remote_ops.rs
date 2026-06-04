@@ -199,7 +199,7 @@ pub async fn cmd_pull(
     local_thread: Option<String>,
     lazy: bool,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     if remote.is_none() && resolved_default_remote_name(&repo)?.is_none() {
         return Err(anyhow::anyhow!(RecoveryAdvice::remote_not_configured("pull")));
     }

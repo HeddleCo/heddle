@@ -47,7 +47,7 @@ struct FetchOutput {
 }
 
 pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     if repo.capability() == RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
         let remotes = if all {
             let configured = repo.refs().list_remotes()?;

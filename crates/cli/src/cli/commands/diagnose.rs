@@ -239,7 +239,7 @@ pub(crate) fn build_diagnose_output(cli: &Cli, include_profile: bool) -> Result<
     let total_start = Instant::now();
 
     let repo_open_start = Instant::now();
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let repo_open_ms = repo_open_start.elapsed().as_millis();
 
     let current_state_start = Instant::now();

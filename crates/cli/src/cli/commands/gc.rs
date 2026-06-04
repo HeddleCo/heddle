@@ -13,7 +13,6 @@
 
 use objects::store::ObjectStore;
 use anyhow::Result;
-use repo::Repository;
 use serde::Serialize;
 
 #[cfg(feature = "git-overlay")]
@@ -38,7 +37,7 @@ struct GcOutput {
 }
 
 pub fn cmd_gc(cli: &Cli, prune: bool, aggressive: bool, dry_run: bool) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let json = should_output_json(cli, Some(repo.config()));
     let mut summary = GcOutput {
         output_kind: "gc",

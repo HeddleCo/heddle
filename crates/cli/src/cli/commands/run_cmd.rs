@@ -4,7 +4,7 @@
 use std::process::{Command, Stdio};
 
 use anyhow::{Result, anyhow};
-use repo::{Repository, SessionManager};
+use repo::SessionManager;
 
 use super::{
     advice::RecoveryAdvice,
@@ -22,7 +22,7 @@ pub fn cmd_run(cli: &Cli, thread: Option<String>, command: Vec<String>) -> Resul
         )));
     }
 
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let thread = match thread {
         Some(thread_id) => load_thread(&repo, &thread_id)?,
         None => current_thread(&repo)?.ok_or_else(|| {

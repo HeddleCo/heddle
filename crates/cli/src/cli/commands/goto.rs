@@ -32,7 +32,7 @@ pub fn cmd_goto(cli: &Cli, target: String, force: bool) -> Result<()> {
     // `thread switch modulo-race` the operator can run goto from any
     // directory and we still resolve the right checkout via metadata.
     // See `Repository::active_worktree_path`.
-    let cwd_repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let cwd_repo = cli.open_repo()?;
     let target_path = cwd_repo.active_worktree_path()?;
     let repo = if target_path == *cwd_repo.root() {
         cwd_repo

@@ -28,7 +28,7 @@ struct FsckOutput {
 }
 
 pub fn cmd_fsck(cli: &Cli, full: bool, thorough: bool, repair: bool, bridge: bool) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
 
     let mut errors: Vec<FsckError> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();

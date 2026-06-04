@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use objects::object::{Session, SessionSegment};
-use repo::{Repository, SessionManager};
+use repo::SessionManager;
 use serde::Serialize;
 
 use super::{
@@ -90,7 +90,7 @@ pub async fn cmd_session_start(
     model: String,
     policy: Option<String>,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let mut manager = SessionManager::new(repo.root());
     let principal = repo.get_principal()?;
 
@@ -117,7 +117,7 @@ pub async fn cmd_session_segment(
     model: String,
     policy: Option<String>,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let mut manager = SessionManager::new(repo.root());
 
     let current_id = manager.get_current_session_id()?.ok_or_else(|| {
@@ -144,7 +144,7 @@ pub async fn cmd_session_segment(
 }
 
 pub async fn cmd_session_end(cli: &Cli, session_id: Option<String>) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let mut manager = SessionManager::new(repo.root());
 
     let session = manager.end_session(session_id.as_deref())?;
@@ -163,7 +163,7 @@ pub async fn cmd_session_end(cli: &Cli, session_id: Option<String>) -> Result<()
 }
 
 pub async fn cmd_session_show(cli: &Cli, session_id: Option<String>) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let manager = SessionManager::new(repo.root());
 
     let id = match session_id {
@@ -219,7 +219,7 @@ pub async fn cmd_session_show(cli: &Cli, session_id: Option<String>) -> Result<(
 }
 
 pub async fn cmd_session_list(cli: &Cli, active_only: bool) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let manager = SessionManager::new(repo.root());
 
     let sessions = manager.list_sessions(active_only)?;

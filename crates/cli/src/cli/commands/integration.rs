@@ -125,7 +125,7 @@ struct IntegrationStatus {
 }
 
 pub fn cmd_integration(cli: &Cli, command: IntegrationCommands) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     match command {
         IntegrationCommands::List => list_integrations(cli, &repo),
         IntegrationCommands::Install(args) => install_integrations(cli, &repo, args),

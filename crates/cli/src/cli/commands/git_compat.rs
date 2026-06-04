@@ -1322,7 +1322,7 @@ pub async fn cmd_switch_compat(cli: &Cli, args: SwitchArgs) -> Result<()> {
             vec![primary],
         )));
     }
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     if repo.refs().get_thread(&ThreadName::new(&args.target))?.is_some() {
         return cmd_thread(
             cli,
