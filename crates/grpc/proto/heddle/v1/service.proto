@@ -353,6 +353,18 @@ message RedactionTransfer {
   bytes redactions_blob = 2;
 }
 
+// Out-of-pack transport for state-visibility sidecars. State visibility
+// records live outside `.heddle/objects/` and are keyed by the state id
+// whose audience tier they declare.
+//
+// `state_id` is the hex-encoded ChangeId of the state.
+// `state_visibility_blob` is the rmp-encoded `StateVisibilityBlob` byte
+// payload.
+message StateVisibilityTransfer {
+  string state_id = 1;
+  bytes state_visibility_blob = 2;
+}
+
 message PushMessage {
   oneof body {
     PushRequest request = 1;
@@ -360,6 +372,7 @@ message PushMessage {
     PackChunk pack = 3;
     PushComplete complete = 4;
     RedactionTransfer redaction = 5;
+    StateVisibilityTransfer state_visibility = 6;
   }
 }
 
@@ -410,6 +423,7 @@ message PullMessage {
     PackChunk pack = 4;
     PullComplete complete = 5;
     RedactionTransfer redaction = 6;
+    StateVisibilityTransfer state_visibility = 7;
   }
 }
 

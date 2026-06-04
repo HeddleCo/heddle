@@ -47,6 +47,14 @@ impl PackChunkState {
     }
 }
 
+pub fn native_pack_excluded_object_types() -> &'static [ObjectType] {
+    &[ObjectType::Redaction, ObjectType::StateVisibility]
+}
+
+pub fn is_native_packable_object_type(obj_type: ObjectType) -> bool {
+    !native_pack_excluded_object_types().contains(&obj_type)
+}
+
 pub fn build_native_pack(
     store: &impl ObjectStore,
     objects: &[ObjectInfo],
@@ -59,10 +67,7 @@ pub fn build_native_pack(
         // folded into the content-addressed pack. They ship via the
         // per-object transfer path instead; callers split them out before
         // packing.
-        if matches!(
-            info.obj_type,
-            ObjectType::Redaction | ObjectType::StateVisibility
-        ) {
+        if !is_native_packable_object_type(info.obj_type) {
             continue;
         }
         let object = load_object_data(store, &info.id, info.obj_type)?;

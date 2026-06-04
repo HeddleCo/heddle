@@ -7,9 +7,9 @@ use std::{
 use grpc::heddle::v1::{
     GetBlobRequest, ListRefsRequest, ObjectAvailabilityStatus, ObjectDescriptor, PackChunk,
     PackStreamKind, PartialFetchStatus, PullMessage, PullRequest, PushMessage, PushRequest,
-    RedactionTransfer, ThreadConfidenceSummary, ThreadIntegrationPolicy, ThreadMetadata,
-    ThreadVerificationSummary, TransportMode, UpdateRefRequest, WantObjects, pull_message,
-    push_message,
+    RedactionTransfer, StateVisibilityTransfer, ThreadConfidenceSummary, ThreadIntegrationPolicy,
+    ThreadMetadata, ThreadVerificationSummary, TransportMode, UpdateRefRequest, WantObjects,
+    pull_message, push_message,
 };
 use objects::{
     object::{ChangeId, ContentHash, MarkerName, ThreadName},
@@ -249,13 +249,12 @@ impl HostedGrpcClient {
             .collect::<Result<Vec<_>, _>>()?;
 
         // Split want_objects: blob/tree/state/action → native pack;
-        // redactions → out-of-pack `RedactionTransfer` channel (the
-        // sidecar lives outside `.heddle/objects/` so GC can't reach
-        // it and it can't ride the pack — `build_native_pack` already
-        // skips Redaction entries on the sender side).
-        let (wanted_redactions, wanted_packable): (Vec<_>, Vec<_>) = wanted_infos
+        // sidecars → out-of-pack transfer channels. Sidecars live outside
+        // `.heddle/objects/` so GC can't reach them and they can't ride the
+        // pack — `build_native_pack` skips the same object-type set.
+        let (wanted_sidecars, wanted_packable): (Vec<_>, Vec<_>) = wanted_infos
             .into_iter()
-            .partition(|info| info.obj_type == proto::ObjectType::Redaction);
+            .partition(|info| is_out_of_pack_transfer_object_type(info.obj_type));
 
         if !wanted_packable.is_empty() {
             let bundle = proto::build_native_pack(repo.store(), &wanted_packable)?;
@@ -272,8 +271,8 @@ impl HostedGrpcClient {
             }
         }
 
-        for info in wanted_redactions {
-            let message = redaction_push_message(repo, info)?;
+        for info in wanted_sidecars {
+            let message = sidecar_push_message(repo, info)?;
             tx.send(message).await.map_err(|_| {
                 ProtocolError::InvalidState("push stream closed unexpectedly".to_string())
             })?;
@@ -727,6 +726,27 @@ impl HostedGrpcClient {
                     let decode_elapsed = decode_start.elapsed();
                     profile.store_receive_object += decode_elapsed;
                 }
+                Some(pull_message::Body::StateVisibility(transfer)) => {
+                    profile.bytes_received = profile
+                        .bytes_received
+                        .saturating_add(transfer.state_visibility_blob.len());
+                    profile.object_mix.record(ObjectType::StateVisibility);
+                    let state = ChangeId::parse(&transfer.state_id).map_err(|err| {
+                        ProtocolError::InvalidState(format!(
+                            "StateVisibilityTransfer.state_id is not a valid ChangeId: {err}"
+                        ))
+                    })?;
+                    let decode_start = Instant::now();
+                    repo.accept_wire_state_visibility(state, &transfer.state_visibility_blob)
+                        .map_err(|err| {
+                            ProtocolError::InvalidState(format!(
+                                "accept_wire_state_visibility for state {}: {err}",
+                                transfer.state_id
+                            ))
+                        })?;
+                    let decode_elapsed = decode_start.elapsed();
+                    profile.store_receive_object += decode_elapsed;
+                }
                 Some(pull_message::Body::Complete(complete)) => {
                     profile.receive_and_apply = receive_start.elapsed();
                     let final_state = if complete.new_state.is_empty() {
@@ -923,6 +943,57 @@ fn redaction_push_message(
             blob_hash: hex,
             redactions_blob: bytes,
         })),
+    })
+}
+
+fn is_out_of_pack_transfer_object_type(obj_type: ObjectType) -> bool {
+    matches!(obj_type, ObjectType::Redaction | ObjectType::StateVisibility)
+}
+
+fn sidecar_push_message(
+    repo: &Repository,
+    info: proto::ObjectInfo,
+) -> Result<PushMessage, ProtocolError> {
+    match info.obj_type {
+        ObjectType::Redaction => redaction_push_message(repo, info),
+        ObjectType::StateVisibility => state_visibility_push_message(repo, info),
+        obj_type => Err(ProtocolError::InvalidState(format!(
+            "{obj_type:?} is not an out-of-pack sidecar object"
+        ))),
+    }
+}
+
+fn state_visibility_push_message(
+    repo: &Repository,
+    info: proto::ObjectInfo,
+) -> Result<PushMessage, ProtocolError> {
+    let proto::ObjectId::ChangeId(state) = info.id else {
+        return Err(ProtocolError::InvalidState(
+            "wanted StateVisibility must be keyed by ObjectId::ChangeId(state)".to_string(),
+        ));
+    };
+    let state_id = state.to_string_full();
+    let bytes = repo
+        .get_state_visibility_bytes_for_state(&state)
+        .map_err(|err| {
+            ProtocolError::InvalidState(format!(
+                "load state-visibility sidecar for {}: {err}",
+                state_id
+            ))
+        })?
+        .ok_or_else(|| {
+            ProtocolError::InvalidState(format!(
+                "server wants state visibility for state {} but sender has no sidecar",
+                state_id
+            ))
+        })?;
+    Ok(PushMessage {
+        body: Some(push_message::Body::StateVisibility(
+            StateVisibilityTransfer {
+                state_id,
+                state_visibility_blob: bytes,
+            },
+        )),
     })
 }
 
@@ -1337,7 +1408,10 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use grpc::heddle::v1::push_message;
     use objects::{
-        object::{Blob, ChangeId, ContentHash, Principal, Redaction, Tree, TreeEntry},
+        object::{
+            Blob, ChangeId, ContentHash, Principal, Redaction, StateVisibility, Tree, TreeEntry,
+            VisibilityTier,
+        },
         store::ObjectStore,
     };
     use proto::{ObjectId, ObjectInfo};
@@ -1355,6 +1429,15 @@ mod tests {
         ObjectInfo {
             id: ObjectId::Hash(blob),
             obj_type: ObjectType::Redaction,
+            size: 0,
+            delta_base: None,
+        }
+    }
+
+    fn state_visibility_info(state: ChangeId) -> ObjectInfo {
+        ObjectInfo {
+            id: ObjectId::ChangeId(state),
+            obj_type: ObjectType::StateVisibility,
             size: 0,
             delta_base: None,
         }
@@ -1388,6 +1471,33 @@ mod tests {
             signature: None,
             purged_at: None,
             supersedes: None,
+        }
+    }
+
+    fn sample_state_visibility(state: ChangeId) -> StateVisibility {
+        StateVisibility {
+            state,
+            tier: VisibilityTier::Restricted {
+                scope_label: "security-embargo".into(),
+            },
+            embargo_until: None,
+            declarer: Principal {
+                name: "Grace Hopper".into(),
+                email: "grace@example.com".into(),
+            },
+            declared_at: Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap(),
+            signature: None,
+            supersedes: None,
+        }
+    }
+
+    #[test]
+    fn non_packable_object_types_are_in_out_of_pack_transfer_partition() {
+        for obj_type in proto::native_pack_excluded_object_types() {
+            assert!(
+                is_out_of_pack_transfer_object_type(*obj_type),
+                "{obj_type:?} is excluded from native packs but missing from the out-of-pack transfer partition"
+            );
         }
     }
 
@@ -1494,5 +1604,26 @@ mod tests {
                 .contains(&format!("load redactions sidecar for {}:", blob.to_hex())),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn state_visibility_push_message_uses_state_keyed_sidecar_payload() {
+        let (_dir, repo) = temp_repo();
+        let state = ChangeId::from_bytes([17u8; 16]);
+        repo.put_state_visibility(sample_state_visibility(state))
+            .expect("put state visibility");
+        let expected_bytes = repo
+            .get_state_visibility_bytes_for_state(&state)
+            .expect("load sidecar")
+            .expect("sidecar exists");
+
+        let message =
+            state_visibility_push_message(&repo, state_visibility_info(state)).expect("message");
+
+        let Some(push_message::Body::StateVisibility(transfer)) = message.body else {
+            panic!("expected state visibility transfer");
+        };
+        assert_eq!(transfer.state_id, state.to_string_full());
+        assert_eq!(transfer.state_visibility_blob, expected_bytes);
     }
 }

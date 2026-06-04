@@ -59,6 +59,9 @@ impl Repository {
     /// prior private record — no caller can leave a Public record that makes
     /// a public state read as non-public.
     pub fn put_state_visibility(&self, record: StateVisibility) -> Result<ContentHash> {
+        record
+            .validate()
+            .with_context(|| "validate state-visibility record before put")?;
         let state = record.state;
 
         // Serialize the full read-modify-write behind the repo write lock so
@@ -105,6 +108,53 @@ impl Repository {
         }
         write_file_atomic(&path, &bytes).with_context(|| format!("write '{}'", path.display()))?;
         Ok(id)
+    }
+
+    /// Return the raw rmp-encoded `StateVisibilityBlob` bytes for the given
+    /// state, or `Ok(None)` if no sidecar exists. The bytes are the
+    /// wire-transfer payload, not a re-serialized view.
+    pub fn get_state_visibility_bytes_for_state(
+        &self,
+        state: &ChangeId,
+    ) -> Result<Option<Vec<u8>>> {
+        let path = self.state_visibility_path_for_state(state);
+        match fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err).with_context(|| format!("read '{}'", path.display())),
+        }
+    }
+
+    /// Accept a wire-transferred `StateVisibilityBlob` for a specific state.
+    /// The payload must decode, every contained record must target `state`,
+    /// and each record is persisted through `put_state_visibility` so
+    /// validation and public-by-absence normalization run at the same
+    /// boundary as local writes.
+    pub fn accept_wire_state_visibility(&self, state: ChangeId, bytes: &[u8]) -> Result<()> {
+        let incoming = StateVisibilityBlob::decode(bytes).with_context(|| {
+            format!(
+                "decode incoming state visibility for state {}",
+                state.to_string_full()
+            )
+        })?;
+
+        for record in &incoming.records {
+            if record.state != state {
+                anyhow::bail!(
+                    "incoming state visibility claims state {} but was transferred under {}",
+                    record.state.to_string_full(),
+                    state.to_string_full()
+                );
+            }
+            record
+                .validate()
+                .with_context(|| "validate incoming state-visibility record")?;
+        }
+
+        for record in incoming.records {
+            self.put_state_visibility(record)?;
+        }
+        Ok(())
     }
 
     /// Load all visibility records targeting `state`. Returns an empty
@@ -246,6 +296,66 @@ mod tests {
                 .expect("has visibility"),
             "a state with a persisted record must report has_visibility_for_state == true"
         );
+    }
+
+    #[test]
+    fn put_rejects_invalid_records_before_persisting_and_round_trips_valid_record() {
+        let (_dir, repo) = fresh_repo();
+        let team_state = ChangeId::from_bytes([31u8; 16]);
+        let restricted_state = ChangeId::from_bytes([32u8; 16]);
+
+        let empty_team = sample_record(
+            team_state,
+            VisibilityTier::TeamScoped {
+                team_id: String::new(),
+            },
+        );
+        let team_err = repo
+            .put_state_visibility(empty_team)
+            .expect_err("empty team id must be rejected");
+        let team_err_chain = format!("{team_err:#}");
+        assert!(
+            team_err_chain.contains("team_scoped"),
+            "unexpected error: {team_err}"
+        );
+        assert!(
+            !repo.state_visibility_path_for_state(&team_state).exists(),
+            "invalid team-scoped record must not persist a sidecar"
+        );
+
+        let empty_scope = sample_record(
+            restricted_state,
+            VisibilityTier::Restricted {
+                scope_label: " ".into(),
+            },
+        );
+        let scope_err = repo
+            .put_state_visibility(empty_scope)
+            .expect_err("empty restricted scope must be rejected");
+        let scope_err_chain = format!("{scope_err:#}");
+        assert!(
+            scope_err_chain.contains("restricted"),
+            "unexpected error: {scope_err}"
+        );
+        assert!(
+            !repo
+                .state_visibility_path_for_state(&restricted_state)
+                .exists(),
+            "invalid restricted record must not persist a sidecar"
+        );
+
+        let valid = sample_record(
+            restricted_state,
+            VisibilityTier::Restricted {
+                scope_label: "security-embargo".into(),
+            },
+        );
+        repo.put_state_visibility(valid.clone())
+            .expect("valid put must persist");
+        let stored = repo
+            .get_state_visibility_for_state(&restricted_state)
+            .expect("read valid record");
+        assert_eq!(stored.records, vec![valid]);
     }
 
     #[test]

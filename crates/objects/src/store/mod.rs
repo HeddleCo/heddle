@@ -196,6 +196,22 @@ impl ObjectStore for AnyStore {
     fn list_blobs_with_redactions(&self) -> Result<Vec<ContentHash>> {
         any_store_dispatch!(self, list_blobs_with_redactions())
     }
+    fn has_state_visibility_for_state(&self, state: &ChangeId) -> Result<bool> {
+        any_store_dispatch!(self, has_state_visibility_for_state(state))
+    }
+    fn get_state_visibility_bytes_for_state(&self, state: &ChangeId) -> Result<Option<Vec<u8>>> {
+        any_store_dispatch!(self, get_state_visibility_bytes_for_state(state))
+    }
+    fn put_state_visibility_bytes_for_state(
+        &self,
+        state: &ChangeId,
+        bytes: &[u8],
+    ) -> Result<()> {
+        any_store_dispatch!(self, put_state_visibility_bytes_for_state(state, bytes))
+    }
+    fn list_states_with_visibility(&self) -> Result<Vec<ChangeId>> {
+        any_store_dispatch!(self, list_states_with_visibility())
+    }
 }
 
 /// Trait for object storage backends.
@@ -554,6 +570,49 @@ pub trait ObjectStore: Send + Sync {
     fn list_blobs_with_redactions(&self) -> Result<Vec<ContentHash>> {
         Ok(Vec::new())
     }
+
+    /// Whether the store holds any state-visibility record for `state`.
+    ///
+    /// Like redactions, state-visibility records live in a sidecar outside
+    /// the content-addressed object graph and cannot ride native packs.
+    /// Sync uses this probe while enumerating a state closure so a non-public
+    /// state can advertise the sidecar that must travel out-of-pack.
+    ///
+    /// Default impl returns `Ok(false)` for stores that do not model this
+    /// sidecar.
+    fn has_state_visibility_for_state(&self, _state: &ChangeId) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Return the raw rmp-encoded `StateVisibilityBlob` bytes for `state`,
+    /// or `Ok(None)` if no sidecar exists. The bytes are the wire-transfer
+    /// payload for state visibility.
+    ///
+    /// Default impl returns `Ok(None)`.
+    fn get_state_visibility_bytes_for_state(&self, _state: &ChangeId) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Persist raw `StateVisibilityBlob` bytes for `state`.
+    ///
+    /// Default impl returns an "unsupported" error so stores that do not
+    /// model the sidecar refuse instead of dropping it.
+    fn put_state_visibility_bytes_for_state(
+        &self,
+        _state: &ChangeId,
+        _bytes: &[u8],
+    ) -> Result<()> {
+        Err(HeddleError::InvalidObject(
+            "this object store does not support persisting state visibility".to_string(),
+        ))
+    }
+
+    /// List every state with at least one state-visibility record.
+    ///
+    /// Default impl returns `Ok(vec![])`.
+    fn list_states_with_visibility(&self) -> Result<Vec<ChangeId>> {
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(test)]
@@ -692,6 +751,26 @@ mod any_store_tests {
             Some(redaction.as_slice())
         );
         assert!(store.list_blobs_with_redactions().unwrap().contains(&blob_hash));
+
+        // ── State visibility ──
+        let state_visibility = b"any-store state visibility bytes";
+        store
+            .put_state_visibility_bytes_for_state(&change_id, state_visibility)
+            .unwrap();
+        assert!(store.has_state_visibility_for_state(&change_id).unwrap());
+        assert_eq!(
+            store
+                .get_state_visibility_bytes_for_state(&change_id)
+                .unwrap()
+                .as_deref(),
+            Some(state_visibility.as_slice())
+        );
+        assert!(
+            store
+                .list_states_with_visibility()
+                .unwrap()
+                .contains(&change_id)
+        );
 
         // ── Caches ──
         store.clear_recent_caches();

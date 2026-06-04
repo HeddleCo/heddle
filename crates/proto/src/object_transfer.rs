@@ -38,12 +38,12 @@ pub fn chunk_offset(chunk_index: usize, chunk_size: usize) -> Option<usize> {
 }
 
 pub fn load_requested_object(store: &impl ObjectStore, req: &ObjectRequest) -> Result<ObjectData> {
-    // Note on Redaction objects: a redaction sidecar is content-addressed by
-    // the *redacted blob's* hash, which also identifies a real blob in the
-    // store. `load_requested_object` resolves blob-vs-tree by content
-    // probe; it cannot disambiguate a Redaction request from a Blob request
-    // by ObjectId alone. Callers that need to fetch a redaction must use
-    // `load_object_data` with an explicit `ObjectType::Redaction`.
+    // Note on sidecar objects: redactions and state visibility are keyed by
+    // ids that also identify primary objects. `load_requested_object`
+    // resolves blob-vs-tree or state by id shape/probe; it cannot
+    // disambiguate a sidecar request by ObjectId alone. Callers that need to
+    // fetch a sidecar must use `load_object_data` with an explicit object
+    // type.
     let (obj_type, data) = match &req.id {
         ObjectId::Hash(hash) => {
             if let Some(blob) = store.get_blob(hash)? {
@@ -96,6 +96,9 @@ pub fn load_object_data(
         (ObjectId::Hash(hash), ObjectType::Redaction) => store
             .get_redactions_bytes_for_blob(hash)?
             .ok_or_else(|| ProtocolError::ObjectNotFound(hash.to_hex()))?,
+        (ObjectId::ChangeId(change_id), ObjectType::StateVisibility) => store
+            .get_state_visibility_bytes_for_state(change_id)?
+            .ok_or_else(|| ProtocolError::ObjectNotFound(change_id.to_string_full()))?,
         _ => {
             return Err(ProtocolError::InvalidState(
                 "object id/type mismatch".to_string(),
@@ -146,6 +149,16 @@ pub fn store_received_object(store: &impl ObjectStore, data: &ObjectData) -> Res
             return Err(ProtocolError::InvalidState(
                 "Redaction objects must be persisted via Repository::accept_wire_redactions, \
                  not store_received_object — signature verification is required"
+                    .to_string(),
+            ));
+        }
+        (_, ObjectType::StateVisibility) => {
+            // State visibility must be validated and normalized at the
+            // Repository boundary (`put_state_visibility` enforces
+            // public-by-absence). Refuse raw sidecar writes here.
+            return Err(ProtocolError::InvalidState(
+                "StateVisibility objects must be persisted via Repository::accept_wire_state_visibility, \
+                 not store_received_object — sidecar validation is required"
                     .to_string(),
             ));
         }
