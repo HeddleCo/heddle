@@ -58,6 +58,24 @@ fn compact_json(args: &[&str], temp: &TempDir) -> Value {
         .unwrap_or_else(|err| panic!("heddle {argv:?} stdout not JSON: {err}\n  line: {line}"))
 }
 
+fn compact_json_output(args: &[&str], temp: &TempDir) -> Value {
+    let out =
+        heddle_output(args, Some(temp.path())).unwrap_or_else(|err| panic!("spawn failed: {err}"));
+    assert!(
+        out.status.success(),
+        "heddle {args:?} should succeed; stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = str::from_utf8(&out.stdout).expect("stdout utf8");
+    let line = stdout
+        .lines()
+        .next()
+        .unwrap_or_else(|| panic!("heddle {args:?} produced no stdout"));
+    serde_json::from_str(line)
+        .unwrap_or_else(|err| panic!("heddle {args:?} stdout not JSON: {err}\n  line: {line}"))
+}
+
 fn full_json(args: &[&str], temp: &TempDir) -> Value {
     let mut argv: Vec<&str> = vec!["--output", "json"];
     argv.extend(args.iter().copied());
@@ -101,6 +119,70 @@ fn status_compact_emits_only_decision_surface() {
     assert!(
         compact.get("git_overlay_health").is_none() && compact.get("verification").is_none(),
         "compact status must drop git_overlay_health/verification: {compact}"
+    );
+}
+
+#[test]
+fn status_compact_keeps_uncaptured_changed_path_count_consistent() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).expect("init");
+    std::fs::write(temp.path().join("work.txt"), "pending\n").unwrap();
+
+    let compact = compact_json(&["status"], &temp);
+    let changed_paths = compact["changed_paths"]
+        .as_array()
+        .unwrap_or_else(|| panic!("compact status must carry changed_paths: {compact}"));
+    assert_eq!(
+        compact["changed_path_count"].as_u64(),
+        Some(changed_paths.len() as u64),
+        "compact status count must match changed_paths in a dirty uncaptured repo: {compact}"
+    );
+    assert_eq!(
+        changed_paths.as_slice(),
+        [Value::String("work.txt".to_string())],
+        "dirty uncaptured repo should report the pending worktree path: {compact}"
+    );
+    assert_only_compact_keys(&compact, "dirty uncaptured status");
+}
+
+#[test]
+fn capture_op_id_compact_replay_emits_only_decision_surface() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).expect("init");
+    std::fs::write(temp.path().join("work.txt"), "pending\n").unwrap();
+    let op_id = "550e8400-e29b-41d4-a716-446655440470";
+    let args = [
+        "--output",
+        "json-compact",
+        "--op-id",
+        op_id,
+        "capture",
+        "-m",
+        "compact op-id capture",
+    ];
+
+    let first = compact_json_output(&args, &temp);
+    assert_only_compact_keys(&first, "capture op-id executed");
+    assert!(
+        first.get("operation_record").is_none()
+            && first.get("op_id").is_none()
+            && first.get("idempotency_status").is_none()
+            && first.get("replayed").is_none(),
+        "compact executed op-id output must not leak idempotency fields: {first}"
+    );
+
+    let replayed = compact_json_output(&args, &temp);
+    assert_only_compact_keys(&replayed, "capture op-id replayed");
+    assert_eq!(
+        replayed, first,
+        "compact op-id replay should return the cached compact payload without wrapper decoration"
+    );
+    assert!(
+        replayed.get("operation_record").is_none()
+            && replayed.get("op_id").is_none()
+            && replayed.get("idempotency_status").is_none()
+            && replayed.get("replayed").is_none(),
+        "compact replayed op-id output must not leak idempotency fields: {replayed}"
     );
 }
 

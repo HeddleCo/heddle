@@ -16,9 +16,29 @@
 //! hand-rolling its own subset.
 
 use serde::Serialize;
+use serde_json::Value;
 
 use super::command_catalog::ActionTemplate;
 use super::thread::CoordinationStatus;
+
+const COMPACT_ALLOWED_KEYS: &[&str] = &[
+    "output_kind",
+    "status",
+    "coordination_status",
+    "blockers",
+    "next_action",
+    "next_action_template",
+    "changed_paths",
+    "changed_path_count",
+    "conflicts",
+    "conflict_count",
+];
+
+pub(crate) fn retain_compact_surface_fields(value: &mut Value) {
+    if let Some(object) = value.as_object_mut() {
+        object.retain(|key, _| COMPACT_ALLOWED_KEYS.contains(&key.as_str()));
+    }
+}
 
 /// The decision-surface projection emitted by `--output json-compact`.
 ///

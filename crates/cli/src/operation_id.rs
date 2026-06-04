@@ -120,7 +120,7 @@ pub fn run_local_idempotency_if_requested(
         repo_for_eager = Some(repo);
         store
     };
-    let json_mode = explicit_json_requested(cli);
+    let json_mode = json_display_mode(cli);
 
     let reserve_outcome = if let Some(repo) = repo_for_eager.as_ref() {
         reserve_operation_id_eager(repo, Arc::clone(&store), op_id, command_name, request_hash)?
@@ -134,11 +134,12 @@ pub fn run_local_idempotency_if_requested(
                 serde_json::from_slice(&response).context("decode cached op-id response")?;
             replay_response(
                 &replay,
-                json_mode.then_some(OpIdDisplayContext {
+                json_mode.map(|mode| OpIdDisplayContext {
                     op_id: &op_id,
                     command_name,
                     status: "replayed",
                     replayed: true,
+                    mode,
                 }),
             )?;
             if replay.status_code != 0 {
@@ -178,11 +179,12 @@ pub fn run_local_idempotency_if_requested(
             store.record(op_id, command_name, request_hash, encoded)?;
             replay_response(
                 &response,
-                json_mode.then_some(OpIdDisplayContext {
+                json_mode.map(|mode| OpIdDisplayContext {
                     op_id: &op_id,
                     command_name,
                     status: "executed",
                     replayed: false,
+                    mode,
                 }),
             )?;
             if response.status_code != 0 {
@@ -199,6 +201,7 @@ struct OpIdDisplayContext<'a> {
     command_name: &'a str,
     status: &'a str,
     replayed: bool,
+    mode: JsonDisplayMode,
 }
 
 fn replay_response(
@@ -218,8 +221,18 @@ fn replay_response(
     Ok(())
 }
 
-fn explicit_json_requested(cli: &Cli) -> bool {
-    matches!(cli.output, Some(OutputMode::Json | OutputMode::JsonCompact))
+#[derive(Clone, Copy)]
+enum JsonDisplayMode {
+    Full,
+    Compact,
+}
+
+fn json_display_mode(cli: &Cli) -> Option<JsonDisplayMode> {
+    match cli.output {
+        Some(OutputMode::Json) => Some(JsonDisplayMode::Full),
+        Some(OutputMode::JsonCompact) => Some(JsonDisplayMode::Compact),
+        _ => None,
+    }
 }
 
 fn decorate_json_stream(bytes: &[u8], context: OpIdDisplayContext) -> Result<Vec<u8>> {
@@ -232,6 +245,12 @@ fn decorate_json_stream(bytes: &[u8], context: OpIdDisplayContext) -> Result<Vec
     let Some(object) = value.as_object_mut() else {
         return Ok(bytes.to_vec());
     };
+    if matches!(context.mode, JsonDisplayMode::Compact) {
+        crate::cli::commands::compact::retain_compact_surface_fields(&mut value);
+        let mut compact = serde_json::to_vec(&value)?;
+        compact.push(b'\n');
+        return Ok(compact);
+    }
     let op_id = context.op_id.to_string();
     object.insert(
         "op_id".to_string(),

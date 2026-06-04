@@ -592,7 +592,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
             impact_categories: Vec::new(),
             heavy_impact_paths: Vec::new(),
             changed_paths: changes_paths(&changes).into_iter().collect(),
-            changed_path_count: 0,
+            changed_path_count: changes_path_count(&changes),
             worktree_changed_path_count: changes_path_count(&changes),
             thread_changed_path_count: 0,
             blockers: if trust.verified {
@@ -1108,7 +1108,7 @@ impl super::compact::CompactProjection for StatusOutput {
         compact.next_action = next_action;
         compact.next_action_template = next_action_template;
         compact.changed_paths = Some(self.changed_paths.clone());
-        compact.changed_path_count = Some(self.changed_path_count);
+        compact.changed_path_count = Some(self.changed_paths.len());
         compact
     }
 }
@@ -1117,11 +1117,12 @@ impl super::compact::CompactProjection for PlainGitStatusOutput {
     fn compact(&self) -> super::compact::CompactOutput {
         let (next_action, next_action_template) =
             compact_next_action(&self.recommended_action, &self.recommended_action_template);
+        let changed_paths: Vec<String> = changes_paths(&self.changes).into_iter().collect();
         let mut compact = super::compact::CompactOutput::new(self.output_kind);
         compact.next_action = next_action;
         compact.next_action_template = next_action_template;
-        compact.changed_paths = Some(changes_paths(&self.changes).into_iter().collect());
-        compact.changed_path_count = Some(self.changed_path_count);
+        compact.changed_path_count = Some(changed_paths.len());
+        compact.changed_paths = Some(changed_paths);
         compact
     }
 }

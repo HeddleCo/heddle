@@ -17,7 +17,7 @@ mod clean;
 mod clone;
 mod collapse;
 mod command_catalog;
-mod compact;
+pub(crate) mod compact;
 mod completion;
 mod conflict;
 mod context;
