@@ -56,7 +56,7 @@ pub use merge_state::{MergeState, MergeStateManager};
 pub use objects::{
     error::{HeddleError as StoreError, HeddleError, Result},
     store::{
-        AgentUsageSummary, FsStore, ObjectStore, ShallowInfo, SharedStore,
+        AgentUsageSummary, FsStore, ObjectStore, ShallowInfo,
         agent_registry::{AgentEntry, AgentRegistry, AgentStatus, generate_agent_id},
     },
 };
@@ -97,12 +97,12 @@ pub use thread_stack::{
 };
 pub use thread_model::{
     ConfidenceBand, EphemeralMarker, ThreadConfidenceSummary, ThreadFreshness, ThreadId,
-    ThreadIdError, ThreadImpactCategory, ThreadIntegrationPolicy, ThreadLifecycleState, ThreadMode,
+    ThreadIdError, ThreadImpactCategory, ThreadIntegrationPolicy, ThreadMode,
     ThreadRecord, ThreadRuntimeOverlay, ThreadState, ThreadVerificationSummary, ThreadView,
     validate_thread_id,
 };
 pub use thread_record_store::{FilesystemThreadRecordStore, ThreadRecordStore};
-pub use thread_storage::{SyncedThreadMetadata, SyncedThreadMetadataStore, Thread, ThreadManager};
+pub use thread_storage::{SyncedThreadMetadata, Thread, ThreadManager};
 pub use worktree_index::{DirectoryCacheEntry, IndexEntry, WorktreeIndex};
 pub use worktree_state::WorktreeState;
 pub use worktree_status_options::{

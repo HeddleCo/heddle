@@ -149,8 +149,8 @@ pub(crate) enum ResidentLifecycle {
     /// (post-unlink / post-rename-over T1/T3); the per-NodeId bytes
     /// must outlive the entry as long as any fd holds the NodeId.
     /// Refcount-irrelevant — the discriminant is what gates the
-    /// drain decision, mirroring the substrate's [`BrandedPending::witness_orphan`]
-    /// constructor.
+    /// drain decision, mirroring the substrate's
+    /// [`BrandedPending::transition_to_orphan`] gate.
     Orphan,
 }
 
@@ -179,12 +179,11 @@ impl ResidentLifecycle {
 ///
 /// # Invariants
 ///
-/// * Constructed only by [`BrandedPending::witness_live_nonzero`] /
-///   [`BrandedPending::witness_live_zero`] /
-///   [`BrandedPending::witness_orphan`] /
-///   [`BrandedPending::witness_released`], each of which performs the
-///   matching FSM check and returns `Some` iff it holds. Those
-///   constructors live on [`BrandedPending`] (not [`Pending`]), and
+/// * Constructed only by [`BrandedPending::witness_live_nonzero`] and
+///   the witness-gated transition [`BrandedPending::transition_to_orphan`],
+///   each of which performs the matching FSM check and returns `Some`
+///   iff it holds. Those constructors live on [`BrandedPending`] (not
+///   [`Pending`]), and
 ///   [`BrandedPending`] is only constructible inside
 ///   [`Pending::with_brand`] — so every witness in the system
 ///   originates from a `with_brand` invocation by construction
@@ -490,40 +489,6 @@ impl<'p, 'brand> BrandedPending<'p, 'brand> {
         }
     }
 
-    /// Witness that `id` is in `Live { open_count == 0 }`. Returns
-    /// `None` for `Live` with any non-zero refcount, for any `Orphan`,
-    /// and for `Released`.
-    #[doc(hidden)]
-    pub fn witness_live_zero(&mut self, id: u64) -> Option<Witness<'_, 'brand, LiveZero>> {
-        match self.inner.lookup_state(id) {
-            Some(NodeState::Live { open_count: 0 }) => Some(Witness::new(id)),
-            _ => None,
-        }
-    }
-
-    /// Witness that `id` is in `Orphan { .. }` (any refcount).
-    /// Returns `None` for `Live` (any refcount) and `Released`.
-    #[doc(hidden)]
-    pub fn witness_orphan(&mut self, id: u64) -> Option<Witness<'_, 'brand, Orphan>> {
-        match self.inner.lookup_state(id) {
-            Some(NodeState::Orphan { .. }) => Some(Witness::new(id)),
-            _ => None,
-        }
-    }
-
-    /// Witness that `id` is `Released` — i.e. has no entry in the
-    /// `state` map. Returns `None` for any of the three resident
-    /// variants. Useful for the "first open" path of the lifecycle
-    /// (`record_open` minting a `LiveZero -> LiveNonZero` transition
-    /// when there is no prior entry).
-    #[doc(hidden)]
-    pub fn witness_released(&mut self, id: u64) -> Option<Witness<'_, 'brand, Released>> {
-        match self.inner.lookup_state(id) {
-            None => Some(Witness::new(id)),
-            _ => None,
-        }
-    }
-
     /// Witness-gated FSM transition: `LiveNonZero` → `Orphan`,
     /// carrying the current `open_count` over to the orphan record.
     /// Returns `Some(Witness<Orphan>)` iff `id` was in
@@ -751,119 +716,6 @@ mod tests {
         assert!(!p.with_brand(|bp| bp.witness_live_nonzero(7).is_some()));
     }
 
-    // ------- witness_live_zero ------------------------------------------------
-
-    #[test]
-    fn witness_live_zero_some_for_live_zero() {
-        let mut p = Pending::default();
-        p.test_insert_state(9, NodeState::Live { open_count: 0 });
-        let id = p
-            .with_brand(|bp| bp.witness_live_zero(9).map(|w| w.id()))
-            .expect("LiveZero witness");
-        assert_eq!(id, 9);
-    }
-
-    #[test]
-    fn witness_live_zero_none_for_live_nonzero() {
-        let mut p = Pending::default();
-        p.test_insert_state(9, NodeState::Live { open_count: 2 });
-        assert!(!p.with_brand(|bp| bp.witness_live_zero(9).is_some()));
-    }
-
-    #[test]
-    fn witness_live_zero_none_for_orphan_zero() {
-        // Orphan with open_count == 0 is shaped like LiveZero
-        // numerically but is a fundamentally different state; the
-        // witness must reject it.
-        let mut p = Pending::default();
-        p.test_insert_state(9, NodeState::Orphan { open_count: 0 });
-        assert!(!p.with_brand(|bp| bp.witness_live_zero(9).is_some()));
-    }
-
-    #[test]
-    fn witness_live_zero_none_for_released() {
-        let mut p = Pending::default();
-        assert!(!p.with_brand(|bp| bp.witness_live_zero(9).is_some()));
-    }
-
-    // ------- witness_orphan ---------------------------------------------------
-
-    #[test]
-    fn witness_orphan_some_for_orphan_nonzero() {
-        let mut p = Pending::default();
-        p.test_insert_state(13, NodeState::Orphan { open_count: 4 });
-        let id = p
-            .with_brand(|bp| bp.witness_orphan(13).map(|w| w.id()))
-            .expect("Orphan witness");
-        assert_eq!(id, 13);
-    }
-
-    #[test]
-    fn witness_orphan_some_for_orphan_zero() {
-        // The orphan witness must match the discriminant, not the
-        // refcount — `Orphan { open_count == 0 }` is a real state
-        // (just one the FSM transitions out of immediately on
-        // release).
-        let mut p = Pending::default();
-        p.test_insert_state(13, NodeState::Orphan { open_count: 0 });
-        let id = p
-            .with_brand(|bp| bp.witness_orphan(13).map(|w| w.id()))
-            .expect("Orphan witness");
-        assert_eq!(id, 13);
-    }
-
-    #[test]
-    fn witness_orphan_none_for_live_nonzero() {
-        let mut p = Pending::default();
-        p.test_insert_state(13, NodeState::Live { open_count: 1 });
-        assert!(!p.with_brand(|bp| bp.witness_orphan(13).is_some()));
-    }
-
-    #[test]
-    fn witness_orphan_none_for_live_zero() {
-        let mut p = Pending::default();
-        p.test_insert_state(13, NodeState::Live { open_count: 0 });
-        assert!(!p.with_brand(|bp| bp.witness_orphan(13).is_some()));
-    }
-
-    #[test]
-    fn witness_orphan_none_for_released() {
-        let mut p = Pending::default();
-        assert!(!p.with_brand(|bp| bp.witness_orphan(13).is_some()));
-    }
-
-    // ------- witness_released -------------------------------------------------
-
-    #[test]
-    fn witness_released_some_for_absent_entry() {
-        let mut p = Pending::default();
-        let id = p
-            .with_brand(|bp| bp.witness_released(21).map(|w| w.id()))
-            .expect("Released witness");
-        assert_eq!(id, 21);
-    }
-
-    #[test]
-    fn witness_released_none_for_live_nonzero() {
-        let mut p = Pending::default();
-        p.test_insert_state(21, NodeState::Live { open_count: 1 });
-        assert!(!p.with_brand(|bp| bp.witness_released(21).is_some()));
-    }
-
-    #[test]
-    fn witness_released_none_for_live_zero() {
-        let mut p = Pending::default();
-        p.test_insert_state(21, NodeState::Live { open_count: 0 });
-        assert!(!p.with_brand(|bp| bp.witness_released(21).is_some()));
-    }
-
-    #[test]
-    fn witness_released_none_for_orphan() {
-        let mut p = Pending::default();
-        p.test_insert_state(21, NodeState::Orphan { open_count: 2 });
-        assert!(!p.with_brand(|bp| bp.witness_released(21).is_some()));
-    }
-
     // ------- witness_kernel_forget --------------------------------------------
 
     #[test]
@@ -998,14 +850,14 @@ mod tests {
         let mut p1 = Pending::default();
         let mut p2 = Pending::default();
         p1.test_insert_state(11, NodeState::Live { open_count: 2 });
-        p2.test_insert_state(13, NodeState::Live { open_count: 0 });
+        p2.test_insert_state(13, NodeState::Live { open_count: 1 });
 
         let id1 = p1
             .with_brand(|bp| bp.witness_live_nonzero(11).map(|w| w.id()))
             .expect("p1 LiveNonZero witness");
         let id2 = p2
-            .with_brand(|bp| bp.witness_live_zero(13).map(|w| w.id()))
-            .expect("p2 LiveZero witness");
+            .with_brand(|bp| bp.witness_live_nonzero(13).map(|w| w.id()))
+            .expect("p2 LiveNonZero witness");
 
         assert_eq!(id1, 11);
         assert_eq!(id2, 13);
@@ -1030,11 +882,11 @@ mod tests {
     #[test]
     fn with_brand_can_return_unbranded_node_id() {
         let mut p = Pending::default();
-        p.test_insert_state(17, NodeState::Orphan { open_count: 3 });
+        p.test_insert_state(17, NodeState::Live { open_count: 3 });
         let extracted: u64 = p.with_brand(|bp| {
             // `u64` is brand-free, so it escapes the closure.
-            // A `Witness<'_, 'brand, Orphan>` could not.
-            bp.witness_orphan(17).map(|w| w.id()).unwrap_or(0)
+            // A `Witness<'_, 'brand, LiveNonZero>` could not.
+            bp.witness_live_nonzero(17).map(|w| w.id()).unwrap_or(0)
         });
         assert_eq!(extracted, 17);
     }
@@ -1768,38 +1620,6 @@ mod tests {
             }
         }
 
-        /// Property 3: at any post-sequence instant the four witness
-        /// constructors classify each NodeId into exactly one bucket
-        /// — i.e. the FSM is a partition of the per-NodeId state
-        /// space (LiveNonZero | LiveZero | Orphan | Released). A
-        /// regression that widened or narrowed any constructor's
-        /// accepting set (e.g. `witness_live_nonzero` returning `Some`
-        /// for `Live { 0 }`) would surface as a multi-bit mask here.
-        #[test]
-        fn fsm_witness_constructors_mutually_exclusive(
-            ops in proptest::collection::vec(op_strategy(), 0..32),
-        ) {
-            let mut p = Pending::default();
-            for op in &ops {
-                apply_to_pending(&mut p, op);
-            }
-            for id in 0u8..8u8 {
-                let id64 = id as u64;
-                let mask = p.with_brand(|bp| {
-                    let mut m = 0u8;
-                    if bp.witness_live_nonzero(id64).is_some() { m |= 1 << 0; }
-                    if bp.witness_live_zero(id64).is_some()    { m |= 1 << 1; }
-                    if bp.witness_orphan(id64).is_some()       { m |= 1 << 2; }
-                    if bp.witness_released(id64).is_some()     { m |= 1 << 3; }
-                    m
-                });
-                proptest::prop_assert_eq!(
-                    mask.count_ones(), 1u32,
-                    "witness mask for id {} is 0b{:04b} after {:?}; expected exactly one bit",
-                    id, mask, ops
-                );
-            }
-        }
     }
 
     /// Pin the harness's divergence-detection at unit-test scale: hand
