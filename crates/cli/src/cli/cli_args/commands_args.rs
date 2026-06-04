@@ -335,12 +335,12 @@ pub struct BranchArgs {
     pub move_branch: bool,
 }
 
-/// Arguments for the Git-compatible `switch` and `checkout` shims.
+/// Arguments for the Git-compatible `switch` shim.
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Examples:
   heddle switch feature/auth       # switch to an existing thread
-  heddle checkout hd-abc123        # move the worktree to a state
+  heddle switch hd-abc123          # move the worktree to a state
   heddle start feature/auth --path ../feature-auth  # create an isolated thread
 ")]
 pub struct SwitchArgs {

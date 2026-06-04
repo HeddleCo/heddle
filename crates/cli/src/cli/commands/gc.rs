@@ -8,7 +8,7 @@
 //! only drops bytes whose canonical copy now lives in a pack. Neither
 //! ever observes or touches a redaction file — they cannot be packed,
 //! cannot be pruned, and cannot be lost to a `gc --prune --aggressive`
-//! pass. We report the pinned count so the audit trail in `heddle gc`
+//! pass. We report the pinned count so the audit trail in `heddle maintenance gc`
 //! output makes the invariant visible to operators.
 
 use objects::store::ObjectStore;

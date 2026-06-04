@@ -1311,7 +1311,7 @@ pub async fn cmd_switch_compat(cli: &Cli, args: SwitchArgs) -> Result<()> {
         let primary = format!("heddle start {} --path ../{}", args.target, path);
         return Err(anyhow!(RecoveryAdvice::safety_refusal(
             "git_checkout_create_branch",
-            "`heddle switch -c` / `heddle checkout -b` are guided to Heddle's isolated thread flow",
+            "`heddle switch -c` / `git checkout -b` are guided to Heddle's isolated thread flow",
             format!(
                 "Create a Heddle thread with `{primary}` so the new work has its own checkout, provenance, and ready/land path."
             ),

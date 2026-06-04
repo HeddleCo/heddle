@@ -131,7 +131,7 @@ mount = { path = "../mount", package = "heddle-mount", version = "0.2", optional
 # Keep the default `heddle` build focused on the local invisible-VCS
 # workflow. Heavier import/hosted surfaces are opt-in for release
 # builds that need them. `semantic` is included in defaults because
-# `heddle diff --semantic`, `heddle compare --semantic`, and the
+# `heddle diff --semantic` and the
 # agent-loop self-review (`/heddle-review`) all reach for it; gating
 # the default install behind an extra `--features semantic` flag
 # turns these documented commands into an opaque error for first-run
