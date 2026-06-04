@@ -27,7 +27,7 @@ use super::{
         override_trust_recommended_action,
         repository_verification_blocked_advice,
     },
-    next_action::{NextActionValidationContext, write_validated_json_stdout},
+    next_action::{NextActionValidationContext, write_command_json},
     operator_core::{OperatorCommandOutput, blocked_operator_exit_code},
     ready_cmd::{worktree_dirty, worktree_dirty_paths},
     snapshot::ensure_current_state,
@@ -36,7 +36,7 @@ use super::{
     worktree_safety::ensure_worktree_clean,
 };
 use crate::{
-    cli::{Cli, should_output_json, style, worktree_status_options},
+    cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     config::UserConfig,
 };
 
@@ -2481,10 +2481,22 @@ fn merge_preview_blocked_advice(output: &MergeOutput) -> RecoveryAdvice {
     advice
 }
 
+impl super::compact::CompactProjection for MergeOutput {
+    fn compact(&self) -> super::compact::CompactOutput {
+        let mut compact = self.operator.compact();
+        compact.changed_paths = Some(self.changed_paths.clone());
+        compact.changed_path_count = Some(self.changed_path_count);
+        compact.conflicts = Some(self.conflicts.clone());
+        compact.conflict_count = Some(self.conflict_count);
+        compact
+    }
+}
+
 fn render_merge_output(cli: &Cli, repo: &Repository, output: MergeOutput) -> Result<()> {
     if should_output_json(cli, None) {
-        write_validated_json_stdout(
+        write_command_json(
             &output,
+            output_is_compact(cli),
             NextActionValidationContext::new(&["merge"], repo.capability()),
         )?;
     } else {

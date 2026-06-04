@@ -75,6 +75,27 @@ pub(crate) fn write_validated_json_stdout<T: Serialize>(
     write_stdout(&encoded)
 }
 
+/// Emit a command's JSON, choosing the full contract or the compact
+/// decision-surface projection (heddle#470). The `T: CompactProjection`
+/// bound is the chokepoint: any output routed through here is guaranteed
+/// to have a compact projection, so a new operator verb cannot silently
+/// ship the full envelope under `--output json-compact`. The compact
+/// payload is only built when `compact` is set.
+pub(crate) fn write_command_json<T>(
+    output: &T,
+    compact: bool,
+    context: NextActionValidationContext<'_>,
+) -> Result<()>
+where
+    T: Serialize + super::compact::CompactProjection,
+{
+    if compact {
+        write_validated_json_stdout(&output.compact(), context)
+    } else {
+        write_validated_json_stdout(output, context)
+    }
+}
+
 pub(crate) fn validate_next_actions_in_value(
     value: &Value,
     context: NextActionValidationContext<'_>,

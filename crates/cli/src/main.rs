@@ -1028,7 +1028,10 @@ fn global_arg_takes_value(arg: &Arg) -> bool {
 }
 
 fn explicit_json_requested(cli: &Cli) -> bool {
-    matches!(cli.output, Some(cli::cli::OutputMode::Json))
+    matches!(
+        cli.output,
+        Some(cli::cli::OutputMode::Json | cli::cli::OutputMode::JsonCompact)
+    )
 }
 
 fn is_plain_git_without_heddle(start: &std::path::Path) -> bool {

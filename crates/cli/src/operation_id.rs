@@ -219,7 +219,7 @@ fn replay_response(
 }
 
 fn explicit_json_requested(cli: &Cli) -> bool {
-    matches!(cli.output, Some(OutputMode::Json))
+    matches!(cli.output, Some(OutputMode::Json | OutputMode::JsonCompact))
 }
 
 fn decorate_json_stream(bytes: &[u8], context: OpIdDisplayContext) -> Result<Vec<u8>> {

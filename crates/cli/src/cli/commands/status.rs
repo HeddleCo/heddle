@@ -37,7 +37,7 @@ use super::{
         remote_tracking_with_verification_action, repository_setup_guidance,
         serialize_empty_action_as_null,
     },
-    next_action::{NextActionValidationContext, write_validated_json_stdout},
+    next_action::{NextActionValidationContext, write_command_json},
     operator_loop::primary_next_action_with_verification,
     snapshot::resolve_principal,
     thread::{
@@ -48,7 +48,7 @@ use super::{
 };
 use crate::{
     bridge::git_core::principal_is_default_unknown,
-    cli::{Cli, should_output_json, style, worktree_status_options},
+    cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     config::UserConfig,
     perf::{ProfileField, emit_profile, profile_enabled},
 };
@@ -382,8 +382,9 @@ fn build_plain_git_status_probe(cli: &Cli) -> Result<Option<PlainGitStatusOutput
 
 fn render_plain_git_status(cli: &Cli, output: &PlainGitStatusOutput, short: bool) -> Result<()> {
     if should_output_json(cli, None) {
-        write_validated_json_stdout(
+        write_command_json(
             output,
+            output_is_compact(cli),
             NextActionValidationContext::without_repo(&["status"]),
         )?;
         return Ok(());
@@ -1078,11 +1079,52 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     Ok(output)
 }
 
+/// Project a `recommended_action` String into the compact
+/// `next_action` (+ template) pair: an empty action is the contract's
+/// "no action" and maps to `None` so the template is dropped too.
+fn compact_next_action(
+    recommended_action: &str,
+    template: &Option<super::command_catalog::ActionTemplate>,
+) -> (Option<String>, Option<super::command_catalog::ActionTemplate>) {
+    if recommended_action.trim().is_empty() {
+        (None, None)
+    } else {
+        (Some(recommended_action.to_string()), template.clone())
+    }
+}
+
+impl super::compact::CompactProjection for StatusOutput {
+    fn compact(&self) -> super::compact::CompactOutput {
+        let (next_action, next_action_template) =
+            compact_next_action(&self.recommended_action, &self.recommended_action_template);
+        let mut compact = super::compact::CompactOutput::new(self.output_kind);
+        compact.coordination_status = Some(self.coordination_status.clone());
+        compact.blockers = self.blockers.clone();
+        compact.next_action = next_action;
+        compact.next_action_template = next_action_template;
+        compact.changed_path_count = Some(self.changed_path_count);
+        compact
+    }
+}
+
+impl super::compact::CompactProjection for PlainGitStatusOutput {
+    fn compact(&self) -> super::compact::CompactOutput {
+        let (next_action, next_action_template) =
+            compact_next_action(&self.recommended_action, &self.recommended_action_template);
+        let mut compact = super::compact::CompactOutput::new(self.output_kind);
+        compact.next_action = next_action;
+        compact.next_action_template = next_action_template;
+        compact.changed_path_count = Some(self.changed_path_count);
+        compact
+    }
+}
+
 pub(crate) fn render_status(cli: &Cli, output: &StatusOutput, short: bool) -> Result<()> {
     let render_start = Instant::now();
     if output.render_json {
-        write_validated_json_stdout(
+        write_command_json(
             output,
+            output_is_compact(cli),
             NextActionValidationContext::new(&["status"], output.validation_capability),
         )?;
     } else if short {

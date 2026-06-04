@@ -2512,7 +2512,10 @@ pub(crate) fn cmd_thread_current(cli: &Cli, repo: &Repository) -> Result<()> {
     // stdout is piped — would be actively counterproductive here. Match
     // `thread cd` and emit plain text by default; only honor an
     // *explicit* request for JSON.
-    let explicit_json = matches!(cli.output, Some(crate::cli::OutputMode::Json));
+    let explicit_json = matches!(
+        cli.output,
+        Some(crate::cli::OutputMode::Json | crate::cli::OutputMode::JsonCompact)
+    );
     if explicit_json {
         #[derive(Serialize)]
         struct CurrentOutput<'a> {

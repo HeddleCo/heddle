@@ -189,6 +189,28 @@ fn normalized_action(action: Option<&str>) -> Option<&str> {
     action.filter(|action| !action.trim().is_empty())
 }
 
+impl super::compact::CompactProjection for OperatorCommandOutput {
+    /// The shared compact core for the whole operator family. `merge`,
+    /// `ready`, `continue`, `abort`, `sync`, and `land` all build their
+    /// compact projection from this so the decision surface stays in
+    /// lockstep with the embedded `OperatorCommandOutput`. Commands that
+    /// also carry changed-path / conflict axes layer those on top of the
+    /// returned value.
+    fn compact(&self) -> super::compact::CompactOutput {
+        // Prefer the validated `recommended_action`; fall back to
+        // `next_action`. Both are the same canonical breadcrumb in the
+        // full envelope — compact emits exactly one, as `next_action`.
+        let action = normalized_action(self.recommended_action.as_deref())
+            .or_else(|| normalized_action(self.next_action.as_deref()));
+        let mut compact = super::compact::CompactOutput::new(self.action.clone());
+        compact.status = Some(self.status.clone());
+        compact.blockers = self.blockers.clone();
+        compact.next_action = action.map(str::to_string);
+        compact.next_action_template = action.and_then(action_template);
+        compact
+    }
+}
+
 pub(crate) fn open_operator_repo_from_path(path: &Path) -> Result<Repository> {
     let cwd_repo = Repository::open(path)?;
     let target_path = cwd_repo.active_worktree_path()?;

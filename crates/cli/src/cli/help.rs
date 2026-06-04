@@ -123,8 +123,9 @@ pub fn print_help(cmd: &clap::Command, topic: &[String]) -> std::io::Result<()> 
             writeln!(
                 out,
                 "Output: text is the default; pass `--output json` for the \
-                 machine contract (stable `output_kind`, exit codes, recovery \
-                 templates). No TTY/pipe auto-detection."
+                 full machine contract (stable `output_kind`, exit codes, recovery \
+                 templates), or `--output json-compact` for the decision surface \
+                 only (fewer tokens, same `output_kind`). No TTY/pipe auto-detection."
             )?;
             writeln!(out)?;
             writeln!(
