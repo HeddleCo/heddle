@@ -17,37 +17,60 @@
 //!
 //! The public tier is the default and stays **record-free**: a public
 //! resolution never writes a file here, and [`Repository::has_visibility_for_state`]
-//! returns `false` when no record exists. Only resolutions more restrictive
-//! than public are persisted. Callers must therefore not persist a
-//! `VisibilityTier::Public` record — the absence *is* the public signal.
+//! returns `false` when the effective tier is public. Only resolutions more
+//! restrictive than public are persisted. This is *enforced* at the write
+//! boundary — [`Repository::put_state_visibility`] normalizes a
+//! `VisibilityTier::Public` put to public-by-absence rather than trusting
+//! callers to keep public off disk — so the absence genuinely *is* the
+//! public signal.
 
 use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use objects::{
     fs_atomic::write_file_atomic,
-    object::{ChangeId, ContentHash, StateVisibility, StateVisibilityBlob},
+    lock::RepositoryLockExt,
+    object::{ChangeId, ContentHash, StateVisibility, StateVisibilityBlob, VisibilityTier},
 };
 
 use crate::repository::Repository;
 
 impl Repository {
-    /// Append a visibility record for its state. Returns the record's
+    /// Record a visibility declaration for its state. Returns the record's
     /// content-addressed id.
+    ///
+    /// The whole read → dedupe → write sequence runs under the repository
+    /// write lock, so two concurrent puts on the same state can't both load
+    /// the same blob and have the second `write_file_atomic` clobber the
+    /// first (a lost update would silently drop an embargo or a promotion).
+    /// This mirrors the `SignState` handler, which serializes its per-state
+    /// read-modify-write the same way — reusing the existing repo lock, not
+    /// a new one.
     ///
     /// Idempotent: if a record with the same canonical bytes already exists
     /// on the state, no second entry is written and the existing id is
     /// returned.
     ///
-    /// Callers must not pass a `VisibilityTier::Public` record — public is
-    /// represented by *absence* (see the module docs). Persisting a public
-    /// record would make [`has_visibility_for_state`](Self::has_visibility_for_state)
-    /// report a state as non-public when it is not.
+    /// **Absence ≡ public, enforced here.** When the *effective* (latest)
+    /// tier resolves to [`VisibilityTier::Public`], the state's sidecar is
+    /// removed so it returns to public-by-absence and
+    /// [`has_visibility_for_state`](Self::has_visibility_for_state) reports
+    /// `false`. This holds whether the Public put is fresh or supersedes a
+    /// prior private record — no caller can leave a Public record that makes
+    /// a public state read as non-public.
     pub fn put_state_visibility(&self, record: StateVisibility) -> Result<ContentHash> {
         let state = record.state;
-        let mut existing = self.get_state_visibility_for_state(&state)?;
+
+        // Serialize the full read-modify-write behind the repo write lock so
+        // concurrent appends on the same state can't clobber each other.
+        let _lock = self
+            .locker()
+            .write()
+            .with_context(|| "acquire repo write lock for state-visibility put")?;
 
         let id = state_visibility_content_hash(&record)?;
+        let mut existing = self.get_state_visibility_for_state(&state)?;
+
         for existing_record in &existing.records {
             if state_visibility_content_hash(existing_record)? == id {
                 return Ok(id);
@@ -55,10 +78,28 @@ impl Repository {
         }
 
         existing.push(record);
+
+        let path = self.state_visibility_path_for_state(&state);
+
+        // Absence ≡ public: if the effective (latest) tier is public, drop the
+        // state back to public-by-absence by removing the sidecar rather than
+        // persisting a record that would classify a public state as non-public.
+        let effective_public = match existing.latest() {
+            Some(latest) => latest.tier == VisibilityTier::Public,
+            None => true,
+        };
+        if effective_public {
+            if path.exists() {
+                fs::remove_file(&path).with_context(|| {
+                    format!("remove state-visibility sidecar '{}'", path.display())
+                })?;
+            }
+            return Ok(id);
+        }
+
         let bytes = existing
             .encode()
             .with_context(|| "encoding state-visibility blob")?;
-        let path = self.state_visibility_path_for_state(&state);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("create '{}'", parent.display()))?;
         }
@@ -79,12 +120,20 @@ impl Repository {
             .with_context(|| format!("decode '{}'", path.display()))
     }
 
-    /// Whether `state` carries any persisted visibility record. `false`
-    /// means **public-by-absence** — the public resolution is record-free,
-    /// so a missing (or empty) sidecar resolves to the public tier. This is
-    /// the keystone query the serve-side gate keys off.
+    /// Whether `state` resolves to a **non-public** effective tier. `false`
+    /// means **public-by-absence** — either no record exists, or the latest
+    /// declaration resolves to [`VisibilityTier::Public`]. By construction
+    /// (see [`put_state_visibility`](Self::put_state_visibility)) a public
+    /// resolution is never persisted, so this is equivalent to "a record
+    /// exists"; computing it from the effective tier keeps the keystone
+    /// invariant — true iff the effective tier is non-public — explicit and
+    /// robust against any blob a future path might introduce. This is the
+    /// query the serve-side gate keys off.
     pub fn has_visibility_for_state(&self, state: &ChangeId) -> Result<bool> {
-        Ok(self.get_state_visibility_for_state(state)?.has_record())
+        Ok(self
+            .get_state_visibility_for_state(state)?
+            .latest()
+            .is_some_and(|r| r.tier != VisibilityTier::Public))
     }
 
     /// Walk every visibility sidecar file in the repo. Returns
@@ -145,6 +194,8 @@ fn state_visibility_content_hash(record: &StateVisibility) -> Result<ContentHash
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::Arc, thread};
+
     use chrono::{TimeZone, Utc};
     use objects::object::{Principal, VisibilityTier};
     use tempfile::TempDir;
@@ -295,5 +346,119 @@ mod tests {
         let mut want = vec![a, b];
         want.sort_by_key(|c| c.to_string_full());
         assert_eq!(listed, want);
+    }
+
+    #[test]
+    fn concurrent_puts_on_same_state_do_not_lose_updates() {
+        // Finding 1: the read → dedupe → write must be serialized behind the
+        // repo write lock. Eight threads each append a *distinct* non-public
+        // record to the SAME state. Without the lock, concurrent appends load
+        // the same base blob and the last `write_file_atomic` wins, silently
+        // dropping the others. With it, every record survives.
+        let (_dir, repo) = fresh_repo();
+        let repo = Arc::new(repo);
+        let state = ChangeId::from_bytes([42u8; 16]);
+
+        const N: u32 = 8;
+        let mut handles = Vec::new();
+        for i in 0..N {
+            let repo = Arc::clone(&repo);
+            handles.push(thread::spawn(move || {
+                // Distinct declared_at per thread → distinct content hash, so
+                // each append accretes (none is a dedup no-op).
+                let record = StateVisibility {
+                    declared_at: Utc.with_ymd_and_hms(2026, 6, 1, 12, i, 0).unwrap(),
+                    ..sample_record(state, VisibilityTier::Internal)
+                };
+                repo.put_state_visibility(record).expect("concurrent put");
+            }));
+        }
+        for h in handles {
+            h.join().expect("join put thread");
+        }
+
+        let stored = repo
+            .get_state_visibility_for_state(&state)
+            .expect("read back");
+        assert_eq!(
+            stored.records.len() as u32,
+            N,
+            "every concurrent append on the same state must survive — no lost update"
+        );
+        assert!(
+            repo.has_visibility_for_state(&state)
+                .expect("has visibility"),
+            "a non-public effective tier must report has_visibility_for_state == true"
+        );
+    }
+
+    #[test]
+    fn public_put_resolves_to_public_by_absence() {
+        // Finding 2: a Public put must not persist a record. The state stays
+        // public-by-absence, so has_visibility_for_state is false and get
+        // resolves to an empty (public) blob.
+        let (_dir, repo) = fresh_repo();
+        let state = ChangeId::from_bytes([20u8; 16]);
+        repo.put_state_visibility(sample_record(state, VisibilityTier::Public))
+            .expect("public put");
+
+        assert!(
+            !repo
+                .has_visibility_for_state(&state)
+                .expect("has visibility"),
+            "a Public put must resolve to public-by-absence (has_visibility_for_state == false)"
+        );
+        assert!(
+            !repo.state_visibility_path_for_state(&state).exists(),
+            "a Public put must not persist a sidecar file"
+        );
+        assert!(
+            repo.get_state_visibility_for_state(&state)
+                .expect("read back")
+                .records
+                .is_empty(),
+            "get must resolve a Public state to an empty (public) blob"
+        );
+    }
+
+    #[test]
+    fn supersede_with_public_drops_back_to_public_by_absence() {
+        // Finding 2 (supersede arm): a private record makes the state
+        // non-public; superseding it with a later Public declaration must
+        // drop the whole state back to public-by-absence (record removed),
+        // not leave a lingering non-public classification.
+        let (_dir, repo) = fresh_repo();
+        let state = ChangeId::from_bytes([21u8; 16]);
+        let private = sample_record(
+            state,
+            VisibilityTier::Restricted {
+                scope_label: "embargo".into(),
+            },
+        );
+        let private_id = repo.put_state_visibility(private).expect("put private");
+        assert!(
+            repo.has_visibility_for_state(&state)
+                .expect("has visibility"),
+            "an embargo/private record must report has_visibility_for_state == true"
+        );
+
+        let public = StateVisibility {
+            declared_at: Utc.with_ymd_and_hms(2026, 6, 2, 9, 0, 0).unwrap(),
+            supersedes: Some(private_id),
+            ..sample_record(state, VisibilityTier::Public)
+        };
+        repo.put_state_visibility(public)
+            .expect("supersede with public");
+
+        assert!(
+            !repo
+                .has_visibility_for_state(&state)
+                .expect("has visibility"),
+            "supersede-to-Public must restore public-by-absence (has_visibility_for_state == false)"
+        );
+        assert!(
+            !repo.state_visibility_path_for_state(&state).exists(),
+            "supersede-to-Public must remove the sidecar entirely"
+        );
     }
 }
