@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use merge::{text_hunk_merge_with_markers, ConflictMarkers, MergeOutcome};
 
-use super::items::{FileSegments, Item, ItemKey, ItemKind};
+use super::items::{ContainerSpan, FileSegments, Item, ItemKey, ItemKind};
 
 /// Three sides of the merge: `[base, ours, theirs]`. Each per-iteration
 /// segment contribution is indexed by [`Side`] so emission tracking can
@@ -160,7 +160,30 @@ pub(crate) fn reconstruct_merged_file(
         }
     }
 
-    let item_emit_order = compute_item_emit_order(&base_mks, &ours_mks, &theirs_mks, &all_keys);
+    // Structural (physical) scope of each match-key — the chain of
+    // module/impl/trait/class bodies the item sits inside. Distinct from
+    // `ItemKey::scope` (the logical match scope). Base wins when present so
+    // matched items keep a stable placement; otherwise the adding side's
+    // nesting is used.
+    let mut struct_scope_of: BTreeMap<MatchKey, &[String]> = BTreeMap::new();
+    for (mks, seg) in [
+        (&theirs_mks, theirs_segments),
+        (&ours_mks, ours_segments),
+        (&base_mks, base_segments),
+    ] {
+        for (mk, item) in mks.iter().zip(seg.items.iter()) {
+            struct_scope_of.insert(mk.clone(), item.struct_scope.as_slice());
+        }
+    }
+
+    let flat_order = compute_item_emit_order(&base_mks, &ours_mks, &theirs_mks, &all_keys);
+    // Re-group so items physically inside the same container stay
+    // contiguous (a valid pre-order over the scope tree). The positional
+    // splice in `compute_item_emit_order` can otherwise drop a top-level
+    // added item between two children of a module added on the other side,
+    // stranding a later child outside the module's `}` (heddle#484 Bug 3).
+    // For files with no cross-scope interleaving this is the identity.
+    let item_emit_order = group_by_struct_scope(&flat_order, &struct_scope_of);
 
     // For each side, record each item's index so we can look up the
     // inter-item segment that preceded it in source.
@@ -175,37 +198,92 @@ pub(crate) fn reconstruct_merged_file(
         theirs_segments.inter_item_ranges(),
     ];
     let side_sources = [base, ours, theirs];
-
-    // Per-side set of inter-item range indices already emitted into
-    // `output`. A side's range is contributed to at most one slot —
-    // either the per-item preceding-segment merge for an item the
-    // side has, the bridging slot for an item the side lacks (next
-    // item the side has owns this range too — so the first occupant
-    // wins), or the postamble. Without this tracking the same range
-    // can be pulled into multiple slots — both Codex r2 P2 #2
-    // (leading-added-item preamble duplication) and P1 #2 (zero-items
-    // side postamble duplication) are this single shape.
-    let mut emitted: [BTreeSet<usize>; N_SIDES] =
-        [BTreeSet::new(), BTreeSet::new(), BTreeSet::new()];
+    let side_containers = [
+        base_segments.containers.as_slice(),
+        ours_segments.containers.as_slice(),
+        theirs_segments.containers.as_slice(),
+    ];
 
     // Walk emit_order. For each item, emit:
-    //   1. The inter-item segment that PRECEDED it in each side. When
-    //      the side has the item, that's the side's range immediately
-    //      before; when it doesn't, the "bridging" range (the range in
-    //      the side that spans where this item would be in emit order)
-    //      stands in. Either way, a range is only contributed if it
-    //      hasn't already been emitted on a prior iteration.
+    //   1. The inter-item segment that PRECEDED it in each side that
+    //      HAS the item — that side's range immediately before it. A
+    //      side that lacks the item contributes nothing for this slot.
     //   2. The merged item bytes.
-    // After the last item, emit the postamble (each side's final range,
-    // skipped per-side if already consumed).
+    // After the last item, emit the postamble (each side's final range).
+    //
+    // Every side range maps to exactly one purpose: range `i` (for
+    // `i < n_items`) is the preceding gap of the one item it sits
+    // before, and the final range (`n_items`) is the postamble. Because
+    // a lacking side never borrows a neighbouring range, no range can be
+    // pulled into two slots — which is what made the prior "bridging"
+    // model emit a one-item side's trailing postamble BOTH as the gap
+    // before an added item AND again as the postamble (heddle#484: the
+    // duplicated `// MARK` / `mod tests {…}` / closing-brace class).
+    let side_n: [usize; N_SIDES] = [
+        side_ranges[0].len() - 1,
+        side_ranges[1].len() - 1,
+        side_ranges[2].len() - 1,
+    ];
     let mut output: Vec<u8> = Vec::new();
+    let empty_scope: &[String] = &[];
+    let mut prev_struct: &[String] = empty_scope;
+    let mut prev_key: Option<&MatchKey> = None;
 
-    for (emit_idx, key) in item_emit_order.iter().enumerate() {
+    for key in item_emit_order.iter() {
+        let y_struct = struct_scope_of.get(key).copied().unwrap_or(empty_scope);
+        // Containers the gap before this item should structurally close /
+        // open: the depths dropped from / added to the previously-emitted
+        // item's scope, relative to the scope they share. A side whose own
+        // preceding item sat at a different depth (because the merged
+        // predecessor was inserted from another side) carries extra braces
+        // in its raw gap; those are trimmed so each `{`/`}` is emitted once.
+        let common = common_prefix_len(prev_struct, y_struct);
+        let needed_exits = prev_struct.len() - common;
+        let needed_enters = y_struct.len() - common;
         let mut segs: [Option<&str>; N_SIDES] = [None, None, None];
+        let mut any_preceding = false;
         for s in 0..N_SIDES {
-            let r = side_range_for_emit(&side_idx_maps[s], key, &item_emit_order, emit_idx);
-            if emitted[s].insert(r) {
-                segs[s] = Some(inter_slice(side_sources[s], &side_ranges[s], r));
+            if let Some(&r) = side_idx_maps[s].get(key) {
+                // `r == 0` is the file preamble, which belongs to the FIRST
+                // emitted item only; for a later item it is not a separator,
+                // so a side on which this item leads contributes nothing.
+                if r > 0 || prev_key.is_none() {
+                    segs[s] = Some(trim_redundant_structure(
+                        side_sources[s],
+                        &side_ranges[s],
+                        side_containers[s],
+                        r,
+                        needed_exits,
+                        needed_enters,
+                    ));
+                    any_preceding |= r > 0;
+                }
+            }
+        }
+        // No side offers a real preceding separator — this item leads every
+        // side that has it (both sides independently prepended a new item
+        // before the first shared item). Source the separator from the
+        // merged predecessor's own trailing between-gap (never its
+        // postamble), so the two prepended items stay separated rather than
+        // being concatenated (heddle#484 regression guard).
+        if let Some(pk) = prev_key
+            && !any_preceding
+        {
+            for s in 0..N_SIDES {
+                if let Some(&j) = side_idx_maps[s].get(pk)
+                    && j + 1 < side_n[s]
+                {
+                    // Only the leading whitespace: the rest of the
+                    // predecessor's trailing gap belongs to ITS real
+                    // successor (e.g. a `mod {` header) and is emitted with
+                    // that item — pulling it here would drag the following
+                    // item into the wrong scope.
+                    segs[s] = Some(leading_whitespace(inter_slice(
+                        side_sources[s],
+                        &side_ranges[s],
+                        j + 1,
+                    )));
+                }
             }
         }
         let (seg_bytes, seg_conflicts) = merge_segment(segs[0], segs[1], segs[2], markers);
@@ -215,24 +293,20 @@ pub(crate) fn reconstruct_merged_file(
         if let Some((Some(item_bytes), _)) = resolved.get(key) {
             output.extend_from_slice(item_bytes);
         }
+        prev_struct = y_struct;
+        prev_key = Some(key);
     }
 
-    // Postamble: each side's last range, but only if that range
-    // wasn't already pulled in as a bridge above (the zero-items-side
-    // shape from P1 #2).
+    // Postamble: each side's final range, merged once. Every side has
+    // exactly one (its last range) and it is never an item's preceding
+    // gap, so there is nothing to dedup against.
     let mut post: [Option<&str>; N_SIDES] = [None, None, None];
     for s in 0..N_SIDES {
         let last = side_ranges[s].len() - 1;
-        if emitted[s].insert(last) {
-            post[s] = Some(inter_slice(side_sources[s], &side_ranges[s], last));
-        }
+        post[s] = Some(inter_slice(side_sources[s], &side_ranges[s], last));
     }
     let (post_bytes, post_conflicts) = merge_segment(post[0], post[1], post[2], markers);
-    // Only emit the postamble if it adds bytes — otherwise we risk
-    // duplicating the trailing newline already in the last item's bytes.
-    if !post_bytes.is_empty() {
-        output.extend_from_slice(&post_bytes);
-    }
+    output.extend_from_slice(&post_bytes);
     total_conflicts += post_conflicts;
 
     reconcile_trailing_newline(&mut output, sides);
@@ -275,29 +349,131 @@ fn inter_slice<'a>(source: &'a str, ranges: &[(usize, usize)], idx: usize) -> &'
     &source[start..end]
 }
 
-/// Pick the inter-item range index that represents `key`'s preceding
-/// segment on one side. If the side has `key`, that's the range
-/// immediately before it. If not, the bridging range is used: the
-/// range in the side that spans `key`'s position in `emit_order`. The
-/// bridging range is found by walking left in `emit_order` to the
-/// nearest prior key the side does have, then taking the range after
-/// that key's item; if no prior key exists, the side's preamble
-/// (range 0) bridges.
-fn side_range_for_emit(
-    side_idx_map: &BTreeMap<MatchKey, usize>,
-    key: &MatchKey,
-    emit_order: &[MatchKey],
-    emit_idx: usize,
-) -> usize {
-    if let Some(i) = side_idx_map.get(key) {
-        return *i;
+/// Length of the shared leading prefix of two scope paths.
+fn common_prefix_len(a: &[String], b: &[String]) -> usize {
+    a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
+}
+
+/// The leading run of whitespace in `s` (up to the first non-whitespace
+/// byte). Used to extract just the blank-line separator from a gap whose
+/// remainder belongs to a following item.
+fn leading_whitespace(s: &str) -> &str {
+    let end = s.find(|c: char| !c.is_whitespace()).unwrap_or(s.len());
+    &s[..end]
+}
+
+/// The inter-item gap before an item on one side, with any *redundant*
+/// leading container braces trimmed off.
+///
+/// `ranges[range_idx]` is the raw gap (`pred.end .. item.start`). On the
+/// originating side it closes every container that ended between this item
+/// and its source predecessor, and opens every container the item newly sits
+/// inside. But in the merged emit order the predecessor may be a different
+/// item — inserted from another side at a different scope — so some of those
+/// containers are *already* closed (or already open) in the output.
+///
+/// `needed_exits` / `needed_enters` are how many closes / opens the gap
+/// *should* perform, derived from the merged predecessor's and this item's
+/// shared scope depth. Extra leading closing braces (over-closing a scope
+/// that is already closed) and extra leading opening braces (re-opening a
+/// scope that is already open) are dropped by advancing the gap start past
+/// them, so each `{` / `}` is emitted exactly once across the merge
+/// (heddle#484 Bug 3 + the add/add-module shape).
+fn trim_redundant_structure<'a>(
+    source: &'a str,
+    ranges: &[(usize, usize)],
+    containers: &[ContainerSpan],
+    range_idx: usize,
+    needed_exits: usize,
+    needed_enters: usize,
+) -> &'a str {
+    let (orig_start, end) = ranges[range_idx];
+    let mut start = orig_start;
+
+    // Drop extra leading closing braces: containers that opened before the
+    // gap and close inside it (innermost / earliest close first).
+    let mut closes: Vec<usize> = containers
+        .iter()
+        .filter(|c| c.open < orig_start && orig_start < c.close && c.close <= end)
+        .map(|c| c.close)
+        .collect();
+    closes.sort_unstable();
+    if closes.len() > needed_exits {
+        start = closes[closes.len() - needed_exits - 1];
     }
-    for j in (0..emit_idx).rev() {
-        if let Some(i) = side_idx_map.get(&emit_order[j]) {
-            return i + 1;
+
+    // Drop extra leading opening braces: containers that open inside the
+    // (already exit-trimmed) gap and still enclose the item (outermost /
+    // earliest open first).
+    let mut opens: Vec<usize> = containers
+        .iter()
+        .filter(|c| c.open >= start && c.open < end && c.close > end)
+        .map(|c| c.open)
+        .collect();
+    opens.sort_unstable();
+    if opens.len() > needed_enters {
+        start = opens[opens.len() - needed_enters - 1] + 1;
+    }
+
+    &source[start..end]
+}
+
+/// Re-order a flat emit order so items physically nested in the same
+/// container are contiguous, yielding a valid pre-order over the structural
+/// scope tree. Items are grouped by their structural scope path one level at
+/// a time, preserving first-appearance order of groups and of items within a
+/// group, then each group recurses one level deeper. For an order whose
+/// scopes are already contiguous (every file with no cross-side
+/// scope-interleaving) this is the identity.
+fn group_by_struct_scope(
+    order: &[MatchKey],
+    struct_scope_of: &BTreeMap<MatchKey, &[String]>,
+) -> Vec<MatchKey> {
+    let empty: &[String] = &[];
+    let annotated: Vec<(MatchKey, &[String])> = order
+        .iter()
+        .map(|k| (k.clone(), struct_scope_of.get(k).copied().unwrap_or(empty)))
+        .collect();
+    group_by_struct_scope_depth(annotated, 0)
+}
+
+fn group_by_struct_scope_depth(
+    items: Vec<(MatchKey, &[String])>,
+    depth: usize,
+) -> Vec<MatchKey> {
+    // A unit at this depth is either a leaf (scope length == depth) or a
+    // module group keyed by `scope[depth]`. Units are kept in
+    // first-appearance order; a module group gathers every item that shares
+    // `scope[depth]` regardless of interleaving, then recurses.
+    enum Unit<'a> {
+        Leaf(MatchKey),
+        Group(Vec<(MatchKey, &'a [String])>),
+    }
+    let mut units: Vec<Unit> = Vec::new();
+    let mut group_at: BTreeMap<String, usize> = BTreeMap::new();
+    for (key, scope) in items {
+        if scope.len() <= depth {
+            units.push(Unit::Leaf(key));
+        } else {
+            let name = scope[depth].clone();
+            if let Some(&idx) = group_at.get(&name) {
+                if let Unit::Group(v) = &mut units[idx] {
+                    v.push((key, scope));
+                }
+            } else {
+                group_at.insert(name, units.len());
+                units.push(Unit::Group(vec![(key, scope)]));
+            }
         }
     }
-    0
+    let mut out = Vec::new();
+    for unit in units {
+        match unit {
+            Unit::Leaf(k) => out.push(k),
+            Unit::Group(v) => out.extend(group_by_struct_scope_depth(v, depth + 1)),
+        }
+    }
+    out
 }
 
 /// 3-way merge a single inter-item segment. Handles "side doesn't have
