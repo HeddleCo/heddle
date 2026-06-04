@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Core object primitives extracted from the monolith.
 
+#[macro_use]
+mod versioned_blob;
+
 mod action_id;
 mod action_operation;
 mod action_struct;

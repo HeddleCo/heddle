@@ -157,38 +157,15 @@ pub enum ContextError {
     InvalidEncoding(String),
 }
 
-impl ContextBlob {
-    /// Current encoded format version. Reject anything that isn't the
-    /// current value — no live deployments to migrate from.
-    pub const FORMAT_VERSION: u8 = 2;
-
-    pub fn new(annotations: Vec<Annotation>) -> Self {
-        Self {
-            format_version: Self::FORMAT_VERSION,
-            annotations,
-        }
-    }
-
-    pub fn validate(&self) -> Result<(), ContextError> {
-        if self.format_version != Self::FORMAT_VERSION {
-            return Err(ContextError::UnsupportedVersion(self.format_version));
-        }
-        for annotation in &self.annotations {
-            annotation.validate()?;
-        }
-        Ok(())
-    }
-
-    pub fn encode(&self) -> Result<Vec<u8>, ContextError> {
-        rmp_serde::to_vec(self).map_err(|err| ContextError::InvalidEncoding(err.to_string()))
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, ContextError> {
-        let blob: Self = rmp_serde::from_slice(bytes)
-            .map_err(|err| ContextError::InvalidEncoding(err.to_string()))?;
-        blob.validate()?;
-        Ok(blob)
-    }
+// Current encoded format version is 2. Reject anything that isn't the
+// current value — no live deployments to migrate from.
+versioned_msgpack_blob! {
+    blob: ContextBlob,
+    item: Annotation,
+    field: annotations,
+    error: ContextError,
+    codec_err: InvalidEncoding,
+    version: 2,
 }
 
 impl Annotation {

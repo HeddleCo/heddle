@@ -25,36 +25,13 @@ pub struct StructuredConflict {
     pub conflicts: Vec<ConflictSymbol>,
 }
 
-impl StructuredConflict {
-    pub const FORMAT_VERSION: u8 = 1;
-
-    pub fn new(conflicts: Vec<ConflictSymbol>) -> Self {
-        Self {
-            format_version: Self::FORMAT_VERSION,
-            conflicts,
-        }
-    }
-
-    pub fn encode(&self) -> Result<Vec<u8>, ConflictError> {
-        rmp_serde::to_vec(self).map_err(|err| ConflictError::Encoding(err.to_string()))
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, ConflictError> {
-        let blob: Self =
-            rmp_serde::from_slice(bytes).map_err(|err| ConflictError::Encoding(err.to_string()))?;
-        blob.validate()?;
-        Ok(blob)
-    }
-
-    pub fn validate(&self) -> Result<(), ConflictError> {
-        if self.format_version != Self::FORMAT_VERSION {
-            return Err(ConflictError::UnsupportedVersion(self.format_version));
-        }
-        for c in &self.conflicts {
-            c.validate()?;
-        }
-        Ok(())
-    }
+versioned_msgpack_blob! {
+    blob: StructuredConflict,
+    item: ConflictSymbol,
+    field: conflicts,
+    error: ConflictError,
+    codec_err: Encoding,
+    version: 1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

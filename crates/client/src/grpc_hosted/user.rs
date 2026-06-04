@@ -19,6 +19,28 @@ use super::{
     },
 };
 
+/// Dispatch an authenticated unary RPC on `self.user`: wrap `$msg` in
+/// a `tonic::Request`, stamp the auth credential via `apply_auth`,
+/// await the call, map a transport `Status` to a `ProtocolError`, and
+/// unwrap the response to its inner message. Every authenticated
+/// user-service call shares this exact prologue; the macro is the one
+/// chokepoint so a change to the auth/await/error-map sequence lands
+/// once. `?`-propagates `ProtocolError` from `apply_auth` and the
+/// mapped status, so it must be invoked inside an `async fn` returning
+/// `Result<_, ProtocolError>`.
+macro_rules! authed_call {
+    ($self:ident, $rpc:ident, $msg:expr) => {{
+        let mut request = Request::new($msg);
+        $self.apply_auth(&mut request)?;
+        $self
+            .user
+            .$rpc(request)
+            .await
+            .map_err(status_to_protocol_error)?
+            .into_inner()
+    }};
+}
+
 impl HostedGrpcClient {
     pub async fn begin_login(
         &mut self,
@@ -44,28 +66,18 @@ impl HostedGrpcClient {
     pub async fn get_current_user_namespace(
         &mut self,
     ) -> Result<proto::HostedNamespaceInfo, ProtocolError> {
-        let mut request = Request::new(GetCurrentUserNamespaceRequest {});
-        self.apply_auth(&mut request)?;
-        let namespace = self
-            .user
-            .get_current_user_namespace(request)
-            .await
-            .map_err(status_to_protocol_error)?
-            .into_inner();
+        let namespace = authed_call!(
+            self,
+            get_current_user_namespace,
+            GetCurrentUserNamespaceRequest {}
+        );
         Ok(to_protocol_namespace(namespace))
     }
 
     pub async fn list_namespaces(
         &mut self,
     ) -> Result<Vec<proto::HostedNamespaceInfo>, ProtocolError> {
-        let mut request = Request::new(ListNamespacesRequest {});
-        self.apply_auth(&mut request)?;
-        let response = self
-            .user
-            .list_namespaces(request)
-            .await
-            .map_err(status_to_protocol_error)?
-            .into_inner();
+        let response = authed_call!(self, list_namespaces, ListNamespacesRequest {});
         Ok(response
             .namespaces
             .into_iter()
@@ -80,20 +92,17 @@ impl HostedGrpcClient {
         parent_path: Option<&str>,
         display_name: Option<String>,
     ) -> Result<proto::HostedNamespaceInfo, ProtocolError> {
-        let mut request = Request::new(grpc::heddle::v1::CreateNamespaceRequest {
-            kind: parse_namespace_kind_arg(kind)? as i32,
-            slug: slug.to_string(),
-            parent_path: parent_path.unwrap_or_default().to_string(),
-            display_name: display_name.unwrap_or_default(),
-            client_operation_id: String::new(),
-        });
-        self.apply_auth(&mut request)?;
-        let namespace = self
-            .user
-            .create_namespace(request)
-            .await
-            .map_err(status_to_protocol_error)?
-            .into_inner();
+        let namespace = authed_call!(
+            self,
+            create_namespace,
+            grpc::heddle::v1::CreateNamespaceRequest {
+                kind: parse_namespace_kind_arg(kind)? as i32,
+                slug: slug.to_string(),
+                parent_path: parent_path.unwrap_or_default().to_string(),
+                display_name: display_name.unwrap_or_default(),
+                client_operation_id: String::new(),
+            }
+        );
         Ok(to_protocol_namespace(namespace))
     }
 
@@ -102,18 +111,15 @@ impl HostedGrpcClient {
         namespace_path: &str,
         slug: &str,
     ) -> Result<proto::HostedRepositoryInfo, ProtocolError> {
-        let mut request = Request::new(CreateRepositoryRequest {
-            namespace_path: namespace_path.to_string(),
-            slug: slug.to_string(),
-            client_operation_id: String::new(),
-        });
-        self.apply_auth(&mut request)?;
-        let repo = self
-            .user
-            .create_repository(request)
-            .await
-            .map_err(status_to_protocol_error)?
-            .into_inner();
+        let repo = authed_call!(
+            self,
+            create_repository,
+            CreateRepositoryRequest {
+                namespace_path: namespace_path.to_string(),
+                slug: slug.to_string(),
+                client_operation_id: String::new(),
+            }
+        );
         Ok(to_protocol_repository(repo))
     }
 
@@ -121,16 +127,13 @@ impl HostedGrpcClient {
         &mut self,
         namespace_path: Option<&str>,
     ) -> Result<Vec<proto::HostedRepositoryInfo>, ProtocolError> {
-        let mut request = Request::new(ListRepositoriesRequest {
-            namespace_path: namespace_path.unwrap_or_default().to_string(),
-        });
-        self.apply_auth(&mut request)?;
-        let response = self
-            .user
-            .list_repositories(request)
-            .await
-            .map_err(status_to_protocol_error)?
-            .into_inner();
+        let response = authed_call!(
+            self,
+            list_repositories,
+            ListRepositoriesRequest {
+                namespace_path: namespace_path.unwrap_or_default().to_string(),
+            }
+        );
         Ok(response
             .repositories
             .into_iter()
@@ -149,33 +152,29 @@ impl HostedGrpcClient {
             Some(None) => (String::new(), true),
             None => (String::new(), false),
         };
-        let mut request = Request::new(UpdateNamespaceRequest {
-            full_path: full_path.to_string(),
-            new_slug: new_slug.unwrap_or_default().to_string(),
-            display_name,
-            clear_display_name,
-            client_operation_id: String::new(),
-        });
-        self.apply_auth(&mut request)?;
-        let namespace = self
-            .user
-            .update_namespace(request)
-            .await
-            .map_err(status_to_protocol_error)?
-            .into_inner();
+        let namespace = authed_call!(
+            self,
+            update_namespace,
+            UpdateNamespaceRequest {
+                full_path: full_path.to_string(),
+                new_slug: new_slug.unwrap_or_default().to_string(),
+                display_name,
+                clear_display_name,
+                client_operation_id: String::new(),
+            }
+        );
         Ok(to_protocol_namespace(namespace))
     }
 
     pub async fn delete_namespace(&mut self, full_path: &str) -> Result<(), ProtocolError> {
-        let mut request = Request::new(DeleteNamespaceRequest {
-            full_path: full_path.to_string(),
-            client_operation_id: String::new(),
-        });
-        self.apply_auth(&mut request)?;
-        self.user
-            .delete_namespace(request)
-            .await
-            .map_err(status_to_protocol_error)?;
+        authed_call!(
+            self,
+            delete_namespace,
+            DeleteNamespaceRequest {
+                full_path: full_path.to_string(),
+                client_operation_id: String::new(),
+            }
+        );
         Ok(())
     }
 
@@ -184,31 +183,27 @@ impl HostedGrpcClient {
         full_path: &str,
         new_slug: &str,
     ) -> Result<proto::HostedRepositoryInfo, ProtocolError> {
-        let mut request = Request::new(UpdateRepositoryRequest {
-            full_path: full_path.to_string(),
-            new_slug: new_slug.to_string(),
-            client_operation_id: String::new(),
-        });
-        self.apply_auth(&mut request)?;
-        let repo = self
-            .user
-            .update_repository(request)
-            .await
-            .map_err(status_to_protocol_error)?
-            .into_inner();
+        let repo = authed_call!(
+            self,
+            update_repository,
+            UpdateRepositoryRequest {
+                full_path: full_path.to_string(),
+                new_slug: new_slug.to_string(),
+                client_operation_id: String::new(),
+            }
+        );
         Ok(to_protocol_repository(repo))
     }
 
     pub async fn delete_repository(&mut self, full_path: &str) -> Result<(), ProtocolError> {
-        let mut request = Request::new(DeleteRepositoryRequest {
-            full_path: full_path.to_string(),
-            client_operation_id: String::new(),
-        });
-        self.apply_auth(&mut request)?;
-        self.user
-            .delete_repository(request)
-            .await
-            .map_err(status_to_protocol_error)?;
+        authed_call!(
+            self,
+            delete_repository,
+            DeleteRepositoryRequest {
+                full_path: full_path.to_string(),
+                client_operation_id: String::new(),
+            }
+        );
         Ok(())
     }
 
@@ -220,19 +215,16 @@ impl HostedGrpcClient {
         repo_path: Option<&str>,
     ) -> Result<proto::HostedGrantInfo, ProtocolError> {
         let target = build_target_ref(namespace_path, repo_path)?;
-        let mut request = Request::new(CreateGrantRequest {
-            subject: subject.to_string(),
-            role: parse_hosted_role_arg(role)? as i32,
-            target,
-            client_operation_id: String::new(),
-        });
-        self.apply_auth(&mut request)?;
-        let grant = self
-            .user
-            .create_grant(request)
-            .await
-            .map_err(status_to_protocol_error)?
-            .into_inner();
+        let grant = authed_call!(
+            self,
+            create_grant,
+            CreateGrantRequest {
+                subject: subject.to_string(),
+                role: parse_hosted_role_arg(role)? as i32,
+                target,
+                client_operation_id: String::new(),
+            }
+        );
         Ok(to_protocol_grant(grant))
     }
 
@@ -240,16 +232,13 @@ impl HostedGrpcClient {
         &mut self,
         resource: Option<&str>,
     ) -> Result<Vec<proto::HostedGrantInfo>, ProtocolError> {
-        let mut request = Request::new(ListGrantsRequest {
-            resource: resource.unwrap_or_default().to_string(),
-        });
-        self.apply_auth(&mut request)?;
-        let response = self
-            .user
-            .list_grants(request)
-            .await
-            .map_err(status_to_protocol_error)?
-            .into_inner();
+        let response = authed_call!(
+            self,
+            list_grants,
+            ListGrantsRequest {
+                resource: resource.unwrap_or_default().to_string(),
+            }
+        );
         Ok(response.grants.into_iter().map(to_protocol_grant).collect())
     }
 
@@ -261,19 +250,16 @@ impl HostedGrpcClient {
         repo_path: Option<&str>,
     ) -> Result<proto::HostedGrantInfo, ProtocolError> {
         let target = build_target_ref(namespace_path, repo_path)?;
-        let mut request = Request::new(UpdateGrantRequest {
-            subject: subject.to_string(),
-            role: parse_hosted_role_arg(role)? as i32,
-            target,
-            client_operation_id: String::new(),
-        });
-        self.apply_auth(&mut request)?;
-        let grant = self
-            .user
-            .update_grant(request)
-            .await
-            .map_err(status_to_protocol_error)?
-            .into_inner();
+        let grant = authed_call!(
+            self,
+            update_grant,
+            UpdateGrantRequest {
+                subject: subject.to_string(),
+                role: parse_hosted_role_arg(role)? as i32,
+                target,
+                client_operation_id: String::new(),
+            }
+        );
         Ok(to_protocol_grant(grant))
     }
 
@@ -284,16 +270,15 @@ impl HostedGrpcClient {
         repo_path: Option<&str>,
     ) -> Result<(), ProtocolError> {
         let target = build_target_ref(namespace_path, repo_path)?;
-        let mut request = Request::new(DeleteGrantRequest {
-            subject: subject.to_string(),
-            target,
-            client_operation_id: String::new(),
-        });
-        self.apply_auth(&mut request)?;
-        self.user
-            .delete_grant(request)
-            .await
-            .map_err(status_to_protocol_error)?;
+        authed_call!(
+            self,
+            delete_grant,
+            DeleteGrantRequest {
+                subject: subject.to_string(),
+                target,
+                client_operation_id: String::new(),
+            }
+        );
         Ok(())
     }
 
@@ -305,21 +290,18 @@ impl HostedGrpcClient {
         namespace_path: &str,
         role: &str,
     ) -> Result<ProtoInvitation, ProtocolError> {
-        let mut request = Request::new(CreateInvitationRequest {
-            email: email.to_string(),
-            namespace_path: namespace_path.to_string(),
-            role: parse_hosted_role_arg(role)? as i32,
-            expires_at: None,
-            metadata: String::new(),
-            client_operation_id: String::new(),
-        });
-        self.apply_auth(&mut request)?;
-        let invitation = self
-            .user
-            .create_invitation(request)
-            .await
-            .map_err(status_to_protocol_error)?
-            .into_inner();
+        let invitation = authed_call!(
+            self,
+            create_invitation,
+            CreateInvitationRequest {
+                email: email.to_string(),
+                namespace_path: namespace_path.to_string(),
+                role: parse_hosted_role_arg(role)? as i32,
+                expires_at: None,
+                metadata: String::new(),
+                client_operation_id: String::new(),
+            }
+        );
         Ok(invitation)
     }
 
@@ -335,35 +317,31 @@ impl HostedGrpcClient {
         source_state: &str,
         note: Option<&str>,
     ) -> Result<ThreadApproval, ProtocolError> {
-        let mut request = Request::new(ApproveThreadRequest {
-            repo_path: repo_path.to_string(),
-            source_thread: source_thread.to_string(),
-            target_thread: target_thread.to_string(),
-            source_state: objects::object::ChangeId::parse(source_state)
-                .map(|id| id.as_bytes().to_vec())
-                .unwrap_or_default(),
-            note: note.unwrap_or_default().to_string(),
-            client_operation_id: String::new(),
-        });
-        self.apply_auth(&mut request)?;
-        Ok(self
-            .user
-            .approve_thread(request)
-            .await
-            .map_err(status_to_protocol_error)?
-            .into_inner())
+        Ok(authed_call!(
+            self,
+            approve_thread,
+            ApproveThreadRequest {
+                repo_path: repo_path.to_string(),
+                source_thread: source_thread.to_string(),
+                target_thread: target_thread.to_string(),
+                source_state: objects::object::ChangeId::parse(source_state)
+                    .map(|id| id.as_bytes().to_vec())
+                    .unwrap_or_default(),
+                note: note.unwrap_or_default().to_string(),
+                client_operation_id: String::new(),
+            }
+        ))
     }
 
     pub async fn revoke_approval(&mut self, id: &str) -> Result<(), ProtocolError> {
-        let mut request = Request::new(RevokeApprovalRequest {
-            id: id.to_string(),
-            client_operation_id: String::new(),
-        });
-        self.apply_auth(&mut request)?;
-        self.user
-            .revoke_approval(request)
-            .await
-            .map_err(status_to_protocol_error)?;
+        authed_call!(
+            self,
+            revoke_approval,
+            RevokeApprovalRequest {
+                id: id.to_string(),
+                client_operation_id: String::new(),
+            }
+        );
         Ok(())
     }
 
@@ -373,19 +351,16 @@ impl HostedGrpcClient {
         source_thread: &str,
         target_thread: &str,
     ) -> Result<Vec<ThreadApproval>, ProtocolError> {
-        let mut request = Request::new(ListThreadApprovalsRequest {
-            repo_path: repo_path.to_string(),
-            source_thread: source_thread.to_string(),
-            target_thread: target_thread.to_string(),
-        });
-        self.apply_auth(&mut request)?;
-        Ok(self
-            .user
-            .list_thread_approvals(request)
-            .await
-            .map_err(status_to_protocol_error)?
-            .into_inner()
-            .approvals)
+        Ok(authed_call!(
+            self,
+            list_thread_approvals,
+            ListThreadApprovalsRequest {
+                repo_path: repo_path.to_string(),
+                source_thread: source_thread.to_string(),
+                target_thread: target_thread.to_string(),
+            }
+        )
+        .approvals)
     }
 
     /// Ask the server "can <source> merge into <target> at
@@ -403,24 +378,21 @@ impl HostedGrpcClient {
         changed_paths: Vec<String>,
         author_user_id: Option<&str>,
     ) -> Result<CheckMergeEligibilityResponse, ProtocolError> {
-        let mut request = Request::new(CheckMergeEligibilityRequest {
-            repo_path: repo_path.to_string(),
-            source_thread: source_thread.to_string(),
-            target_thread: target_thread.to_string(),
-            source_state: objects::object::ChangeId::parse(source_state)
-                .map(|id| id.as_bytes().to_vec())
-                .unwrap_or_default(),
-            gated_action: gated_action.to_string(),
-            changed_paths,
-            author_user_id: author_user_id.unwrap_or_default().to_string(),
-        });
-        self.apply_auth(&mut request)?;
-        Ok(self
-            .user
-            .check_merge_eligibility(request)
-            .await
-            .map_err(status_to_protocol_error)?
-            .into_inner())
+        Ok(authed_call!(
+            self,
+            check_merge_eligibility,
+            CheckMergeEligibilityRequest {
+                repo_path: repo_path.to_string(),
+                source_thread: source_thread.to_string(),
+                target_thread: target_thread.to_string(),
+                source_state: objects::object::ChangeId::parse(source_state)
+                    .map(|id| id.as_bytes().to_vec())
+                    .unwrap_or_default(),
+                gated_action: gated_action.to_string(),
+                changed_paths,
+                author_user_id: author_user_id.unwrap_or_default().to_string(),
+            }
+        ))
     }
 
     /// Phase C: grant a Heddle staff member temporary admin on a
@@ -436,23 +408,20 @@ impl HostedGrpcClient {
         client_operation_id: String,
     ) -> Result<SupportAccessGrant, ProtocolError> {
         let target = build_target_ref(namespace_path, repo_path)?;
-        let mut request = Request::new(GrantSupportAccessRequest {
-            operator_email: operator_email.to_string(),
-            target,
-            ttl_seconds: Some(prost_types::Duration {
-                seconds: i64::from(ttl_seconds),
-                nanos: 0,
-            }),
-            reason: reason.to_string(),
-            client_operation_id,
-        });
-        self.apply_auth(&mut request)?;
-        Ok(self
-            .user
-            .grant_support_access(request)
-            .await
-            .map_err(status_to_protocol_error)?
-            .into_inner())
+        Ok(authed_call!(
+            self,
+            grant_support_access,
+            GrantSupportAccessRequest {
+                operator_email: operator_email.to_string(),
+                target,
+                ttl_seconds: Some(prost_types::Duration {
+                    seconds: i64::from(ttl_seconds),
+                    nanos: 0,
+                }),
+                reason: reason.to_string(),
+                client_operation_id,
+            }
+        ))
     }
 
     pub async fn list_support_access_grants(
@@ -462,18 +431,15 @@ impl HostedGrpcClient {
         include_inactive: bool,
     ) -> Result<Vec<SupportAccessGrant>, ProtocolError> {
         let target = build_target_ref(namespace_path, repo_path)?;
-        let mut request = Request::new(ListSupportAccessGrantsRequest {
-            target,
-            include_inactive,
-        });
-        self.apply_auth(&mut request)?;
-        Ok(self
-            .user
-            .list_support_access_grants(request)
-            .await
-            .map_err(status_to_protocol_error)?
-            .into_inner()
-            .grants)
+        Ok(authed_call!(
+            self,
+            list_support_access_grants,
+            ListSupportAccessGrantsRequest {
+                target,
+                include_inactive,
+            }
+        )
+        .grants)
     }
 
     pub async fn revoke_support_access(
@@ -481,15 +447,14 @@ impl HostedGrpcClient {
         id: &str,
         client_operation_id: String,
     ) -> Result<(), ProtocolError> {
-        let mut request = Request::new(RevokeSupportAccessRequest {
-            id: id.to_string(),
-            client_operation_id,
-        });
-        self.apply_auth(&mut request)?;
-        self.user
-            .revoke_support_access(request)
-            .await
-            .map_err(status_to_protocol_error)?;
+        authed_call!(
+            self,
+            revoke_support_access,
+            RevokeSupportAccessRequest {
+                id: id.to_string(),
+                client_operation_id,
+            }
+        );
         Ok(())
     }
 }

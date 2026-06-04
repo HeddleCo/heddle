@@ -1245,11 +1245,7 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
     }
 
     fn entry_from_tree_entry(&self, parent_path: &Path, tree_entry: &TreeEntry) -> Result<Entry> {
-        let entry_path = if parent_path.as_os_str().is_empty() {
-            PathBuf::from(&tree_entry.name)
-        } else {
-            parent_path.join(&tree_entry.name)
-        };
+        let entry_path = join_child(parent_path, &tree_entry.name);
         let (kind, size, unix_mode, record) = match tree_entry.entry_type {
             EntryType::Tree => {
                 // We deliberately load the subtree here so the entry
@@ -1300,6 +1296,54 @@ impl<S: ObjectStore + 'static> ContentAddressedMount<S> {
             size,
             unix_mode,
         })
+    }
+
+    /// Build an [`Entry`] from a [`PendingHit`]. `path` is the child's
+    /// mount-relative path (used to intern the `PendingFile` /
+    /// `PendingSymlink` record for warm/symlink hits); `name` is the
+    /// leaf name of the returned entry. Returns `None` for
+    /// [`PendingHit::Tombstone`] — the caller treats that as "entry
+    /// hidden". Shared by `lookup` and `enumerate`.
+    fn entry_from_pending_hit(&self, hit: PendingHit, path: &Path, name: &OsStr) -> Option<Entry> {
+        match hit {
+            PendingHit::Tombstone => None,
+            PendingHit::Hot { node, size, mode } => Some(Entry {
+                node,
+                name: name.to_os_string(),
+                kind: kind_for_mode(mode),
+                size,
+                unix_mode: mode.to_unix_mode(),
+            }),
+            PendingHit::Warm {
+                blob: _,
+                size,
+                mode,
+            } => {
+                let node = self.intern(NodeRecord::PendingFile {
+                    path: path.to_path_buf(),
+                    mode,
+                });
+                Some(Entry {
+                    node,
+                    name: name.to_os_string(),
+                    kind: kind_for_mode(mode),
+                    size,
+                    unix_mode: mode.to_unix_mode(),
+                })
+            }
+            PendingHit::Symlink { target_len } => {
+                let node = self.intern(NodeRecord::PendingSymlink {
+                    path: path.to_path_buf(),
+                });
+                Some(Entry {
+                    node,
+                    name: name.to_os_string(),
+                    kind: NodeKind::Symlink,
+                    size: target_len,
+                    unix_mode: FileMode::Symlink.to_unix_mode(),
+                })
+            }
+        }
     }
 
     fn tree_for_record(&self, record: &NodeRecord) -> Result<Tree> {
@@ -3066,53 +3110,19 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
         let Some(name_str) = name.to_str() else {
             return Ok(None);
         };
-        let child_path = if parent_path.as_os_str().is_empty() {
-            PathBuf::from(name_str)
-        } else {
-            parent_path.join(name_str)
-        };
+        let child_path = join_child(&parent_path, name_str);
 
         // Pending tier wins over the immutable tree for files —
         // that's what makes "write then read" return the new bytes.
         match self.pending_lookup(&child_path) {
             Some(PendingHit::Tombstone) => return Ok(None),
-            Some(PendingHit::Hot { node, size, mode }) => {
-                return Ok(Some(Entry {
-                    node,
-                    name: OsString::from(name_str),
-                    kind: kind_for_mode(mode),
-                    size,
-                    unix_mode: mode.to_unix_mode(),
-                }));
-            }
-            Some(PendingHit::Warm {
-                blob: _,
-                size,
-                mode,
-            }) => {
-                let node = self.intern(NodeRecord::PendingFile {
-                    path: child_path.clone(),
-                    mode,
-                });
-                return Ok(Some(Entry {
-                    node,
-                    name: OsString::from(name_str),
-                    kind: kind_for_mode(mode),
-                    size,
-                    unix_mode: mode.to_unix_mode(),
-                }));
-            }
-            Some(PendingHit::Symlink { target_len }) => {
-                let node = self.intern(NodeRecord::PendingSymlink {
-                    path: child_path.clone(),
-                });
-                return Ok(Some(Entry {
-                    node,
-                    name: OsString::from(name_str),
-                    kind: NodeKind::Symlink,
-                    size: target_len,
-                    unix_mode: FileMode::Symlink.to_unix_mode(),
-                }));
+            Some(hit) => {
+                // Non-tombstone hits always yield an entry; tombstone
+                // is handled above.
+                if let Some(entry) = self.entry_from_pending_hit(hit, &child_path, name) {
+                    return Ok(Some(entry));
+                }
+                return Ok(None);
             }
             None => {}
         }
@@ -3481,11 +3491,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
 
         // Pass 1: captured-tree entries, with pending overlay.
         for tree_entry in tree.entries() {
-            let entry_path = if parent_path.as_os_str().is_empty() {
-                PathBuf::from(&tree_entry.name)
-            } else {
-                parent_path.join(&tree_entry.name)
-            };
+            let entry_path = join_child(&parent_path, &tree_entry.name);
             // Whole-subtree rmdir on a captured dir entry.
             {
                 let pending = self.inner.pending.lock().expect("pending lock");
@@ -3495,52 +3501,12 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
             }
             match self.pending_lookup(&entry_path) {
                 Some(PendingHit::Tombstone) => continue,
-                Some(PendingHit::Hot { node, size, mode }) => {
-                    by_name.insert(
-                        tree_entry.name.clone(),
-                        Entry {
-                            node,
-                            name: OsString::from(&tree_entry.name),
-                            kind: kind_for_mode(mode),
-                            size,
-                            unix_mode: mode.to_unix_mode(),
-                        },
-                    );
-                    continue;
-                }
-                Some(PendingHit::Warm {
-                    blob: _,
-                    size,
-                    mode,
-                }) => {
-                    let node = self.intern(NodeRecord::PendingFile {
-                        path: entry_path,
-                        mode,
-                    });
-                    by_name.insert(
-                        tree_entry.name.clone(),
-                        Entry {
-                            node,
-                            name: OsString::from(&tree_entry.name),
-                            kind: kind_for_mode(mode),
-                            size,
-                            unix_mode: mode.to_unix_mode(),
-                        },
-                    );
-                    continue;
-                }
-                Some(PendingHit::Symlink { target_len }) => {
-                    let node = self.intern(NodeRecord::PendingSymlink { path: entry_path });
-                    by_name.insert(
-                        tree_entry.name.clone(),
-                        Entry {
-                            node,
-                            name: OsString::from(&tree_entry.name),
-                            kind: NodeKind::Symlink,
-                            size: target_len,
-                            unix_mode: FileMode::Symlink.to_unix_mode(),
-                        },
-                    );
+                Some(hit) => {
+                    if let Some(entry) =
+                        self.entry_from_pending_hit(hit, &entry_path, OsStr::new(&tree_entry.name))
+                    {
+                        by_name.insert(tree_entry.name.clone(), entry);
+                    }
                     continue;
                 }
                 None => {}
@@ -3558,11 +3524,7 @@ impl<S: ObjectStore + 'static> PlatformShell for ContentAddressedMount<S> {
             if by_name.contains_key(&name) {
                 continue;
             }
-            let full_path = if parent_path.as_os_str().is_empty() {
-                PathBuf::from(&name)
-            } else {
-                parent_path.join(&name)
-            };
+            let full_path = join_child(&parent_path, &name);
             match kind {
                 PendingChildKind::HotFile { node, size, mode } => {
                     by_name.insert(

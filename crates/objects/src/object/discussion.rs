@@ -24,36 +24,13 @@ pub struct DiscussionsBlob {
     pub discussions: Vec<Discussion>,
 }
 
-impl DiscussionsBlob {
-    pub const FORMAT_VERSION: u8 = 1;
-
-    pub fn new(discussions: Vec<Discussion>) -> Self {
-        Self {
-            format_version: Self::FORMAT_VERSION,
-            discussions,
-        }
-    }
-
-    pub fn encode(&self) -> Result<Vec<u8>, DiscussionError> {
-        rmp_serde::to_vec(self).map_err(|err| DiscussionError::Encoding(err.to_string()))
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DiscussionError> {
-        let blob: Self = rmp_serde::from_slice(bytes)
-            .map_err(|err| DiscussionError::Encoding(err.to_string()))?;
-        blob.validate()?;
-        Ok(blob)
-    }
-
-    pub fn validate(&self) -> Result<(), DiscussionError> {
-        if self.format_version != Self::FORMAT_VERSION {
-            return Err(DiscussionError::UnsupportedVersion(self.format_version));
-        }
-        for d in &self.discussions {
-            d.validate()?;
-        }
-        Ok(())
-    }
+versioned_msgpack_blob! {
+    blob: DiscussionsBlob,
+    item: Discussion,
+    field: discussions,
+    error: DiscussionError,
+    codec_err: Encoding,
+    version: 1,
 }
 
 /// Stable opaque identifier for a discussion. Generated server-side at open

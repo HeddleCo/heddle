@@ -131,15 +131,7 @@ pub(super) fn parse_object_type(value: &str) -> Result<ObjectType, ProtocolError
 }
 
 pub(super) fn to_proto_object_info(info: &ObjectInfo) -> ObjectDescriptor {
-    ObjectDescriptor {
-        id: match &info.id {
-            ObjectId::Hash(hash) => hash.to_hex(),
-            ObjectId::ChangeId(change_id) => change_id.to_string_full(),
-        },
-        object_type: object_type_name(info.obj_type).to_string(),
-        availability_status: ObjectAvailabilityStatus::Present as i32,
-        availability_note: String::new(),
-    }
+    object_descriptor_with_status(info, ObjectAvailabilityStatus::Present, "")
 }
 
 pub(super) fn object_descriptor_with_status(
