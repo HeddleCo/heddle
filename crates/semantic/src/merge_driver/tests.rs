@@ -5337,6 +5337,53 @@ fn rust_use_identical_glob_both_sides_dedups_clean() {
     assert!(merged.contains("fn beta() { 20 }"), "theirs edit lost: {merged}");
 }
 
+// heddle#490 r7 — per-scope use-poison. An unanalyzable glob nested in
+// `mod m { use x::*; }` (unchanged on both sides) must NOT poison the
+// disjoint TOP-LEVEL use-region: ours adds `use a::A;` and theirs adds
+// `use b::B;` at the file root, on leaves the nested glob cannot reach. With
+// the old file-global poison flag these collapsed onto one USE_POISON_KEY
+// component and reported a spurious add/add conflict; scope-keyed poison
+// leaves the top-level region clean so both disjoint imports survive.
+#[test]
+fn rust_use_nested_glob_does_not_poison_disjoint_top_level_adds() {
+    let base = "mod m {\n    use x::*;\n}\nfn anchor() { 0 }\n";
+    let ours = "use a::A;\nmod m {\n    use x::*;\n}\nfn anchor() { 0 }\n";
+    let theirs = "use b::B;\nmod m {\n    use x::*;\n}\nfn anchor() { 0 }\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(merged.contains("use a::A;"), "ours top-level add lost: {merged}");
+    assert!(merged.contains("use b::B;"), "theirs top-level add lost: {merged}");
+    assert_eq!(
+        merged.matches("use x::*;").count(),
+        1,
+        "unchanged nested glob must dedup to one copy: {merged}"
+    );
+}
+
+// heddle#490 r7 — companion: the SAME nested glob STILL poisons ITS OWN
+// scope (correctness of the poison is preserved; only the cross-scope leak
+// is fixed). Both sides divergently edit a plain `use` *inside* `mod m`,
+// whose scope holds the unanalyzable `use x::*;`. Without the glob the two
+// edits rekey to distinct leaf-components and union cleanly; WITH the glob,
+// `m`'s use-region is poisoned, every `use` collapses onto USE_POISON_KEY,
+// and the divergent component conservatively conflicts. A same-line
+// modify/modify also conflicts under the textual floor, so the conservative
+// verdict holds regardless of which path resolves it.
+#[test]
+fn rust_use_nested_glob_still_poisons_its_own_scope() {
+    let base = "mod m {\n    use x::*;\n    use crate::foo::Thing;\n}\n";
+    let ours = "mod m {\n    use x::*;\n    use crate::foo::ThingA;\n}\n";
+    let theirs = "mod m {\n    use x::*;\n    use crate::foo::ThingB;\n}\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(
+        count >= 1,
+        "divergent use edits inside a glob-poisoned scope must conflict: {text}"
+    );
+    assert!(
+        text.contains("<<<<<<<"),
+        "expected a conflict region in the poisoned nested scope: {text}"
+    );
+}
+
 
 // =====================================================================
 // heddle#484 / #490 — close-the-class conformance harness (ported from the

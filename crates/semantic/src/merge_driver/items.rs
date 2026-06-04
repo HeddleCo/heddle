@@ -21,7 +21,7 @@
 //!
 //! See HeddleCo/heddle#133 for the audit motivation.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use tree_sitter::Node;
@@ -401,19 +401,30 @@ fn assemble_tree(mut raws: Vec<RawItem>) -> Vec<Item> {
 /// * disjoint leaf sets → distinct canonical keys → **union** (the r0
 ///   additive-re-export case stays clean).
 ///
-/// The leaf union runs ONLY when every `use` item on every side is a
-/// fully-analyzable plain import ([`UseIdentity::Plain`]). A single
-/// unanalyzable form ([`UseIdentity::Unanalyzable`] — `self` in a group,
-/// nested group, glob, `as` alias, metavariable, malformed) anywhere
-/// **poisons** the use-region: we cannot extract its leaves, so it might
-/// overlap a plain import on a leaf we never saw, and the leaf partition
-/// can no longer be trusted. In that case every `use` item is rekeyed to
-/// the shared [`USE_POISON_KEY`] instead, collapsing the region into one
-/// component that [`super::reconstruct::resolve_use_component`] resolves
-/// as a single conservative whole-region 3-way merge (byte-identical →
-/// dedup, anything else → conflict). Capping the clever union to
-/// plain-imports-only makes the exotic-form drip class impossible
-/// (heddle#468 r6 on PR #477).
+/// The leaf union runs ONLY for the `use` items of a *scope* in which every
+/// `use` on every side is a fully-analyzable plain import
+/// ([`UseIdentity::Plain`]). A single unanalyzable form
+/// ([`UseIdentity::Unanalyzable`] — `self` in a group, nested group, glob,
+/// `as` alias, metavariable, malformed) **poisons** the use-region it lives
+/// in — and ONLY that region. We cannot extract its leaves, so it might
+/// overlap a plain import on a leaf we never saw, and the leaf partition can
+/// no longer be trusted *for siblings sharing its scope*. In that scope every
+/// `use` item is rekeyed to the shared [`USE_POISON_KEY`], collapsing the
+/// region into one component that
+/// [`super::reconstruct::resolve_use_component`] resolves as a single
+/// conservative whole-region 3-way merge (byte-identical → dedup, anything
+/// else → conflict). Capping the clever union to plain-imports-only makes the
+/// exotic-form drip class impossible (heddle#468 r6 on PR #477).
+///
+/// The poison is keyed on [`ItemKey::scope`] — the container-as-node path that
+/// the cross-side matcher already uses — NOT a file-wide flag. Cross-side
+/// `use` matching keys on the full [`ItemKey`] (scope included), so two
+/// declarations only ever collide within one scope; an unanalyzable form can
+/// therefore only hide a leaf that overlaps a plain import in *that same
+/// scope*. An unchanged nested `mod m { use x::*; }` poisons only `m`'s
+/// use-region and no longer forces unrelated top-level (or sibling-module)
+/// imports onto [`USE_POISON_KEY`], which used to turn disjoint sibling adds
+/// into a spurious add/add conflict (heddle#490 r7 on PR #506).
 ///
 /// This is a no-op for any `use` whose leaf set overlaps nothing in the
 /// un-poisoned path: its component is itself and its canonical name equals
@@ -423,31 +434,39 @@ pub(crate) fn canonicalize_use_keys(
     ours: &mut FileSegments,
     theirs: &mut FileSegments,
 ) {
-    // Poison gate: any unanalyzable `use` on any side disqualifies the
-    // whole region from the leaf union. Collapse every `use` item onto one
-    // key so the conservative whole-region merge runs instead.
-    let mut poisoned = false;
+    // Poison gate, scoped: an unanalyzable `use` disqualifies only the
+    // use-region it lives in — the items sharing its `ItemKey::scope` — from
+    // the leaf union, never sibling or parent regions. Collect the set of
+    // poisoned scopes, then collapse every `use` item in a poisoned scope onto
+    // one key so the conservative whole-region merge runs for that scope; uses
+    // in disjoint scopes still go through the leaf union below.
+    let mut poisoned_scopes: HashSet<Vec<String>> = HashSet::new();
     for seg in [&*base, &*ours, &*theirs] {
         visit_items(&seg.items, &mut |item| {
             if matches!(item.use_identity, Some(UseIdentity::Unanalyzable)) {
-                poisoned = true;
+                poisoned_scopes.insert(item.key.scope.clone());
             }
         });
     }
-    if poisoned {
-        for seg in [base, ours, theirs] {
+    if !poisoned_scopes.is_empty() {
+        for seg in [&mut *base, &mut *ours, &mut *theirs] {
             visit_items_mut(&mut seg.items, &mut |item| {
-                if item.use_identity.is_some() {
+                if item.use_identity.is_some() && poisoned_scopes.contains(&item.key.scope) {
                     item.key.name = USE_POISON_KEY.to_string();
                 }
             });
         }
-        return;
     }
 
+    // Leaf union over the un-poisoned scopes only. Poisoned-scope items keep
+    // their `USE_POISON_KEY` name — skip them so the union never re-stamps a
+    // leaf-component name back over the poison.
     let mut uf = LeafUnionFind::default();
     for seg in [&*base, &*ours, &*theirs] {
         visit_items(&seg.items, &mut |item| {
+            if poisoned_scopes.contains(&item.key.scope) {
+                return;
+            }
             let Some(UseIdentity::Plain(leaves)) = &item.use_identity else {
                 return;
             };
@@ -466,6 +485,9 @@ pub(crate) fn canonicalize_use_keys(
     let canonical = uf.component_min_label();
     for seg in [base, ours, theirs] {
         visit_items_mut(&mut seg.items, &mut |item| {
+            if poisoned_scopes.contains(&item.key.scope) {
+                return;
+            }
             let Some(UseIdentity::Plain(leaves)) = &item.use_identity else {
                 return;
             };
