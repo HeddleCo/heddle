@@ -56,8 +56,15 @@ pub fn load_signer(path: &Path, algorithm: Option<&str>) -> Result<Box<dyn Signe
     pem_loader::load_signer_from_pem(&pem_content)
 }
 
+/// Reject a private-key file whose permissions expose it to group/world
+/// readers. The single source of the `0600`-or-stricter rule: the key-file
+/// signer loader ([`load_signer`]) and the auto-signing identity loader
+/// (`repo::identity`) both call this so the threshold lives in one place. On
+/// unix, errors with [`SignerError::InsecureKeyPermissions`] when any of the
+/// group/world bits (`0o077`) are set; a no-op on platforms without a unix
+/// permission model. Propagates I/O errors (e.g. `NotFound`) from the stat.
 #[cfg(unix)]
-fn reject_group_or_world_readable_key(path: &Path) -> Result<(), SignerError> {
+pub fn reject_group_or_world_readable_key(path: &Path) -> Result<(), SignerError> {
     use std::os::unix::fs::PermissionsExt;
 
     let mode = std::fs::metadata(path)?.permissions().mode() & 0o777;
@@ -70,8 +77,9 @@ fn reject_group_or_world_readable_key(path: &Path) -> Result<(), SignerError> {
     Ok(())
 }
 
+/// Non-unix stub: no permission model to enforce. See the unix variant.
 #[cfg(not(unix))]
-fn reject_group_or_world_readable_key(_path: &Path) -> Result<(), SignerError> {
+pub fn reject_group_or_world_readable_key(_path: &Path) -> Result<(), SignerError> {
     Ok(())
 }
 

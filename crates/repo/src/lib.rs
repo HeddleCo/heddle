@@ -13,6 +13,7 @@ mod ephemeral_thread;
 mod fsmonitor;
 pub mod git_worktree_status;
 mod hooks;
+pub mod identity;
 pub mod lazy_hydrator;
 mod merge_state;
 pub mod migration;

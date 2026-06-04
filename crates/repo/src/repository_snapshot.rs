@@ -237,8 +237,13 @@ impl SnapshotMutation<'_> {
             }
         }
 
+        // Auto-sign every captured state (heddle#482) via the capture-path
+        // chokepoint. Signing is the LAST mutation before the write: it covers
+        // `compute_hash()` over the fields enriched above, so any later change
+        // would invalidate it. Best-effort — a missing key leaves the state
+        // unsigned, never fails the capture.
         let state_ref_oplog_start = std::time::Instant::now();
-        self.repo.store.put_state(&state)?;
+        self.repo.put_authored_state(&mut state)?;
         self.repo.store.flush_snapshot_write_batch()?;
 
         Ok(SnapshotExecution {
@@ -690,7 +695,12 @@ impl Repository {
             state = state.with_context(merged_context);
         }
 
-        self.store.put_state(&state)?;
+        // Auto-sign the merge state (heddle#482) via the authored-state
+        // chokepoint: the merge author vouches for this merge of parents X and
+        // Y. Each parent keeps its own author signature — they are unchanged on
+        // disk, so they stay verifiable. Last mutation before the write, same
+        // ordering rule as capture.
+        self.put_authored_state(&mut state)?;
 
         let head = self.head_ref()?;
         let thread = match &head {
