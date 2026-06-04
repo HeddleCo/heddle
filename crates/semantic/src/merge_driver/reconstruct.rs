@@ -792,6 +792,7 @@ fn merge_container_3way(
         header_bytes(ours, sides.ours),
         header_bytes(theirs, sides.theirs),
         markers,
+        sides,
     );
 
     let ob = ours.body.as_ref().expect("container");
@@ -822,6 +823,7 @@ fn merge_container_3way(
         footer_bytes(ours, sides.ours),
         footer_bytes(theirs, sides.theirs),
         markers,
+        sides,
     );
 
     let mut out = header;
@@ -832,25 +834,36 @@ fn merge_container_3way(
 
 /// 3-way merge a slice of bytes (a container header/footer). `base` is `None`
 /// for add/add (treated as empty). Equal-sides dedup and unchanged-side defer
-/// short-circuit; otherwise fall through to the text hunk merge.
+/// short-circuit; a divergent add/add (no base anchor) conflicts; otherwise
+/// fall through to the text hunk merge.
 fn merge3_text(
     base: Option<&[u8]>,
     ours: &[u8],
     theirs: &[u8],
     markers: ConflictMarkers<'_>,
+    sides: SideSources<'_>,
 ) -> (Vec<u8>, usize) {
     if ours == theirs {
         return (ours.to_vec(), 0);
     }
-    if let Some(b) = base {
-        if ours == b {
-            return (theirs.to_vec(), 0);
-        }
-        if theirs == b {
-            return (ours.to_vec(), 0);
-        }
+    let Some(b) = base else {
+        // Add/add header/footer with NO base anchor. The diff3 engine treats
+        // two non-empty insertions at an empty anchor as a CLEAN concatenation
+        // (crates/merge/src/diff3.rs `emit_hunk`'s empty-base branch), which
+        // would silently fuse divergent headers (`pub mod foo {` vs `mod foo {`)
+        // into a duplicate/malformed container instead of reporting the
+        // disagreement. Mirror `resolve_item`'s divergent add/add arm: identical
+        // was handled above; any divergence is irreconcilable without a base, so
+        // surface it as a conflict (heddle#490 r4). This closes the class for
+        // BOTH the header and footer call sites, which share this helper.
+        return (emit_addadd_conflict(ours, theirs, markers, sides), 1);
+    };
+    if ours == b {
+        return (theirs.to_vec(), 0);
     }
-    let b = base.unwrap_or(&[]);
+    if theirs == b {
+        return (ours.to_vec(), 0);
+    }
     materialize_segment(
         text_hunk_merge_with_markers(b, ours, theirs, markers),
         std::str::from_utf8(b).unwrap_or(""),

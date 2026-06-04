@@ -2445,6 +2445,72 @@ fn foo() {
 }
 
 // =====================================================================
+// heddle#490 r4: same-key CONTAINER add/add with divergent header bytes.
+// `merge_container_3way` 3-way-merges the header (and footer) with an EMPTY
+// base for the add/add case; `merge3_text` then delegated to the diff3 engine,
+// which concatenates two insertions at an empty anchor as a CLEAN merge. So a
+// header disagreement (`pub mod foo {` vs `mod foo {`) silently fused into a
+// malformed double-header — the conservation floor rejected the unparseable
+// clean output and routed to the whole-file textual path, which ALSO
+// concatenates at the empty base, yielding a CLEAN merge with the module
+// silently DUPLICATED. This is a sibling of the r3 leaf add/add class that
+// `resolve_item` already guards. The fix mirrors that guard in `merge3_text`,
+// closing the class for BOTH the header and footer call sites (they share the
+// helper): identical add/add stays clean, divergent add/add is a conflict.
+// =====================================================================
+#[test]
+fn add_add_container_divergent_header_conflicts_not_silent_concat() {
+    let base = "";
+    let ours = "pub mod foo {\n    fn a() {}\n}\n";
+    let theirs = "mod foo {\n    fn a() {}\n}\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(count >= 1, "expected ≥1 conflict on the divergent header, got {count}: {text}");
+    assert!(
+        text.contains("<<<<<<<") && text.contains("=======") && text.contains(">>>>>>>"),
+        "expected canonical conflict markers around the divergent module header: {text}"
+    );
+    assert!(
+        text.contains("pub mod foo"),
+        "ours's header spelling must survive inside the conflict: {text}"
+    );
+    // Scoped, not a whole-file concat: the shared body merges ONCE outside the
+    // markers. Pre-fix the duplication emitted `fn a()` twice (one per cloned
+    // module).
+    assert_eq!(
+        text.matches("fn a()").count(),
+        1,
+        "body duplicated — the header conflict must stay scoped, not concat the whole container: {text}"
+    );
+}
+
+// The clean counterpart: identical add/add container headers/footers must NOT
+// conflict (r4 conflicts only on DIVERGENT add/add bytes). Both sides add
+// `mod foo` with the SAME header + footer; a shared child (`fn shared`) aligns
+// the two instances to one container, and their divergent-but-disjoint children
+// weave into the single module. The header path must stay clean.
+#[test]
+fn add_add_container_identical_header_divergent_body_merges_clean() {
+    let base = "";
+    let ours = "mod foo {\n    fn shared() {}\n    fn a() {}\n}\n";
+    let theirs = "mod foo {\n    fn shared() {}\n    fn b() {}\n}\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert_eq!(merged.matches("mod foo").count(), 1, "module duplicated: {merged}");
+    assert!(
+        merged.contains("fn a()") && merged.contains("fn b()"),
+        "both divergent children must weave into the single module: {merged}"
+    );
+    assert_eq!(
+        merged.matches("fn shared()").count(),
+        1,
+        "the shared child must dedup, not duplicate: {merged}"
+    );
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "no spurious conflict on identical add/add headers: {merged}"
+    );
+}
+
+// =====================================================================
 // Codex r5 P1 #1: `signature_hash_from_field` hashes the whole
 // `parameters` text — INCLUDING parameter NAMES. A pure parameter
 // rename on one side (`foo(x: u32)` → `foo(y: u32)`) changes
