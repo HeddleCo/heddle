@@ -658,9 +658,28 @@ fn footer_bytes<'a>(item: &Item, src: &'a str) -> &'a [u8] {
     &src.as_bytes()[inner_end..item.end_byte]
 }
 
-/// Dispatch a match-key resolution to the container or leaf path. A key is
-/// consistently a container or a leaf across sides (its `ItemKind` is part of
-/// the key), so the kind on any present side decides.
+/// Dispatch a match-key resolution to the container or leaf path.
+///
+/// The structural container path ([`resolve_container`] → [`merge_container_3way`])
+/// is entered ONLY when *every* side that carries this matched item is a real
+/// container WITH a body. That is a hard precondition: `merge_container_3way`
+/// (and the `header_bytes` / `footer_bytes` it calls) read `body.inner_start` /
+/// `body.inner_end`, which a leaf does not have.
+///
+/// A key is *usually* consistently a container or a leaf across sides, but it
+/// can be MIXED: the same `ItemKey` (kind, name, scope) names a container on one
+/// side and a leaf on another, because two distinct syntactic forms share a key.
+/// Concretely — a Python `class C` (container) wrapped in a decorator becomes a
+/// `decorated_definition` whose `container_body` is forced to `None` (a leaf)
+/// while keeping the inner class's key; a Rust `mod foo { … }` (container)
+/// rewritten to `mod foo;` (a leaf, no body) keeps the same module key. Such a
+/// kind-mismatch cannot merge on the tree, so it routes to a whole-item 3-way
+/// text merge ([`resolve_item`], over each side's full `[start_byte, end_byte)`
+/// span) — clean when the edits are disjoint, a normal conflict when they
+/// overlap. Making body-presence a CHECKED precondition of structural entry —
+/// rather than an `unwrap` deep inside `merge_container_3way` — closes the whole
+/// "structural-merge precondition violated" panic class (heddle#490 r3 / Codex
+/// P2).
 fn resolve_node(
     sides: SideSources<'_>,
     base_item: Option<&Item>,
@@ -668,11 +687,9 @@ fn resolve_node(
     theirs_item: Option<&Item>,
     markers: ConflictMarkers<'_>,
 ) -> (Option<Vec<u8>>, usize) {
-    let is_container = base_item
-        .or(ours_item)
-        .or(theirs_item)
-        .is_some_and(|i| i.body.is_some());
-    if is_container {
+    let mut present = [base_item, ours_item, theirs_item].into_iter().flatten().peekable();
+    let all_containers = present.peek().is_some() && present.all(|i| i.body.is_some());
+    if all_containers {
         resolve_container(sides, base_item, ours_item, theirs_item, markers)
     } else {
         resolve_item(sides, base_item, ours_item, theirs_item, markers)
@@ -762,6 +779,14 @@ fn merge_container_3way(
     theirs: &Item,
     markers: ConflictMarkers<'_>,
 ) -> (Option<Vec<u8>>, usize) {
+    // Precondition (guaranteed by `resolve_node`'s `all_containers` gate): every
+    // participating side is a container WITH a body. The `header_bytes` /
+    // `footer_bytes` / `body.as_ref()` reads below depend on it; a mixed
+    // container/leaf key never reaches here (it routes to whole-item text merge).
+    debug_assert!(
+        base.is_none_or(|b| b.body.is_some()) && ours.body.is_some() && theirs.body.is_some(),
+        "merge_container_3way entered with a leaf side — structural precondition violated"
+    );
     let (header, hc) = merge3_text(
         base.map(|b| header_bytes(b, sides.base)),
         header_bytes(ours, sides.ours),

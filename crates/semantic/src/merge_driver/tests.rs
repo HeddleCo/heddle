@@ -5737,6 +5737,132 @@ fn floor_490_conserves_inputs_allows_within_line_edit_recombination() {
     );
 }
 
+// =====================================================================
+// heddle#490 r3 / Codex P2: MIXED container/leaf matched item must NEVER
+// enter the structural path (a PANIC class, now closed).
+//
+// The same `ItemKey` (kind, name, scope) can name a container on one side and a
+// LEAF on another, because two syntactic forms share a key:
+//   * Python: `class C` (container, `class_definition`) wrapped in a decorator
+//     becomes a `decorated_definition` whose `container_body` is forced to
+//     `None` (a leaf) while inheriting the inner class's key.
+//   * Rust: `mod foo { … }` (container) rewritten to `mod foo;` (a leaf, no body)
+//     keeps the same module key.
+// Pre-fix `resolve_node` decided container-vs-leaf from the FIRST present side,
+// so a base/theirs container routed the matched node into `resolve_container` →
+// `merge_container_3way`, which unwrapped the leaf side's missing `body` via
+// `header_bytes(...).expect("container")` → PANIC. The fix enters the structural
+// path ONLY when EVERY present side is a container with a body; any mixed /
+// missing-body case routes to a whole-item 3-way text merge (clean if disjoint,
+// conflict if overlapping) — never panics. These are the fail-pre (panic) /
+// pass-post witnesses, plus the language-mirrored sibling that closes the class.
+// =====================================================================
+
+#[test]
+fn repro_490_r3_python_class_to_decorated_mixed_kind_no_panic_clean() {
+    // base: `class C` with a method (container). ours adds a decorator above it,
+    // which tree-sitter wraps in a `decorated_definition` → a LEAF carrying the
+    // same module key (no body). theirs edits the method body (container). The
+    // decorator-add and the body-edit are DISJOINT lines, so the whole-item text
+    // merge is clean: both the decorator and theirs's edit survive. Pre-fix this
+    // panicked in `merge_container_3way` (leaf side has no body to unwrap).
+    let base = "\
+class C:
+    def m(self):
+        return 1
+";
+    let ours = "\
+@deco
+class C:
+    def m(self):
+        return 1
+";
+    let theirs = "\
+class C:
+    def m(self):
+        return 2
+";
+    let merged = match merge_at(base, ours, theirs, "f.py") {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        other => panic!("expected Clean, got {other:?}"),
+    };
+    assert!(merged.contains("@deco"), "ours decorator lost:\n{merged}");
+    assert!(merged.contains("return 2"), "theirs body edit lost:\n{merged}");
+    assert!(!merged.contains("<<<<<<<"), "unexpected conflict markers:\n{merged}");
+}
+
+#[test]
+fn repro_490_r3_python_class_to_decorated_mixed_kind_overlap_conflicts() {
+    // Same mixed container/leaf shape, but ours's decorator-add and theirs's edit
+    // to the SAME method line overlap in the whole-item text merge → a normal
+    // conflict (NOT a panic, NOT a silent drop). ours decorates AND edits the
+    // body to `return 10`; theirs edits the body to `return 20`.
+    let base = "\
+class C:
+    def m(self):
+        return 1
+";
+    let ours = "\
+@deco
+class C:
+    def m(self):
+        return 10
+";
+    let theirs = "\
+class C:
+    def m(self):
+        return 20
+";
+    let (text, count) = assert_conflicts(merge_at(base, ours, theirs, "f.py"));
+    assert!(count >= 1, "expected a conflict, got {count}");
+    assert!(
+        text.contains("<<<<<<<") && text.contains(">>>>>>>"),
+        "missing conflict markers:\n{text}"
+    );
+    // Both sides' divergent bodies are represented in the conflict, none lost.
+    assert!(text.contains("return 10"), "ours side lost from conflict:\n{text}");
+    assert!(text.contains("return 20"), "theirs side lost from conflict:\n{text}");
+}
+
+#[test]
+fn repro_490_r3_rust_mod_block_to_decl_mixed_kind_no_panic() {
+    // Rust sibling of the class. base: `mod foo { fn a() {} }` (container). ours
+    // rewrites it to `mod foo;` (a LEAF, no body, same module key). theirs edits
+    // inside the block (container). The kind-mismatch routes to a whole-item text
+    // merge; ours's whole-block replacement overlaps theirs's in-block edit → a
+    // normal conflict. The contract that matters: NO panic, and a deterministic
+    // MergeOutcome. Pre-fix `merge_container_3way` unwrapped ours's missing body.
+    let base = "mod foo {\n    fn a() {}\n}\n";
+    let ours = "mod foo;\n";
+    let theirs = "mod foo {\n    fn a() {\n        let x = 1;\n    }\n}\n";
+    // The assertion here is that we get SOME outcome without panicking; the
+    // overlapping change resolves as a conflict.
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(count >= 1, "expected a conflict, got {count}");
+    assert!(
+        text.contains("<<<<<<<") && text.contains(">>>>>>>"),
+        "missing conflict markers:\n{text}"
+    );
+    // Both forms appear inside the conflict block — `mod foo;` (ours) and the
+    // edited block body (theirs) — so neither side is silently dropped.
+    assert!(text.contains("mod foo;"), "ours leaf form lost from conflict:\n{text}");
+    assert!(text.contains("let x = 1;"), "theirs edit lost from conflict:\n{text}");
+}
+
+#[test]
+fn repro_490_r3_rust_mod_decl_to_block_mixed_kind_disjoint_clean() {
+    // Mirror direction with a DISJOINT edit so the whole-item text merge stays
+    // clean. base: `mod foo;` (leaf). ours expands it to a block with a fn
+    // (container); theirs leaves it untouched. With theirs == base, the
+    // unchanged-side-defers rule takes ours wholesale — no panic, clean, ours's
+    // expansion preserved.
+    let base = "mod foo;\n";
+    let ours = "mod foo {\n    fn a() {}\n}\n";
+    let theirs = "mod foo;\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(merged.contains("fn a() {}"), "ours expansion lost:\n{merged}");
+    assert!(!merged.contains("<<<<<<<"), "unexpected conflict markers:\n{merged}");
+}
 
 // C++ `namespace N {…} namespace N {…}` is the same close-the-class shape in
 // another language; gated behind `lang-cpp` (extended-languages) since the cpp
