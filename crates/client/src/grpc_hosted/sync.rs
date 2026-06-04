@@ -39,9 +39,11 @@ struct PullOptions<'a> {
 
 struct PullWantPlan {
     wants: Vec<ObjectDescriptor>,
-    wanted_types: HashMap<PackObjectId, ObjectType>,
+    wanted_types: WantedTypes,
     want_full_closure: bool,
 }
+
+type WantedTypes = HashMap<PackObjectId, Vec<ObjectType>>;
 
 #[derive(Debug, Clone, Default)]
 pub struct PullObjectMix {
@@ -775,7 +777,7 @@ impl HostedGrpcClient {
                             profile.store_receive_object += store_start.elapsed();
                             received = installed_ids.len();
                             for id in installed_ids {
-                                match (id, wanted_types.get(&id).copied()) {
+                                match (id, wanted_packable_type(&wanted_types, &id)) {
                                     (PackObjectId::Hash(hash), Some(ObjectType::Blob)) => {
                                         profile.object_mix.record(ObjectType::Blob);
                                         repo.clear_missing_blob(&hash)?;
@@ -953,13 +955,39 @@ fn is_out_of_pack_transfer_object_type(obj_type: ObjectType) -> bool {
 
 fn native_pack_required_for_pull(
     want_full_closure: bool,
-    wanted_types: &HashMap<PackObjectId, ObjectType>,
+    wanted_types: &WantedTypes,
 ) -> bool {
     want_full_closure
         || wanted_types
             .values()
+            .flatten()
             .copied()
             .any(proto::is_native_packable_object_type)
+}
+
+fn record_wanted_type(
+    wanted_types: &mut WantedTypes,
+    pack_id: PackObjectId,
+    obj_type: ObjectType,
+) {
+    let types = wanted_types.entry(pack_id).or_default();
+    if !types.contains(&obj_type) {
+        types.push(obj_type);
+    }
+}
+
+fn wanted_packable_type(
+    wanted_types: &WantedTypes,
+    pack_id: &PackObjectId,
+) -> Option<ObjectType> {
+    wanted_types
+        .get(pack_id)
+        .and_then(|types| {
+            types
+                .iter()
+                .copied()
+                .find(|obj_type| proto::is_native_packable_object_type(*obj_type))
+        })
 }
 
 fn sidecar_push_message(
@@ -1051,7 +1079,7 @@ fn plan_pull_wants(
         };
 
         if include {
-            wanted_types.insert(pack_id, info.obj_type);
+            record_wanted_type(&mut wanted_types, pack_id, info.obj_type);
             wants.push(object_descriptor_with_status(
                 &info,
                 ObjectAvailabilityStatus::Missing,
@@ -1453,6 +1481,15 @@ mod tests {
         }
     }
 
+    fn state_info(state: ChangeId) -> ObjectInfo {
+        ObjectInfo {
+            id: ObjectId::ChangeId(state),
+            obj_type: ObjectType::State,
+            size: 0,
+            delta_base: None,
+        }
+    }
+
     fn state_visibility_info(state: ChangeId) -> ObjectInfo {
         ObjectInfo {
             id: ObjectId::ChangeId(state),
@@ -1527,16 +1564,57 @@ mod tests {
 
         let sidecar_only = HashMap::from([(
             PackObjectId::ChangeId(state),
-            ObjectType::StateVisibility,
+            vec![ObjectType::StateVisibility],
         )]);
         assert!(!native_pack_required_for_pull(false, &sidecar_only));
 
-        let redaction_only = HashMap::from([(PackObjectId::Hash(blob), ObjectType::Redaction)]);
+        let redaction_only = HashMap::from([(PackObjectId::Hash(blob), vec![ObjectType::Redaction])]);
         assert!(!native_pack_required_for_pull(false, &redaction_only));
 
-        let packable = HashMap::from([(PackObjectId::Hash(blob), ObjectType::Blob)]);
+        let packable = HashMap::from([(PackObjectId::Hash(blob), vec![ObjectType::Blob])]);
         assert!(native_pack_required_for_pull(false, &packable));
+
+        let state_with_sidecar = HashMap::from([(
+            PackObjectId::ChangeId(state),
+            vec![ObjectType::State, ObjectType::StateVisibility],
+        )]);
+        assert!(native_pack_required_for_pull(false, &state_with_sidecar));
         assert!(native_pack_required_for_pull(true, &HashMap::new()));
+    }
+
+    #[test]
+    fn plan_pull_wants_accumulates_state_and_visibility_for_same_change_id() {
+        let (_dir, repo) = temp_repo();
+        let state = ChangeId::from_bytes([9u8; 16]);
+        let plan = plan_pull_wants(
+            &repo,
+            &state,
+            false,
+            vec![
+                object_descriptor_with_status(
+                    &state_info(state),
+                    ObjectAvailabilityStatus::Missing,
+                    "missing state",
+                ),
+                object_descriptor_with_status(
+                    &state_visibility_info(state),
+                    ObjectAvailabilityStatus::Missing,
+                    "missing state visibility",
+                ),
+            ],
+            false,
+        )
+        .expect("plan pull wants");
+
+        let wanted = plan
+            .wanted_types
+            .get(&PackObjectId::ChangeId(state))
+            .expect("same ChangeId want entry");
+        assert_eq!(wanted.as_slice(), &[ObjectType::State, ObjectType::StateVisibility]);
+        assert!(native_pack_required_for_pull(
+            plan.want_full_closure,
+            &plan.wanted_types
+        ));
     }
 
     #[derive(Clone)]
@@ -1751,6 +1829,338 @@ mod tests {
         assert_eq!(exchange.profile.object_mix.state_visibilities, 1);
         assert!(
             repo.get_state_visibility_for_state(&state_id)
+                .expect("load accepted sidecar")
+                .has_record(),
+            "pull must accept the out-of-pack StateVisibility sidecar"
+        );
+    }
+
+    #[derive(Clone)]
+    struct StateAndVisibilityPullService {
+        state: ChangeId,
+        pack_bundle: proto::NativePackBundle,
+        state_visibility_blob: Vec<u8>,
+    }
+
+    #[tonic::async_trait]
+    impl RepoSyncService for StateAndVisibilityPullService {
+        async fn list_refs(
+            &self,
+            _request: tonic::Request<ListRefsRequest>,
+        ) -> Result<Response<ListRefsResponse>, Status> {
+            Ok(Response::new(ListRefsResponse::default()))
+        }
+
+        async fn update_ref(
+            &self,
+            _request: tonic::Request<UpdateRefRequest>,
+        ) -> Result<Response<UpdateRefResponse>, Status> {
+            Ok(Response::new(UpdateRefResponse::default()))
+        }
+
+        type PushStream = tokio_stream::wrappers::ReceiverStream<Result<PushMessage, Status>>;
+
+        async fn push(
+            &self,
+            _request: tonic::Request<tonic::Streaming<PushMessage>>,
+        ) -> Result<Response<Self::PushStream>, Status> {
+            let (_tx, rx) = mpsc::channel(1);
+            Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        }
+
+        type PullStream = tokio_stream::wrappers::ReceiverStream<Result<PullMessage, Status>>;
+
+        async fn pull(
+            &self,
+            request: tonic::Request<tonic::Streaming<PullMessage>>,
+        ) -> Result<Response<Self::PullStream>, Status> {
+            let state = self.state;
+            let pack_bundle = self.pack_bundle.clone();
+            let state_visibility_blob = self.state_visibility_blob.clone();
+            let (tx, rx) = mpsc::channel(8);
+
+            tokio::spawn(async move {
+                let mut inbound = request.into_inner();
+                match inbound.message().await {
+                    Ok(Some(PullMessage {
+                        body: Some(pull_message::Body::Request(_)),
+                    })) => {}
+                    other => {
+                        let _ = tx
+                            .send(Err(Status::invalid_argument(format!(
+                                "expected pull request, got {other:?}"
+                            ))))
+                            .await;
+                        return;
+                    }
+                }
+
+                let ready = PullMessage {
+                    body: Some(pull_message::Body::Ready(PullReady {
+                        remote_state: state.to_string_full(),
+                        objects_to_fetch: vec![
+                            object_descriptor_with_status(
+                                &state_info(state),
+                                ObjectAvailabilityStatus::Missing,
+                                "missing state",
+                            ),
+                            object_descriptor_with_status(
+                                &state_visibility_info(state),
+                                ObjectAvailabilityStatus::Missing,
+                                "missing state visibility",
+                            ),
+                        ],
+                        transfer: None,
+                        partial_fetch_status: PartialFetchStatus::Disabled as i32,
+                        missing_objects: Vec::new(),
+                        full_closure_available: false,
+                        object_count: 2,
+                    })),
+                };
+                if tx.send(Ok(ready)).await.is_err() {
+                    return;
+                }
+
+                match inbound.message().await {
+                    Ok(Some(PullMessage {
+                        body: Some(pull_message::Body::Want(want)),
+                    })) if !want.want_full_closure
+                        && want.objects.len() == 2
+                        && want.objects.iter().any(|object| object.object_type == "state")
+                        && want
+                            .objects
+                            .iter()
+                            .any(|object| object.object_type == "state_visibility") => {}
+                    other => {
+                        let _ = tx
+                            .send(Err(Status::invalid_argument(format!(
+                                "expected state + sidecar wants, got {other:?}"
+                            ))))
+                            .await;
+                        return;
+                    }
+                }
+
+                for message in encode_pull_native_pack_messages(
+                    &pack_bundle,
+                    "state-and-visibility-test",
+                    16,
+                ) {
+                    if tx.send(Ok(message)).await.is_err() {
+                        return;
+                    }
+                }
+
+                let transfer = PullMessage {
+                    body: Some(pull_message::Body::StateVisibility(
+                        StateVisibilityTransfer {
+                            state_id: state.to_string_full(),
+                            state_visibility_blob,
+                        },
+                    )),
+                };
+                if tx.send(Ok(transfer)).await.is_err() {
+                    return;
+                }
+
+                let complete = PullMessage {
+                    body: Some(pull_message::Body::Complete(GrpcPullComplete {
+                        success: true,
+                        new_state: state.to_string_full(),
+                        error: String::new(),
+                        transfer: Some(TransferCheckpoint {
+                            transfer_id: "state-and-visibility-test".to_string(),
+                            transport_mode: TransportMode::NativePack as i32,
+                            resume_offset: 0,
+                            chunk_index: 0,
+                            checkpoint: b"heddle-markers-v1\n".to_vec(),
+                            is_complete: true,
+                        }),
+                    })),
+                };
+                let _ = tx.send(Ok(complete)).await;
+            });
+
+            Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        }
+    }
+
+    fn encode_pull_native_pack_messages(
+        bundle: &proto::NativePackBundle,
+        transfer_id: &str,
+        chunk_size: usize,
+    ) -> Vec<PullMessage> {
+        let mut messages = Vec::new();
+        let chunk_size = chunk_size.max(1);
+
+        let pack_total_chunks = proto::chunk_count(bundle.pack_data.len(), chunk_size);
+        for chunk_index in 0..pack_total_chunks.max(1) {
+            let Some((start, len)) =
+                proto::chunk_bounds(bundle.pack_data.len(), chunk_size, chunk_index)
+            else {
+                break;
+            };
+            messages.push(PullMessage {
+                body: Some(pull_message::Body::Pack(PackChunk {
+                    stream_kind: PackStreamKind::Pack as i32,
+                    data: bundle.pack_data[start..start + len].to_vec(),
+                    transfer: Some(TransferCheckpoint {
+                        transfer_id: transfer_id.to_string(),
+                        transport_mode: TransportMode::NativePack as i32,
+                        resume_offset: start as u64,
+                        chunk_index: chunk_index as u32,
+                        checkpoint: Vec::new(),
+                        is_complete: chunk_index + 1 == pack_total_chunks,
+                    }),
+                    chunk_length: len as u32,
+                    is_final_chunk: chunk_index + 1 == pack_total_chunks,
+                })),
+            });
+        }
+
+        let index_total_chunks = proto::chunk_count(bundle.index_data.len(), chunk_size);
+        for chunk_index in 0..index_total_chunks.max(1) {
+            let Some((start, len)) =
+                proto::chunk_bounds(bundle.index_data.len(), chunk_size, chunk_index)
+            else {
+                break;
+            };
+            messages.push(PullMessage {
+                body: Some(pull_message::Body::Pack(PackChunk {
+                    stream_kind: PackStreamKind::Index as i32,
+                    data: bundle.index_data[start..start + len].to_vec(),
+                    transfer: Some(TransferCheckpoint {
+                        transfer_id: transfer_id.to_string(),
+                        transport_mode: TransportMode::NativePack as i32,
+                        resume_offset: start as u64,
+                        chunk_index: chunk_index as u32,
+                        checkpoint: Vec::new(),
+                        is_complete: chunk_index + 1 == index_total_chunks,
+                    }),
+                    chunk_length: len as u32,
+                    is_final_chunk: chunk_index + 1 == index_total_chunks,
+                })),
+            });
+        }
+
+        messages
+    }
+
+    async fn connect_state_and_visibility_service(
+        service: StateAndVisibilityPullService,
+    ) -> (HostedGrpcClient, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            match listener.accept().await {
+                Ok((stream, _addr)) => Some((Ok::<_, std::io::Error>(stream), listener)),
+                Err(err) => Some((Err(err), listener)),
+            }
+        });
+
+        let handle = tokio::spawn(async move {
+            Server::builder()
+                .add_service(RepoSyncServiceServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .expect("serve state-and-visibility test service");
+        });
+
+        let client = HostedGrpcClient::connect(addr, &ClientConfig::default())
+            .await
+            .expect("connect client");
+        (client, handle)
+    }
+
+    #[tokio::test]
+    async fn state_and_visibility_same_change_id_pull_requests_pack_and_sidecar() {
+        let (_source_dir, source_repo) = temp_repo();
+        let (_target_dir, target_repo) = temp_repo();
+        let tree_hash = source_repo.store().put_tree(&Tree::new()).expect("put tree");
+        let state = State::new_snapshot(
+            tree_hash,
+            vec![],
+            Attribution::human(Principal {
+                name: "Grace Hopper".into(),
+                email: "grace@example.com".into(),
+            }),
+        );
+        let state_id = state.change_id;
+        source_repo.store().put_state(&state).expect("put source state");
+        let state_visibility_blob =
+            StateVisibilityBlob::new(vec![sample_state_visibility(state_id)])
+                .encode()
+                .expect("encode state visibility blob");
+        source_repo
+            .accept_wire_state_visibility(state_id, &state_visibility_blob)
+            .expect("put source state visibility");
+        let pack_bundle = proto::build_native_pack(
+            source_repo.store(),
+            &[state_info(state_id)],
+        )
+        .expect("build state pack");
+
+        assert!(
+            target_repo
+                .store()
+                .get_state(&state_id)
+                .expect("load target state")
+                .is_none(),
+            "test starts with state absent"
+        );
+        assert!(
+            target_repo
+                .get_state_visibility_bytes_for_state(&state_id)
+                .expect("load target sidecar")
+                .is_none(),
+            "test starts with StateVisibility sidecar absent"
+        );
+
+        let (mut client, server) =
+            connect_state_and_visibility_service(StateAndVisibilityPullService {
+                state: state_id,
+                pack_bundle,
+                state_visibility_blob,
+            })
+            .await;
+
+        let exchange = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.pull_exchange(
+                &target_repo,
+                "owner/repo",
+                "main",
+                PullOptions {
+                    local_thread: None,
+                    depth: None,
+                    target_state: Some(state_id),
+                    materialization: PullMaterialization::Full,
+                },
+            ),
+        )
+        .await
+        .expect("state + sidecar pull must not hang waiting for native pack")
+        .expect("state + sidecar pull succeeds");
+        server.abort();
+
+        assert!(exchange.result.success);
+        assert_eq!(exchange.object_count, 1);
+        assert!(exchange.profile.pack_bytes_received > 0);
+        assert_eq!(exchange.profile.object_mix.states, 1);
+        assert_eq!(exchange.profile.object_mix.state_visibilities, 1);
+        assert!(
+            target_repo
+                .store()
+                .get_state(&state_id)
+                .expect("load installed state")
+                .is_some(),
+            "native pack must install the State"
+        );
+        assert!(
+            target_repo
+                .get_state_visibility_for_state(&state_id)
                 .expect("load accepted sidecar")
                 .has_record(),
             "pull must accept the out-of-pack StateVisibility sidecar"
