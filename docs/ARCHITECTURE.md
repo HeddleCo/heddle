@@ -78,13 +78,13 @@ Heddle uses separate config/state scopes instead of a single repository config f
 
 - `UserConfig` lives in the user's config directory and owns identity, agent defaults, output preferences, and client auth profiles
 - `RepoConfig` lives in `.heddle/config.toml` and owns repository-local behavior, storage coordinates, and remotes
-- `ServerConfig` lives with the hosted runtime and owns storage, database, auth, TLS, and admission settings
+- `ServerConfig` lives with the hosted runtime (in the sibling **weft** repo) and owns storage, database, auth, TLS, and admission settings
 - `WorktreeState` is checkout-local runtime state and should not be serialized into repo config
 
 Binary ownership follows the same split:
 
-- `heddle` owns local repository operations and hosted client access
-- `hosted` owns the hosted server runtime and hosted admin operations
+- `heddle` (this repo) owns local repository operations and hosted client access
+- the hosted server runtime and admin operations live in the sibling **weft** repo (no `hosted` binary in this workspace)
 
 ## Core Repository Model
 
