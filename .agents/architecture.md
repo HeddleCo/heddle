@@ -11,15 +11,16 @@ crates/
   repo/       # repository operations and helpers
   refs/       # threads, markers, HEAD, packed refs
   oplog/      # undo/redo oplog logic
-  server/     # hosted server, admin/content APIs
   heddle-bridge/     # Git interoperability
   semantic/   # semantic diff and parser-heavy analysis
   ...
 docs/              # architecture, hosted model, roadmap, future-state plans
-web/               # SvelteKit marketing site and hosted app
 specs/             # Quint formal specifications
 tests/             # integration and property tests
 ```
+
+The hosted server now lives in the sibling **weft** repo and the SvelteKit web
+product in the sibling **tapestry** repo — neither is part of this workspace.
 
 ## Key Design Patterns
 
@@ -113,18 +114,12 @@ Important current direction:
 
 ### 7. Web App (SvelteKit)
 
-The `web/` directory contains a SvelteKit frontend (hosted app prototype).
-
-Key files:
-- `web/src/lib/server/api.ts` — server-side typed client for admin and content APIs
-- `web/src/routes/app/repos/[...repoPath]/+page.server.ts` — repository workspace
-- `web/src/routes/app/repos/[...repoPath]/-/changes/+page.server.ts` — change list
-- `web/src/routes/app/repos/[...repoPath]/-/changes/[changeId]/+page.server.ts` — change detail
-- `web/src/routes/app/repos/[...repoPath]/-/files/[...path]/+page.server.ts` — file viewer
-- `web/src/routes/app/repos/[...repoPath]/-/context/+page.server.ts` — repository context view
-- `web/src/routes/app/namespaces/[...namespacePath]/+page.server.ts` — namespace detail
-
-All repo content pages use `+page.server.ts` so API credentials never reach the browser. Some authenticated surfaces are fully wired to the backend, while others are still mock-backed or partial. Check `web/PRODUCT_SPEC.md` and the route implementation before treating a web surface as shipped behavior.
+The SvelteKit web product (marketing site + hosted app prototype) lives in the
+sibling **tapestry** repo, not in this workspace. Its repo content pages use
+`+page.server.ts` loaders so API credentials never reach the browser. Some
+authenticated surfaces are fully wired to the backend, while others are still
+mock-backed or partial. Consult the tapestry repo's product spec and route
+implementations before treating a web surface as shipped behavior.
 
 ### 8. Packfile and Delta Compression
 

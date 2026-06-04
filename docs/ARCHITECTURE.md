@@ -61,16 +61,16 @@ crates/
   repo/      # repository operations and helpers
   refs/      # threads, markers, HEAD, packed refs
   oplog/     # undo/redo oplog logic
-  server/    # hosted server, admin/content APIs
-  hosted/    # hosted server/admin binary
   heddle-bridge/    # Git interoperability
   semantic/  # semantic diff and parser-heavy analysis
   ...
 docs/             # architecture, hosted model, roadmap, future-state plans
-web/              # SvelteKit marketing site and hosted app
 specs/            # Quint formal specifications
 tests/            # integration and property tests
 ```
+
+The hosted server now lives in the sibling **weft** repo and the SvelteKit web
+product in the sibling **tapestry** repo — neither is part of this workspace.
 
 ## Configuration Boundaries
 
@@ -273,7 +273,7 @@ Hosted Heddle has two major layers.
 
 ## Web Product Positioning In The Architecture
 
-The `web/` app is not a browser IDE. It is an emerging hosted product for:
+The web app (now in the sibling **tapestry** repo) is not a browser IDE. It is an emerging hosted product for:
 
 - repository inspection
 - namespace and access operations
@@ -314,4 +314,4 @@ Core state machines are specified in `specs/quint/` and mirrored by Rust propert
 - `docs/ENTERPRISE_BACKEND_ROADMAP.md` - hosted platform roadmap
 - `docs/RUNNERS_AND_BUILDS.md` - hosted workflow and automation direction
 - `docs/LINE_PROVENANCE_PLAN.md` - provenance status and next-step roadmap
-- `web/PRODUCT_SPEC.md` - hosted web product scope and surface plan
+- `PRODUCT_SPEC.md` in the sibling **tapestry** repo - hosted web product scope and surface plan
