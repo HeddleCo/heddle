@@ -24,6 +24,7 @@ A user or agent bypasses a hosted-rejected causal parent by creating a hosted-va
 
 Heddle should expose hosted-valid continuation through a first-class command or subcommand rather than a hidden option on ordinary discussion writes. The workflow selects the last hosted-valid operation, shows the omitted hosted-invalid chain, requires a reason, and emits the continuation operation. This keeps intentional causal splits explicit for humans and safe for agents.
 
+<!-- doctor-docs:planned -->
 The discussion command surface should name this workflow explicitly, for example `heddle discuss continue-hosted`. The wording should emphasize hosted validity because the local operation history remains valid and retained.
 
 Continuation workflows may prefill content from a rejected operation for review, but they must not silently copy it. The emitted operation is a new collaboration operation with fresh attribution, capability context, timestamp, and continuation reason.

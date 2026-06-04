@@ -6,4 +6,5 @@ Discussion blockers are discussion turns with blocker turn kind when authored as
 
 **Status:** proposed
 
+<!-- doctor-docs:planned -->
 **Considered Options:** Making every attention item a durable object would simplify inbox queries, but it would duplicate state and risk drift such as a resolved discussion still appearing as an open task. A derived view keeps `heddle inbox` honest while preserving room for actor-specific overlays.

@@ -1,5 +1,6 @@
 # Local discussion log first
 
+<!-- doctor-docs:planned -->
 The first collaboration implementation slice is a local repository-scoped discussion log plus derived inbox, before hosted sync or live collaboration. This slice should prove discussion open, append, resolve, reopen, semantic anchors, append-only turns, local attention derivation, schemas, docs gates, and migration from the current state-attached discussion shape if needed. `heddle inbox` should ship in this slice as the stable local "what needs me" surface for agents and humans.
 
 The first slice does not need general collaboration import roots unless migration from the current state-attached discussion shape requires them. The operation model should leave room for import roots without expanding the initial implementation scope.

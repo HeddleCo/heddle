@@ -8,7 +8,12 @@ Git push-adjacent output should mention Heddle collaboration when local collabor
 
 Hosted rejection or blocked collaboration sync should appear in `status` when it affects the current checkout or thread, but it must be described as a collaboration sync problem rather than dirty source history. `ready` can block through attention severity, while `status` keeps source history and the collaboration sync lane separate.
 
-In the first local discussion slice, `status` should summarize discussions only when they create attention for the current checkout or thread. It should point to `heddle inbox` or `heddle discuss list` for details rather than becoming a discussion list.
+In the first local discussion slice, `status` should summarize discussions only when they create attention for the current checkout or thread.
+
+<!-- doctor-docs:planned -->
+It should point to `heddle inbox` for attention details.
+
+It can also point to `heddle discuss list` for discussion details rather than becoming a discussion list.
 
 **Status:** proposed
 

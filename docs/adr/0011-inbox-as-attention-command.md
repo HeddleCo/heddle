@@ -1,11 +1,14 @@
 # Inbox as the attention command
 
+<!-- doctor-docs:planned -->
 Heddle uses `heddle inbox` as the canonical cross-cutting command for attention items. Discussions, reviews, thread blockers, orphaned anchors, resolution conflicts, and stale context can each keep object-specific commands, but humans and agents need one stable command for "what needs me next?" The inbox is local-first and remains useful without Weft; when hosted attention is available, it can merge policy-filtered hosted overlays into the same view.
 
 Attention should route through structured targets such as principals, agents, threads, roles, or the current checkout context. Human text can support convenient mention syntax, but durable inbox behavior should not depend on ambiguous display-name parsing.
 
+<!-- doctor-docs:planned -->
 Every `heddle inbox` JSON response should include an explicit schema identifier and version. Inbox is an agent work queue, so consumers need to detect contract changes without inferring them from field presence.
 
+<!-- doctor-docs:planned -->
 `heddle inbox` JSON should expose task provenance grouping when available and policy-visible. Human output may offer optional grouping by task provenance, but the default view should still prioritize severity, target, and recency so urgent attention items are not hidden inside task groups.
 
 First-slice inbox JSON should not claim unread/read state unless explicit actor read-state metadata ships. It may expose derived attention status, targets, timestamps, and reasons; read and snooze overlays can be added later as explicit actor metadata.
