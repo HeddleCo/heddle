@@ -23,6 +23,8 @@ use objects::{
     lock::RepositoryLockExt,
     object::{ChangeId, State, ThreadName, Tree},
 };
+use oplog::OpRecord;
+use refs::RefExpectation;
 use tracing::{debug, instrument};
 
 use super::{HeddleError, Repository, Result};
@@ -134,6 +136,83 @@ impl Repository {
             "thread manifest recorded post-materialize"
         );
         Ok(manifest)
+    }
+
+    /// The staged domain commit record for a brand-new materialized-thread
+    /// start. The repo owns the op-record shape so callers don't reconstruct
+    /// `OpRecord::ThreadCreateV2`'s fields. `manager_snapshot` is `None`: the
+    /// thread record is written by the start's converge step (so there is
+    /// nothing to snapshot at record-construction time — heddle#23 r2). The
+    /// caller stages this as the executor's single commit record (it is NOT
+    /// appended eagerly); the commit marker dedups on the stable
+    /// `transaction_id`.
+    pub fn thread_create_op_record(&self, name: &str, state: ChangeId) -> OpRecord {
+        OpRecord::ThreadCreateV2 {
+            name: name.to_string(),
+            state,
+            manager_snapshot: None,
+        }
+    }
+
+    /// CAS-guarded rollback of a materialized-thread-start ref forward
+    /// (heddle#356 cid 3333881583).
+    ///
+    /// The forward set the thread ref to `set_value` (the start's base state).
+    /// Undo it ONLY if the ref STILL points there: restore `restore_to` when a
+    /// prior value existed (a re-start that reused the ref), or delete a ref
+    /// this start created (`restore_to == None`). If a concurrent process
+    /// advanced/changed the ref after our forward (a concurrent start or
+    /// crash-recovery), leave their write in place — an unconditional
+    /// reset/delete would clobber it.
+    pub fn cas_guarded_thread_ref_rollback(
+        &self,
+        name: &ThreadName,
+        set_value: ChangeId,
+        restore_to: Option<ChangeId>,
+    ) -> Result<()> {
+        // Compare-before-write: bail without touching the ref if it no longer
+        // holds the value our forward set.
+        if self.refs().get_thread(name)? != Some(set_value) {
+            return Ok(());
+        }
+        let result = match restore_to {
+            Some(prior) => {
+                self.refs()
+                    .set_thread_cas(name, RefExpectation::Value(set_value), &prior)
+            }
+            None => self
+                .refs()
+                .delete_thread_cas(name, RefExpectation::Value(set_value)),
+        };
+        match result {
+            Ok(()) => Ok(()),
+            // Lost the race between the read above and this CAS: a concurrent
+            // writer advanced the ref. The expectation guard means we wrote
+            // nothing — leave their advance intact (the whole point of the
+            // guard).
+            Err(HeddleError::Conflict(_)) => Ok(()),
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Restore the thread manifest sidecar to its captured pre-start snapshot:
+    /// rewrite the prior `manifest.toml` bytes if one existed, or remove the
+    /// directory this start created. Restoring (not blind-deleting) preserves
+    /// an OLD manifest left by a prior materialization of a reused thread ref
+    /// (heddle#356 cid 3333881561).
+    pub fn restore_thread_manifest(&self, thread: &str, prior: Option<Vec<u8>>) -> Result<()> {
+        match prior {
+            Some(bytes) => {
+                let path = crate::thread_manifest::manifest_path(self.heddle_dir(), thread);
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).map_err(HeddleError::Io)?;
+                }
+                fs::write(&path, bytes).map_err(HeddleError::Io)
+            }
+            None => crate::thread_manifest::remove_thread_manifest_dir(self.heddle_dir(), thread)
+                .map(|_| ())
+                .map_err(HeddleError::Io),
+        }
     }
 
     /// Scan the materialized worktree at `root`, build a fresh tree
