@@ -716,17 +716,26 @@ fn resolve_container(
         // Added on one side only — take it verbatim.
         (None, Some(o), None) => (Some(whole_bytes(o, sides.ours).to_vec()), 0),
         (None, None, Some(t)) => (Some(whole_bytes(t, sides.theirs).to_vec()), 0),
-        // Both sides added a same-key container. Byte-identical → dedup;
-        // otherwise merge their bodies structurally with an empty base so
-        // disjoint additions inside the new container combine cleanly (and a
-        // divergent header/child conflicts).
+        // Both sides added a same-key container with NO base to anchor against.
+        // A recursive body merge is only sound when a BASE container exists to
+        // diff each side against; with no anchor, recursing mis-weaves the
+        // header/delimiters — it attaches each side's opening `{`/preamble to
+        // that side's first added child, emitting `{` before BOTH children and
+        // duplicating the delimiter, and the empty-base safety fallback can then
+        // duplicate the whole module (heddle#490 r5). So compare the two added
+        // containers as WHOLE units (header + body + footer): byte-identical →
+        // both sides added the same thing, take one copy; any divergence → an
+        // irreconcilable whole-container conflict. This single rule subsumes the
+        // r4 divergent-header case (different header ⇒ different whole content ⇒
+        // conflict). The recursive structural merge below stays for the
+        // base-anchored case, where diffing against the base makes it sound.
         (None, Some(o), Some(t)) => {
             let ow = whole_bytes(o, sides.ours);
             let tw = whole_bytes(t, sides.theirs);
             if ow == tw {
                 (Some(ow.to_vec()), 0)
             } else {
-                merge_container_3way(sides, None, o, t, markers)
+                (Some(emit_addadd_conflict(ow, tw, markers, sides)), 1)
             }
         }
         // Existed in base, removed on both sides → clean delete.
@@ -762,19 +771,23 @@ fn resolve_container(
             } else if tw == bw || ow == tw {
                 (Some(ow.to_vec()), 0)
             } else {
-                merge_container_3way(sides, Some(b), o, t, markers)
+                merge_container_3way(sides, b, o, t, markers)
             }
         }
     }
 }
 
-/// Merge a container that genuinely diverged across sides: 3-way merge its
-/// header text, recurse [`merge_region`] over its body children, 3-way merge
-/// its footer text, and concatenate. `base` is `None` for the add/add case
-/// (an empty base body, against which both sides' children are additions).
+/// Merge a container that genuinely diverged across sides *against a base
+/// anchor*: 3-way merge its header text, recurse [`merge_region`] over its body
+/// children (base body vs ours vs theirs), 3-way merge its footer text, and
+/// concatenate. Entered ONLY for the base-anchored 3-way-modify case — a real
+/// base container exists to diff each side against, which is what makes the
+/// recursive body merge sound. The no-base add/add case never reaches here: it
+/// is resolved by a whole-container comparison in [`resolve_container`] (no
+/// recursion without an anchor — heddle#490 r5).
 fn merge_container_3way(
     sides: SideSources<'_>,
-    base: Option<&Item>,
+    base: &Item,
     ours: &Item,
     theirs: &Item,
     markers: ConflictMarkers<'_>,
@@ -784,46 +797,35 @@ fn merge_container_3way(
     // `footer_bytes` / `body.as_ref()` reads below depend on it; a mixed
     // container/leaf key never reaches here (it routes to whole-item text merge).
     debug_assert!(
-        base.is_none_or(|b| b.body.is_some()) && ours.body.is_some() && theirs.body.is_some(),
+        base.body.is_some() && ours.body.is_some() && theirs.body.is_some(),
         "merge_container_3way entered with a leaf side — structural precondition violated"
     );
     let (header, hc) = merge3_text(
-        base.map(|b| header_bytes(b, sides.base)),
+        header_bytes(base, sides.base),
         header_bytes(ours, sides.ours),
         header_bytes(theirs, sides.theirs),
         markers,
-        sides,
     );
 
+    let bb = base.body.as_ref().expect("container");
     let ob = ours.body.as_ref().expect("container");
     let tb = theirs.body.as_ref().expect("container");
-    // Empty base body uses bounds (0, 0): always valid for `sides.base`
-    // regardless of how short it is, and yields a single empty preamble so
-    // both sides' children weave in as additions.
-    let (base_children, base_bounds): (&[Item], (usize, usize)) = match base {
-        Some(b) => {
-            let bb = b.body.as_ref().expect("container");
-            (&bb.items, (bb.inner_start, bb.inner_end))
-        }
-        None => (&[], (0, 0)),
-    };
     let (body, bc) = merge_region(
         sides,
-        base_children,
+        &bb.items,
         &ob.items,
         &tb.items,
-        base_bounds,
+        (bb.inner_start, bb.inner_end),
         (ob.inner_start, ob.inner_end),
         (tb.inner_start, tb.inner_end),
         markers,
     );
 
     let (footer, fc) = merge3_text(
-        base.map(|b| footer_bytes(b, sides.base)),
+        footer_bytes(base, sides.base),
         footer_bytes(ours, sides.ours),
         footer_bytes(theirs, sides.theirs),
         markers,
-        sides,
     );
 
     let mut out = header;
@@ -832,41 +834,29 @@ fn merge_container_3way(
     (Some(out), hc + bc + fc)
 }
 
-/// 3-way merge a slice of bytes (a container header/footer). `base` is `None`
-/// for add/add (treated as empty). Equal-sides dedup and unchanged-side defer
-/// short-circuit; a divergent add/add (no base anchor) conflicts; otherwise
-/// fall through to the text hunk merge.
+/// 3-way merge a slice of bytes (a base-anchored container header/footer).
+/// Equal-sides dedup and unchanged-side defer short-circuit; otherwise fall
+/// through to the text hunk merge. Only ever called with a real base anchor —
+/// the no-base add/add case is conflicted as a whole container upstream in
+/// [`resolve_container`] and never recurses into header/footer here.
 fn merge3_text(
-    base: Option<&[u8]>,
+    base: &[u8],
     ours: &[u8],
     theirs: &[u8],
     markers: ConflictMarkers<'_>,
-    sides: SideSources<'_>,
 ) -> (Vec<u8>, usize) {
     if ours == theirs {
         return (ours.to_vec(), 0);
     }
-    let Some(b) = base else {
-        // Add/add header/footer with NO base anchor. The diff3 engine treats
-        // two non-empty insertions at an empty anchor as a CLEAN concatenation
-        // (crates/merge/src/diff3.rs `emit_hunk`'s empty-base branch), which
-        // would silently fuse divergent headers (`pub mod foo {` vs `mod foo {`)
-        // into a duplicate/malformed container instead of reporting the
-        // disagreement. Mirror `resolve_item`'s divergent add/add arm: identical
-        // was handled above; any divergence is irreconcilable without a base, so
-        // surface it as a conflict (heddle#490 r4). This closes the class for
-        // BOTH the header and footer call sites, which share this helper.
-        return (emit_addadd_conflict(ours, theirs, markers, sides), 1);
-    };
-    if ours == b {
+    if ours == base {
         return (theirs.to_vec(), 0);
     }
-    if theirs == b {
+    if theirs == base {
         return (ours.to_vec(), 0);
     }
     materialize_segment(
-        text_hunk_merge_with_markers(b, ours, theirs, markers),
-        std::str::from_utf8(b).unwrap_or(""),
+        text_hunk_merge_with_markers(base, ours, theirs, markers),
+        std::str::from_utf8(base).unwrap_or(""),
     )
 }
 

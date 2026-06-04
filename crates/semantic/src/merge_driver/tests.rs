@@ -2445,21 +2445,76 @@ fn foo() {
 }
 
 // =====================================================================
-// heddle#490 r4: same-key CONTAINER add/add with divergent header bytes.
-// `merge_container_3way` 3-way-merges the header (and footer) with an EMPTY
-// base for the add/add case; `merge3_text` then delegated to the diff3 engine,
-// which concatenates two insertions at an empty anchor as a CLEAN merge. So a
-// header disagreement (`pub mod foo {` vs `mod foo {`) silently fused into a
-// malformed double-header — the conservation floor rejected the unparseable
-// clean output and routed to the whole-file textual path, which ALSO
-// concatenates at the empty base, yielding a CLEAN merge with the module
-// silently DUPLICATED. This is a sibling of the r3 leaf add/add class that
-// `resolve_item` already guards. The fix mirrors that guard in `merge3_text`,
-// closing the class for BOTH the header and footer call sites (they share the
-// helper): identical add/add stays clean, divergent add/add is a conflict.
+// heddle#490 r5: same-key CONTAINER add/add with NO base anchor. A recursive
+// body merge is only sound when a BASE container exists to diff each side
+// against. For the no-base add/add case (both sides independently created the
+// same-key container, nothing to anchor to), recursing into the bodies via
+// `merge_container_3way`/`merge_region` mis-weaves the delimiters: it attaches
+// each side's opening `{`/preamble to that side's first added child, so `{` is
+// emitted before BOTH children — duplicating the delimiter — and the empty-base
+// safety fallback can then duplicate the whole module silently. The fix STOPS
+// recursing for the no-base case and compares the two added containers as WHOLE
+// units (header + body + footer): identical → take one copy; any divergence →
+// one whole-container conflict. This single rule subsumes r4 (divergent header
+// ⇒ different whole content ⇒ conflict) and fixes r5 (identical header + disjoint
+// children ⇒ different whole content ⇒ conflict, no delimiter duplication). The
+// recursive structural body merge is preserved for the base-anchored case below,
+// where diffing against the base makes it sound.
 // =====================================================================
+
+// r5 core: identical header, DISJOINT children, no base. Pre-fix the empty-base
+// recursion duplicated the opening `{` (one before `fn a`, one before `fn b`)
+// and could silently duplicate the module; post-fix the divergent whole
+// containers conflict instead.
 #[test]
-fn add_add_container_divergent_header_conflicts_not_silent_concat() {
+fn add_add_container_disjoint_children_no_base_conflicts() {
+    let base = "";
+    let ours = "mod foo {\n    fn a() {}\n}\n";
+    let theirs = "mod foo {\n    fn b() {}\n}\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(count >= 1, "expected ≥1 conflict, got {count}: {text}");
+    assert!(
+        text.contains("<<<<<<<") && text.contains("=======") && text.contains(">>>>>>>"),
+        "expected canonical conflict markers around the divergent module: {text}"
+    );
+    assert!(
+        text.contains("fn a()") && text.contains("fn b()"),
+        "both sides' bodies must survive inside the conflict: {text}"
+    );
+    // The delimiter-duplication bug: pre-fix `{` was emitted before both `fn a`
+    // and `fn b`, yielding three `{` for a one-brace module. The whole-container
+    // conflict emits each side's body verbatim, so each opening brace appears
+    // exactly as written on that side.
+    assert_eq!(
+        text.matches("mod foo {").count(),
+        2,
+        "expected one `mod foo {{` per conflict side, not a duplicated delimiter: {text}"
+    );
+}
+
+// The clean take-one counterpart: both sides add the BYTE-IDENTICAL container.
+// No base, but nothing diverges → take one copy, no spurious conflict, no
+// duplication.
+#[test]
+fn add_add_container_identical_no_base_takes_one() {
+    let base = "";
+    let ours = "mod foo {\n    fn a() {}\n}\n";
+    let theirs = "mod foo {\n    fn a() {}\n}\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert_eq!(merged.matches("mod foo").count(), 1, "module duplicated: {merged}");
+    assert_eq!(merged.matches("fn a()").count(), 1, "body duplicated: {merged}");
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "no spurious conflict on identical add/add containers: {merged}"
+    );
+}
+
+// r4, now via the general rule: divergent HEADER add/add. `pub mod foo` vs
+// `mod foo` ⇒ different whole content ⇒ whole-container conflict. Pre-r4 this
+// silently fused into a duplicated/malformed module; the whole-container rule
+// surfaces it as a conflict with both header spellings preserved.
+#[test]
+fn add_add_container_divergent_header_no_base_conflicts() {
     let base = "";
     let ours = "pub mod foo {\n    fn a() {}\n}\n";
     let theirs = "mod foo {\n    fn a() {}\n}\n";
@@ -2467,46 +2522,83 @@ fn add_add_container_divergent_header_conflicts_not_silent_concat() {
     assert!(count >= 1, "expected ≥1 conflict on the divergent header, got {count}: {text}");
     assert!(
         text.contains("<<<<<<<") && text.contains("=======") && text.contains(">>>>>>>"),
-        "expected canonical conflict markers around the divergent module header: {text}"
+        "expected canonical conflict markers around the divergent module: {text}"
     );
     assert!(
-        text.contains("pub mod foo"),
-        "ours's header spelling must survive inside the conflict: {text}"
+        text.contains("pub mod foo") && text.contains("mod foo {"),
+        "both header spellings must survive inside the conflict: {text}"
     );
-    // Scoped, not a whole-file concat: the shared body merges ONCE outside the
-    // markers. Pre-fix the duplication emitted `fn a()` twice (one per cloned
-    // module).
-    assert_eq!(
-        text.matches("fn a()").count(),
-        1,
-        "body duplicated — the header conflict must stay scoped, not concat the whole container: {text}"
+    assert!(
+        !matches!(merge_rust(base, ours, theirs), MergeOutcome::Clean(_)),
+        "divergent add/add must not be a silent clean concat"
     );
 }
 
-// The clean counterpart: identical add/add container headers/footers must NOT
-// conflict (r4 conflicts only on DIVERGENT add/add bytes). Both sides add
-// `mod foo` with the SAME header + footer; a shared child (`fn shared`) aligns
-// the two instances to one container, and their divergent-but-disjoint children
-// weave into the single module. The header path must stay clean.
+// The masking case from the finding: a SHARED child used to let the recursive
+// body merge weave a clean module, hiding the no-base unsoundness. With the
+// whole-container rule, divergent bodies (`fn a` vs `fn b`) conflict even when a
+// child is shared — there is still no base to anchor the merge.
 #[test]
-fn add_add_container_identical_header_divergent_body_merges_clean() {
+fn add_add_container_shared_child_divergent_body_no_base_conflicts() {
     let base = "";
     let ours = "mod foo {\n    fn shared() {}\n    fn a() {}\n}\n";
     let theirs = "mod foo {\n    fn shared() {}\n    fn b() {}\n}\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(count >= 1, "expected ≥1 conflict, got {count}: {text}");
+    assert!(
+        text.contains("<<<<<<<") && text.contains("=======") && text.contains(">>>>>>>"),
+        "expected canonical conflict markers: {text}"
+    );
+    assert!(
+        text.contains("fn a()") && text.contains("fn b()"),
+        "both divergent bodies must survive inside the conflict: {text}"
+    );
+}
+
+// The recursive structural merge is PRESERVED for the base-anchored case: base
+// has `mod foo { fn a }`, ours adds `fn b`, theirs adds `fn c`. A real base
+// container exists to diff against, so the body merges structurally + cleanly
+// (`fn a` unchanged, `fn b`/`fn c` are disjoint additions). This is the path
+// the r5 fix must NOT regress.
+#[test]
+fn base_anchored_container_merges_structurally_clean() {
+    let base = "mod foo {\n    fn a() {}\n}\n";
+    let ours = "mod foo {\n    fn a() {}\n    fn b() {}\n}\n";
+    let theirs = "mod foo {\n    fn a() {}\n    fn c() {}\n}\n";
     let merged = assert_clean(merge_rust(base, ours, theirs));
     assert_eq!(merged.matches("mod foo").count(), 1, "module duplicated: {merged}");
+    assert_eq!(merged.matches("mod foo {").count(), 1, "delimiter duplicated: {merged}");
     assert!(
-        merged.contains("fn a()") && merged.contains("fn b()"),
-        "both divergent children must weave into the single module: {merged}"
-    );
-    assert_eq!(
-        merged.matches("fn shared()").count(),
-        1,
-        "the shared child must dedup, not duplicate: {merged}"
+        merged.contains("fn a()") && merged.contains("fn b()") && merged.contains("fn c()"),
+        "base child + both disjoint additions must weave into the single module: {merged}"
     );
     assert!(
         !merged.contains("<<<<<<<"),
-        "no spurious conflict on identical add/add headers: {merged}"
+        "no spurious conflict on a base-anchored disjoint-additions merge: {merged}"
+    );
+}
+
+// Relocated from `conformance_484_structural_matrix`: a no-base add/add of a
+// DIVERGENT `pub mod m`. Pre-r5 this only "merged clean" via the buggy
+// structural-recursion → conservation-floor → whole-file-concat fallback, which
+// emitted TWO `pub mod m` blocks — an illegal duplicate module (E0428). The
+// whole-container rule surfaces it as a conflict instead of silently producing
+// the duplicate. A `mod` is NOT reopenable, so a conflict (not a weave) is the
+// only sound outcome with no base anchor.
+#[test]
+fn add_add_divergent_mod_no_base_conflicts_not_duplicate_module() {
+    let base = "pub fn a() {}\n";
+    let ours = "pub fn a() {}\n\npub mod m {\n    pub use crate::x;\n}\n";
+    let theirs = "pub fn a() {}\n\npub mod m {\n    pub use crate::y;\n}\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(count >= 1, "expected ≥1 conflict, got {count}: {text}");
+    assert!(
+        text.contains("<<<<<<<") && text.contains("=======") && text.contains(">>>>>>>"),
+        "expected canonical conflict markers: {text}"
+    );
+    assert!(
+        text.contains("pub use crate::x") && text.contains("pub use crate::y"),
+        "both sides' re-exports must survive inside the conflict: {text}"
     );
 }
 
@@ -5172,11 +5264,14 @@ fn conformance_484_structural_matrix() {
             "pub mod outer {\n    pub mod inner {\n        pub use crate::a;\n        pub use crate::b;\n    }\n}\n\npub fn ours_fn() {}\n",
             "pub mod outer {\n    pub mod inner {\n        pub use crate::a;\n        pub use crate::c;\n    }\n}\n\npub fn theirs_fn() {}\n",
         ),
-        (
-            "pub fn a() {}\n",
-            "pub fn a() {}\n\npub mod m {\n    pub use crate::x;\n}\n",
-            "pub fn a() {}\n\npub mod m {\n    pub use crate::y;\n}\n",
-        ),
+        // NOTE: the no-base add/add of a DIVERGENT `pub mod m` (ours adds
+        // `{ pub use crate::x }`, theirs `{ pub use crate::y }`) used to land
+        // here as a "clean" merge — but only via the buggy structural-recursion
+        // → conservation-floor → whole-file-concat fallback, which silently
+        // emitted TWO `pub mod m` blocks (an illegal duplicate module, E0428).
+        // heddle#490 r5 routes that no-base add/add through a whole-container
+        // comparison: divergent ⇒ conflict. It now lives in
+        // `add_add_divergent_mod_no_base_conflicts_not_duplicate_module` below.
         (
             "struct S;\nimpl S {\n    fn base(&self) {}\n}\n",
             "struct S;\nimpl S {\n    fn base(&self) {}\n    fn ours_m(&self) {}\n}\n\nfn ours_top() {}\n",
@@ -5363,8 +5458,11 @@ fn repro_484_r3_prepend_new_impl_before_base_block_no_collapse() {
 #[test]
 fn conformance_484_r3_cross_side_container_alignment_matrix() {
     // Same-name-container arrangements the per-side ordinal model mis-aligned.
-    // The `both-add-different` case is the round-4 prepend-on-ours +
-    // append-on-theirs case. All must merge CLEAN and conformant.
+    // A new block added on ONE side only (prepend/append) aligns distinctly from
+    // the matched base block and must merge CLEAN. The `both-add-different`
+    // round-4 case (a new block added on BOTH sides with no base anchor) is no
+    // longer clean: heddle#490 r5 conflicts it as a whole container — see
+    // `reopened_impl_both_add_new_block_no_base_conflicts` below.
     let cases: &[(&str, &str, &str, &str)] = &[
         (
             "prepend",
@@ -5378,12 +5476,6 @@ fn conformance_484_r3_cross_side_container_alignment_matrix() {
             "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n\nimpl Foo {\n    fn a(&self) {}\n}\n",
             "struct Foo;\n\nimpl Foo {\n    fn b(&self) { let _ = 1; }\n}\n",
         ),
-        (
-            "both-add-different",
-            "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n",
-            "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n",
-            "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n\nimpl Foo {\n    fn c(&self) {}\n}\n",
-        ),
     ];
     for (label, base, ours, theirs) in cases {
         let merged = assert_conformant(base, ours, theirs);
@@ -5395,6 +5487,36 @@ fn conformance_484_r3_cross_side_container_alignment_matrix() {
             "[{label}] unparseable merge:\n{merged}"
         );
     }
+}
+
+// The round-4 `both-add-different` case, post heddle#490 r5. base has one
+// `impl Foo { fn b }`; ours prepends a NEW `impl Foo { fn a }`, theirs appends a
+// NEW `impl Foo { fn c }`. The two NEW blocks have no base anchor and collide on
+// the same fresh discriminator — an add/add with divergent whole content. Pre-r5
+// this only "merged clean" via the buggy structural-recursion → floor →
+// whole-file-concat fallback (the same fallback that silently duplicates a
+// non-reopenable module). r5 routes it through the whole-container comparison:
+// divergent ⇒ a single conflict that preserves both new blocks' bodies, while
+// the base-anchored `fn b` block resolves cleanly outside the markers. A
+// conflict is the safe outcome — the engine has no base to know these are two
+// independent additions vs the same block added twice.
+#[test]
+fn reopened_impl_both_add_new_block_no_base_conflicts() {
+    let base = "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
+    let ours = "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
+    let theirs = "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n\nimpl Foo {\n    fn c(&self) {}\n}\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(count >= 1, "expected ≥1 conflict, got {count}: {text}");
+    assert!(
+        text.contains("<<<<<<<") && text.contains("=======") && text.contains(">>>>>>>"),
+        "expected canonical conflict markers: {text}"
+    );
+    assert!(
+        text.contains("fn a(&self)") && text.contains("fn c(&self)"),
+        "both new blocks' bodies must survive inside the conflict: {text}"
+    );
+    // The base-anchored `fn b` block resolves cleanly, outside the markers.
+    assert!(text.contains("fn b(&self)"), "base-anchored block lost: {text}");
 }
 
 #[test]
