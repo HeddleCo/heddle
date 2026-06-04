@@ -316,6 +316,7 @@ pub fn replay_active_transactions(repo: &Repository) -> ReplayReport {
 mod tests {
     use std::{fs, path::Path};
 
+    use oplog::OpLogBackend;
     use proptest::prelude::*;
     use repo::Repository;
     use tempfile::TempDir;

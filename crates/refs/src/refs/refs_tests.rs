@@ -1214,8 +1214,9 @@ mod write_read_conformance {
         ] {
             let body = first_body(&[MANAGER_SRC], reader);
             assert!(
-                body.contains("reconciled_load("),
-                "read bypass: `{reader}` must funnel through `reconciled_load`"
+                body.contains("reconciled_load(") || body.contains("reconciled_point("),
+                "read bypass: `{reader}` must funnel through `reconciled_load` \
+                 (directly or via the `reconciled_point` helper)"
             );
             for raw in [".raw_load(", ".raw_get_", ".read_head_state(", ".raw_list_"] {
                 assert!(
@@ -1224,6 +1225,13 @@ mod write_read_conformance {
                 );
             }
         }
+        // The `reconciled_point` helper is the only sanctioned indirection a reader
+        // may funnel through; assert it itself routes to the read chokepoint so a
+        // future bypass planted inside the helper still trips this guard.
+        assert!(
+            first_body(&[MANAGER_SRC], "reconciled_point").contains("reconciled_load("),
+            "read bypass: the `reconciled_point` helper must funnel through `reconciled_load`"
+        );
     }
 
     /// The read chokepoint re-reads the persisted watermark each reconcile, so a

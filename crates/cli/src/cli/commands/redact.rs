@@ -25,6 +25,7 @@ use objects::{
     object::{ChangeId, ContentHash, Redaction, RedactionsBlob, StateSignature},
     worktree::should_ignore,
 };
+use oplog::OpLogBackend;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 

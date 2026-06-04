@@ -2,7 +2,7 @@
 use objects::store::ObjectStore;
 use anyhow::{Context, Result, anyhow};
 use objects::object::{ChangeId, ThreadName};
-use oplog::{OpBatch, OpRecord};
+use oplog::{OpBatch, OpLogBackend, OpRecord};
 use repo::{Repository, Thread, ThreadIntegrationPolicy, thread_flag};
 use serde::Serialize;
 

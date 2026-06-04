@@ -8,6 +8,7 @@ use objects::object::ThreadName;
 use objects::store::{
     AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ReserveOutcome, current_boot_id,
 };
+use oplog::OpLogBackend;
 use refs::{Head, RefExpectation};
 use repo::{
     Repository, Thread, ThreadConfidenceSummary, ThreadFreshness, ThreadId,

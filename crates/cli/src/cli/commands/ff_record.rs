@@ -17,7 +17,7 @@
 
 use anyhow::{Result, anyhow};
 use objects::object::{ChangeId, ThreadName};
-use oplog::OpRecord;
+use oplog::{OpLogBackend, OpRecord};
 use refs::Head;
 use repo::Repository;
 

@@ -19,6 +19,7 @@ use proto::{
     HarnessIdentity, ProgressCheckpoint, SessionDiffSummary, SessionReportEnvelope,
     TranscriptAttachmentRef, UsageTotals, WorktreeChangeBaseline,
 };
+use oplog::OpLogBackend;
 use refs::Head;
 use repo::{
     Repository, SessionManager, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,

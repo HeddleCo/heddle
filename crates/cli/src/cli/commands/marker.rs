@@ -4,6 +4,7 @@
 use objects::store::ObjectStore;
 use anyhow::{anyhow, Result};
 use objects::object::MarkerName;
+use oplog::OpLogBackend;
 use repo::Repository;
 use serde::Serialize;
 

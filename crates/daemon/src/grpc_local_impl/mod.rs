@@ -86,13 +86,12 @@ pub(super) async fn with_idempotency<F, Fut, T>(
     client_operation_id: &str,
     verb: &'static str,
     request_body: &[u8],
-    encode_response: impl FnOnce(&T) -> Vec<u8>,
-    decode_response: impl FnOnce(Vec<u8>) -> Result<T, tonic::Status>,
     execute: F,
 ) -> Result<T, tonic::Status>
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<T, tonic::Status>>,
+    T: prost::Message + Default,
 {
     use objects::object::OperationId;
     use repo::operation_dedup::{DedupOutcome, hash_request_body};
@@ -112,7 +111,8 @@ where
     let outcome = reserve_operation_id_eager(service.repo(), Arc::clone(&dedup), op_id, verb, hash)
         .map_err(|err| tonic::Status::internal(format!("dedup reserve failed: {err}")))?;
     match outcome {
-        DedupOutcome::Replay { response } => decode_response(response),
+        DedupOutcome::Replay { response } => T::decode(response.as_slice())
+            .map_err(|err| tonic::Status::internal(format!("decode replay failed: {err}"))),
         DedupOutcome::Conflict => Err(tonic::Status::failed_precondition(
             "client_operation_id reused with a different request body",
         )),
@@ -126,7 +126,7 @@ where
             // would see as `Conflict`/`InFlight` until compaction.
             match execute().await {
                 Ok(result) => {
-                    let encoded = encode_response(&result);
+                    let encoded = result.encode_to_vec();
                     dedup.record(op_id, verb, hash, encoded).map_err(|err| {
                         tonic::Status::internal(format!("dedup record failed: {err}"))
                     })?;
@@ -170,6 +170,7 @@ mod tests {
 
     use std::{sync::Arc, time::Duration};
 
+    use grpc::heddle::v1::UpdateRefResponse;
     use objects::object::OperationId;
     use repo::{Repository, operation_dedup::OperationDedupStore};
     use tempfile::TempDir;
@@ -184,6 +185,17 @@ mod tests {
         (temp, GrpcLocalService::new(repo, store))
     }
 
+    /// A distinguishable prost response payload for the idempotency-flow
+    /// tests: the carried marker rides in `old_value` so a replayed decode
+    /// can be asserted against the originally-recorded value.
+    fn marker_response(marker: &str) -> UpdateRefResponse {
+        UpdateRefResponse {
+            success: true,
+            old_value: marker.to_string(),
+            error: String::new(),
+        }
+    }
+
     #[tokio::test]
     async fn replays_recorded_response() {
         let (_t, service) = make_service();
@@ -191,44 +203,22 @@ mod tests {
         let body = b"req";
 
         // First call executes and records.
-        let first: i32 = with_idempotency(
-            &service,
-            &op_id,
-            "verb",
-            body,
-            |v: &i32| v.to_be_bytes().to_vec(),
-            |bytes| {
-                Ok(i32::from_be_bytes(
-                    bytes.as_slice().try_into().expect("4 bytes"),
-                ))
-            },
-            || async { Ok::<i32, tonic::Status>(42) },
-        )
+        let first = with_idempotency(&service, &op_id, "verb", body, || async {
+            Ok::<UpdateRefResponse, tonic::Status>(marker_response("42"))
+        })
         .await
         .unwrap();
-        assert_eq!(first, 42);
+        assert_eq!(first.old_value, "42");
 
         // Second call must replay without re-executing — proven by the
-        // execute closure returning a sentinel that would mismatch.
-        let second: i32 = with_idempotency(
-            &service,
-            &op_id,
-            "verb",
-            body,
-            |v: &i32| v.to_be_bytes().to_vec(),
-            |bytes| {
-                Ok(i32::from_be_bytes(
-                    bytes.as_slice().try_into().expect("4 bytes"),
-                ))
-            },
-            || async {
-                #[allow(unreachable_code)]
-                Ok::<i32, tonic::Status>(panic!("execute must not be called on replay"))
-            },
-        )
+        // execute closure panicking if invoked.
+        let second = with_idempotency(&service, &op_id, "verb", body, || async {
+            #[allow(unreachable_code)]
+            Ok::<UpdateRefResponse, tonic::Status>(panic!("execute must not be called on replay"))
+        })
         .await
         .unwrap();
-        assert_eq!(second, 42);
+        assert_eq!(second.old_value, "42");
     }
 
     #[tokio::test]
@@ -248,22 +238,10 @@ mod tests {
         let service_a = service.clone();
         let op_a = op_id.clone();
         let a_handle = tokio::spawn(async move {
-            with_idempotency(
-                &service_a,
-                &op_a,
-                "verb",
-                body,
-                |v: &i32| v.to_be_bytes().to_vec(),
-                |bytes| {
-                    Ok(i32::from_be_bytes(
-                        bytes.as_slice().try_into().expect("4 bytes"),
-                    ))
-                },
-                || async move {
-                    rx.await.expect("recv gate");
-                    Ok::<i32, tonic::Status>(7)
-                },
-            )
+            with_idempotency(&service_a, &op_a, "verb", body, || async move {
+                rx.await.expect("recv gate");
+                Ok::<UpdateRefResponse, tonic::Status>(marker_response("7"))
+            })
             .await
         });
 
@@ -274,22 +252,11 @@ mod tests {
 
         let service_b = service.clone();
         let op_b = op_id.clone();
-        let b_result = with_idempotency(
-            &service_b,
-            &op_b,
-            "verb",
-            body,
-            |v: &i32| v.to_be_bytes().to_vec(),
-            |bytes| {
-                Ok(i32::from_be_bytes(
-                    bytes.as_slice().try_into().expect("4 bytes"),
-                ))
-            },
-            || async {
+        let b_result: Result<UpdateRefResponse, tonic::Status> =
+            with_idempotency(&service_b, &op_b, "verb", body, || async {
                 panic!("B's execute must not run while A holds the reservation");
-            },
-        )
-        .await;
+            })
+            .await;
 
         // B sees the in-flight reservation and aborts.
         let err = b_result.expect_err("B should be aborted");
@@ -298,28 +265,17 @@ mod tests {
         // Now release A.
         tx.send(()).unwrap();
         let a_result = a_handle.await.unwrap().unwrap();
-        assert_eq!(a_result, 7);
+        assert_eq!(a_result.old_value, "7");
 
         // After A finishes, the entry is finalised: a third call with the
         // same body replays.
-        let third = with_idempotency(
-            &service,
-            &op_id,
-            "verb",
-            body,
-            |v: &i32| v.to_be_bytes().to_vec(),
-            |bytes| {
-                Ok(i32::from_be_bytes(
-                    bytes.as_slice().try_into().expect("4 bytes"),
-                ))
-            },
-            || async {
-                panic!("execute must not run on replay");
-            },
-        )
+        let third = with_idempotency(&service, &op_id, "verb", body, || async {
+            #[allow(unreachable_code)]
+            Ok::<UpdateRefResponse, tonic::Status>(panic!("execute must not run on replay"))
+        })
         .await
         .unwrap();
-        assert_eq!(third, 7);
+        assert_eq!(third.old_value, "7");
     }
 
     #[tokio::test]
@@ -334,38 +290,19 @@ mod tests {
         let op_id = OperationId::new().to_string();
         let body = b"req";
 
-        let first = with_idempotency::<_, _, i32>(
-            &service,
-            &op_id,
-            "verb",
-            body,
-            |v| v.to_be_bytes().to_vec(),
-            |bytes| {
-                Ok(i32::from_be_bytes(
-                    bytes.as_slice().try_into().expect("4 bytes"),
-                ))
-            },
-            || async { Err(tonic::Status::internal("transient")) },
-        )
-        .await;
+        let first: Result<UpdateRefResponse, tonic::Status> =
+            with_idempotency(&service, &op_id, "verb", body, || async {
+                Err(tonic::Status::internal("transient"))
+            })
+            .await;
         assert!(first.is_err());
 
         // Retry must succeed — the reservation was released.
-        let second = with_idempotency(
-            &service,
-            &op_id,
-            "verb",
-            body,
-            |v: &i32| v.to_be_bytes().to_vec(),
-            |bytes| {
-                Ok(i32::from_be_bytes(
-                    bytes.as_slice().try_into().expect("4 bytes"),
-                ))
-            },
-            || async { Ok(11) },
-        )
+        let second = with_idempotency(&service, &op_id, "verb", body, || async {
+            Ok::<UpdateRefResponse, tonic::Status>(marker_response("11"))
+        })
         .await
         .unwrap();
-        assert_eq!(second, 11);
+        assert_eq!(second.old_value, "11");
     }
 }

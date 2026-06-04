@@ -6,7 +6,7 @@ use objects::{
     object::{Blob, ChangeId, ThreadName, Tree, TreeEntry},
     util::symlink_target_bytes,
 };
-use oplog::OpRecord;
+use oplog::{OpLogBackend, OpRecord};
 use refs::Head;
 use serde_json::json;
 use tempfile::TempDir;

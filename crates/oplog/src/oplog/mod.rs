@@ -4,7 +4,6 @@
 mod op_record_codec;
 mod oplog_backend;
 mod oplog_core;
-mod oplog_records;
 mod oplog_types;
 mod packed_oplog;
 

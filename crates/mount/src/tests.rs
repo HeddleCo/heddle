@@ -1124,7 +1124,7 @@ fn capture_unlink_drops_only_named_path() {
 fn capture_records_oplog_entry() {
     // After a mount-side capture, the oplog should hold a `Snapshot`
     // entry pointing at the new state. Mirrors the CLI capture path.
-    use oplog::OpRecord;
+    use oplog::{OpLogBackend, OpRecord};
     let (_temp, mount) = fresh_mount();
     let prior_count = mount
         .repo_handle()

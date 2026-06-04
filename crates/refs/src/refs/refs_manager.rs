@@ -722,11 +722,19 @@ impl RefManager {
         }])
     }
 
-    pub fn get_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>> {
-        match self.reconciled_load(LoadRequest::Thread(name.clone()))? {
+    /// Resolve a point-valued ref request (thread / marker / remote-thread /
+    /// undo-recovery) through reconciliation. All four share the same
+    /// `Loaded::Point` shape; the catch-all is unreachable because the load
+    /// request and the returned variant are paired by construction.
+    fn reconciled_point(&self, request: LoadRequest) -> Result<Option<ChangeId>> {
+        match self.reconciled_load(request)? {
             Loaded::Point(id) => Ok(id),
-            _ => unreachable!("Thread request yields Point"),
+            _ => unreachable!("point request yields Point"),
         }
+    }
+
+    pub fn get_thread(&self, name: &ThreadName) -> Result<Option<ChangeId>> {
+        self.reconciled_point(LoadRequest::Thread(name.clone()))
     }
 
     pub fn set_thread(&self, name: &ThreadName, state: &ChangeId) -> Result<()> {
@@ -778,10 +786,7 @@ impl RefManager {
     }
 
     pub fn get_marker(&self, name: &MarkerName) -> Result<Option<ChangeId>> {
-        match self.reconciled_load(LoadRequest::Marker(name.clone()))? {
-            Loaded::Point(id) => Ok(id),
-            _ => unreachable!("Marker request yields Point"),
-        }
+        self.reconciled_point(LoadRequest::Marker(name.clone()))
     }
 
     pub fn create_marker(&self, name: &MarkerName, state: &ChangeId) -> Result<()> {
@@ -881,20 +886,14 @@ impl RefManager {
     /// Read the heddle-internal pre-undo recovery pointer, if one has been
     /// recorded. Returns `None` when no undo has run in this repo.
     pub fn get_undo_recovery(&self) -> Result<Option<ChangeId>> {
-        match self.reconciled_load(LoadRequest::UndoRecovery)? {
-            Loaded::Point(id) => Ok(id),
-            _ => unreachable!("UndoRecovery request yields Point"),
-        }
+        self.reconciled_point(LoadRequest::UndoRecovery)
     }
 
     pub fn get_remote_thread(&self, remote: &str, thread: &ThreadName) -> Result<Option<ChangeId>> {
-        match self.reconciled_load(LoadRequest::RemoteThread {
+        self.reconciled_point(LoadRequest::RemoteThread {
             remote: remote.to_string(),
             thread: thread.clone(),
-        })? {
-            Loaded::Point(id) => Ok(id),
-            _ => unreachable!("RemoteThread request yields Point"),
-        }
+        })
     }
 
     pub fn set_remote_thread(
