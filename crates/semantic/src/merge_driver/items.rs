@@ -77,14 +77,27 @@ pub(crate) struct Item {
 /// of the body node (the delimiters `{` / `}` fall *inside* this span for
 /// brace languages); `items` are the nested children in source order.
 ///
+/// `content_start`/`content_end` bracket the *woven child content* — the body
+/// span MINUS its structural opening/closing delimiters. For a brace body
+/// they sit just inside the `{` and `}`; for a delimiter-less body (Python
+/// `block`) they equal `inner_start`/`inner_end`. The structural delimiters
+/// `[inner_start, content_start)` and `[content_end, inner_end)` are merged
+/// ONCE by [`super::reconstruct::merge_container_3way`] and emitted around the
+/// woven children, never folded into the child weave — an empty base body
+/// (whose only inter-item range would otherwise be the whole `{}`) can no
+/// longer re-emit a side's opening `{` per added child (heddle#490 r6). See
+/// [`body_content_bounds`].
+///
 /// The container's *header* is `[Item::start_byte, inner_start)` (e.g.
 /// `impl Foo `), its *footer* is `[inner_end, Item::end_byte)` (usually
-/// empty). The braces are woven as the body region's preamble/postamble by
-/// [`super::reconstruct`], so no `{`/`}` is ever synthesized or trimmed.
+/// empty). No `{`/`}` is ever synthesized or trimmed — the delimiter bytes are
+/// taken verbatim from the body span.
 #[derive(Clone, Debug)]
 pub(crate) struct ContainerBody {
     pub inner_start: usize,
     pub inner_end: usize,
+    pub content_start: usize,
+    pub content_end: usize,
     pub items: Vec<Item>,
 }
 
@@ -115,6 +128,48 @@ pub(crate) fn inter_ranges(
     }
     out.push((cursor, region_end));
     out
+}
+
+/// Structural content span of a container body — the body span MINUS its
+/// opening/closing delimiter tokens.
+///
+/// For a brace-delimited body (Rust `declaration_list`, C++/Java/JS block-like
+/// nodes) tree-sitter exposes the `{` and `}` as the body node's first and
+/// last *unnamed* children; the woven child content is everything between them.
+/// For a delimiter-less body (Python `block`, whose first child is a named
+/// statement) there is nothing to strip, so the content span equals the whole
+/// body and the opening/closing delimiter slices are empty — the merge then
+/// treats them as a no-op pass-through.
+///
+/// Keeping the delimiters OUT of the woven child region is what makes them
+/// structural: [`super::reconstruct::merge_container_3way`] merges and emits
+/// the delimiter exactly once around the children, so an empty base body can
+/// never re-emit a side's `{` per added child (heddle#490 r6).
+fn body_content_bounds(body: Node<'_>) -> (usize, usize) {
+    let inner_start = body.start_byte();
+    let inner_end = body.end_byte();
+    let mut content_start = inner_start;
+    let mut content_end = inner_end;
+    let count = body.child_count();
+    if count > 0 {
+        let first = body.child(0).unwrap();
+        if !first.is_named() {
+            content_start = first.end_byte();
+        }
+        let last = body.child(count as u32 - 1).unwrap();
+        if !last.is_named() {
+            content_end = last.start_byte();
+        }
+    }
+    // Degenerate guards: keep the content span inside the body and non-inverted
+    // even if only one delimiter token is present (a one-token / error body),
+    // so neither delimiter slice can go negative downstream.
+    content_start = content_start.clamp(inner_start, inner_end);
+    content_end = content_end.clamp(inner_start, inner_end);
+    if content_start > content_end {
+        content_end = content_start;
+    }
+    (content_start, content_end)
 }
 
 /// Extract items from a parsed file as a shallow tree (containers carry their
@@ -159,9 +214,11 @@ struct RawItem {
     start_byte: usize,
     end_byte: usize,
     use_identity: Option<UseIdentity>,
-    /// `Some((inner_start, inner_end))` when this record is a container we
-    /// recursed into; `None` for leaves and for opaque (too-deep) containers.
-    container: Option<(usize, usize)>,
+    /// `Some((inner_start, inner_end, content_start, content_end))` when this
+    /// record is a container we recursed into; `None` for leaves and for opaque
+    /// (too-deep) containers. The content bounds strip the structural body
+    /// delimiters — see [`body_content_bounds`].
+    container: Option<(usize, usize, usize, usize)>,
 }
 
 /// Iterative DFS over the AST producing a flat list of [`RawItem`]s. Avoids
@@ -208,7 +265,10 @@ fn collect_raw_items(language: Language, source: &str, root: Node<'_>) -> Vec<Ra
                         start_byte,
                         end_byte: child.end_byte(),
                         use_identity: None,
-                        container: recurse.then(|| (body.start_byte(), body.end_byte())),
+                        container: recurse.then(|| {
+                            let (content_start, content_end) = body_content_bounds(body);
+                            (body.start_byte(), body.end_byte(), content_start, content_end)
+                        }),
                     });
                     if recurse {
                         let mut next_scope = (*scope).clone();
@@ -281,7 +341,7 @@ fn assemble_tree(mut raws: Vec<RawItem>) -> Vec<Item> {
             close_one(&mut open, &mut top);
         }
         match raw.container {
-            Some((inner_start, inner_end)) => {
+            Some((inner_start, inner_end, content_start, content_end)) => {
                 let item = Item {
                     key: raw.key,
                     start_byte: raw.start_byte,
@@ -290,6 +350,8 @@ fn assemble_tree(mut raws: Vec<RawItem>) -> Vec<Item> {
                     body: Some(ContainerBody {
                         inner_start,
                         inner_end,
+                        content_start,
+                        content_end,
                         items: Vec::new(),
                     }),
                 };

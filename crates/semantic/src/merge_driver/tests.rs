@@ -2603,6 +2603,199 @@ fn add_add_divergent_mod_no_base_conflicts_not_duplicate_module() {
 }
 
 // =====================================================================
+// heddle#490 r6: BASE-anchored container whose body is EMPTY (`mod foo {}`),
+// with both sides adding DIFFERENT children. The body's opening delimiter `{`
+// lives at the head of each side's first inter-item range; folding it into the
+// child weave let ours's `{` and theirs's `{` each emit in a separate added-
+// child slot, duplicating the opening delimiter. Pre-fix a clean version was
+// caught by the conservation floor (re-parse failed → text fallback), but a
+// version that ALSO carried a real conflict (a divergent header) shipped the
+// malformed body because the floor skipped conflict outputs. The fix makes the
+// body delimiter structural — merged once in `merge_container_3way`, emitted
+// around the woven children — so it can never duplicate, AND extends the floor
+// to conflict outputs as a belt-and-suspenders well-formedness guard.
+// =====================================================================
+
+// Clean case: empty base body, ours adds `fn a`, theirs adds `fn b`, headers
+// agree. Must weave both children into ONE `mod foo { ... }` with exactly one
+// opening and one closing brace, no conflict.
+#[test]
+fn empty_base_container_both_sides_add_weaves_single_delimiter_clean() {
+    let base = "mod foo {}\n";
+    let ours = "mod foo {\n    fn a() {}\n}\n";
+    let theirs = "mod foo {\n    fn b() {}\n}\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert_eq!(
+        merged.matches("mod foo {").count(),
+        1,
+        "opening delimiter duplicated: {merged}"
+    );
+    assert!(
+        merged.contains("fn a()") && merged.contains("fn b()"),
+        "both disjoint additions must weave into the single module: {merged}"
+    );
+    assert_eq!(
+        merged.matches('{').count(),
+        merged.matches('}').count(),
+        "braces must balance: {merged}"
+    );
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "no spurious conflict on disjoint additions into an empty base body: {merged}"
+    );
+}
+
+// Conflict case: empty base body + a DIVERGENT header (`pub mod` vs
+// `pub(crate) mod`) AND both sides adding different children. The header
+// conflicts, but the merged output must be WELL-FORMED: exactly one body
+// opening `{` and one closing `}`, balanced braces, conflict markers present.
+// Pre-fix this shipped a duplicated `{` (open=4, close=3) because the floor
+// skipped conflict outputs.
+#[test]
+fn empty_base_container_divergent_header_conflict_is_well_formed() {
+    let base = "mod foo {}\n";
+    let ours = "pub mod foo {\n    fn a() {}\n}\n";
+    let theirs = "pub(crate) mod foo {\n    fn b() {}\n}\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(count >= 1, "expected ≥1 conflict on the divergent header: {text}");
+    assert!(
+        text.contains("<<<<<<<") && text.contains("=======") && text.contains(">>>>>>>"),
+        "expected canonical conflict markers: {text}"
+    );
+    assert_eq!(
+        text.matches('{').count(),
+        text.matches('}').count(),
+        "delimiter duplicated — braces unbalanced (the r6 malformed-conflict bug): {text}"
+    );
+    // Resolving either side must yield valid, balanced code.
+    for side in resolve_both_sides(&text) {
+        assert_eq!(
+            side.matches('{').count(),
+            side.matches('}').count(),
+            "a resolved side has unbalanced braces: {side}"
+        );
+        assert!(
+            crate::parser::ParsedFile::parse(side.as_str(), crate::parser::Language::Rust).is_some(),
+            "a resolved side does not parse: {side}"
+        );
+    }
+}
+
+// The extended floor guards conflict outputs: a structurally malformed conflict
+// (a resolved side that does not re-parse) must NOT be emitted silently — it is
+// routed to the textual fallback, which is well-formed by construction. We
+// exercise the guard through a real merge that, absent the structural fix,
+// would emit a duplicate-delimiter conflict; with the floor extended, even a
+// regression in the weave can no longer ship a malformed conflict. Here we
+// assert the strong invariant directly: whatever the driver returns for the
+// r6 shape, both resolved sides re-parse.
+#[test]
+fn conflict_output_resolved_sides_always_reparse() {
+    // A divergent-header empty-base container (the r6 malformed-conflict shape).
+    let base = "mod foo {}\n";
+    let ours = "pub mod foo {\n    fn a() {}\n}\n";
+    let theirs = "pub(crate) mod foo {\n    fn b() {}\n}\n";
+    let text = match merge_rust(base, ours, theirs) {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    for side in resolve_both_sides(&text) {
+        assert!(
+            crate::parser::ParsedFile::parse(side.as_str(), crate::parser::Language::Rust).is_some(),
+            "driver emitted a conflict whose resolved side does not parse: {side}"
+        );
+    }
+}
+
+// Direct floor-guard test: a deliberately MALFORMED conflict output (the r6
+// duplicate-opening-`{` shape) is rejected by the extended floor, while a
+// well-formed conflict passes. This pins the guard itself, independent of the
+// structural fix that makes the driver emit well-formed conflicts.
+#[test]
+fn extended_floor_rejects_malformed_conflict_passes_well_formed() {
+    use crate::parser::Language::Rust;
+
+    // The exact malformed shape the pre-fix driver shipped: a divergent header
+    // conflict followed by a body that duplicated the opening `{` (two `{`, one
+    // `}`). Resolving the OURS side is unbalanced and unparseable.
+    let malformed = "\
+<<<<<<< OURS
+pub mod foo
+=======
+pub(crate) mod foo
+>>>>>>> THEIRS
+{
+    fn b() {}{
+    fn a() {}
+}
+";
+    assert!(
+        !super::conflict_well_formed(malformed.as_bytes(), Rust),
+        "extended floor must reject a duplicate-delimiter conflict"
+    );
+
+    // A balanced, parseable conflict (both resolved sides are valid Rust) passes.
+    let well_formed = "\
+<<<<<<< OURS
+fn foo() { 1 }
+=======
+fn foo() { 2 }
+>>>>>>> THEIRS
+";
+    assert!(
+        super::conflict_well_formed(well_formed.as_bytes(), Rust),
+        "extended floor must accept a well-formed conflict whose sides both parse"
+    );
+
+    // Structurally broken markers (an orphan `=======` with no open `<<<<<<<`)
+    // resolve to None → treated as not-well-formed.
+    let broken_markers = "fn a() {}\n=======\nfn b() {}\n";
+    assert!(
+        !super::conflict_well_formed(broken_markers.as_bytes(), Rust),
+        "extended floor must reject structurally broken conflict markers"
+    );
+}
+
+// Resolve a conflict-marked text into its two sides (take-ours, take-theirs) by
+// dropping the markers and the opposite side's hunks. Mirrors the marker shape
+// emitted by `heddle-merge::markers` / `emit_addadd_conflict`.
+fn resolve_both_sides(text: &str) -> [String; 2] {
+    #[derive(PartialEq)]
+    enum S {
+        Normal,
+        Ours,
+        Theirs,
+    }
+    let mut ours = String::new();
+    let mut theirs = String::new();
+    let mut state = S::Normal;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.strip_suffix('\n').unwrap_or(line);
+        if trimmed.starts_with("<<<<<<<") {
+            state = S::Ours;
+        } else if trimmed == "=======" {
+            state = S::Theirs;
+        } else if trimmed.starts_with(">>>>>>>") {
+            state = S::Normal;
+        } else {
+            match state {
+                S::Normal => {
+                    ours.push_str(line);
+                    theirs.push_str(line);
+                }
+                S::Ours => ours.push_str(line),
+                S::Theirs => theirs.push_str(line),
+            }
+        }
+    }
+    [ours, theirs]
+}
+
+// =====================================================================
 // Codex r5 P1 #1: `signature_hash_from_field` hashes the whole
 // `parameters` text — INCLUDING parameter NAMES. A pure parameter
 // rename on one side (`foo(x: u32)` → `foo(y: u32)`) changes

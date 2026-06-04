@@ -810,14 +810,37 @@ fn merge_container_3way(
     let bb = base.body.as_ref().expect("container");
     let ob = ours.body.as_ref().expect("container");
     let tb = theirs.body.as_ref().expect("container");
+
+    // The body's STRUCTURAL opening/closing delimiters (`{` / `}` for brace
+    // languages; empty for delimiter-less Python `block`s) are merged ONCE
+    // here and emitted around the woven children — never folded into the child
+    // weave. Folding them in let an empty base body, whose only inter-item
+    // range is the whole `{}`, re-emit each side's opening `{` in that side's
+    // first added-child slot: `mod foo {}` + ours adds `fn a` + theirs adds
+    // `fn b` produced two `{` (heddle#490 r6). With the delimiters peeled off,
+    // `merge_region` only ever weaves the inter-child content between
+    // `content_start` and `content_end`, so the opening delimiter is emitted
+    // exactly once for the region.
+    let (open, oc) = merge3_text(
+        &sides.base.as_bytes()[bb.inner_start..bb.content_start],
+        &sides.ours.as_bytes()[ob.inner_start..ob.content_start],
+        &sides.theirs.as_bytes()[tb.inner_start..tb.content_start],
+        markers,
+    );
     let (body, bc) = merge_region(
         sides,
         &bb.items,
         &ob.items,
         &tb.items,
-        (bb.inner_start, bb.inner_end),
-        (ob.inner_start, ob.inner_end),
-        (tb.inner_start, tb.inner_end),
+        (bb.content_start, bb.content_end),
+        (ob.content_start, ob.content_end),
+        (tb.content_start, tb.content_end),
+        markers,
+    );
+    let (close, cc) = merge3_text(
+        &sides.base.as_bytes()[bb.content_end..bb.inner_end],
+        &sides.ours.as_bytes()[ob.content_end..ob.inner_end],
+        &sides.theirs.as_bytes()[tb.content_end..tb.inner_end],
         markers,
     );
 
@@ -829,9 +852,11 @@ fn merge_container_3way(
     );
 
     let mut out = header;
+    out.extend_from_slice(&open);
     out.extend_from_slice(&body);
+    out.extend_from_slice(&close);
     out.extend_from_slice(&footer);
-    (Some(out), hc + bc + fc)
+    (Some(out), hc + oc + bc + cc + fc)
 }
 
 /// 3-way merge a slice of bytes (a base-anchored container header/footer).
