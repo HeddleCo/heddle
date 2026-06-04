@@ -50,7 +50,7 @@ CLI / Web UI
   -> immutable objects and hosted control-plane metadata
 ```
 
-Heddle is no longer best understood as a single `src/` tree. The repository is a Cargo workspace with separate crates for the local/client CLI, core types, repository helpers, refs, oplog, server, semantic analysis, bridge functionality, and the hosted server/admin binary.
+Heddle is no longer best understood as a single `src/` tree. The repository is a Cargo workspace with separate crates for the local/client CLI, core types, repository helpers, refs, oplog, semantic analysis, and bridge functionality. (The hosted server and admin binary moved to the sibling **weft** repo — see below.)
 
 ## Workspace Structure
 
@@ -61,16 +61,16 @@ crates/
   repo/      # repository operations and helpers
   refs/      # threads, markers, HEAD, packed refs
   oplog/     # undo/redo oplog logic
-  server/    # hosted server, admin/content APIs
-  hosted/    # hosted server/admin binary
-  heddle-bridge/    # Git interoperability
+  cli/src/bridge/   # Git interoperability (module within the cli crate)
   semantic/  # semantic diff and parser-heavy analysis
   ...
 docs/             # architecture, hosted model, roadmap, future-state plans
-web/              # SvelteKit marketing site and hosted app
 specs/            # Quint formal specifications
 tests/            # integration and property tests
 ```
+
+The hosted server now lives in the sibling **weft** repo and the SvelteKit web
+product in the sibling **tapestry** repo — neither is part of this workspace.
 
 ## Configuration Boundaries
 
@@ -78,13 +78,13 @@ Heddle uses separate config/state scopes instead of a single repository config f
 
 - `UserConfig` lives in the user's config directory and owns identity, agent defaults, output preferences, and client auth profiles
 - `RepoConfig` lives in `.heddle/config.toml` and owns repository-local behavior, storage coordinates, and remotes
-- `ServerConfig` lives with the hosted runtime and owns storage, database, auth, TLS, and admission settings
+- `ServerConfig` lives with the hosted runtime (in the sibling **weft** repo) and owns storage, database, auth, TLS, and admission settings
 - `WorktreeState` is checkout-local runtime state and should not be serialized into repo config
 
 Binary ownership follows the same split:
 
-- `heddle` owns local repository operations and hosted client access
-- `hosted` owns the hosted server runtime and hosted admin operations
+- `heddle` (this repo) owns local repository operations and hosted client access
+- the hosted server runtime and admin operations live in the sibling **weft** repo (no `hosted` binary in this workspace)
 
 ## Core Repository Model
 
@@ -273,7 +273,7 @@ Hosted Heddle has two major layers.
 
 ## Web Product Positioning In The Architecture
 
-The `web/` app is not a browser IDE. It is an emerging hosted product for:
+The web app (now in the sibling **tapestry** repo) is not a browser IDE. It is an emerging hosted product for:
 
 - repository inspection
 - namespace and access operations
@@ -308,10 +308,10 @@ Core state machines are specified in `specs/quint/` and mirrored by Rust propert
 
 ## Related Documentation
 
-- `SPEC.md` - formal behavior and storage/protocol truth
-- `docs/HOSTED_NAMESPACES.md` - hosted namespace and grant model
-- `docs/HOSTED_ADMIN.md` - hosted admin commands and API usage
-- `docs/ENTERPRISE_BACKEND_ROADMAP.md` - hosted platform roadmap
-- `docs/RUNNERS_AND_BUILDS.md` - hosted workflow and automation direction
-- `docs/LINE_PROVENANCE_PLAN.md` - provenance status and next-step roadmap
-- `web/PRODUCT_SPEC.md` - hosted web product scope and surface plan
+- `SPEC.md` in the sibling **weft** repo - formal behavior and storage/protocol truth
+- `docs/HOSTED_NAMESPACES.md` in the sibling **weft** repo - hosted namespace and grant model
+- `docs/HOSTED_ADMIN.md` in the sibling **weft** repo - hosted admin commands and API usage
+- `docs/ENTERPRISE_BACKEND_ROADMAP.md` in the sibling **weft** repo - hosted platform roadmap
+- `docs/RUNNERS_AND_BUILDS.md` in the sibling **weft** repo - hosted workflow and automation direction
+- `docs/LINE_PROVENANCE_PLAN.md` in the sibling **weft** repo - provenance status and next-step roadmap
+- `PRODUCT_SPEC.md` in the sibling **tapestry** repo - hosted web product scope and surface plan

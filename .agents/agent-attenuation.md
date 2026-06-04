@@ -215,14 +215,17 @@ boundary is:
 
 ## Where the server enforces this
 
-- Authority + attenuation blocks: `crates/server/src/biscuit.rs::attenuate`
-- Verifier rule pack: `crates/server/src/biscuit/rules.biscuit`
+The hosted server moved to the sibling **weft** repo; the paths below are
+relative to that repo's server crate.
+
+- Authority + attenuation blocks: `src/biscuit.rs::attenuate`
+- Verifier rule pack: `src/biscuit/rules.biscuit`
 - Per-request facts (`time`, `operation`, `resource`) injected in:
-  `crates/server/src/biscuit.rs::authorize`
+  `src/biscuit.rs::authorize`
 - Revocation cache (cascade-revoke via parent rev_id):
-  `crates/server/src/biscuit/cache.rs`
+  `src/biscuit/cache.rs`
 - Integration tests for chain-three-deep, expiry, and cascade
-  revoke: `tests/grpc_hosted_integration.rs::agent_attenuation_*`
+  revoke: `agent_attenuation_*` in weft's hosted-gRPC integration suite
 
 ## Token size
 

@@ -109,7 +109,7 @@ Two layers of path-conditioning, both CODEOWNERS-style globs:
   intersects. Empty = always fires.
 
 So you can write: "every merge to main needs 1 maintainer
-approval; if the diff touches `crates/server/src/biscuit/**`,
+approval; if the diff touches `crates/crypto/**`,
 *also* needs 1 approval from the `security-reviewers` group."
 
 If the caller passes `changed_paths: []` (we don't know what the
@@ -188,7 +188,7 @@ heddle thread approve feat/x main
 heddle thread approvals feat/x main
 
 # Query the gate
-heddle thread check-merge feat/x main --path crates/server/src/biscuit.rs
+heddle thread check-merge feat/x main --path crates/crypto/src/ed25519.rs
 
 # Take it back
 heddle thread revoke-approval <uuid>
@@ -236,14 +236,18 @@ diff touches crypto. Most-restrictive cumulative.
 
 ## Server-side touchpoints
 
+The hosted server moved to the sibling **weft** repo; the `src/...` paths below
+are relative to that repo's server crate (`crates/weft-server/`), and the schema
+path is relative to the weft repo root.
+
 | Concern | File |
 |---|---|
-| Glob matcher | `crates/server/src/access/glob.rs` |
-| Gate evaluator | `crates/server/src/access/merge_gate.rs` |
-| Policy + group SQL | `crates/server/src/pg_registry.rs` |
-| Admin RPC handlers | `crates/server/src/server/grpc_hosted_impl/admin.rs` |
-| Approval RPC handlers | `crates/server/src/server/grpc_hosted_impl/user.rs` |
-| Schema | `migrations/006_thread_policies.sql` |
+| Glob matcher | `src/access/glob.rs` |
+| Gate evaluator | `src/access/merge_gate.rs` |
+| Policy + group SQL | `src/pg_registry.rs` |
+| Policy + group admin RPC handlers | `src/server/grpc_hosted_impl/user.rs` (e.g. `create_thread_policy`, `create_approval_group`) |
+| Approval RPC handlers | `src/server/grpc_hosted_impl/user.rs` (e.g. `approve_thread`, `revoke_approval`) |
+| Schema | `migrations/003_governance.sql` |
 
 The whole role-inheritance + group-membership lattice fits in two
 helpers (`role_satisfies`, `namespace_covers`) and a recursive CTE

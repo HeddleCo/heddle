@@ -52,7 +52,7 @@ When making changes:
 
 ## Hosted Backend Changes
 
-1. Read `SPEC.md`, `docs/HOSTED_ADMIN.md`, and `docs/HOSTED_NAMESPACES.md` first
+1. Read `SPEC.md`, `docs/HOSTED_ADMIN.md`, and `docs/HOSTED_NAMESPACES.md` in the sibling **weft** repo first
 2. Keep durable metadata in Postgres and object content in shared object storage
 3. Prefer external/shared admission-control state for horizontally scaled behavior
 4. Add targeted tests for hosted authz, admin surfaces, and feature-gated Postgres paths
@@ -64,15 +64,17 @@ Content routes live in the hosted server implementation and are intercepted befo
 1. Add the new content query/helper in the relevant hosted server module
 2. Wire it into both filesystem-backed and Postgres-backed paths if both modes are supported
 3. Add or update route interception for the content prefix if needed
-4. Add the corresponding typed method to `web/src/lib/server/api.ts`
-5. Create or update `+page.server.ts` in the relevant SvelteKit route to call the new method
+4. Add the corresponding typed method to the server-side API client in the sibling **tapestry** repo
+5. Create or update the relevant SvelteKit server loader in tapestry to call the new method
 
-Keep the implementation model consistent with the owning server path. Before changing sync/async boundaries, read the hosted server architecture docs and the current module shape.
+Keep the implementation model consistent with the owning server path. Before changing sync/async boundaries, read the hosted server architecture docs and the current module shape. Note the hosted server now lives in the sibling **weft** repo and the SvelteKit web product in **tapestry**.
 
 ## Wiring a New Web Page
 
-1. Create `+page.server.ts` (not `+page.ts`) in the route directory — server-only loaders keep API creds server-side
-2. Import `api` from `$lib/server/api` and call the appropriate content/admin methods
+> The SvelteKit web product lives in the sibling **tapestry** repo. The steps below describe its loader conventions; make the edits there, not in this workspace.
+
+1. Create a `+page.server.ts` (not `+page.ts`) in the route directory — server-only loaders keep API creds server-side
+2. Import the server-side `api` client and call the appropriate content/admin methods
 3. Handle errors with `throw error(status, message)` from `@sveltejs/kit`
 4. Wrap parallel fetches in `Promise.all([...]).catch(...)` for graceful degradation
 5. Update the corresponding `+page.svelte` to use the new `PageData` shape from `./$types`

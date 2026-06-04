@@ -147,18 +147,11 @@ docker run --rm heddle-enterprise-backend:test --help
 
 ## Web App (SvelteKit)
 
-```bash
-cd web
-bun install          # Install dependencies
-bun run dev          # Dev server (default port 5173)
-bun run build        # Production build
-bun run preview      # Preview production build
-npx svelte-check     # Type-check all Svelte + TS files
-```
-
-Environment variables for the web app (`.env` in `web/`):
-```
-HEDDLE_API_URL=http://localhost:8080    # Rust server base URL
-HEDDLE_API_TOKEN=<admin-token>          # Static admin token
-HEDDLE_SERVER_BISCUIT_PRIVATE_KEY=<pem> # Server-side only; used by hosted for Biscuit signing
-```
+The SvelteKit web product moved to the sibling **tapestry** repo and is no longer
+part of this workspace. Run its dev/build/check commands (`bun install`,
+`bun run dev`, `bun run build`, `npx svelte-check`) and configure its `.env`
+(`HEDDLE_API_URL`, `HEDDLE_API_TOKEN`) from within the tapestry repo. The hosted
+Rust server it talks to lives in **weft**; its server secrets — including the
+Biscuit signing keypair (`HEDDLE_SERVER_BISCUIT_PRIVATE_KEY` /
+`HEDDLE_SERVER_BISCUIT_PUBLIC_KEYS`) — belong in weft's hosted config, not
+tapestry's web `.env`.
