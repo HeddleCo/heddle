@@ -160,31 +160,26 @@ pub(crate) fn reconstruct_merged_file(
         }
     }
 
-    // Structural (physical) scope of each match-key — the chain of
-    // module/impl/trait/class bodies the item sits inside. Distinct from
-    // `ItemKey::scope` (the logical match scope). Base wins when present so
-    // matched items keep a stable placement; otherwise the adding side's
-    // nesting is used.
-    let mut struct_scope_of: BTreeMap<MatchKey, &[String]> = BTreeMap::new();
-    // Instance-annotated structural scope: the same path with each level
-    // tagged by a per-prefix occurrence index that distinguishes a scope
-    // closed and *reopened* around an intervening item. Built per side in
-    // source order (see `scope_instances`); base wins for matched keys — the
-    // same priority as `struct_scope_of` — so a matched block keeps a stable
-    // instance and an added block gets its own. The grouping below keys on
-    // this, not the bare name, so two reopened `namespace N {}` (or `mod m`)
-    // blocks separated by a top-level item are NOT collapsed into one group
-    // and reordered across that item (heddle#484 P1).
+    // Instance-annotated structural scope of each match-key — the chain of
+    // module/impl/trait/class bodies the item sits inside, with each level
+    // tagged by the source-order ordinal of the concrete container span it
+    // physically lives in (see [`Item::struct_scope_inst`], assigned from the
+    // real parse spans in `items.rs`). Distinct from `ItemKey::scope` (the
+    // logical match scope). Base wins when present so matched items keep a
+    // stable placement; otherwise the adding side's nesting is used. Both the
+    // emit-order grouping AND the brace-weave depth below key on this — never
+    // the bare name — so two reopened `impl Foo {}` / `namespace N {}` blocks
+    // stay distinct no matter what separates them (nothing, a comment,
+    // whitespace, or a top-level item), and a clean merge never collapses or
+    // reorders one reopened block across another (heddle#484).
     let mut struct_scope_inst_of: BTreeMap<MatchKey, Vec<(String, usize)>> = BTreeMap::new();
     for (mks, seg) in [
         (&theirs_mks, theirs_segments),
         (&ours_mks, ours_segments),
         (&base_mks, base_segments),
     ] {
-        let instances = scope_instances(seg);
-        for ((mk, item), instance) in mks.iter().zip(seg.items.iter()).zip(instances) {
-            struct_scope_of.insert(mk.clone(), item.struct_scope.as_slice());
-            struct_scope_inst_of.insert(mk.clone(), instance);
+        for (mk, item) in mks.iter().zip(seg.items.iter()) {
+            struct_scope_inst_of.insert(mk.clone(), item.struct_scope_inst.clone());
         }
     }
 
@@ -240,18 +235,29 @@ pub(crate) fn reconstruct_merged_file(
         side_ranges[2].len() - 1,
     ];
     let mut output: Vec<u8> = Vec::new();
-    let empty_scope: &[String] = &[];
-    let mut prev_struct: &[String] = empty_scope;
+    let empty_scope: &[(String, usize)] = &[];
+    let mut prev_struct: &[(String, usize)] = empty_scope;
     let mut prev_key: Option<&MatchKey> = None;
 
     for key in item_emit_order.iter() {
-        let y_struct = struct_scope_of.get(key).copied().unwrap_or(empty_scope);
+        let y_struct = struct_scope_inst_of
+            .get(key)
+            .map(Vec::as_slice)
+            .unwrap_or(empty_scope);
         // Containers the gap before this item should structurally close /
         // open: the depths dropped from / added to the previously-emitted
         // item's scope, relative to the scope they share. A side whose own
         // preceding item sat at a different depth (because the merged
         // predecessor was inserted from another side) carries extra braces
         // in its raw gap; those are trimmed so each `{`/`}` is emitted once.
+        //
+        // Crucially this depth is over the INSTANCE-tagged scope: a level
+        // matches only when both its name and its container-instance ordinal
+        // match. So the gap between two reopened same-name containers
+        // (`impl Foo {…}` then `impl Foo {…}`) sees `needed_exits ==
+        // needed_enters == 1` — closing the first and opening the second —
+        // instead of the name-only `0`/`0` that made `trim_redundant_structure`
+        // drop both braces and silently collapse the blocks (heddle#484).
         let common = common_prefix_len(prev_struct, y_struct);
         let needed_exits = prev_struct.len() - common;
         let needed_enters = y_struct.len() - common;
@@ -364,8 +370,14 @@ fn inter_slice<'a>(source: &'a str, ranges: &[(usize, usize)], idx: usize) -> &'
     &source[start..end]
 }
 
-/// Length of the shared leading prefix of two scope paths.
-fn common_prefix_len(a: &[String], b: &[String]) -> usize {
+/// Length of the shared leading prefix of two *instance-tagged* scope paths.
+/// A level matches only when BOTH its container name and its source-order
+/// instance ordinal match, so two reopened same-name containers share a prefix
+/// length of 0 at that level — forcing the gap between them to close one
+/// container and open the other rather than be trimmed as redundant (heddle#484:
+/// the back-to-back / comment- / whitespace-separated reopens that a name-only
+/// prefix silently collapsed).
+fn common_prefix_len(a: &[(String, usize)], b: &[(String, usize)]) -> usize {
     a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
 }
 
@@ -433,49 +445,11 @@ fn trim_redundant_structure<'a>(
     &source[start..end]
 }
 
-/// Annotate every item on one side with its *instance-tagged* structural
-/// scope: the physical scope path, but each level paired with a per-prefix
-/// occurrence index that counts how many times that exact scope-prefix has
-/// been entered, in source order, on this side.
-///
-/// A prefix is "entered" whenever the previous item did not already sit
-/// inside it at the same depth — i.e. the first item of a block, or the
-/// first item after the scope was left and reopened. So in
-/// `namespace N { a } top(); namespace N { b }` the `a` gets `[("N", 0)]`
-/// and the `b` gets `[("N", 1)]`: the intervening top-level `top()` ends the
-/// first run, and the second `namespace N` opens a new instance. Two items
-/// that share an instance at every level are physically in the same block;
-/// grouping on this distinguishes reopened blocks the bare name would
-/// collapse (heddle#484 P1). Returned in `seg.items` order.
-fn scope_instances(seg: &FileSegments) -> Vec<Vec<(String, usize)>> {
-    let mut run_index: BTreeMap<Vec<String>, usize> = BTreeMap::new();
-    let mut prev: &[String] = &[];
-    let mut out = Vec::with_capacity(seg.items.len());
-    for item in &seg.items {
-        let scope = item.struct_scope.as_slice();
-        let mut annotated = Vec::with_capacity(scope.len());
-        for d in 0..scope.len() {
-            let prefix = &scope[..=d];
-            // Same block we were already in at this depth → reuse its index;
-            // otherwise this is a fresh entry into the prefix, so bump it.
-            let same_as_prev = prev.len() > d && &prev[..=d] == prefix;
-            if !same_as_prev {
-                let slot = run_index.entry(prefix.to_vec()).or_insert(usize::MAX);
-                *slot = slot.wrapping_add(1);
-            }
-            let idx = run_index.get(prefix).copied().unwrap_or(0);
-            annotated.push((scope[d].clone(), idx));
-        }
-        prev = scope;
-        out.push(annotated);
-    }
-    out
-}
-
 /// Re-order a flat emit order so items physically nested in the same
 /// container *instance* are contiguous, yielding a valid pre-order over the
 /// structural scope tree. Items are grouped one level at a time by their
-/// instance-tagged scope (see [`scope_instances`]), preserving
+/// instance-tagged scope ([`Item::struct_scope_inst`], derived from the real
+/// parse spans in `items.rs`), preserving
 /// first-appearance order of groups and of items within a group, then each
 /// group recurses one level deeper. Keying on `(name, instance)` rather than
 /// the bare name keeps a reopened scope a distinct group, so a clean merge

@@ -5437,3 +5437,169 @@ impl Foo {
         "top-level fn must sit between the two impl blocks:\n{merged}"
     );
 }
+
+// =====================================================================
+// heddle#484 close-the-class — REOPENED same-name container SEPARATOR
+// MATRIX. Round 1 only distinguished two reopened blocks when a top-level
+// *item* sat between them (the heuristic keyed instance identity off
+// neighbouring items' scopes). It could NOT see a close→reopen boundary
+// when the blocks were back-to-back, comment-separated, or whitespace-
+// separated — `struct_scope` carries no signal there — so the brace-weave
+// computed `needed_exits == needed_enters == 0` and `trim_redundant_structure`
+// dropped the intervening `}` / `{` (and any comment), silently collapsing
+// the second block into the first.
+//
+// The structural fix derives each item's container instance from the real
+// parse span (`Item::struct_scope_inst`), so EVERY separator yields distinct
+// instances by construction. This matrix pins that: for each separator, a
+// clean disjoint merge (ours adds to block 1, theirs to block 2) must keep
+// the two blocks distinct, preserve the braces + any separator text, re-parse
+// with the conserved item set, and keep source order. A regression in ANY
+// cell fails CI.
+//
+// Fail-pre / pass-post: on the pre-fix tree (name-only brace depth) the
+// back-to-back and whitespace/comment cells collapse to a SINGLE `impl Foo`,
+// so the `count() == 2` assertion fails; with the span-instance fix they pass.
+// =====================================================================
+
+/// A reopened-`impl Foo` base/ours/theirs triple whose two blocks are joined
+/// by `sep` (placed between block 1's closing `}` and block 2's `impl`). ours
+/// adds `fn a2` to the first block; theirs adds `fn b2` to the second — a
+/// disjoint, clean merge.
+fn impl_reopen_triple(sep: &str) -> (String, String, String) {
+    let base = format!(
+        "struct Foo;\n\nimpl Foo {{\n    fn a(&self) {{}}\n}}{sep}impl Foo {{\n    fn b(&self) {{}}\n}}\n"
+    );
+    let ours = format!(
+        "struct Foo;\n\nimpl Foo {{\n    fn a(&self) {{}}\n    fn a2(&self) {{}}\n}}{sep}impl Foo {{\n    fn b(&self) {{}}\n}}\n"
+    );
+    let theirs = format!(
+        "struct Foo;\n\nimpl Foo {{\n    fn a(&self) {{}}\n}}{sep}impl Foo {{\n    fn b(&self) {{}}\n    fn b2(&self) {{}}\n}}\n"
+    );
+    (base, ours, theirs)
+}
+
+#[test]
+fn conformance_484_reopened_rust_impl_separator_matrix() {
+    // (label, separator between block 1's `}` and block 2's `impl`).
+    let cases: &[(&str, &str)] = &[
+        ("back-to-back", "\n"),
+        ("whitespace-separated", "\n\n"),
+        ("comment-separated", "\n// section\n"),
+        ("item-separated", "\n\nfn top_level() {}\n\n"),
+    ];
+    for (label, sep) in cases {
+        let (base, ours, theirs) = impl_reopen_triple(sep);
+        let merged = assert_conformant(&base, &ours, &theirs);
+        // The two reopened blocks stay distinct — the core invariant the
+        // collapse violated. Pre-fix the non-item separators fold this to 1.
+        assert_eq!(
+            merged.matches("impl Foo").count(),
+            2,
+            "[{label}] reopened impls collapsed:\n{merged}"
+        );
+        // Both disjoint additions landed.
+        assert!(
+            merged.contains("fn a2(&self) {}"),
+            "[{label}] ours add lost:\n{merged}"
+        );
+        assert!(
+            merged.contains("fn b2(&self) {}"),
+            "[{label}] theirs add lost:\n{merged}"
+        );
+        // Source order: a2 belongs to the first block (before the second
+        // `impl`), b2 to the second (after it).
+        let second_impl = merged.rfind("impl Foo").unwrap();
+        assert!(
+            merged.find("fn a2(&self) {}").unwrap() < second_impl,
+            "[{label}] a2 escaped the first block:\n{merged}"
+        );
+        assert!(
+            merged.find("fn b2(&self) {}").unwrap() > second_impl,
+            "[{label}] b2 escaped the second block:\n{merged}"
+        );
+        // The separator text is preserved verbatim where it carries content.
+        if sep.contains("// section") {
+            assert_eq!(
+                merged.matches("// section").count(),
+                1,
+                "[{label}] comment separator dropped/duplicated:\n{merged}"
+            );
+        }
+        if sep.contains("fn top_level") {
+            let first_impl = merged.find("impl Foo").unwrap();
+            let top = merged.find("fn top_level()").unwrap();
+            assert!(
+                first_impl < top && top < second_impl,
+                "[{label}] top-level item must stay between the blocks:\n{merged}"
+            );
+        }
+    }
+}
+
+// C++ `namespace N {…} namespace N {…}` is the same close-the-class shape in
+// another language; gated behind `lang-cpp` like the sibling reopen test.
+#[cfg(feature = "lang-cpp")]
+fn namespace_reopen_triple(sep: &str) -> (String, String, String) {
+    let base = format!("namespace N {{\nvoid a() {{}}\n}}{sep}namespace N {{\nvoid b() {{}}\n}}\n");
+    let ours = format!(
+        "namespace N {{\nvoid a() {{}}\nvoid a2() {{}}\n}}{sep}namespace N {{\nvoid b() {{}}\n}}\n"
+    );
+    let theirs = format!(
+        "namespace N {{\nvoid a() {{}}\n}}{sep}namespace N {{\nvoid b() {{}}\nvoid b2() {{}}\n}}\n"
+    );
+    (base, ours, theirs)
+}
+
+#[cfg(feature = "lang-cpp")]
+#[test]
+fn conformance_484_reopened_cpp_namespace_separator_matrix() {
+    let cases: &[(&str, &str)] = &[
+        ("back-to-back", "\n"),
+        ("whitespace-separated", "\n\n"),
+        ("comment-separated", "\n// section\n"),
+        ("item-separated", "\n\nint top_level() { return 0; }\n\n"),
+    ];
+    for (label, sep) in cases {
+        let (base, ours, theirs) = namespace_reopen_triple(sep);
+        let merged =
+            assert_conformant_at(&base, &ours, &theirs, "f.cpp", crate::parser::Language::Cpp);
+        assert_eq!(
+            merged.matches("namespace N").count(),
+            2,
+            "[{label}] reopened namespaces collapsed:\n{merged}"
+        );
+        assert!(
+            merged.contains("void a2() {}"),
+            "[{label}] ours add lost:\n{merged}"
+        );
+        assert!(
+            merged.contains("void b2() {}"),
+            "[{label}] theirs add lost:\n{merged}"
+        );
+        let second_ns = merged.rfind("namespace N").unwrap();
+        assert!(
+            merged.find("void a2() {}").unwrap() < second_ns,
+            "[{label}] a2 escaped the first block:\n{merged}"
+        );
+        assert!(
+            merged.find("void b2() {}").unwrap() > second_ns,
+            "[{label}] b2 escaped the second block:\n{merged}"
+        );
+        if sep.contains("// section") {
+            assert_eq!(
+                merged.matches("// section").count(),
+                1,
+                "[{label}] comment separator dropped/duplicated:\n{merged}"
+            );
+        }
+        if sep.contains("top_level") {
+            let first_ns = merged.find("namespace N").unwrap();
+            let top = merged.find("int top_level()").unwrap();
+            assert!(
+                first_ns < top && top < second_ns,
+                "[{label}] top-level item must stay between the blocks:\n{merged}"
+            );
+        }
+    }
+}

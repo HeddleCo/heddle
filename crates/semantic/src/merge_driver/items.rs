@@ -70,6 +70,17 @@ pub(crate) struct Item {
     /// (heddle#484: cross-side additions at different depths must not strand
     /// a child outside its module).
     pub struct_scope: Vec<String>,
+    /// `struct_scope` with each level paired to the *source-order ordinal of
+    /// the concrete [`ContainerSpan`]* the item physically sits inside at that
+    /// depth. A container closed and reopened under the same name is a
+    /// different source span, so it draws a fresh ordinal — making two
+    /// back-to-back (or comment-/whitespace-separated) `impl Foo {…} impl Foo
+    /// {…}` blocks distinct *by construction*. This is the seam that
+    /// reconstruction keys both its emit-order grouping AND its brace-weave
+    /// depth on, so no arrangement of reopened same-name containers can
+    /// collapse. Derived in [`assign_struct_scope_instances`] from the real
+    /// spans — never inferred from neighbouring items' scopes (heddle#484).
+    pub struct_scope_inst: Vec<(String, usize)>,
 }
 
 /// A structural container (`mod`/`impl`/`trait`/`class` … with a body) and
@@ -118,6 +129,10 @@ impl FileSegments {
 fn extract_items_and_containers(parsed: &ParsedFile) -> (Vec<Item>, Vec<ContainerSpan>) {
     let mut items = Vec::new();
     let mut containers = Vec::new();
+    // Full scope-prefix (outermost-first names) of each container, parallel to
+    // `containers`. Lets the post-pass tag each item with the real container
+    // instance it sits inside without re-deriving nesting from item adjacency.
+    let mut container_prefixes = Vec::new();
     let root = parsed.root_node();
     collect_items(
         parsed.language,
@@ -126,11 +141,64 @@ fn extract_items_and_containers(parsed: &ParsedFile) -> (Vec<Item>, Vec<Containe
         &[],
         &mut items,
         &mut containers,
+        &mut container_prefixes,
     );
     // Items can be reported in any DFS order; ensure source order for
     // deterministic reconstruction.
     items.sort_by_key(|item| item.start_byte);
+    assign_struct_scope_instances(&mut items, &containers, &container_prefixes);
     (items, containers)
+}
+
+/// Tag every item with its [`Item::struct_scope_inst`]: for each enclosing
+/// container span, pair the container's own name with the source-order ordinal
+/// of that span among containers sharing its full scope-prefix.
+///
+/// Two same-name containers that close and reopen are distinct source spans, so
+/// they draw distinct ordinals — the invariant that makes back-to-back /
+/// comment- / whitespace-separated reopens impossible to collapse. Ordinals are
+/// assigned in source order (by opening brace) so a side that merely *adds* an
+/// item to an existing container reproduces the same ordinals as base, keeping
+/// matched and added items in the same instance group across sides.
+fn assign_struct_scope_instances(
+    items: &mut [Item],
+    containers: &[ContainerSpan],
+    prefixes: &[Vec<String>],
+) {
+    // Source-order ordinal per full container prefix.
+    let mut source_order: Vec<usize> = (0..containers.len()).collect();
+    source_order.sort_by_key(|&i| containers[i].open);
+    let mut per_prefix_count: HashMap<&[String], usize> = HashMap::new();
+    let mut ordinal_of = vec![0usize; containers.len()];
+    for &i in &source_order {
+        let count = per_prefix_count.entry(prefixes[i].as_slice()).or_insert(0);
+        ordinal_of[i] = *count;
+        *count += 1;
+    }
+    // Each item's enclosing containers (real span containment), outermost
+    // first. This is the same nesting chain as `struct_scope`, so we pair each
+    // authoritative scope name with the source-order ordinal of the real span
+    // it sits in — the instance is read off the span, never inferred from
+    // neighbouring items.
+    for item in items.iter_mut() {
+        let mut enclosing: Vec<usize> = (0..containers.len())
+            .filter(|&i| {
+                containers[i].open <= item.start_byte && item.start_byte < containers[i].close
+            })
+            .collect();
+        enclosing.sort_by_key(|&i| containers[i].open);
+        debug_assert_eq!(
+            enclosing.len(),
+            item.struct_scope.len(),
+            "span-derived nesting must match struct_scope depth"
+        );
+        item.struct_scope_inst = item
+            .struct_scope
+            .iter()
+            .zip(enclosing.iter())
+            .map(|(name, &ci)| (name.clone(), ordinal_of[ci]))
+            .collect();
+    }
 }
 
 /// Top-level entry: segment a parsed file into items + record the source
@@ -158,6 +226,7 @@ fn collect_items(
     base_scope: &[String],
     out: &mut Vec<Item>,
     containers: &mut Vec<ContainerSpan>,
+    container_prefixes: &mut Vec<Vec<String>>,
 ) {
     // Iterative DFS over the AST. Avoids the unbounded recursion shape
     // a deeply-parseable file could otherwise trigger — collect_items
@@ -191,6 +260,7 @@ fn collect_items(
                         open: body.start_byte(),
                         close: body.end_byte(),
                     });
+                    container_prefixes.push(next_scope.clone());
                     stack.push((body, Rc::new(next_scope), depth + 1));
                 } else {
                     let struct_scope = (*scope).clone();
@@ -214,6 +284,9 @@ fn collect_items(
                         end_byte: child.end_byte(),
                         use_identity,
                         struct_scope,
+                        // Filled by `assign_struct_scope_instances` once all
+                        // container spans are known.
+                        struct_scope_inst: Vec::new(),
                     });
                 }
             } else {
