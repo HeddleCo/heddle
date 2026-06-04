@@ -21,7 +21,7 @@ mod reconstruct;
 #[cfg(test)]
 mod tests;
 
-use items::segment_file;
+use items::{InstanceAlignment, align_container_instances, segment_file};
 use reconstruct::reconstruct_merged_file;
 
 /// Three-way merge of `base`, `ours`, `theirs` using AST-defined item boundaries
@@ -113,6 +113,21 @@ pub fn semantic_three_way_merge(
         if !addadd_in_empty_base {
             return text_hunk_merge_with_markers(base, ours, theirs, markers);
         }
+    }
+
+    // Anchor each side's container-instance ordinals to base spans so a
+    // prepended / appended / reordered same-name container keeps an identity
+    // distinct from the matched base block (heddle#484 r3, part 1). When the
+    // matched-item correspondence is non-bijective — a side merged two base
+    // containers into one, split one across two, or moved a matched item
+    // between containers — the instance model cannot decide whether two
+    // same-name spans are one instance or two. Rather than risk a silent
+    // collapse, route to the textual conflict path: a conflict the user
+    // resolves is safe; a silent collapse is the P0 (part 2).
+    if let InstanceAlignment::Ambiguous =
+        align_container_instances(&base_segments, &mut ours_segments, &mut theirs_segments)
+    {
+        return text_hunk_merge_with_markers(base, ours, theirs, markers);
     }
 
     reconstruct_merged_file(

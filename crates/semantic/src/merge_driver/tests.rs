@@ -5603,3 +5603,364 @@ fn conformance_484_reopened_cpp_namespace_separator_matrix() {
         }
     }
 }
+
+// C++ analogue of the cross-side container-alignment matrix: one side prepends
+// a new same-name `namespace N` before the existing base block. Gated behind
+// `lang-cpp` like the sibling reopen tests; the alignment it exercises is
+// language-agnostic (also covered by the default-feature Rust cases above).
+#[cfg(feature = "lang-cpp")]
+#[test]
+fn conformance_484_r3_cross_side_cpp_namespace_prepend_no_collapse() {
+    // base has one `namespace N { void b(); }`. ours prepends a NEW
+    // `namespace N { void a(); }`; theirs edits b's body. Pre-fix the
+    // prepended block collapsed into the base block.
+    let base = "namespace N {\nvoid b() {}\n}\n";
+    let ours = "namespace N {\nvoid a() {}\n}\n\nnamespace N {\nvoid b() {}\n}\n";
+    let theirs = "namespace N {\nvoid b() { int x = 1; }\n}\n";
+    let merged = assert_conformant_at(base, ours, theirs, "f.cpp", crate::parser::Language::Cpp);
+    assert_eq!(
+        merged.matches("namespace N").count(),
+        2,
+        "prepended namespace collapsed into base block:\n{merged}"
+    );
+    assert!(merged.contains("void a() {}"), "ours add lost:\n{merged}");
+    assert!(
+        merged.contains("void b() { int x = 1; }"),
+        "theirs body edit lost:\n{merged}"
+    );
+    assert!(
+        merged.find("void a()").unwrap() < merged.find("void b()").unwrap(),
+        "prepended block must precede the base block:\n{merged}"
+    );
+}
+
+// =====================================================================
+// heddle#484 r3 (Codex P1, items.rs container-instance identity) —
+// CROSS-SIDE ordinal alignment. Round 2 made `struct_scope_inst` ordinals
+// span-derived, but counted them *independently within each side*. That is
+// correct within a side yet NOT aligned across sides: when one side
+// prepends a new same-name container before an existing base container,
+// the prepended block draws ordinal 0 on that side while the matched base
+// block (still 0 in base) becomes 1 — so reconstruction paired base's
+// matched block with the side's *prepended* block (both "Foo#0"), trimmed
+// the close/reopen gap, and collapsed two physically-distinct `impl Foo`
+// blocks into one silently-clean (wrong) merge.
+//
+// The fix anchors matched-container ordinals to the BASE span (a container
+// holding matched base items inherits that base container's ordinal) and
+// gives an *added* container a fresh ordinal above the base range, so a
+// prepended/appended/reordered same-name container keeps an identity
+// distinct from the matched base block. These cases must merge CLEAN with
+// no collapse; the standard conformance invariants (item-set + nesting
+// conserved, no duplicated lines, output re-parses) hold throughout.
+// =====================================================================
+
+#[test]
+fn repro_484_r3_prepend_new_impl_before_base_block_no_collapse() {
+    // THE named base case from the finding. base has one `impl Foo { fn b }`.
+    // ours prepends a NEW `impl Foo { fn a }` before it; theirs edits fn b's
+    // body (a disjoint change so reconstruction actually runs). Pre-fix the
+    // prepended block and the base block collapse into a single `impl Foo`.
+    let base = "\
+struct Foo;
+
+impl Foo {
+    fn b(&self) {}
+}
+";
+    let ours = "\
+struct Foo;
+
+impl Foo {
+    fn a(&self) {}
+}
+
+impl Foo {
+    fn b(&self) {}
+}
+";
+    let theirs = "\
+struct Foo;
+
+impl Foo {
+    fn b(&self) { let _ = 1; }
+}
+";
+    let merged = assert_conformant(base, ours, theirs);
+    // Two distinct impl blocks survive — the prepended one did NOT collapse
+    // into the base block.
+    assert_eq!(
+        merged.matches("impl Foo").count(),
+        2,
+        "prepended impl collapsed into base block:\n{merged}"
+    );
+    assert!(merged.contains("fn a(&self) {}"), "ours add lost:\n{merged}");
+    assert!(
+        merged.contains("fn b(&self) { let _ = 1; }"),
+        "theirs body edit lost:\n{merged}"
+    );
+    // Source order: the prepended `fn a` block comes before the `fn b` block.
+    assert!(
+        merged.find("fn a(&self) {}").unwrap() < merged.find("fn b(&self)").unwrap(),
+        "prepended block must precede the base block:\n{merged}"
+    );
+}
+
+#[test]
+fn conformance_484_r3_cross_side_container_alignment_matrix() {
+    // Each case is a same-name-container arrangement that the per-side
+    // ordinal count mis-aligned. All must merge CLEAN and conformant.
+    // (label, base, ours, theirs).
+    let cases: &[(&str, &str, &str, &str)] = &[
+        // ours PREPENDS a new impl before the base block; theirs edits base.
+        (
+            "prepend",
+            "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n",
+            "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n",
+            "struct Foo;\n\nimpl Foo {\n    fn b(&self) { let _ = 1; }\n}\n",
+        ),
+        // ours APPENDS a new impl after the base block; theirs edits base.
+        (
+            "append",
+            "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n",
+            "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n\nimpl Foo {\n    fn a(&self) {}\n}\n",
+            "struct Foo;\n\nimpl Foo {\n    fn b(&self) { let _ = 1; }\n}\n",
+        ),
+        // BOTH sides add a different same-name container (ours before, theirs
+        // after the base block).
+        (
+            "both-add-different",
+            "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n",
+            "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n",
+            "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n\nimpl Foo {\n    fn c(&self) {}\n}\n",
+        ),
+    ];
+    for (label, base, ours, theirs) in cases {
+        let merged = assert_conformant(base, ours, theirs);
+        // Every added/base method survives somewhere in an `impl Foo` scope.
+        for needle in ["fn a", "fn b"] {
+            assert!(
+                merged.contains(needle),
+                "[{label}] {needle} lost:\n{merged}"
+            );
+        }
+        // Output is well-formed Rust (no stray/unbalanced braces from a
+        // mis-trimmed reopen gap).
+        assert!(
+            crate::parser::ParsedFile::parse(&merged, crate::parser::Language::Rust).is_some(),
+            "[{label}] unparseable merge:\n{merged}"
+        );
+    }
+}
+
+#[test]
+fn repro_484_r3_reordered_container_bails_no_silent_collapse() {
+    // ours REORDERS the two same-name `impl Foo` blocks (swaps a-block and
+    // b-block); theirs edits the first block disjointly. The matched
+    // containers' source order disagrees with base, so the brace-weave cannot
+    // place the `}` / `impl Foo {` boundaries cleanly. Pre-fix this produced a
+    // CLEAN but UNPARSEABLE file (a dropped `}`). The instance model bails to
+    // the textual path: the result either conflicts or re-parses with both
+    // blocks intact — never a silent corruption.
+    let base = "\
+struct Foo;
+
+impl Foo {
+    fn a(&self) {}
+}
+
+impl Foo {
+    fn b(&self) {}
+}
+";
+    let ours = "\
+struct Foo;
+
+impl Foo {
+    fn b(&self) {}
+}
+
+impl Foo {
+    fn a(&self) {}
+}
+";
+    let theirs = "\
+struct Foo;
+
+impl Foo {
+    fn a(&self) { let _ = 1; }
+}
+
+impl Foo {
+    fn b(&self) {}
+}
+";
+    let outcome = merge_rust(base, ours, theirs);
+    let text = match outcome {
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            conflict_count,
+        } => {
+            assert!(conflict_count >= 1);
+            String::from_utf8(merged_bytes_with_markers).unwrap()
+        }
+        MergeOutcome::Clean(bytes) => {
+            let text = String::from_utf8(bytes).unwrap();
+            // A clean outcome must be well-formed (no dropped brace) — the
+            // pre-fix corruption produced an UNPARSEABLE clean merge.
+            assert!(
+                crate::parser::ParsedFile::parse(&text, crate::parser::Language::Rust).is_some(),
+                "clean merge is unparseable (silent corruption):\n{text}"
+            );
+            text
+        }
+        other => panic!("unexpected outcome: {other:?}"),
+    };
+    assert!(text.contains("fn a(&self)"), "fn a lost:\n{text}");
+    assert!(text.contains("fn b(&self)"), "fn b lost:\n{text}");
+}
+
+// =====================================================================
+// heddle#484 r3 part 2 — DETECT-AND-BAIL safety net. The instance model
+// pairs a side container with a base container via the matched items inside
+// it. When a side *merges* two base containers into one (its single block
+// holds items matched to two different base blocks) or *splits* one base
+// container across two side blocks, the correspondence is non-bijective:
+// the reconstructor cannot decide whether the spans are one instance or
+// two. Rather than emit a silently-clean collapse, it must route the file
+// to the textual conflict path — a conflict the user resolves is safe; a
+// silent collapse is the P0. The bail is NARROW: the add-before/add-after/
+// reorder cases above stay clean (they yield a bijection).
+// =====================================================================
+
+#[test]
+fn repro_484_r3_ambiguous_block_merge_bails_to_conflict() {
+    // base has TWO `impl Foo` blocks. ours MERGES them into one block (its
+    // single `impl Foo` now holds both `a` and `b`, matched to two distinct
+    // base blocks) AND edits a's body; theirs edits a's body differently and
+    // keeps the two blocks. The container-instance correspondence is
+    // ambiguous (one ours-block ↦ two base-blocks), so we must NOT emit a
+    // clean collapse. We bail to text_hunk_merge, whose overlapping edits to
+    // a's line surface a conflict.
+    let base = "\
+struct Foo;
+
+impl Foo {
+    fn a(&self) -> u32 { 0 }
+}
+
+impl Foo {
+    fn b(&self) {}
+}
+";
+    let ours = "\
+struct Foo;
+
+impl Foo {
+    fn a(&self) -> u32 { 9 }
+    fn b(&self) {}
+}
+";
+    let theirs = "\
+struct Foo;
+
+impl Foo {
+    fn a(&self) -> u32 { 1 }
+}
+
+impl Foo {
+    fn b(&self) {}
+}
+";
+    let outcome = merge_rust(base, ours, theirs);
+    // Never a silent collapse: the outcome is EITHER a conflict (markers
+    // present) OR a clean merge that re-parses with both methods intact.
+    match outcome {
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            conflict_count,
+        } => {
+            let text = String::from_utf8(merged_bytes_with_markers).unwrap();
+            assert!(conflict_count >= 1, "expected a real conflict");
+            assert!(
+                text.contains("<<<<<<<") && text.contains(">>>>>>>"),
+                "conflict markers missing:\n{text}"
+            );
+            // No block silently dropped.
+            assert!(text.contains("fn a(&self)"), "fn a lost:\n{text}");
+            assert!(text.contains("fn b(&self)"), "fn b lost:\n{text}");
+        }
+        MergeOutcome::Clean(bytes) => {
+            let text = String::from_utf8(bytes).unwrap();
+            // A clean outcome is only acceptable if it did NOT collapse —
+            // both methods present and the file re-parses.
+            assert!(
+                crate::parser::ParsedFile::parse(&text, crate::parser::Language::Rust).is_some(),
+                "clean merge is unparseable:\n{text}"
+            );
+            assert!(
+                text.contains("fn a(&self)") && text.contains("fn b(&self)"),
+                "clean merge dropped a block:\n{text}"
+            );
+        }
+        other => panic!("unexpected outcome: {other:?}"),
+    }
+}
+
+#[test]
+fn repro_484_r3_ambiguous_block_split_bails_no_silent_collapse() {
+    // Mirror of the merge case: base has ONE `impl Foo` holding a and b.
+    // ours SPLITS it into two blocks (a in the first, b in the second) and
+    // edits a; theirs edits a differently in the single block. Two ours
+    // blocks both correspond to base's single block — ambiguous. The result
+    // must not be a silent collapse.
+    let base = "\
+struct Foo;
+
+impl Foo {
+    fn a(&self) -> u32 { 0 }
+    fn b(&self) {}
+}
+";
+    let ours = "\
+struct Foo;
+
+impl Foo {
+    fn a(&self) -> u32 { 9 }
+}
+
+impl Foo {
+    fn b(&self) {}
+}
+";
+    let theirs = "\
+struct Foo;
+
+impl Foo {
+    fn a(&self) -> u32 { 1 }
+    fn b(&self) {}
+}
+";
+    let outcome = merge_rust(base, ours, theirs);
+    let text = match outcome {
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            conflict_count,
+        } => {
+            assert!(conflict_count >= 1);
+            String::from_utf8(merged_bytes_with_markers).unwrap()
+        }
+        MergeOutcome::Clean(bytes) => {
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(
+                crate::parser::ParsedFile::parse(&text, crate::parser::Language::Rust).is_some(),
+                "clean merge unparseable:\n{text}"
+            );
+            text
+        }
+        other => panic!("unexpected outcome: {other:?}"),
+    };
+    // In neither outcome is a method silently dropped.
+    assert!(text.contains("fn a(&self)"), "fn a lost:\n{text}");
+    assert!(text.contains("fn b(&self)"), "fn b lost:\n{text}");
+}

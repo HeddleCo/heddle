@@ -21,7 +21,7 @@
 //!
 //! See HeddleCo/heddle#133 for the audit motivation.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
 use tree_sitter::Node;
@@ -198,6 +198,316 @@ fn assign_struct_scope_instances(
             .zip(enclosing.iter())
             .map(|(name, &ci)| (name.clone(), ordinal_of[ci]))
             .collect();
+    }
+}
+
+/// The chain prefix of `chain` up to and including depth `d` (length `d + 1`).
+type InstChain = Vec<(String, usize)>;
+
+/// Per-side cross-side match key: an [`ItemKey`] paired with its per-key
+/// occurrence index within the side (source order). Identical to
+/// `reconstruct::MatchKey`; recomputed here so the alignment pass matches the
+/// SAME item pairings the reconstructor will use.
+type AlignKey = (ItemKey, usize);
+
+/// Tag every item in source order with its `(ItemKey, occurrence)` align key.
+fn align_match_keys(seg: &FileSegments) -> Vec<AlignKey> {
+    let mut counters: HashMap<ItemKey, usize> = HashMap::new();
+    seg.items
+        .iter()
+        .map(|item| {
+            let n = counters.entry(item.key.clone()).or_insert(0);
+            let occurrence = *n;
+            *n += 1;
+            (item.key.clone(), occurrence)
+        })
+        .collect()
+}
+
+/// Outcome of [`align_container_instances`].
+pub(crate) enum InstanceAlignment {
+    /// Ordinals were re-anchored to base; `ours`/`theirs` now carry
+    /// cross-side-consistent `struct_scope_inst`.
+    Aligned,
+    /// The container-instance correspondence is ambiguous: a side container
+    /// holds matched items belonging to two different base containers (a
+    /// block *merge*), two side containers hold items of one base container (a
+    /// *split*), or a matched item's physical container chain diverges across
+    /// sides. The instance model cannot decide whether two same-name spans are
+    /// one instance or two, so the caller MUST route to the textual conflict
+    /// path rather than risk a silent collapse (heddle#484 r3 part 2).
+    Ambiguous,
+}
+
+/// Re-anchor each side's container-instance ordinals
+/// ([`Item::struct_scope_inst`]) to BASE spans, making instance identity a
+/// 3-way-aligned notion instead of a per-side count (heddle#484 r3, Codex P1).
+///
+/// [`assign_struct_scope_instances`] numbers each side's containers in source
+/// order *independently*. That is correct within a side but not across sides:
+/// when one side prepends a new same-name container before an existing base
+/// container, the prepended block draws ordinal 0 while the matched base block
+/// (still 0 in base) becomes 1 — so the reconstructor paired base's matched
+/// block with the side's *prepended* block and collapsed two distinct
+/// containers into one. This pass fixes the cross-side numbering:
+///
+/// * A side container that **matches** a base container — i.e. holds an item
+///   whose [`AlignKey`] also sits in that base container — inherits the base
+///   container's ordinal. (The correspondence is read off the matched items'
+///   instance chains, the same pairing the reconstructor uses.)
+/// * A side container with **no** base counterpart (added) draws a **fresh**
+///   ordinal at or above the base range for its `(canonical-parent, name)`, so
+///   it can never collide with a base ordinal. Added containers of the same
+///   name are paired positionally across `ours`/`theirs`, so an add/add of the
+///   *same* new container unions into one instance while a prepend on one side
+///   and an append on the other stay separable.
+///
+/// Returns [`InstanceAlignment::Ambiguous`] without mutating anything when the
+/// matched-item correspondence is not a partial bijection between a side's
+/// containers and base's (a block merge/split, or a matched item that changed
+/// container chains across sides) — the detect-and-bail half of the close-
+/// the-class fix.
+pub(crate) fn align_container_instances(
+    base: &FileSegments,
+    ours: &mut FileSegments,
+    theirs: &mut FileSegments,
+) -> InstanceAlignment {
+    // base AlignKey -> base container chain (its `struct_scope_inst`).
+    let base_keys = align_match_keys(base);
+    let base_chain_of: HashMap<AlignKey, &[(String, usize)]> = base_keys
+        .iter()
+        .zip(base.items.iter())
+        .map(|(mk, it)| (mk.clone(), it.struct_scope_inst.as_slice()))
+        .collect();
+
+    // Build each side's matched correspondence; bail on any non-bijection.
+    let Some(corr_ours) = build_correspondence(ours, &base_chain_of) else {
+        return InstanceAlignment::Ambiguous;
+    };
+    let Some(corr_theirs) = build_correspondence(theirs, &base_chain_of) else {
+        return InstanceAlignment::Ambiguous;
+    };
+
+    // Fresh-ordinal floor per (canonical-parent, name): one past base's
+    // highest ordinal there, so added containers never reuse a base ordinal.
+    let mut base_next: BTreeMap<(InstChain, String), usize> = BTreeMap::new();
+    for c in distinct_container_prefixes(base) {
+        let (parent, (name, ord)) = split_prefix(&c);
+        let slot = base_next.entry((parent, name)).or_insert(0);
+        *slot = (*slot).max(ord + 1);
+    }
+
+    // Canonical (base-anchored) chain for every side container prefix.
+    let canon_ours = canonicalize_side(ours, &corr_ours);
+    let canon_theirs = canonicalize_side(theirs, &corr_theirs);
+    let (canon_ours, canon_theirs) =
+        allocate_added_ordinals(ours, theirs, &corr_ours, &corr_theirs, &base_next, canon_ours, canon_theirs);
+
+    rewrite_side(ours, &canon_ours);
+    rewrite_side(theirs, &canon_theirs);
+    InstanceAlignment::Aligned
+}
+
+/// `(prefix[..last], prefix[last])` — the parent chain and the deepest level.
+fn split_prefix(prefix: &[(String, usize)]) -> (InstChain, (String, usize)) {
+    let last = prefix.len() - 1;
+    (prefix[..last].to_vec(), prefix[last].clone())
+}
+
+/// Every distinct container-instance chain prefix (all depths) that any item in
+/// `seg` physically sits inside.
+fn distinct_container_prefixes(seg: &FileSegments) -> BTreeSet<InstChain> {
+    let mut out = BTreeSet::new();
+    for it in &seg.items {
+        let ch = &it.struct_scope_inst;
+        for d in 0..ch.len() {
+            out.insert(ch[0..=d].to_vec());
+        }
+    }
+    out
+}
+
+/// Map each matched side container prefix to its base counterpart, or `None`
+/// if the correspondence is not a partial bijection (the ambiguous-bail case).
+fn build_correspondence(
+    side: &FileSegments,
+    base_chain_of: &HashMap<AlignKey, &[(String, usize)]>,
+) -> Option<BTreeMap<InstChain, InstChain>> {
+    let side_keys = align_match_keys(side);
+    let mut forward: BTreeMap<InstChain, InstChain> = BTreeMap::new();
+    let mut reverse: BTreeMap<InstChain, InstChain> = BTreeMap::new();
+    for (mk, it) in side_keys.iter().zip(side.items.iter()) {
+        let Some(bchain) = base_chain_of.get(mk) else {
+            continue; // added item — no base container to anchor to.
+        };
+        let schain = &it.struct_scope_inst;
+        // A matched item whose physical container chain changed shape across
+        // sides (different depth or different names) is itself ambiguous.
+        if schain.len() != bchain.len() {
+            return None;
+        }
+        for d in 0..schain.len() {
+            if schain[d].0 != bchain[d].0 {
+                return None;
+            }
+            let sp = schain[0..=d].to_vec();
+            let bp = bchain[0..=d].to_vec();
+            // Functional: a side container maps to exactly one base container.
+            if let Some(prev) = forward.get(&sp) {
+                if *prev != bp {
+                    return None;
+                }
+            } else {
+                forward.insert(sp.clone(), bp.clone());
+            }
+            // Injective: a base container is claimed by at most one side
+            // container.
+            if let Some(prev) = reverse.get(&bp) {
+                if *prev != sp {
+                    return None;
+                }
+            } else {
+                reverse.insert(bp, sp);
+            }
+        }
+    }
+    // A side that *reorders* two matched same-name containers (their source
+    // order disagrees with base's) can't be brace-woven cleanly: the matched
+    // item in the moved block carries a structurally-wrong preceding gap (it
+    // opens where base closes), and the weave would drop a `}` and emit an
+    // unparseable file. That is a silent corruption, so route it to the
+    // textual path instead (heddle#484 r3 part 2). Detect by checking, within
+    // each `(parent, name)` group, that side source order and base source
+    // order agree.
+    if reorders_matched_containers(&forward) {
+        return None;
+    }
+    Some(forward)
+}
+
+/// Whether `forward` (side container prefix → base container prefix) reorders
+/// two matched containers that share a parent and name — i.e. their deepest
+/// ordinals are not co-monotonic between side and base source order.
+fn reorders_matched_containers(forward: &BTreeMap<InstChain, InstChain>) -> bool {
+    let mut groups: BTreeMap<(InstChain, String), Vec<(usize, usize)>> = BTreeMap::new();
+    for (sp, bp) in forward {
+        let (parent, (name, side_ord)) = split_prefix(sp);
+        let base_ord = bp[bp.len() - 1].1;
+        groups
+            .entry((parent, name))
+            .or_default()
+            .push((side_ord, base_ord));
+    }
+    groups.values_mut().any(|pairs| {
+        pairs.sort_by_key(|&(s, _)| s);
+        pairs.windows(2).any(|w| w[0].1 >= w[1].1)
+    })
+}
+
+/// Seed the canonical map with matched containers (inherit base ordinals).
+/// Added containers are left out here and filled by [`allocate_added_ordinals`].
+fn canonicalize_side(
+    seg: &FileSegments,
+    corr: &BTreeMap<InstChain, InstChain>,
+) -> BTreeMap<InstChain, InstChain> {
+    let mut canon: BTreeMap<InstChain, InstChain> = BTreeMap::new();
+    for sp in distinct_container_prefixes(seg) {
+        if let Some(bp) = corr.get(&sp) {
+            canon.insert(sp, bp.clone());
+        }
+    }
+    canon
+}
+
+/// Assign fresh ordinals to every *added* container (depth by depth, so a
+/// child's canonical parent is known before it). Added containers of the same
+/// `(canonical-parent, name)` are paired positionally across the two sides:
+/// `ours`'s k-th and `theirs`'s k-th draw the same fresh ordinal, so an add/add
+/// of the same new container unions while divergent additions stay distinct.
+fn allocate_added_ordinals(
+    ours: &FileSegments,
+    theirs: &FileSegments,
+    corr_ours: &BTreeMap<InstChain, InstChain>,
+    corr_theirs: &BTreeMap<InstChain, InstChain>,
+    base_next: &BTreeMap<(InstChain, String), usize>,
+    mut canon_ours: BTreeMap<InstChain, InstChain>,
+    mut canon_theirs: BTreeMap<InstChain, InstChain>,
+) -> (BTreeMap<InstChain, InstChain>, BTreeMap<InstChain, InstChain>) {
+    let prefixes_ours = distinct_container_prefixes(ours);
+    let prefixes_theirs = distinct_container_prefixes(theirs);
+    let max_depth = prefixes_ours
+        .iter()
+        .chain(prefixes_theirs.iter())
+        .map(Vec::len)
+        .max()
+        .unwrap_or(0);
+
+    for depth in 0..max_depth {
+        // (canonical-parent, name) -> added side prefixes on each side, kept in
+        // source order (their deepest within-side ordinal).
+        let mut buckets: BTreeMap<(InstChain, String), (Vec<InstChain>, Vec<InstChain>)> =
+            BTreeMap::new();
+        for (which, prefixes, corr, canon) in [
+            (0usize, &prefixes_ours, corr_ours, &canon_ours),
+            (1usize, &prefixes_theirs, corr_theirs, &canon_theirs),
+        ] {
+            for sp in prefixes.iter().filter(|p| p.len() == depth + 1) {
+                if corr.contains_key(sp) {
+                    continue; // matched — already canonical.
+                }
+                let canon_parent = canonical_parent(sp, canon);
+                let name = sp[depth].0.clone();
+                let entry = buckets.entry((canon_parent, name)).or_default();
+                if which == 0 {
+                    entry.0.push(sp.clone());
+                } else {
+                    entry.1.push(sp.clone());
+                }
+            }
+        }
+        for ((canon_parent, name), (mut ours_list, mut theirs_list)) in buckets {
+            ours_list.sort_by_key(|p| p[depth].1);
+            theirs_list.sort_by_key(|p| p[depth].1);
+            let start = base_next
+                .get(&(canon_parent.clone(), name.clone()))
+                .copied()
+                .unwrap_or(0);
+            let n = ours_list.len().max(theirs_list.len());
+            for i in 0..n {
+                let ord = start + i;
+                let mut cc = canon_parent.clone();
+                cc.push((name.clone(), ord));
+                if let Some(sp) = ours_list.get(i) {
+                    canon_ours.insert(sp.clone(), cc.clone());
+                }
+                if let Some(sp) = theirs_list.get(i) {
+                    canon_theirs.insert(sp.clone(), cc.clone());
+                }
+            }
+        }
+    }
+    (canon_ours, canon_theirs)
+}
+
+/// Canonical chain of `sp`'s parent (`sp` minus its deepest level), read from
+/// the already-computed `canon` map. The empty chain for a top-level container.
+fn canonical_parent(sp: &[(String, usize)], canon: &BTreeMap<InstChain, InstChain>) -> InstChain {
+    if sp.len() <= 1 {
+        return Vec::new();
+    }
+    let parent = sp[..sp.len() - 1].to_vec();
+    canon.get(&parent).cloned().unwrap_or(parent)
+}
+
+/// Replace each item's `struct_scope_inst` with its canonical chain.
+fn rewrite_side(seg: &mut FileSegments, canon: &BTreeMap<InstChain, InstChain>) {
+    for it in &mut seg.items {
+        if it.struct_scope_inst.is_empty() {
+            continue;
+        }
+        if let Some(c) = canon.get(&it.struct_scope_inst) {
+            it.struct_scope_inst = c.clone();
+        }
     }
 }
 
