@@ -29,6 +29,27 @@ The branch was rebased onto `origin/main` after the collaboration ADRs were writ
 - Oplog undo/redo semantics were consolidated per variant. Collaboration operations should stay out of source-history undo/redo and keep using compensating collaboration operations for corrections.
 - Recent CLI cleanup removed dead commands and deprecated surface area. That reinforces the pre-1.0 decision to evolve `discuss` in place and remove misleading state-attached flags instead of preserving compatibility shims.
 
+## Heddle Project alignment notes
+
+The Heddle GitHub Project is already a large cross-repo collaboration surface: 440 items across Heddle, Weft, and Tapestry, with Status, Priority, Size, Epic, Scope, DoD Type, parent/sub-issue progress, linked pull requests, and reviewers. That project shape validates the roadmap's attention and provenance direction, but it also shows where the first version was too narrow.
+
+Strong alignment:
+
+- The Project's Ready, In progress, In review, and Done states are practical input to `heddle inbox`: they represent attention, readiness, review state, and recommended next work.
+- Whole-CLI consolidation work aligns with the command-contract foundation; collaboration should reuse the existing command catalog and op-id machinery rather than invent a new agent contract layer.
+- StateVisibility, self-sovereign auth, signing, Weft hardening, and Tapestry review work align with the planned capability, policy, attestation, and hosted projection layers.
+- Semantic merge correctness and anchor-travel work are prerequisites for trustworthy semantic anchors.
+
+Roadmap adjustments from the Project review:
+
+- Add minimal external artifact references in the first operation-model slice. Heddle does not need default GitHub mirroring, but it does need durable references to external issues, pull requests, review comments, and project items when those artifacts explain imported or linked collaboration history.
+- Make `collaboration.import_root` a required early operation kind, not only a migration contingency. Legacy state-attached discussions and later explicit GitHub/Tapestry imports both need a first-class source and trust boundary.
+- Split inbox from full semantic anchor convergence. A minimal inbox should work for targeted blockers, unanswered questions, follow-up tasks, review states, and unanchored operational work before every semantic anchor case is solved.
+- Model review lifecycle as machine-actionable attention. Requested reviewers, changes requested, re-review requested, unresolved review threads, linked PRs, and CI gates should not collapse into discussion prose.
+- Keep full project-board parity deferred. Labels, assignees, priority, size, epic, scope, DoD type, and project status can enter as projection/import metadata before Heddle decides whether they deserve native collaboration operations.
+- Add a later explicit GitHub Project/Issue/PR-review import and cutover milestone for dogfooding. This is not default Git bridge import/export; it is an intentional migration path with import roots, source references, and policy labels.
+- Treat project dependencies and rollups as a separate planning graph from collaboration operation causality. Parent/sub-issue progress and "ready after parent lands" should inform inbox/readiness, but they are not causal parents in the CRDT operation graph.
+
 ## Milestones
 
 ### M0: Command contract foundation
@@ -80,6 +101,7 @@ Goal: introduce the durable Heddle-native operation model without hosted sync.
   - `TaskProvenance`
   - `SemanticAnchor`
   - `AttentionTarget`
+  - `ExternalArtifactRef`
 - Use canonical MessagePack envelopes with explicit schema version and operation kind.
 - Reuse the packed oplog versioning pattern:
   - latest encoder
@@ -90,7 +112,8 @@ Goal: introduce the durable Heddle-native operation model without hosted sync.
 - Compute `CollabOpId` from exact canonical envelope bytes.
 - Include the collaboration idempotency key in the envelope.
 - Use UUIDv7 for `DiscussionId`.
-- Reserve operation kinds for later redaction, attestation, visibility, and import roots even if the first slice implements only a subset.
+- Include minimal external artifact references when a collaboration operation is imported from or linked to a source outside the local Heddle repository.
+- Reserve operation kinds for later redaction, attestation, and visibility even if the first slice implements only a subset.
 
 First implemented operation kinds:
 
@@ -100,7 +123,18 @@ First implemented operation kinds:
 - `discussion.reopen`
 - `discussion.retarget`
 - `collaboration.resolve_conflict`
-- `collaboration.import_root` if migration needs it
+- `collaboration.import_root`
+
+Minimum `ExternalArtifactRef` fields:
+
+- provider, such as `github`
+- repository or namespace
+- artifact kind, such as issue, pull request, review, review comment, project item, or discussion
+- external id
+- URL
+- parent artifact when relevant
+- imported or linked time
+- source trust label
 
 Deferred operation kinds:
 
@@ -116,6 +150,7 @@ Exit criteria:
 - Same semantic operation encoded as different schema versions produces different `CollabOpId`s.
 - Same idempotency key with changed request content rejects locally.
 - Missing token material does not invalidate an operation that has capability id and scope summary.
+- Imported or externally linked operations retain source metadata without trusting external authorship for Heddle capability policy.
 
 ### M2: Local collaboration store
 
@@ -174,14 +209,52 @@ Exit criteria:
 - Hash collision or same `CollabOpId` with different bytes fails closed.
 - `fsck` and `doctor` do not require Weft access.
 
-### M3: Materialization, anchors, and inbox
+### M3a: Minimal materialization and inbox
 
-Goal: derive useful local collaboration views from the operation log.
+Goal: derive useful local collaboration views and attention before full semantic anchor convergence.
 
-- Materialize records by causal graph, not timestamp order.
+- Materialize discussion records by causal graph, not timestamp order.
 - Preserve current head sets internally.
 - Render deterministic display order for humans and JSON convenience.
 - Surface concurrent append turns as siblings, not conflicts.
+- Surface incompatible lifecycle claims as conflicts.
+- Implement `heddle inbox` as a derived attention view.
+- Do not claim read/unread state in first-slice inbox JSON.
+- Include sync/local-only diagnostics in inbox only when they affect actionability, readiness, or sync.
+- Include review lifecycle and project-state projection inputs where available:
+  - requested reviewers
+  - changes requested
+  - re-review requested
+  - unresolved review threads
+  - CI gate state
+  - linked pull requests
+  - parent/sub-issue or dependency readiness
+  - imported project status, priority, epic, scope, and DoD metadata as non-authoritative projection data
+- Keep planning dependencies separate from collaboration causality. A planning dependency can block readiness or route attention, but it is not a causal parent in the collaboration operation graph.
+
+First-slice attention sources:
+
+- blocker turns targeted at current actor/thread
+- targeted unanswered questions
+- resolution conflicts that affect current work
+- follow-up tasks imported from or linked to review comments
+- requested review or re-review on linked source work
+- unresolved review threads linked to current work
+- CI gate failures linked to current work
+- unresolved operations that affect current work or sync
+- hosted rejection diagnostics once sync exists
+
+Exit criteria:
+
+- Same accepted operation set materializes to the same view regardless of arrival order.
+- Deterministic display order does not hide conflicts, ambiguity, redactions, or local-only divergence.
+- `ready` blocks only on targeted or high-severity attention, not every open discussion.
+- Review and project projection metadata can inform inbox/readiness without becoming native project-board operations.
+
+### M3b: Semantic anchor convergence
+
+Goal: derive useful local collaboration views from the operation log.
+
 - Surface incompatible lifecycle, visibility, and single-anchor claims as conflicts.
 - Keep conflict resolution as an explicit operation that cites conflicting operations.
 - Implement semantic anchors with:
@@ -197,24 +270,14 @@ Goal: derive useful local collaboration views from the operation log.
   - `orphaned`
 - Do not make anchor resolver thresholds per-user in v1.
 - Do not depend on hosted services or live language-server state for OSS anchor resolution.
-- Implement `heddle inbox` as a derived attention view.
-- Do not claim read/unread state in first-slice inbox JSON.
-- Include sync/local-only diagnostics in inbox only when they affect actionability, readiness, or sync.
-
-First-slice attention sources:
-
-- blocker turns targeted at current actor/thread
-- targeted unanswered questions
-- resolution conflicts that affect current work
-- ambiguous or orphaned anchors that affect actionability
-- unresolved operations that affect current work or sync
-- hosted rejection diagnostics once sync exists
+- Treat the existing anchor-travel decision as a prerequisite. Heddle should wire useful anchor-travel fields into semantic anchor status or explicitly retire them before migrating state-attached discussions.
+- Add ambiguous or orphaned anchor attention when anchor status affects actionability.
 
 Exit criteria:
 
-- Same accepted operation set materializes to the same view regardless of arrival order.
-- Deterministic display order does not hide conflicts, ambiguity, redactions, or local-only divergence.
-- `ready` blocks only on targeted or high-severity attention, not every open discussion.
+- Anchor status is deterministic for a repository version.
+- Existing state-attached anchor-travel fields have an explicit migration or retirement rule.
+- Ambiguous or orphaned anchors feed inbox/readiness only when they affect current work or policy gates.
 
 ### M4: CLI replacement and migration
 
@@ -323,6 +386,8 @@ Required test groups:
   - answer citing question clears question attention
   - unrelated open discussion does not block
   - context conflict blocks only when linked to current work or policy gate
+  - requested review or unresolved review thread blocks linked work
+  - parent/dependency state affects readiness without becoming a causal parent
 
 First-slice release gate:
 
@@ -334,6 +399,7 @@ First-slice release gate:
 - Migration plan/apply tests exist if legacy data exists.
 - User docs label local-only, Weft-backed, and planned capabilities.
 - At least one end-to-end JSON-first agent workflow is documented.
+- At least one fixture covers review comment to follow-up task to inbox item to resolution.
 
 ### M6: Weft sync preparation
 
@@ -361,6 +427,7 @@ Goal: prepare local collaboration for hosted sync without shipping live collabor
 - Source push success is not rolled back if collaboration sync fails.
 - Retry resumes collaboration lane from sync metadata and remote cursors.
 - Add redaction and policy-suppression story before broad hosted collaboration rollout.
+- Prepare hosted review collaboration before Tapestry Review MVP depends on it. Threaded discussion, approval/block state, review signatures, and policy-filtered visibility should share the same collaboration sync and rejection vocabulary.
 
 Exit criteria:
 
@@ -384,6 +451,34 @@ Exit criteria:
 - Watch mode is a transport over the same operation log.
 - Push/pull catch-up and live updates converge through the same materializer.
 - Live sync can be disabled without losing correctness.
+
+### M8: Explicit GitHub import and dogfood cutover
+
+Goal: support deliberate migration from GitHub-hosted planning/review artifacts into Heddle-hosted collaboration without turning Git bridge into an automatic comment mirror.
+
+- Add an explicit import workflow for selected GitHub issues, pull requests, review comments, and project items.
+- Represent imported artifacts with `ExternalArtifactRef` and `collaboration.import_root`.
+- Preserve source URL, source id, author metadata, imported time, parent artifact, and trust/source labels.
+- Keep the import actor distinct from original external authors.
+- Map GitHub Project fields to projection metadata first:
+  - status
+  - priority
+  - size
+  - epic
+  - scope
+  - DoD type
+  - parent/sub-issue progress
+  - linked pull requests
+  - reviewers
+- Let imported project metadata inform inbox, readiness, filters, and migration reports without making full project-board parity a first-slice Heddle primitive.
+- Support a dogfood cutover report that shows which GitHub artifacts are imported, linked, stale, local-only, or still GitHub-authoritative.
+- Keep default GitHub/GitLab/Git notes import/export disabled.
+
+Exit criteria:
+
+- A selected GitHub review comment can become a Heddle follow-up discussion or attention item with source provenance.
+- Imported Project items retain enough metadata for agents to understand status, review state, and dependencies.
+- Dogfood cutover can run as an explicit command or report without silently ingesting unrelated GitHub content.
 
 ## Command schema sketches
 
@@ -519,14 +614,18 @@ Each item includes:
 - `task_provenance`
 - `sync`
 - `recommended_actions`
+- `projection`
 
 No `read` or `unread` field appears until explicit read-state metadata exists.
+
+Projection metadata may include imported or hosted project/review fields such as status, priority, epic, scope, DoD type, linked pull requests, requested reviewers, and parent/sub-issue progress. Projection fields are query and attention inputs, not collaboration operation causality.
 
 ## User-facing docs tasks
 
 - Add a local discussion quickstart with JSON-first examples.
 - Add a human-oriented short workflow after the JSON examples.
 - Add a migration guide for state-attached discussions.
+- Add an explicit GitHub import/cutover guide once M8 starts.
 - Add a troubleshooting guide for:
   - stale heads
   - local-only collaboration
@@ -545,11 +644,10 @@ No `read` or `unread` field appears until explicit read-state metadata exists.
 - Hosted sync.
 - Live watch mode.
 - Presence or typing indicators.
-- General issue tracker labels, assignees, milestones, or project boards.
+- Full native project-board parity.
 - Full context extraction.
 - Read/unread state.
 - Snooze.
 - Local encrypted collaboration storage.
 - Pack/segment compaction.
-- General import roots except what migration needs.
-- GitHub/GitLab/Git notes import or export.
+- Default GitHub/GitLab/Git notes import or export.
