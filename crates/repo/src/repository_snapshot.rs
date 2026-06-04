@@ -237,6 +237,13 @@ impl SnapshotMutation<'_> {
             }
         }
 
+        // Auto-sign every captured state (heddle#482). This must be the LAST
+        // mutation before `put_state`: signing covers `compute_hash()` over the
+        // fields enriched above, so any later change would invalidate it.
+        // Best-effort — a missing key leaves the state unsigned, never fails
+        // the capture.
+        self.repo.sign_state_best_effort(&mut state);
+
         let state_ref_oplog_start = std::time::Instant::now();
         self.repo.store.put_state(&state)?;
         self.repo.store.flush_snapshot_write_batch()?;
@@ -689,6 +696,12 @@ impl Repository {
         if let Some(merged_context) = self.union_parent_contexts(&[&ours_state, &theirs_state])? {
             state = state.with_context(merged_context);
         }
+
+        // Auto-sign the merge state (heddle#482): the merge author vouches for
+        // this merge of parents X and Y. Each parent keeps its own author
+        // signature — they are unchanged on disk, so they stay verifiable.
+        // Last mutation before `put_state`, same ordering rule as capture.
+        self.sign_state_best_effort(&mut state);
 
         self.store.put_state(&state)?;
 

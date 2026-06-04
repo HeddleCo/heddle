@@ -53,7 +53,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{Arc, OnceLock, RwLock},
 };
 
 use chrono::Utc;
@@ -285,6 +285,11 @@ where
     config: RepoConfig,
     shallow: RwLock<ShallowInfo>,
     blob_hydrator: RwLock<Option<Arc<dyn BlobHydrator>>>,
+    /// Process-lifetime cache of the resolved auto-signing key (heddle#482).
+    /// `None` (cached) means no key could be produced — captures proceed
+    /// unsigned and surface that status rather than failing. Resolved once
+    /// per handle to avoid re-reading the key file on every capture.
+    signing_signer_cache: OnceLock<Option<Arc<dyn crypto::Signer>>>,
 }
 
 impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> RepositoryLockExt for Repository<R, O, S> {
@@ -325,6 +330,7 @@ impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> Repository<R, O, S> {
             config,
             shallow: RwLock::new(shallow),
             blob_hydrator: RwLock::new(None),
+            signing_signer_cache: OnceLock::new(),
         }
     }
 
@@ -580,6 +586,7 @@ impl Repository {
             config,
             shallow: RwLock::new(ShallowInfo::load(&heddle_dir)?),
             blob_hydrator: RwLock::new(None),
+            signing_signer_cache: OnceLock::new(),
         })
     }
 

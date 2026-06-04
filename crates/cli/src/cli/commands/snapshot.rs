@@ -52,6 +52,11 @@ pub(crate) struct SnapshotOutput {
     pub agent: Option<SnapshotAgentOutput>,
     pub promotion_suggested: bool,
     pub heavy_impact_paths: Vec<String>,
+    /// Whether this state carries an ed25519 author signature (heddle#482).
+    /// `false` means signing degraded (no key, or an unreadable key); the
+    /// state is still captured, just unsigned — surfaced here so a degraded
+    /// signing path is never silent.
+    pub signed: bool,
     pub message: String,
     pub next_action: Option<String>,
     pub next_action_template: Option<ActionTemplate>,
@@ -227,6 +232,15 @@ pub async fn cmd_snapshot(
                 "Agent: {}/{}",
                 style::bold(&agent.provider),
                 style::dim(&agent.model)
+            );
+        }
+        if !output.signed {
+            // Degraded signing must be visible, never silent (heddle#482).
+            println!(
+                "{}",
+                style::warn(
+                    "Unsigned: no signing identity available — captured without an ed25519 signature"
+                )
             );
         }
         if output.confidence.is_some() {
@@ -539,6 +553,7 @@ pub(crate) fn create_snapshot_profiled(
             .map(SnapshotAgentOutput::from),
         promotion_suggested,
         heavy_impact_paths: heavy_impact_paths.clone(),
+        signed: execution.state.signature.is_some(),
         message: format!(
             "Captured state {} ({})",
             execution.state.change_id.short(),
@@ -658,6 +673,7 @@ pub(crate) fn create_snapshot_from_tree_profiled(
             .map(SnapshotAgentOutput::from),
         promotion_suggested,
         heavy_impact_paths: heavy_impact_paths.clone(),
+        signed: execution.state.signature.is_some(),
         message: format!(
             "Captured state {} ({})",
             execution.state.change_id.short(),

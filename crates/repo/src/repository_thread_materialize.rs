@@ -246,7 +246,11 @@ impl Repository {
             Some(prev) => vec![prev],
             None => vec![],
         };
-        let state = State::new_snapshot(new_tree_hash, parents, attribution);
+        let mut state = State::new_snapshot(new_tree_hash, parents, attribution);
+        // Auto-sign this thread-materialization capture (heddle#482), the same
+        // as the primary capture path — it is a real author capture that
+        // bypasses `stage_snapshot_objects`. Last mutation before `put_state`.
+        self.sign_state_best_effort(&mut state);
         self.store().put_state(&state)?;
         self.refs().set_thread(&thread_name, &state.change_id)?;
 

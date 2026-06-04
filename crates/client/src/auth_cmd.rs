@@ -134,7 +134,7 @@ async fn cmd_auth_login(server: &str, no_browser: bool) -> Result<()> {
         } else {
             Some(access_token.credential_id)
         },
-        private_key_pem: Some(private_key_pem),
+        private_key_pem: Some(private_key_pem.clone()),
         expires_at: access_token.expires_at.as_ref().and_then(|ts| {
             chrono::DateTime::from_timestamp(ts.seconds, ts.nanos.max(0) as u32)
                 .map(|dt| dt.to_rfc3339())
@@ -142,6 +142,18 @@ async fn cmd_auth_login(server: &str, no_browser: bool) -> Result<()> {
     };
 
     credentials::store_server_credential(server, credential)?;
+
+    // Reconcile the local signing identity with the device key (heddle#482):
+    // record the device key as the machine's active signing identity so
+    // subsequent captures sign with it (it supersedes any per-repo local key;
+    // states already signed by a local key keep verifying). Best-effort — a
+    // failure here just leaves captures signing with the local key.
+    if let Err(error) =
+        repo::identity::link_device_key(&public_key_bytes, &private_key_pem, server)
+    {
+        tracing::warn!(%error, "could not record device signing identity; captures will use the per-repo local key");
+    }
+
     println!();
     println!(
         "Authenticated as {}. Credentials saved.",
