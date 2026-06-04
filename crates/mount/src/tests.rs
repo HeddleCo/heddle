@@ -409,6 +409,57 @@ fn write_past_end_zero_fills() {
     assert_eq!(bytes.len(), 13);
 }
 
+/// Serializes the env-mutating signing test(s) below: they pin the
+/// process-global `HEDDLE_HOME` so the device-identity lookup resolves into a
+/// per-test temp dir (absent device key -> falls to the auto-minted local key).
+static SIGNING_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// heddle#482: a state captured through the MOUNT path must be auto-signed
+/// identically to one captured via `Repository::snapshot` — the mount path
+/// routes through the same capture-path chokepoint, so no state write bypasses
+/// signing.
+#[test]
+fn mount_capture_auto_signs() {
+    use objects::object::SignatureStatus;
+
+    let _guard = SIGNING_HOME_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = TempDir::new().unwrap();
+    let previous = std::env::var_os("HEDDLE_HOME");
+    unsafe {
+        std::env::set_var("HEDDLE_HOME", home.path());
+    }
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (_temp, mount) = mount_with_seed("greet.txt", b"hello world\n");
+        let node = mount.lookup_path("greet.txt").unwrap();
+        mount.write(node, 0, b"HELLO").unwrap();
+        mount.flush(node).unwrap();
+        let new_id = mount.capture(Some("signed capture".into())).unwrap();
+
+        let repo = mount.repo_handle();
+        let state = repo.store().get_state(&new_id).unwrap().unwrap();
+        assert!(
+            state.signature.is_some(),
+            "mount-captured state must be auto-signed, not stored unsigned",
+        );
+        assert_eq!(
+            repo.verify_state_signature(&new_id).unwrap(),
+            SignatureStatus::Valid,
+            "mount-captured state signature must verify",
+        );
+    }));
+
+    match previous {
+        Some(value) => unsafe { std::env::set_var("HEDDLE_HOME", value) },
+        None => unsafe { std::env::remove_var("HEDDLE_HOME") },
+    }
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 #[test]
 fn write_seeds_from_warm_tier_not_captured() {
     // Captured: "original" (8 bytes). First write replaces it with

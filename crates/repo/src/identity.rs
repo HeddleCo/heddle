@@ -156,7 +156,24 @@ pub fn load_or_mint_local(path: &Path) -> std::io::Result<LocalIdentity> {
     Ok(identity)
 }
 
+/// Reject an identity TOML whose embedded private key is exposed by
+/// group/world-readable permissions (heddle#482). Single-sources the key-file
+/// signer loader's rule via [`crypto::reject_group_or_world_readable_key`], so
+/// auto-signing trusts an identity file only when it is as locked-down as a
+/// `heddle sign --key` key file. A no-op when the file is absent (the mint
+/// path handles that) or on platforms without a unix permission model.
+fn reject_insecure_identity(path: &Path) -> std::io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    crypto::reject_group_or_world_readable_key(path)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::PermissionDenied, error))
+}
+
 fn load_local(path: &Path) -> std::io::Result<Option<LocalIdentity>> {
+    // Refuse an exposed private key before reading its bytes — fail closed
+    // rather than sign with a key any local user could have copied.
+    reject_insecure_identity(path)?;
     match std::fs::read_to_string(path) {
         Ok(contents) => toml::from_str(&contents)
             .map(Some)
@@ -177,6 +194,9 @@ fn persist_local(path: &Path, identity: &LocalIdentity) -> std::io::Result<()> {
 
 /// Load the global device identity at `path`, if present.
 pub fn load_device(path: &Path) -> std::io::Result<Option<DeviceIdentity>> {
+    // Same fail-closed permission gate as the local identity: an exposed
+    // device key must not be trusted for auto-signing.
+    reject_insecure_identity(path)?;
     match std::fs::read_to_string(path) {
         Ok(contents) => toml::from_str(&contents)
             .map(Some)
@@ -374,5 +394,88 @@ mod tests {
         let loaded = load_device(&path).expect("load").expect("present");
         assert_eq!(loaded.public_key, hex::encode(signer.public_key()));
         assert_eq!(loaded.server, "grpc.example");
+    }
+
+    /// A `0600` identity loads; loosening it to a group/world-readable mode
+    /// (e.g. a backup restore that didn't preserve perms) makes the loader
+    /// fail closed with the same insecure-permission refusal the key-file
+    /// signer loader raises — never signing with the exposed key (heddle#482).
+    #[cfg(unix)]
+    #[test]
+    fn load_local_rejects_group_or_world_readable_identity() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().expect("temp dir");
+        let path = temp.path().join("identity.toml");
+
+        // Minted 0600 — loads fine.
+        load_or_mint_local(&path).expect("mint local identity");
+        assert!(load_local(&path).expect("secure identity loads").is_some());
+
+        // Loosen to world-readable.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("loosen perms");
+
+        let err =
+            load_local(&path).expect_err("group/world-readable identity must be rejected");
+        let signer_err = err
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<SignerError>());
+        assert!(
+            matches!(signer_err, Some(SignerError::InsecureKeyPermissions { .. })),
+            "rejection must be the insecure-permission refusal, got {err:?}",
+        );
+
+        // Fail closed: the resolver yields no signer rather than signing with
+        // the exposed key, so a capture would be unsigned-but-marked.
+        let absent_device = temp.path().join("absent-device.toml");
+        assert!(
+            resolve_signer(&path, &absent_device).is_none(),
+            "an exposed local key must degrade to no signer, never sign",
+        );
+
+        // Tightening back to 0600 restores loadability.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("tighten perms");
+        assert!(load_local(&path).expect("re-secured identity loads").is_some());
+    }
+
+    /// The device-identity load path enforces the same permission gate, so a
+    /// group/world-readable device key is refused before signing (heddle#482).
+    #[cfg(unix)]
+    #[test]
+    fn load_device_rejects_group_or_world_readable_identity() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().expect("temp dir");
+        let path = temp.path().join("device-identity.toml");
+        let signer = Ed25519Signer::generate().expect("keypair");
+        write_device(
+            &path,
+            &DeviceIdentity {
+                public_key: hex::encode(signer.public_key()),
+                private_key_pem: signer.to_pem().expect("pem"),
+                server: "grpc.example".to_string(),
+                linked_at: now_rfc3339(),
+            },
+        )
+        .expect("write device identity");
+
+        // Written 0600 by `write_file_atomic_secret` — loads fine.
+        assert!(load_device(&path).expect("secure device loads").is_some());
+
+        // Loosen to group-readable -> rejected with the insecure-permission
+        // refusal, and no key bytes are trusted for signing.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+            .expect("loosen perms");
+        let err =
+            load_device(&path).expect_err("group-readable device identity must be rejected");
+        let signer_err = err
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<SignerError>());
+        assert!(
+            matches!(signer_err, Some(SignerError::InsecureKeyPermissions { .. })),
+            "rejection must be the insecure-permission refusal, got {err:?}",
+        );
     }
 }

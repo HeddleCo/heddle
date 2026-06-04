@@ -3956,7 +3956,13 @@ impl ContentAddressedMount {
         // default confidence so downstream tools that key on it
         // don't see a sudden None for mount-captured states.
         state = state.with_confidence(self.inner.repo.config().defaults.confidence);
-        self.store().put_state(&state).map_err(MountError::Store)?;
+        // Auto-sign before persisting (heddle#482): route through the same
+        // capture-path chokepoint the repo capture/commit/merge paths use, so a
+        // mount-captured state is signed identically and no write bypasses it.
+        self.inner
+            .repo
+            .record_captured_state(&mut state)
+            .map_err(MountError::Store)?;
 
         // Step 3 + 3a unified: advance the served thread and record the
         // `OpRecord::Snapshot` **record-first** through the write chokepoint

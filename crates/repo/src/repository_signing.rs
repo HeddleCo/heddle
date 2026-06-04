@@ -48,6 +48,19 @@ impl Repository {
         }
     }
 
+    /// The capture-path chokepoint (heddle#482): auto-sign (best-effort) then
+    /// persist a freshly built capture/commit/merge `State`. Every state-write
+    /// path that records a *new author capture* — in this crate AND the `mount`
+    /// crate — routes through here, so none can store a state unsigned. Signing
+    /// is the last mutation before the write, so the signature covers the final
+    /// field set. (The raw `store.put_state` remains for non-capture writes:
+    /// re-signing an existing state, seeding init, and tests.)
+    pub fn record_captured_state(&self, state: &mut State) -> Result<()> {
+        self.sign_state_best_effort(state);
+        self.store.put_state(state)?;
+        Ok(())
+    }
+
     /// Sign a state with the given signer.
     ///
     /// This loads the state, signs it, and stores the updated state.
