@@ -384,11 +384,34 @@ struct Invocation {
 fn extract_invocations(text: &str) -> Vec<Invocation> {
     let mut result = Vec::new();
     let mut in_fence = false;
+    let mut planned_fence = false;
+    let mut skip_next_planned_line = false;
     for (idx, line) in text.lines().enumerate() {
         let line_no = idx + 1;
         let trimmed = line.trim_start();
         if trimmed.starts_with("```") {
-            in_fence = !in_fence;
+            if in_fence {
+                in_fence = false;
+                planned_fence = false;
+            } else {
+                in_fence = true;
+                planned_fence = is_planned_docs_marker(trimmed) || skip_next_planned_line;
+                skip_next_planned_line = false;
+            }
+            continue;
+        }
+        if is_planned_docs_marker(line) {
+            skip_next_planned_line = true;
+            continue;
+        }
+        if skip_next_planned_line {
+            if trimmed.is_empty() {
+                continue;
+            }
+            skip_next_planned_line = false;
+            continue;
+        }
+        if planned_fence {
             continue;
         }
         if in_fence {
@@ -439,6 +462,16 @@ fn extract_invocations(text: &str) -> Vec<Invocation> {
         }
     }
     result
+}
+
+/// Explicit opt-out for planned or illustrative command surfaces.
+///
+/// Place `<!-- doctor-docs:planned -->` immediately before a markdown
+/// line or fence, or include `doctor-docs:planned` in the fence info
+/// string. The skip is deliberately local so shipped-command examples in
+/// the same document remain checked against the live CLI contract.
+fn is_planned_docs_marker(line: &str) -> bool {
+    line.contains("doctor-docs:planned") || line.contains("doctor-docs: planned")
 }
 
 fn strip_shell_prefix(s: &str) -> &str {
@@ -978,6 +1011,45 @@ mod tests {
                 .iter()
                 .any(|i| matches!(i.kind, IssueKind::UnknownVerb))
         );
+    }
+
+    #[test]
+    fn planned_marker_skips_only_next_inline_invocation_line() {
+        let mut issues = Vec::new();
+        scan_markdown(
+            "test.md",
+            "<!-- doctor-docs:planned -->\n\
+             Planned command: `heddle frobnicate --foo`.\n\
+             Real drift: `heddle unsupported --bar`.\n",
+            &cli(),
+            &mut issues,
+        );
+        assert_eq!(
+            issues.len(),
+            1,
+            "planned marker should skip exactly one content line; got: {:?}",
+            issues
+        );
+        assert!(
+            issues[0].invocation.contains("heddle unsupported"),
+            "unmarked drift should remain checked; got: {:?}",
+            issues
+        );
+    }
+
+    #[test]
+    fn planned_marker_skips_fenced_invocations() {
+        let mut issues = Vec::new();
+        scan_markdown(
+            "test.md",
+            "```sh doctor-docs:planned\n\
+             heddle frobnicate --foo\n\
+             ```\n\
+             `heddle status --output json`\n",
+            &cli(),
+            &mut issues,
+        );
+        assert!(issues.is_empty(), "expected no drift, got: {:?}", issues);
     }
 
     #[test]
