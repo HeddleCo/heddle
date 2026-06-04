@@ -20,7 +20,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
-  SCCACHE_GHA_ENABLED: "true"
+  # Local-disk sccache, not the GHA (Azure) cache: the Blacksmith self-hosted
+  # runners can't reach the Azure cache backend (exit 74). See rust-tests.yml.
+  SCCACHE_GHA_ENABLED: "false"
 
 jobs:
   criterion:
