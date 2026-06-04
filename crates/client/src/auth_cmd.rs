@@ -170,16 +170,21 @@ async fn cmd_auth_login(server: &str, no_browser: bool) -> Result<()> {
 /// Remove stored credentials.
 fn cmd_auth_logout(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
     let server = resolve_server(server)?;
-    credentials::remove_server_credential(&server)?;
 
     // Remove the device signing identity `auth login` recorded for THIS server
-    // (heddle#482). Fail-closed: if a matching device key is on disk but can't
-    // be removed, surface the error rather than reporting a clean logout while
-    // the logged-out private key — which `signing_signer()` would keep
-    // preferring for every capture — still persists.
+    // BEFORE dropping the credential (heddle#482 ordering). Fail-closed: if a
+    // matching device key is on disk but can't be removed, surface the error
+    // rather than reporting a clean logout while the logged-out private key —
+    // which `signing_signer()` would keep preferring for every capture — still
+    // persists. Unlinking first keeps a failed logout retryable: were the
+    // credential removed first, `resolve_server` would no longer resolve back to
+    // this server, so a no-arg retry could never re-target the matching
+    // `device-identity.toml` still on disk. Holding the credential until the
+    // unlink succeeds preserves the same server resolution for the retry.
     let device_identity_removed = repo::identity::unlink_device_key(&server).map_err(|error| {
         anyhow::anyhow!("failed to remove device signing identity for {server}: {error}")
     })?;
+    credentials::remove_server_credential(&server)?;
 
     if ctx.should_output_json(None) {
         let output = AuthLogoutOutput {
@@ -519,7 +524,7 @@ fn open_url(url: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::infer_server_uri;
+    use super::*;
 
     #[test]
     fn infers_http_for_plain_ip_targets() {
@@ -555,5 +560,134 @@ mod tests {
             infer_server_uri("https://grpc.heddle.sh"),
             "https://grpc.heddle.sh"
         );
+    }
+
+    /// Minimal `CliContext` for the logout tests — text output, no repo.
+    struct TextCtx;
+
+    impl CliContext for TextCtx {
+        fn repo_path(&self) -> Option<&std::path::Path> {
+            None
+        }
+        fn operation_id_wire(&self) -> String {
+            String::new()
+        }
+        fn should_output_json(&self, _repo_config: Option<&repo::Config>) -> bool {
+            false
+        }
+    }
+
+    /// Run `f` with `HOME` pointed at a fresh temp dir and `HEDDLE_HOME` cleared,
+    /// so the credential store and device identity both resolve under
+    /// `<temp>/.heddle`. Serialised with the credential store's env tests.
+    fn with_isolated_home<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = credentials::lock_test_env();
+        let temp = tempfile::TempDir::new().expect("temp home");
+        let prev_home = std::env::var_os("HOME");
+        let prev_heddle_home = std::env::var_os("HEDDLE_HOME");
+        unsafe {
+            std::env::set_var("HOME", temp.path());
+            std::env::remove_var("HEDDLE_HOME");
+        }
+        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        unsafe {
+            match prev_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_heddle_home {
+                Some(value) => std::env::set_var("HEDDLE_HOME", value),
+                None => std::env::remove_var("HEDDLE_HOME"),
+            }
+        }
+        drop(temp);
+        match out {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    fn sample_credential() -> ServerCredential {
+        ServerCredential {
+            token: "tkn".to_string(),
+            subject: "dev".to_string(),
+            device_id: None,
+            credential_id: None,
+            private_key_pem: None,
+            expires_at: None,
+        }
+    }
+
+    /// On a successful logout, both the credential and the matching device
+    /// signing identity are removed (heddle#482).
+    #[test]
+    fn logout_removes_credential_and_device_identity_on_success() {
+        with_isolated_home(|| {
+            credentials::store_server_credential("grpc.S", sample_credential())
+                .expect("store credential");
+
+            // Record a matching device identity via the real link path.
+            let signer = Ed25519Signer::generate().expect("keypair");
+            repo::identity::link_device_key(
+                signer.public_key(),
+                &signer.to_pem().expect("pem"),
+                "grpc.S",
+            )
+            .expect("link device key");
+            assert!(repo::identity::device_identity_path().exists());
+
+            // No explicit --server: resolve_server falls back to the stored
+            // default written by `store_server_credential`.
+            cmd_auth_logout(&TextCtx, None).expect("logout succeeds");
+
+            assert!(
+                credentials::get_server_credential("grpc.S")
+                    .expect("load")
+                    .is_none(),
+                "credential must be removed on a successful logout",
+            );
+            assert!(
+                !repo::identity::device_identity_path().exists(),
+                "device identity must be removed on a successful logout",
+            );
+        });
+    }
+
+    /// Ordering (heddle#482): logout unlinks the device identity BEFORE dropping
+    /// the credential, so a fail-closed unlink leaves the credential/default
+    /// intact and `heddle auth logout` stays retryable with the SAME server
+    /// resolution. A corrupt device-identity file stands in for any unlink
+    /// failure (it fails the parse). Were the credential removed first, a no-arg
+    /// retry could no longer resolve back to this server.
+    #[test]
+    fn logout_preserves_credential_when_device_unlink_fails() {
+        with_isolated_home(|| {
+            credentials::store_server_credential("grpc.S", sample_credential())
+                .expect("store credential");
+
+            let device_path = repo::identity::device_identity_path();
+            std::fs::create_dir_all(device_path.parent().expect("home parent"))
+                .expect("home dir");
+            std::fs::write(&device_path, b"!!! definitely not valid device-identity toml !!!")
+                .expect("write corrupt device identity");
+
+            let result = cmd_auth_logout(&TextCtx, None);
+            assert!(
+                result.is_err(),
+                "a failed device unlink must fail the logout, not report a clean removal",
+            );
+
+            assert!(
+                credentials::get_server_credential("grpc.S")
+                    .expect("load")
+                    .is_some(),
+                "credential must be preserved when unlink fails, so logout is retryable",
+            );
+            assert_eq!(
+                credentials::default_server().expect("default").as_deref(),
+                Some("grpc.S"),
+                "default server must be preserved so a no-arg retry re-targets the same server",
+            );
+        });
     }
 }

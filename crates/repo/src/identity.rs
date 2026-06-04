@@ -92,13 +92,28 @@ pub fn link_device_key(
     private_key_pem: &str,
     server: &str,
 ) -> std::io::Result<()> {
+    link_device_key_at(&device_identity_path(), public_key, private_key_pem, server)
+}
+
+/// Write the device identity at `path` while holding the device write-lock, so
+/// the link serializes with logout's [`unlink_device_key`] (heddle#482). The
+/// shared lock closes a TOCTOU window: without it, a concurrent logout that read
+/// a *matching* identity could `remove_file` the identity this link atomically
+/// renames in — deleting a *different* server's key.
+fn link_device_key_at(
+    path: &Path,
+    public_key: &[u8],
+    private_key_pem: &str,
+    server: &str,
+) -> std::io::Result<()> {
+    let _lock = acquire_device_lock(path)?;
     let identity = DeviceIdentity {
         public_key: hex::encode(public_key),
         private_key_pem: private_key_pem.to_string(),
         server: server.to_string(),
         linked_at: now_rfc3339(),
     };
-    write_device(&device_identity_path(), &identity)
+    write_device(path, &identity)
 }
 
 /// Remove the recorded device signing identity when it belongs to `server` —
@@ -115,11 +130,24 @@ pub fn link_device_key(
 /// still on disk rather than falsely claiming a clean removal. Leaving it would
 /// let [`resolve_signer`] keep preferring the logged-out private key for every
 /// subsequent capture.
+///
+/// Race-safe (heddle#482): the whole read→compare→remove runs under the device
+/// write-lock that [`link_device_key`] also takes, and the on-disk `server` is
+/// RE-READ under that lock immediately before the remove. A concurrent
+/// `auth login` that atomically swaps in a *different* server's identity can
+/// therefore never be the casualty of this unlink — the revalidation sees the
+/// new server and leaves it intact.
 pub fn unlink_device_key(server: &str) -> std::io::Result<bool> {
     unlink_device_key_at(&device_identity_path(), server)
 }
 
 fn unlink_device_key_at(path: &Path, server: &str) -> std::io::Result<bool> {
+    // Hold the device write-lock across the entire decision: a concurrent login
+    // takes the same lock in `link_device_key_at`, so the file cannot be swapped
+    // between our read and our remove (heddle#482 TOCTOU).
+    let _lock = acquire_device_lock(path)?;
+    // RE-READ under the lock and remove ONLY if the on-disk identity STILL
+    // belongs to the logged-out server — never delete one a login swapped in.
     let Some(identity) = read_device_record(path)? else {
         return Ok(false);
     };
@@ -132,6 +160,22 @@ fn unlink_device_key_at(path: &Path, server: &str) -> std::io::Result<bool> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),
     }
+}
+
+/// Process-wide write lock serializing device-identity mutations — login's
+/// [`link_device_key`] and logout's [`unlink_device_key`] (heddle#482). The lock
+/// file sits beside the device identity, derived from its parent, so the global
+/// path (`<heddle_home>/locks/device-identity.lock`) and any test path stay in
+/// lockstep with whichever `device-identity.toml` they guard.
+fn device_lock(device_path: &Path) -> objects::lock::RepoLock {
+    let dir = device_path.parent().unwrap_or_else(|| Path::new("."));
+    objects::lock::RepoLock::at(dir.join("locks").join("device-identity.lock"))
+}
+
+fn acquire_device_lock(device_path: &Path) -> std::io::Result<objects::lock::WriteLockGuard> {
+    device_lock(device_path)
+        .write()
+        .map_err(|error| std::io::Error::other(format!("acquiring device-identity lock: {error}")))
 }
 
 /// Read the device-identity record at `path` for the logout/unlink decision,
@@ -607,6 +651,12 @@ mod tests {
         let device = dir.join("device-identity.toml");
         write_device_for(&device, "grpc.S");
 
+        // Prime the device lock (materialises `<dir>/locks/device-identity.lock`)
+        // while `dir` is still writable, so the unlink can ACQUIRE the lock and
+        // the only thing that fails is the removal itself — this exercises the
+        // fail-closed remove path under a held lock, not lock setup.
+        drop(device_lock(&device).write().expect("prime device lock"));
+
         // Read-only parent dir: the file is still readable (r-x) but cannot be
         // unlinked (removal needs write on the directory).
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).expect("lock dir");
@@ -625,6 +675,53 @@ mod tests {
             device.exists(),
             "the logged-out key is still on disk after the failed removal",
         );
+    }
+
+    /// Race-safety (heddle#482 TOCTOU): a logout for server A, racing a fresh
+    /// login for server B that atomically replaces the file, must NEVER delete
+    /// B's identity. Because link and unlink both take the device write-lock,
+    /// the logout either removes A's file before B is linked, or re-reads B
+    /// under the lock and no-ops — so in EVERY interleaving B's freshly-linked
+    /// identity is the survivor. Pre-fix, the logout's pre-lock read of A could
+    /// `remove_file` the B file that the login had just renamed in.
+    #[test]
+    fn concurrent_login_and_logout_never_delete_a_different_servers_identity() {
+        for _ in 0..64 {
+            let temp = TempDir::new().expect("temp dir");
+            let device = temp.path().join("device-identity.toml");
+
+            // The file starts as server A's identity.
+            write_device_for(&device, "grpc.A");
+
+            // Mint B's keypair up front so the login thread just writes it.
+            let b = Ed25519Signer::generate().expect("b keypair");
+            let b_pubkey = hex::encode(b.public_key());
+            let b_pub = b.public_key().to_vec();
+            let b_pem = b.to_pem().expect("b pem");
+
+            let logout_path = device.clone();
+            let logout =
+                std::thread::spawn(move || unlink_device_key_at(&logout_path, "grpc.A"));
+
+            let login_path = device.clone();
+            let login = std::thread::spawn(move || {
+                link_device_key_at(&login_path, &b_pub, &b_pem, "grpc.B")
+            });
+
+            logout.join().expect("logout thread").expect("unlink ok");
+            login.join().expect("login thread").expect("link ok");
+
+            // B's identity must survive every interleaving — it is never the
+            // unlink's casualty.
+            let surviving = load_device(&device)
+                .expect("load device")
+                .expect("the concurrent login's identity must survive");
+            assert_eq!(surviving.server, "grpc.B");
+            assert_eq!(
+                surviving.public_key, b_pubkey,
+                "the concurrent login's identity must never be deleted by the unlink",
+            );
+        }
     }
 
     /// The device-identity load path enforces the same permission gate, so a
