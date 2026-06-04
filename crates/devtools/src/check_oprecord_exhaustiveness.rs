@@ -35,9 +35,7 @@
 //! empty, because there are no legitimate exceptions).
 
 use std::{
-    env,
     ffi::OsStr,
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -45,9 +43,8 @@ use anyhow::{Context, Result, bail};
 use syn::{
     Attribute, ExprMatch, ImplItemFn, ItemFn, ItemMod, Meta, Pat, spanned::Spanned, visit::Visit,
 };
-use walkdir::WalkDir;
 
-const DEFAULT_SEARCH_DIRS: &[&str] = &["crates"];
+use crate::asserter::{for_each_rs_file, read_allowlist, read_search_dirs};
 
 /// Enums whose `match` consumers must be exhaustive. `OpKind` is listed
 /// proactively so a future emitted-kind enum is covered the day it lands.
@@ -61,7 +58,10 @@ HEDDLE_OPRECORD_EXHAUSTIVENESS_SEARCH_DIRS, HEDDLE_OPRECORD_EXHAUSTIVENESS_ALLOW
         );
     }
 
-    check(&read_search_dirs(), &read_allowlist())
+    check(
+        &read_search_dirs("HEDDLE_OPRECORD_EXHAUSTIVENESS_SEARCH_DIRS"),
+        &read_allowlist("HEDDLE_OPRECORD_EXHAUSTIVENESS_ALLOWLIST"),
+    )
 }
 
 /// The testable core: scan `search_dirs`, filter hits by `allowlist`, print
@@ -115,21 +115,6 @@ scanned)",
     Ok(())
 }
 
-fn read_search_dirs() -> Vec<PathBuf> {
-    match env::var("HEDDLE_OPRECORD_EXHAUSTIVENESS_SEARCH_DIRS") {
-        Ok(value) if !value.is_empty() => value.split(':').map(PathBuf::from).collect(),
-        _ => DEFAULT_SEARCH_DIRS.iter().map(PathBuf::from).collect(),
-    }
-}
-
-fn read_allowlist() -> Vec<String> {
-    match env::var("HEDDLE_OPRECORD_EXHAUSTIVENESS_ALLOWLIST") {
-        Ok(value) if value.is_empty() => Vec::new(),
-        Ok(value) => value.split(';').map(str::to_string).collect(),
-        Err(_) => Vec::new(),
-    }
-}
-
 #[derive(Debug)]
 struct Hit {
     path: PathBuf,
@@ -140,25 +125,8 @@ struct Hit {
 }
 
 fn scan_dir(dir: &Path, hits: &mut Vec<Hit>, files_scanned: &mut usize) -> Result<()> {
-    if !dir.exists() {
-        return Ok(());
-    }
-    for entry in WalkDir::new(dir).follow_links(false) {
-        let entry = entry.with_context(|| format!("walkdir under {}", dir.display()))?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if path.extension().and_then(OsStr::to_str) != Some("rs") {
-            continue;
-        }
-        if is_test_path(path) {
-            continue;
-        }
-        let source =
-            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        *files_scanned += 1;
-        let file = syn::parse_file(&source).with_context(|| format!("parse {}", path.display()))?;
+    for_each_rs_file(dir, files_scanned, is_test_path, |path, source| {
+        let file = syn::parse_file(source).with_context(|| format!("parse {}", path.display()))?;
         let lines: Vec<&str> = source.lines().collect();
         let mut visitor = Finder {
             path: path.to_path_buf(),
@@ -166,8 +134,8 @@ fn scan_dir(dir: &Path, hits: &mut Vec<Hit>, files_scanned: &mut usize) -> Resul
             hits,
         };
         visitor.visit_file(&file);
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Skip test code: tests legitimately plant wildcard arms (this asserter's own

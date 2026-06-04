@@ -69,6 +69,20 @@ When editing docs, specs, or web copy, classify capabilities explicitly:
 
 Do not describe a capability as live if it is only mock-backed in the web app or only planned in docs. Future-state positioning is encouraged when it is grounded in the codebase and roadmap, but it must be labeled accurately.
 
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues for `HeddleCo/heddle`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the canonical triage labels, with `question` retained as an additional GitHub issue label for general questions. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context repo: use root `CONTEXT.md` and `docs/adr/` for domain language and ADRs, and read `AGENTS.md` plus relevant `.agents/*.md` files for operating guidance. See `docs/agents/domain.md`.
+
 ## Guidelines
 
 | Topic | Description |

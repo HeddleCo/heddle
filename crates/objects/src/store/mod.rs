@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Backend-neutral object storage abstractions and concrete implementations.
 
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 
 use crate::object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree};
 
@@ -38,115 +38,6 @@ pub use crate::error::{HeddleError as StoreError, HeddleError, Result};
 impl From<CompressionError> for HeddleError {
     fn from(e: CompressionError) -> Self {
         HeddleError::Compression(e.to_string())
-    }
-}
-
-#[derive(Clone)]
-pub struct SharedStore(pub Arc<dyn ObjectStore>);
-
-impl ObjectStore for SharedStore {
-    fn get_blob(&self, hash: &ContentHash) -> Result<Option<Blob>> {
-        self.0.get_blob(hash)
-    }
-    fn put_blob(&self, blob: &Blob) -> Result<ContentHash> {
-        self.0.put_blob(blob)
-    }
-    fn put_blob_with_hash(&self, blob: &Blob, hash: ContentHash) -> Result<ContentHash> {
-        self.0.put_blob_with_hash(blob, hash)
-    }
-    fn has_blob(&self, hash: &ContentHash) -> Result<bool> {
-        self.0.has_blob(hash)
-    }
-    fn blob_size(&self, hash: &ContentHash) -> Result<Option<u64>> {
-        self.0.blob_size(hash)
-    }
-    fn loose_blob_path(&self, hash: &ContentHash) -> Option<PathBuf> {
-        self.0.loose_blob_path(hash)
-    }
-    fn promote_to_loose_uncompressed(&self, hash: &ContentHash) -> Result<bool> {
-        self.0.promote_to_loose_uncompressed(hash)
-    }
-    fn clear_recent_caches(&self) {
-        self.0.clear_recent_caches()
-    }
-    fn get_blob_bytes(&self, hash: &ContentHash) -> Result<Option<bytes::Bytes>> {
-        self.0.get_blob_bytes(hash)
-    }
-    fn get_tree(&self, hash: &ContentHash) -> Result<Option<Tree>> {
-        self.0.get_tree(hash)
-    }
-    fn put_tree(&self, tree: &Tree) -> Result<ContentHash> {
-        self.0.put_tree(tree)
-    }
-    fn has_tree(&self, hash: &ContentHash) -> Result<bool> {
-        self.0.has_tree(hash)
-    }
-    fn get_state(&self, id: &ChangeId) -> Result<Option<State>> {
-        self.0.get_state(id)
-    }
-    fn put_state(&self, state: &State) -> Result<()> {
-        self.0.put_state(state)
-    }
-    fn has_state(&self, id: &ChangeId) -> Result<bool> {
-        self.0.has_state(id)
-    }
-    fn list_states(&self) -> Result<Vec<ChangeId>> {
-        self.0.list_states()
-    }
-    fn get_action(&self, id: &ActionId) -> Result<Option<Action>> {
-        self.0.get_action(id)
-    }
-    fn put_action(&self, action: &mut Action) -> Result<ActionId> {
-        self.0.put_action(action)
-    }
-    fn list_actions(&self) -> Result<Vec<ActionId>> {
-        self.0.list_actions()
-    }
-    fn list_blobs(&self) -> Result<Vec<ContentHash>> {
-        self.0.list_blobs()
-    }
-    fn list_trees(&self) -> Result<Vec<ContentHash>> {
-        self.0.list_trees()
-    }
-    fn get_pack_object(
-        &self,
-        id: &pack::PackObjectId,
-    ) -> Result<Option<(pack::ObjectType, Vec<u8>)>> {
-        self.0.get_pack_object(id)
-    }
-    fn install_pack(&self, pack_data: &[u8], index_data: &[u8]) -> Result<Vec<pack::PackObjectId>> {
-        self.0.install_pack(pack_data, index_data)
-    }
-    fn install_pack_streaming(
-        &self,
-        pack_path: &std::path::Path,
-        index_path: &std::path::Path,
-    ) -> Result<()> {
-        self.0.install_pack_streaming(pack_path, index_path)
-    }
-    fn put_blobs_packed(&self, blobs: Vec<(ContentHash, Vec<u8>)>) -> Result<()> {
-        self.0.put_blobs_packed(blobs)
-    }
-    fn begin_snapshot_write_batch(&self) -> Result<()> {
-        self.0.begin_snapshot_write_batch()
-    }
-    fn flush_snapshot_write_batch(&self) -> Result<()> {
-        self.0.flush_snapshot_write_batch()
-    }
-    fn abort_snapshot_write_batch(&self) {
-        self.0.abort_snapshot_write_batch()
-    }
-    fn has_redactions_for_blob(&self, blob: &ContentHash) -> Result<bool> {
-        self.0.has_redactions_for_blob(blob)
-    }
-    fn get_redactions_bytes_for_blob(&self, blob: &ContentHash) -> Result<Option<Vec<u8>>> {
-        self.0.get_redactions_bytes_for_blob(blob)
-    }
-    fn put_redactions_bytes_for_blob(&self, blob: &ContentHash, bytes: &[u8]) -> Result<()> {
-        self.0.put_redactions_bytes_for_blob(blob, bytes)
-    }
-    fn list_blobs_with_redactions(&self) -> Result<Vec<ContentHash>> {
-        self.0.list_blobs_with_redactions()
     }
 }
 
@@ -275,7 +166,7 @@ impl ObjectStore for AnyStore {
         &self,
         pack_path: &std::path::Path,
         index_path: &std::path::Path,
-    ) -> Result<()> {
+    ) -> Result<Vec<pack::PackObjectId>> {
         any_store_dispatch!(self, install_pack_streaming(pack_path, index_path))
     }
     fn pack_objects(&self, aggressive: bool) -> Result<(u64, u64)> {
@@ -575,24 +466,24 @@ pub trait ObjectStore: Send + Sync {
     /// have been moved or removed depending on the backend; callers
     /// shouldn't continue to rely on them.
     ///
-    /// Returns nothing — callers that need the list of installed ids
-    /// can read the freshly-installed pack via the store. Most
-    /// callers (including `Importer`) already track inserted ids
-    /// out-of-band via the sha map and don't need a return value.
+    /// Returns the ids of the installed objects — the same set
+    /// `install_pack` reports for the equivalent byte-buffer install,
+    /// so callers (e.g. native sync) read the installed ids off the
+    /// install result instead of tracking them out-of-band.
     fn install_pack_streaming(
         &self,
         pack_path: &std::path::Path,
         index_path: &std::path::Path,
-    ) -> Result<()> {
+    ) -> Result<Vec<pack::PackObjectId>> {
         let pack_data = std::fs::read(pack_path).map_err(StoreError::from)?;
         let index_data = std::fs::read(index_path).map_err(StoreError::from)?;
-        self.install_pack(&pack_data, &index_data)?;
+        let ids = self.install_pack(&pack_data, &index_data)?;
         // Default impl: clean up the staged files. Override
         // implementations that move/rename should not call super and
         // should manage the file lifecycle themselves.
         let _ = std::fs::remove_file(pack_path);
         let _ = std::fs::remove_file(index_path);
-        Ok(())
+        Ok(ids)
     }
 
     fn pack_objects(&self, aggressive: bool) -> Result<(u64, u64)> {

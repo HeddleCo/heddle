@@ -16,7 +16,7 @@ pub fn cmd_cherry_pick(
     no_commit: bool,
     force: bool,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
 
     // Cherry-pick rewrites the worktree to match a different tree. Without a
     // dirty-worktree guard, modified-but-unsnapshotted files and untracked

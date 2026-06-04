@@ -13,7 +13,7 @@ use serde::Serialize;
 use crate::cli::{should_output_json, Cli, StackArgs, StackCommands};
 
 pub fn cmd_stack(cli: &Cli, args: StackArgs) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let outer_thread = args.thread.clone();
 
     match args.command {

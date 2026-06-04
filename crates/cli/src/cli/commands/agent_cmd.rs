@@ -8,6 +8,7 @@ use objects::object::ThreadName;
 use objects::store::{
     AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ReserveOutcome, current_boot_id,
 };
+use oplog::OpLogBackend;
 use refs::{Head, RefExpectation};
 use repo::{
     Repository, Thread, ThreadConfidenceSummary, ThreadFreshness, ThreadId,
@@ -165,7 +166,7 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
     // record, so reject an unsafe thread name here too (same early-reject
     // rule as `start_thread` / `thread create`). (heddle#464 close-the-class.)
     ThreadId::new(args.thread.as_str()).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let anchor = match &args.anchor {
         Some(spec) => repo
             .resolve_state(spec)?
@@ -434,7 +435,7 @@ fn ensure_thread_record(
 }
 
 pub fn cmd_agent_heartbeat(cli: &Cli, args: AgentHeartbeatArgs) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let registry = AgentRegistry::new(repo.heddle_dir());
     let entry = registry
         .update_entry(&args.session, |entry| {
@@ -446,7 +447,7 @@ pub fn cmd_agent_heartbeat(cli: &Cli, args: AgentHeartbeatArgs) -> Result<()> {
 }
 
 pub fn cmd_agent_release(cli: &Cli, args: AgentReleaseArgs) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let registry = AgentRegistry::new(repo.heddle_dir());
     let status = match args.status {
         AgentReleaseStatusArg::Complete => AgentStatus::Complete,
@@ -467,7 +468,7 @@ pub fn cmd_agent_release(cli: &Cli, args: AgentReleaseArgs) -> Result<()> {
 }
 
 pub fn cmd_agent_list(cli: &Cli, args: AgentApiListArgs) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let registry = AgentRegistry::new(repo.heddle_dir());
     if args.alive_only {
         // Sweep dead reservations before reporting so callers asking

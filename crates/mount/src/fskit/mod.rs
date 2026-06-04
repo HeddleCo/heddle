@@ -370,7 +370,7 @@ fn guarded_c_int<F: FnOnce() -> c_int>(label: &'static str, f: F) -> c_int {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(rc) => rc,
         Err(payload) => {
-            let msg = panic_payload_str(&payload);
+            let msg = crate::error::panic_payload_str(&payload);
             tracing::error!(trampoline = label, %msg, "FSKit trampoline panicked; returning EIO");
             libc::EIO
         }
@@ -386,18 +386,8 @@ fn guarded_c_int<F: FnOnce() -> c_int>(label: &'static str, f: F) -> c_int {
 #[inline]
 fn guarded_drop<F: FnOnce()>(label: &'static str, f: F) {
     if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-        let msg = panic_payload_str(&payload);
+        let msg = crate::error::panic_payload_str(&payload);
         tracing::error!(trampoline = label, %msg, "FSKit trampoline panicked during drop");
-    }
-}
-
-fn panic_payload_str(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(s) = payload.downcast_ref::<&'static str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "<non-string panic payload>".to_string()
     }
 }
 

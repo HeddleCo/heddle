@@ -15,6 +15,7 @@ use objects::{
     object::{ChangeId, State, ThreadName, Tree},
     store::{AgentEntry, AgentRegistry, AgentStatus, current_boot_id},
 };
+use oplog::OpLogBackend;
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
     AgentUsageSummary, GitOverlayBranchTip, GitOverlayImportHint, GitRemoteTrackingStatus,
@@ -353,7 +354,7 @@ pub(crate) struct ThreadCaptureSummary {
 }
 
 pub fn cmd_start(cli: &Cli, args: ThreadStartArgs) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     if args.path.is_some() {
         ensure_worktree_clean(&repo, "start thread")?;
     }

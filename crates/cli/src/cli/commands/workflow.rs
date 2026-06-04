@@ -2,7 +2,7 @@
 use objects::store::ObjectStore;
 use anyhow::{Context, Result, anyhow};
 use objects::object::{ChangeId, ThreadName};
-use oplog::{OpBatch, OpRecord};
+use oplog::{OpBatch, OpLogBackend, OpRecord};
 use repo::{Repository, Thread, ThreadIntegrationPolicy, thread_flag};
 use serde::Serialize;
 
@@ -83,7 +83,7 @@ struct DelegateOutput {
 }
 
 pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let mut thread = resolve_thread(
         &repo,
         args.thread.as_deref(),
@@ -252,7 +252,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     // thread directory before landing. The capture/merge below run
     // against `repo`, so they all see the same checkout. See
     // `Repository::active_worktree_path`.
-    let cwd_repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let cwd_repo = cli.open_repo()?;
     let target_path = cwd_repo.active_worktree_path()?;
     let repo = if target_path == *cwd_repo.root() {
         cwd_repo
@@ -897,7 +897,7 @@ fn land_checkpoint_message(repo: &Repository, thread: &Thread, explicit: Option<
 }
 
 pub fn cmd_delegate(cli: &Cli, args: DelegateArgs) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     warn_if_path_prefix_inside_repo(&repo, args.path_prefix.as_deref());
     let parent = resolve_parent_thread(&repo, args.parent.as_deref())?;
 

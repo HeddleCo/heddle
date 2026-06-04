@@ -15,7 +15,7 @@
 use objects::store::ObjectStore;
 use anyhow::{Result, anyhow};
 use objects::object::ThreadName;
-use oplog::OpRecord;
+use oplog::{OpLogBackend, OpRecord};
 use repo::{CommitGraphIndex, GitCheckpointRecord, Repository, RepositoryCapability};
 use serde::Serialize;
 

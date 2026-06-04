@@ -3,6 +3,7 @@
 mod content;
 mod helpers;
 mod hydration;
+mod session;
 mod sync;
 mod user;
 
@@ -344,3 +345,4 @@ impl HostedGrpcClient {
 }
 
 pub use hydration::{LazyHostedHydrator, PullMaterialization, register_hosted_factory};
+pub use session::{HostedAuthMode, HostedSession};

@@ -4,7 +4,6 @@
 mod op_record_codec;
 mod oplog_backend;
 mod oplog_core;
-mod oplog_records;
 mod oplog_types;
 mod packed_oplog;
 
@@ -18,7 +17,7 @@ pub use oplog_backend::OpLogBackend;
 pub use oplog_core::OpLog;
 pub use oplog_types::{
     ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
-    isolation_keys_for_record,
+    RedactionUndoClass, isolation_keys_for_record,
 };
 #[cfg(feature = "postgres")]
 pub use pg_oplog::PgOpLogBackend;

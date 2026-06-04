@@ -13,8 +13,8 @@ mod symbol_extraction;
 pub mod symbol_resolver;
 
 pub use analysis::{
-    AggregateKind, AggregatedChange, AggregationResult, BlastRadius, CallGraph, CallGraphNode,
-    FunctionKey, HotEventKind, HotSpot, HotSpotKey, HotSpotKeyValue, HotSpotParams, HotSpotsReport,
+    AggregateKind, AggregatedChange, AggregationResult, HotEventKind, HotSpot, HotSpotKey,
+    HotSpotKeyValue, HotSpotParams, HotSpotsReport,
     SimilarityMethod, aggregate_changes, analyze_actor_histogram, analyze_hot_spots,
     classify_modification, classify_modification_with_confidence, compute_similarity,
     detect_file_renames, detect_function_changes,

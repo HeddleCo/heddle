@@ -19,7 +19,7 @@ struct CleanOutput {
 }
 
 pub fn cmd_clean(cli: &Cli, force: bool, dry_run: bool) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
 
     if !force && !dry_run {
         return Err(anyhow!(RecoveryAdvice::destructive_requires_force(

@@ -5,7 +5,7 @@ use std::{
     thread,
 };
 
-use objects::object::{ChangeId, ContentHash};
+use objects::object::{ChangeId, ContentHash, MarkerName, ThreadName};
 use tempfile::TempDir;
 
 use super::oplog_backend::OpLogBackend;
@@ -728,11 +728,18 @@ fn record_methods_persist_expected_variants() {
         .record_goto(&result, Some(&from), Some("lane"))
         .unwrap();
     oplog
-        .record_thread_create("feat", &result, Some(vec![9, 8, 7]), Some("lane"))
+        .record_thread_create(&ThreadName::new("feat"), &result, Some(vec![9, 8, 7]), Some("lane"))
         .unwrap();
-    oplog.record_thread_delete("legacy", &result, None).unwrap();
+    oplog
+        .record_thread_delete(&ThreadName::new("legacy"), &result, None)
+        .unwrap();
     let rename_ids = oplog
-        .record_thread_rename("old", "new", &result, Some("lane"))
+        .record_thread_rename(
+            &ThreadName::new("old"),
+            &ThreadName::new("new"),
+            &result,
+            Some("lane"),
+        )
         .unwrap();
     assert_eq!(rename_ids.len(), 2);
     oplog
@@ -741,14 +748,24 @@ fn record_methods_persist_expected_variants() {
     oplog
         .record_collapse(&[from, result], &result, Some("trunk"), None)
         .unwrap();
-    oplog.record_marker_create("v1", &result).unwrap();
-    oplog.record_marker_delete("v1", &result).unwrap();
+    oplog
+        .record_marker_create(&MarkerName::new("v1"), &result)
+        .unwrap();
+    oplog
+        .record_marker_delete(&MarkerName::new("v1"), &result)
+        .unwrap();
     oplog
         .record_redact(&redaction, &blob, &result, "secret.txt", Some("lane"))
         .unwrap();
     oplog.record_purge(&redaction, &blob, Some("lane")).unwrap();
     oplog
-        .record_fast_forward("topic", "main", &from, &result, Some("lane"))
+        .record_fast_forward(
+            &ThreadName::new("topic"),
+            &ThreadName::new("main"),
+            &from,
+            &result,
+            Some("lane"),
+        )
         .unwrap();
 
     // record_fork must store `from` as the source state, not the result.

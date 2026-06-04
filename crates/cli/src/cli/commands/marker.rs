@@ -4,6 +4,7 @@
 use objects::store::ObjectStore;
 use anyhow::{anyhow, Result};
 use objects::object::MarkerName;
+use oplog::OpLogBackend;
 use repo::Repository;
 use serde::Serialize;
 
@@ -42,7 +43,7 @@ struct MarkerBulkDeleteOutput {
 }
 
 pub fn cmd_marker(cli: &Cli, command: MarkerCommands) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
 
     match command {
         MarkerCommands::List { filter } => cmd_marker_list(cli, &repo, filter),

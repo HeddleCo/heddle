@@ -33,32 +33,33 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use tracing::debug;
 
-use super::types::{FileTouch, Provider, TouchKind, Transcript};
-use crate::IngestError;
+use super::stream::{CwdSignal, StreamEvent, fold_transcript, read_session_text};
+use super::types::{FileTouch, Provider, TouchKind};
+use crate::Transcript;
 
 /// Load a single session `.jsonl`, returning `Ok(None)` if the file
 /// contains no events we could normalize (empty sessions happen when a
 /// user hits Ctrl-C before the first turn).
 pub fn load(path: impl AsRef<Path>) -> crate::Result<Option<Transcript>> {
     let path = path.as_ref();
-    let text = std::fs::read_to_string(path).map_err(|e| {
-        IngestError::Io(std::io::Error::new(
-            e.kind(),
-            format!("reading claude session {}: {e}", path.display()),
-        ))
-    })?;
+    let text = read_session_text(path, "claude session")?;
     parse(&text, path)
 }
 
 /// Internal entry point, split out so tests don't need a file on disk.
 pub(super) fn parse(text: &str, source_path: &Path) -> crate::Result<Option<Transcript>> {
-    let mut session_id: Option<String> = None;
-    let mut cwd: Option<PathBuf> = None;
-    let mut started: Option<DateTime<Utc>> = None;
-    let mut ended: Option<DateTime<Utc>> = None;
-    let mut turn_count: u32 = 0;
-    let mut touches: Vec<FileTouch> = Vec::new();
+    Ok(fold_transcript(
+        Provider::Claude,
+        source_path,
+        stream_events(text, source_path),
+    ))
+}
 
+/// Walk a Claude session JSONL into the shared [`StreamEvent`] stream.
+/// This is the single low-level parse both the [`Transcript`] builder and
+/// the reasoning harvester consume.
+pub(crate) fn stream_events(text: &str, source_path: &Path) -> Vec<StreamEvent> {
+    let mut out = Vec::new();
     for (line_no, raw) in text.lines().enumerate() {
         if raw.trim().is_empty() {
             continue;
@@ -78,80 +79,69 @@ pub(super) fn parse(text: &str, source_path: &Path) -> crate::Result<Option<Tran
             }
         };
 
-        // Session id and cwd come from the first event that carries them
-        // (they're redundant across events but first-wins is deterministic).
-        if session_id.is_none() {
-            session_id = event.session_id.clone();
-        }
-        if cwd.is_none()
-            && let Some(c) = event.cwd.as_ref()
-        {
-            cwd = Some(PathBuf::from(c));
-        }
-
-        if let Some(ts) = event.timestamp {
-            started = Some(started.map_or(ts, |s| s.min(ts)));
-            ended = Some(ended.map_or(ts, |e| e.max(ts)));
-        }
-
-        match event.event_type.as_deref() {
-            Some("user") | Some("assistant") => turn_count += 1,
-            _ => {}
-        }
-
-        if event.event_type.as_deref() == Some("assistant")
+        let is_assistant = event.event_type.as_deref() == Some("assistant");
+        let mut texts = Vec::new();
+        let mut touches = Vec::new();
+        if is_assistant
             && let Some(content) = event.message.as_ref().and_then(|m| m.content.as_ref())
         {
             for block in content.blocks() {
-                if block.block_type.as_deref() != Some("tool_use") {
-                    continue;
+                match block.block_type.as_deref() {
+                    Some("text") => {
+                        if let Some(s) = block.text.as_deref()
+                            && !s.trim().is_empty()
+                        {
+                            texts.push(s.to_string());
+                        }
+                    }
+                    Some("tool_use") => {
+                        let kind = match block.name.as_deref() {
+                            // `Write` replaces, `Edit` modifies, `MultiEdit`
+                            // does several Edits in one call, `NotebookEdit`
+                            // targets a notebook cell. All count as writes.
+                            Some("Write" | "Edit" | "MultiEdit" | "NotebookEdit") => {
+                                TouchKind::Write
+                            }
+                            Some("Read") => TouchKind::Read,
+                            _ => continue,
+                        };
+                        let Some(input) = block.input.as_ref() else {
+                            continue;
+                        };
+                        // `NotebookEdit` uses `notebook_path`; the others
+                        // use `file_path`. Accept either.
+                        let path_str = input
+                            .file_path
+                            .as_deref()
+                            .or(input.notebook_path.as_deref());
+                        let Some(path) = path_str else { continue };
+                        let Some(ts) = event.timestamp else { continue };
+                        touches.push(FileTouch {
+                            path: PathBuf::from(path),
+                            timestamp: ts,
+                            kind,
+                        });
+                    }
+                    // `thinking` blocks are redacted at write-time; the
+                    // `thinking` string is empty. Nothing to harvest.
+                    _ => {}
                 }
-                let Some(name) = block.name.as_deref() else {
-                    continue;
-                };
-                let kind = match name {
-                    // `Write` replaces, `Edit` modifies, `MultiEdit` does
-                    // several Edits in one call, `NotebookEdit` targets a
-                    // notebook cell. All count as writes.
-                    "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => TouchKind::Write,
-                    "Read" => TouchKind::Read,
-                    _ => continue,
-                };
-                let Some(input) = block.input.as_ref() else {
-                    continue;
-                };
-                // `NotebookEdit` uses `notebook_path`; the others
-                // use `file_path`. Accept either.
-                let path_str = input
-                    .file_path
-                    .as_deref()
-                    .or(input.notebook_path.as_deref());
-                let Some(path) = path_str else { continue };
-                let Some(ts) = event.timestamp else { continue };
-                touches.push(FileTouch {
-                    path: PathBuf::from(path),
-                    timestamp: ts,
-                    kind,
-                });
             }
         }
+
+        out.push(StreamEvent {
+            timestamp: event.timestamp,
+            // Session id and cwd come from the first event that carries
+            // them (redundant across events, but first-wins is deterministic).
+            session_id: event.session_id,
+            starting_commit: None,
+            cwd: event.cwd.map(|c| CwdSignal::IfUnset(PathBuf::from(c))),
+            is_turn: matches!(event.event_type.as_deref(), Some("user") | Some("assistant")),
+            texts,
+            touches,
+        });
     }
-
-    let (Some(session_id), Some(started_at), Some(ended_at)) = (session_id, started, ended) else {
-        return Ok(None);
-    };
-
-    Ok(Some(Transcript {
-        provider: Provider::Claude,
-        session_id,
-        source_path: source_path.to_path_buf(),
-        cwd,
-        started_at,
-        ended_at,
-        turn_count,
-        files_touched: touches,
-        starting_commit: None,
-    }))
+    out
 }
 
 /// Top-level JSONL event. Fields are `Option` because different event
@@ -207,6 +197,9 @@ struct RawBlock {
     #[serde(rename = "type")]
     block_type: Option<String>,
     name: Option<String>,
+    /// Narrative content of a `text` block. The harvester mines this;
+    /// the matcher ignores it.
+    text: Option<String>,
     input: Option<RawToolInput>,
 }
 

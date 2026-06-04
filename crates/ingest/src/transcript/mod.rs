@@ -20,6 +20,7 @@ pub mod codex;
 pub mod locator;
 pub mod matcher;
 pub mod opencode;
+pub(crate) mod stream;
 pub mod types;
 
 use std::path::{Path, PathBuf};

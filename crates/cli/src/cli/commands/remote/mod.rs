@@ -11,8 +11,6 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use gix::{bstr::ByteSlice, refs::transaction::PreviousValue};
 use objects::{fs_atomic::write_file_atomic, object::ThreadName};
-#[cfg(feature = "client")]
-use proto::AuthToken;
 use refs::Head;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
@@ -25,7 +23,7 @@ use super::{
     snapshot::ensure_current_state,
 };
 #[cfg(feature = "client")]
-use crate::client::{ClientConfig, HostedGrpcClient};
+use crate::client::{HostedAuthMode, HostedSession};
 use crate::{
     bridge::{
         GitBridge,
@@ -165,7 +163,7 @@ pub async fn cmd_push(
     all_threads: bool,
     mirror: Option<String>,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     if remote.is_none() && resolved_default_remote_name(&repo)?.is_none() {
         return Err(anyhow!(RecoveryAdvice::remote_not_configured("push")));
     }
@@ -334,40 +332,35 @@ pub async fn cmd_push(
 
     preflight_native_remote_transport(&repo, remote.as_deref(), "push")?;
 
+    #[cfg(not(feature = "client"))]
     let token = user_config.remote_token()?;
     #[cfg(feature = "client")]
-    let mut token = token;
     let (target, server_key) =
         resolve_remote_with_key(&repo, remote.as_deref()).map_err(anyhow::Error::msg)?;
-
-    // Fall back to the credential store if no token was provided via env/config.
-    #[cfg(feature = "client")]
-    let mut credential_proof_key: Option<String> = None;
     #[cfg(not(feature = "client"))]
-    let credential_proof_key: Option<String> = None;
-    #[cfg(feature = "client")]
-    if token.is_none()
-        && let Some(ref key) = server_key
-        && let Ok(Some(cred)) = heddle_client::credentials::resolve_credential_for_server(key)
-    {
-        token = Some(AuthToken::new(cred.token, "credential-store"));
-        credential_proof_key = cred.private_key_pem;
-    }
+    let (target, _server_key) =
+        resolve_remote_with_key(&repo, remote.as_deref()).map_err(anyhow::Error::msg)?;
 
-    let network_client_config = if matches!(target, RemoteTarget::Network { .. }) {
-        let mut config = user_config.heddle_client_config(token.clone())?;
-        if let Some(ref key) = server_key {
-            config = config.with_server_key(key.clone());
-        }
-        if let Some(ref pem) = credential_proof_key
-            && config.auth_proof_key_pem.is_none()
-        {
-            config = config.with_auth_proof_key_pem(pem.clone());
-        }
-        Some(config)
+    // Prevalidate auth/TLS config (including the credential-store fallback)
+    // before any irreversible state mutation below; a rejected security
+    // config must leave no partial state behind.
+    #[cfg(feature = "client")]
+    let network_session = if matches!(target, RemoteTarget::Network { .. }) {
+        Some(HostedSession::build(
+            &user_config,
+            server_key,
+            HostedAuthMode::CredentialFallback,
+        )?)
     } else {
         None
     };
+    // Builds without the `client` feature can't push over the network, but
+    // must still fail closed on a bad TLS/auth config before bootstrapping
+    // local state — matching the prevalidation the `client` build runs above.
+    #[cfg(not(feature = "client"))]
+    if matches!(target, RemoteTarget::Network { .. }) {
+        user_config.heddle_client_config(token.clone())?;
+    }
 
     let state_id = if let Some(state_str) = state {
         if matches!(state_str.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {
@@ -399,7 +392,7 @@ pub async fn cmd_push(
                 PushNetworkOptions {
                     addr,
                     repo_path: repo_path.as_deref(),
-                    client_config: network_client_config
+                    session: network_session
                         .as_ref()
                         .context("network client config was not prevalidated")?,
                     state_id: &state_id,
@@ -410,7 +403,7 @@ pub async fn cmd_push(
             )
             .await?;
             #[cfg(not(feature = "client"))]
-            let _ = (addr, repo_path, token, network_client_config);
+            let _ = (addr, repo_path, token);
             #[cfg(not(feature = "client"))]
             anyhow::bail!(RecoveryAdvice::network_feature_unavailable("push"));
         }
@@ -1157,8 +1150,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
         .repo_path
         .context("network remotes must include a hosted repository path")?;
 
-    let mut client = HostedGrpcClient::connect(options.addr, options.client_config).await?;
-    client.auto_rotate_if_needed().await;
+    let mut client = options.session.connect(options.addr).await?;
 
     if !should_output_json(options.cli, Some(repo.config())) {
         println!(
@@ -1211,7 +1203,7 @@ async fn push_network(repo: &Repository, options: PushNetworkOptions<'_>) -> Res
 struct PushNetworkOptions<'a> {
     addr: SocketAddr,
     repo_path: Option<&'a str>,
-    client_config: &'a ClientConfig,
+    session: &'a HostedSession,
     state_id: &'a objects::object::ChangeId,
     track_name: &'a str,
     force: bool,

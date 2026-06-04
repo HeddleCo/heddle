@@ -35,28 +35,36 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracing::debug;
 
-use super::types::{FileTouch, Provider, TouchKind, Transcript};
-use crate::IngestError;
+use super::stream::{CwdSignal, StreamEvent, fold_transcript, read_session_text};
+use super::types::{FileTouch, Provider, TouchKind};
+use crate::Transcript;
 
 pub fn load(path: impl AsRef<Path>) -> crate::Result<Option<Transcript>> {
     let path = path.as_ref();
-    let text = std::fs::read_to_string(path).map_err(|e| {
-        IngestError::Io(std::io::Error::new(
-            e.kind(),
-            format!("reading codex session {}: {e}", path.display()),
-        ))
-    })?;
+    let text = read_session_text(path, "codex rollout")?;
     parse(&text, path)
 }
 
 pub(super) fn parse(text: &str, source_path: &Path) -> crate::Result<Option<Transcript>> {
-    let mut session_id: Option<String> = None;
-    let mut cwd: Option<PathBuf> = None;
-    let mut starting_commit: Option<String> = None;
-    let mut started: Option<DateTime<Utc>> = None;
-    let mut ended: Option<DateTime<Utc>> = None;
-    let mut turn_count: u32 = 0;
-    let mut touches: Vec<FileTouch> = Vec::new();
+    Ok(fold_transcript(
+        Provider::Codex,
+        source_path,
+        stream_events(text, source_path),
+    ))
+}
+
+/// Walk a Codex rollout JSONL into the shared [`StreamEvent`] stream.
+/// This is the single low-level parse both the [`Transcript`] builder and
+/// the reasoning harvester consume.
+///
+/// `cwd` is tracked across `session_meta` and `turn_context` events so
+/// shell tokens that resolve relative to the current workdir get stamped
+/// against the right path — the running cwd is used to resolve touches
+/// inline here, and also surfaced as a [`CwdSignal`] for the transcript's
+/// `cwd` field.
+pub(crate) fn stream_events(text: &str, source_path: &Path) -> Vec<StreamEvent> {
+    let mut current_cwd: Option<PathBuf> = None;
+    let mut out = Vec::new();
 
     for (line_no, raw) in text.lines().enumerate() {
         if raw.trim().is_empty() {
@@ -74,122 +82,137 @@ pub(super) fn parse(text: &str, source_path: &Path) -> crate::Result<Option<Tran
                 continue;
             }
         };
-
-        if let Some(ts) = event.timestamp {
-            started = Some(started.map_or(ts, |s| s.min(ts)));
-            ended = Some(ended.map_or(ts, |e| e.max(ts)));
-        }
+        let ts = event.timestamp;
 
         match event.event_type.as_deref() {
             Some("session_meta") => {
+                let mut ev = StreamEvent::bare(ts);
                 if let Some(p) = event.payload.as_ref() {
-                    if session_id.is_none() {
-                        session_id = p.get("id").and_then(Value::as_str).map(String::from);
-                    }
-                    if cwd.is_none() {
-                        cwd = p.get("cwd").and_then(Value::as_str).map(PathBuf::from);
-                    }
-                    if starting_commit.is_none() {
-                        starting_commit = p
-                            .get("git")
-                            .and_then(|g| g.get("commit_hash"))
-                            .and_then(Value::as_str)
-                            .map(String::from);
+                    ev.session_id = p.get("id").and_then(Value::as_str).map(String::from);
+                    ev.starting_commit = p
+                        .get("git")
+                        .and_then(|g| g.get("commit_hash"))
+                        .and_then(Value::as_str)
+                        .map(String::from);
+                    if let Some(c) = p.get("cwd").and_then(Value::as_str) {
+                        if current_cwd.is_none() {
+                            current_cwd = Some(PathBuf::from(c));
+                        }
+                        ev.cwd = Some(CwdSignal::IfUnset(PathBuf::from(c)));
                     }
                 }
+                out.push(ev);
             }
             Some("turn_context") => {
                 // A workdir switch mid-session: respect the newest cwd
                 // without clobbering the session_meta cwd if no switch is
                 // actually logged.
+                let mut ev = StreamEvent::bare(ts);
                 if let Some(p) = event.payload.as_ref()
                     && let Some(new_cwd) = p.get("cwd").and_then(Value::as_str)
                 {
-                    cwd = Some(PathBuf::from(new_cwd));
+                    current_cwd = Some(PathBuf::from(new_cwd));
+                    ev.cwd = Some(CwdSignal::Force(PathBuf::from(new_cwd)));
                 }
+                out.push(ev);
             }
             Some("response_item") => {
                 let Some(p) = event.payload.as_ref() else {
+                    out.push(StreamEvent::bare(ts));
                     continue;
                 };
-                let payload_type = p.get("type").and_then(Value::as_str).unwrap_or("");
-                match payload_type {
+                match p.get("type").and_then(Value::as_str).unwrap_or("") {
                     "message" => {
-                        turn_count += 1;
+                        // Every message counts as a turn; only assistant
+                        // turns carry harvest-able prose. User/developer
+                        // messages are inputs, not the model's reasoning.
+                        let texts = if p.get("role").and_then(Value::as_str) == Some("assistant") {
+                            collect_message_texts(p)
+                        } else {
+                            Vec::new()
+                        };
+                        let mut ev = StreamEvent::bare(ts);
+                        ev.is_turn = true;
+                        ev.texts = texts;
+                        out.push(ev);
                     }
                     "function_call" => {
-                        turn_count += 1;
-                        let name = p.get("name").and_then(Value::as_str).unwrap_or("");
-                        if name != "exec_command" {
-                            continue;
+                        // Every function_call counts as a turn; only
+                        // `exec_command` ever resolves to file touches.
+                        let mut ev = StreamEvent::bare(ts);
+                        ev.is_turn = true;
+                        if p.get("name").and_then(Value::as_str) == Some("exec_command")
+                            && let Some(ts) = ts
+                            && let Some(args_str) = p.get("arguments").and_then(Value::as_str)
+                            && let Ok(args_json) = serde_json::from_str::<Value>(args_str)
+                            && let Some(cmd) = args_json.get("cmd").and_then(Value::as_str)
+                        {
+                            // Per-call workdir override falls back to the
+                            // session's running cwd.
+                            let base_cwd = args_json
+                                .get("workdir")
+                                .and_then(Value::as_str)
+                                .map(PathBuf::from)
+                                .or_else(|| current_cwd.clone());
+                            extract_shell_touches(cmd, ts, base_cwd.as_deref(), &mut ev.touches);
                         }
-                        let Some(args_str) = p.get("arguments").and_then(Value::as_str) else {
-                            continue;
-                        };
-                        let Ok(args_json) = serde_json::from_str::<Value>(args_str) else {
-                            continue;
-                        };
-                        let Some(cmd) = args_json.get("cmd").and_then(Value::as_str) else {
-                            continue;
-                        };
-                        let ts = match event.timestamp {
-                            Some(ts) => ts,
-                            None => continue,
-                        };
-                        let base_cwd = args_json
-                            .get("workdir")
-                            .and_then(Value::as_str)
-                            .map(PathBuf::from)
-                            .or_else(|| cwd.clone());
-                        extract_shell_touches(cmd, ts, base_cwd.as_deref(), &mut touches);
+                        out.push(ev);
                     }
                     "custom_tool_call" => {
-                        let name = p.get("name").and_then(Value::as_str).unwrap_or("");
-                        if name != "apply_patch" {
-                            continue;
+                        // `apply_patch` touches files but does not count as
+                        // a turn (matching the loader's historical tally).
+                        let mut ev = StreamEvent::bare(ts);
+                        if p.get("name").and_then(Value::as_str) == Some("apply_patch")
+                            && let Some(ts) = ts
+                            && let Some(input) = p.get("input").and_then(Value::as_str)
+                        {
+                            extract_shell_touches(
+                                input,
+                                ts,
+                                current_cwd.as_deref(),
+                                &mut ev.touches,
+                            );
                         }
-                        let Some(input) = p.get("input").and_then(Value::as_str) else {
-                            continue;
-                        };
-                        let ts = match event.timestamp {
-                            Some(ts) => ts,
-                            None => continue,
-                        };
-                        extract_shell_touches(input, ts, cwd.as_deref(), &mut touches);
+                        out.push(ev);
                     }
-                    _ => {}
+                    // `reasoning` events are server-redacted; anything else
+                    // is not a harvestable shape. Window-only.
+                    _ => out.push(StreamEvent::bare(ts)),
                 }
             }
-            _ => {}
+            _ => out.push(StreamEvent::bare(ts)),
         }
     }
+    out
+}
 
-    let (Some(session_id), Some(started_at), Some(ended_at)) = (session_id, started, ended) else {
-        return Ok(None);
+/// Pull every `output_text` block out of a Codex assistant message
+/// payload. The content array can carry other types (`refusal`, future
+/// tool-result variants); we ignore those and surface only the text the
+/// model actually showed the user.
+fn collect_message_texts(payload: &Value) -> Vec<String> {
+    let Some(content) = payload.get("content").and_then(|c| c.as_array()) else {
+        return Vec::new();
     };
-
-    Ok(Some(Transcript {
-        provider: Provider::Codex,
-        session_id,
-        source_path: source_path.to_path_buf(),
-        cwd,
-        started_at,
-        ended_at,
-        turn_count,
-        files_touched: touches,
-        starting_commit,
-    }))
+    let mut out = Vec::with_capacity(content.len());
+    for block in content {
+        if block.get("type").and_then(|t| t.as_str()) != Some("output_text") {
+            continue;
+        }
+        if let Some(text) = block.get("text").and_then(|t| t.as_str())
+            && !text.trim().is_empty()
+        {
+            out.push(text.to_string());
+        }
+    }
+    out
 }
 
 /// Parse a single `exec_command` shell string for file references. Results
 /// are appended to `out`. This is deliberately conservative — false
 /// negatives (missed touches) are fine, false positives (noise) pollute
 /// the matcher.
-///
-/// Exposed `pub(crate)` so the reasoning harvester can reuse the exact
-/// same shell-parsing rules the matcher's loader uses, instead of
-/// re-deriving them and risking drift.
-pub(crate) fn extract_shell_touches(
+fn extract_shell_touches(
     cmd: &str,
     ts: DateTime<Utc>,
     base_cwd: Option<&Path>,

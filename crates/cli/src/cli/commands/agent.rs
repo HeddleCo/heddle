@@ -94,7 +94,7 @@ async fn run_serve(cli: &Cli, args: &AgentServeArgs) -> Result<()> {
     }
     #[cfg(unix)]
     {
-        let repo = open_repo(cli)?;
+        let repo = cli.open_repo()?;
         let mut config = LocalDaemonConfig::from_repo(&repo);
         if let Some(socket) = args.socket.clone() {
             config = config.with_socket(socket);
@@ -146,7 +146,7 @@ async fn run_serve(cli: &Cli, args: &AgentServeArgs) -> Result<()> {
 }
 
 async fn run_status(cli: &Cli) -> Result<()> {
-    let repo = open_repo(cli)?;
+    let repo = cli.open_repo()?;
     let pid_path = pid_path(&repo);
     let socket_path = socket_path(&repo);
     let pid = read_pid(&pid_path);
@@ -180,7 +180,7 @@ async fn run_status(cli: &Cli) -> Result<()> {
 }
 
 async fn run_stop(cli: &Cli) -> Result<()> {
-    let repo = open_repo(cli)?;
+    let repo = cli.open_repo()?;
     let pid_path = pid_path(&repo);
 
     // Read the pidfile and require the heddle marker. A pidfile lacking
@@ -320,11 +320,6 @@ async fn run_stop(cli: &Cli) -> Result<()> {
 fn print_stop_output(_repo: &Repository, output: AgentStopOutput) -> Result<()> {
     println!("{}", serde_json::to_string(&output)?);
     Ok(())
-}
-
-fn open_repo(cli: &Cli) -> Result<Repository> {
-    let cwd = std::env::current_dir().context("get current working directory")?;
-    Repository::open(cli.repo.as_ref().unwrap_or(&cwd)).context("open Heddle repository")
 }
 
 #[cfg(unix)]

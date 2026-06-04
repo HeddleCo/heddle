@@ -4,13 +4,13 @@
 use std::io::{self, IsTerminal, Read};
 
 use anyhow::{Context, Result, anyhow};
-use repo::{Hook, HookManager, Repository};
+use repo::{Hook, HookManager};
 
 use super::advice::RecoveryAdvice;
 use crate::cli::{Cli, HookCommands, HookInstallSource, should_output_json};
 
 pub fn cmd_hook(cli: &Cli, command: HookCommands) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let manager = HookManager::new(&repo);
 
     match command {

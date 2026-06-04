@@ -25,6 +25,7 @@ use objects::{
     object::{ChangeId, ContentHash, Redaction, RedactionsBlob, StateSignature},
     worktree::should_ignore,
 };
+use oplog::OpLogBackend;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 
@@ -39,7 +40,7 @@ use crate::{
 
 pub fn cmd_redact(cli: &Cli, command: RedactCommands) -> Result<()> {
     let _user = UserConfig::load_default().unwrap_or_default();
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     match command {
         RedactCommands::Apply(args) => cmd_redact_apply(cli, &repo, args),
         RedactCommands::List(args) => cmd_redact_list(cli, &repo, args),

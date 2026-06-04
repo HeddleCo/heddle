@@ -5,7 +5,6 @@ use anyhow::Result;
 use objects::object::{State, ThreadName};
 use oplog::OpRecord;
 use refs::{Head, RefExpectation, RefUpdate};
-use repo::Repository;
 use serde::Serialize;
 
 use super::{
@@ -35,7 +34,7 @@ struct ForkOutput {
 ///
 /// If `--name` is provided, a new thread is created pointing to the new state.
 pub fn cmd_fork(cli: &Cli, name: Option<String>, from: Option<String>) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let user_config = UserConfig::load_default()?;
 
     // Determine the source state

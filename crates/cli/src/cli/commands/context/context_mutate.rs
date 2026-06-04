@@ -7,7 +7,7 @@ use objects::{
     lock::RepositoryLockExt,
     object::{Annotation, AnnotationStatus, ContextBlob},
 };
-use repo::{Repository, compute_rewrite_pct};
+use repo::compute_rewrite_pct;
 
 use super::{
     apply_new_state, build_context_state, compute_source_hash, parse_kind, parse_scope,
@@ -34,7 +34,7 @@ pub async fn cmd_context_set(
     message: Option<String>,
     file: Option<std::path::PathBuf>,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let target = resolve_target(&repo, path, state)?;
     let scope = parse_scope(scope.as_deref())?;
     target.validate_scope(&scope)?;
@@ -112,7 +112,7 @@ pub async fn cmd_context_edit(
     message: Option<String>,
     file: Option<std::path::PathBuf>,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let content = read_annotation_content(message, file)?;
     let _lock = repo.locker().write().map_err(|e| anyhow::anyhow!("{e}"))?;
     let head_state = resolve_state(&repo, None)?;
@@ -194,7 +194,7 @@ pub async fn cmd_context_supersede(
     message: Option<String>,
     file: Option<std::path::PathBuf>,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let content = read_annotation_content(message, file)?;
     let _lock = repo.locker().write().map_err(|e| anyhow::anyhow!("{e}"))?;
     let head_state = resolve_state(&repo, None)?;
@@ -287,7 +287,7 @@ pub async fn cmd_context_rm(
     scope: Option<String>,
     all: bool,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let target = resolve_target(&repo, path, state)?;
 
     let _lock = repo.locker().write().map_err(|e| anyhow::anyhow!("{e}"))?;

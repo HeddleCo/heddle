@@ -676,7 +676,7 @@ fn guarded_hresult<F: FnOnce() -> HRESULT>(label: &'static str, f: F) -> HRESULT
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(rc) => rc,
         Err(payload) => {
-            let msg = panic_payload_str(&payload);
+            let msg = crate::error::panic_payload_str(&payload);
             tracing::error!(
                 trampoline = label,
                 %msg,
@@ -687,16 +687,6 @@ fn guarded_hresult<F: FnOnce() -> HRESULT>(label: &'static str, f: F) -> HRESULT
                 std::io::Error::from_raw_os_error(1117),
             )))
         }
-    }
-}
-
-fn panic_payload_str(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(s) = payload.downcast_ref::<&'static str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "<non-string panic payload>".to_string()
     }
 }
 

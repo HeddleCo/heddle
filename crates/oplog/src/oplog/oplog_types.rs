@@ -624,6 +624,210 @@ impl OpRecord {
     }
 }
 
+/// How a record participates in undo's redaction-safety preflight.
+///
+/// Returned by [`OpRecord::redaction_undo_class`] so the CLI preflight reads
+/// the classification off the variant instead of re-deriving it from an
+/// exhaustive match (heddle#500). The borrowed fields are exactly what the
+/// CLI needs to build its refusal messages and `redaction_is_purged` lookups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedactionUndoClass<'a> {
+    /// `Purge` — irreversible; undo of the whole chain is refused.
+    Purge { redaction_id: &'a ContentHash },
+    /// `Redact` — reversible but gated: undo re-exposes hidden content, so it
+    /// runs only with `--allow-redact-undo`, and is refused outright if the
+    /// blob bytes have since been purged.
+    Redact {
+        blob: &'a ContentHash,
+        state: &'a ChangeId,
+        path: &'a str,
+    },
+    /// Every other record is irrelevant to redaction-undo safety.
+    Other,
+}
+
+/// Per-variant undo/redo semantics, classified beside `OpRecord` so adding a
+/// variant updates these rules in one place rather than editing CLI safety
+/// matches (heddle#500, architecture-deepening C3). Each match enumerates
+/// every variant with no wildcard, so the compiler forces a new variant to
+/// declare its undo/redo semantics here.
+impl OpRecord {
+    /// State IDs the *undo* inverse must load from the object store. Variants
+    /// whose undo is a no-op, only mutates sidecars/Git OIDs, or is
+    /// irreversible return an empty list — they can't trip a missing-state
+    /// reachability check. Enumerated explicitly (no wildcard) so a new
+    /// state-carrying variant must declare what its undo needs to load
+    /// (heddle#354 r9).
+    pub fn states_required_for_undo(&self) -> Vec<ChangeId> {
+        match self {
+            OpRecord::Snapshot {
+                prev_head: Some(prev),
+                ..
+            } => vec![*prev],
+            OpRecord::Goto {
+                prev_head: Some(prev),
+                ..
+            } => vec![*prev],
+            OpRecord::ThreadDelete { state, .. } => vec![*state],
+            OpRecord::ThreadUpdate { old_state, .. } => vec![*old_state],
+            OpRecord::MarkerDelete { state, .. } => vec![*state],
+            OpRecord::FastForward { pre_target_id, .. } => vec![*pre_target_id],
+            OpRecord::FastForwardV2 { pre_target_id, .. } => vec![*pre_target_id],
+            OpRecord::Snapshot { prev_head: None, .. }
+            | OpRecord::Goto { prev_head: None, .. }
+            | OpRecord::ThreadCreate { .. }
+            | OpRecord::ThreadCreateV2 { .. }
+            | OpRecord::Fork { .. }
+            | OpRecord::Collapse { .. }
+            | OpRecord::MarkerCreate { .. }
+            | OpRecord::Checkpoint { .. }
+            | OpRecord::TransactionAbort { .. }
+            | OpRecord::EphemeralThreadCollapse { .. }
+            | OpRecord::ConflictResolved { .. }
+            | OpRecord::TransactionCommit { .. }
+            | OpRecord::Redact { .. }
+            | OpRecord::Purge { .. }
+            | OpRecord::GitCheckpoint { .. }
+            | OpRecord::RemoteThreadUpdate { .. }
+            | OpRecord::RemoteThreadDelete { .. }
+            | OpRecord::UndoRecoveryUpdate { .. } => Vec::new(),
+        }
+    }
+
+    /// State IDs the *redo* replay must load from the object store. Variants
+    /// whose redo is a no-op, deletes a ref, touches only sidecars/Git OIDs,
+    /// or (legacy V1 `FastForward`) re-resolves `source_thread → tip` through
+    /// its own error path return an empty list. Enumerated explicitly so a new
+    /// state-carrying variant must declare its redo target (heddle#354 r9).
+    pub fn states_required_for_redo(&self) -> Vec<ChangeId> {
+        match self {
+            OpRecord::Snapshot { new_state, .. } => vec![*new_state],
+            OpRecord::Goto { target, .. } => vec![*target],
+            OpRecord::ThreadCreate { state, .. } => vec![*state],
+            OpRecord::ThreadCreateV2 { state, .. } => vec![*state],
+            OpRecord::ThreadUpdate { new_state, .. } => vec![*new_state],
+            OpRecord::MarkerCreate { state, .. } => vec![*state],
+            OpRecord::FastForwardV2 { post_target_id, .. } => vec![*post_target_id],
+            OpRecord::ThreadDelete { .. }
+            | OpRecord::MarkerDelete { .. }
+            | OpRecord::Fork { .. }
+            | OpRecord::Collapse { .. }
+            | OpRecord::Checkpoint { .. }
+            | OpRecord::TransactionAbort { .. }
+            | OpRecord::EphemeralThreadCollapse { .. }
+            | OpRecord::ConflictResolved { .. }
+            | OpRecord::TransactionCommit { .. }
+            | OpRecord::Redact { .. }
+            | OpRecord::Purge { .. }
+            | OpRecord::FastForward { .. }
+            | OpRecord::GitCheckpoint { .. }
+            | OpRecord::RemoteThreadUpdate { .. }
+            | OpRecord::RemoteThreadDelete { .. }
+            | OpRecord::UndoRecoveryUpdate { .. } => Vec::new(),
+        }
+    }
+
+    /// Label of the operation kind when this record has *no* faithful redo
+    /// path, else `None`. `Redact`/`Purge` can't be replayed — the OpRecord
+    /// doesn't preserve the full `Redaction` (reason, redactor, signature) and
+    /// `Purge` is irreversible. Enumerated explicitly so a future variant
+    /// without a redo path must be classified here (heddle#354 r9).
+    pub fn redo_unsupported_label(&self) -> Option<&'static str> {
+        match self {
+            OpRecord::Redact { .. } => Some("Redact"),
+            OpRecord::Purge { .. } => Some("Purge"),
+            OpRecord::Snapshot { .. }
+            | OpRecord::Goto { .. }
+            | OpRecord::ThreadCreate { .. }
+            | OpRecord::ThreadCreateV2 { .. }
+            | OpRecord::ThreadDelete { .. }
+            | OpRecord::ThreadUpdate { .. }
+            | OpRecord::Fork { .. }
+            | OpRecord::Collapse { .. }
+            | OpRecord::MarkerCreate { .. }
+            | OpRecord::MarkerDelete { .. }
+            | OpRecord::Checkpoint { .. }
+            | OpRecord::TransactionAbort { .. }
+            | OpRecord::EphemeralThreadCollapse { .. }
+            | OpRecord::ConflictResolved { .. }
+            | OpRecord::TransactionCommit { .. }
+            | OpRecord::FastForward { .. }
+            | OpRecord::FastForwardV2 { .. }
+            | OpRecord::GitCheckpoint { .. }
+            | OpRecord::RemoteThreadUpdate { .. }
+            | OpRecord::RemoteThreadDelete { .. }
+            | OpRecord::UndoRecoveryUpdate { .. } => None,
+        }
+    }
+
+    /// This record's role in undo's redaction-safety preflight. Enumerated
+    /// explicitly so a future redaction-adjacent variant must be classified
+    /// here (heddle#354 r9).
+    pub fn redaction_undo_class(&self) -> RedactionUndoClass<'_> {
+        match self {
+            OpRecord::Purge { redaction_id, .. } => RedactionUndoClass::Purge { redaction_id },
+            OpRecord::Redact {
+                blob, state, path, ..
+            } => RedactionUndoClass::Redact { blob, state, path },
+            OpRecord::Snapshot { .. }
+            | OpRecord::Goto { .. }
+            | OpRecord::ThreadCreate { .. }
+            | OpRecord::ThreadCreateV2 { .. }
+            | OpRecord::ThreadDelete { .. }
+            | OpRecord::ThreadUpdate { .. }
+            | OpRecord::Fork { .. }
+            | OpRecord::Collapse { .. }
+            | OpRecord::MarkerCreate { .. }
+            | OpRecord::MarkerDelete { .. }
+            | OpRecord::Checkpoint { .. }
+            | OpRecord::TransactionAbort { .. }
+            | OpRecord::EphemeralThreadCollapse { .. }
+            | OpRecord::ConflictResolved { .. }
+            | OpRecord::TransactionCommit { .. }
+            | OpRecord::FastForward { .. }
+            | OpRecord::FastForwardV2 { .. }
+            | OpRecord::GitCheckpoint { .. }
+            | OpRecord::RemoteThreadUpdate { .. }
+            | OpRecord::RemoteThreadDelete { .. }
+            | OpRecord::UndoRecoveryUpdate { .. } => RedactionUndoClass::Other,
+        }
+    }
+
+    /// The thread name if undoing this record carries the worktree-orphan
+    /// hazard — i.e. a thread-create (V1 or V2) whose inverse only removes the
+    /// ref, leaving any materialized worktree orphaned. `None` for every other
+    /// record. Enumerated explicitly so a future worktree-creating variant
+    /// must be classified here (heddle#354 r9).
+    pub fn thread_worktree_undo_hazard_name(&self) -> Option<&str> {
+        match self {
+            OpRecord::ThreadCreate { name, .. } | OpRecord::ThreadCreateV2 { name, .. } => {
+                Some(name)
+            }
+            OpRecord::Snapshot { .. }
+            | OpRecord::Goto { .. }
+            | OpRecord::ThreadDelete { .. }
+            | OpRecord::ThreadUpdate { .. }
+            | OpRecord::Fork { .. }
+            | OpRecord::Collapse { .. }
+            | OpRecord::MarkerCreate { .. }
+            | OpRecord::MarkerDelete { .. }
+            | OpRecord::Checkpoint { .. }
+            | OpRecord::TransactionAbort { .. }
+            | OpRecord::EphemeralThreadCollapse { .. }
+            | OpRecord::ConflictResolved { .. }
+            | OpRecord::TransactionCommit { .. }
+            | OpRecord::Redact { .. }
+            | OpRecord::Purge { .. }
+            | OpRecord::FastForward { .. }
+            | OpRecord::FastForwardV2 { .. }
+            | OpRecord::GitCheckpoint { .. }
+            | OpRecord::RemoteThreadUpdate { .. }
+            | OpRecord::RemoteThreadDelete { .. }
+            | OpRecord::UndoRecoveryUpdate { .. } => None,
+        }
+    }
+}
+
 /// Entry in the operation log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpEntry {

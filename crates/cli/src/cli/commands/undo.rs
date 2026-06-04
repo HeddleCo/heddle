@@ -4,7 +4,7 @@
 use objects::store::ObjectStore;
 use anyhow::{Result, anyhow};
 use objects::object::{ChangeId, ContentHash};
-use oplog::{OpBatch, OpRecord};
+use oplog::{OpBatch, RedactionUndoClass};
 use refs::UNDO_RECOVERY_HANDLE;
 use repo::{Repository, ThreadManager};
 use serde::Serialize;
@@ -99,7 +99,7 @@ pub fn cmd_undo(
     preview: bool,
     allow_redact_undo: bool,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
 
     if list && preview {
         return Err(anyhow!(undo_mode_conflict_advice()));
@@ -274,7 +274,7 @@ pub fn cmd_undo(
 }
 
 pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
 
     // Serialize against concurrent undo/redo (mirror of `cmd_undo`; heddle#355
     // cid 3330867776).
@@ -605,7 +605,7 @@ fn ensure_undo_states_reachable(repo: &Repository, batches: &[OpBatch]) -> Resul
     let mut missing: Vec<(u64, ChangeId)> = Vec::new();
     for batch in batches {
         for entry in &batch.entries {
-            for needed in states_required_for_undo(&entry.operation) {
+            for needed in entry.operation.states_required_for_undo() {
                 if !repo.store().has_state(&needed)? {
                     missing.push((entry.id, needed));
                 }
@@ -635,53 +635,6 @@ fn ensure_undo_states_reachable(repo: &Repository, batches: &[OpBatch]) -> Resul
     )))
 }
 
-/// Identify the state IDs that an inverse for `op` would need to load.
-/// Variants whose undo is a no-op (e.g. `Fork`, `Collapse`, `Checkpoint`)
-/// or which only mutate sidecars (`Redact`) return an empty list —
-/// they don't reach into the object store, so a missing state can't
-/// trip them. `Purge` is irreversible and handled by
-/// `ensure_redaction_undo_safe`; it returns nothing here too.
-fn states_required_for_undo(op: &OpRecord) -> Vec<ChangeId> {
-    match op {
-        OpRecord::Snapshot {
-            prev_head: Some(prev),
-            ..
-        } => vec![*prev],
-        OpRecord::Goto {
-            prev_head: Some(prev),
-            ..
-        } => vec![*prev],
-        OpRecord::ThreadDelete { state, .. } => vec![*state],
-        OpRecord::ThreadUpdate { old_state, .. } => vec![*old_state],
-        OpRecord::MarkerDelete { state, .. } => vec![*state],
-        OpRecord::FastForward { pre_target_id, .. } => vec![*pre_target_id],
-        OpRecord::FastForwardV2 { pre_target_id, .. } => vec![*pre_target_id],
-        // No prior state to load: the inverse is a no-op, touches only
-        // sidecars / Git OIDs, or is irreversible. Enumerated explicitly (no
-        // wildcard) so a new state-carrying variant must declare what its undo
-        // needs to load, instead of silently skipping the reachability check
-        // (heddle#354 r9).
-        OpRecord::Snapshot { prev_head: None, .. }
-        | OpRecord::Goto { prev_head: None, .. }
-        | OpRecord::ThreadCreate { .. }
-        | OpRecord::ThreadCreateV2 { .. }
-        | OpRecord::Fork { .. }
-        | OpRecord::Collapse { .. }
-        | OpRecord::MarkerCreate { .. }
-        | OpRecord::Checkpoint { .. }
-        | OpRecord::TransactionAbort { .. }
-        | OpRecord::EphemeralThreadCollapse { .. }
-        | OpRecord::ConflictResolved { .. }
-        | OpRecord::TransactionCommit { .. }
-        | OpRecord::Redact { .. }
-        | OpRecord::Purge { .. }
-        | OpRecord::GitCheckpoint { .. }
-        | OpRecord::RemoteThreadUpdate { .. }
-        | OpRecord::RemoteThreadDelete { .. }
-        | OpRecord::UndoRecoveryUpdate { .. } => Vec::new(),
-    }
-}
-
 /// Symmetric to `ensure_undo_states_reachable`: walk every batch we'd
 /// redo and verify the post-state it would advance to is still in the
 /// object store. Without this check, a `gc --prune` that reached past
@@ -696,7 +649,7 @@ fn ensure_redo_states_reachable(repo: &Repository, batches: &[OpBatch]) -> Resul
     let mut missing: Vec<(u64, ChangeId)> = Vec::new();
     for batch in batches {
         for entry in &batch.entries {
-            for needed in states_required_for_redo(&entry.operation) {
+            for needed in entry.operation.states_required_for_redo() {
                 if !repo.store().has_state(&needed)? {
                     missing.push((entry.id, needed));
                 }
@@ -724,40 +677,6 @@ fn ensure_redo_states_reachable(repo: &Repository, batches: &[OpBatch]) -> Resul
         "heddle log",
         vec!["heddle log".to_string()],
     )))
-}
-
-fn states_required_for_redo(op: &OpRecord) -> Vec<ChangeId> {
-    match op {
-        OpRecord::Snapshot { new_state, .. } => vec![*new_state],
-        OpRecord::Goto { target, .. } => vec![*target],
-        OpRecord::ThreadCreate { state, .. } => vec![*state],
-        OpRecord::ThreadCreateV2 { state, .. } => vec![*state],
-        OpRecord::ThreadUpdate { new_state, .. } => vec![*new_state],
-        OpRecord::MarkerCreate { state, .. } => vec![*state],
-        OpRecord::FastForwardV2 { post_target_id, .. } => vec![*post_target_id],
-        // No post-state to load at redo time: the redo is a no-op, deletes a
-        // ref, touches only sidecars / Git OIDs, or (legacy V1 `FastForward`)
-        // re-resolves `source_thread → tip` through its own error path.
-        // Enumerated explicitly (no wildcard) so a new state-carrying variant
-        // must declare its redo target instead of silently skipping the
-        // reachability check (heddle#354 r9).
-        OpRecord::ThreadDelete { .. }
-        | OpRecord::MarkerDelete { .. }
-        | OpRecord::Fork { .. }
-        | OpRecord::Collapse { .. }
-        | OpRecord::Checkpoint { .. }
-        | OpRecord::TransactionAbort { .. }
-        | OpRecord::EphemeralThreadCollapse { .. }
-        | OpRecord::ConflictResolved { .. }
-        | OpRecord::TransactionCommit { .. }
-        | OpRecord::Redact { .. }
-        | OpRecord::Purge { .. }
-        | OpRecord::FastForward { .. }
-        | OpRecord::GitCheckpoint { .. }
-        | OpRecord::RemoteThreadUpdate { .. }
-        | OpRecord::RemoteThreadDelete { .. }
-        | OpRecord::UndoRecoveryUpdate { .. } => Vec::new(),
-    }
 }
 
 /// Pre-flight check for redaction-related ops in the batch chain.
@@ -798,41 +717,17 @@ fn ensure_redaction_undo_safe(
 
     for batch in batches {
         for entry in &batch.entries {
-            match &entry.operation {
-                OpRecord::Purge { redaction_id, .. } => purge_ops.push((entry.id, *redaction_id)),
-                OpRecord::Redact {
-                    blob, state, path, ..
-                } => redact_ops.push(RedactSummary {
+            match entry.operation.redaction_undo_class() {
+                RedactionUndoClass::Purge { redaction_id } => {
+                    purge_ops.push((entry.id, *redaction_id))
+                }
+                RedactionUndoClass::Redact { blob, state, path } => redact_ops.push(RedactSummary {
                     op_id: entry.id,
                     blob: *blob,
                     state: *state,
-                    path: path.clone(),
+                    path: path.to_string(),
                 }),
-                // This preflight only concerns redaction bookkeeping; every
-                // other record is irrelevant to undo safety. Enumerated
-                // explicitly (no wildcard) so a future redaction-adjacent
-                // variant must be classified here (heddle#354 r9).
-                OpRecord::Snapshot { .. }
-                | OpRecord::Goto { .. }
-                | OpRecord::ThreadCreate { .. }
-                | OpRecord::ThreadCreateV2 { .. }
-                | OpRecord::ThreadDelete { .. }
-                | OpRecord::ThreadUpdate { .. }
-                | OpRecord::Fork { .. }
-                | OpRecord::Collapse { .. }
-                | OpRecord::MarkerCreate { .. }
-                | OpRecord::MarkerDelete { .. }
-                | OpRecord::Checkpoint { .. }
-                | OpRecord::TransactionAbort { .. }
-                | OpRecord::EphemeralThreadCollapse { .. }
-                | OpRecord::ConflictResolved { .. }
-                | OpRecord::TransactionCommit { .. }
-                | OpRecord::FastForward { .. }
-                | OpRecord::FastForwardV2 { .. }
-                | OpRecord::GitCheckpoint { .. }
-                | OpRecord::RemoteThreadUpdate { .. }
-                | OpRecord::RemoteThreadDelete { .. }
-                | OpRecord::UndoRecoveryUpdate { .. } => {}
+                RedactionUndoClass::Other => {}
             }
         }
     }
@@ -930,34 +825,8 @@ fn ensure_redaction_redo_supported(batches: &[OpBatch]) -> Result<()> {
     let mut blocking: Vec<(u64, &'static str)> = Vec::new();
     for batch in batches {
         for entry in &batch.entries {
-            match &entry.operation {
-                OpRecord::Redact { .. } => blocking.push((entry.id, "Redact")),
-                OpRecord::Purge { .. } => blocking.push((entry.id, "Purge")),
-                // Only Redact/Purge lack a faithful redo path; every other
-                // record redoes normally. Enumerated explicitly (no wildcard)
-                // so a future variant without a redo path must be classified
-                // here (heddle#354 r9).
-                OpRecord::Snapshot { .. }
-                | OpRecord::Goto { .. }
-                | OpRecord::ThreadCreate { .. }
-                | OpRecord::ThreadCreateV2 { .. }
-                | OpRecord::ThreadDelete { .. }
-                | OpRecord::ThreadUpdate { .. }
-                | OpRecord::Fork { .. }
-                | OpRecord::Collapse { .. }
-                | OpRecord::MarkerCreate { .. }
-                | OpRecord::MarkerDelete { .. }
-                | OpRecord::Checkpoint { .. }
-                | OpRecord::TransactionAbort { .. }
-                | OpRecord::EphemeralThreadCollapse { .. }
-                | OpRecord::ConflictResolved { .. }
-                | OpRecord::TransactionCommit { .. }
-                | OpRecord::FastForward { .. }
-                | OpRecord::FastForwardV2 { .. }
-                | OpRecord::GitCheckpoint { .. }
-                | OpRecord::RemoteThreadUpdate { .. }
-                | OpRecord::RemoteThreadDelete { .. }
-                | OpRecord::UndoRecoveryUpdate { .. } => {}
+            if let Some(label) = entry.operation.redo_unsupported_label() {
+                blocking.push((entry.id, label));
             }
         }
     }
@@ -1008,36 +877,11 @@ fn ensure_thread_worktree_undo_safe(repo: &Repository, batches: &[OpBatch]) -> R
 
     for batch in batches {
         for entry in &batch.entries {
-            // Match V1 and V2 — the rename batch's new-name arm and all
-            // post-heddle#23-r2 creates record as V2. Both have the
-            // same worktree-orphan hazard on undo.
-            let name = match &entry.operation {
-                OpRecord::ThreadCreate { name, .. } | OpRecord::ThreadCreateV2 { name, .. } => name,
-                // Only thread creates carry the worktree-orphan hazard on undo;
-                // every other record is irrelevant to this preflight.
-                // Enumerated explicitly (no wildcard) so a future
-                // worktree-creating variant must be classified (heddle#354 r9).
-                OpRecord::Snapshot { .. }
-                | OpRecord::Goto { .. }
-                | OpRecord::ThreadDelete { .. }
-                | OpRecord::ThreadUpdate { .. }
-                | OpRecord::Fork { .. }
-                | OpRecord::Collapse { .. }
-                | OpRecord::MarkerCreate { .. }
-                | OpRecord::MarkerDelete { .. }
-                | OpRecord::Checkpoint { .. }
-                | OpRecord::TransactionAbort { .. }
-                | OpRecord::EphemeralThreadCollapse { .. }
-                | OpRecord::ConflictResolved { .. }
-                | OpRecord::TransactionCommit { .. }
-                | OpRecord::Redact { .. }
-                | OpRecord::Purge { .. }
-                | OpRecord::FastForward { .. }
-                | OpRecord::FastForwardV2 { .. }
-                | OpRecord::GitCheckpoint { .. }
-                | OpRecord::RemoteThreadUpdate { .. }
-                | OpRecord::RemoteThreadDelete { .. }
-                | OpRecord::UndoRecoveryUpdate { .. } => continue,
+            // V1 and V2 thread-creates (the rename batch's new-name arm and all
+            // post-heddle#23-r2 creates) share the worktree-orphan hazard on
+            // undo; every other record is irrelevant to this preflight.
+            let Some(name) = entry.operation.thread_worktree_undo_hazard_name() else {
+                continue;
             };
             // The `ThreadCreate` inverse converges the name to EMPTY — it removes
             // EVERY record filed under the name, not just the `find_by_thread`
@@ -1049,7 +893,7 @@ fn ensure_thread_worktree_undo_safe(repo: &Repository, batches: &[OpBatch]) -> R
                     continue;
                 };
                 if path.exists() {
-                    blocking.push((entry.id, name.clone(), path.clone()));
+                    blocking.push((entry.id, name.to_string(), path.clone()));
                 }
             }
         }
@@ -1093,8 +937,10 @@ fn ensure_thread_worktree_undo_safe(repo: &Repository, batches: &[OpBatch]) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use oplog::{OpLogBackend, OpRecord};
     use tempfile::TempDir;
+
+    use super::*;
 
     fn record(
         id: &str,

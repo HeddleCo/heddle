@@ -27,38 +27,13 @@ pub struct ReviewSignaturesBlob {
     pub signatures: Vec<ReviewSignature>,
 }
 
-impl ReviewSignaturesBlob {
-    pub const FORMAT_VERSION: u8 = 1;
-
-    pub fn new(signatures: Vec<ReviewSignature>) -> Self {
-        Self {
-            format_version: Self::FORMAT_VERSION,
-            signatures,
-        }
-    }
-
-    pub fn encode(&self) -> Result<Vec<u8>, ReviewSignatureError> {
-        rmp_serde::to_vec(self).map_err(|err| ReviewSignatureError::Encoding(err.to_string()))
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, ReviewSignatureError> {
-        let blob: Self = rmp_serde::from_slice(bytes)
-            .map_err(|err| ReviewSignatureError::Encoding(err.to_string()))?;
-        blob.validate()?;
-        Ok(blob)
-    }
-
-    pub fn validate(&self) -> Result<(), ReviewSignatureError> {
-        if self.format_version != Self::FORMAT_VERSION {
-            return Err(ReviewSignatureError::UnsupportedVersion(
-                self.format_version,
-            ));
-        }
-        for sig in &self.signatures {
-            sig.validate()?;
-        }
-        Ok(())
-    }
+versioned_msgpack_blob! {
+    blob: ReviewSignaturesBlob,
+    item: ReviewSignature,
+    field: signatures,
+    error: ReviewSignatureError,
+    codec_err: Encoding,
+    version: 1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

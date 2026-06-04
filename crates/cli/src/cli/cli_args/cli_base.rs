@@ -83,6 +83,24 @@ pub struct Cli {
     pub op_id: Option<String>,
 }
 
+impl Cli {
+    /// Open the Heddle repository the command should act on: the `--repo`
+    /// path if given, otherwise the current working directory (resolved
+    /// lazily so a supplied `--repo` never touches the cwd).
+    pub fn open_repo(&self) -> anyhow::Result<repo::Repository> {
+        use anyhow::Context as _;
+        let cwd;
+        let repo_path = match self.repo.as_ref() {
+            Some(path) => path,
+            None => {
+                cwd = std::env::current_dir().context("get current working directory")?;
+                &cwd
+            }
+        };
+        repo::Repository::open(repo_path).context("open Heddle repository")
+    }
+}
+
 #[derive(Copy, Clone, Debug, ValueEnum)]
 pub enum OutputMode {
     Json,

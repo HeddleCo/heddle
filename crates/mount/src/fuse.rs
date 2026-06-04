@@ -304,21 +304,32 @@ fn file_type_for_kind(kind: NodeKind) -> FileType {
     }
 }
 
-fn file_attr_from(attrs: Attrs) -> FileAttr {
-    let kind = file_type_for_kind(attrs.kind);
+/// Shared `FileAttr` builder. The 14 constant-shape fields (block
+/// count, the four mirrored timestamps, uid/gid, rdev/blksize/flags,
+/// and the type-bit-masked `perm`) live here once; the two callers
+/// supply only the values that actually differ between an `Attrs`
+/// snapshot and a freshly-resolved `Entry`.
+fn make_file_attr(
+    node: NodeId,
+    size: u64,
+    mtime: std::time::SystemTime,
+    kind: NodeKind,
+    unix_mode: u32,
+    nlink: u32,
+) -> FileAttr {
     FileAttr {
-        ino: INodeNo(attrs.node.0),
-        size: attrs.size,
-        blocks: attrs.size.div_ceil(512),
-        atime: attrs.mtime,
-        mtime: attrs.mtime,
-        ctime: attrs.mtime,
-        crtime: attrs.mtime,
-        kind,
+        ino: INodeNo(node.0),
+        size,
+        blocks: size.div_ceil(512),
+        atime: mtime,
+        mtime,
+        ctime: mtime,
+        crtime: mtime,
+        kind: file_type_for_kind(kind),
         // The `unix_mode` we store includes the type bits; FUSE wants
         // just the permission bits in `perm`.
-        perm: (attrs.unix_mode & 0o7777) as u16,
-        nlink: attrs.nlink,
+        perm: (unix_mode & 0o7777) as u16,
+        nlink,
         uid: process_uid(),
         gid: process_gid(),
         rdev: 0,
@@ -327,24 +338,26 @@ fn file_attr_from(attrs: Attrs) -> FileAttr {
     }
 }
 
+fn file_attr_from(attrs: Attrs) -> FileAttr {
+    make_file_attr(
+        attrs.node,
+        attrs.size,
+        attrs.mtime,
+        attrs.kind,
+        attrs.unix_mode,
+        attrs.nlink,
+    )
+}
+
 fn entry_attr_from(entry: &Entry, mtime: std::time::SystemTime) -> FileAttr {
-    FileAttr {
-        ino: INodeNo(entry.node.0),
-        size: entry.size,
-        blocks: entry.size.div_ceil(512),
-        atime: mtime,
+    make_file_attr(
+        entry.node,
+        entry.size,
         mtime,
-        ctime: mtime,
-        crtime: mtime,
-        kind: file_type_for_kind(entry.kind),
-        perm: (entry.unix_mode & 0o7777) as u16,
-        nlink: 1,
-        uid: process_uid(),
-        gid: process_gid(),
-        rdev: 0,
-        blksize: 4096,
-        flags: 0,
-    }
+        entry.kind,
+        entry.unix_mode,
+        1,
+    )
 }
 
 /// Convert a `MountError`'s errno back into the `Errno` newtype that
@@ -371,7 +384,7 @@ fn guard_call<T>(label: &'static str, f: impl FnOnce() -> Result<T>) -> Result<T
     match std::panic::catch_unwind(AssertUnwindSafe(f)) {
         Ok(result) => result,
         Err(payload) => {
-            let msg = panic_payload_str(&payload);
+            let msg = crate::error::panic_payload_str(&payload);
             tracing::error!(callback = label, %msg, "FUSE callback panicked; returning EIO");
             Err(crate::error::MountError::Store(
                 objects::error::HeddleError::Io(std::io::Error::other(format!(
@@ -379,16 +392,6 @@ fn guard_call<T>(label: &'static str, f: impl FnOnce() -> Result<T>) -> Result<T
                 ))),
             ))
         }
-    }
-}
-
-fn panic_payload_str(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(s) = payload.downcast_ref::<&'static str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "<non-string panic payload>".to_string()
     }
 }
 
@@ -765,20 +768,13 @@ impl Filesystem for FuseShell {
         // pre-check left a TOCTOU window between the lookup and the
         // rename — a concurrent writer could install the
         // destination in between and the rename would clobber it.
-        #[cfg(target_os = "linux")]
         if flags.contains(RenameFlags::RENAME_EXCHANGE)
             || flags.contains(RenameFlags::RENAME_WHITEOUT)
         {
             reply.error(Errno::from_i32(libc::EINVAL));
             return;
         }
-        #[cfg(target_os = "linux")]
         let no_replace = flags.contains(RenameFlags::RENAME_NOREPLACE);
-        #[cfg(not(target_os = "linux"))]
-        let no_replace = {
-            let _ = flags;
-            false
-        };
         let options = RenameOptions { no_replace };
         match guard_call("rename", || {
             self.inner.rename_entry_with_options(

@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pure risk-signal computation for the Review epic.
 //!
-//! Five modules sit behind [`RiskSignalModule`]: novelty, test reachability,
-//! pattern deviation, invariant adjacency, and self-flagged uncertainty.
-//! Each receives the prior state, the new state, and a per-repo config; each
-//! returns the signals it fired. Computation is pure — no I/O, no clock, no
-//! environment lookups — so the same inputs always produce the same output.
+//! Five modules are registered as [`ComputeFn`] fn-pointers in
+//! [`ALL_MODULES`]: novelty, test reachability, pattern deviation, invariant
+//! adjacency, and self-flagged uncertainty. Each receives the prior state, the
+//! new state, and a per-repo config; each returns the signals it fired.
+//! Computation is pure — no I/O, no clock, no environment lookups — so the
+//! same inputs always produce the same output.
 //!
 //! Render-time tick budgeting is in [`budget`]. Per-repo health metrics
 //! (per-signal fire rates) are in [`health`]. The high-level entry point is
@@ -28,7 +29,7 @@ pub use health::{SignalHealth, StateSignalSnapshot, compute_health};
 // reach into `objects` directly.
 pub use objects::object::{MAX_REASON_LEN, ProducerId, RiskSignal, RiskSignalKind, SignalAnchor};
 pub use payload::{PathSymbol, ReadingOrderPartition, SymbolKind, build_review_payload_partition};
-pub use registry::{ALL_MODULES, ModuleId, RiskSignalModule, SemanticContext, run_all};
+pub use registry::{ALL_MODULES, ComputeFn, SemanticContext, run_all};
 
 pub(crate) fn truncate_reason(reason: &str) -> String {
     if reason.len() <= objects::object::MAX_REASON_LEN {

@@ -5,6 +5,7 @@ use objects::store::ObjectStore;
 use std::time::Instant;
 
 use objects::{lock::RepositoryLockExt, object::ChangeId};
+use oplog::OpLogBackend;
 use refs::Head;
 use tracing::debug;
 

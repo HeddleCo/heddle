@@ -149,11 +149,6 @@ impl TransactionService for LocalTransactionService {
             &client_op,
             "TransactionService.BeginTransaction",
             &request_body,
-            |resp: &BeginTransactionResponse| resp.encode_to_vec(),
-            |bytes| {
-                BeginTransactionResponse::decode(bytes.as_slice())
-                    .map_err(|err| Status::internal(format!("decode replay failed: {err}")))
-            },
             move || async move {
                 let repo = inner.repo();
 
@@ -225,11 +220,6 @@ impl TransactionService for LocalTransactionService {
             &client_op,
             "TransactionService.CommitTransaction",
             &request_body,
-            |resp: &CommitTransactionResponse| resp.encode_to_vec(),
-            |bytes| {
-                CommitTransactionResponse::decode(bytes.as_slice())
-                    .map_err(|err| Status::internal(format!("decode replay failed: {err}")))
-            },
             move || async move {
                 let repo = inner.repo();
                 let path = sentinel_path(repo, &transaction_id);
@@ -296,11 +286,6 @@ impl TransactionService for LocalTransactionService {
             &client_op,
             "TransactionService.AbortTransaction",
             &request_body,
-            |resp: &AbortTransactionResponse| resp.encode_to_vec(),
-            |bytes| {
-                AbortTransactionResponse::decode(bytes.as_slice())
-                    .map_err(|err| Status::internal(format!("decode replay failed: {err}")))
-            },
             move || async move {
                 let repo = inner.repo();
                 let path = sentinel_path(repo, &transaction_id);
@@ -373,6 +358,7 @@ impl TransactionService for LocalTransactionService {
 mod tests {
     use std::{fs, path::Path, sync::Arc};
 
+    use oplog::OpLogBackend;
     use repo::{Repository, operation_dedup::OperationDedupStore};
     use tempfile::TempDir;
 

@@ -19,7 +19,7 @@ use gix::{
 use objects::error::{HeddleError, Result as HeddleResult};
 use objects::lock::{RepoLock, WriteLockGuard};
 use objects::object::{ChangeId, ContentHash, MarkerName, ThreadName};
-use oplog::{IsolationKey, OpBatch, OpEntry, OpRecord, isolation_keys_for_record};
+use oplog::{IsolationKey, OpBatch, OpEntry, OpLogBackend, OpRecord, isolation_keys_for_record};
 use refs::Head;
 use repo::{
     CommitGraphIndex, Repository, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,

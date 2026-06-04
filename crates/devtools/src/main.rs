@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
+mod asserter;
 mod check_atomic_ledger_encapsulation;
 mod check_no_silent_default_tree_load;
 mod check_oprecord_exhaustiveness;

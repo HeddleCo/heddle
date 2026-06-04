@@ -623,7 +623,7 @@ fn all_ten_readers_reconcile() {
         .unwrap();
     let marker_state = ChangeId::generate();
     repo.oplog()
-        .record_marker_create("mk", &marker_state)
+        .record_marker_create(&MarkerName::new("mk"), &marker_state)
         .unwrap();
     let remote_state = ChangeId::generate();
     repo.oplog()
@@ -1109,7 +1109,8 @@ fn reconcile_folds_every_record_shape() {
     }])
     .unwrap();
     // V2 create + a delete (folds to None).
-    op.record_thread_create("t_v2", &v2, None, None).unwrap();
+    op.record_thread_create(&ThreadName::new("t_v2"), &v2, None, None)
+        .unwrap();
     op.record_batch(vec![OpRecord::ThreadDelete {
         name: "t_del".to_string(),
         state: v2,
@@ -1138,8 +1139,14 @@ fn reconcile_folds_every_record_shape() {
     }])
     .unwrap();
     // Fast-forward (V2) folds target_thread → post_target_id.
-    op.record_fast_forward("t_src", "t_ff", &v1, &ff, None)
-        .unwrap();
+    op.record_fast_forward(
+        &ThreadName::new("t_src"),
+        &ThreadName::new("t_ff"),
+        &v1,
+        &ff,
+        None,
+    )
+    .unwrap();
     // Fork that publishes no ref (thread = None arm).
     op.record_batch(vec![OpRecord::Fork {
         from: v1,
@@ -1155,7 +1162,8 @@ fn reconcile_folds_every_record_shape() {
     }])
     .unwrap();
     // Marker create + delete; remote update + delete; undo-recovery (local).
-    op.record_marker_create("mk2", &mk).unwrap();
+    op.record_marker_create(&MarkerName::new("mk2"), &mk)
+        .unwrap();
     op.record_batch(vec![OpRecord::MarkerDelete {
         name: "mk_del".to_string(),
         state: mk,
@@ -1887,7 +1895,13 @@ fn fast_forward_after_fork_reconcile_defers_to_reattached_head() {
         })
         .unwrap();
     repo.oplog()
-        .record_fast_forward("src", "main", &base, &ff_target, Some(&scope))
+        .record_fast_forward(
+            &ThreadName::new("src"),
+            &ThreadName::new("main"),
+            &base,
+            &ff_target,
+            Some(&scope),
+        )
         .unwrap();
 
     assert_eq!(
@@ -2100,7 +2114,7 @@ fn snapshot_does_not_clobber_newer_committed_thread_write_attached() {
     // B advances `feature` = sB and records (record-first) at the higher id.
     let sb = ChangeId::generate();
     repo.oplog()
-        .record_thread_create("feature", &sb, None, Some(&scope))
+        .record_thread_create(&ThreadName::new("feature"), &sb, None, Some(&scope))
         .unwrap();
 
     assert_eq!(

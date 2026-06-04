@@ -12,8 +12,6 @@ use anyhow::Result;
 use objects::object::{MarkerName, ThreadName};
 #[cfg(feature = "client")]
 use objects::object::ChangeId;
-#[cfg(feature = "client")]
-use proto::AuthToken;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 
@@ -22,12 +20,13 @@ use super::{
     remote::resolved_default_remote_name,
 };
 #[cfg(feature = "client")]
-use crate::client::HostedGrpcClient;
+use crate::client::{HostedAuthMode, HostedGrpcClient};
+#[cfg(feature = "client")]
+use crate::config::UserConfig;
 use crate::{
     bridge::GitBridge,
     cli::{Cli, should_output_json, style},
     client::LocalSync,
-    config::UserConfig,
     remote::{RemoteTarget, resolve_remote_with_key},
 };
 
@@ -48,7 +47,7 @@ struct FetchOutput {
 }
 
 pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     if repo.capability() == RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
         let remotes = if all {
             let configured = repo.refs().list_remotes()?;
@@ -119,10 +118,10 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
 
     let mut total_refs = 0;
     let mut total_objects = 0;
+    #[cfg(feature = "client")]
     let user_config = UserConfig::load_default()?;
 
     for remote_name in &remotes {
-        let token = user_config.remote_token()?;
         #[cfg(feature = "client")]
         let (target, server_key) = resolve_remote_with_key(&repo, Some(remote_name.as_str()))
             .map_err(anyhow::Error::msg)?;
@@ -145,7 +144,6 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
                             addr,
                             repo_path: repo_path.as_deref(),
                             user_config: &user_config,
-                            token,
                             server_key,
                             remote_name,
                             cli,
@@ -163,7 +161,7 @@ pub async fn cmd_fetch(cli: &Cli, remote: Option<String>, all: bool) -> Result<(
                 }
                 #[cfg(not(feature = "client"))]
                 {
-                    let _ = (addr, repo_path, token);
+                    let _ = (addr, repo_path);
                     anyhow::bail!(RecoveryAdvice::network_feature_unavailable("fetch"));
                 }
             }
@@ -254,7 +252,6 @@ struct FetchNetworkOptions<'a> {
     addr: std::net::SocketAddr,
     repo_path: Option<&'a str>,
     user_config: &'a UserConfig,
-    token: Option<AuthToken>,
     server_key: Option<String>,
     remote_name: &'a str,
     cli: &'a Cli,
@@ -269,12 +266,13 @@ async fn fetch_network(
         .repo_path
         .context("network remotes must include a hosted repository path")?;
 
-    let mut config = options.user_config.heddle_client_config(options.token)?;
-    if let Some(key) = options.server_key {
-        config = config.with_server_key(key);
-    }
-    let mut client = HostedGrpcClient::connect(options.addr, &config).await?;
-    client.auto_rotate_if_needed().await;
+    let mut client = HostedGrpcClient::open_session(
+        options.addr,
+        options.user_config,
+        options.server_key,
+        HostedAuthMode::ConfigToken,
+    )
+    .await?;
 
     if !should_output_json(options.cli, Some(repo.config())) {
         println!(
