@@ -65,6 +65,12 @@ schema_registry! {
     (&["commit"], CommitSchema),
     (&["checkpoint"], CheckpointSchema),
     (&["undo"], UndoSchema),
+    // heddle#473 phase 1 folded `redo` into `undo --redo` and surfaced the
+    // `undo --list` history view; both emit their own `output_kind`, so both
+    // need a schema mirror. `redo` shares `undo`'s payload (`UndoSchema`); the
+    // `--list` view has its own list-shaped schema.
+    (&["redo"], UndoSchema),
+    (&["undo --list"], UndoListSchema),
     (&["clean"], CleanSchema),
     (&["diff"], DiffSchema),
     (&["goto"], GotoSchema),
@@ -972,6 +978,16 @@ pub struct UndoSchema {
     pub recovery_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_marker: Option<String>,
+}
+
+/// `heddle undo --list --output json` history view. Distinct from
+/// [`UndoSchema`] (the rewind/redo payload): the list view carries only the
+/// discriminator and the oplog batches, with none of the action/status/
+/// recovery fields a real undo emits. Mirrors `OpListOutput` in `undo.rs`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct UndoListSchema {
+    pub output_kind: Option<String>,
+    pub batches: Vec<Value>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

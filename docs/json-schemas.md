@@ -213,8 +213,8 @@ in-progress operation.
       "verified_scope_mutating_commands_without_schema": 0,
       "advanced_scope_mutating_commands_total": 76,
       "advanced_scope_mutating_commands_with_accepted_opaque_schema": 26,
-      "schema_verbs_total": 170,
-      "documented_schema_verbs_total": 170,
+      "schema_verbs_total": 172,
+      "documented_schema_verbs_total": 172,
       "undocumented_schema_verbs_total": 0,
       "opaque_schema_verbs_total": 51,
       "accepted_opaque_schema_verbs_total": 51,
@@ -510,6 +510,17 @@ surface; the native first-run loop should prefer `commit`.
   "next_action_template": null,
   "recommended_action": null,
   "recommended_action_template": null
+}
+```
+
+`heddle undo --list --output json` emits the history view (its own
+`output_kind: "undo_list"` discriminator — distinct from the `undo`/`redo`
+payload above):
+
+```json
+{
+  "output_kind": "undo_list",
+  "batches": []
 }
 ```
 

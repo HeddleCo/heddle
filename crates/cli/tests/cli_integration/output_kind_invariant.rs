@@ -1066,3 +1066,104 @@ fn runtime_emits_output_kind_for_invokable_swept_verbs() {
         failures.join("\n  - ")
     );
 }
+
+/// The set of `output_kind` values the catalog advertises for one command
+/// display path (a command MAY advertise several — `undo` advertises three,
+/// `clone` two).
+fn advertised_output_kinds(display: &str) -> BTreeSet<String> {
+    catalog_output_kind_discriminators()
+        .into_iter()
+        .filter(|(d, _, _)| d == display)
+        .map(|(_, value, _)| value)
+        .collect()
+}
+
+/// The `output_kind` of the first JSON record `argv` prints in `dir`.
+fn emitted_output_kind(argv: &[&str], dir: &std::path::Path) -> String {
+    let output =
+        heddle_output(argv, Some(dir)).unwrap_or_else(|err| panic!("spawn {argv:?}: {err}"));
+    assert!(
+        output.status.success(),
+        "{argv:?} exited non-zero: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first_line = stdout.lines().next().unwrap_or("").trim();
+    let parsed: Value = serde_json::from_str(first_line)
+        .unwrap_or_else(|err| panic!("{argv:?} stdout not JSON: {err}\n  line: {first_line}"));
+    parsed
+        .get("output_kind")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("{argv:?} payload missing `output_kind`: {first_line}"))
+        .to_string()
+}
+
+/// Close-the-class guard for the heddle#473 verb folds: a command that folds a
+/// former sibling verb into a flag (e.g. `redo` → `undo --redo`) gains EXTRA
+/// `output_kind` values on the SAME command path. Every such value must be in
+/// that command's advertised catalog discriminator set, or an agent that
+/// validates responses against `heddle commands --output json` rejects the
+/// off-contract record.
+///
+/// The static catalog tests above only confirm the *first* `output_kind`
+/// discriminator matches the display path; they cannot see the alternate kinds
+/// a `--flag` path emits. This test drives every JSON-emitting flag variant of a
+/// folded verb and asserts the emitted kind is advertised — so a future fold
+/// that forgets to register a kind fails CI here.
+///
+/// Pre-fix (only `undo` advertised) this failed on `undo --list` (`undo_list`)
+/// and `undo --redo` (`redo`); post-fix all three are advertised.
+///
+/// New multi-`output_kind` command paths MUST add their flag variants below.
+#[test]
+fn folded_verb_flag_variants_emit_only_advertised_output_kinds() {
+    let advertised = advertised_output_kinds("undo");
+    assert!(
+        advertised.is_superset(&BTreeSet::from([
+            "undo".to_string(),
+            "redo".to_string(),
+            "undo_list".to_string(),
+        ])),
+        "catalog must advertise all three undo output_kinds; advertised: {advertised:?}"
+    );
+
+    // Fixture with redo-able history: two commits, so an `undo` leaves exactly
+    // one batch to redo.
+    let temp = init_fixture();
+    std::fs::write(temp.path().join("a.txt"), "one").unwrap();
+    heddle(&["commit", "-m", "first"], Some(temp.path())).expect("commit first");
+    std::fs::write(temp.path().join("a.txt"), "two").unwrap();
+    heddle(&["commit", "-m", "second"], Some(temp.path())).expect("commit second");
+
+    // Drive each JSON-emitting flag variant on the single `undo` command path,
+    // in an order that keeps the repo consistent: list (read-only) → undo
+    // (rewinds, making a redo available) → redo (re-applies).
+    let cases: &[(&[&str], &str)] = &[
+        (&["--output", "json", "undo", "--list"], "undo_list"),
+        (&["--output", "json", "undo"], "undo"),
+        (&["--output", "json", "undo", "--redo"], "redo"),
+    ];
+
+    let mut failures = Vec::new();
+    for (argv, expected) in cases {
+        let kind = emitted_output_kind(argv, temp.path());
+        if kind != *expected {
+            failures.push(format!(
+                "{argv:?}: emitted output_kind=`{kind}`, expected `{expected}`"
+            ));
+        }
+        if !advertised.contains(&kind) {
+            failures.push(format!(
+                "{argv:?}: emitted output_kind=`{kind}` is NOT in the catalog-advertised \
+                 set for `undo` ({advertised:?}) — off-contract"
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "Folded `undo` flag variants emit output_kinds outside the advertised set:\n  - {}",
+        failures.join("\n  - ")
+    );
+}

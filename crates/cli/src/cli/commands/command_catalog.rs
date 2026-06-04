@@ -2453,8 +2453,20 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["undo"],
         front_door(
             json_discriminators(
-                documented_schemas(WORKTREE_MUTATION, &["undo"]),
-                &[json_discriminator(Some("undo"), "output_kind", "undo")],
+                // `undo` folded the former `redo` verb (heddle#473 phase 1) and
+                // its own `--list` history view, so one command path now emits
+                // THREE output_kinds: `undo` (the default rewind / `--preview`),
+                // `redo` (`--redo`), and `undo_list` (`--list`). Every kind the
+                // handler can emit must be advertised here or an agent that
+                // validates responses via `heddle commands --output json` rejects
+                // the off-contract record. `redo` shares `undo`'s payload shape
+                // (`UndoSchema`); `undo --list` has its own `UndoListSchema`.
+                documented_schemas(WORKTREE_MUTATION, &["undo", "redo", "undo --list"]),
+                &[
+                    json_discriminator(Some("undo"), "output_kind", "undo"),
+                    json_discriminator(Some("redo"), "output_kind", "redo"),
+                    json_discriminator(Some("undo --list"), "output_kind", "undo_list"),
+                ],
             ),
             100,
         ),
@@ -5196,6 +5208,12 @@ mod tests {
                 "thread list",
                 "thread show",
                 "verify",
+                // `undo` advertises three output_kinds on one command path —
+                // `undo`, `redo` (folded from the former `redo` verb), and
+                // `undo_list` (`--list`) — so its path appears three times,
+                // mirroring how `clone` appears twice above. See heddle#473.
+                "undo",
+                "undo",
                 "undo",
                 "workspace show",
             ]
