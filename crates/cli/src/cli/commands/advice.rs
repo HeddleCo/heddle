@@ -1259,7 +1259,7 @@ impl RecoveryAdvice {
             "rebase_referenced_state_missing",
             format!("{role} '{state_id}' not found while continuing rebase"),
             format!(
-                "Abort with `{primary}` to rewind to the pre-rebase head, then inspect the object store with `heddle log` and `heddle gc --dry-run` before restarting the rebase."
+                "Abort with `{primary}` to rewind to the pre-rebase head, then inspect the object store with `heddle log` and `heddle maintenance gc --dry-run` before restarting the rebase."
             ),
             format!(
                 "rebase replay referenced {role} '{state_id}', but the object store does not contain it (possibly pruned or imported from a sibling repository)"

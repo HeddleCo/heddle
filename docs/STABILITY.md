@@ -233,7 +233,7 @@ on open issues in `HeddleCo/heddle` with the corresponding label:
 
 Tradeoff: tighter S1 (e.g. zero open) makes the gate punitive —
 every CLI verb has at least one edge case, and the marginal harm of
-"`heddle compare` is slow on a 10 GB tree" is not "do not bet the
+"`heddle diff` is slow on a 10 GB tree" is not "do not bet the
 company on this". Looser S0 (e.g. "documented") is not acceptable —
 a data-corruption bug with a documented workaround is still a data-
 corruption bug.

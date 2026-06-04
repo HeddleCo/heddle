@@ -799,7 +799,7 @@ fn emit(cli: &Cli, repo: &Repository, output: &AttemptOutput) -> Result<()> {
     // tree. On materialized threads this can include checkout-metadata
     // artifacts that aren't the user's actual change set — useful as a
     // tertiary ranking signal, but read it as "delta against parent",
-    // not "edits the command made". `heddle compare <parent> <attempt>`
+    // not "edits the command made". `heddle diff <parent> <attempt>`
     // gives the authoritative diff.
     println!(
         "  {:>4}  {:<thread_width$}  {:<10}  {:<10}  {:<10}  {:<10}  state",

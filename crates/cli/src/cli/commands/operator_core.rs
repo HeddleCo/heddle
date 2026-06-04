@@ -14,7 +14,6 @@ use repo::{
 use serde::{ser::SerializeStruct, Serialize, Serializer};
 
 use super::{
-    bisect::reset_bisect_state,
     git_overlay_health::{
         action_template, repository_verification_blockers,
         repository_verification_primary_command, RepositoryVerificationState,
@@ -397,15 +396,13 @@ fn continue_from_operation(
         (OperationScope::Heddle, OperationKind::Bisect) => Ok(OperatorCommandOutput {
             status: "blocked".to_string(),
             action: "bisect".to_string(),
-            message: "Bisect needs a good/bad decision before it can continue".to_string(),
+            message: "A stale bisect state from an older Heddle version is present; \
+                      the bisect command has been removed. Abort to clear it."
+                .to_string(),
             blockers: Vec::new(),
             warnings: Vec::new(),
-            next_action: Some(
-                "heddle bisect good <state> or heddle bisect bad <state>".to_string(),
-            ),
-            recommended_action: Some(
-                "heddle bisect good <state> or heddle bisect bad <state>".to_string(),
-            ),
+            next_action: Some("heddle abort".to_string()),
+            recommended_action: Some("heddle abort".to_string()),
         }),
         (OperationScope::Git, OperationKind::Rebase) => {
             let unresolved = git_unmerged_paths(repo)?;
@@ -448,7 +445,12 @@ fn abort_from_operation(
             cmd_rebase_silent(repo, None, true, false)?;
         }
         (OperationScope::Heddle, OperationKind::Bisect) => {
-            reset_bisect_state(repo)?;
+            // Clear any stale BISECT_STATE file left by an older Heddle
+            // version; the `bisect` verb itself no longer exists.
+            let state_path = repo.heddle_dir().join("BISECT_STATE");
+            if state_path.exists() {
+                std::fs::remove_file(&state_path)?;
+            }
         }
         (OperationScope::Git, _) => {
             let unresolved = git_unmerged_paths(repo).unwrap_or_default();

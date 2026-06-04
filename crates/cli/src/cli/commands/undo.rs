@@ -627,7 +627,7 @@ fn ensure_undo_states_reachable(repo: &Repository, batches: &[OpBatch]) -> Resul
             shorts.join(", ")
         ),
         "Restore the missing states from a backup, or run `heddle undo --list` and pick an entry past the boundary.",
-        "a destructive boundary (likely `heddle gc --prune`) has been crossed past the live oplog window",
+        "a destructive boundary (likely `heddle maintenance gc --prune`) has been crossed past the live oplog window",
         "undo cannot rewind here without the prior states",
         "no undo mutation was applied",
         "heddle undo --list",
@@ -718,7 +718,7 @@ fn ensure_redo_states_reachable(repo: &Repository, batches: &[OpBatch]) -> Resul
             shorts.join(", ")
         ),
         "Restore the missing states from a backup, or re-run the original operation manually.",
-        "a destructive boundary (likely `heddle gc --prune`) has been crossed past the live oplog window",
+        "a destructive boundary (likely `heddle maintenance gc --prune`) has been crossed past the live oplog window",
         "redo cannot replay here without the post-states",
         "no redo mutation was applied",
         "heddle log",

@@ -26,6 +26,7 @@
 use anyhow::Result;
 
 use crate::cli::{ShellCommands, ShellKind};
+use super::cmd_completion;
 
 pub fn cmd_shell(command: ShellCommands) -> Result<()> {
     match command {
@@ -34,6 +35,7 @@ pub fn cmd_shell(command: ShellCommands) -> Result<()> {
             print!("{}", snippet_for(kind));
             Ok(())
         }
+        ShellCommands::Completion { shell } => cmd_completion(shell),
     }
 }
 

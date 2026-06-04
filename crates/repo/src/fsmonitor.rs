@@ -679,6 +679,7 @@ fn spawn_local_helper_background(repo_root: &Path) -> Result<(), HeddleError> {
     if let Err(error) = Command::new(current_exe)
         .arg("--repo")
         .arg(repo_root)
+        .arg("maintenance")
         .arg("monitor")
         .arg("--serve")
         .stdin(Stdio::null())

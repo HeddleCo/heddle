@@ -831,7 +831,7 @@ fn apply_redo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
                 .ok_or_else(|| {
                     HeddleError::Conflict(format!(
                         "cannot redo fast-forward: source thread '{}' no longer exists \
-                         (legacy V1 oplog record; re-run the merge or `heddle gc oplog` to prune)",
+                         (legacy V1 oplog record; re-run the merge or `heddle maintenance gc --prune` to prune)",
                         source_thread
                     ))
                 })?;

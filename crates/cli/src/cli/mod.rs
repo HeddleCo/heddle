@@ -14,17 +14,18 @@ pub mod transaction_sentinel;
 #[cfg(feature = "client")]
 pub use cli_args::PresenceCommands;
 pub use cli_args::{
-    ActorCommands, AdoptArgs, AgentCommands, AttemptArgs, BisectCommands, BranchArgs,
+    ActorCommands, AdoptArgs, AgentCommands, AttemptArgs, BranchArgs,
     CheckpointArgs, Cli, CloneArgs, CollapseArgs, Commands, CommitArgs, ContextCommands,
     DaemonCommands, DiagnoseArgs, DiffArgs, DoctorArgs, DoctorCommands, DoctorDocsArgs,
     HookCommands, HookInstallSource, InitArgs, IntegrationCommands, IntegrationInstallArgs,
     IntegrationRelayArgs, IntegrationTargetArgs, LogArgs, MaintenanceCommands, MarkerCommands,
     MergeArgs, OutputMode, PullArgs, PurgeApplyArgs, PurgeCommands, PurgeListArgs, PushArgs,
     ReadyArgs, RedactApplyArgs, RedactCommands, RedactListArgs, RedactShowArgs, RedactTrustAddArgs,
-    RedactTrustCommands, RedactTrustListArgs, RedactTrustRemoveArgs, RemoteCommands, ResolveArgs,
+    RedactTrustCommands, RedactTrustListArgs, RedactTrustRemoveArgs, RedoArgs, RemoteCommands,
+    ResolveArgs,
     RetroArgs, RevertArgs, RunArgs, SessionCommands, SessionEndArgs, SessionListArgs,
     SessionSegmentArgs, SessionShowArgs, SessionStartArgs, ShellCommands, ShellKind, SnapshotArgs,
-    StackArgs, StackCommands, StashCommands, StoreCommands, SwitchArgs, ThreadAbsorbArgs,
+    StackArgs, StackCommands, StashCommands, SwitchArgs, ThreadAbsorbArgs,
     ThreadCleanupArgs, ThreadCommands, ThreadDropArgs, ThreadListArgs, ThreadMoveArgs,
     ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs, ThreadResolveArgs, ThreadShowArgs,
     ThreadStartArgs, TryArgs, UndoArgs, WatchArgs, WorkspaceCommands, WorkspaceModeArg,

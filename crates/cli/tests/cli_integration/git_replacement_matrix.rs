@@ -190,7 +190,7 @@ fn git_replacement_matrix_fresh_git_read_commands_without_git_on_path() {
     );
 
     for args in [
-        &["diagnose", "--output", "json"][..],
+        &["doctor", "--output", "json"][..],
         &["doctor", "--output", "json"],
         &["bridge", "git", "status", "--output", "json"],
         &["thread", "list", "--output", "json"],
@@ -572,7 +572,7 @@ fn git_replacement_matrix_everyday_save_read_machine_streams_without_git_on_path
     for args in [
         &["--output", "json", "log"][..],
         &["--output", "json", "show", "HEAD"],
-        &["--output", "json", "diagnose"],
+        &["--output", "json", "doctor"],
         &["--output", "json", "ready"],
     ] {
         let parsed = assert_clean_json_without_git(args, temp.path());

@@ -103,10 +103,6 @@ const SWEPT: &[&str] = &[
     "review next",
     "review health",
     "cherry-pick",
-    "bisect start",
-    "bisect good",
-    "bisect bad",
-    "bisect reset",
 ];
 
 /// The catalog itself advertises its container kind as `"kind":
@@ -145,9 +141,7 @@ const UNSWEPT_TODO: &[&str] = &[
     "bridge git pull",
     "bridge git push",
     "bridge git reason",
-    "checkout",
     "collapse",
-    "compare",
     "conflict list",
     "conflict show",
     "continue",
@@ -155,18 +149,15 @@ const UNSWEPT_TODO: &[&str] = &[
     "daemon status",
     "daemon stop",
     "delegate",
-    "diagnose",
     "doctor",
     "fetch",
     "fsck",
-    "gc",
     "git-overlay",
     "harness-bridge",
     "hook events",
     "hook install",
     "hook list",
     "hook uninstall",
-    "index",
     "inspect",
     "integration doctor",
     "integration install",
@@ -185,7 +176,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "marker list",
     "marker show",
     "merge",
-    "monitor",
     "pull",
     "push",
     "query",
@@ -212,7 +202,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "stash pop",
     "stash push",
     "start",
-    "store warm",
     "switch",
     "sync",
     "thread absorb",
@@ -236,7 +225,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "transaction commit",
     "transaction status",
     "try",
-    "version",
     "watch",
     "workspace",
 ];
@@ -639,9 +627,6 @@ fn runtime_invocation_args(display: &str) -> Option<(&'static [&'static str], bo
         "review health" => Some((&["review", "health"], true)),
         // `fork` succeeds in an init'd repo (forks the empty initial state).
         "fork" => Some((&["fork"], true)),
-        // `bisect start` accepts a no-state init and emits its session.
-        "bisect start" => Some((&["bisect", "start"], true)),
-        "bisect reset" => Some((&["bisect", "reset"], true)),
         _ => None,
     }
 }
@@ -768,7 +753,6 @@ fn head_change_id(dir: &std::path::Path) -> String {
 /// match or the invariant test fails demanding it.
 fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
     let case = match output_kind {
-        "bisect_start" => (init_fixture(), sv(&["bisect", "start"])),
         "clean" => {
             let t = init_fixture();
             std::fs::write(t.path().join("untracked.txt"), "junk").unwrap();
@@ -1080,6 +1064,113 @@ fn runtime_emits_output_kind_for_invokable_swept_verbs() {
     assert!(
         failures.is_empty(),
         "Runtime JSON output is missing or mismatches `output_kind`:\n  - {}",
+        failures.join("\n  - ")
+    );
+}
+
+/// The set of `output_kind` values the catalog advertises for one command
+/// display path (a command MAY advertise several — `undo` advertises two,
+/// `clone` two).
+fn advertised_output_kinds(display: &str) -> BTreeSet<String> {
+    catalog_output_kind_discriminators()
+        .into_iter()
+        .filter(|(d, _, _)| d == display)
+        .map(|(_, value, _)| value)
+        .collect()
+}
+
+/// The `output_kind` of the first JSON record `argv` prints in `dir`.
+fn emitted_output_kind(argv: &[&str], dir: &std::path::Path) -> String {
+    let output =
+        heddle_output(argv, Some(dir)).unwrap_or_else(|err| panic!("spawn {argv:?}: {err}"));
+    assert!(
+        output.status.success(),
+        "{argv:?} exited non-zero: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first_line = stdout.lines().next().unwrap_or("").trim();
+    let parsed: Value = serde_json::from_str(first_line)
+        .unwrap_or_else(|err| panic!("{argv:?} stdout not JSON: {err}\n  line: {first_line}"));
+    parsed
+        .get("output_kind")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("{argv:?} payload missing `output_kind`: {first_line}"))
+        .to_string()
+}
+
+/// Close-the-class guard for the heddle#473 verb consolidation: a command can
+/// emit MORE than one `output_kind` from a single command path — `undo` emits
+/// `undo` (the rewind / `--preview`) and `undo_list` (`--list`). Every value a
+/// handler can emit must be in that command's advertised catalog discriminator
+/// set, or an agent that validates responses against `heddle commands --output
+/// json` rejects the off-contract record.
+///
+/// `redo` is its own top-level verb again (re-split from the brief `undo --redo`
+/// fold), so it owns the `redo` output_kind 1:1 — driven here too so a future
+/// re-fold that forgets to register a kind fails CI.
+///
+/// The static catalog tests above only confirm the *first* `output_kind`
+/// discriminator matches the display path; they cannot see the alternate kinds
+/// a `--flag` path emits. This test drives every JSON-emitting variant and
+/// asserts the emitted kind is advertised for the command that produced it.
+///
+/// New multi-`output_kind` command paths MUST add their variants below.
+#[test]
+fn folded_verb_flag_variants_emit_only_advertised_output_kinds() {
+    let undo_advertised = advertised_output_kinds("undo");
+    assert!(
+        undo_advertised.is_superset(&BTreeSet::from([
+            "undo".to_string(),
+            "undo_list".to_string(),
+        ])),
+        "catalog must advertise both undo output_kinds; advertised: {undo_advertised:?}"
+    );
+    let redo_advertised = advertised_output_kinds("redo");
+    assert!(
+        redo_advertised.is_superset(&BTreeSet::from(["redo".to_string()])),
+        "catalog must advertise the redo output_kind; advertised: {redo_advertised:?}"
+    );
+
+    // Fixture with redo-able history: two commits, so an `undo` leaves exactly
+    // one batch to redo.
+    let temp = init_fixture();
+    std::fs::write(temp.path().join("a.txt"), "one").unwrap();
+    heddle(&["commit", "-m", "first"], Some(temp.path())).expect("commit first");
+    std::fs::write(temp.path().join("a.txt"), "two").unwrap();
+    heddle(&["commit", "-m", "second"], Some(temp.path())).expect("commit second");
+
+    // Drive each JSON-emitting variant, in an order that keeps the repo
+    // consistent: undo --list (read-only) → undo (rewinds, making a redo
+    // available) → redo (re-applies). Each case names the command display whose
+    // advertised set must contain the emitted kind.
+    let cases: &[(&[&str], &str, &str)] = &[
+        (&["--output", "json", "undo", "--list"], "undo_list", "undo"),
+        (&["--output", "json", "undo"], "undo", "undo"),
+        (&["--output", "json", "redo"], "redo", "redo"),
+    ];
+
+    let mut failures = Vec::new();
+    for (argv, expected, display) in cases {
+        let advertised = advertised_output_kinds(display);
+        let kind = emitted_output_kind(argv, temp.path());
+        if kind != *expected {
+            failures.push(format!(
+                "{argv:?}: emitted output_kind=`{kind}`, expected `{expected}`"
+            ));
+        }
+        if !advertised.contains(&kind) {
+            failures.push(format!(
+                "{argv:?}: emitted output_kind=`{kind}` is NOT in the catalog-advertised \
+                 set for `{display}` ({advertised:?}) — off-contract"
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "undo/redo variants emit output_kinds outside the advertised set:\n  - {}",
         failures.join("\n  - ")
     );
 }

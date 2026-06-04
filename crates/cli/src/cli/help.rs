@@ -1044,13 +1044,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn hidden_aliases_are_hidden() {
-        for verb in ["gc", "index", "monitor"] {
-            assert_eq!(tier_of(verb), Tier::Hidden, "{verb}");
-        }
-    }
-
     /// Build-break property: every verb listed in `everyday_verbs` and
     /// `advanced_verbs` that's compiled into the current build MUST
     /// resolve to a command catalog entry with a non-empty summary. Verbs

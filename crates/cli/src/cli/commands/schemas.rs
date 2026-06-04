@@ -65,12 +65,18 @@ schema_registry! {
     (&["commit"], CommitSchema),
     (&["checkpoint"], CheckpointSchema),
     (&["undo"], UndoSchema),
+    // heddle#473 phase 1: `redo` is its own top-level verb again (re-split from
+    // the brief `undo --redo` fold), and `undo --list` is undo's history view.
+    // Both emit their own `output_kind`, so both need a schema mirror. `redo`
+    // shares `undo`'s payload (`UndoSchema`); the `--list` view has its own
+    // list-shaped schema.
     (&["redo"], UndoSchema),
+    (&["undo --list"], UndoListSchema),
     (&["clean"], CleanSchema),
     (&["diff"], DiffSchema),
     (&["goto"], GotoSchema),
     (&["branch"], BranchCompatSchema),
-    (&["switch", "checkout"], SwitchCheckoutSchema),
+    (&["switch"], SwitchCheckoutSchema),
     (&["merge --preview"], MergePreviewSchema),
     (&["ready"], ReadySchema),
     (&["land"], LandSchema),
@@ -131,7 +137,6 @@ schema_registry! {
     (&["stash list"], StashListSchema),
     (&["stash show"], StashShowSchema),
     (&["revert"], RevertSchema),
-    (&["diagnose"], DiagnoseSchema),
     (&["doctor"], DiagnoseSchema),
     (&["doctor docs"], DoctorDocsSchema),
     (&["doctor schemas"], DoctorSchemasSchema),
@@ -150,13 +155,12 @@ schema_registry! {
     (&["session segment"], SessionSegmentEnvelopeSchema),
     (&["session list"], SessionListSchema),
     (&["git-overlay"], GitOverlayGuideSchema),
-    (&["version"], VersionSchema),
     (&["watch"], WatchLineSchema),
     (&["try"], TrySchema),
     (&["blame"], BlameSchema),
     (&["fsck"], FsckSchema),
     (&["resolve"], ResolveSchema),
-    (&["index", "maintenance index"], IndexSchema),
+    (&["maintenance index"], IndexSchema),
     (&["error"], ErrorEnvelopeSchema),
 }
 
@@ -975,6 +979,16 @@ pub struct UndoSchema {
     pub recovery_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_marker: Option<String>,
+}
+
+/// `heddle undo --list --output json` history view. Distinct from
+/// [`UndoSchema`] (the rewind/redo payload): the list view carries only the
+/// discriminator and the oplog batches, with none of the action/status/
+/// recovery fields a real undo emits. Mirrors `OpListOutput` in `undo.rs`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct UndoListSchema {
+    pub output_kind: Option<String>,
+    pub batches: Vec<Value>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2468,16 +2482,6 @@ pub struct GitOverlayGuideSchema {
     pub topic: String,
     pub summary: String,
     pub steps: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct VersionSchema {
-    pub version: String,
-    pub profile: String,
-    pub features: Vec<String>,
-    pub git_version: Option<String>,
-    pub repository_capability: Option<String>,
-    pub repository_root: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

@@ -507,6 +507,7 @@ fn check_invocation(
     // and tokens with internal colons (rendered prompts).
     if verb.starts_with('<')
         || verb.starts_with('[')
+        || verb.starts_with('{')
         || verb.starts_with('-')
         || verb.ends_with(':')
         || verb == "..."
@@ -771,6 +772,100 @@ mod tests {
 
     fn cli() -> ClapCommand {
         Cli::command()
+    }
+
+    fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs_files(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    // Guard against stale references to folded/deleted verbs in
+    // user-facing source strings (recovery breadcrumbs, advice, help
+    // text, error messages, emitted doc comments). Phase-1 of the CLI
+    // consolidation (heddle#473) folded `gc`/`monitor`/`checkout`/… into
+    // their canonical parents, but free-text strings that still spelled
+    // the old verb slipped past the markdown-only `doctor docs` check —
+    // that scanner only reads `.md` files, not `.rs` sources. We reuse
+    // the exact same backtick-invocation extractor + clap/catalog
+    // resolution against every Rust source file so a future fold can't
+    // leave an invalid `heddle <verb>` behind in an emitted string.
+    //
+    // Validity is data-driven off the live clap command tree +
+    // feature-gated catalog roots — never a hardcoded list — so it stays
+    // correct as verbs are added or removed.
+    #[test]
+    fn source_strings_reference_only_current_top_level_verbs() {
+        let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let cli_command = cli();
+
+        // The docs-drift checker's own surfaces intentionally embed
+        // invalid `heddle foo`/`bar`/`frobnicate` examples (enum docs +
+        // negative-test fixtures). Skipping them keeps the guard's
+        // source-of-truth the *real* command set rather than forcing a
+        // denylist of pedagogical tokens.
+        const SELF_TEST_SURFACES: &[&str] = &["doctor_docs.rs", "doctor_schemas.rs"];
+
+        let mut rs_files = Vec::new();
+        collect_rs_files(&src_root, &mut rs_files);
+        assert!(
+            rs_files.len() > 50,
+            "expected to walk the cli source tree; only found {} .rs files under {}",
+            rs_files.len(),
+            src_root.display(),
+        );
+
+        let mut stale = Vec::new();
+        for path in rs_files {
+            if SELF_TEST_SURFACES
+                .iter()
+                .any(|name| path.file_name().is_some_and(|f| f == *name))
+            {
+                continue;
+            }
+            let content = std::fs::read_to_string(&path).unwrap();
+            let display = path
+                .strip_prefix(&src_root)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            let mut issues = Vec::new();
+            scan_markdown(&display, &content, &cli_command, &mut issues);
+            for issue in issues {
+                // The regression class is folded/deleted *top-level*
+                // verbs (gc/monitor/prune/checkout → maintenance …/
+                // switch). Subverb/flag drift in source strings is a
+                // separate, pre-existing concern and out of scope here.
+                //
+                // A backslash in the captured invocation means the
+                // backtick code-span wrapped across a Rust `\n\` string
+                // continuation, so the line-by-line extractor only saw a
+                // fragment (e.g. `heddle help\n\`). That's a scan
+                // artifact on an otherwise-valid reference, not a stale
+                // verb — a real CLI verb never contains a backslash.
+                if matches!(issue.kind, IssueKind::UnknownVerb)
+                    && !issue.invocation.contains('\\')
+                {
+                    stale.push(format!("{}:{} — {}", issue.file, issue.line, issue.detail));
+                }
+            }
+        }
+
+        assert!(
+            stale.is_empty(),
+            "source strings reference verbs that are not current CLI commands \
+             (a folded/deleted verb left a stale `heddle <verb>` reference — \
+             update it to the canonical spelling):\n{}",
+            stale.join("\n"),
+        );
     }
 
     #[test]

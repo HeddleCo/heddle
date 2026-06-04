@@ -8,15 +8,15 @@ use super::BridgeCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
-    AgentCommands, BisectCommands, CheckpointArgs, ConflictCommands, ContextCommands,
+    AgentCommands, CheckpointArgs, ConflictCommands, ContextCommands,
     DiscussCommands, HookCommands, IntegrationCommands, MarkerCommands, PurgeCommands, QueryArgs,
     RedactCommands, RemoteCommands, ReviewCommands, ShellCommands, StackArgs, StashCommands,
     ThreadCommands, TransactionCommands, WorkspaceCommands,
     commands_args::{
         ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AdoptArgs,
         AttemptArgs, BranchArgs, CloneArgs, CollapseArgs, CommandCatalogArgs, CommitArgs,
-        DelegateArgs, DiagnoseArgs, DiffArgs, DoctorArgs, InitArgs, LogArgs, MergeArgs, PullArgs,
-        PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionEndArgs,
+        DelegateArgs, DiffArgs, DoctorArgs, InitArgs, LogArgs, MergeArgs, PullArgs,
+        PushArgs, ReadyArgs, RedoArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionEndArgs,
         SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, LandArgs,
         SnapshotArgs, SwitchArgs, SyncArgs, ThreadStartArgs, TryArgs, UndoArgs, WatchArgs,
     },
@@ -84,9 +84,6 @@ Examples:
     /// Exits on Ctrl-C.
     Watch(WatchArgs),
 
-    /// Diagnose repository, thread, actor, and worktree context.
-    Diagnose(DiagnoseArgs),
-
     /// Verify this workspace; exits nonzero until every check is clean.
     #[command(after_help = "\
 Checks: Git mapping, worktree, remote, operation, clone verification, machine contract.
@@ -101,8 +98,8 @@ Examples:
     /// Explain repository health, or run targeted doctor checks.
     ///
     /// `heddle doctor` (no subcommand) reports repository health and
-    /// the next recovery step (the same payload as `heddle diagnose`).
-    /// `heddle doctor docs` diff-checks markdown documentation against
+    /// the next recovery step. `heddle doctor docs` diff-checks markdown
+    /// documentation against
     /// the actual CLI surface and exits non-zero on drift — wire it
     /// into CI to stop docs from going stale.
     Doctor(DoctorArgs),
@@ -136,9 +133,6 @@ Examples:
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         verb: Vec<String>,
     },
-
-    /// Show Heddle version. Pass global `--verbose` for bug-report context.
-    Version,
 
     /// Print the public command and flag catalog.
     #[command(visible_aliases = ["command-catalog", "catalog"])]
@@ -294,9 +288,6 @@ Examples:
     /// Git-compatible alias for `heddle thread switch`.
     Switch(SwitchArgs),
 
-    /// Git-compatible alias for `heddle thread switch`.
-    Checkout(SwitchArgs),
-
     /// Open or resolve discussions anchored to symbols.
     ///
     /// Open a discussion against a symbol; append turns;
@@ -383,16 +374,8 @@ Examples:
     /// Undo the last Heddle operation.
     Undo(UndoArgs),
 
-    /// Redo undone operation.
-    Redo {
-        /// Redo N operations.
-        #[arg(short = 'n', long, default_value = "1")]
-        steps: usize,
-
-        /// Preview operations without redoing.
-        #[arg(long)]
-        preview: bool,
-    },
+    /// Redo a previously undone operation.
+    Redo(RedoArgs),
 
     /// Fork an exploration thread from a state.
     Fork {
@@ -407,19 +390,6 @@ Examples:
 
     /// Collapse (squash) multiple states into one.
     Collapse(CollapseArgs),
-
-    /// Compare two states.
-    Compare {
-        /// First state.
-        state_a: String,
-
-        /// Second state.
-        state_b: String,
-
-        /// Include semantic analysis.
-        #[arg(long)]
-        semantic: bool,
-    },
 
     /// Manage markers.
     Marker {
@@ -580,48 +550,6 @@ Examples:
         command: SemanticCommands,
     },
 
-    /// Generate shell completion scripts.
-    Completion {
-        /// Shell to generate completion for.
-        shell: String,
-    },
-
-    /// Hidden compatibility alias for `maintenance gc`.
-    #[command(hide = true)]
-    Gc {
-        /// Prune unreachable objects.
-        #[arg(long)]
-        prune: bool,
-
-        /// Aggressive garbage collection.
-        #[arg(long)]
-        aggressive: bool,
-
-        /// Show what would be removed without removing.
-        #[arg(long)]
-        dry_run: bool,
-    },
-
-    /// Hidden compatibility alias for `maintenance index`.
-    #[command(hide = true)]
-    Index {
-        /// Dump the index contents in human-readable format.
-        #[arg(long)]
-        dump: bool,
-    },
-
-    /// Hidden compatibility alias for `maintenance monitor`.
-    #[command(hide = true)]
-    Monitor {
-        /// Print changed paths as well as backend/status summary.
-        #[arg(long)]
-        paths: bool,
-
-        /// Internal helper mode: serve monitor queries for this repo.
-        #[arg(long, hide = true)]
-        serve: bool,
-    },
-
     /// FUSE mount-daemon control plane — distinct from `agent`.
     ///
     /// `heddle daemon serve` runs a foreground mount daemon that
@@ -654,19 +582,6 @@ Examples:
         command: MaintenanceCommands,
     },
 
-    /// Object-store maintenance commands.
-    ///
-    /// `store warm <state>` proactively promotes every blob reachable
-    /// from `<state>` into the canonical loose-uncompressed form.
-    /// This keeps the hardlink-first materializer on its fast path
-    /// after `pack_objects + prune_loose_objects` has consolidated
-    /// blobs into packfiles. Useful before fanning out N worktrees
-    /// from the same state (e.g. before a `heddle delegate` round).
-    Store {
-        #[command(subcommand)]
-        command: StoreCommands,
-    },
-
     /// Show line-by-line attribution for a file.
     Blame {
         /// File to blame.
@@ -679,12 +594,6 @@ Examples:
         /// Show concise applicable context before blame output.
         #[arg(long)]
         context: bool,
-    },
-
-    /// Binary search for bugs.
-    Bisect {
-        #[command(subcommand)]
-        command: BisectCommands,
     },
 
     /// Apply specific commits.
@@ -830,24 +739,6 @@ pub enum MaintenanceCommands {
         /// Internal helper mode: serve monitor queries for this repo.
         #[arg(long, hide = true)]
         serve: bool,
-    },
-}
-
-/// Store subcommands.
-#[derive(Clone, Debug, clap::Subcommand)]
-pub enum StoreCommands {
-    /// Promote every reachable blob from `<state>` into the
-    /// uncompressed-loose canonical store so the hardlink-first
-    /// materializer can `link(2)` directly without paying
-    /// `decompress + write` on the first materialize.
-    ///
-    /// Defaults to HEAD when `<state>` is omitted. Idempotent: a
-    /// second call is essentially a no-op (every blob is already
-    /// loose+uncompressed).
-    Warm {
-        /// State specifier (HEAD, thread name, marker, change-id);
-        /// defaults to HEAD when omitted.
-        state: Option<String>,
     },
 }
 

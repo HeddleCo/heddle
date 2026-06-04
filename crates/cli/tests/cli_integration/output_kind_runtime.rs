@@ -226,52 +226,6 @@ fn cherry_pick_commit_emits_output_kind_with_new_commit() {
     );
 }
 
-#[test]
-fn bisect_good_bad_emit_output_kind() {
-    let temp = init_and_capture();
-    capture_second(&temp);
-    // Start the session — covered by the lint test, but we need an
-    // active session before good/bad will accept marks.
-    let started = heddle_json(&["bisect", "start"], &temp);
-    assert_output_kind(&started, "bisect_start");
-
-    let log = heddle_json(&["log", "--limit", "2"], &temp);
-    let head_id = log["states"][0]["change_id"]
-        .as_str()
-        .expect("log JSON head id")
-        .to_string();
-    let parent_id = log["states"][1]["change_id"]
-        .as_str()
-        .expect("log JSON parent id")
-        .to_string();
-
-    let good = heddle_json(&["bisect", "good", &parent_id], &temp);
-    assert_output_kind(&good, "bisect_good");
-    assert_eq!(good["status"].as_str(), Some("marked_good"));
-    assert!(
-        good.get("commit")
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.is_empty()),
-        "bisect good must echo resolved commit: {good}"
-    );
-
-    let bad = heddle_json(&["bisect", "bad", &head_id], &temp);
-    assert_output_kind(&bad, "bisect_bad");
-    assert_eq!(bad["status"].as_str(), Some("marked_bad"));
-    assert!(
-        bad.get("commit")
-            .and_then(|v| v.as_str())
-            .is_some_and(|s| !s.is_empty()),
-        "bisect bad must echo resolved commit: {bad}"
-    );
-
-    // `bisect reset` is exercised by the lint test, but rerunning it
-    // here keeps the test self-contained (leaves no dangling session
-    // for the harness to clean up).
-    let reset = heddle_json(&["bisect", "reset"], &temp);
-    assert_output_kind(&reset, "bisect_reset");
-    assert_eq!(reset["status"].as_str(), Some("reset"));
-}
 
 #[test]
 fn stash_show_emits_output_kind() {

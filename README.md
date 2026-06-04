@@ -9,7 +9,7 @@ Heddle is an AI-native version control CLI written in Rust. It keeps its own sta
 - thread-first agent workflows (lightweight named work units with lifecycle, freshness, and promotion semantics)
 - local captures and Git-compatible commits with explicit human and agent attribution
 - content-addressed immutable history with stable change identifiers that survive rewrites
-- provenance-aware inspection (`heddle blame`, `heddle inspect`, `heddle compare --semantic`)
+- provenance-aware inspection (`heddle blame`, `heddle inspect`, `heddle diff --semantic`)
 
 ```bash
 cargo install heddle-cli
@@ -121,11 +121,11 @@ heddle land --thread feature/auth --push
 
 # Inspect history and provenance
 heddle log
-heddle compare HEAD~1 HEAD --semantic
+heddle diff HEAD~1 HEAD --semantic
 heddle blame path/to/file.rs
 ```
 
-`heddle status` reports the current branch or thread, what is dirty, whether another operation is in progress, and the recommended next command. The same `recommended_action` field is carried through `heddle diagnose`, `heddle thread show`, and `heddle workspace show` for programmatic use.
+`heddle status` reports the current branch or thread, what is dirty, whether another operation is in progress, and the recommended next command. The same `recommended_action` field is carried through `heddle doctor`, `heddle thread show`, and `heddle workspace show` for programmatic use.
 
 ## Core concepts
 
@@ -145,7 +145,7 @@ Heddle is designed for programmatic use by agents and automation. Most read-shap
 
 ```bash
 heddle status --output json
-heddle diagnose --output json
+heddle doctor --output json
 heddle diff --output json
 heddle log --output json
 heddle show HEAD --output json

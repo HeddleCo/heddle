@@ -16,8 +16,6 @@ use std::{
 use serde_json::Value;
 use tempfile::TempDir;
 
-#[path = "comprehensive/bisect.rs"]
-mod bisect_comprehensive;
 #[path = "comprehensive/blame.rs"]
 mod blame_comprehensive;
 #[path = "comprehensive/cherry_pick.rs"]

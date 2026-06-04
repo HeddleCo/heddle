@@ -24,4 +24,10 @@ pub enum ShellCommands {
         #[arg(value_enum)]
         kind: ShellKind,
     },
+
+    /// Generate a shell completion script on stdout.
+    Completion {
+        /// Shell to generate completion for.
+        shell: String,
+    },
 }

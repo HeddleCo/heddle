@@ -113,10 +113,10 @@ fn compare_accepts_short_id() {
     let short_a = log_val["states"][1]["change_id"].as_str().unwrap();
 
     let _output = heddle(
-        &["--output", "json", "compare", short_a, &short_b],
+        &["--output", "json", "diff", short_a, &short_b],
         Some(temp.path()),
     )
-    .expect("compare should accept short IDs on both sides");
+    .expect("diff should accept short IDs on both sides");
 }
 
 #[test]

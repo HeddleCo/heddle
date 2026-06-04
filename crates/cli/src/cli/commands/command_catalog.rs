@@ -11,10 +11,10 @@ use serde::Serialize;
 #[cfg(feature = "semantic")]
 use crate::cli::SemanticCommands;
 use crate::cli::{
-    ActorCommands, AgentCommands, BisectCommands, Cli, Commands, ContextCommands, DaemonCommands,
+    ActorCommands, AgentCommands, Cli, Commands, ContextCommands, DaemonCommands,
     DoctorCommands, HookCommands, IntegrationCommands, MaintenanceCommands, MarkerCommands,
     PurgeCommands, RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands,
-    ShellCommands, StackCommands, StashCommands, StoreCommands, ThreadCommands, WorkspaceCommands,
+    ShellCommands, StackCommands, StashCommands, ThreadCommands, WorkspaceCommands,
     cli_args::{
         CommandCatalogArgs, ConflictCommands, DiscussCommands, ReviewCommands, TransactionCommands,
     },
@@ -390,9 +390,6 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     "heddle actor show <session>",
     "heddle stash push -m \"...\"",
     "heddle thread show <THREAD>",
-    // Choice placeholders: the user must choose one command and fill
-    // in the state after inspecting the bisect result.
-    "heddle bisect good <state> or heddle bisect bad <state>",
     // Remote setup requires filling in a real name and URL after
     // inspecting current configuration.
     "heddle remote add <name> <url>",
@@ -607,12 +604,6 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         &["heddle", "stash", "push", "-m", "<message>"],
         &["message"],
         true,
-    ),
-    (
-        "heddle bisect good <state> or heddle bisect bad <state>",
-        &["heddle", "bisect", "<good|bad>", "<state>"],
-        &["verdict", "state"],
-        false,
     ),
     (
         "heddle remote add <name> <url>",
@@ -1176,51 +1167,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["auth", "status"], READ_JSON),
     #[cfg(feature = "client")]
     entry(&["auth", "create-service-token"], MUTATING_NO_OP_ID),
-    entry(&["bisect"], GROUP),
-    entry(
-        &["bisect", "start"],
-        json_discriminators(
-            opaque_schemas(WORKTREE_MUTATION, &["bisect start"]),
-            &[json_discriminator(
-                Some("bisect start"),
-                "output_kind",
-                "bisect_start",
-            )],
-        ),
-    ),
-    entry(
-        &["bisect", "good"],
-        json_discriminators(
-            opaque_schemas(WORKTREE_MUTATION, &["bisect good"]),
-            &[json_discriminator(
-                Some("bisect good"),
-                "output_kind",
-                "bisect_good",
-            )],
-        ),
-    ),
-    entry(
-        &["bisect", "bad"],
-        json_discriminators(
-            opaque_schemas(WORKTREE_MUTATION, &["bisect bad"]),
-            &[json_discriminator(
-                Some("bisect bad"),
-                "output_kind",
-                "bisect_bad",
-            )],
-        ),
-    ),
-    entry(
-        &["bisect", "reset"],
-        json_discriminators(
-            opaque_schemas(WORKTREE_MUTATION, &["bisect reset"]),
-            &[json_discriminator(
-                Some("bisect reset"),
-                "output_kind",
-                "bisect_reset",
-            )],
-        ),
-    ),
     entry(&["blame"], documented_schemas(READ_JSON, &["blame"])),
     entry(
         &["branch"],
@@ -1404,13 +1350,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["checkout"],
-        git_adapter_alias(
-            documented_schemas(WORKTREE_MUTATION, &["checkout"]),
-            "thread switch",
-        ),
-    ),
-    entry(
         &["cherry-pick"],
         json_discriminators(
             opaque_schemas(WORKTREE_MUTATION, &["cherry-pick"]),
@@ -1511,8 +1450,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "automation",
         ),
     ),
-    entry(&["compare"], opaque_schemas(READ_JSON, &["compare"])),
-    entry(&["completion"], READ_TEXT),
     entry(&["conflict"], GROUP),
     entry(
         &["conflict", "list"],
@@ -1651,7 +1588,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["delegate"],
         documented_schemas(WORKTREE_MUTATION, &["delegate"]),
     ),
-    entry(&["diagnose"], documented_schemas(READ_JSON, &["diagnose"])),
     entry(
         &["diff"],
         front_door(
@@ -1768,7 +1704,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(&["fsck"], documented_schemas(MUTATING, &["fsck"])),
-    entry(&["gc"], hidden(opaque_schemas(GC_MUTATION, &["gc"]))),
     entry(
         &["git-overlay"],
         documented_schemas(READ_JSON, &["git-overlay"]),
@@ -1807,10 +1742,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["hook", "events"],
         surface(opaque_schemas(READ_JSON, &["hook events"]), "automation"),
-    ),
-    entry(
-        &["index"],
-        hidden(documented_schemas(READ_JSON, &["index"])),
     ),
     entry(
         &["init"],
@@ -1955,10 +1886,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 "stack_snapshot",
             )],
         ),
-    ),
-    entry(
-        &["monitor"],
-        hidden(opaque_schemas(READ_JSON, &["monitor"])),
     ),
     entry(&["presence"], feature_gated(READ_JSON, "client")),
     entry(&["presence", "publish"], feature_gated(READ_JSON, "client")),
@@ -2120,6 +2047,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
+        // `redo` is the symmetric inverse of `undo`, a standalone top-level verb
+        // again after the heddle#473 phase-1 re-split. It emits exactly one
+        // output_kind — `redo` — schema-backed by `UndoSchema` (shared payload
+        // shape with `undo`).
         &["redo"],
         json_discriminators(
             documented_schemas(WORKTREE_MUTATION, &["redo"]),
@@ -2259,6 +2190,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(&["shell"], READ_TEXT),
     entry(&["shell", "init"], READ_TEXT),
+    entry(&["shell", "completion"], READ_TEXT),
     entry(
         &["land"],
         front_door(
@@ -2383,11 +2315,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ),
             &[(0, "ok"), (74, "io reading workspace state")],
         ),
-    ),
-    entry(&["store"], surface(GROUP, "admin")),
-    entry(
-        &["store", "warm"],
-        surface(opaque_schemas(MUTATING, &["store warm"]), "admin"),
     ),
     entry(&["support"], feature_gated(MUTATING, "client")),
     entry(
@@ -2537,13 +2464,24 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["undo"],
         front_door(
             json_discriminators(
-                documented_schemas(WORKTREE_MUTATION, &["undo"]),
-                &[json_discriminator(Some("undo"), "output_kind", "undo")],
+                // `undo` keeps its own `--list` history view, so this one command
+                // path emits TWO output_kinds: `undo` (the default rewind /
+                // `--preview`) and `undo_list` (`--list`). The former `redo` verb
+                // is its own top-level command again (heddle#473 phase 1 re-split),
+                // so `redo` is advertised on the `redo` entry below, not here.
+                // Every kind the handler can emit must be advertised or an agent
+                // validating responses via `heddle commands --output json` rejects
+                // the off-contract record. `undo --list` has its own
+                // `UndoListSchema`.
+                documented_schemas(WORKTREE_MUTATION, &["undo", "undo --list"]),
+                &[
+                    json_discriminator(Some("undo"), "output_kind", "undo"),
+                    json_discriminator(Some("undo --list"), "output_kind", "undo_list"),
+                ],
             ),
             100,
         ),
     ),
-    entry(&["version"], documented_schemas(READ_JSON, &["version"])),
     entry(
         &["watch"],
         surface(documented_schemas(READ_JSONL, &["watch"]), "automation"),
@@ -3911,7 +3849,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Help { .. } => vec!["help"],
         Commands::Status { .. } => vec!["status"],
         Commands::Watch(_) => vec!["watch"],
-        Commands::Diagnose(_) => vec!["diagnose"],
         Commands::Verify => vec!["verify"],
         Commands::Doctor(args) => match &args.command {
             None => vec!["doctor"],
@@ -3921,7 +3858,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         #[cfg(feature = "git-overlay")]
         Commands::GitOverlay => vec!["git-overlay"],
         Commands::Schemas { .. } => vec!["schemas"],
-        Commands::Version => vec!["version"],
         Commands::Commands(_) => vec!["commands"],
         Commands::Start(_) => vec!["start"],
         Commands::Try(_) => vec!["try"],
@@ -3945,7 +3881,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Diff(_) => vec!["diff"],
         Commands::Branch(_) => vec!["branch"],
         Commands::Switch(_) => vec!["switch"],
-        Commands::Checkout(_) => vec!["checkout"],
         Commands::Discuss { command } => match command {
             DiscussCommands::Open(_) => vec!["discuss", "open"],
             DiscussCommands::Append(_) => vec!["discuss", "append"],
@@ -3986,10 +3921,9 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         },
         Commands::Revert(_) => vec!["revert"],
         Commands::Undo(_) => vec!["undo"],
-        Commands::Redo { .. } => vec!["redo"],
+        Commands::Redo(_) => vec!["redo"],
         Commands::Fork { .. } => vec!["fork"],
         Commands::Collapse(_) => vec!["collapse"],
-        Commands::Compare { .. } => vec!["compare"],
         Commands::Marker { command } => match command {
             MarkerCommands::List { .. } => vec!["marker", "list"],
             MarkerCommands::Create { .. } => vec!["marker", "create"],
@@ -4019,6 +3953,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         },
         Commands::Shell { command } => match command {
             ShellCommands::Init { .. } => vec!["shell", "init"],
+            ShellCommands::Completion { .. } => vec!["shell", "completion"],
         },
         Commands::Workspace { command } => match command {
             None => vec!["workspace"],
@@ -4105,10 +4040,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Semantic { command } => match command {
             SemanticCommands::Hot { .. } => vec!["semantic", "hot"],
         },
-        Commands::Completion { .. } => vec!["completion"],
-        Commands::Gc { .. } => vec!["gc"],
-        Commands::Index { .. } => vec!["index"],
-        Commands::Monitor { .. } => vec!["monitor"],
         Commands::Daemon { command } => match command {
             DaemonCommands::Serve => vec!["daemon", "serve"],
             DaemonCommands::Status => vec!["daemon", "status"],
@@ -4132,16 +4063,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             MaintenanceCommands::Index { .. } => vec!["maintenance", "index"],
             MaintenanceCommands::Monitor { .. } => vec!["maintenance", "monitor"],
         },
-        Commands::Store { command } => match command {
-            StoreCommands::Warm { .. } => vec!["store", "warm"],
-        },
         Commands::Blame { .. } => vec!["blame"],
-        Commands::Bisect { command } => match command {
-            BisectCommands::Start => vec!["bisect", "start"],
-            BisectCommands::Good { .. } => vec!["bisect", "good"],
-            BisectCommands::Bad { .. } => vec!["bisect", "bad"],
-            BisectCommands::Reset => vec!["bisect", "reset"],
-        },
         Commands::CherryPick { .. } => vec!["cherry-pick"],
         Commands::Clone(_) => vec!["clone"],
         Commands::Rebase { .. } => vec!["rebase"],
@@ -4223,10 +4145,6 @@ mod tests {
         ),
         sample(&["agent", "list"], &["agent", "list"]),
         sample(&["attempt"], &["attempt", "1", "true"]),
-        sample(&["bisect", "start"], &["bisect", "start"]),
-        sample(&["bisect", "good"], &["bisect", "good"]),
-        sample(&["bisect", "bad"], &["bisect", "bad"]),
-        sample(&["bisect", "reset"], &["bisect", "reset"]),
         sample(&["blame"], &["blame", "src/lib.rs"]),
         sample(&["branch"], &["branch"]),
         #[cfg(feature = "git-overlay")]
@@ -4268,7 +4186,6 @@ mod tests {
         ),
         sample(&["capture"], &["capture"]),
         sample(&["checkpoint"], &["checkpoint"]),
-        sample(&["checkout"], &["checkout", "main"]),
         sample(&["cherry-pick"], &["cherry-pick", "abc123"]),
         sample(&["clean"], &["clean"]),
         sample(&["clone"], &["clone", "remote", "local"]),
@@ -4278,8 +4195,6 @@ mod tests {
         ),
         sample(&["commit"], &["commit"]),
         sample(&["commands"], &["commands"]),
-        sample(&["compare"], &["compare", "s1", "s2"]),
-        sample(&["completion"], &["completion", "bash"]),
         sample(&["conflict", "list"], &["conflict", "list"]),
         sample(&["conflict", "show"], &["conflict", "show", "conflict-1"]),
         sample(&["continue"], &["continue"]),
@@ -4309,7 +4224,6 @@ mod tests {
         sample(&["daemon", "status"], &["daemon", "status"]),
         sample(&["daemon", "stop"], &["daemon", "stop"]),
         sample(&["delegate"], &["delegate", "task"]),
-        sample(&["diagnose"], &["diagnose"]),
         sample(&["diff"], &["diff"]),
         sample(
             &["discuss", "open"],
@@ -4331,7 +4245,6 @@ mod tests {
         sample(&["fetch"], &["fetch"]),
         sample(&["fork"], &["fork"]),
         sample(&["fsck"], &["fsck"]),
-        sample(&["gc"], &["gc"]),
         #[cfg(feature = "git-overlay")]
         sample(&["git-overlay"], &["git-overlay"]),
         sample(&["goto"], &["goto", "HEAD"]),
@@ -4344,7 +4257,6 @@ mod tests {
             &["hook", "uninstall", "pre-snapshot"],
         ),
         sample(&["hook", "events"], &["hook", "events"]),
-        sample(&["index"], &["index"]),
         sample(&["init"], &["init"]),
         sample(&["inspect"], &["inspect"]),
         sample(&["integration", "list"], &["integration", "list"]),
@@ -4367,7 +4279,6 @@ mod tests {
         sample(&["marker", "delete"], &["marker", "delete", "mark-1"]),
         sample(&["marker", "show"], &["marker", "show", "mark-1"]),
         sample(&["merge"], &["merge", "feature"]),
-        sample(&["monitor"], &["monitor"]),
         sample(&["pull"], &["pull"]),
         sample(
             &["purge", "apply"],
@@ -4476,6 +4387,7 @@ mod tests {
         sample(&["session", "show"], &["session", "show"]),
         sample(&["session", "list"], &["session", "list"]),
         sample(&["shell", "init"], &["shell", "init", "bash"]),
+        sample(&["shell", "completion"], &["shell", "completion", "bash"]),
         sample(&["land"], &["land"]),
         sample(&["show"], &["show", "HEAD"]),
         sample(&["start"], &["start", "feature"]),
@@ -4487,7 +4399,6 @@ mod tests {
         sample(&["stash", "clear"], &["stash", "clear"]),
         sample(&["stash", "show"], &["stash", "show"]),
         sample(&["status"], &["status"]),
-        sample(&["store", "warm"], &["store", "warm"]),
         sample(&["switch"], &["switch", "main"]),
         sample(&["sync"], &["sync"]),
         sample(&["thread", "create"], &["thread", "create", "feature"]),
@@ -4544,7 +4455,6 @@ mod tests {
         sample(&["verify"], &["verify"]),
         sample(&["try"], &["try", "true"]),
         sample(&["undo"], &["undo"]),
-        sample(&["version"], &["version"]),
         sample(&["watch"], &["watch"]),
         sample(&["workspace"], &["workspace"]),
         sample(&["workspace", "show"], &["workspace", "show"]),
@@ -4573,7 +4483,6 @@ mod tests {
             "heddle bridge git import --path <full-git-repo> --ref <ref>",
             "heddle thread promote main",
             "heddle thread resolve main",
-            "heddle bisect good <state> or heddle bisect bad <state>",
         ] {
             validate_recommended_action(action)
                 .unwrap_or_else(|err| panic!("expected `{action}` to validate: {err}"));
@@ -5256,10 +5165,6 @@ mod tests {
         assert_eq!(
             displays,
             vec![
-                "bisect start",
-                "bisect good",
-                "bisect bad",
-                "bisect reset",
                 "bridge git status",
                 "bridge git import",
                 "bridge git sync",
@@ -5317,6 +5222,12 @@ mod tests {
                 "thread list",
                 "thread show",
                 "verify",
+                // `undo` advertises two output_kinds on one command path —
+                // `undo` and `undo_list` (`--list`) — so its path appears twice,
+                // mirroring how `clone` appears twice above. The former `redo`
+                // verb is its own top-level entry again (`redo`, above). See
+                // heddle#473.
+                "undo",
                 "undo",
                 "workspace show",
             ]
@@ -5634,7 +5545,7 @@ mod tests {
         for (argv, expected) in [
             (vec!["heddle", "status"], true),
             (vec!["heddle", "commands"], true),
-            (vec!["heddle", "completion", "bash"], false),
+            (vec!["heddle", "shell", "completion", "bash"], false),
             (vec!["heddle", "thread", "cd", "feature"], false),
         ] {
             let cli = Cli::try_parse_from(argv.clone())

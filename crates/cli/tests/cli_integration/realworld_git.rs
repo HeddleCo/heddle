@@ -668,7 +668,7 @@ fn realworld_git_gc_prunes_unreachable_mapping_entries() {
     }));
     std::fs::write(&mapping_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
 
-    heddle_with_host_git(&["gc"], &work).unwrap();
+    heddle_with_host_git(&["maintenance", "gc"], &work).unwrap();
 
     let post_text = std::fs::read_to_string(&mapping_path).unwrap();
     let post_value: Value = serde_json::from_str(&post_text).unwrap();

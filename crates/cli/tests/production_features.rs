@@ -751,67 +751,15 @@ mod cherry_pick {
 mod bisect {
     use super::*;
 
+    /// `bisect` was removed in the whole-CLI consolidation (#473); it was a
+    /// non-functional stub with no binary search. The verb must now error as
+    /// an unknown subcommand.
     #[test]
-    fn test_bisect_start() {
+    fn test_bisect_is_removed() {
         let temp = TempDir::new().unwrap();
-
         heddle(&["init"], Some(temp.path())).unwrap();
-        for i in 0..5 {
-            fs::write(temp.path().join("file.txt"), format!("version {}", i)).unwrap();
-            heddle(
-                &["capture", "-m", &format!("Commit {}", i)],
-                Some(temp.path()),
-            )
-            .unwrap();
-        }
-
         let result = heddle(&["bisect", "start"], Some(temp.path()));
-        assert!(result.is_ok(), "bisect start failed: {:?}", result.err());
-    }
-
-    #[test]
-    fn test_bisect_good_bad() {
-        let temp = TempDir::new().unwrap();
-
-        heddle(&["init"], Some(temp.path())).unwrap();
-        for i in 0..5 {
-            fs::write(temp.path().join("file.txt"), format!("version {}", i)).unwrap();
-            heddle(
-                &["capture", "-m", &format!("Commit {}", i)],
-                Some(temp.path()),
-            )
-            .unwrap();
-        }
-
-        heddle(&["bisect", "start"], Some(temp.path())).unwrap();
-
-        let log_output =
-            heddle(&["log", "--oneline", "--output", "text"], Some(temp.path())).unwrap();
-        let commits: Vec<&str> = log_output.lines().take(5).collect();
-        let bad_commit = commits[0].split_whitespace().next().unwrap();
-        let good_commit = commits[4].split_whitespace().next().unwrap();
-
-        let result = heddle(&["bisect", "bad", bad_commit], Some(temp.path()));
-        assert!(result.is_ok(), "bisect bad failed: {:?}", result.err());
-
-        let result = heddle(&["bisect", "good", good_commit], Some(temp.path()));
-        assert!(result.is_ok(), "bisect good failed: {:?}", result.err());
-    }
-
-    #[test]
-    fn test_bisect_reset() {
-        let temp = TempDir::new().unwrap();
-
-        heddle(&["init"], Some(temp.path())).unwrap();
-        for i in 0..3 {
-            fs::write(temp.path().join("file.txt"), format!("v{}", i)).unwrap();
-            heddle(&["capture", "-m", &format!("C{}", i)], Some(temp.path())).unwrap();
-        }
-
-        heddle(&["bisect", "start"], Some(temp.path())).unwrap();
-
-        let result = heddle(&["bisect", "reset"], Some(temp.path()));
-        assert!(result.is_ok(), "bisect reset failed: {:?}", result.err());
+        assert!(result.is_err(), "bisect should be an unknown verb after #473");
     }
 }
 
@@ -1880,7 +1828,7 @@ mod completion {
     fn test_completion_bash() {
         let temp = TempDir::new().unwrap();
 
-        let result = heddle(&["completion", "bash"], Some(temp.path()));
+        let result = heddle(&["shell", "completion", "bash"], Some(temp.path()));
         assert!(result.is_ok(), "completion bash failed: {:?}", result.err());
 
         let output = result.unwrap();
@@ -1894,7 +1842,7 @@ mod completion {
     fn test_completion_zsh() {
         let temp = TempDir::new().unwrap();
 
-        let result = heddle(&["completion", "zsh"], Some(temp.path()));
+        let result = heddle(&["shell", "completion", "zsh"], Some(temp.path()));
         assert!(result.is_ok(), "completion zsh failed: {:?}", result.err());
     }
 
@@ -1902,7 +1850,7 @@ mod completion {
     fn test_completion_fish() {
         let temp = TempDir::new().unwrap();
 
-        let result = heddle(&["completion", "fish"], Some(temp.path()));
+        let result = heddle(&["shell", "completion", "fish"], Some(temp.path()));
         assert!(result.is_ok(), "completion fish failed: {:?}", result.err());
     }
 }

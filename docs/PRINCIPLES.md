@@ -74,9 +74,9 @@ they are, what is in flight, what to do next, and how to recover.
 State IDs follow the same logic. Every state-taking verb accepts the same
 specifiers — full change ID, 4-character-or-longer prefix, marker name,
 `HEAD`, `HEAD~N`, thread name — so the muscle memory you build on
-`heddle show` carries to `heddle diff`, `heddle compare`, `heddle revert`,
-`heddle goto`, `heddle bisect`, `heddle blame --state`, `heddle review show`,
-and `heddle retro --since`. One acceptance rule, fifteen verbs.
+`heddle show` carries to `heddle diff`, `heddle revert`,
+`heddle goto`, `heddle blame --state`, `heddle review show`,
+and `heddle retro --since`. One acceptance rule, every state-taking verb.
 
 Restraint in defaults: `heddle attempt` defaults `--shared-target` ON
 whenever the workspace has a `Cargo.toml`, because ten parallel
