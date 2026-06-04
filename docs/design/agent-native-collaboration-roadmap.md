@@ -35,6 +35,7 @@ The Heddle GitHub Project is already a large cross-repo collaboration surface: 4
 
 Strong alignment:
 
+<!-- doctor-docs:planned -->
 - The Project's Ready, In progress, In review, and Done states are practical input to `heddle inbox`: they represent attention, readiness, review state, and recommended next work.
 - Whole-CLI consolidation work aligns with the command-contract foundation; collaboration should reuse the existing command catalog and op-id machinery rather than invent a new agent contract layer.
 - `VisibilityTier` / `StateVisibility` work from #315-#319 and #523 is the shared visibility substrate for collaboration; discussion visibility should consume it instead of growing a parallel model.
@@ -219,6 +220,7 @@ Goal: derive useful local collaboration views and attention before full semantic
 - Render deterministic display order for humans and JSON convenience.
 - Surface concurrent append turns as siblings, not conflicts.
 - Surface incompatible lifecycle claims as conflicts.
+<!-- doctor-docs:planned -->
 - Implement `heddle inbox` as a derived attention view.
 - Do not claim read/unread state in first-slice inbox JSON.
 - Include sync/local-only diagnostics in inbox only when they affect actionability, readiness, or sync.
@@ -287,17 +289,23 @@ Goal: evolve `heddle discuss` in place from state-attached discussions to reposi
 Canonical commands:
 
 - `heddle discuss open`
+<!-- doctor-docs:planned -->
 - `heddle discuss turn`
 - `heddle discuss resolve`
+<!-- doctor-docs:planned -->
 - `heddle discuss reopen`
+<!-- doctor-docs:planned -->
 - `heddle discuss retarget`
+<!-- doctor-docs:planned -->
 - `heddle discuss resolve-conflict`
 - `heddle discuss list`
 - `heddle discuss show`
+<!-- doctor-docs:planned -->
 - `heddle inbox`
 
 Aliases:
 
+<!-- doctor-docs:planned -->
 - `heddle discuss comment` may exist as a human alias for `turn --kind comment`.
 - The current `append` verb should be replaced or kept only as a short-lived pre-1.0 alias if implementation sequencing needs it.
 
@@ -316,6 +324,7 @@ First-slice command behavior:
 Migration behavior:
 
 - Detect legacy state-attached discussions.
+<!-- doctor-docs:planned -->
 - `heddle discuss migrate` is advanced/doctor-oriented, not daily help.
 - Migration is plan-first by default.
 - Applying migration requires `--apply` or equivalent.
@@ -550,6 +559,7 @@ Required fields:
 - `sync`
 - `warnings`
 
+<!-- doctor-docs:planned -->
 ### `heddle discuss turn --output json`
 
 Required fields:
@@ -589,6 +599,7 @@ Required fields:
 
 The `display_order` is convenience output. Agents should use `operations`, `heads`, and `conflicts` for correctness.
 
+<!-- doctor-docs:planned -->
 ### `heddle inbox --output json`
 
 Required fields:
