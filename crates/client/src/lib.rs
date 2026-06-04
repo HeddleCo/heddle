@@ -19,7 +19,7 @@ pub use auth_cmd::cmd_auth;
 // callers using `weft_client::auth::{...}` resolve symbols at the
 // same path the cli used internally pre-move.
 pub use device_flow as auth;
-pub use grpc_hosted::HostedGrpcClient;
+pub use grpc_hosted::{HostedAuthMode, HostedGrpcClient, HostedSession};
 pub use presence::{
     PublisherConfig, cmd_presence_publish, resolve_publisher_config, run_publisher,
 };
