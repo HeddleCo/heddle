@@ -5416,6 +5416,154 @@ fn repro_484_r3_ambiguous_block_split_no_silent_collapse() {
     assert!(text.contains("fn b(&self)"), "fn b lost:\n{text}");
 }
 
+// =====================================================================
+// heddle#490 r1 / Codex P1: ZERO child-overlap container alignment.
+//
+// The container matcher (build_aligned_match_keys) picks a base block by
+// immediate child-key OVERLAP. An EMPTY container (or one whose children were
+// fully replaced) overlaps nothing, so pre-fix every such block minted a FRESH
+// discriminator and its base slot resolved as deleted. The positional fallback
+// aligns a zero-overlap block to its next unused base slot in source order;
+// content-overlap stays the PRIMARY mechanism (covered above).
+//
+// The additive cases below are CONTRACT guards: the add/add weaving already
+// reconstructs them byte-for-byte even pre-fix, so they pin the clean-merge
+// contract for empty/zero-overlap containers against future regressions rather
+// than witnessing the pre-fix defect. The observable fail-pre/pass-post witness
+// is `..._modify_vs_delete_empty_container_conflicts`: pre-fix the deleted base
+// slot let a modify-vs-delete merge silently resolve to one side (data loss);
+// the positional fallback routes it through the same modify/delete CONFLICT path
+// a non-empty container already uses.
+// =====================================================================
+
+#[test]
+fn repro_490_r1_two_empty_impl_blocks_one_side_adds_method_clean() {
+    // Two EMPTY `impl Foo {}` blocks in base; ours adds a method to the FIRST,
+    // theirs is unchanged. The first block must gain the method, the second
+    // stay empty — a clean one-sided edit with no drop/dup/conflict.
+    let base = "struct Foo;\n\nimpl Foo {}\n\nimpl Foo {}\n";
+    let ours = "struct Foo;\n\nimpl Foo {\n    fn m(&self) {}\n}\n\nimpl Foo {}\n";
+    let theirs = base;
+    let merged = assert_conformant(base, ours, theirs);
+    assert_eq!(
+        merged.matches("impl Foo").count(),
+        2,
+        "empty blocks dropped/duplicated:\n{merged}"
+    );
+    assert!(merged.contains("fn m(&self) {}"), "ours add lost:\n{merged}");
+    // The method lands in the FIRST block; the second stays empty.
+    let first = merged.find("impl Foo").unwrap();
+    let second = merged.rfind("impl Foo").unwrap();
+    let m = merged.find("fn m(&self) {}").unwrap();
+    assert!(first < m && m < second, "method escaped the first block:\n{merged}");
+}
+
+#[test]
+fn repro_490_r1_two_empty_impl_blocks_each_side_edits_different_block_clean() {
+    // Two empty blocks; ours edits the FIRST, theirs edits the SECOND. Both
+    // edits land on their own base slot — a clean merge of both.
+    let base = "struct Foo;\n\nimpl Foo {}\n\nimpl Foo {}\n";
+    let ours = "struct Foo;\n\nimpl Foo {\n    fn ours_m(&self) {}\n}\n\nimpl Foo {}\n";
+    let theirs = "struct Foo;\n\nimpl Foo {}\n\nimpl Foo {\n    fn theirs_m(&self) {}\n}\n";
+    let merged = assert_conformant(base, ours, theirs);
+    assert_eq!(
+        merged.matches("impl Foo").count(),
+        2,
+        "empty blocks dropped/duplicated:\n{merged}"
+    );
+    assert!(merged.contains("fn ours_m(&self) {}"), "ours edit lost:\n{merged}");
+    assert!(merged.contains("fn theirs_m(&self) {}"), "theirs edit lost:\n{merged}");
+    assert!(
+        merged.find("fn ours_m(&self) {}").unwrap() < merged.find("fn theirs_m(&self) {}").unwrap(),
+        "edits landed in the wrong blocks:\n{merged}"
+    );
+}
+
+#[test]
+fn repro_490_r1_fully_replaced_impl_children_align_to_base_slot_no_conflict() {
+    // A non-empty container whose children are FULLY replaced on ours (child
+    // overlap with base = 0) must still align to its single base slot, not be
+    // treated as delete + add. base holds `fn x`; ours replaces it with `fn y`;
+    // theirs keeps `fn x` and adds `fn z`. Positional alignment recurses the
+    // body and combines the edits cleanly (ours's deletion of x + add of y,
+    // theirs's add of z). Contract guard for the zero-overlap fallback.
+    let base = "struct Foo;\n\nimpl Foo {\n    fn x(&self) {}\n}\n";
+    let ours = "struct Foo;\n\nimpl Foo {\n    fn y(&self) {}\n}\n";
+    let theirs = "struct Foo;\n\nimpl Foo {\n    fn x(&self) {}\n    fn z(&self) {}\n}\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(
+        crate::parser::ParsedFile::parse(&merged, crate::parser::Language::Rust).is_some(),
+        "unparseable merge:\n{merged}"
+    );
+    assert_eq!(merged.matches("impl Foo").count(), 1, "block duplicated:\n{merged}");
+    assert!(merged.contains("fn y(&self) {}"), "ours replacement lost:\n{merged}");
+    assert!(merged.contains("fn z(&self) {}"), "theirs add lost:\n{merged}");
+    assert!(!merged.contains("fn x(&self) {}"), "ours deletion of fn x dropped:\n{merged}");
+}
+
+#[test]
+fn repro_490_r1_fully_replaced_mod_children_align_to_base_slot_no_conflict() {
+    // `mod` variant of the fully-replaced case (single block, valid Rust): base
+    // `mod m { fn x }`; ours replaces the body with `fn y` (zero child-overlap);
+    // theirs keeps `fn x` and adds `fn z`. Positional alignment keeps the one
+    // base slot so the bodies merge instead of conflicting.
+    let base = "mod m {\n    fn x() {}\n}\n";
+    let ours = "mod m {\n    fn y() {}\n}\n";
+    let theirs = "mod m {\n    fn x() {}\n    fn z() {}\n}\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(
+        crate::parser::ParsedFile::parse(&merged, crate::parser::Language::Rust).is_some(),
+        "unparseable merge:\n{merged}"
+    );
+    assert_eq!(merged.matches("mod m").count(), 1, "mod duplicated:\n{merged}");
+    assert!(merged.contains("fn y() {}"), "ours replacement lost:\n{merged}");
+    assert!(merged.contains("fn z() {}"), "theirs add lost:\n{merged}");
+    assert!(!merged.contains("fn x() {}"), "ours deletion of fn x dropped:\n{merged}");
+}
+
+#[cfg(feature = "lang-cpp")]
+#[test]
+fn repro_490_r1_two_empty_cpp_namespaces_one_side_adds_clean() {
+    // C++ `namespace` variant of the two-empty-blocks case: base has two empty
+    // `namespace N {}` blocks; ours adds a function to the FIRST, theirs is
+    // unchanged. Clean one-sided edit, both namespaces preserved.
+    let base = "namespace N {}\n\nnamespace N {}\n";
+    let ours = "namespace N {\nvoid m() {}\n}\n\nnamespace N {}\n";
+    let theirs = base;
+    let merged = assert_conformant_at(base, ours, theirs, "f.cpp", crate::parser::Language::Cpp);
+    assert_eq!(
+        merged.matches("namespace N").count(),
+        2,
+        "empty namespaces dropped/duplicated:\n{merged}"
+    );
+    assert!(merged.contains("void m() {}"), "ours add lost:\n{merged}");
+    let first = merged.find("namespace N").unwrap();
+    let second = merged.rfind("namespace N").unwrap();
+    let m = merged.find("void m() {}").unwrap();
+    assert!(first < m && m < second, "function escaped the first namespace:\n{merged}");
+}
+
+#[test]
+fn repro_490_r1_modify_vs_delete_empty_container_conflicts() {
+    // The observable fail-pre/pass-post witness. base has one EMPTY `impl Foo {}`.
+    // ours adds a method to it (a modify); theirs deletes the whole block. This
+    // is a textbook modify/delete and MUST conflict — exactly as a non-empty
+    // container's modify/delete already does (resolve_container's Some/Some/None
+    // arm). Pre-fix the empty block's zero overlap minted a fresh discriminator,
+    // so the base slot resolved as a clean delete on both sides and ours's
+    // modification was re-added as a brand-new block: the conflict vanished and
+    // ours's content silently won (data loss + a trailing-whitespace artifact).
+    // The positional fallback claims the base slot, so the modify/delete is seen
+    // and conflicts.
+    let base = "struct Foo;\n\nimpl Foo {}\n";
+    let ours = "struct Foo;\n\nimpl Foo {\n    fn m(&self) {}\n}\n";
+    let theirs = "struct Foo;\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(count >= 1, "expected a modify/delete conflict, got {count}");
+    assert!(text.contains("fn m(&self) {}"), "ours modification lost from conflict:\n{text}");
+    assert!(text.contains("<<<<<<<") && text.contains(">>>>>>>"), "missing conflict markers:\n{text}");
+}
+
 
 // C++ `namespace N {…} namespace N {…}` is the same close-the-class shape in
 // another language; gated behind `lang-cpp` (extended-languages) since the cpp

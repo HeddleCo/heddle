@@ -295,15 +295,25 @@ fn child_key_set(item: &Item) -> BTreeSet<&ItemKey> {
 ///
 /// Leaves get a per-side positional occurrence index — base's first `foo`
 /// pairs with ours's first `foo`, the existing heddle#68 scheme. **Container
-/// instances** (same `(kind, name, scope)`, multiple blocks) instead anchor to
-/// base by *immediate child-key overlap*: each ours/theirs block is paired with
-/// the base block whose children it most overlaps, inheriting that base block's
-/// discriminator; a block matching no base block (a prepended/appended new
-/// container) gets a fresh discriminator above the base range. Positional
-/// occurrence alone mis-pairs a prepended `impl Foo` (occurrence 0) with base's
-/// `impl Foo` (occurrence 0) — the r3 collapse; overlap alignment pairs by what
-/// the block actually contains, so identity survives reordering. For leaves
-/// (no children) every overlap is 0, so this degenerates to positional.
+/// instances** (same `(kind, name, scope)`, multiple blocks) anchor to base in
+/// two passes:
+///
+/// 1. **Content-overlap (primary).** Each ours/theirs block is paired with the
+///    unused base block whose immediate child-keys it most overlaps (overlap
+///    `> 0`), inheriting that base block's discriminator. Positional occurrence
+///    alone mis-pairs a prepended `impl Foo` (occurrence 0) with base's
+///    `impl Foo` (occurrence 0) — the r3 collapse; overlap alignment pairs by
+///    what the block actually contains, so identity survives reordering.
+/// 2. **Positional fallback (no content signal).** A block that found no
+///    overlap — an EMPTY container, or one whose children were fully replaced —
+///    claims the next UNUSED base block of its key in base source order. Only
+///    when no unused base block of that key remains is it a genuinely-new
+///    container → fresh discriminator above the base range. Without this an
+///    empty same-key container minted fresh, its base slot resolved as deleted,
+///    and a clean one-sided edit corrupted (heddle#490 r1 / Codex P1).
+///
+/// For leaves (no children) every overlap is 0 and the leaf path applies a
+/// plain positional occurrence index directly.
 fn build_aligned_match_keys(
     base: &[Item],
     ours: &[Item],
@@ -324,7 +334,9 @@ fn build_aligned_match_keys(
     let base_mks = build_match_keys(base);
 
     let align = |side: &[Item]| -> Vec<MatchKey> {
-        // base container instances per key: (base discriminator, &base item).
+        // base container instances per key: (base discriminator, &base item),
+        // in base source order (so the positional fallback below claims the
+        // *earliest* unused base slot).
         let mut base_by_key: BTreeMap<&ItemKey, Vec<(usize, &Item)>> = BTreeMap::new();
         for (i, it) in base.iter().enumerate() {
             if container_keys.contains(&it.key) {
@@ -335,32 +347,74 @@ fn build_aligned_match_keys(
         let mut leaf_occ: BTreeMap<&ItemKey, usize> = BTreeMap::new();
         let mut fresh: BTreeMap<&ItemKey, usize> = BTreeMap::new();
 
-        let mut out = Vec::with_capacity(side.len());
-        for it in side {
-            if container_keys.contains(&it.key) {
-                let childset = child_key_set(it);
-                let used_set = used.entry(&it.key).or_default();
-                let mut best: Option<(usize, usize)> = None; // (overlap, base disc)
-                if let Some(cands) = base_by_key.get(&it.key) {
-                    for (disc, bitem) in cands {
-                        if used_set.contains(disc) {
-                            continue;
-                        }
-                        let overlap = childset.intersection(&child_key_set(bitem)).count();
-                        if overlap > 0 && best.is_none_or(|(o, _)| overlap > o) {
-                            best = Some((overlap, *disc));
-                        }
+        // Container discriminators are decided in TWO passes so that
+        // content-overlap stays the PRIMARY signal: a zero-overlap (e.g. empty)
+        // block must never greedily claim a base slot that a later
+        // content-overlap block would match. `disc_of[pos]` holds the
+        // pass-1 verdict per side position; `None` = deferred to pass 2.
+        let mut disc_of: Vec<Option<usize>> = vec![None; side.len()];
+
+        // Pass 1 — content-overlap alignment (PRIMARY). Each container claims
+        // the unused base candidate of its key with the greatest immediate
+        // child-key overlap, when that overlap is > 0. This is the heddle#484
+        // r3 mechanism: a reordered/edited non-empty block matches by what it
+        // actually contains.
+        for (pos, it) in side.iter().enumerate() {
+            if !container_keys.contains(&it.key) {
+                continue;
+            }
+            let childset = child_key_set(it);
+            let used_set = used.entry(&it.key).or_default();
+            let mut best: Option<(usize, usize)> = None; // (overlap, base disc)
+            if let Some(cands) = base_by_key.get(&it.key) {
+                for (disc, bitem) in cands {
+                    if used_set.contains(disc) {
+                        continue;
+                    }
+                    let overlap = childset.intersection(&child_key_set(bitem)).count();
+                    if overlap > 0 && best.is_none_or(|(o, _)| overlap > o) {
+                        best = Some((overlap, *disc));
                     }
                 }
-                let disc = if let Some((_, d)) = best {
-                    used_set.insert(d);
+            }
+            if let Some((_, d)) = best {
+                used_set.insert(d);
+                disc_of[pos] = Some(d);
+            }
+        }
+
+        // Pass 2 — positional fallback for the no-content-signal case + leaves.
+        // A container that found no overlap > 0 in pass 1 (an EMPTY container,
+        // or one whose children were fully replaced so it overlaps no base
+        // block) claims the NEXT UNUSED base candidate of its key in base
+        // source order — a bounded positional alignment to its base slot. Only
+        // when no unused base candidate of that key remains is the block a
+        // genuinely-new container beyond base's count → mint a fresh
+        // discriminator above the base range. Without this fallback every
+        // zero-overlap same-key container minted fresh, its base slot resolved
+        // as deleted, and a clean one-sided edit of an empty block corrupted
+        // (heddle#490 r1 / Codex P1). This is a narrow fallback for the
+        // zero-overlap case, NOT a return to the per-everything ordinal model.
+        let mut out = Vec::with_capacity(side.len());
+        for (pos, it) in side.iter().enumerate() {
+            if container_keys.contains(&it.key) {
+                let disc = if let Some(d) = disc_of[pos] {
                     d
                 } else {
-                    let base_count = base_by_key.get(&it.key).map_or(0, Vec::len);
-                    let f = fresh.entry(&it.key).or_insert(0);
-                    let d = base_count + *f;
-                    *f += 1;
-                    d
+                    let used_set = used.entry(&it.key).or_default();
+                    let next_unused = base_by_key.get(&it.key).and_then(|cands| {
+                        cands.iter().map(|(d, _)| *d).find(|d| !used_set.contains(d))
+                    });
+                    if let Some(d) = next_unused {
+                        used_set.insert(d);
+                        d
+                    } else {
+                        let base_count = base_by_key.get(&it.key).map_or(0, Vec::len);
+                        let f = fresh.entry(&it.key).or_insert(0);
+                        let d = base_count + *f;
+                        *f += 1;
+                        d
+                    }
                 };
                 out.push((it.key.clone(), disc));
             } else {
