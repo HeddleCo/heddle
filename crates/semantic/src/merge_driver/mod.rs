@@ -115,7 +115,7 @@ pub fn semantic_three_way_merge(
         }
     }
 
-    reconstruct_merged_file(
+    let outcome = reconstruct_merged_file(
         base_text,
         ours_text,
         theirs_text,
@@ -123,7 +123,168 @@ pub fn semantic_three_way_merge(
         &ours_segments,
         &theirs_segments,
         markers,
-    )
+    );
+
+    // Input-grounded safety net (heddle#490 P3 floor). The tree model makes
+    // silent structural collapse impossible *by construction*, but a cheap
+    // conservation check against the INPUTS — not the merge's own resolved
+    // metadata — is kept as defense-in-depth: if a CLEAN merge ever fails to
+    // re-parse or invents an item/nesting no input had, route to the textual
+    // path instead of emitting the corruption.
+    //
+    // The floor also guards CONFLICT outputs (heddle#490 r6). The clean-only
+    // check could not see a malformed body that ships *alongside* a real
+    // conflict: a divergent container header plus an empty-base both-sides-add
+    // emitted a duplicated opening `{` (so `{`/`}` no longer balance) while the
+    // outcome was `Conflicts`, and a conflict skipped the clean floor — the
+    // malformed markers shipped silently. A conflict the user resolves must
+    // still be well-formed: resolving the markers to EITHER side must yield a
+    // file that re-parses. If a resolution is unparseable (an unbalanced /
+    // duplicated delimiter), route to the textual fallback, whose markers are
+    // well-formed by construction. Part 1 (structural body delimiter) makes
+    // this hold by construction; this guard keeps a future weave regression
+    // from re-shipping the class silently.
+    match &outcome {
+        MergeOutcome::Clean(output) => {
+            if !conserves_inputs(output, language, &base_parsed, &ours_parsed, &theirs_parsed) {
+                return text_hunk_merge_with_markers(base, ours, theirs, markers);
+            }
+        }
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => {
+            if !conflict_well_formed(merged_bytes_with_markers, language) {
+                return text_hunk_merge_with_markers(base, ours, theirs, markers);
+            }
+        }
+        MergeOutcome::Binary | MergeOutcome::DeleteVsModify => {}
+    }
+    outcome
+}
+
+/// Whether a conflict output is structurally well-formed: resolving its markers
+/// to EITHER side independently yields a file that re-parses.
+///
+/// Reuses the clean floor's re-parse signal ([`ParsedFile::parse`] returns
+/// `None` on a tree with errors) so both floors close the SAME class with the
+/// same mechanism. The duplicate-delimiter corruption (heddle#490 r6) leaves a
+/// resolved side with an unbalanced `{`/`}`, which fails to parse and is caught
+/// here. If the markers themselves are malformed (unbalanced
+/// `<<<<<<< / ======= / >>>>>>>` nesting) the resolver returns `None`, which is
+/// likewise treated as not-well-formed.
+fn conflict_well_formed(output: &[u8], language: Language) -> bool {
+    let Ok(text) = std::str::from_utf8(output) else {
+        return false;
+    };
+    let Some((ours, theirs)) = resolve_conflict_sides(text) else {
+        return false;
+    };
+    ParsedFile::parse(ours.as_str(), language).is_some()
+        && ParsedFile::parse(theirs.as_str(), language).is_some()
+}
+
+/// Resolve conflict-marked `text` into its two independent sides: the
+/// take-ours resolution (drop the `theirs` hunks + markers) and the take-theirs
+/// resolution (drop the `ours` hunks + markers). Mirrors the marker shape
+/// emitted by [`merge::markers`] / `reconstruct::emit_addadd_conflict`:
+/// `<<<<<<< <label>` … `=======` … `>>>>>>> <label>`.
+///
+/// Returns `None` when the markers are malformed — a `=======` outside an open
+/// `<<<<<<<`, a `>>>>>>>` outside an open `=======`, a nested `<<<<<<<`, or an
+/// unterminated block at end of input — so a structurally broken conflict is
+/// itself surfaced as not-well-formed.
+fn resolve_conflict_sides(text: &str) -> Option<(String, String)> {
+    enum State {
+        Normal,
+        Ours,
+        Theirs,
+    }
+    let mut ours = String::new();
+    let mut theirs = String::new();
+    let mut state = State::Normal;
+    for line in text.split_inclusive('\n') {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let body = body.strip_suffix('\r').unwrap_or(body);
+        if body.starts_with("<<<<<<<") {
+            match state {
+                State::Normal => state = State::Ours,
+                _ => return None,
+            }
+        } else if body == "=======" {
+            match state {
+                State::Ours => state = State::Theirs,
+                _ => return None,
+            }
+        } else if body.starts_with(">>>>>>>") {
+            match state {
+                State::Theirs => state = State::Normal,
+                _ => return None,
+            }
+        } else {
+            match state {
+                State::Normal => {
+                    ours.push_str(line);
+                    theirs.push_str(line);
+                }
+                State::Ours => ours.push_str(line),
+                State::Theirs => theirs.push_str(line),
+            }
+        }
+    }
+    match state {
+        State::Normal => Some((ours, theirs)),
+        _ => None,
+    }
+}
+
+/// Whether a clean `output` conserves the structure of its inputs. Re-parses
+/// the output and checks, against the three inputs (re-segmented raw so `use`
+/// keys compare on the same footing as the output's):
+///
+/// 1. **Re-parse** — a clean merge that yields an unparseable file is a
+///    corruption (catches a collapse's unbalanced delimiters).
+/// 2. **Item-identity subset** — every `(scope, kind, name)` in the output
+///    must appear in some input; the merge may not invent an item or move one
+///    into a scope no contributing side gave it (catches mis-nesting / a child
+///    escaping its container).
+///
+/// Both checks are deletion-safe (a subset relation, not equality), so a
+/// legitimate clean merge with deletions passes; and edit-safe (they key on
+/// item identity, not line text), so a within-line edit that recombines bytes
+/// passes. The line-duplication class the harness pins (Bug 1's doubled
+/// postamble) is excluded by construction in the tree model and covered by the
+/// ported conformance tests, so it needs no production line-budget check.
+fn conserves_inputs(
+    output: &[u8],
+    language: Language,
+    base_parsed: &ParsedFile,
+    ours_parsed: &ParsedFile,
+    theirs_parsed: &ParsedFile,
+) -> bool {
+    use std::collections::BTreeSet;
+
+    let Ok(out_text) = std::str::from_utf8(output) else {
+        return false;
+    };
+    let Some(out_parsed) = ParsedFile::parse(out_text, language) else {
+        return false;
+    };
+
+    type Identity = (Vec<String>, items::ItemKind, String);
+    let collect = |seg: &items::FileSegments, set: &mut BTreeSet<Identity>| {
+        items::visit_items(&seg.items, &mut |i| {
+            set.insert((i.key.scope.clone(), i.key.kind, i.key.name.clone()));
+        });
+    };
+
+    let mut allowed: BTreeSet<Identity> = BTreeSet::new();
+    for parsed in [base_parsed, ours_parsed, theirs_parsed] {
+        collect(&segment_file(parsed), &mut allowed);
+    }
+    let mut got: BTreeSet<Identity> = BTreeSet::new();
+    collect(&segment_file(&out_parsed), &mut got);
+    got.is_subset(&allowed)
 }
 
 /// Strategy a merge call should use for content reconciliation.

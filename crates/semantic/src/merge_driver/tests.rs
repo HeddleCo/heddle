@@ -2445,6 +2445,357 @@ fn foo() {
 }
 
 // =====================================================================
+// heddle#490 r5: same-key CONTAINER add/add with NO base anchor. A recursive
+// body merge is only sound when a BASE container exists to diff each side
+// against. For the no-base add/add case (both sides independently created the
+// same-key container, nothing to anchor to), recursing into the bodies via
+// `merge_container_3way`/`merge_region` mis-weaves the delimiters: it attaches
+// each side's opening `{`/preamble to that side's first added child, so `{` is
+// emitted before BOTH children — duplicating the delimiter — and the empty-base
+// safety fallback can then duplicate the whole module silently. The fix STOPS
+// recursing for the no-base case and compares the two added containers as WHOLE
+// units (header + body + footer): identical → take one copy; any divergence →
+// one whole-container conflict. This single rule subsumes r4 (divergent header
+// ⇒ different whole content ⇒ conflict) and fixes r5 (identical header + disjoint
+// children ⇒ different whole content ⇒ conflict, no delimiter duplication). The
+// recursive structural body merge is preserved for the base-anchored case below,
+// where diffing against the base makes it sound.
+// =====================================================================
+
+// r5 core: identical header, DISJOINT children, no base. Pre-fix the empty-base
+// recursion duplicated the opening `{` (one before `fn a`, one before `fn b`)
+// and could silently duplicate the module; post-fix the divergent whole
+// containers conflict instead.
+#[test]
+fn add_add_container_disjoint_children_no_base_conflicts() {
+    let base = "";
+    let ours = "mod foo {\n    fn a() {}\n}\n";
+    let theirs = "mod foo {\n    fn b() {}\n}\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(count >= 1, "expected ≥1 conflict, got {count}: {text}");
+    assert!(
+        text.contains("<<<<<<<") && text.contains("=======") && text.contains(">>>>>>>"),
+        "expected canonical conflict markers around the divergent module: {text}"
+    );
+    assert!(
+        text.contains("fn a()") && text.contains("fn b()"),
+        "both sides' bodies must survive inside the conflict: {text}"
+    );
+    // The delimiter-duplication bug: pre-fix `{` was emitted before both `fn a`
+    // and `fn b`, yielding three `{` for a one-brace module. The whole-container
+    // conflict emits each side's body verbatim, so each opening brace appears
+    // exactly as written on that side.
+    assert_eq!(
+        text.matches("mod foo {").count(),
+        2,
+        "expected one `mod foo {{` per conflict side, not a duplicated delimiter: {text}"
+    );
+}
+
+// The clean take-one counterpart: both sides add the BYTE-IDENTICAL container.
+// No base, but nothing diverges → take one copy, no spurious conflict, no
+// duplication.
+#[test]
+fn add_add_container_identical_no_base_takes_one() {
+    let base = "";
+    let ours = "mod foo {\n    fn a() {}\n}\n";
+    let theirs = "mod foo {\n    fn a() {}\n}\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert_eq!(merged.matches("mod foo").count(), 1, "module duplicated: {merged}");
+    assert_eq!(merged.matches("fn a()").count(), 1, "body duplicated: {merged}");
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "no spurious conflict on identical add/add containers: {merged}"
+    );
+}
+
+// r4, now via the general rule: divergent HEADER add/add. `pub mod foo` vs
+// `mod foo` ⇒ different whole content ⇒ whole-container conflict. Pre-r4 this
+// silently fused into a duplicated/malformed module; the whole-container rule
+// surfaces it as a conflict with both header spellings preserved.
+#[test]
+fn add_add_container_divergent_header_no_base_conflicts() {
+    let base = "";
+    let ours = "pub mod foo {\n    fn a() {}\n}\n";
+    let theirs = "mod foo {\n    fn a() {}\n}\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(count >= 1, "expected ≥1 conflict on the divergent header, got {count}: {text}");
+    assert!(
+        text.contains("<<<<<<<") && text.contains("=======") && text.contains(">>>>>>>"),
+        "expected canonical conflict markers around the divergent module: {text}"
+    );
+    assert!(
+        text.contains("pub mod foo") && text.contains("mod foo {"),
+        "both header spellings must survive inside the conflict: {text}"
+    );
+    assert!(
+        !matches!(merge_rust(base, ours, theirs), MergeOutcome::Clean(_)),
+        "divergent add/add must not be a silent clean concat"
+    );
+}
+
+// The masking case from the finding: a SHARED child used to let the recursive
+// body merge weave a clean module, hiding the no-base unsoundness. With the
+// whole-container rule, divergent bodies (`fn a` vs `fn b`) conflict even when a
+// child is shared — there is still no base to anchor the merge.
+#[test]
+fn add_add_container_shared_child_divergent_body_no_base_conflicts() {
+    let base = "";
+    let ours = "mod foo {\n    fn shared() {}\n    fn a() {}\n}\n";
+    let theirs = "mod foo {\n    fn shared() {}\n    fn b() {}\n}\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(count >= 1, "expected ≥1 conflict, got {count}: {text}");
+    assert!(
+        text.contains("<<<<<<<") && text.contains("=======") && text.contains(">>>>>>>"),
+        "expected canonical conflict markers: {text}"
+    );
+    assert!(
+        text.contains("fn a()") && text.contains("fn b()"),
+        "both divergent bodies must survive inside the conflict: {text}"
+    );
+}
+
+// The recursive structural merge is PRESERVED for the base-anchored case: base
+// has `mod foo { fn a }`, ours adds `fn b`, theirs adds `fn c`. A real base
+// container exists to diff against, so the body merges structurally + cleanly
+// (`fn a` unchanged, `fn b`/`fn c` are disjoint additions). This is the path
+// the r5 fix must NOT regress.
+#[test]
+fn base_anchored_container_merges_structurally_clean() {
+    let base = "mod foo {\n    fn a() {}\n}\n";
+    let ours = "mod foo {\n    fn a() {}\n    fn b() {}\n}\n";
+    let theirs = "mod foo {\n    fn a() {}\n    fn c() {}\n}\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert_eq!(merged.matches("mod foo").count(), 1, "module duplicated: {merged}");
+    assert_eq!(merged.matches("mod foo {").count(), 1, "delimiter duplicated: {merged}");
+    assert!(
+        merged.contains("fn a()") && merged.contains("fn b()") && merged.contains("fn c()"),
+        "base child + both disjoint additions must weave into the single module: {merged}"
+    );
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "no spurious conflict on a base-anchored disjoint-additions merge: {merged}"
+    );
+}
+
+// Relocated from `conformance_484_structural_matrix`: a no-base add/add of a
+// DIVERGENT `pub mod m`. Pre-r5 this only "merged clean" via the buggy
+// structural-recursion → conservation-floor → whole-file-concat fallback, which
+// emitted TWO `pub mod m` blocks — an illegal duplicate module (E0428). The
+// whole-container rule surfaces it as a conflict instead of silently producing
+// the duplicate. A `mod` is NOT reopenable, so a conflict (not a weave) is the
+// only sound outcome with no base anchor.
+#[test]
+fn add_add_divergent_mod_no_base_conflicts_not_duplicate_module() {
+    let base = "pub fn a() {}\n";
+    let ours = "pub fn a() {}\n\npub mod m {\n    pub use crate::x;\n}\n";
+    let theirs = "pub fn a() {}\n\npub mod m {\n    pub use crate::y;\n}\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(count >= 1, "expected ≥1 conflict, got {count}: {text}");
+    assert!(
+        text.contains("<<<<<<<") && text.contains("=======") && text.contains(">>>>>>>"),
+        "expected canonical conflict markers: {text}"
+    );
+    assert!(
+        text.contains("pub use crate::x") && text.contains("pub use crate::y"),
+        "both sides' re-exports must survive inside the conflict: {text}"
+    );
+}
+
+// =====================================================================
+// heddle#490 r6: BASE-anchored container whose body is EMPTY (`mod foo {}`),
+// with both sides adding DIFFERENT children. The body's opening delimiter `{`
+// lives at the head of each side's first inter-item range; folding it into the
+// child weave let ours's `{` and theirs's `{` each emit in a separate added-
+// child slot, duplicating the opening delimiter. Pre-fix a clean version was
+// caught by the conservation floor (re-parse failed → text fallback), but a
+// version that ALSO carried a real conflict (a divergent header) shipped the
+// malformed body because the floor skipped conflict outputs. The fix makes the
+// body delimiter structural — merged once in `merge_container_3way`, emitted
+// around the woven children — so it can never duplicate, AND extends the floor
+// to conflict outputs as a belt-and-suspenders well-formedness guard.
+// =====================================================================
+
+// Clean case: empty base body, ours adds `fn a`, theirs adds `fn b`, headers
+// agree. Must weave both children into ONE `mod foo { ... }` with exactly one
+// opening and one closing brace, no conflict.
+#[test]
+fn empty_base_container_both_sides_add_weaves_single_delimiter_clean() {
+    let base = "mod foo {}\n";
+    let ours = "mod foo {\n    fn a() {}\n}\n";
+    let theirs = "mod foo {\n    fn b() {}\n}\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert_eq!(
+        merged.matches("mod foo {").count(),
+        1,
+        "opening delimiter duplicated: {merged}"
+    );
+    assert!(
+        merged.contains("fn a()") && merged.contains("fn b()"),
+        "both disjoint additions must weave into the single module: {merged}"
+    );
+    assert_eq!(
+        merged.matches('{').count(),
+        merged.matches('}').count(),
+        "braces must balance: {merged}"
+    );
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "no spurious conflict on disjoint additions into an empty base body: {merged}"
+    );
+}
+
+// Conflict case: empty base body + a DIVERGENT header (`pub mod` vs
+// `pub(crate) mod`) AND both sides adding different children. The header
+// conflicts, but the merged output must be WELL-FORMED: exactly one body
+// opening `{` and one closing `}`, balanced braces, conflict markers present.
+// Pre-fix this shipped a duplicated `{` (open=4, close=3) because the floor
+// skipped conflict outputs.
+#[test]
+fn empty_base_container_divergent_header_conflict_is_well_formed() {
+    let base = "mod foo {}\n";
+    let ours = "pub mod foo {\n    fn a() {}\n}\n";
+    let theirs = "pub(crate) mod foo {\n    fn b() {}\n}\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(count >= 1, "expected ≥1 conflict on the divergent header: {text}");
+    assert!(
+        text.contains("<<<<<<<") && text.contains("=======") && text.contains(">>>>>>>"),
+        "expected canonical conflict markers: {text}"
+    );
+    assert_eq!(
+        text.matches('{').count(),
+        text.matches('}').count(),
+        "delimiter duplicated — braces unbalanced (the r6 malformed-conflict bug): {text}"
+    );
+    // Resolving either side must yield valid, balanced code.
+    for side in resolve_both_sides(&text) {
+        assert_eq!(
+            side.matches('{').count(),
+            side.matches('}').count(),
+            "a resolved side has unbalanced braces: {side}"
+        );
+        assert!(
+            crate::parser::ParsedFile::parse(side.as_str(), crate::parser::Language::Rust).is_some(),
+            "a resolved side does not parse: {side}"
+        );
+    }
+}
+
+// The extended floor guards conflict outputs: a structurally malformed conflict
+// (a resolved side that does not re-parse) must NOT be emitted silently — it is
+// routed to the textual fallback, which is well-formed by construction. We
+// exercise the guard through a real merge that, absent the structural fix,
+// would emit a duplicate-delimiter conflict; with the floor extended, even a
+// regression in the weave can no longer ship a malformed conflict. Here we
+// assert the strong invariant directly: whatever the driver returns for the
+// r6 shape, both resolved sides re-parse.
+#[test]
+fn conflict_output_resolved_sides_always_reparse() {
+    // A divergent-header empty-base container (the r6 malformed-conflict shape).
+    let base = "mod foo {}\n";
+    let ours = "pub mod foo {\n    fn a() {}\n}\n";
+    let theirs = "pub(crate) mod foo {\n    fn b() {}\n}\n";
+    let text = match merge_rust(base, ours, theirs) {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        other => panic!("unexpected: {other:?}"),
+    };
+    for side in resolve_both_sides(&text) {
+        assert!(
+            crate::parser::ParsedFile::parse(side.as_str(), crate::parser::Language::Rust).is_some(),
+            "driver emitted a conflict whose resolved side does not parse: {side}"
+        );
+    }
+}
+
+// Direct floor-guard test: a deliberately MALFORMED conflict output (the r6
+// duplicate-opening-`{` shape) is rejected by the extended floor, while a
+// well-formed conflict passes. This pins the guard itself, independent of the
+// structural fix that makes the driver emit well-formed conflicts.
+#[test]
+fn extended_floor_rejects_malformed_conflict_passes_well_formed() {
+    use crate::parser::Language::Rust;
+
+    // The exact malformed shape the pre-fix driver shipped: a divergent header
+    // conflict followed by a body that duplicated the opening `{` (two `{`, one
+    // `}`). Resolving the OURS side is unbalanced and unparseable.
+    let malformed = "\
+<<<<<<< OURS
+pub mod foo
+=======
+pub(crate) mod foo
+>>>>>>> THEIRS
+{
+    fn b() {}{
+    fn a() {}
+}
+";
+    assert!(
+        !super::conflict_well_formed(malformed.as_bytes(), Rust),
+        "extended floor must reject a duplicate-delimiter conflict"
+    );
+
+    // A balanced, parseable conflict (both resolved sides are valid Rust) passes.
+    let well_formed = "\
+<<<<<<< OURS
+fn foo() { 1 }
+=======
+fn foo() { 2 }
+>>>>>>> THEIRS
+";
+    assert!(
+        super::conflict_well_formed(well_formed.as_bytes(), Rust),
+        "extended floor must accept a well-formed conflict whose sides both parse"
+    );
+
+    // Structurally broken markers (an orphan `=======` with no open `<<<<<<<`)
+    // resolve to None → treated as not-well-formed.
+    let broken_markers = "fn a() {}\n=======\nfn b() {}\n";
+    assert!(
+        !super::conflict_well_formed(broken_markers.as_bytes(), Rust),
+        "extended floor must reject structurally broken conflict markers"
+    );
+}
+
+// Resolve a conflict-marked text into its two sides (take-ours, take-theirs) by
+// dropping the markers and the opposite side's hunks. Mirrors the marker shape
+// emitted by `heddle-merge::markers` / `emit_addadd_conflict`.
+fn resolve_both_sides(text: &str) -> [String; 2] {
+    #[derive(PartialEq)]
+    enum S {
+        Normal,
+        Ours,
+        Theirs,
+    }
+    let mut ours = String::new();
+    let mut theirs = String::new();
+    let mut state = S::Normal;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.strip_suffix('\n').unwrap_or(line);
+        if trimmed.starts_with("<<<<<<<") {
+            state = S::Ours;
+        } else if trimmed == "=======" {
+            state = S::Theirs;
+        } else if trimmed.starts_with(">>>>>>>") {
+            state = S::Normal;
+        } else {
+            match state {
+                S::Normal => {
+                    ours.push_str(line);
+                    theirs.push_str(line);
+                }
+                S::Ours => ours.push_str(line),
+                S::Theirs => theirs.push_str(line),
+            }
+        }
+    }
+    [ours, theirs]
+}
+
+// =====================================================================
 // Codex r5 P1 #1: `signature_hash_from_field` hashes the whole
 // `parameters` text — INCLUDING parameter NAMES. A pure parameter
 // rename on one side (`foo(x: u32)` → `foo(y: u32)`) changes
@@ -3311,33 +3662,46 @@ interface Foo {
   f(y: string): void;
 }
 ";
-    let outcome = merge_at(base, ours, theirs, "f.ts");
-    let text = match outcome {
-        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+    // ours reverses order; theirs edits the first AND last signatures. The
+    // signature edit splits each endpoint into a delete (base/ours `a()`) + an
+    // add (theirs `a(x: number)`), and TS `;` statement terminators are
+    // separate tokens living in the inter-item gaps — so this reorder cannot be
+    // reconstructed without re-deriving terminator placement. Pre-#490 the
+    // semantic path emitted a silently-UNPARSEABLE "clean" result (stray `;`,
+    // doubled `}`); the heddle#490 conservation guard now re-parses every clean
+    // merge and routes this to the safe textual conflict instead. Either way
+    // the methods are still extracted as items (theirs's edits survive, nothing
+    // is dropped) and NO silent corruption escapes.
+    match merge_at(base, ours, theirs, "f.ts") {
+        MergeOutcome::Clean(b) => {
+            let text = String::from_utf8(b).unwrap();
+            assert!(
+                crate::parser::ParsedFile::parse(
+                    text.as_str(),
+                    crate::parser::Language::TypeScript
+                )
+                .is_some(),
+                "clean merge must re-parse (no silent corruption): {text}"
+            );
+            assert!(text.contains("a(x: number)"), "theirs's edit on a lost: {text}");
+            assert!(text.contains("f(y: string)"), "theirs's edit on f lost: {text}");
+            for m in ["a(", "b(", "c(", "d(", "e(", "f("] {
+                assert_eq!(text.matches(m).count(), 1, "{m} not once: {text}");
+            }
+        }
         MergeOutcome::Conflicts {
             merged_bytes_with_markers,
             ..
-        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
+        } => {
+            let text = String::from_utf8(merged_bytes_with_markers).unwrap();
+            assert!(text.contains("a(x: number)"), "theirs's edit on a lost: {text}");
+            assert!(text.contains("f(y: string)"), "theirs's edit on f lost: {text}");
+            for m in ["a(", "b(", "c(", "d(", "e(", "f("] {
+                assert!(text.contains(m), "{m} silently dropped: {text}");
+            }
+        }
         other => panic!("unexpected: {other:?}"),
-    };
-    // theirs's edits on both endpoints (a and f) must land.
-    assert!(
-        text.contains("a(x: number)"),
-        "theirs's parameter-add on a must survive: {text}"
-    );
-    assert!(
-        text.contains("f(y: string)"),
-        "theirs's parameter-add on f must survive: {text}"
-    );
-    // every method must still be present exactly once.
-    for m in ["a(", "b(", "c(", "d(", "e(", "f("] {
-        let n = text.matches(m).count();
-        assert_eq!(n, 1, "{m} must appear exactly once, got {n}: {text}");
     }
-    assert!(
-        !text.contains("<<<<<<<"),
-        "interface method reorder + disjoint signature edit must merge cleanly: {text}"
-    );
 }
 
 // =====================================================================
@@ -3378,38 +3742,51 @@ abstract class Foo {
   abstract f(y: string): void;
 }
 ";
-    let outcome = merge_at(base, ours, theirs, "f.ts");
-    let text = match outcome {
-        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
-        MergeOutcome::Conflicts {
-            merged_bytes_with_markers,
-            ..
-        } => String::from_utf8(merged_bytes_with_markers).unwrap(),
-        other => panic!("unexpected: {other:?}"),
-    };
-    assert!(
-        text.contains("abstract a(x: number)"),
-        "theirs's parameter-add on abstract a must survive: {text}"
-    );
-    assert!(
-        text.contains("abstract f(y: string)"),
-        "theirs's parameter-add on abstract f must survive: {text}"
-    );
-    for m in [
+    // Same shape as the interface reorder test: the signature edit splits each
+    // endpoint into delete+add and TS `;` terminators are separate gap tokens,
+    // so this reorder can't reconstruct cleanly. Pre-#490 it emitted a silently
+    // unparseable result; the heddle#490 guard now re-parses clean merges and
+    // routes this to a safe conflict. The abstract methods are still extracted
+    // as items (theirs's edits survive, nothing dropped) — the Codex r8 P2
+    // classification this test was added for still holds.
+    let methods = [
         "abstract a(",
         "abstract b(",
         "abstract c(",
         "abstract d(",
         "abstract e(",
         "abstract f(",
-    ] {
-        let n = text.matches(m).count();
-        assert_eq!(n, 1, "{m} must appear exactly once, got {n}: {text}");
+    ];
+    match merge_at(base, ours, theirs, "f.ts") {
+        MergeOutcome::Clean(b) => {
+            let text = String::from_utf8(b).unwrap();
+            assert!(
+                crate::parser::ParsedFile::parse(
+                    text.as_str(),
+                    crate::parser::Language::TypeScript
+                )
+                .is_some(),
+                "clean merge must re-parse (no silent corruption): {text}"
+            );
+            assert!(text.contains("abstract a(x: number)"), "abstract a edit lost: {text}");
+            assert!(text.contains("abstract f(y: string)"), "abstract f edit lost: {text}");
+            for m in methods {
+                assert_eq!(text.matches(m).count(), 1, "{m} not once: {text}");
+            }
+        }
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            ..
+        } => {
+            let text = String::from_utf8(merged_bytes_with_markers).unwrap();
+            assert!(text.contains("abstract a(x: number)"), "abstract a edit lost: {text}");
+            assert!(text.contains("abstract f(y: string)"), "abstract f edit lost: {text}");
+            for m in methods {
+                assert!(text.contains(m), "{m} silently dropped: {text}");
+            }
+        }
+        other => panic!("unexpected: {other:?}"),
     }
-    assert!(
-        !text.contains("<<<<<<<"),
-        "abstract-method reorder + disjoint signature edit must merge cleanly: {text}"
-    );
 }
 
 // =====================================================================
@@ -4958,4 +5335,1044 @@ fn rust_use_identical_glob_both_sides_dedups_clean() {
     );
     assert!(merged.contains("fn alpha() { 10 }"), "ours edit lost: {merged}");
     assert!(merged.contains("fn beta() { 20 }"), "theirs edit lost: {merged}");
+}
+
+// heddle#490 r7 — per-scope use-poison. An unanalyzable glob nested in
+// `mod m { use x::*; }` (unchanged on both sides) must NOT poison the
+// disjoint TOP-LEVEL use-region: ours adds `use a::A;` and theirs adds
+// `use b::B;` at the file root, on leaves the nested glob cannot reach. With
+// the old file-global poison flag these collapsed onto one USE_POISON_KEY
+// component and reported a spurious add/add conflict; scope-keyed poison
+// leaves the top-level region clean so both disjoint imports survive.
+#[test]
+fn rust_use_nested_glob_does_not_poison_disjoint_top_level_adds() {
+    let base = "mod m {\n    use x::*;\n}\nfn anchor() { 0 }\n";
+    let ours = "use a::A;\nmod m {\n    use x::*;\n}\nfn anchor() { 0 }\n";
+    let theirs = "use b::B;\nmod m {\n    use x::*;\n}\nfn anchor() { 0 }\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(merged.contains("use a::A;"), "ours top-level add lost: {merged}");
+    assert!(merged.contains("use b::B;"), "theirs top-level add lost: {merged}");
+    assert_eq!(
+        merged.matches("use x::*;").count(),
+        1,
+        "unchanged nested glob must dedup to one copy: {merged}"
+    );
+}
+
+// heddle#490 r7 — companion: the SAME nested glob STILL poisons ITS OWN
+// scope (correctness of the poison is preserved; only the cross-scope leak
+// is fixed). Both sides divergently edit a plain `use` *inside* `mod m`,
+// whose scope holds the unanalyzable `use x::*;`. Without the glob the two
+// edits rekey to distinct leaf-components and union cleanly; WITH the glob,
+// `m`'s use-region is poisoned, every `use` collapses onto USE_POISON_KEY,
+// and the divergent component conservatively conflicts. A same-line
+// modify/modify also conflicts under the textual floor, so the conservative
+// verdict holds regardless of which path resolves it.
+#[test]
+fn rust_use_nested_glob_still_poisons_its_own_scope() {
+    let base = "mod m {\n    use x::*;\n    use crate::foo::Thing;\n}\n";
+    let ours = "mod m {\n    use x::*;\n    use crate::foo::ThingA;\n}\n";
+    let theirs = "mod m {\n    use x::*;\n    use crate::foo::ThingB;\n}\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(
+        count >= 1,
+        "divergent use edits inside a glob-poisoned scope must conflict: {text}"
+    );
+    assert!(
+        text.contains("<<<<<<<"),
+        "expected a conflict region in the poisoned nested scope: {text}"
+    );
+}
+
+
+// =====================================================================
+// heddle#484 / #490 — close-the-class conformance harness (ported from the
+// paused PR #487 branch, adapted to the container-as-node tree model).
+//
+// For every CLEAN semantic merge it asserts, on the PARSED output:
+//   1. item-set + nesting conservation — every merged item (now INCLUDING
+//      container items: impl/mod/trait, which the tree model makes
+//      first-class) is present with the structural scope a contributing side
+//      gave it, and none is invented or dropped;
+//   2. the output re-parses — a clean merge that yields an unparseable file is
+//      by definition a corruption.
+//
+// In the #487 branch this used a re-derived `struct_scope`; here identity is
+// `(key.scope, kind, name)` flattened over the real tree via `visit_items`, so
+// a child's scope IS its enclosing-container chain by construction.
+// =====================================================================
+
+/// (structural-scope, kind, name) identity of every item in `source`,
+/// flattened over the container tree (no `use` canonicalization, so output and
+/// inputs compare on the same footing).
+fn item_identities(
+    source: &str,
+    language: crate::parser::Language,
+) -> std::collections::BTreeSet<(Vec<String>, String, String)> {
+    let parsed = crate::parser::ParsedFile::parse(source, language).expect("input must parse");
+    let segs = super::items::segment_file(&parsed);
+    let mut out = std::collections::BTreeSet::new();
+    super::items::visit_items(&segs.items, &mut |i| {
+        out.insert((
+            i.key.scope.clone(),
+            format!("{:?}", i.key.kind),
+            i.key.name.clone(),
+        ));
+    });
+    out
+}
+
+/// Run the conformance checks against a clean semantic merge of a Rust triple.
+fn assert_conformant(base: &str, ours: &str, theirs: &str) -> String {
+    assert_conformant_at(base, ours, theirs, "a.rs", crate::parser::Language::Rust)
+}
+
+/// Language-parameterized [`assert_conformant`].
+fn assert_conformant_at(
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    path: &str,
+    language: crate::parser::Language,
+) -> String {
+    let out = assert_clean(merge_at(base, ours, theirs, path));
+
+    assert!(
+        crate::parser::ParsedFile::parse(&out, language).is_some(),
+        "clean merge produced an unparseable file:\n{out}"
+    );
+
+    let mut expected = item_identities(base, language);
+    expected.extend(item_identities(ours, language));
+    expected.extend(item_identities(theirs, language));
+    let got = item_identities(&out, language);
+    assert_eq!(
+        got, expected,
+        "item-set / nesting not conserved\n got: {got:?}\n want: {expected:?}\n output:\n{out}"
+    );
+    out
+}
+
+#[test]
+fn conformance_484_structural_matrix() {
+    // {flat-top-level, trailing-mod, nested-pub-use} × {added-above,
+    // added-below, added-inside}. Each side makes a disjoint additive edit;
+    // every cell must survive the conformance checks.
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "pub fn a() {}\n\n// MARK\n",
+            "pub fn a() {}\n\npub fn c() {}\n\n// MARK\n",
+            "pub fn a() {}\n\npub fn b() {}\n\n// MARK\n",
+        ),
+        (
+            "pub fn a() {}\n",
+            "pub fn a() {}\n\npub fn c() {}\n",
+            "pub fn a() {}\n\npub fn b() {}\n",
+        ),
+        (
+            "pub fn z() {}\n",
+            "pub fn c() {}\n\npub fn z() {}\n",
+            "pub fn b() {}\n\npub fn z() {}\n",
+        ),
+        (
+            "pub fn a() {}\n\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n",
+            "pub fn a() {}\n\npub fn c() {}\n\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n",
+            "pub fn a() {}\n\npub fn b() {}\n\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n",
+        ),
+        (
+            "#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n",
+            "#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n\npub fn ours_after() {}\n",
+            "#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n\npub fn theirs_after() {}\n",
+        ),
+        (
+            "mod tests {\n    fn t() {}\n}\n",
+            "mod tests {\n    fn t() {}\n    fn ours_t() {}\n}\n",
+            "mod tests {\n    fn t() {}\n    fn theirs_t() {}\n}\n",
+        ),
+        (
+            "pub mod prelude {\n    pub use crate::a;\n}\n",
+            "pub mod prelude {\n    pub use crate::a;\n    pub use crate::b;\n}\n\npub fn ours_fn() {}\n",
+            "pub mod prelude {\n    pub use crate::a;\n    pub use crate::c;\n}\n\npub fn theirs_fn() {}\n",
+        ),
+        (
+            "pub mod prelude {\n    pub use crate::a;\n}\n",
+            "pub fn ours_fn() {}\n\npub mod prelude {\n    pub use crate::a;\n    pub use crate::b;\n}\n",
+            "pub fn theirs_fn() {}\n\npub mod prelude {\n    pub use crate::a;\n    pub use crate::c;\n}\n",
+        ),
+        (
+            "pub mod outer {\n    pub mod inner {\n        pub use crate::a;\n    }\n}\n",
+            "pub mod outer {\n    pub mod inner {\n        pub use crate::a;\n        pub use crate::b;\n    }\n}\n\npub fn ours_fn() {}\n",
+            "pub mod outer {\n    pub mod inner {\n        pub use crate::a;\n        pub use crate::c;\n    }\n}\n\npub fn theirs_fn() {}\n",
+        ),
+        // NOTE: the no-base add/add of a DIVERGENT `pub mod m` (ours adds
+        // `{ pub use crate::x }`, theirs `{ pub use crate::y }`) used to land
+        // here as a "clean" merge — but only via the buggy structural-recursion
+        // → conservation-floor → whole-file-concat fallback, which silently
+        // emitted TWO `pub mod m` blocks (an illegal duplicate module, E0428).
+        // heddle#490 r5 routes that no-base add/add through a whole-container
+        // comparison: divergent ⇒ conflict. It now lives in
+        // `add_add_divergent_mod_no_base_conflicts_not_duplicate_module` below.
+        (
+            "struct S;\nimpl S {\n    fn base(&self) {}\n}\n",
+            "struct S;\nimpl S {\n    fn base(&self) {}\n    fn ours_m(&self) {}\n}\n\nfn ours_top() {}\n",
+            "struct S;\nimpl S {\n    fn base(&self) {}\n    fn theirs_m(&self) {}\n}\n\nfn theirs_top() {}\n",
+        ),
+    ];
+    for (base, ours, theirs) in cases {
+        assert_conformant(base, ours, theirs);
+    }
+}
+
+#[test]
+fn repro_484_bug1_trailing_postamble_not_duplicated() {
+    // Each side adds a function above a trailing `// MARK`. Pre-fix the
+    // postamble was woven in twice. The tree model never duplicates it.
+    let base = "pub fn a() {}\n\n// MARK\n";
+    let ours = "pub fn a() {}\n\npub fn c() {}\n\n// MARK\n";
+    let theirs = "pub fn a() {}\n\npub fn b() {}\n\n// MARK\n";
+    let merged = assert_conformant(base, ours, theirs);
+    assert_eq!(merged.matches("// MARK").count(), 1, "marker duplicated:\n{merged}");
+    assert!(merged.contains("pub fn b() {}"), "theirs add lost:\n{merged}");
+    assert!(merged.contains("pub fn c() {}"), "ours add lost:\n{merged}");
+    // both additions precede the single marker.
+    let mark = merged.find("// MARK").unwrap();
+    assert!(merged.find("pub fn b() {}").unwrap() < mark, "b after marker:\n{merged}");
+    assert!(merged.find("pub fn c() {}").unwrap() < mark, "c after marker:\n{merged}");
+}
+
+#[test]
+fn repro_484_bug2_trailing_module_not_nested_or_duplicated() {
+    // Each side adds a top-level fn above a trailing `mod tests`. Pre-fix one
+    // fn nested INSIDE mod tests and the module duplicated (unclosed brace).
+    let base = "pub fn a() {}\n\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n";
+    let ours = "pub fn a() {}\n\npub fn c() {}\n\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n";
+    let theirs = "pub fn a() {}\n\npub fn b() {}\n\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n";
+    let merged = assert_conformant(base, ours, theirs);
+    assert_eq!(merged.matches("mod tests").count(), 1, "module duplicated:\n{merged}");
+    // both added fns stay at top level, BEFORE the module.
+    let m = merged.find("mod tests").unwrap();
+    assert!(merged.find("pub fn b() {}").unwrap() < m, "b nested/after module:\n{merged}");
+    assert!(merged.find("pub fn c() {}").unwrap() < m, "c nested/after module:\n{merged}");
+    assert!(merged.contains("fn t() {}"), "module body lost:\n{merged}");
+}
+
+#[test]
+fn repro_484_bug3_nested_pub_use_stays_inside_module() {
+    // Each side adds a `pub use` inside `pub mod prelude` AND a sibling
+    // top-level fn. Pre-fix one re-export escaped `prelude`.
+    let base = "pub mod prelude {\n    pub use crate::a;\n}\n";
+    let ours = "pub mod prelude {\n    pub use crate::a;\n    pub use crate::b;\n}\n\npub fn ours_fn() {}\n";
+    let theirs =
+        "pub mod prelude {\n    pub use crate::a;\n    pub use crate::c;\n}\n\npub fn theirs_fn() {}\n";
+    let merged = assert_conformant(base, ours, theirs);
+    assert_eq!(merged.matches("pub mod prelude").count(), 1, "module duplicated:\n{merged}");
+    // The two re-exports stay INSIDE the module (before its closing brace),
+    // and the sibling fns stay OUTSIDE (after it). conformance already pins
+    // the scopes; this pins the byte order.
+    let close = merged.find("}").unwrap();
+    assert!(merged.find("pub use crate::b").unwrap() < close, "b escaped module:\n{merged}");
+    assert!(merged.find("pub use crate::c").unwrap() < close, "c escaped module:\n{merged}");
+    assert!(merged.find("pub fn ours_fn").unwrap() > close, "ours_fn inside module:\n{merged}");
+    assert!(merged.find("pub fn theirs_fn").unwrap() > close, "theirs_fn inside module:\n{merged}");
+}
+
+#[test]
+fn repro_484_reopened_rust_impl_keeps_top_level_between_blocks() {
+    // Two inherent `impl Foo` blocks separated by a top-level fn. ours adds a
+    // method to the first; theirs to the second. Pre-fix the impls collapsed
+    // and the second's method reordered ahead of `top_level`.
+    let base = "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n}\n\nfn top_level() {}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
+    let ours = "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n    fn a2(&self) {}\n}\n\nfn top_level() {}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
+    let theirs = "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n}\n\nfn top_level() {}\n\nimpl Foo {\n    fn b(&self) {}\n    fn b2(&self) {}\n}\n";
+    let merged = assert_conformant(base, ours, theirs);
+    assert!(merged.contains("fn a2(&self) {}"), "ours add lost:\n{merged}");
+    assert!(merged.contains("fn b2(&self) {}"), "theirs add lost:\n{merged}");
+    assert_eq!(merged.matches("impl Foo").count(), 2, "reopened impls collapsed:\n{merged}");
+    let first = merged.find("impl Foo").unwrap();
+    let top = merged.find("fn top_level()").unwrap();
+    let last = merged.rfind("impl Foo").unwrap();
+    assert!(first < top && top < last, "top-level fn must sit between impls:\n{merged}");
+    assert!(merged.find("fn a2(&self) {}").unwrap() < top, "a2 escaped first impl:\n{merged}");
+    assert!(merged.find("fn b2(&self) {}").unwrap() > top, "b2 escaped second impl:\n{merged}");
+}
+
+#[test]
+fn repro_484_reopened_rust_impl_add_first_modify_second_keeps_order() {
+    // ours adds a method to the FIRST impl; theirs modifies a body in the
+    // SECOND. The intervening `top_level` must stay between, theirs's edit
+    // survive, the two blocks stay distinct.
+    let base = "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n}\n\nfn top_level() {}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
+    let ours = "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n    fn a2(&self) {}\n}\n\nfn top_level() {}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
+    let theirs = "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n}\n\nfn top_level() {}\n\nimpl Foo {\n    fn b(&self) { let _ = 1; }\n}\n";
+    let merged = assert_conformant(base, ours, theirs);
+    assert!(merged.contains("fn a2(&self) {}"), "ours add lost:\n{merged}");
+    assert!(merged.contains("fn b(&self) { let _ = 1; }"), "theirs edit lost:\n{merged}");
+    assert_eq!(merged.matches("impl Foo").count(), 2, "reopened impls collapsed:\n{merged}");
+    let first = merged.find("impl Foo").unwrap();
+    let top = merged.find("fn top_level()").unwrap();
+    let last = merged.rfind("impl Foo").unwrap();
+    assert!(first < top && top < last, "top-level fn must sit between impls:\n{merged}");
+}
+
+/// A reopened-`impl Foo` triple whose two blocks are joined by `sep`. ours
+/// adds `fn a2` to the first block; theirs adds `fn b2` to the second.
+fn impl_reopen_triple(sep: &str) -> (String, String, String) {
+    let base = format!(
+        "struct Foo;\n\nimpl Foo {{\n    fn a(&self) {{}}\n}}{sep}impl Foo {{\n    fn b(&self) {{}}\n}}\n"
+    );
+    let ours = format!(
+        "struct Foo;\n\nimpl Foo {{\n    fn a(&self) {{}}\n    fn a2(&self) {{}}\n}}{sep}impl Foo {{\n    fn b(&self) {{}}\n}}\n"
+    );
+    let theirs = format!(
+        "struct Foo;\n\nimpl Foo {{\n    fn a(&self) {{}}\n}}{sep}impl Foo {{\n    fn b(&self) {{}}\n    fn b2(&self) {{}}\n}}\n"
+    );
+    (base, ours, theirs)
+}
+
+#[test]
+fn conformance_484_reopened_rust_impl_separator_matrix() {
+    // back-to-back / whitespace / comment / item separators between the two
+    // `impl Foo` blocks. Every separator must keep the blocks distinct,
+    // preserve any separator text, and keep source order.
+    let cases: &[(&str, &str)] = &[
+        ("back-to-back", "\n"),
+        ("whitespace-separated", "\n\n"),
+        ("comment-separated", "\n// section\n"),
+        ("item-separated", "\n\nfn top_level() {}\n\n"),
+    ];
+    for (label, sep) in cases {
+        let (base, ours, theirs) = impl_reopen_triple(sep);
+        let merged = assert_conformant(&base, &ours, &theirs);
+        assert_eq!(
+            merged.matches("impl Foo").count(),
+            2,
+            "[{label}] reopened impls collapsed:\n{merged}"
+        );
+        assert!(merged.contains("fn a2(&self) {}"), "[{label}] ours add lost:\n{merged}");
+        assert!(merged.contains("fn b2(&self) {}"), "[{label}] theirs add lost:\n{merged}");
+        let second_impl = merged.rfind("impl Foo").unwrap();
+        assert!(
+            merged.find("fn a2(&self) {}").unwrap() < second_impl,
+            "[{label}] a2 escaped first block:\n{merged}"
+        );
+        assert!(
+            merged.find("fn b2(&self) {}").unwrap() > second_impl,
+            "[{label}] b2 escaped second block:\n{merged}"
+        );
+        if sep.contains("// section") {
+            assert_eq!(
+                merged.matches("// section").count(),
+                1,
+                "[{label}] comment separator dropped/duplicated:\n{merged}"
+            );
+        }
+        if sep.contains("fn top_level") {
+            let first_impl = merged.find("impl Foo").unwrap();
+            let top = merged.find("fn top_level()").unwrap();
+            assert!(
+                first_impl < top && top < second_impl,
+                "[{label}] top-level item must stay between blocks:\n{merged}"
+            );
+        }
+    }
+}
+
+#[test]
+fn repro_484_r3_prepend_new_impl_before_base_block_no_collapse() {
+    // base has one `impl Foo { fn b }`. ours prepends a NEW `impl Foo { fn a }`
+    // before it; theirs edits fn b's body. Pre-fix the prepended block and the
+    // base block collapsed into a single `impl Foo`.
+    let base = "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
+    let ours = "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
+    let theirs = "struct Foo;\n\nimpl Foo {\n    fn b(&self) { let _ = 1; }\n}\n";
+    let merged = assert_conformant(base, ours, theirs);
+    assert_eq!(merged.matches("impl Foo").count(), 2, "prepended impl collapsed:\n{merged}");
+    assert!(merged.contains("fn a(&self) {}"), "ours add lost:\n{merged}");
+    assert!(merged.contains("fn b(&self) { let _ = 1; }"), "theirs edit lost:\n{merged}");
+    assert!(
+        merged.find("fn a(&self) {}").unwrap() < merged.find("fn b(&self)").unwrap(),
+        "prepended block must precede base block:\n{merged}"
+    );
+}
+
+#[test]
+fn conformance_484_r3_cross_side_container_alignment_matrix() {
+    // Same-name-container arrangements the per-side ordinal model mis-aligned.
+    // A new block added on ONE side only (prepend/append) aligns distinctly from
+    // the matched base block and must merge CLEAN. The `both-add-different`
+    // round-4 case (a new block added on BOTH sides with no base anchor) is no
+    // longer clean: heddle#490 r5 conflicts it as a whole container — see
+    // `reopened_impl_both_add_new_block_no_base_conflicts` below.
+    let cases: &[(&str, &str, &str, &str)] = &[
+        (
+            "prepend",
+            "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n",
+            "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n",
+            "struct Foo;\n\nimpl Foo {\n    fn b(&self) { let _ = 1; }\n}\n",
+        ),
+        (
+            "append",
+            "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n",
+            "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n\nimpl Foo {\n    fn a(&self) {}\n}\n",
+            "struct Foo;\n\nimpl Foo {\n    fn b(&self) { let _ = 1; }\n}\n",
+        ),
+    ];
+    for (label, base, ours, theirs) in cases {
+        let merged = assert_conformant(base, ours, theirs);
+        for needle in ["fn a", "fn b"] {
+            assert!(merged.contains(needle), "[{label}] {needle} lost:\n{merged}");
+        }
+        assert!(
+            crate::parser::ParsedFile::parse(&merged, crate::parser::Language::Rust).is_some(),
+            "[{label}] unparseable merge:\n{merged}"
+        );
+    }
+}
+
+// The round-4 `both-add-different` case, post heddle#490 r5. base has one
+// `impl Foo { fn b }`; ours prepends a NEW `impl Foo { fn a }`, theirs appends a
+// NEW `impl Foo { fn c }`. The two NEW blocks have no base anchor and collide on
+// the same fresh discriminator — an add/add with divergent whole content. Pre-r5
+// this only "merged clean" via the buggy structural-recursion → floor →
+// whole-file-concat fallback (the same fallback that silently duplicates a
+// non-reopenable module). r5 routes it through the whole-container comparison:
+// divergent ⇒ a single conflict that preserves both new blocks' bodies, while
+// the base-anchored `fn b` block resolves cleanly outside the markers. A
+// conflict is the safe outcome — the engine has no base to know these are two
+// independent additions vs the same block added twice.
+#[test]
+fn reopened_impl_both_add_new_block_no_base_conflicts() {
+    let base = "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
+    let ours = "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
+    let theirs = "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n\nimpl Foo {\n    fn c(&self) {}\n}\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(count >= 1, "expected ≥1 conflict, got {count}: {text}");
+    assert!(
+        text.contains("<<<<<<<") && text.contains("=======") && text.contains(">>>>>>>"),
+        "expected canonical conflict markers: {text}"
+    );
+    assert!(
+        text.contains("fn a(&self)") && text.contains("fn c(&self)"),
+        "both new blocks' bodies must survive inside the conflict: {text}"
+    );
+    // The base-anchored `fn b` block resolves cleanly, outside the markers.
+    assert!(text.contains("fn b(&self)"), "base-anchored block lost: {text}");
+}
+
+#[test]
+fn repro_484_r3_reordered_container_no_silent_collapse() {
+    // ours REORDERS the two same-name `impl Foo` blocks; theirs edits the first
+    // disjointly. Never a silent corruption: the outcome is a conflict OR a
+    // clean merge that re-parses with both blocks intact.
+    let base = "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
+    let ours = "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n\nimpl Foo {\n    fn a(&self) {}\n}\n";
+    let theirs = "struct Foo;\n\nimpl Foo {\n    fn a(&self) { let _ = 1; }\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
+    let text = match merge_rust(base, ours, theirs) {
+        MergeOutcome::Conflicts { merged_bytes_with_markers, conflict_count } => {
+            assert!(conflict_count >= 1);
+            String::from_utf8(merged_bytes_with_markers).unwrap()
+        }
+        MergeOutcome::Clean(bytes) => {
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(
+                crate::parser::ParsedFile::parse(&text, crate::parser::Language::Rust).is_some(),
+                "clean merge is unparseable (silent corruption):\n{text}"
+            );
+            text
+        }
+        other => panic!("unexpected outcome: {other:?}"),
+    };
+    assert!(text.contains("fn a(&self)"), "fn a lost:\n{text}");
+    assert!(text.contains("fn b(&self)"), "fn b lost:\n{text}");
+}
+
+#[test]
+fn repro_484_r3_ambiguous_block_merge_no_silent_collapse() {
+    // base has TWO `impl Foo` blocks. ours MERGES them into one (holding both
+    // a and b) AND edits a; theirs edits a differently and keeps two blocks.
+    // Never a silent collapse: conflict, or a clean re-parsing merge with both
+    // methods present.
+    let base = "struct Foo;\n\nimpl Foo {\n    fn a(&self) -> u32 { 0 }\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
+    let ours = "struct Foo;\n\nimpl Foo {\n    fn a(&self) -> u32 { 9 }\n    fn b(&self) {}\n}\n";
+    let theirs = "struct Foo;\n\nimpl Foo {\n    fn a(&self) -> u32 { 1 }\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
+    match merge_rust(base, ours, theirs) {
+        MergeOutcome::Conflicts { merged_bytes_with_markers, conflict_count } => {
+            let text = String::from_utf8(merged_bytes_with_markers).unwrap();
+            assert!(conflict_count >= 1, "expected a real conflict");
+            assert!(text.contains("fn a(&self)"), "fn a lost:\n{text}");
+            assert!(text.contains("fn b(&self)"), "fn b lost:\n{text}");
+        }
+        MergeOutcome::Clean(bytes) => {
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(
+                crate::parser::ParsedFile::parse(&text, crate::parser::Language::Rust).is_some(),
+                "clean merge is unparseable:\n{text}"
+            );
+            assert!(
+                text.contains("fn a(&self)") && text.contains("fn b(&self)"),
+                "clean merge dropped a block:\n{text}"
+            );
+        }
+        other => panic!("unexpected outcome: {other:?}"),
+    }
+}
+
+#[test]
+fn repro_484_r3_ambiguous_block_split_no_silent_collapse() {
+    // Mirror: base has ONE `impl Foo` holding a and b. ours SPLITS it into two
+    // and edits a; theirs edits a differently in the single block. No silent
+    // collapse.
+    let base = "struct Foo;\n\nimpl Foo {\n    fn a(&self) -> u32 { 0 }\n    fn b(&self) {}\n}\n";
+    let ours = "struct Foo;\n\nimpl Foo {\n    fn a(&self) -> u32 { 9 }\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
+    let theirs = "struct Foo;\n\nimpl Foo {\n    fn a(&self) -> u32 { 1 }\n    fn b(&self) {}\n}\n";
+    let text = match merge_rust(base, ours, theirs) {
+        MergeOutcome::Conflicts { merged_bytes_with_markers, conflict_count } => {
+            assert!(conflict_count >= 1);
+            String::from_utf8(merged_bytes_with_markers).unwrap()
+        }
+        MergeOutcome::Clean(bytes) => {
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(
+                crate::parser::ParsedFile::parse(&text, crate::parser::Language::Rust).is_some(),
+                "clean merge unparseable:\n{text}"
+            );
+            text
+        }
+        other => panic!("unexpected outcome: {other:?}"),
+    };
+    assert!(text.contains("fn a(&self)"), "fn a lost:\n{text}");
+    assert!(text.contains("fn b(&self)"), "fn b lost:\n{text}");
+}
+
+// =====================================================================
+// heddle#490 r1 / Codex P1: ZERO child-overlap container alignment.
+//
+// The container matcher (build_aligned_match_keys) picks a base block by
+// immediate child-key OVERLAP. An EMPTY container (or one whose children were
+// fully replaced) overlaps nothing, so pre-fix every such block minted a FRESH
+// discriminator and its base slot resolved as deleted. The positional fallback
+// aligns a zero-overlap block to its next unused base slot in source order;
+// content-overlap stays the PRIMARY mechanism (covered above).
+//
+// The additive cases below are CONTRACT guards: the add/add weaving already
+// reconstructs them byte-for-byte even pre-fix, so they pin the clean-merge
+// contract for empty/zero-overlap containers against future regressions rather
+// than witnessing the pre-fix defect. The observable fail-pre/pass-post witness
+// is `..._modify_vs_delete_empty_container_conflicts`: pre-fix the deleted base
+// slot let a modify-vs-delete merge silently resolve to one side (data loss);
+// the positional fallback routes it through the same modify/delete CONFLICT path
+// a non-empty container already uses.
+// =====================================================================
+
+#[test]
+fn repro_490_r1_two_empty_impl_blocks_one_side_adds_method_clean() {
+    // Two EMPTY `impl Foo {}` blocks in base; ours adds a method to the FIRST,
+    // theirs is unchanged. The first block must gain the method, the second
+    // stay empty — a clean one-sided edit with no drop/dup/conflict.
+    let base = "struct Foo;\n\nimpl Foo {}\n\nimpl Foo {}\n";
+    let ours = "struct Foo;\n\nimpl Foo {\n    fn m(&self) {}\n}\n\nimpl Foo {}\n";
+    let theirs = base;
+    let merged = assert_conformant(base, ours, theirs);
+    assert_eq!(
+        merged.matches("impl Foo").count(),
+        2,
+        "empty blocks dropped/duplicated:\n{merged}"
+    );
+    assert!(merged.contains("fn m(&self) {}"), "ours add lost:\n{merged}");
+    // The method lands in the FIRST block; the second stays empty.
+    let first = merged.find("impl Foo").unwrap();
+    let second = merged.rfind("impl Foo").unwrap();
+    let m = merged.find("fn m(&self) {}").unwrap();
+    assert!(first < m && m < second, "method escaped the first block:\n{merged}");
+}
+
+#[test]
+fn repro_490_r1_two_empty_impl_blocks_each_side_edits_different_block_clean() {
+    // Two empty blocks; ours edits the FIRST, theirs edits the SECOND. Both
+    // edits land on their own base slot — a clean merge of both.
+    let base = "struct Foo;\n\nimpl Foo {}\n\nimpl Foo {}\n";
+    let ours = "struct Foo;\n\nimpl Foo {\n    fn ours_m(&self) {}\n}\n\nimpl Foo {}\n";
+    let theirs = "struct Foo;\n\nimpl Foo {}\n\nimpl Foo {\n    fn theirs_m(&self) {}\n}\n";
+    let merged = assert_conformant(base, ours, theirs);
+    assert_eq!(
+        merged.matches("impl Foo").count(),
+        2,
+        "empty blocks dropped/duplicated:\n{merged}"
+    );
+    assert!(merged.contains("fn ours_m(&self) {}"), "ours edit lost:\n{merged}");
+    assert!(merged.contains("fn theirs_m(&self) {}"), "theirs edit lost:\n{merged}");
+    assert!(
+        merged.find("fn ours_m(&self) {}").unwrap() < merged.find("fn theirs_m(&self) {}").unwrap(),
+        "edits landed in the wrong blocks:\n{merged}"
+    );
+}
+
+#[test]
+fn repro_490_r1_fully_replaced_impl_children_align_to_base_slot_no_conflict() {
+    // A non-empty container whose children are FULLY replaced on ours (child
+    // overlap with base = 0) must still align to its single base slot, not be
+    // treated as delete + add. base holds `fn x`; ours replaces it with `fn y`;
+    // theirs keeps `fn x` and adds `fn z`. Positional alignment recurses the
+    // body and combines the edits cleanly (ours's deletion of x + add of y,
+    // theirs's add of z). Contract guard for the zero-overlap fallback.
+    let base = "struct Foo;\n\nimpl Foo {\n    fn x(&self) {}\n}\n";
+    let ours = "struct Foo;\n\nimpl Foo {\n    fn y(&self) {}\n}\n";
+    let theirs = "struct Foo;\n\nimpl Foo {\n    fn x(&self) {}\n    fn z(&self) {}\n}\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(
+        crate::parser::ParsedFile::parse(&merged, crate::parser::Language::Rust).is_some(),
+        "unparseable merge:\n{merged}"
+    );
+    assert_eq!(merged.matches("impl Foo").count(), 1, "block duplicated:\n{merged}");
+    assert!(merged.contains("fn y(&self) {}"), "ours replacement lost:\n{merged}");
+    assert!(merged.contains("fn z(&self) {}"), "theirs add lost:\n{merged}");
+    assert!(!merged.contains("fn x(&self) {}"), "ours deletion of fn x dropped:\n{merged}");
+}
+
+#[test]
+fn repro_490_r1_fully_replaced_mod_children_align_to_base_slot_no_conflict() {
+    // `mod` variant of the fully-replaced case (single block, valid Rust): base
+    // `mod m { fn x }`; ours replaces the body with `fn y` (zero child-overlap);
+    // theirs keeps `fn x` and adds `fn z`. Positional alignment keeps the one
+    // base slot so the bodies merge instead of conflicting.
+    let base = "mod m {\n    fn x() {}\n}\n";
+    let ours = "mod m {\n    fn y() {}\n}\n";
+    let theirs = "mod m {\n    fn x() {}\n    fn z() {}\n}\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(
+        crate::parser::ParsedFile::parse(&merged, crate::parser::Language::Rust).is_some(),
+        "unparseable merge:\n{merged}"
+    );
+    assert_eq!(merged.matches("mod m").count(), 1, "mod duplicated:\n{merged}");
+    assert!(merged.contains("fn y() {}"), "ours replacement lost:\n{merged}");
+    assert!(merged.contains("fn z() {}"), "theirs add lost:\n{merged}");
+    assert!(!merged.contains("fn x() {}"), "ours deletion of fn x dropped:\n{merged}");
+}
+
+#[cfg(feature = "lang-cpp")]
+#[test]
+fn repro_490_r1_two_empty_cpp_namespaces_one_side_adds_clean() {
+    // C++ `namespace` variant of the two-empty-blocks case: base has two empty
+    // `namespace N {}` blocks; ours adds a function to the FIRST, theirs is
+    // unchanged. Clean one-sided edit, both namespaces preserved.
+    let base = "namespace N {}\n\nnamespace N {}\n";
+    let ours = "namespace N {\nvoid m() {}\n}\n\nnamespace N {}\n";
+    let theirs = base;
+    let merged = assert_conformant_at(base, ours, theirs, "f.cpp", crate::parser::Language::Cpp);
+    assert_eq!(
+        merged.matches("namespace N").count(),
+        2,
+        "empty namespaces dropped/duplicated:\n{merged}"
+    );
+    assert!(merged.contains("void m() {}"), "ours add lost:\n{merged}");
+    let first = merged.find("namespace N").unwrap();
+    let second = merged.rfind("namespace N").unwrap();
+    let m = merged.find("void m() {}").unwrap();
+    assert!(first < m && m < second, "function escaped the first namespace:\n{merged}");
+}
+
+#[test]
+fn repro_490_r1_modify_vs_delete_empty_container_conflicts() {
+    // The observable fail-pre/pass-post witness. base has one EMPTY `impl Foo {}`.
+    // ours adds a method to it (a modify); theirs deletes the whole block. This
+    // is a textbook modify/delete and MUST conflict — exactly as a non-empty
+    // container's modify/delete already does (resolve_container's Some/Some/None
+    // arm). Pre-fix the empty block's zero overlap minted a fresh discriminator,
+    // so the base slot resolved as a clean delete on both sides and ours's
+    // modification was re-added as a brand-new block: the conflict vanished and
+    // ours's content silently won (data loss + a trailing-whitespace artifact).
+    // The positional fallback claims the base slot, so the modify/delete is seen
+    // and conflicts.
+    let base = "struct Foo;\n\nimpl Foo {}\n";
+    let ours = "struct Foo;\n\nimpl Foo {\n    fn m(&self) {}\n}\n";
+    let theirs = "struct Foo;\n";
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(count >= 1, "expected a modify/delete conflict, got {count}");
+    assert!(text.contains("fn m(&self) {}"), "ours modification lost from conflict:\n{text}");
+    assert!(text.contains("<<<<<<<") && text.contains(">>>>>>>"), "missing conflict markers:\n{text}");
+}
+
+// =====================================================================
+// heddle#490 r2 / Codex P1: zero-overlap container alignment must respect
+// the TRUE base OCCURRENCE, not "first unused slot".
+//
+// r1's positional fallback claimed the next UNUSED base discriminator in
+// source order. When a side DELETES an earlier same-key zero-overlap container
+// and edits a later one, that grabs slot 0 for the survivor instead of its true
+// base occurrence (1): base slot 1 is then treated as deleted and its
+// separator/leading trivia woven onto the wrong block (moved/duplicated), or a
+// spurious conflict is raised. The fix aligns a zero-overlap block to the base
+// candidate whose HEADER bytes (which absorb leading metadata — separator
+// comments, attributes) byte-match it, run as a PRIORITY pass before the
+// source-order scan so a surviving block re-anchors to its true slot even under
+// delete-earlier / prepend / reorder. The class backstop is the input-grounded
+// conservation floor (`conserves_inputs`): any residual mis-alignment that
+// drops/invents/mis-nests an item, or fails to re-parse, routes to a textual
+// CONFLICT rather than silent corruption (floor contract guards below).
+// =====================================================================
+
+#[test]
+fn repro_490_r2_delete_earlier_edit_later_zero_overlap_separator_not_moved() {
+    // The r2 fail-pre/pass-post witness. base: two EMPTY `impl Foo {}` blocks
+    // separated by a comment, which binds as the SECOND block's leading
+    // metadata. ours DELETES the first block and adds a method to the second;
+    // theirs edits the separator comment. The survivor must keep its identity as
+    // base's SECOND occurrence so ours's method and theirs's separator edit
+    // combine cleanly, the first block is deleted, and the separator is neither
+    // moved onto the wrong block nor duplicated. Pre-fix the survivor (zero
+    // child overlap) claimed the earliest unused base slot (0); base slot 1 was
+    // treated as deleted and its separator wove onto the wrong block — a
+    // spurious conflict. Header-anchored alignment re-pins the survivor to slot
+    // 1 by its `// sep` leading metadata.
+    let base = "impl Foo {}\n// sep\nimpl Foo {}\n";
+    let ours = "// sep\nimpl Foo {\n    fn m(&self) {}\n}\n";
+    let theirs = "impl Foo {}\n// edited sep\nimpl Foo {}\n";
+    let merged = assert_conformant(base, ours, theirs);
+    assert_eq!(
+        merged.matches("impl Foo").count(),
+        1,
+        "block dropped/duplicated:\n{merged}"
+    );
+    assert!(merged.contains("fn m(&self) {}"), "ours method lost:\n{merged}");
+    assert!(merged.contains("// edited sep"), "theirs separator edit lost:\n{merged}");
+    assert_eq!(
+        merged.matches("sep").count(),
+        1,
+        "separator moved/duplicated:\n{merged}"
+    );
+}
+
+#[test]
+fn repro_490_r2_prepend_zero_overlap_keeps_survivor_base_slot() {
+    // Add-earlier variant. ours PREPENDS a new empty same-key container above the
+    // base block; theirs edits the base block. The prepended block must take a
+    // FRESH slot while the surviving base block keeps slot 0 — matched by its
+    // `// orig` leading comment. Header anchoring runs before the source-order
+    // scan, so the new (header-mismatched) block can't greedily steal slot 0.
+    let base = "// orig\nimpl Foo {}\n";
+    let ours = "impl Foo {}\n\n// orig\nimpl Foo {}\n";
+    let theirs = "// orig\nimpl Foo {\n    fn m(&self) {}\n}\n";
+    let merged = assert_conformant(base, ours, theirs);
+    assert_eq!(
+        merged.matches("impl Foo").count(),
+        2,
+        "block dropped/duplicated:\n{merged}"
+    );
+    assert!(merged.contains("fn m(&self) {}"), "theirs method lost:\n{merged}");
+    // The method lands on the `// orig` (base) block; the comment survives once.
+    assert_eq!(merged.matches("// orig").count(), 1, "comment moved/duplicated:\n{merged}");
+    assert!(
+        merged.find("// orig").unwrap() < merged.find("fn m(&self) {}").unwrap(),
+        "method escaped the original block:\n{merged}"
+    );
+}
+
+#[test]
+fn repro_490_r2_reorder_zero_overlap_blocks_keep_identity_by_header() {
+    // Reorder variant. Two empty same-key blocks distinguished only by their
+    // leading comments. ours SWAPS their order; theirs adds a method to the
+    // `// a` block. Header anchoring keeps each block's identity through the
+    // reorder, so theirs's method lands on the `// a` block and nothing is
+    // dropped, duplicated, or mis-merged.
+    let base = "// a\nimpl Foo {}\n\n// b\nimpl Foo {}\n";
+    let ours = "// b\nimpl Foo {}\n\n// a\nimpl Foo {}\n";
+    let theirs = "// a\nimpl Foo {\n    fn am(&self) {}\n}\n\n// b\nimpl Foo {}\n";
+    let merged = assert_conformant(base, ours, theirs);
+    assert_eq!(
+        merged.matches("impl Foo").count(),
+        2,
+        "block dropped/duplicated:\n{merged}"
+    );
+    assert!(merged.contains("fn am(&self) {}"), "theirs method lost:\n{merged}");
+    // The method stays bound to the `// a` block, not `// b`.
+    assert!(
+        merged.find("// a").unwrap() < merged.find("fn am(&self) {}").unwrap()
+            && merged.find("fn am(&self) {}").unwrap() < merged.find("// b").unwrap(),
+        "method bound to the wrong block:\n{merged}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// heddle#490 floor contract guards. `conserves_inputs` is the input-grounded
+// output-boundary backstop: after a CLEAN reconstruction it re-parses the
+// output and checks item-set + nesting conservation against the RAW INPUTS
+// (never the merge's own resolved metadata, which could encode the very
+// mistake). A re-parse failure or a conservation violation routes the merge to
+// the textual conflict path — so a residual mis-alignment surfaces as a CONFLICT
+// the user resolves, never a silent collapse. These pin its contract directly;
+// the "no false positives, all correct merges stay clean byte-identical"
+// guarantee is enforced by the whole ported harness above staying green.
+// ---------------------------------------------------------------------
+
+#[test]
+fn floor_490_conserves_inputs_rejects_unparseable_output() {
+    use crate::parser::{Language, ParsedFile};
+    let base = ParsedFile::parse("fn a() {}\n", Language::Rust).unwrap();
+    let ours = ParsedFile::parse("fn a() {}\n\nfn b() {}\n", Language::Rust).unwrap();
+    let theirs = ParsedFile::parse("fn a() {}\n", Language::Rust).unwrap();
+    // Unbalanced braces — the shape a structural collapse would emit.
+    let corrupt = b"fn a() { fn b() {\n";
+    assert!(
+        !super::conserves_inputs(corrupt, Language::Rust, &base, &ours, &theirs),
+        "floor must reject an unparseable clean output"
+    );
+}
+
+#[test]
+fn floor_490_conserves_inputs_rejects_invented_or_misnested_item() {
+    use crate::parser::{Language, ParsedFile};
+    // Every input keeps `m` INSIDE `impl Foo` (identity [Foo], Fn, m). An output
+    // that floats `m` to the top level invents identity ([], Fn, m) no input
+    // had — a child escaping its container. The floor must reject it.
+    let src = "impl Foo {\n    fn m(&self) {}\n}\n";
+    let base = ParsedFile::parse(src, Language::Rust).unwrap();
+    let ours = ParsedFile::parse(src, Language::Rust).unwrap();
+    let theirs = ParsedFile::parse(src, Language::Rust).unwrap();
+    let misnested = b"fn m(&self) {}\n\nimpl Foo {}\n";
+    assert!(
+        !super::conserves_inputs(misnested, Language::Rust, &base, &ours, &theirs),
+        "floor must reject an item escaped to a scope no input had"
+    );
+}
+
+#[test]
+fn floor_490_conserves_inputs_allows_legitimate_deletion() {
+    use crate::parser::{Language, ParsedFile};
+    // A clean one-sided deletion: ours drops `b`. The floor is a SUBSET relation
+    // (not equality), so the deletion is allowed — no false positive.
+    let base = ParsedFile::parse("fn a() {}\n\nfn b() {}\n", Language::Rust).unwrap();
+    let ours = ParsedFile::parse("fn a() {}\n", Language::Rust).unwrap();
+    let theirs = ParsedFile::parse("fn a() {}\n\nfn b() {}\n", Language::Rust).unwrap();
+    let deleted = b"fn a() {}\n";
+    assert!(
+        super::conserves_inputs(deleted, Language::Rust, &base, &ours, &theirs),
+        "floor must accept a clean deletion"
+    );
+}
+
+#[test]
+fn floor_490_conserves_inputs_allows_within_line_edit_recombination() {
+    use crate::parser::{Language, ParsedFile};
+    // A within-line merge that recombines bytes from both sides. The floor keys
+    // on item IDENTITY, not line text, so the recombined body is allowed.
+    let base = ParsedFile::parse("fn a() { let x = 1; }\n", Language::Rust).unwrap();
+    let ours = ParsedFile::parse("fn a() { let x = 2; }\n", Language::Rust).unwrap();
+    let theirs = ParsedFile::parse("fn a() { let y = 1; }\n", Language::Rust).unwrap();
+    let edited = b"fn a() { let x = 2; let y = 1; }\n";
+    assert!(
+        super::conserves_inputs(edited, Language::Rust, &base, &ours, &theirs),
+        "floor must accept an edit recombination"
+    );
+}
+
+// =====================================================================
+// heddle#490 r3 / Codex P2: MIXED container/leaf matched item must NEVER
+// enter the structural path (a PANIC class, now closed).
+//
+// The same `ItemKey` (kind, name, scope) can name a container on one side and a
+// LEAF on another, because two syntactic forms share a key:
+//   * Python: `class C` (container, `class_definition`) wrapped in a decorator
+//     becomes a `decorated_definition` whose `container_body` is forced to
+//     `None` (a leaf) while inheriting the inner class's key.
+//   * Rust: `mod foo { … }` (container) rewritten to `mod foo;` (a leaf, no body)
+//     keeps the same module key.
+// Pre-fix `resolve_node` decided container-vs-leaf from the FIRST present side,
+// so a base/theirs container routed the matched node into `resolve_container` →
+// `merge_container_3way`, which unwrapped the leaf side's missing `body` via
+// `header_bytes(...).expect("container")` → PANIC. The fix enters the structural
+// path ONLY when EVERY present side is a container with a body; any mixed /
+// missing-body case routes to a whole-item 3-way text merge (clean if disjoint,
+// conflict if overlapping) — never panics. These are the fail-pre (panic) /
+// pass-post witnesses, plus the language-mirrored sibling that closes the class.
+// =====================================================================
+
+#[test]
+fn repro_490_r3_python_class_to_decorated_mixed_kind_no_panic_clean() {
+    // base: `class C` with a method (container). ours adds a decorator above it,
+    // which tree-sitter wraps in a `decorated_definition` → a LEAF carrying the
+    // same module key (no body). theirs edits the method body (container). The
+    // decorator-add and the body-edit are DISJOINT lines, so the whole-item text
+    // merge is clean: both the decorator and theirs's edit survive. Pre-fix this
+    // panicked in `merge_container_3way` (leaf side has no body to unwrap).
+    let base = "\
+class C:
+    def m(self):
+        return 1
+";
+    let ours = "\
+@deco
+class C:
+    def m(self):
+        return 1
+";
+    let theirs = "\
+class C:
+    def m(self):
+        return 2
+";
+    let merged = match merge_at(base, ours, theirs, "f.py") {
+        MergeOutcome::Clean(b) => String::from_utf8(b).unwrap(),
+        other => panic!("expected Clean, got {other:?}"),
+    };
+    assert!(merged.contains("@deco"), "ours decorator lost:\n{merged}");
+    assert!(merged.contains("return 2"), "theirs body edit lost:\n{merged}");
+    assert!(!merged.contains("<<<<<<<"), "unexpected conflict markers:\n{merged}");
+}
+
+#[test]
+fn repro_490_r3_python_class_to_decorated_mixed_kind_overlap_conflicts() {
+    // Same mixed container/leaf shape, but ours's decorator-add and theirs's edit
+    // to the SAME method line overlap in the whole-item text merge → a normal
+    // conflict (NOT a panic, NOT a silent drop). ours decorates AND edits the
+    // body to `return 10`; theirs edits the body to `return 20`.
+    let base = "\
+class C:
+    def m(self):
+        return 1
+";
+    let ours = "\
+@deco
+class C:
+    def m(self):
+        return 10
+";
+    let theirs = "\
+class C:
+    def m(self):
+        return 20
+";
+    let (text, count) = assert_conflicts(merge_at(base, ours, theirs, "f.py"));
+    assert!(count >= 1, "expected a conflict, got {count}");
+    assert!(
+        text.contains("<<<<<<<") && text.contains(">>>>>>>"),
+        "missing conflict markers:\n{text}"
+    );
+    // Both sides' divergent bodies are represented in the conflict, none lost.
+    assert!(text.contains("return 10"), "ours side lost from conflict:\n{text}");
+    assert!(text.contains("return 20"), "theirs side lost from conflict:\n{text}");
+}
+
+#[test]
+fn repro_490_r3_rust_mod_block_to_decl_mixed_kind_no_panic() {
+    // Rust sibling of the class. base: `mod foo { fn a() {} }` (container). ours
+    // rewrites it to `mod foo;` (a LEAF, no body, same module key). theirs edits
+    // inside the block (container). The kind-mismatch routes to a whole-item text
+    // merge; ours's whole-block replacement overlaps theirs's in-block edit → a
+    // normal conflict. The contract that matters: NO panic, and a deterministic
+    // MergeOutcome. Pre-fix `merge_container_3way` unwrapped ours's missing body.
+    let base = "mod foo {\n    fn a() {}\n}\n";
+    let ours = "mod foo;\n";
+    let theirs = "mod foo {\n    fn a() {\n        let x = 1;\n    }\n}\n";
+    // The assertion here is that we get SOME outcome without panicking; the
+    // overlapping change resolves as a conflict.
+    let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
+    assert!(count >= 1, "expected a conflict, got {count}");
+    assert!(
+        text.contains("<<<<<<<") && text.contains(">>>>>>>"),
+        "missing conflict markers:\n{text}"
+    );
+    // Both forms appear inside the conflict block — `mod foo;` (ours) and the
+    // edited block body (theirs) — so neither side is silently dropped.
+    assert!(text.contains("mod foo;"), "ours leaf form lost from conflict:\n{text}");
+    assert!(text.contains("let x = 1;"), "theirs edit lost from conflict:\n{text}");
+}
+
+#[test]
+fn repro_490_r3_rust_mod_decl_to_block_mixed_kind_disjoint_clean() {
+    // Mirror direction with a DISJOINT edit so the whole-item text merge stays
+    // clean. base: `mod foo;` (leaf). ours expands it to a block with a fn
+    // (container); theirs leaves it untouched. With theirs == base, the
+    // unchanged-side-defers rule takes ours wholesale — no panic, clean, ours's
+    // expansion preserved.
+    let base = "mod foo;\n";
+    let ours = "mod foo {\n    fn a() {}\n}\n";
+    let theirs = "mod foo;\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert!(merged.contains("fn a() {}"), "ours expansion lost:\n{merged}");
+    assert!(!merged.contains("<<<<<<<"), "unexpected conflict markers:\n{merged}");
+}
+
+// C++ `namespace N {…} namespace N {…}` is the same close-the-class shape in
+// another language; gated behind `lang-cpp` (extended-languages) since the cpp
+// parser isn't in the default feature set. The alignment is language-agnostic
+// and also covered by the default-feature Rust cases above.
+#[cfg(feature = "lang-cpp")]
+fn namespace_reopen_triple(sep: &str) -> (String, String, String) {
+    let base = format!("namespace N {{\nvoid a() {{}}\n}}{sep}namespace N {{\nvoid b() {{}}\n}}\n");
+    let ours = format!(
+        "namespace N {{\nvoid a() {{}}\nvoid a2() {{}}\n}}{sep}namespace N {{\nvoid b() {{}}\n}}\n"
+    );
+    let theirs = format!(
+        "namespace N {{\nvoid a() {{}}\n}}{sep}namespace N {{\nvoid b() {{}}\nvoid b2() {{}}\n}}\n"
+    );
+    (base, ours, theirs)
+}
+
+#[cfg(feature = "lang-cpp")]
+#[test]
+fn conformance_484_reopened_cpp_namespace_separator_matrix() {
+    let cases: &[(&str, &str)] = &[
+        ("back-to-back", "\n"),
+        ("whitespace-separated", "\n\n"),
+        ("comment-separated", "\n// section\n"),
+        ("item-separated", "\n\nint top_level() { return 0; }\n\n"),
+    ];
+    for (label, sep) in cases {
+        let (base, ours, theirs) = namespace_reopen_triple(sep);
+        let merged =
+            assert_conformant_at(&base, &ours, &theirs, "f.cpp", crate::parser::Language::Cpp);
+        assert_eq!(
+            merged.matches("namespace N").count(),
+            2,
+            "[{label}] reopened namespaces collapsed:\n{merged}"
+        );
+        assert!(merged.contains("void a2() {}"), "[{label}] ours add lost:\n{merged}");
+        assert!(merged.contains("void b2() {}"), "[{label}] theirs add lost:\n{merged}");
+        let second_ns = merged.rfind("namespace N").unwrap();
+        assert!(
+            merged.find("void a2() {}").unwrap() < second_ns,
+            "[{label}] a2 escaped first block:\n{merged}"
+        );
+        assert!(
+            merged.find("void b2() {}").unwrap() > second_ns,
+            "[{label}] b2 escaped second block:\n{merged}"
+        );
+        if sep.contains("// section") {
+            assert_eq!(
+                merged.matches("// section").count(),
+                1,
+                "[{label}] comment separator dropped/duplicated:\n{merged}"
+            );
+        }
+        if sep.contains("top_level") {
+            let first_ns = merged.find("namespace N").unwrap();
+            let top = merged.find("int top_level()").unwrap();
+            assert!(
+                first_ns < top && top < second_ns,
+                "[{label}] top-level item must stay between blocks:\n{merged}"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "lang-cpp")]
+#[test]
+fn conformance_484_r3_cross_side_cpp_namespace_prepend_no_collapse() {
+    // base has one `namespace N { void b(); }`. ours prepends a NEW
+    // `namespace N { void a(); }`; theirs edits b's body.
+    let base = "namespace N {\nvoid b() {}\n}\n";
+    let ours = "namespace N {\nvoid a() {}\n}\n\nnamespace N {\nvoid b() {}\n}\n";
+    let theirs = "namespace N {\nvoid b() { int x = 1; }\n}\n";
+    let merged = assert_conformant_at(base, ours, theirs, "f.cpp", crate::parser::Language::Cpp);
+    assert_eq!(
+        merged.matches("namespace N").count(),
+        2,
+        "prepended namespace collapsed into base block:\n{merged}"
+    );
+    assert!(merged.contains("void a() {}"), "ours add lost:\n{merged}");
+    assert!(merged.contains("void b() { int x = 1; }"), "theirs edit lost:\n{merged}");
+    assert!(
+        merged.find("void a()").unwrap() < merged.find("void b()").unwrap(),
+        "prepended block must precede the base block:\n{merged}"
+    );
 }
