@@ -41,6 +41,13 @@ pub enum ObjectType {
     /// the *redacted blob*, since `Repository`'s sidecar store is
     /// indexed that way.
     Redaction,
+    /// A `StateVisibilityBlob` sidecar — the rmp-encoded record(s)
+    /// declaring a non-public audience tier for a specific state. Keyed
+    /// on the wire by `ObjectId::ChangeId` of the *state*, since the
+    /// per-state sidecar store is indexed that way. Like `Redaction`, it
+    /// is a sidecar record that lives outside the content-addressed pack
+    /// and ships via the per-object transfer path, not the pack.
+    StateVisibility,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -88,6 +95,7 @@ pub fn enumerate_state_closure_with_options(
             size: state_bytes.len() as u64,
             delta_base: None,
         });
+        emit_state_visibility_info(store, &id, &mut out)?;
 
         if options.depth.map(|max| depth < max).unwrap_or(true) {
             for parent in &state.parents {
@@ -161,6 +169,7 @@ pub fn enumerate_state_closure_plan_with_options(
             id: ObjectId::ChangeId(id),
             obj_type: ObjectType::State,
         });
+        emit_state_visibility_plan(store, &id, &mut out)?;
 
         if options.depth.map(|max| depth < max).unwrap_or(true) {
             for parent in &state.parents {
@@ -268,6 +277,39 @@ fn enumerate_tree_closure_filtered(
         }
     }
 
+    Ok(())
+}
+
+/// If `state` carries a state-visibility sidecar, push a StateVisibility
+/// `ObjectInfo` keyed by the state id. No-op when the state is public by
+/// absence.
+fn emit_state_visibility_info(
+    store: &impl ObjectStore,
+    state: &ChangeId,
+    out: &mut Vec<ObjectInfo>,
+) -> Result<()> {
+    if let Some(bytes) = store.get_state_visibility_bytes_for_state(state)? {
+        out.push(ObjectInfo {
+            id: ObjectId::ChangeId(*state),
+            obj_type: ObjectType::StateVisibility,
+            size: bytes.len() as u64,
+            delta_base: None,
+        });
+    }
+    Ok(())
+}
+
+fn emit_state_visibility_plan(
+    store: &impl ObjectStore,
+    state: &ChangeId,
+    out: &mut Vec<PlannedObject>,
+) -> Result<()> {
+    if store.has_state_visibility_for_state(state)? {
+        out.push(PlannedObject {
+            id: ObjectId::ChangeId(*state),
+            obj_type: ObjectType::StateVisibility,
+        });
+    }
     Ok(())
 }
 
@@ -462,7 +504,7 @@ pub fn is_ancestor(
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use objects::object::{Principal, Redaction};
+    use objects::object::{Principal, Redaction, StateVisibility, VisibilityTier};
     use objects::store::ObjectStore;
     use repo::Repository;
     use tempfile::TempDir;
@@ -573,6 +615,54 @@ mod tests {
             plan.iter()
                 .any(|p| p.obj_type == ObjectType::Redaction && p.id == ObjectId::Hash(blob_hash)),
             "plan closure must include a Redaction entry for the redacted blob"
+        );
+    }
+
+    #[test]
+    fn enumerate_state_closure_emits_state_visibility_for_visible_state() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("README.md"), "hello\n").unwrap();
+        let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
+
+        repo.put_state_visibility(StateVisibility {
+            state: state.change_id,
+            tier: VisibilityTier::Restricted {
+                scope_label: "security-embargo".into(),
+            },
+            embargo_until: None,
+            declarer: Principal {
+                name: "Tester".into(),
+                email: "tester@heddle.sh".into(),
+            },
+            declared_at: Utc::now(),
+            signature: None,
+            supersedes: None,
+        })
+        .unwrap();
+
+        let full = enumerate_state_closure_with_options(
+            repo.store(),
+            state.change_id,
+            StateClosureOptions::default(),
+        )
+        .unwrap();
+        let plan = enumerate_state_closure_plan_with_options(
+            repo.store(),
+            state.change_id,
+            StateClosureOptions::default(),
+        )
+        .unwrap();
+
+        assert!(
+            full.iter().any(|info| info.obj_type == ObjectType::StateVisibility
+                && info.id == ObjectId::ChangeId(state.change_id)),
+            "full closure must include a StateVisibility entry for the visible state"
+        );
+        assert!(
+            plan.iter().any(|p| p.obj_type == ObjectType::StateVisibility
+                && p.id == ObjectId::ChangeId(state.change_id)),
+            "plan closure must include a StateVisibility entry for the visible state"
         );
     }
 }

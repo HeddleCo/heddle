@@ -47,6 +47,14 @@ impl PackChunkState {
     }
 }
 
+pub fn native_pack_excluded_object_types() -> &'static [ObjectType] {
+    &[ObjectType::Redaction, ObjectType::StateVisibility]
+}
+
+pub fn is_native_packable_object_type(obj_type: ObjectType) -> bool {
+    !native_pack_excluded_object_types().contains(&obj_type)
+}
+
 pub fn build_native_pack(
     store: &impl ObjectStore,
     objects: &[ObjectInfo],
@@ -54,11 +62,12 @@ pub fn build_native_pack(
     let mut builder = PackBuilder::new(sync_pack_compression());
 
     for info in objects {
-        // Redactions are sidecar records (live outside `.heddle/objects/`
-        // so GC cannot touch them) and must not be folded into the
-        // content-addressed pack. They ship via the per-object transfer
-        // path instead; callers split them out before packing.
-        if info.obj_type == ObjectType::Redaction {
+        // Sidecar records (redaction + state-visibility) live outside
+        // `.heddle/objects/` so GC cannot touch them, and must not be
+        // folded into the content-addressed pack. They ship via the
+        // per-object transfer path instead; callers split them out before
+        // packing.
+        if !is_native_packable_object_type(info.obj_type) {
             continue;
         }
         let object = load_object_data(store, &info.id, info.obj_type)?;
@@ -202,6 +211,10 @@ fn to_pack_object_type(obj_type: ObjectType) -> Result<PackObjectType> {
         ObjectType::Action => Ok(PackObjectType::Action),
         ObjectType::Redaction => Err(ProtocolError::InvalidState(
             "Redaction sidecar records cannot be packed into the content-addressed object pack"
+                .to_string(),
+        )),
+        ObjectType::StateVisibility => Err(ProtocolError::InvalidState(
+            "StateVisibility sidecar records cannot be packed into the content-addressed object pack"
                 .to_string(),
         )),
     }

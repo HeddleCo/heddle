@@ -406,7 +406,7 @@ mod tests {
             }],
             supersedes_annotation_id: None,
             supersedes_rewrite_pct: None,
-            visibility: objects::object::AnnotationVisibility::default(),
+            visibility: objects::object::VisibilityTier::default(),
             resolved_from_discussion: None,
         }
     }

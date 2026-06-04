@@ -35,6 +35,7 @@ pub struct InMemoryStore {
     states: RwLock<HashMap<ChangeId, Vec<u8>>>,
     actions: RwLock<HashMap<ActionId, Vec<u8>>>,
     redactions: RwLock<HashMap<ContentHash, Vec<u8>>>,
+    state_visibility: RwLock<HashMap<ChangeId, Vec<u8>>>,
 }
 
 impl InMemoryStore {
@@ -172,6 +173,30 @@ impl ObjectStore for InMemoryStore {
 
     fn list_blobs_with_redactions(&self) -> Result<Vec<ContentHash>> {
         Ok(self.redactions.read().unwrap().keys().copied().collect())
+    }
+
+    fn has_state_visibility_for_state(&self, state: &ChangeId) -> Result<bool> {
+        Ok(self.state_visibility.read().unwrap().contains_key(state))
+    }
+
+    fn get_state_visibility_bytes_for_state(&self, state: &ChangeId) -> Result<Option<Vec<u8>>> {
+        Ok(self.state_visibility.read().unwrap().get(state).cloned())
+    }
+
+    fn put_state_visibility_bytes_for_state(
+        &self,
+        state: &ChangeId,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.state_visibility
+            .write()
+            .unwrap()
+            .insert(*state, bytes.to_vec());
+        Ok(())
+    }
+
+    fn list_states_with_visibility(&self) -> Result<Vec<ChangeId>> {
+        Ok(self.state_visibility.read().unwrap().keys().copied().collect())
     }
 }
 

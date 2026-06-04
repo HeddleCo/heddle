@@ -50,3 +50,11 @@ pub(super) fn redactions_dir(root: &Path) -> PathBuf {
 pub(super) fn redaction_path(root: &Path, blob: &ContentHash) -> PathBuf {
     redactions_dir(root).join(format!("{}.bin", blob.to_hex()))
 }
+
+pub(super) fn state_visibility_dir(root: &Path) -> PathBuf {
+    root.join("visibility")
+}
+
+pub(super) fn state_visibility_path(root: &Path, state: &ChangeId) -> PathBuf {
+    state_visibility_dir(root).join(format!("{}.bin", state.to_string_full()))
+}

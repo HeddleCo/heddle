@@ -97,9 +97,9 @@ impl LocalSync {
         let state_already_present = target.store().has_state(state_id)?;
 
         // Source-side state read drives both the object copy (when
-        // needed) and the redaction-propagation tree walk (always).
+        // needed) and sidecar propagation (always).
         // If the source no longer has the state but the target does,
-        // we can't enumerate blob hashes for propagation — skip with
+        // we can't enumerate sidecars for propagation — skip with
         // no error in that case.
         let state = match self.source.store().get_state(state_id)? {
             Some(state) => state,
@@ -107,11 +107,9 @@ impl LocalSync {
             None => return Err(anyhow!("State {} not found in source", state_id)),
         };
 
-        // Always propagate redactions for every blob in the state's
-        // trees, regardless of whether the trees themselves need
-        // copying. `propagate_redactions_in_tree` walks the trees
-        // without the has_tree fast-path so re-syncs after a redact
-        // still ferry the sidecar.
+        // Always propagate per-state visibility and per-blob redactions,
+        // regardless of whether the objects themselves need copying.
+        self.propagate_state_visibility_for_state(target, state_id)?;
         let mut propagated_trees: HashSet<ContentHash> = HashSet::new();
         self.propagate_redactions_in_tree(target, &state.tree, &mut propagated_trees)?;
         if let Some(provenance_root) = state.provenance {
@@ -267,6 +265,21 @@ impl LocalSync {
             return Ok(());
         };
         target.accept_wire_redactions(*blob, &bytes)?;
+        Ok(())
+    }
+
+    /// If the source repository has state-visibility records for `state`,
+    /// ferry the sidecar bytes through the same repository boundary used by
+    /// the network path.
+    fn propagate_state_visibility_for_state(
+        &self,
+        target: &Repository,
+        state: &ChangeId,
+    ) -> Result<()> {
+        let Some(bytes) = self.source.get_state_visibility_bytes_for_state(state)? else {
+            return Ok(());
+        };
+        target.accept_wire_state_visibility(*state, &bytes)?;
         Ok(())
     }
 
