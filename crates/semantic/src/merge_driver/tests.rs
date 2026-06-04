@@ -4959,3 +4959,229 @@ fn rust_use_identical_glob_both_sides_dedups_clean() {
     assert!(merged.contains("fn alpha() { 10 }"), "ours edit lost: {merged}");
     assert!(merged.contains("fn beta() { 20 }"), "theirs edit lost: {merged}");
 }
+
+// =====================================================================
+// heddle#484 — function-level merge silently corrupted subdirectory-file
+// merges: the reconstruction wove a side's trailing postamble in twice
+// (duplicating `// MARK` / a trailing `mod tests {…}`) and, for items
+// added at different structural depths on each side, stranded a child
+// outside its module (`pub use` escaping `pub mod prelude`). These were
+// invisible to the marker-based checks: clean, zero conflict markers.
+//
+// The harness below is the close-the-class guard. For every CLEAN
+// semantic merge it asserts, on the PARSED output:
+//   1. item-set + nesting conservation — every merged item is present
+//      with the structural scope a contributing side gave it, and no
+//      item is invented or dropped (catches the mis-nesting in Bug 2/3);
+//   2. no invented / duplicated lines — a line can appear in the output
+//      no more often than base plus each side's additions over base
+//      justify (catches the duplicated postamble in Bug 1);
+//   3. the output re-parses — a clean merge that yields an unparseable
+//      file is by definition a corruption (catches Bug 2/3's unclosed /
+//      stray delimiters).
+// =====================================================================
+
+/// (structural-scope, kind, name) identity of every item in `source`,
+/// taken from the raw segmentation (no `use` canonicalization, so output
+/// and inputs are compared on the same footing).
+fn item_identities(source: &str) -> std::collections::BTreeSet<(Vec<String>, String, String)> {
+    let parsed = crate::parser::ParsedFile::parse(source, crate::parser::Language::Rust)
+        .expect("input must parse");
+    let segs = super::items::segment_file(&parsed);
+    segs.items
+        .iter()
+        .map(|i| {
+            (
+                i.struct_scope.clone(),
+                format!("{:?}", i.key.kind),
+                i.key.name.clone(),
+            )
+        })
+        .collect()
+}
+
+/// Count of each non-blank, trimmed line in `source`.
+fn line_counts(source: &str) -> std::collections::HashMap<String, usize> {
+    let mut counts = std::collections::HashMap::new();
+    for line in source.lines() {
+        let t = line.trim();
+        if !t.is_empty() {
+            *counts.entry(t.to_string()).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+/// Run the three close-the-class conformance checks against a clean
+/// semantic merge of `base`/`ours`/`theirs` (all additive — no deletions).
+fn assert_conformant(base: &str, ours: &str, theirs: &str) -> String {
+    let out = assert_clean(merge_rust(base, ours, theirs));
+
+    // Check 3: the merged file must re-parse.
+    assert!(
+        crate::parser::ParsedFile::parse(&out, crate::parser::Language::Rust).is_some(),
+        "clean merge produced an unparseable file:\n{out}"
+    );
+
+    // Check 1: item-set + nesting conservation. With only additions, the
+    // merged item set is exactly the union across the three sides, and each
+    // item keeps the structural scope (its tuple's first element) a
+    // contributing side gave it.
+    let mut expected = item_identities(base);
+    expected.extend(item_identities(ours));
+    expected.extend(item_identities(theirs));
+    let got = item_identities(&out);
+    assert_eq!(
+        got, expected,
+        "item-set / nesting not conserved\n got: {got:?}\n want: {expected:?}\n output:\n{out}"
+    );
+
+    // Check 2: no invented / duplicated lines. A line may appear in the
+    // output at most `base + max(0, ours-base) + max(0, theirs-base)`
+    // times — base's copies plus whatever each side added over base.
+    let (cb, co, ct) = (line_counts(base), line_counts(ours), line_counts(theirs));
+    for (line, &n) in &line_counts(&out) {
+        let b = cb.get(line).copied().unwrap_or(0);
+        let o = co.get(line).copied().unwrap_or(0);
+        let t = ct.get(line).copied().unwrap_or(0);
+        let allowed = b + o.saturating_sub(b) + t.saturating_sub(b);
+        assert!(
+            n <= allowed,
+            "line {line:?} appears {n}× (allowed {allowed}: base {b}, ours {o}, theirs {t})\n{out}"
+        );
+    }
+    out
+}
+
+#[test]
+fn conformance_484_structural_matrix() {
+    // {flat-top-level, trailing-mod, nested-pub-use} × {added-above,
+    // added-below, added-inside}. Each side makes a disjoint additive edit;
+    // every cell must survive all three conformance checks.
+    let cases: &[(&str, &str, &str)] = &[
+        // flat / added-above a trailing comment marker (Bug 1 shape).
+        (
+            "pub fn a() {}\n\n// MARK\n",
+            "pub fn a() {}\n\npub fn c() {}\n\n// MARK\n",
+            "pub fn a() {}\n\npub fn b() {}\n\n// MARK\n",
+        ),
+        // flat / added-below an item.
+        (
+            "pub fn a() {}\n",
+            "pub fn a() {}\n\npub fn c() {}\n",
+            "pub fn a() {}\n\npub fn b() {}\n",
+        ),
+        // flat / added-above the first item.
+        (
+            "pub fn z() {}\n",
+            "pub fn c() {}\n\npub fn z() {}\n",
+            "pub fn b() {}\n\npub fn z() {}\n",
+        ),
+        // trailing-mod / added-above the module (Bug 2 shape).
+        (
+            "pub fn a() {}\n\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n",
+            "pub fn a() {}\n\npub fn c() {}\n\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n",
+            "pub fn a() {}\n\npub fn b() {}\n\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n",
+        ),
+        // trailing-mod / added-below the module.
+        (
+            "#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n",
+            "#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n\npub fn ours_after() {}\n",
+            "#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n\npub fn theirs_after() {}\n",
+        ),
+        // trailing-mod / added-inside the module body.
+        (
+            "mod tests {\n    fn t() {}\n}\n",
+            "mod tests {\n    fn t() {}\n    fn ours_t() {}\n}\n",
+            "mod tests {\n    fn t() {}\n    fn theirs_t() {}\n}\n",
+        ),
+        // nested-pub-use / added-inside the module + a sibling top-level fn
+        // below (Bug 3 shape).
+        (
+            "pub mod prelude {\n    pub use crate::a;\n}\n",
+            "pub mod prelude {\n    pub use crate::a;\n    pub use crate::b;\n}\n\npub fn ours_fn() {}\n",
+            "pub mod prelude {\n    pub use crate::a;\n    pub use crate::c;\n}\n\npub fn theirs_fn() {}\n",
+        ),
+        // nested-pub-use / added-above the module (top-level fn before it).
+        (
+            "pub mod prelude {\n    pub use crate::a;\n}\n",
+            "pub fn ours_fn() {}\n\npub mod prelude {\n    pub use crate::a;\n    pub use crate::b;\n}\n",
+            "pub fn theirs_fn() {}\n\npub mod prelude {\n    pub use crate::a;\n    pub use crate::c;\n}\n",
+        ),
+        // nested / two-level module, added-inside the innermost + sibling.
+        (
+            "pub mod outer {\n    pub mod inner {\n        pub use crate::a;\n    }\n}\n",
+            "pub mod outer {\n    pub mod inner {\n        pub use crate::a;\n        pub use crate::b;\n    }\n}\n\npub fn ours_fn() {}\n",
+            "pub mod outer {\n    pub mod inner {\n        pub use crate::a;\n        pub use crate::c;\n    }\n}\n\npub fn theirs_fn() {}\n",
+        ),
+        // both sides CREATE the same module (add/add) with disjoint uses.
+        (
+            "pub fn a() {}\n",
+            "pub fn a() {}\n\npub mod m {\n    pub use crate::x;\n}\n",
+            "pub fn a() {}\n\npub mod m {\n    pub use crate::y;\n}\n",
+        ),
+        // impl version of Bug 3: method added inside impl + sibling top-level
+        // fn, on each side.
+        (
+            "struct S;\nimpl S {\n    fn base(&self) {}\n}\n",
+            "struct S;\nimpl S {\n    fn base(&self) {}\n    fn ours_m(&self) {}\n}\n\nfn ours_top() {}\n",
+            "struct S;\nimpl S {\n    fn base(&self) {}\n    fn theirs_m(&self) {}\n}\n\nfn theirs_top() {}\n",
+        ),
+    ];
+    for (base, ours, theirs) in cases {
+        assert_conformant(base, ours, theirs);
+    }
+}
+
+#[test]
+fn repro_484_bug1_trailing_postamble_not_duplicated() {
+    // Each side adds a function above a trailing `// MARK`. Pre-fix the
+    // postamble (`\n\n// MARK\n`) was woven in twice and the second added
+    // function landed after the first marker copy.
+    let base = "pub fn a() {}\n\n// MARK\n";
+    let ours = "pub fn a() {}\n\npub fn c() {}\n\n// MARK\n";
+    let theirs = "pub fn a() {}\n\npub fn b() {}\n\n// MARK\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert_eq!(
+        merged, "pub fn a() {}\n\npub fn b() {}\n\npub fn c() {}\n\n// MARK\n",
+        "got:\n{merged}"
+    );
+    assert_eq!(merged.matches("// MARK").count(), 1);
+}
+
+#[test]
+fn repro_484_bug2_trailing_module_not_nested_or_duplicated() {
+    // Each side adds a top-level fn above a trailing `#[cfg(test)] mod
+    // tests {…}`. Pre-fix one fn nested INSIDE mod tests and the module +
+    // its preamble duplicated, producing an unclosed delimiter.
+    let base = "pub fn a() {}\n\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n";
+    let ours = "pub fn a() {}\n\npub fn c() {}\n\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n";
+    let theirs = "pub fn a() {}\n\npub fn b() {}\n\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert_eq!(
+        merged,
+        "pub fn a() {}\n\npub fn b() {}\n\npub fn c() {}\n\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n",
+        "got:\n{merged}"
+    );
+    assert_eq!(merged.matches("mod tests").count(), 1);
+    assert!(crate::parser::ParsedFile::parse(&merged, crate::parser::Language::Rust).is_some());
+}
+
+#[test]
+fn repro_484_bug3_nested_pub_use_stays_inside_module() {
+    // Each side adds a `pub use` inside `pub mod prelude` AND a sibling
+    // top-level fn. Pre-fix one re-export escaped `prelude` (landed after a
+    // top-level fn) followed by a dangling `}`.
+    let base = "pub mod prelude {\n    pub use crate::a;\n}\n";
+    let ours = "pub mod prelude {\n    pub use crate::a;\n    pub use crate::b;\n}\n\npub fn ours_fn() {}\n";
+    let theirs =
+        "pub mod prelude {\n    pub use crate::a;\n    pub use crate::c;\n}\n\npub fn theirs_fn() {}\n";
+    let merged = assert_clean(merge_rust(base, ours, theirs));
+    assert_eq!(
+        merged,
+        "pub mod prelude {\n    pub use crate::a;\n    pub use crate::c;\n    pub use crate::b;\n}\n\npub fn theirs_fn() {}\n\npub fn ours_fn() {}\n",
+        "got:\n{merged}"
+    );
+    assert_eq!(merged.matches("pub mod prelude").count(), 1);
+    assert!(crate::parser::ParsedFile::parse(&merged, crate::parser::Language::Rust).is_some());
+}

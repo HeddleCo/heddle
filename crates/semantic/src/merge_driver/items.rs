@@ -60,6 +60,28 @@ pub(crate) struct Item {
     /// add/add resolution in [`super::reconstruct`] then dedups only on exact
     /// bytes and conflicts on every other difference.
     pub use_identity: Option<UseIdentity>,
+    /// Path of enclosing *structural* containers (module / impl / trait /
+    /// class bodies this item physically sits inside), outermost first.
+    /// Distinct from [`ItemKey::scope`], which is the LOGICAL match scope: a
+    /// C++ out-of-class method `void Foo::bar()` has `key.scope == ["Foo"]`
+    /// (so it matches the inline `bar`) but `struct_scope == []` (it sits at
+    /// file top level). Reconstruction groups + weaves by this physical
+    /// nesting so a container's `{ … }` wraps exactly its source children
+    /// (heddle#484: cross-side additions at different depths must not strand
+    /// a child outside its module).
+    pub struct_scope: Vec<String>,
+}
+
+/// A structural container (`mod`/`impl`/`trait`/`class` … with a body) and
+/// the byte offsets of its braces. Used by reconstruction to know where a
+/// scope opens and closes so the weave can keep added items on the correct
+/// side of a brace.
+#[derive(Clone, Debug)]
+pub(crate) struct ContainerSpan {
+    /// Byte offset of the opening `{`.
+    pub open: usize,
+    /// Byte offset one past the closing `}`.
+    pub close: usize,
 }
 
 /// The result of segmenting a file: items in source order, exposed via the
@@ -69,6 +91,10 @@ pub(crate) struct Item {
 pub(crate) struct FileSegments {
     pub items: Vec<Item>,
     pub source_len: usize,
+    /// Structural containers (module / impl / trait / class bodies) in the
+    /// source, in extraction order. Lets reconstruction locate the `{`/`}`
+    /// of each scope an item sits inside.
+    pub containers: Vec<ContainerSpan>,
 }
 
 impl FileSegments {
@@ -88,24 +114,33 @@ impl FileSegments {
     }
 }
 
-/// Extract items from a parsed file. Public for the `debug_items` hatch and
-/// for `segment_file`.
-pub(crate) fn extract_items(parsed: &ParsedFile) -> Vec<Item> {
+/// Extract items + structural container spans from a parsed file.
+fn extract_items_and_containers(parsed: &ParsedFile) -> (Vec<Item>, Vec<ContainerSpan>) {
     let mut items = Vec::new();
+    let mut containers = Vec::new();
     let root = parsed.root_node();
-    collect_items(parsed.language, &parsed.source, root, &[], &mut items);
+    collect_items(
+        parsed.language,
+        &parsed.source,
+        root,
+        &[],
+        &mut items,
+        &mut containers,
+    );
     // Items can be reported in any DFS order; ensure source order for
     // deterministic reconstruction.
     items.sort_by_key(|item| item.start_byte);
-    items
+    (items, containers)
 }
 
 /// Top-level entry: segment a parsed file into items + record the source
 /// length so reconstruction can recover inter-item content.
 pub(crate) fn segment_file(parsed: &ParsedFile) -> FileSegments {
+    let (items, containers) = extract_items_and_containers(parsed);
     FileSegments {
-        items: extract_items(parsed),
+        items,
         source_len: parsed.source.len(),
+        containers,
     }
 }
 
@@ -122,6 +157,7 @@ fn collect_items(
     root: Node<'_>,
     base_scope: &[String],
     out: &mut Vec<Item>,
+    containers: &mut Vec<ContainerSpan>,
 ) {
     // Iterative DFS over the AST. Avoids the unbounded recursion shape
     // a deeply-parseable file could otherwise trigger — collect_items
@@ -151,9 +187,14 @@ fn collect_items(
                 if let Some(body) = container_body {
                     let mut next_scope = (*scope).clone();
                     next_scope.push(name);
+                    containers.push(ContainerSpan {
+                        open: body.start_byte(),
+                        close: body.end_byte(),
+                    });
                     stack.push((body, Rc::new(next_scope), depth + 1));
                 } else {
-                    let mut item_scope = (*scope).clone();
+                    let struct_scope = (*scope).clone();
+                    let mut item_scope = struct_scope.clone();
                     item_scope.extend(extra_scope);
                     let use_identity = if matches!(kind, ItemKind::Use) {
                         super::language_rules::use_identity(language, source, child)
@@ -172,6 +213,7 @@ fn collect_items(
                         start_byte,
                         end_byte: child.end_byte(),
                         use_identity,
+                        struct_scope,
                     });
                 }
             } else {
