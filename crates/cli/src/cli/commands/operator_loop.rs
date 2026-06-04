@@ -6,8 +6,7 @@ use super::{
     action_line::print_next_step,
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     next_action::{
-        NextActionInput, NextActionValidationContext, effective_next_action,
-        write_validated_json_stdout,
+        NextActionInput, NextActionValidationContext, effective_next_action, write_command_json,
     },
     operator_core::{
         OperatorCommandOutput, abort_operator, exit_if_blocked_operator_status,
@@ -19,7 +18,7 @@ use super::{
 };
 use crate::{
     bridge::GitBridge,
-    cli::{Cli, cli_args::SyncArgs, should_output_json, style},
+    cli::{Cli, cli_args::SyncArgs, output_is_compact, should_output_json, style},
 };
 
 pub async fn cmd_continue(cli: &Cli) -> Result<()> {
@@ -153,8 +152,9 @@ fn emit(
     emitting_command: &[&str],
 ) -> Result<()> {
     if should_output_json(cli, None) {
-        write_validated_json_stdout(
+        write_command_json(
             &output,
+            output_is_compact(cli),
             NextActionValidationContext::new(emitting_command, repo.capability()),
         )?;
     } else {

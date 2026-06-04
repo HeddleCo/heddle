@@ -83,12 +83,23 @@ pub fn should_output_json(cli: &Cli, config: Option<&Config>) -> bool {
 
     if let Some(output) = cli.output {
         format = match output {
-            OutputMode::Json => OutputFormat::Json,
+            // `json-compact` is still JSON output — it only narrows
+            // *which* fields are emitted (see `output_is_compact`).
+            OutputMode::Json | OutputMode::JsonCompact => OutputFormat::Json,
             OutputMode::Text => OutputFormat::Text,
         };
     }
 
     matches!(format, OutputFormat::Json)
+}
+
+/// Whether the caller asked for the compact decision-surface projection
+/// (`--output json-compact`, heddle#470). Compact is a CLI-only modifier
+/// on top of JSON output — it is never reachable from config
+/// (`output.format` is `json`/`text` only), so the full machine contract
+/// stays the default for piped/configured JSON.
+pub fn output_is_compact(cli: &Cli) -> bool {
+    matches!(cli.output, Some(OutputMode::JsonCompact))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,7 +122,10 @@ pub fn json_output_mode_for_kind(
 ) -> JsonOutputMode {
     match json_kind {
         "jsonl" => {
-            if matches!(cli.output, Some(OutputMode::Json)) {
+            // Stream-shaped commands (e.g. `watch`) have no compact
+            // projection; `json-compact` falls back to the full jsonl
+            // stream rather than silently downgrading to text.
+            if matches!(cli.output, Some(OutputMode::Json | OutputMode::JsonCompact)) {
                 JsonOutputMode::Jsonl
             } else {
                 JsonOutputMode::Text

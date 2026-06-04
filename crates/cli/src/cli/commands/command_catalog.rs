@@ -262,6 +262,7 @@ impl CommandCatalogOutput {
 #[derive(Debug, Clone, Copy)]
 struct CommandContract {
     supports_json: bool,
+    supports_json_compact: bool,
     mutates: bool,
     supports_op_id: bool,
     persists_op_id: bool,
@@ -325,6 +326,7 @@ pub struct CommandRuntimeContract {
     pub path: Vec<&'static str>,
     pub display: String,
     pub supports_json: bool,
+    pub supports_json_compact: bool,
     pub supports_op_id: bool,
     pub persists_op_id: bool,
     pub uses_bootstrap_op_id_store: bool,
@@ -664,6 +666,7 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
 
 const READ_JSON: CommandContract = CommandContract {
     supports_json: true,
+    supports_json_compact: false,
     mutates: false,
     supports_op_id: false,
     persists_op_id: false,
@@ -752,6 +755,13 @@ const INIT: CommandContract = CommandContract {
 };
 
 const CAPTURE: CommandContract = CommandContract { ..MUTATING };
+
+const fn compact_json(contract: CommandContract) -> CommandContract {
+    CommandContract {
+        supports_json_compact: true,
+        ..contract
+    }
+}
 
 const WORKTREE_MUTATION: CommandContract = CommandContract {
     may_write_worktree: true,
@@ -998,7 +1008,10 @@ const fn advertised_action(
 }
 
 const CONTRACTS: &[CommandContractEntry] = &[
-    entry(&["abort"], documented_schemas(MUTATING, &["abort"])),
+    entry(
+        &["abort"],
+        documented_schemas(compact_json(MUTATING), &["abort"]),
+    ),
     entry(
         &["adopt"],
         front_door(
@@ -1266,7 +1279,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["capture"],
         json_discriminators(
-            documented_schemas(CAPTURE, &["capture"]),
+            documented_schemas(compact_json(CAPTURE), &["capture"]),
             &[json_discriminator(
                 Some("capture"),
                 "output_kind",
@@ -1401,7 +1414,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["conflict", "show"],
         opaque_schemas(READ_JSON, &["conflict show"]),
     ),
-    entry(&["continue"], documented_schemas(MUTATING, &["continue"])),
+    entry(
+        &["continue"],
+        documented_schemas(compact_json(MUTATING), &["continue"]),
+    ),
     entry(&["context"], GROUP),
     entry(
         &["context", "set"],
@@ -1784,7 +1800,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         exits(
             surface(
                 advertised_action(
-                    documented_schemas(WORKTREE_MUTATION, &["merge --preview"]),
+                    documented_schemas(compact_json(WORKTREE_MUTATION), &["merge --preview"]),
                     "heddle merge <thread> --preview",
                     &["heddle", "merge", "<thread>", "--preview"],
                     &["thread"],
@@ -1917,7 +1933,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["query"], documented_schemas(READ_JSON, &["query"])),
     entry(
         &["ready"],
-        front_door(documented_schemas(CAPTURE, &["ready"]), 50),
+        front_door(documented_schemas(compact_json(CAPTURE), &["ready"]), 50),
     ),
     entry(&["rebase"], opaque_schemas(WORKTREE_MUTATION, &["rebase"])),
     entry(&["redact"], GROUP),
@@ -2140,7 +2156,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 CommandContract {
                     writes_git_refs: true,
                     network_io: true,
-                    ..MUTATING
+                    ..compact_json(MUTATING)
                 },
                 &["land"],
             ),
@@ -2250,7 +2266,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         exits(
             front_door(
                 json_discriminators(
-                    documented_schemas(READ_JSON_OR_JSONL, &["status"]),
+                    documented_schemas(compact_json(READ_JSON_OR_JSONL), &["status"]),
                     &[json_discriminator(Some("status"), "output_kind", "status")],
                 ),
                 10,
@@ -2275,7 +2291,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "thread switch",
         ),
     ),
-    entry(&["sync"], documented_schemas(MUTATING, &["sync"])),
+    entry(
+        &["sync"],
+        documented_schemas(compact_json(MUTATING), &["sync"]),
+    ),
     entry(&["thread"], surface(GROUP, "native")),
     entry(
         &["thread", "create"],
@@ -3279,6 +3298,7 @@ fn runtime_contract(
         path: path.to_vec(),
         display: path.join(" "),
         supports_json: contract.supports_json,
+        supports_json_compact: contract.supports_json_compact,
         supports_op_id: contract.supports_op_id,
         persists_op_id: contract.persists_op_id,
         uses_bootstrap_op_id_store: uses_bootstrap_op_id_store(contract),
@@ -4790,6 +4810,68 @@ mod tests {
         }
     }
 
+    #[test]
+    fn json_compact_runtime_contract_is_projection_or_rejection() {
+        let expected_compact = BTreeSet::from([
+            "abort".to_string(),
+            "capture".to_string(),
+            "continue".to_string(),
+            "land".to_string(),
+            "merge".to_string(),
+            "ready".to_string(),
+            "status".to_string(),
+            "sync".to_string(),
+        ]);
+        let actual_compact = active_command_contract_entries()
+            .iter()
+            .filter(|entry| entry.contract.supports_json_compact)
+            .map(|entry| entry.path.join(" "))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual_compact, expected_compact);
+
+        let json_output_commands = active_command_contract_entries()
+            .iter()
+            .filter(|entry| entry.contract.supports_json)
+            .map(|entry| entry.path.join(" "))
+            .collect::<BTreeSet<_>>();
+        let compact_rejections = active_command_contract_entries()
+            .iter()
+            .filter(|entry| entry.contract.supports_json && !entry.contract.supports_json_compact)
+            .map(|entry| entry.path.join(" "))
+            .collect::<BTreeSet<_>>();
+        let classified_commands = actual_compact
+            .union(&compact_rejections)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            classified_commands, json_output_commands,
+            "every JSON-output command must either project json-compact or reject it before execution"
+        );
+        assert!(
+            compact_rejections.contains("commands"),
+            "the harness must include commands that accept --output json but reject json-compact"
+        );
+
+        for sample in RUNTIME_CONTRACT_PARSE_SAMPLES {
+            let mut argv = vec!["heddle", "--output", "json-compact"];
+            argv.extend_from_slice(sample.argv_tail);
+            let cli = Cli::try_parse_from(argv.clone())
+                .unwrap_or_else(|err| panic!("failed to parse sample {argv:?}: {err}"));
+            let runtime = command_runtime_contract_for_command(&cli.command);
+            assert!(
+                runtime.supports_json_compact
+                    || !expected_compact.contains(&runtime.display),
+                "`{}` accepts json-compact at parse time but lacks an explicit compact projection; main must reject it before command execution",
+                runtime.display
+            );
+            assert!(
+                runtime.supports_json || !runtime.supports_json_compact,
+                "`{}` cannot support json-compact without supporting json",
+                runtime.display
+            );
+        }
+    }
+
     fn contract_paths_with_children(
         entries: &[&'static CommandContractEntry],
     ) -> BTreeSet<Vec<&'static str>> {
@@ -5274,7 +5356,7 @@ mod tests {
             .iter()
             .find(|option| option.long.as_deref() == Some("output"))
             .expect("global --output should be included in command options");
-        assert_eq!(output.possible_values, vec!["json", "text"]);
+        assert_eq!(output.possible_values, vec!["json", "json-compact", "text"]);
         for command in &catalog.commands {
             assert!(
                 !command

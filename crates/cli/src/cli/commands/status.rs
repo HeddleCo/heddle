@@ -37,7 +37,7 @@ use super::{
         remote_tracking_with_verification_action, repository_setup_guidance,
         serialize_empty_action_as_null,
     },
-    next_action::{NextActionValidationContext, write_validated_json_stdout},
+    next_action::{NextActionValidationContext, write_command_json},
     operator_loop::primary_next_action_with_verification,
     snapshot::resolve_principal,
     thread::{
@@ -48,7 +48,7 @@ use super::{
 };
 use crate::{
     bridge::git_core::principal_is_default_unknown,
-    cli::{Cli, should_output_json, style, worktree_status_options},
+    cli::{Cli, output_is_compact, should_output_json, style, worktree_status_options},
     config::UserConfig,
     perf::{ProfileField, emit_profile, profile_enabled},
 };
@@ -105,6 +105,8 @@ pub(crate) struct StatusOutput {
     promotion_suggested: bool,
     impact_categories: Vec<ThreadImpactCategory>,
     heavy_impact_paths: Vec<String>,
+    #[serde(skip)]
+    changed_paths: Vec<String>,
     changed_path_count: usize,
     worktree_changed_path_count: usize,
     thread_changed_path_count: usize,
@@ -382,8 +384,9 @@ fn build_plain_git_status_probe(cli: &Cli) -> Result<Option<PlainGitStatusOutput
 
 fn render_plain_git_status(cli: &Cli, output: &PlainGitStatusOutput, short: bool) -> Result<()> {
     if should_output_json(cli, None) {
-        write_validated_json_stdout(
+        write_command_json(
             output,
+            output_is_compact(cli),
             NextActionValidationContext::without_repo(&["status"]),
         )?;
         return Ok(());
@@ -588,7 +591,8 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
             promotion_suggested: false,
             impact_categories: Vec::new(),
             heavy_impact_paths: Vec::new(),
-            changed_path_count: 0,
+            changed_paths: changes_paths(&changes).into_iter().collect(),
+            changed_path_count: changes_path_count(&changes),
             worktree_changed_path_count: changes_path_count(&changes),
             thread_changed_path_count: 0,
             blockers: if trust.verified {
@@ -819,6 +823,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
             .as_ref()
             .map(|thread| thread.heavy_impact_paths.clone())
             .unwrap_or_default(),
+        changed_paths: Vec::new(),
         changed_path_count: thread_summary
             .as_ref()
             .map(|thread| thread.changed_paths.len())
@@ -1035,6 +1040,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         // same thread/instant (heddle#306). The verification/dirty-worktree
         // blocker is a health signal, surfaced via `coordination_status` above.
         thread_state: output.thread_state,
+        changed_paths: changed_paths(thread_summary.as_ref(), &output.changes),
         changed_path_count: if trust.verified {
             changed_path_count(thread_summary.as_ref(), &output.changes)
         } else {
@@ -1078,11 +1084,55 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     Ok(output)
 }
 
+/// Project a `recommended_action` String into the compact
+/// `next_action` (+ template) pair: an empty action is the contract's
+/// "no action" and maps to `None` so the template is dropped too.
+fn compact_next_action(
+    recommended_action: &str,
+    template: &Option<super::command_catalog::ActionTemplate>,
+) -> (Option<String>, Option<super::command_catalog::ActionTemplate>) {
+    if recommended_action.trim().is_empty() {
+        (None, None)
+    } else {
+        (Some(recommended_action.to_string()), template.clone())
+    }
+}
+
+impl super::compact::CompactProjection for StatusOutput {
+    fn compact(&self) -> super::compact::CompactOutput {
+        let (next_action, next_action_template) =
+            compact_next_action(&self.recommended_action, &self.recommended_action_template);
+        let mut compact = super::compact::CompactOutput::new(self.output_kind);
+        compact.coordination_status = Some(self.coordination_status.clone());
+        compact.blockers = self.blockers.clone();
+        compact.next_action = next_action;
+        compact.next_action_template = next_action_template;
+        compact.changed_paths = Some(self.changed_paths.clone());
+        compact.changed_path_count = Some(self.changed_paths.len());
+        compact
+    }
+}
+
+impl super::compact::CompactProjection for PlainGitStatusOutput {
+    fn compact(&self) -> super::compact::CompactOutput {
+        let (next_action, next_action_template) =
+            compact_next_action(&self.recommended_action, &self.recommended_action_template);
+        let changed_paths: Vec<String> = changes_paths(&self.changes).into_iter().collect();
+        let mut compact = super::compact::CompactOutput::new(self.output_kind);
+        compact.next_action = next_action;
+        compact.next_action_template = next_action_template;
+        compact.changed_path_count = Some(changed_paths.len());
+        compact.changed_paths = Some(changed_paths);
+        compact
+    }
+}
+
 pub(crate) fn render_status(cli: &Cli, output: &StatusOutput, short: bool) -> Result<()> {
     let render_start = Instant::now();
     if output.render_json {
-        write_validated_json_stdout(
+        write_command_json(
             output,
+            output_is_compact(cli),
             NextActionValidationContext::new(&["status"], output.validation_capability),
         )?;
     } else if short {
@@ -1919,6 +1969,20 @@ fn changed_path_count(
     paths.extend(changes.added.iter().cloned());
     paths.extend(changes.deleted.iter().cloned());
     paths.len()
+}
+
+fn changed_paths(
+    thread: Option<&super::thread::ThreadSummary>,
+    changes: &ChangesInfo,
+) -> Vec<String> {
+    let mut paths = BTreeSet::new();
+    if let Some(thread) = thread {
+        paths.extend(thread.changed_paths.iter().cloned());
+    }
+    paths.extend(changes.modified.iter().cloned());
+    paths.extend(changes.added.iter().cloned());
+    paths.extend(changes.deleted.iter().cloned());
+    paths.into_iter().collect()
 }
 
 fn changes_path_count(changes: &ChangesInfo) -> usize {

@@ -19,8 +19,7 @@ use super::{
     },
     merge::{ThreadPreviewReport, build_thread_preview_report},
     next_action::{
-        NextActionInput, NextActionValidationContext, effective_next_action,
-        write_validated_json_stdout,
+        NextActionInput, NextActionValidationContext, effective_next_action, write_command_json,
     },
     operator_core::{
         OperatorCommandOutput, VerificationClaimPolicy, exit_if_blocked_operator_status,
@@ -31,7 +30,7 @@ use super::{
     thread_landing::land_local_command,
 };
 use crate::{
-    cli::{Cli, ReadyArgs, should_output_json, style, worktree_status_options},
+    cli::{Cli, ReadyArgs, output_is_compact, should_output_json, style, worktree_status_options},
     config::UserConfig,
 };
 
@@ -353,6 +352,7 @@ fn write_ready_output(cli: &Cli, repo: &Repository, output: &ReadyOutput) -> Res
     write_ready_output_inner(
         output,
         should_output_json(cli, Some(repo.config())),
+        output_is_compact(cli),
         NextActionValidationContext::new(&["ready"], repo.capability()),
     )
 }
@@ -361,17 +361,30 @@ fn write_ready_output_without_repo(cli: &Cli, output: &ReadyOutput) -> Result<()
     write_ready_output_inner(
         output,
         should_output_json(cli, None),
+        output_is_compact(cli),
         NextActionValidationContext::without_repo(&["ready"]),
     )
+}
+
+impl super::compact::CompactProjection for ReadyOutput {
+    fn compact(&self) -> super::compact::CompactOutput {
+        let mut compact = self.operator.compact();
+        compact.changed_paths = Some(self.report.changed_paths.clone());
+        compact.changed_path_count = Some(self.report.changed_path_count);
+        compact.conflicts = Some(self.report.conflicts.clone());
+        compact.conflict_count = Some(self.report.conflict_count);
+        compact
+    }
 }
 
 fn write_ready_output_inner(
     output: &ReadyOutput,
     json: bool,
+    compact: bool,
     context: NextActionValidationContext<'_>,
 ) -> Result<()> {
     if json {
-        write_validated_json_stdout(output, context)?;
+        write_command_json(output, compact, context)?;
     } else {
         let missing_intent = ready_blocked_by_missing_intent(output);
         if !missing_intent {

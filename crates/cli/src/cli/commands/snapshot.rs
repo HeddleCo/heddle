@@ -28,14 +28,14 @@ use super::{
         build_repository_verification_state, git_overlay_mutation_preflight_advice,
         plain_git_mutation_preflight_advice, unimported_git_history_advice,
     },
-    next_action::{NextActionValidationContext, write_validated_json_stdout},
+    next_action::{NextActionValidationContext, write_command_json},
     thread::find_active_thread_entry,
     thread_cmd::current_thread,
 };
 use crate::{
     attribution::clean_attribution_value,
     bridge::GitBridge,
-    cli::{Cli, should_output_json, style},
+    cli::{Cli, output_is_compact, should_output_json, style},
     config::UserConfig,
 };
 
@@ -64,6 +64,29 @@ pub(crate) struct SnapshotOutput {
     pub recommended_action_template: Option<ActionTemplate>,
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationState,
+}
+
+impl super::compact::CompactProjection for SnapshotOutput {
+    fn compact(&self) -> super::compact::CompactOutput {
+        let mut compact = super::compact::CompactOutput::new(self.output_kind);
+        compact.status = Some(self.status.to_string());
+        let action = self
+            .recommended_action
+            .as_ref()
+            .filter(|action| !action.trim().is_empty())
+            .map(|action| (action, &self.recommended_action_template))
+            .or_else(|| {
+                self.next_action
+                    .as_ref()
+                    .filter(|action| !action.trim().is_empty())
+                    .map(|action| (action, &self.next_action_template))
+            });
+        if let Some((action, template)) = action {
+            compact.next_action = Some(action.clone());
+            compact.next_action_template = template.clone();
+        }
+        compact
+    }
 }
 
 #[derive(Serialize)]
@@ -209,8 +232,9 @@ pub async fn cmd_snapshot(
     }
 
     if as_json {
-        write_validated_json_stdout(
+        write_command_json(
             &output,
+            output_is_compact(cli),
             NextActionValidationContext::new(&["capture"], repo.capability()),
         )?;
     } else {

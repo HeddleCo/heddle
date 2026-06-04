@@ -33,7 +33,7 @@ use super::{
         override_trust_recommended_action, plain_git_mutation_preflight_advice,
         repository_verification_blocked_advice,
     },
-    next_action::{NextActionValidationContext, write_validated_json_stdout},
+    next_action::{NextActionValidationContext, write_full_command_json},
     snapshot::{
         SnapshotAgentOverrides, create_snapshot, create_snapshot_from_tree,
         preflight_large_capture_for_compat_commit, resolve_principal,
@@ -1186,7 +1186,7 @@ fn render_commit_compat(
     repository_capability: RepositoryCapability,
 ) -> Result<()> {
     if json {
-        write_validated_json_stdout(
+        write_full_command_json(
             output,
             NextActionValidationContext::new(&["commit"], repository_capability),
         )?;

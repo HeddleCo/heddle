@@ -48,9 +48,12 @@ pub struct Cli {
     pub command: Commands,
 
     /// Output format. Default is `text`. Pass `--output json` for the
-    /// machine contract (stable `output_kind`, exit codes, recovery
-    /// templates). No TTY/pipe auto-detection — the default never
-    /// switches under you.
+    /// full machine contract (stable `output_kind`, exit codes, recovery
+    /// templates), or `--output json-compact` for the decision surface
+    /// only (`output_kind`, `status`/`coordination_status`, `blockers`,
+    /// `next_action`, `changed_paths`, `conflicts`) — fewer tokens, same
+    /// `output_kind` so callers can still dispatch. No TTY/pipe
+    /// auto-detection — the default never switches under you.
     #[arg(long, global = true, value_enum)]
     pub output: Option<OutputMode>,
 
@@ -101,8 +104,11 @@ impl Cli {
     }
 }
 
-#[derive(Copy, Clone, Debug, ValueEnum)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum OutputMode {
     Json,
+    /// JSON, but only the decision-surface fields (heddle#470). Renders
+    /// as `--output json-compact` on the CLI.
+    JsonCompact,
     Text,
 }

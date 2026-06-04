@@ -244,6 +244,14 @@ async fn async_main() -> Result<()> {
         print_error_with_hint(&cli, &err);
         std::process::exit(HeddleExitCode::Usage.into());
     }
+    if cli::cli::output_is_compact(&cli) && !command_contract.supports_json_compact {
+        telemetry.shutdown();
+        let err = anyhow::anyhow!(
+            cli::cli::commands::RecoveryAdvice::json_compact_unsupported(&command_name)
+        );
+        print_error_with_hint(&cli, &err);
+        std::process::exit(HeddleExitCode::Usage.into());
+    }
 
     match run_local_idempotency_if_requested(&cli, &command_name, command_supports_op_id) {
         Ok(true) => {
@@ -1028,7 +1036,10 @@ fn global_arg_takes_value(arg: &Arg) -> bool {
 }
 
 fn explicit_json_requested(cli: &Cli) -> bool {
-    matches!(cli.output, Some(cli::cli::OutputMode::Json))
+    matches!(
+        cli.output,
+        Some(cli::cli::OutputMode::Json | cli::cli::OutputMode::JsonCompact)
+    )
 }
 
 fn is_plain_git_without_heddle(start: &std::path::Path) -> bool {

@@ -39,7 +39,7 @@ use super::{
     next_action::{
         NextActionInput, NextActionValidationContext, effective_next_action,
         thread_recovery_action_is_primary as shared_thread_recovery_action_is_primary,
-        write_validated_json_stdout,
+        write_full_command_json,
     },
     operator_loop::{primary_next_action, primary_next_action_with_verification},
     snapshot::{ensure_current_state, summarize_confidence, summarize_verification},
@@ -1306,7 +1306,7 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
     };
 
     if as_json {
-        write_validated_json_stdout(
+        write_full_command_json(
             &output,
             NextActionValidationContext::new(&["thread", "list"], repo.capability()),
         )?;
@@ -2512,7 +2512,10 @@ pub(crate) fn cmd_thread_current(cli: &Cli, repo: &Repository) -> Result<()> {
     // stdout is piped — would be actively counterproductive here. Match
     // `thread cd` and emit plain text by default; only honor an
     // *explicit* request for JSON.
-    let explicit_json = matches!(cli.output, Some(crate::cli::OutputMode::Json));
+    let explicit_json = matches!(
+        cli.output,
+        Some(crate::cli::OutputMode::Json | crate::cli::OutputMode::JsonCompact)
+    );
     if explicit_json {
         #[derive(Serialize)]
         struct CurrentOutput<'a> {
@@ -2907,7 +2910,7 @@ pub(crate) fn show_thread_summary(
             recovery_commands: trust.recovery_commands.clone(),
             trust,
         };
-        write_validated_json_stdout(
+        write_full_command_json(
             &output,
             NextActionValidationContext::new(&["thread", "show"], repo.capability()),
         )?;
