@@ -444,10 +444,14 @@ fn apply_commit(
     )
     .with_status(commit_state.status);
 
-    let new_state = copy_state_metadata(new_state, commit_state);
+    let mut new_state = copy_state_metadata(new_state, commit_state);
 
     let new_state_id = new_state.change_id;
-    repo.store().put_state(&new_state)?;
+    // Authored-state chokepoint (heddle#482): a rebase replay re-authors the
+    // commit onto a new base (new tree + new parent) — a new author-created
+    // state — so it is auto-signed rather than carrying the pre-rebase
+    // signature forward.
+    repo.put_authored_state(&mut new_state)?;
     let advance = ff_advance_deferred(
         repo,
         REBASE_REPLAY_SOURCE,
@@ -560,10 +564,14 @@ fn apply_tree_to_worktree(
             .unwrap_or_else(|| "rebase".to_string()),
     )
     .with_status(commit_state.status);
-    let new_state = copy_state_metadata(new_state, commit_state);
+    let mut new_state = copy_state_metadata(new_state, commit_state);
 
     let new_state_id = new_state.change_id;
-    repo.store().put_state(&new_state)?;
+    // Authored-state chokepoint (heddle#482): a rebase replay re-authors the
+    // commit onto a new base (new tree + new parent) — a new author-created
+    // state — so it is auto-signed rather than carrying the pre-rebase
+    // signature forward.
+    repo.put_authored_state(&mut new_state)?;
     let advance = ff_advance_deferred(
         repo,
         REBASE_REPLAY_SOURCE,

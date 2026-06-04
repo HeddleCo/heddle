@@ -336,8 +336,14 @@ pub(crate) fn build_context_state(
 }
 
 pub(crate) fn apply_new_state(repo: &Repository, state: &State) -> Result<()> {
-    repo.store().put_state(state)?;
-    advance_head(repo, state)?;
+    // Authored-state chokepoint (heddle#482): a context annotation advances
+    // HEAD to a new author-created state, so it is auto-signed like a capture.
+    // Sign a local copy (signing only adds `.signature`; `change_id` and every
+    // other field are unchanged) so callers that reuse `state.change_id`
+    // afterward still see the right id.
+    let mut signed = state.clone();
+    repo.put_authored_state(&mut signed)?;
+    advance_head(repo, &signed)?;
     Ok(())
 }
 

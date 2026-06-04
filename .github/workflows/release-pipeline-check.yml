@@ -103,3 +103,16 @@ jobs:
 
       - name: Assert no cross-crate publish-first snapshot regressions
         run: bash scripts/check-snapshot-atomicity.sh
+
+  authored-states-signed:
+    name: authored states sign via chokepoint (heddle#482)
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # Pure-bash grep guard: a new authored-state writer under the CLI
+      # command tree must route through Repository::put_authored_state
+      # (auto-signs), never store().put_state directly. Closes the
+      # signing coverage-leak class (heddle#482 r2).
+      - name: Assert no authored-state signing-chokepoint bypasses
+        run: bash scripts/check-authored-states-signed.sh

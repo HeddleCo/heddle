@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Fork command: create exploration branch.
 
-use objects::store::ObjectStore;
 use anyhow::Result;
 use objects::object::{State, ThreadName};
 use oplog::OpRecord;
@@ -66,8 +65,11 @@ pub fn cmd_fork(cli: &Cli, name: Option<String>, from: Option<String>) -> Result
         new_state = new_state.with_intent(format!("Fork from {}", source_state.change_id.short()));
     }
 
-    // Store the new state (orphan until a ref points at it).
-    repo.store().put_state(&new_state)?;
+    // Store the new state (orphan until a ref points at it). Route through the
+    // authored-state chokepoint (heddle#482) so the fork is auto-signed like
+    // every other authored capture — a fork is a new author-created state, not
+    // a replay of an existing signed one.
+    repo.put_authored_state(&mut new_state)?;
 
     // Build the atomic ref batch + its matching `Fork` record, then publish
     // record-first through the write chokepoint (heddle#330 §2.2): the oplog

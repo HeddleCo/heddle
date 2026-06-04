@@ -16,19 +16,24 @@ impl Repository {
         self.heddle_dir().join(crate::identity::LOCAL_IDENTITY_FILE)
     }
 
-    /// Resolve — and cache for this handle's lifetime — the machine signing
-    /// key: the device key if `heddle auth login` has linked one, otherwise
-    /// the auto-minted per-repo local key. Returns `None` only when no key can
-    /// be produced (e.g. an unwritable home), in which case captures proceed
-    /// unsigned and surface that status.
+    /// Resolve the machine signing key for THIS sign attempt: the device key
+    /// if `heddle auth login` has linked one, otherwise the auto-minted
+    /// per-repo local key. Returns `None` only when no key can be produced
+    /// (e.g. an unwritable home, or — fail-closed — an identity file whose
+    /// permissions have been loosened to group/world-readable), in which case
+    /// captures proceed unsigned and surface that status.
+    ///
+    /// Deliberately NOT cached (heddle#482): the identity file's permissions
+    /// are re-validated by `resolve_signer` on every call, so a mid-session
+    /// `chmod` that exposes the private key makes the very next sign fail
+    /// closed instead of reusing a signer minted while the file was still
+    /// `0600`. A long-lived handle (e.g. the mount path) therefore can't keep
+    /// signing with a now-exposed key. Resolution is a small file read + PEM
+    /// parse — negligible against the tree/blob writes a capture already does.
     pub(crate) fn signing_signer(&self) -> Option<Arc<dyn Signer>> {
-        self.signing_signer_cache
-            .get_or_init(|| {
-                let local = self.local_identity_path();
-                let device = crate::identity::device_identity_path();
-                crate::identity::resolve_signer(&local, &device).map(Arc::from)
-            })
-            .clone()
+        let local = self.local_identity_path();
+        let device = crate::identity::device_identity_path();
+        crate::identity::resolve_signer(&local, &device).map(Arc::from)
     }
 
     /// Best-effort auto-sign on the capture/commit/merge path (heddle#482).
@@ -48,14 +53,24 @@ impl Repository {
         }
     }
 
-    /// The capture-path chokepoint (heddle#482): auto-sign (best-effort) then
-    /// persist a freshly built capture/commit/merge `State`. Every state-write
-    /// path that records a *new author capture* — in this crate AND the `mount`
-    /// crate — routes through here, so none can store a state unsigned. Signing
-    /// is the last mutation before the write, so the signature covers the final
-    /// field set. (The raw `store.put_state` remains for non-capture writes:
-    /// re-signing an existing state, seeding init, and tests.)
-    pub fn record_captured_state(&self, state: &mut State) -> Result<()> {
+    /// The authored-state write chokepoint (heddle#482): auto-sign
+    /// (best-effort) then persist a freshly authored `State`. EVERY writer that
+    /// records a *new authored state* routes through here — capture/snapshot,
+    /// merge, mount capture, thread materialize, fork, collapse, context
+    /// annotation, and both rebase replay paths, across this crate AND the
+    /// `mount`/`cli` crates — so no authored state can reach the store
+    /// unsigned. Signing is the LAST mutation before the write, so the
+    /// signature covers the final field set; any later change would invalidate
+    /// it.
+    ///
+    /// Non-authored writes deliberately do NOT use this path — they keep their
+    /// existing signature (or stay legitimately unsigned) rather than minting a
+    /// fresh one: replaying/transferring an already-signed state
+    /// (`put_state_serialized`, sync/packfile ops), the synthetic init root
+    /// (`seed_default_thread`), git-import of foreign history, and server-side
+    /// review/signal mutations. Re-signing those would either clobber an
+    /// existing signature or falsely attribute foreign content to this device.
+    pub fn put_authored_state(&self, state: &mut State) -> Result<()> {
         self.sign_state_best_effort(state);
         self.store.put_state(state)?;
         Ok(())
@@ -450,6 +465,72 @@ mod tests {
                 repo.verify_state_signature(&state.change_id)
                     .expect("verify"),
                 SignatureStatus::Unsigned,
+            );
+        });
+    }
+
+    /// The permission gate is re-checked before EVERY sign (heddle#482): a
+    /// signer minted while the identity file was `0600` must NOT survive a
+    /// mid-session `chmod` that exposes the key. The pre-fix handle cached the
+    /// signer on first capture, so a later capture on the same handle kept
+    /// signing with the now-readable key — this test fails closed instead.
+    #[cfg(unix)]
+    #[test]
+    fn perm_loosening_mid_session_fails_closed_without_cached_signer() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = TempDir::new().expect("home temp");
+        with_signing_home(home.path(), || {
+            let (temp, repo) = setup_repo();
+            let identity = temp.path().join(".heddle").join("identity.toml");
+
+            // First capture on this handle mints the 0600 local key and signs.
+            std::fs::write(temp.path().join("a.txt"), "a").expect("write");
+            let first = repo.snapshot(Some("a".to_string()), None).expect("capture a");
+            assert!(
+                first.signature.is_some(),
+                "first capture signs with the freshly-minted 0600 key",
+            );
+            assert_eq!(
+                std::fs::metadata(&identity)
+                    .expect("identity metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600,
+            );
+
+            // Mid-session a restore/chmod exposes the private key.
+            std::fs::set_permissions(&identity, std::fs::Permissions::from_mode(0o644))
+                .expect("loosen perms");
+
+            // The SAME handle must refuse to reuse a cached signer: the gate is
+            // re-validated per sign, so this capture is unsigned-but-marked.
+            std::fs::write(temp.path().join("b.txt"), "b").expect("write");
+            let exposed = repo.snapshot(Some("b".to_string()), None).expect("capture b");
+            assert!(
+                exposed.signature.is_none(),
+                "an exposed key must make the next sign fail closed, not reuse a cached signer",
+            );
+            assert_eq!(
+                repo.verify_state_signature(&exposed.change_id)
+                    .expect("verify"),
+                SignatureStatus::Unsigned,
+            );
+
+            // Re-securing the key restores signing on the very same handle.
+            std::fs::set_permissions(&identity, std::fs::Permissions::from_mode(0o600))
+                .expect("re-secure perms");
+            std::fs::write(temp.path().join("c.txt"), "c").expect("write");
+            let resecured = repo.snapshot(Some("c".to_string()), None).expect("capture c");
+            assert!(
+                resecured.signature.is_some(),
+                "re-securing the key lets the same handle sign again",
+            );
+            assert_eq!(
+                repo.verify_state_signature(&resecured.change_id)
+                    .expect("verify"),
+                SignatureStatus::Valid,
             );
         });
     }

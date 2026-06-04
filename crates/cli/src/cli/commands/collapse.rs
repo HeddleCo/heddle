@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Collapse command: squash multiple states into one.
 
-use objects::store::ObjectStore;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -90,8 +89,10 @@ pub fn cmd_collapse(
         new_state = new_state.with_confidence(conf);
     }
 
-    // Store the new state
-    repo.store().put_state(&new_state)?;
+    // Store the new state through the authored-state chokepoint (heddle#482):
+    // a collapse mints a new author-created state, so it is auto-signed like a
+    // capture rather than carrying any source state's signature forward.
+    repo.put_authored_state(&mut new_state)?;
     if !json {
         eprintln!("Writing collapsed state {}...", new_state.change_id.short());
     }

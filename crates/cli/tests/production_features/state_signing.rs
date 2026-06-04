@@ -1,8 +1,178 @@
 // SPDX-License-Identifier: Apache-2.0
 use crypto::{Ed25519Signer, P256Signer, RsaSigner, Signer, SignerError};
 use objects::store::ObjectStore;
+use serial_test::serial;
 
 use super::*;
+
+/// Run `heddle` with a pinned `HEDDLE_HOME` (so no device identity leaks in
+/// from the dev's real home) and a fixed principal. Auto-signing then resolves
+/// the per-repo local identity, minted on first capture.
+fn heddle_signed(
+    args: &[&str],
+    cwd: &std::path::Path,
+    home: &std::path::Path,
+) -> Result<String, String> {
+    heddle_with_env(
+        args,
+        Some(cwd),
+        &[
+            ("HEDDLE_HOME", home.to_str().expect("home utf8")),
+            ("HEDDLE_PRINCIPAL_NAME", "Sign Test"),
+            ("HEDDLE_PRINCIPAL_EMAIL", "sign@heddle.dev"),
+        ],
+    )
+}
+
+/// Assert the repo's current HEAD state carries a valid auto-signature. This
+/// is the conformance gate: it fails for ANY authored writer that reaches the
+/// store without routing through the signing chokepoint (heddle#482).
+fn assert_head_signed(path: &std::path::Path, what: &str) {
+    let repo = repo::Repository::open(path).expect("open repo");
+    let head = repo
+        .current_state()
+        .expect("current state")
+        .expect("repo has a HEAD state");
+    assert!(
+        head.signature.is_some(),
+        "{what}: authored HEAD state {} must be auto-signed, not stored unsigned",
+        head.change_id.short(),
+    );
+    assert_eq!(
+        repo.verify_state_signature(&head.change_id)
+            .expect("verify"),
+        crypto::SignatureStatus::Valid,
+        "{what}: the auto-signature on the HEAD state must verify",
+    );
+}
+
+/// Coverage conformance (heddle#482): drive each production command that
+/// produces a new *authored* state and assert the resulting HEAD state is
+/// signed + verifies. Because signing is lifted to the repo-layer chokepoint
+/// (`Repository::put_authored_state`), a future writer that bypasses it —
+/// reaching `store().put_state` directly for an authored state — makes the
+/// matching arm below fail, so the regression can't merge.
+///
+/// `capture`, `fork`, `collapse`, `context set`, `rebase`, and `merge` are
+/// exercised here. Mount capture routes through the same chokepoint and is
+/// covered by `crates/mount` tests + the repo-level signing unit tests (it
+/// needs a FUSE mount this subprocess harness can't stand up).
+#[test]
+#[serial]
+fn authored_commands_auto_sign_their_states() {
+    // capture / commit
+    {
+        let temp = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        heddle_signed(&["init"], temp.path(), home.path()).unwrap();
+        fs::write(temp.path().join("f.txt"), "x").unwrap();
+        heddle_signed(&["capture", "-m", "c"], temp.path(), home.path()).unwrap();
+        assert_head_signed(temp.path(), "capture");
+    }
+
+    // fork (creates a new authored state on a new thread)
+    {
+        let temp = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        heddle_signed(&["init"], temp.path(), home.path()).unwrap();
+        fs::write(temp.path().join("f.txt"), "x").unwrap();
+        heddle_signed(&["capture", "-m", "base"], temp.path(), home.path()).unwrap();
+        heddle_signed(&["fork", "--name", "explore"], temp.path(), home.path()).unwrap();
+        assert_head_signed(temp.path(), "fork");
+    }
+
+    // collapse (squash two states into one authored state)
+    {
+        let temp = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        heddle_signed(&["init"], temp.path(), home.path()).unwrap();
+        fs::write(temp.path().join("f.txt"), "one").unwrap();
+        heddle_signed(&["capture", "-m", "first"], temp.path(), home.path()).unwrap();
+        fs::write(temp.path().join("f.txt"), "two").unwrap();
+        heddle_signed(&["capture", "-m", "second"], temp.path(), home.path()).unwrap();
+
+        let repo = repo::Repository::open(temp.path()).unwrap();
+        let head = repo.current_state().unwrap().unwrap();
+        let first = head.parents[0];
+        heddle_signed(
+            &[
+                "collapse",
+                &first.to_string_full(),
+                &head.change_id.to_string_full(),
+                "--into",
+                "combined",
+            ],
+            temp.path(),
+            home.path(),
+        )
+        .unwrap();
+        assert_head_signed(temp.path(), "collapse");
+    }
+
+    // context set (annotation advances HEAD to a new authored state)
+    {
+        let temp = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        heddle_signed(&["init"], temp.path(), home.path()).unwrap();
+        fs::write(temp.path().join("f.txt"), "code\n").unwrap();
+        heddle_signed(&["capture", "-m", "base"], temp.path(), home.path()).unwrap();
+        heddle_signed(
+            &["context", "set", "--path", "f.txt", "-m", "why this exists"],
+            temp.path(),
+            home.path(),
+        )
+        .unwrap();
+        assert_head_signed(temp.path(), "context set");
+    }
+
+    // rebase (replay re-authors commits onto a new base)
+    {
+        let temp = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        heddle_signed(&["init"], temp.path(), home.path()).unwrap();
+        fs::write(temp.path().join("base.txt"), "base").unwrap();
+        heddle_signed(&["capture", "-m", "Base"], temp.path(), home.path()).unwrap();
+
+        heddle_signed(&["thread", "create", "feature"], temp.path(), home.path()).unwrap();
+        heddle_signed(&["thread", "switch", "feature"], temp.path(), home.path()).unwrap();
+        fs::write(temp.path().join("a1.txt"), "a1").unwrap();
+        heddle_signed(&["capture", "-m", "A1"], temp.path(), home.path()).unwrap();
+
+        heddle_signed(&["thread", "switch", "main"], temp.path(), home.path()).unwrap();
+        fs::write(temp.path().join("b1.txt"), "b1").unwrap();
+        heddle_signed(&["capture", "-m", "B1"], temp.path(), home.path()).unwrap();
+
+        heddle_signed(&["thread", "switch", "feature"], temp.path(), home.path()).unwrap();
+        heddle_signed(&["rebase", "main"], temp.path(), home.path()).unwrap();
+        assert_head_signed(temp.path(), "rebase replay");
+    }
+
+    // merge (a two-parent merge state is itself authored)
+    {
+        let temp = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        heddle_signed(&["init"], temp.path(), home.path()).unwrap();
+        fs::write(temp.path().join("base.txt"), "base").unwrap();
+        heddle_signed(&["capture", "-m", "Base"], temp.path(), home.path()).unwrap();
+
+        heddle_signed(&["thread", "create", "feature"], temp.path(), home.path()).unwrap();
+        heddle_signed(&["thread", "switch", "feature"], temp.path(), home.path()).unwrap();
+        fs::write(temp.path().join("feat.txt"), "feature").unwrap();
+        heddle_signed(&["capture", "-m", "Feature"], temp.path(), home.path()).unwrap();
+
+        heddle_signed(&["thread", "switch", "main"], temp.path(), home.path()).unwrap();
+        fs::write(temp.path().join("main.txt"), "main").unwrap();
+        heddle_signed(&["capture", "-m", "Main"], temp.path(), home.path()).unwrap();
+
+        // Stale threads must refresh before merge (harness invariant); refresh
+        // feature against main, then merge it back into main.
+        heddle_signed(&["thread", "switch", "feature"], temp.path(), home.path()).unwrap();
+        heddle_signed(&["thread", "refresh", "feature"], temp.path(), home.path()).unwrap();
+        heddle_signed(&["thread", "switch", "main"], temp.path(), home.path()).unwrap();
+        heddle_signed(&["merge", "feature"], temp.path(), home.path()).unwrap();
+        assert_head_signed(temp.path(), "merge");
+    }
+}
 
 #[test]
 fn test_sign_verify_ed25519() {
