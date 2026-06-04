@@ -259,7 +259,7 @@ fn resume_manual_resolution_if_present(
     // normal `apply_commit` arm there is no `ff_advance_deferred` call
     // to buffer the corresponding FF (or `Goto`) into the rebase batch.
     // Without folding it in here, the batch's last FF points at the
-    // pre-conflict commit's rebased tip; `heddle undo --redo` then replays
+    // pre-conflict commit's rebased tip; `heddle redo` then replays
     // only the recorded FFs and lands one commit short of the actual
     // post-rebase tip. Append the implicit advance before bumping
     // `current_index` so the batch envelope reflects the full rebase

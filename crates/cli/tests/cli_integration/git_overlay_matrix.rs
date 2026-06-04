@@ -2688,7 +2688,7 @@ fn git_overlay_matrix_undo_after_push_recommends_publish_undo_not_pull() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|command| command == "heddle undo --redo"),
+            .any(|command| command == "heddle redo"),
         "undo should also name the restore-the-work option: {undo}"
     );
 
@@ -6251,7 +6251,7 @@ fn git_overlay_matrix_ship_undo_restores_git_and_heddle_together() {
 
     std::fs::write(temp.path().join("local-dirty.txt"), "local dirty\n").unwrap();
     let redo_refusal =
-        heddle_output(&["--output", "json", "undo", "--redo"], Some(temp.path())).expect("redo should run");
+        heddle_output(&["--output", "json", "redo"], Some(temp.path())).expect("redo should run");
     assert!(!redo_refusal.status.success(), "dirty redo should refuse");
     let stderr = String::from_utf8_lossy(&redo_refusal.stderr);
     let envelope: Value = serde_json::from_str(stderr.trim())
@@ -6268,7 +6268,7 @@ fn git_overlay_matrix_ship_undo_restores_git_and_heddle_together() {
     );
 
     std::fs::remove_file(temp.path().join("local-dirty.txt")).unwrap();
-    let redo = json(temp.path(), &["--output", "json", "undo", "--redo"]);
+    let redo = json(temp.path(), &["--output", "json", "redo"]);
     assert_eq!(redo["action"], "redo");
     assert_eq!(redo["status"], "completed");
     assert_eq!(redo["verification"]["verified"], true);

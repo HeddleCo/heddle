@@ -2046,6 +2046,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
+    entry(
+        // `redo` is the symmetric inverse of `undo`, a standalone top-level verb
+        // again after the heddle#473 phase-1 re-split. It emits exactly one
+        // output_kind — `redo` — schema-backed by `UndoSchema` (shared payload
+        // shape with `undo`).
+        &["redo"],
+        json_discriminators(
+            documented_schemas(WORKTREE_MUTATION, &["redo"]),
+            &[json_discriminator(Some("redo"), "output_kind", "redo")],
+        ),
+    ),
     entry(&["remote"], surface(GROUP, "native")),
     entry(
         &["remote", "list"],
@@ -2453,18 +2464,18 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["undo"],
         front_door(
             json_discriminators(
-                // `undo` folded the former `redo` verb (heddle#473 phase 1) and
-                // its own `--list` history view, so one command path now emits
-                // THREE output_kinds: `undo` (the default rewind / `--preview`),
-                // `redo` (`--redo`), and `undo_list` (`--list`). Every kind the
-                // handler can emit must be advertised here or an agent that
-                // validates responses via `heddle commands --output json` rejects
-                // the off-contract record. `redo` shares `undo`'s payload shape
-                // (`UndoSchema`); `undo --list` has its own `UndoListSchema`.
-                documented_schemas(WORKTREE_MUTATION, &["undo", "redo", "undo --list"]),
+                // `undo` keeps its own `--list` history view, so this one command
+                // path emits TWO output_kinds: `undo` (the default rewind /
+                // `--preview`) and `undo_list` (`--list`). The former `redo` verb
+                // is its own top-level command again (heddle#473 phase 1 re-split),
+                // so `redo` is advertised on the `redo` entry below, not here.
+                // Every kind the handler can emit must be advertised or an agent
+                // validating responses via `heddle commands --output json` rejects
+                // the off-contract record. `undo --list` has its own
+                // `UndoListSchema`.
+                documented_schemas(WORKTREE_MUTATION, &["undo", "undo --list"]),
                 &[
                     json_discriminator(Some("undo"), "output_kind", "undo"),
-                    json_discriminator(Some("redo"), "output_kind", "redo"),
                     json_discriminator(Some("undo --list"), "output_kind", "undo_list"),
                 ],
             ),
@@ -3910,6 +3921,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         },
         Commands::Revert(_) => vec!["revert"],
         Commands::Undo(_) => vec!["undo"],
+        Commands::Redo(_) => vec!["redo"],
         Commands::Fork { .. } => vec!["fork"],
         Commands::Collapse(_) => vec!["collapse"],
         Commands::Marker { command } => match command {
@@ -4311,6 +4323,7 @@ mod tests {
             &["redact", "trust", "remove"],
             &["redact", "trust", "remove", "abcd"],
         ),
+        sample(&["redo"], &["redo"]),
         sample(&["remote", "list"], &["remote", "list"]),
         sample(
             &["remote", "add"],
@@ -5196,6 +5209,7 @@ mod tests {
                 "redact trust add",
                 "redact trust list",
                 "redact trust remove",
+                "redo",
                 "revert",
                 "review show",
                 "review sign",
@@ -5208,11 +5222,11 @@ mod tests {
                 "thread list",
                 "thread show",
                 "verify",
-                // `undo` advertises three output_kinds on one command path —
-                // `undo`, `redo` (folded from the former `redo` verb), and
-                // `undo_list` (`--list`) — so its path appears three times,
-                // mirroring how `clone` appears twice above. See heddle#473.
-                "undo",
+                // `undo` advertises two output_kinds on one command path —
+                // `undo` and `undo_list` (`--list`) — so its path appears twice,
+                // mirroring how `clone` appears twice above. The former `redo`
+                // verb is its own top-level entry again (`redo`, above). See
+                // heddle#473.
                 "undo",
                 "undo",
                 "workspace show",

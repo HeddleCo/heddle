@@ -16,7 +16,7 @@ use super::{
         ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AdoptArgs,
         AttemptArgs, BranchArgs, CloneArgs, CollapseArgs, CommandCatalogArgs, CommitArgs,
         DelegateArgs, DiffArgs, DoctorArgs, InitArgs, LogArgs, MergeArgs, PullArgs,
-        PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionEndArgs,
+        PushArgs, ReadyArgs, RedoArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionEndArgs,
         SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, LandArgs,
         SnapshotArgs, SwitchArgs, SyncArgs, ThreadStartArgs, TryArgs, UndoArgs, WatchArgs,
     },
@@ -371,8 +371,11 @@ Examples:
     /// Revert changes from a state.
     Revert(RevertArgs),
 
-    /// Undo the last Heddle operation, or redo a previously undone one with `--redo`.
+    /// Undo the last Heddle operation.
     Undo(UndoArgs),
+
+    /// Redo a previously undone operation.
+    Redo(RedoArgs),
 
     /// Fork an exploration thread from a state.
     Fork {

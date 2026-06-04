@@ -1893,7 +1893,7 @@ impl AtomicMutation for UndoOp {
     }
 }
 
-/// Root composite for `heddle undo --redo`: nest one [`ApplyRedoBatch`] per batch. No
+/// Root composite for `heddle redo`: nest one [`ApplyRedoBatch`] per batch. No
 /// recovery child (redo restores the pre-undo state the recovery pointer was
 /// captured against).
 pub(super) struct RedoOp {

@@ -4890,7 +4890,7 @@ fn empty_undo_redo_refuse_with_typed_advice() {
             "Nothing to undo",
         ),
         (
-            &["--output", "json", "undo", "--redo"][..],
+            &["--output", "json", "redo"][..],
             "nothing_to_redo",
             "Nothing to redo",
         ),

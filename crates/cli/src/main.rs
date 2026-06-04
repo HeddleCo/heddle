@@ -16,8 +16,8 @@ use cli::{
     cli::{
         ActorCommands, AgentCommands, Cli, CloneArgs, CollapseArgs, Commands, ContextCommands,
         DaemonCommands, DiagnoseArgs, DiffArgs, LogArgs, MergeArgs, ResolveArgs, RetroArgs,
-        RevertArgs, RunArgs, SessionCommands, SessionEndArgs, SessionListArgs, SessionSegmentArgs,
-        SessionShowArgs, SessionStartArgs, UndoArgs,
+        RedoArgs, RevertArgs, RunArgs, SessionCommands, SessionEndArgs, SessionListArgs,
+        SessionSegmentArgs, SessionShowArgs, SessionStartArgs, UndoArgs,
         cli_args::{DelegateArgs, LandArgs, SyncArgs},
         commands::{
             LogCommandOptions, RetroCommandOptions, SnapshotAgentOverrides, build_command_catalog,
@@ -513,18 +513,13 @@ async fn async_main() -> Result<()> {
 
         Commands::Undo(UndoArgs {
             steps,
-            redo,
             list,
             depth,
             preview,
             allow_redact_undo,
-        }) => {
-            if *redo {
-                cmd_redo(&cli, *steps, *preview)
-            } else {
-                cmd_undo(&cli, *steps, *list, *depth, *preview, *allow_redact_undo)
-            }
-        }
+        }) => cmd_undo(&cli, *steps, *list, *depth, *preview, *allow_redact_undo),
+
+        Commands::Redo(RedoArgs { steps, preview }) => cmd_redo(&cli, *steps, *preview),
 
         Commands::Fetch { remote, all } => cmd_fetch(&cli, remote.clone(), *all).await,
 

@@ -54,6 +54,7 @@ const SWEPT: &[&str] = &[
     "clone",
     "diff",
     "undo",
+    "redo",
     "thread list",
     "thread show",
     "workspace show",
@@ -1068,7 +1069,7 @@ fn runtime_emits_output_kind_for_invokable_swept_verbs() {
 }
 
 /// The set of `output_kind` values the catalog advertises for one command
-/// display path (a command MAY advertise several — `undo` advertises three,
+/// display path (a command MAY advertise several — `undo` advertises two,
 /// `clone` two).
 fn advertised_output_kinds(display: &str) -> BTreeSet<String> {
     catalog_output_kind_discriminators()
@@ -1099,33 +1100,37 @@ fn emitted_output_kind(argv: &[&str], dir: &std::path::Path) -> String {
         .to_string()
 }
 
-/// Close-the-class guard for the heddle#473 verb folds: a command that folds a
-/// former sibling verb into a flag (e.g. `redo` → `undo --redo`) gains EXTRA
-/// `output_kind` values on the SAME command path. Every such value must be in
-/// that command's advertised catalog discriminator set, or an agent that
-/// validates responses against `heddle commands --output json` rejects the
-/// off-contract record.
+/// Close-the-class guard for the heddle#473 verb consolidation: a command can
+/// emit MORE than one `output_kind` from a single command path — `undo` emits
+/// `undo` (the rewind / `--preview`) and `undo_list` (`--list`). Every value a
+/// handler can emit must be in that command's advertised catalog discriminator
+/// set, or an agent that validates responses against `heddle commands --output
+/// json` rejects the off-contract record.
+///
+/// `redo` is its own top-level verb again (re-split from the brief `undo --redo`
+/// fold), so it owns the `redo` output_kind 1:1 — driven here too so a future
+/// re-fold that forgets to register a kind fails CI.
 ///
 /// The static catalog tests above only confirm the *first* `output_kind`
 /// discriminator matches the display path; they cannot see the alternate kinds
-/// a `--flag` path emits. This test drives every JSON-emitting flag variant of a
-/// folded verb and asserts the emitted kind is advertised — so a future fold
-/// that forgets to register a kind fails CI here.
+/// a `--flag` path emits. This test drives every JSON-emitting variant and
+/// asserts the emitted kind is advertised for the command that produced it.
 ///
-/// Pre-fix (only `undo` advertised) this failed on `undo --list` (`undo_list`)
-/// and `undo --redo` (`redo`); post-fix all three are advertised.
-///
-/// New multi-`output_kind` command paths MUST add their flag variants below.
+/// New multi-`output_kind` command paths MUST add their variants below.
 #[test]
 fn folded_verb_flag_variants_emit_only_advertised_output_kinds() {
-    let advertised = advertised_output_kinds("undo");
+    let undo_advertised = advertised_output_kinds("undo");
     assert!(
-        advertised.is_superset(&BTreeSet::from([
+        undo_advertised.is_superset(&BTreeSet::from([
             "undo".to_string(),
-            "redo".to_string(),
             "undo_list".to_string(),
         ])),
-        "catalog must advertise all three undo output_kinds; advertised: {advertised:?}"
+        "catalog must advertise both undo output_kinds; advertised: {undo_advertised:?}"
+    );
+    let redo_advertised = advertised_output_kinds("redo");
+    assert!(
+        redo_advertised.is_superset(&BTreeSet::from(["redo".to_string()])),
+        "catalog must advertise the redo output_kind; advertised: {redo_advertised:?}"
     );
 
     // Fixture with redo-able history: two commits, so an `undo` leaves exactly
@@ -1136,17 +1141,19 @@ fn folded_verb_flag_variants_emit_only_advertised_output_kinds() {
     std::fs::write(temp.path().join("a.txt"), "two").unwrap();
     heddle(&["commit", "-m", "second"], Some(temp.path())).expect("commit second");
 
-    // Drive each JSON-emitting flag variant on the single `undo` command path,
-    // in an order that keeps the repo consistent: list (read-only) → undo
-    // (rewinds, making a redo available) → redo (re-applies).
-    let cases: &[(&[&str], &str)] = &[
-        (&["--output", "json", "undo", "--list"], "undo_list"),
-        (&["--output", "json", "undo"], "undo"),
-        (&["--output", "json", "undo", "--redo"], "redo"),
+    // Drive each JSON-emitting variant, in an order that keeps the repo
+    // consistent: undo --list (read-only) → undo (rewinds, making a redo
+    // available) → redo (re-applies). Each case names the command display whose
+    // advertised set must contain the emitted kind.
+    let cases: &[(&[&str], &str, &str)] = &[
+        (&["--output", "json", "undo", "--list"], "undo_list", "undo"),
+        (&["--output", "json", "undo"], "undo", "undo"),
+        (&["--output", "json", "redo"], "redo", "redo"),
     ];
 
     let mut failures = Vec::new();
-    for (argv, expected) in cases {
+    for (argv, expected, display) in cases {
+        let advertised = advertised_output_kinds(display);
         let kind = emitted_output_kind(argv, temp.path());
         if kind != *expected {
             failures.push(format!(
@@ -1156,14 +1163,14 @@ fn folded_verb_flag_variants_emit_only_advertised_output_kinds() {
         if !advertised.contains(&kind) {
             failures.push(format!(
                 "{argv:?}: emitted output_kind=`{kind}` is NOT in the catalog-advertised \
-                 set for `undo` ({advertised:?}) — off-contract"
+                 set for `{display}` ({advertised:?}) — off-contract"
             ));
         }
     }
 
     assert!(
         failures.is_empty(),
-        "Folded `undo` flag variants emit output_kinds outside the advertised set:\n  - {}",
+        "undo/redo variants emit output_kinds outside the advertised set:\n  - {}",
         failures.join("\n  - ")
     );
 }

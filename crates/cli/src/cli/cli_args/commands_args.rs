@@ -528,16 +528,12 @@ Not undoable (file a follow-up if you need one):
   - cross-worktree shared-backend undo (no worktree registry yet; single-
                                         worktree usage is the supported
                                         configuration for 0.3)
-  - redo across CLI invocations       (use `heddle undo --redo` in the same shell)
+  - redo across CLI invocations       (use `heddle redo` in the same shell)
 ")]
 pub struct UndoArgs {
     /// Undo N operations.
     #[arg(short = 'n', long, default_value = "1")]
     pub steps: usize,
-
-    /// Redo previously undone operations instead of undoing.
-    #[arg(long)]
-    pub redo: bool,
 
     /// List recent operations without undoing.
     #[arg(long)]
@@ -561,6 +557,26 @@ pub struct UndoArgs {
     /// a Purge has destroyed the bytes: Purge is irreversible.
     #[arg(long)]
     pub allow_redact_undo: bool,
+}
+
+/// `heddle redo` — the symmetric inverse of `heddle undo`: re-applies
+/// operations that a prior `undo` rewound, within the same shell.
+#[derive(clap::Args, Clone, Debug)]
+#[command(after_help = "\
+Examples:
+  heddle redo                # re-apply the most recently undone operation
+  heddle redo -n 3           # re-apply the last three undone operations
+  heddle redo --dry-run      # show what would change without applying
+")]
+pub struct RedoArgs {
+    /// Redo N operations.
+    #[arg(short = 'n', long, default_value = "1")]
+    pub steps: usize,
+
+    /// Preview operations without redoing. `--dry-run` is an accepted
+    /// alias kept for muscle memory from git/other VCS tooling.
+    #[arg(long, visible_alias = "dry-run")]
+    pub preview: bool,
 }
 
 /// User-facing `--workspace` flag values. Vocabulary is the same as
