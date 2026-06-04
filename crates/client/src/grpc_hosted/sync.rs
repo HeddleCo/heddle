@@ -645,6 +645,7 @@ impl HostedGrpcClient {
             ready.objects_to_fetch,
             allow_partial_fetch,
         )?;
+        let native_pack_required = native_pack_required_for_pull(want_full_closure, &wanted_types);
 
         tx.send(PullMessage {
             body: Some(pull_message::Body::Want(WantObjects {
@@ -759,7 +760,7 @@ impl HostedGrpcClient {
                     };
 
                     if complete.success {
-                        if want_full_closure || !wants.is_empty() {
+                        if native_pack_required {
                             if !pack_state.is_complete() {
                                 return Err(ProtocolError::InvalidState(
                                     "pull completed before native pack stream finished".to_string(),
@@ -948,6 +949,17 @@ fn redaction_push_message(
 
 fn is_out_of_pack_transfer_object_type(obj_type: ObjectType) -> bool {
     matches!(obj_type, ObjectType::Redaction | ObjectType::StateVisibility)
+}
+
+fn native_pack_required_for_pull(
+    want_full_closure: bool,
+    wanted_types: &HashMap<PackObjectId, ObjectType>,
+) -> bool {
+    want_full_closure
+        || wanted_types
+            .values()
+            .copied()
+            .any(proto::is_native_packable_object_type)
 }
 
 fn sidecar_push_message(
@@ -1406,16 +1418,23 @@ fn preferred_transport_mode(
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
-    use grpc::heddle::v1::push_message;
+    use cli_shared::ClientConfig;
+    use grpc::heddle::v1::{
+        ListRefsRequest, ListRefsResponse, PullComplete as GrpcPullComplete, PullReady,
+        TransferCheckpoint, UpdateRefRequest, UpdateRefResponse,
+        repo_sync_service_server::{RepoSyncService, RepoSyncServiceServer},
+        push_message,
+    };
     use objects::{
         object::{
-            Blob, ChangeId, ContentHash, Principal, Redaction, StateVisibility, Tree, TreeEntry,
-            VisibilityTier,
+            Attribution, Blob, ChangeId, ContentHash, Principal, Redaction, State,
+            StateVisibility, StateVisibilityBlob, Tree, TreeEntry, VisibilityTier,
         },
         store::ObjectStore,
     };
     use proto::{ObjectId, ObjectInfo};
     use tempfile::TempDir;
+    use tonic::{Response, Status, transport::Server};
 
     use super::*;
 
@@ -1499,6 +1518,243 @@ mod tests {
                 "{obj_type:?} is excluded from native packs but missing from the out-of-pack transfer partition"
             );
         }
+    }
+
+    #[test]
+    fn native_pack_required_tracks_packable_pull_wants() {
+        let blob = sample_blob();
+        let state = ChangeId::from_bytes([9u8; 16]);
+
+        let sidecar_only = HashMap::from([(
+            PackObjectId::ChangeId(state),
+            ObjectType::StateVisibility,
+        )]);
+        assert!(!native_pack_required_for_pull(false, &sidecar_only));
+
+        let redaction_only = HashMap::from([(PackObjectId::Hash(blob), ObjectType::Redaction)]);
+        assert!(!native_pack_required_for_pull(false, &redaction_only));
+
+        let packable = HashMap::from([(PackObjectId::Hash(blob), ObjectType::Blob)]);
+        assert!(native_pack_required_for_pull(false, &packable));
+        assert!(native_pack_required_for_pull(true, &HashMap::new()));
+    }
+
+    #[derive(Clone)]
+    struct SidecarOnlyPullService {
+        state: ChangeId,
+        state_visibility_blob: Vec<u8>,
+    }
+
+    #[tonic::async_trait]
+    impl RepoSyncService for SidecarOnlyPullService {
+        async fn list_refs(
+            &self,
+            _request: tonic::Request<ListRefsRequest>,
+        ) -> Result<Response<ListRefsResponse>, Status> {
+            Ok(Response::new(ListRefsResponse::default()))
+        }
+
+        async fn update_ref(
+            &self,
+            _request: tonic::Request<UpdateRefRequest>,
+        ) -> Result<Response<UpdateRefResponse>, Status> {
+            Ok(Response::new(UpdateRefResponse::default()))
+        }
+
+        type PushStream = tokio_stream::wrappers::ReceiverStream<Result<PushMessage, Status>>;
+
+        async fn push(
+            &self,
+            _request: tonic::Request<tonic::Streaming<PushMessage>>,
+        ) -> Result<Response<Self::PushStream>, Status> {
+            let (_tx, rx) = mpsc::channel(1);
+            Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        }
+
+        type PullStream = tokio_stream::wrappers::ReceiverStream<Result<PullMessage, Status>>;
+
+        async fn pull(
+            &self,
+            request: tonic::Request<tonic::Streaming<PullMessage>>,
+        ) -> Result<Response<Self::PullStream>, Status> {
+            let state = self.state;
+            let state_visibility_blob = self.state_visibility_blob.clone();
+            let (tx, rx) = mpsc::channel(4);
+
+            tokio::spawn(async move {
+                let mut inbound = request.into_inner();
+                match inbound.message().await {
+                    Ok(Some(PullMessage {
+                        body: Some(pull_message::Body::Request(_)),
+                    })) => {}
+                    other => {
+                        let _ = tx
+                            .send(Err(Status::invalid_argument(format!(
+                                "expected pull request, got {other:?}"
+                            ))))
+                            .await;
+                        return;
+                    }
+                }
+
+                let descriptor = object_descriptor_with_status(
+                    &state_visibility_info(state),
+                    ObjectAvailabilityStatus::Missing,
+                    "missing state visibility",
+                );
+                let ready = PullMessage {
+                    body: Some(pull_message::Body::Ready(PullReady {
+                        remote_state: state.to_string_full(),
+                        objects_to_fetch: vec![descriptor],
+                        transfer: None,
+                        partial_fetch_status: PartialFetchStatus::Disabled as i32,
+                        missing_objects: Vec::new(),
+                        full_closure_available: false,
+                        object_count: 1,
+                    })),
+                };
+                if tx.send(Ok(ready)).await.is_err() {
+                    return;
+                }
+
+                match inbound.message().await {
+                    Ok(Some(PullMessage {
+                        body: Some(pull_message::Body::Want(want)),
+                    })) if !want.want_full_closure
+                        && want.objects.len() == 1
+                        && want.objects[0].object_type == "state_visibility" => {}
+                    other => {
+                        let _ = tx
+                            .send(Err(Status::invalid_argument(format!(
+                                "expected sidecar-only want, got {other:?}"
+                            ))))
+                            .await;
+                        return;
+                    }
+                }
+
+                let transfer = PullMessage {
+                    body: Some(pull_message::Body::StateVisibility(
+                        StateVisibilityTransfer {
+                            state_id: state.to_string_full(),
+                            state_visibility_blob,
+                        },
+                    )),
+                };
+                if tx.send(Ok(transfer)).await.is_err() {
+                    return;
+                }
+
+                let complete = PullMessage {
+                    body: Some(pull_message::Body::Complete(GrpcPullComplete {
+                        success: true,
+                        new_state: state.to_string_full(),
+                        error: String::new(),
+                        transfer: Some(TransferCheckpoint {
+                            transfer_id: "sidecar-only-test".to_string(),
+                            transport_mode: TransportMode::NativePack as i32,
+                            resume_offset: 0,
+                            chunk_index: 0,
+                            checkpoint: b"heddle-markers-v1\n".to_vec(),
+                            is_complete: true,
+                        }),
+                    })),
+                };
+                let _ = tx.send(Ok(complete)).await;
+            });
+
+            Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        }
+    }
+
+    async fn connect_sidecar_only_service(
+        service: SidecarOnlyPullService,
+    ) -> (HostedGrpcClient, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            match listener.accept().await {
+                Ok((stream, _addr)) => Some((Ok::<_, std::io::Error>(stream), listener)),
+                Err(err) => Some((Err(err), listener)),
+            }
+        });
+
+        let handle = tokio::spawn(async move {
+            Server::builder()
+                .add_service(RepoSyncServiceServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+                .expect("serve sidecar-only test service");
+        });
+
+        let client = HostedGrpcClient::connect(addr, &ClientConfig::default())
+            .await
+            .expect("connect client");
+        (client, handle)
+    }
+
+    #[tokio::test]
+    async fn state_visibility_sidecar_only_pull_completes_without_native_pack() {
+        let (_dir, repo) = temp_repo();
+        let tree_hash = repo.store().put_tree(&Tree::new()).expect("put tree");
+        let state = State::new_snapshot(
+            tree_hash,
+            vec![],
+            Attribution::human(Principal {
+                name: "Grace Hopper".into(),
+                email: "grace@example.com".into(),
+            }),
+        );
+        let state_id = state.change_id;
+        repo.store().put_state(&state).expect("put state");
+        assert!(
+            repo.get_state_visibility_bytes_for_state(&state_id)
+                .expect("load local sidecar")
+                .is_none(),
+            "test starts with state present and StateVisibility sidecar absent"
+        );
+
+        let state_visibility_blob =
+            StateVisibilityBlob::new(vec![sample_state_visibility(state_id)])
+                .encode()
+                .expect("encode state visibility blob");
+        let (mut client, server) = connect_sidecar_only_service(SidecarOnlyPullService {
+            state: state_id,
+            state_visibility_blob,
+        })
+        .await;
+
+        let exchange = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.pull_exchange(
+                &repo,
+                "owner/repo",
+                "main",
+                PullOptions {
+                    local_thread: None,
+                    depth: None,
+                    target_state: Some(state_id),
+                    materialization: PullMaterialization::Full,
+                },
+            ),
+        )
+        .await
+        .expect("sidecar-only pull must not hang waiting for native pack")
+        .expect("sidecar-only pull succeeds");
+        server.abort();
+
+        assert!(exchange.result.success);
+        assert_eq!(exchange.object_count, 0);
+        assert_eq!(exchange.profile.pack_bytes_received, 0);
+        assert_eq!(exchange.profile.object_mix.state_visibilities, 1);
+        assert!(
+            repo.get_state_visibility_for_state(&state_id)
+                .expect("load accepted sidecar")
+                .has_record(),
+            "pull must accept the out-of-pack StateVisibility sidecar"
+        );
     }
 
     #[test]
