@@ -28,6 +28,8 @@ mod bridge;
 mod cli_help_consistency;
 #[path = "cli_integration/cli_premium_output.rs"]
 mod cli_premium_output;
+#[path = "cli_integration/compact_output.rs"]
+mod compact_output;
 #[path = "cli_integration/context_recovery_advice.rs"]
 mod context_recovery_advice;
 #[path = "cli_integration/current_context_advice.rs"]
