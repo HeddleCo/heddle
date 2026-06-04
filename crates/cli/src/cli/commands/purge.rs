@@ -8,6 +8,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use objects::object::ChangeId;
+use oplog::OpLogBackend;
 use repo::Repository;
 use serde::Serialize;
 

@@ -263,10 +263,6 @@ impl StateReviewService for LocalStateReviewService {
             &client_operation_id,
             "state_review.sign_state",
             &req_bytes,
-            |resp: &SignStateResponse| resp.encode_to_vec(),
-            |bytes| {
-                SignStateResponse::decode(&bytes[..]).map_err(|e| Status::internal(e.to_string()))
-            },
             move || {
                 let inner = inner.clone();
                 async move { execute_sign_state(&inner, req).await }

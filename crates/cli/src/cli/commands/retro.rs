@@ -634,6 +634,7 @@ mod tests {
     use std::sync::Mutex;
 
     use objects::object::{Attribution, Principal};
+    use oplog::OpLogBackend;
     use repo::Repository;
     use tempfile::TempDir;
 

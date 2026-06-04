@@ -246,11 +246,6 @@ impl DiscussionService for LocalDiscussionService {
             &client_op_id,
             "discussion.open",
             &req_bytes,
-            |proto: &ProtoDiscussion| proto.encode_to_vec(),
-            |bytes| {
-                ProtoDiscussion::decode(bytes.as_slice())
-                    .map_err(|e| Status::internal(e.to_string()))
-            },
             move || {
                 let req = req.clone();
                 let inner = inner.clone();
@@ -321,11 +316,6 @@ impl DiscussionService for LocalDiscussionService {
             &client_op_id,
             "discussion.append_turn",
             &req_bytes,
-            |proto: &ProtoDiscussion| proto.encode_to_vec(),
-            |bytes| {
-                ProtoDiscussion::decode(bytes.as_slice())
-                    .map_err(|e| Status::internal(e.to_string()))
-            },
             move || {
                 let req = req.clone();
                 let inner = inner.clone();
@@ -381,11 +371,6 @@ impl DiscussionService for LocalDiscussionService {
             &client_op_id,
             "discussion.resolve",
             &req_bytes,
-            |proto: &ProtoDiscussion| proto.encode_to_vec(),
-            |bytes| {
-                ProtoDiscussion::decode(bytes.as_slice())
-                    .map_err(|e| Status::internal(e.to_string()))
-            },
             move || {
                 let req = req.clone();
                 let inner = inner.clone();

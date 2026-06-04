@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use objects::error::{HeddleError, Result};
 use objects::object::Principal;
-use oplog::{OpLog, OpRecord};
+use oplog::{OpLog, OpLogBackend, OpRecord};
 use refs::RefCommitter;
 
 /// Appends ref-carrying records to the file oplog as the phase-4 commit point.

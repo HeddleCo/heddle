@@ -193,17 +193,6 @@ impl OpLog {
     }
 
     /// Get the last operation entry.
-    pub fn last(&self) -> Result<Option<OpEntry>> {
-        let guard = self.load_cached()?;
-        guard.as_ref().unwrap().last_entry()
-    }
-
-    /// Get the last N operations.
-    pub fn recent(&self, count: usize) -> Result<Vec<OpEntry>> {
-        let guard = self.load_cached()?;
-        guard.as_ref().unwrap().recent_entries(count)
-    }
-
     pub fn recent_batches(&self, count: usize) -> Result<Vec<OpBatch>> {
         self.recent_batches_scoped(count, None)
     }
@@ -274,110 +263,9 @@ impl OpLog {
         )
     }
 
-    /// Mark a batch as undone.
-    pub fn mark_batch_undone(&self, batch: &OpBatch) -> Result<OpBatch> {
-        self.update_batch_undone_state(batch, true)
-    }
-
-    /// Mark a batch as redone.
-    pub fn mark_batch_redone(&self, batch: &OpBatch) -> Result<OpBatch> {
-        self.update_batch_undone_state(batch, false)
-    }
-
-    /// Coalesce two existing batches into one logical undo/redo unit.
-    ///
-    /// This is intentionally narrow: it rewrites only batch metadata for
-    /// already-recorded entries. Forward side effects must already be durable
-    /// before callers use this to present them as one operation.
-    pub fn coalesce_batches(
-        &self,
-        primary_batch_id: u64,
-        secondary_batch_id: u64,
-    ) -> Result<OpBatch> {
-        if primary_batch_id == secondary_batch_id {
-            let mut batches =
-                self.collect_batches_scoped(1, |batch| batch.id == primary_batch_id, None)?;
-            return batches.pop().ok_or_else(|| {
-                HeddleError::Config(format!("oplog batch {primary_batch_id} not found"))
-            });
-        }
-
-        let _lock = self.write_lock()?;
-        let mut packed = self.load_fresh_for_write()?;
-        let mut matching_indices = Vec::new();
-        let mut saw_primary = false;
-        let mut saw_secondary = false;
-
-        for (idx, entry) in packed.entries.iter().enumerate() {
-            let batch_id = if entry.batch_id == 0 {
-                entry.id
-            } else {
-                entry.batch_id
-            };
-            if batch_id == primary_batch_id {
-                saw_primary = true;
-                matching_indices.push(idx);
-            } else if batch_id == secondary_batch_id {
-                saw_secondary = true;
-                matching_indices.push(idx);
-            }
-        }
-
-        if !saw_primary || !saw_secondary {
-            return Err(HeddleError::Config(format!(
-                "cannot coalesce missing oplog batch(es): primary={primary_batch_id}, secondary={secondary_batch_id}"
-            )));
-        }
-
-        matching_indices.sort_by_key(|idx| packed.entries[*idx].id);
-        for (batch_index, entry_idx) in matching_indices.iter().copied().enumerate() {
-            let entry = &mut packed.entries[entry_idx];
-            entry.batch_id = primary_batch_id;
-            entry.batch_index = batch_index as u32;
-        }
-
-        packed.save()?;
-        let entries = matching_indices
-            .into_iter()
-            .map(|idx| packed.entries[idx].clone())
-            .collect::<Vec<_>>();
-        *self.cached.lock().unwrap() = Some(PackedOpLogIndex::open(&self.oplog_path())?);
-
-        Ok(OpBatch {
-            id: primary_batch_id,
-            entries,
-        })
-    }
-
     /// Record a batch of operations.
     pub fn record_batch(&self, operations: Vec<OpRecord>) -> Result<Vec<u64>> {
         self.record_batch_scoped(operations, None)
-    }
-
-    pub fn record_batch_scoped(
-        &self,
-        operations: Vec<OpRecord>,
-        scope: Option<&str>,
-    ) -> Result<Vec<u64>> {
-        if operations.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let _lock = self.write_lock()?;
-        // Reload from disk to catch any writes from other processes
-        let index = self.open_index_for_write()?;
-
-        let start_id = index.head_id() + 1;
-        let timestamp = Utc::now();
-        let scope_owned = scope.map(str::to_string);
-        let new_entries =
-            Self::build_entries(&self.actor, operations, start_id, timestamp, &scope_owned);
-        let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
-
-        let updated = index.append_entries(&new_entries)?;
-        *self.cached.lock().unwrap() = Some(updated);
-
-        Ok(ids)
     }
 
     /// Atomic dedup+append for transaction-scoped batches.
@@ -486,51 +374,6 @@ impl OpLog {
         Ok(Some(ids))
     }
 
-    pub fn record_batch_exactly_once_if_unchanged(
-        &self,
-        operations: Vec<OpRecord>,
-        scope: Option<&str>,
-        transaction_id: &str,
-        precondition: &IsolationPrecondition,
-    ) -> Result<ConditionalCommitOutcome> {
-        if operations.is_empty() {
-            return Ok(ConditionalCommitOutcome::Committed(Vec::new()));
-        }
-
-        let _lock = self.write_lock()?;
-        let index = self.open_index_for_write()?;
-
-        if index.transaction_commit(transaction_id)?.is_some() {
-            let committed = index.committed_batch_records(transaction_id)?;
-            return Ok(ConditionalCommitOutcome::AlreadyCommitted(committed));
-        }
-
-        if !precondition.keys.is_empty() && index.head_id() != precondition.since_head_id {
-            for entry in index.entries_after(precondition.since_head_id)? {
-                let touched = isolation_keys_for_record(&entry.operation, entry.scope.as_deref());
-                if let Some(key) = touched.intersection(&precondition.keys).next().cloned() {
-                    return Ok(ConditionalCommitOutcome::IsolationConflict {
-                        key,
-                        since_head_id: precondition.since_head_id,
-                        conflicting_entry_id: entry.id,
-                    });
-                }
-            }
-        }
-
-        let start_id = index.head_id() + 1;
-        let timestamp = Utc::now();
-        let scope_owned = scope.map(str::to_string);
-        let new_entries =
-            Self::build_entries(&self.actor, operations, start_id, timestamp, &scope_owned);
-        let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
-
-        let updated = index.append_entries(&new_entries)?;
-        *self.cached.lock().unwrap() = Some(updated);
-
-        Ok(ConditionalCommitOutcome::Committed(ids))
-    }
-
     /// Current oplog generation — the monotonic `head_id`
     /// (`packed_oplog.rs` leading field). Reads only the **fixed-size header**
     /// from disk (not the whole log), so it is the cheap O(1) gate the per-read
@@ -603,36 +446,6 @@ impl OpLog {
             .committed_batch_records(transaction_id)
     }
 
-    pub(super) fn record_single_scoped(
-        &self,
-        operation: OpRecord,
-        scope: Option<&str>,
-    ) -> Result<u64> {
-        let _lock = self.write_lock()?;
-        let index = self.open_index_for_write()?;
-
-        let id = index.head_id() + 1;
-        let entry = OpEntry {
-            id,
-            timestamp: Utc::now(),
-            operation,
-            undone: false,
-            batch_id: id,
-            batch_index: 0,
-            scope: scope.map(str::to_string),
-            actor: self.actor.clone(),
-            operation_id: None,
-        };
-
-        let updated = index.append_entries(&[entry])?;
-        *self.cached.lock().unwrap() = Some(updated);
-
-        Ok(id)
-    }
-
-    pub(super) fn record_single(&self, operation: OpRecord) -> Result<u64> {
-        self.record_single_scoped(operation, None)
-    }
 
     fn update_batch_undone_state(&self, batch: &OpBatch, undone: bool) -> Result<OpBatch> {
         let _lock = self.write_lock()?;
@@ -676,7 +489,25 @@ impl OpLogBackend for OpLog {
         operations: Vec<OpRecord>,
         scope: Option<&str>,
     ) -> Result<Vec<u64>> {
-        OpLog::record_batch_scoped(self, operations, scope)
+        if operations.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let _lock = self.write_lock()?;
+        // Reload from disk to catch any writes from other processes
+        let index = self.open_index_for_write()?;
+
+        let start_id = index.head_id() + 1;
+        let timestamp = Utc::now();
+        let scope_owned = scope.map(str::to_string);
+        let new_entries =
+            Self::build_entries(&self.actor, operations, start_id, timestamp, &scope_owned);
+        let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
+
+        let updated = index.append_entries(&new_entries)?;
+        *self.cached.lock().unwrap() = Some(updated);
+
+        Ok(ids)
     }
 
     async fn record_batch_scoped_if_no_transaction(
@@ -702,21 +533,52 @@ impl OpLogBackend for OpLog {
         transaction_id: &str,
         precondition: &IsolationPrecondition,
     ) -> Result<ConditionalCommitOutcome> {
-        OpLog::record_batch_exactly_once_if_unchanged(
-            self,
-            operations,
-            scope,
-            transaction_id,
-            precondition,
-        )
+        if operations.is_empty() {
+            return Ok(ConditionalCommitOutcome::Committed(Vec::new()));
+        }
+
+        let _lock = self.write_lock()?;
+        let index = self.open_index_for_write()?;
+
+        if index.transaction_commit(transaction_id)?.is_some() {
+            let committed = index.committed_batch_records(transaction_id)?;
+            return Ok(ConditionalCommitOutcome::AlreadyCommitted(committed));
+        }
+
+        if !precondition.keys.is_empty() && index.head_id() != precondition.since_head_id {
+            for entry in index.entries_after(precondition.since_head_id)? {
+                let touched = isolation_keys_for_record(&entry.operation, entry.scope.as_deref());
+                if let Some(key) = touched.intersection(&precondition.keys).next().cloned() {
+                    return Ok(ConditionalCommitOutcome::IsolationConflict {
+                        key,
+                        since_head_id: precondition.since_head_id,
+                        conflicting_entry_id: entry.id,
+                    });
+                }
+            }
+        }
+
+        let start_id = index.head_id() + 1;
+        let timestamp = Utc::now();
+        let scope_owned = scope.map(str::to_string);
+        let new_entries =
+            Self::build_entries(&self.actor, operations, start_id, timestamp, &scope_owned);
+        let ids: Vec<u64> = new_entries.iter().map(|e| e.id).collect();
+
+        let updated = index.append_entries(&new_entries)?;
+        *self.cached.lock().unwrap() = Some(updated);
+
+        Ok(ConditionalCommitOutcome::Committed(ids))
     }
 
     fn last(&self) -> Result<Option<OpEntry>> {
-        OpLog::last(self)
+        let guard = self.load_cached()?;
+        guard.as_ref().unwrap().last_entry()
     }
 
     fn recent(&self, count: usize) -> Result<Vec<OpEntry>> {
-        OpLog::recent(self, count)
+        let guard = self.load_cached()?;
+        guard.as_ref().unwrap().recent_entries(count)
     }
 
     async fn recent_batches_scoped(
@@ -736,14 +598,66 @@ impl OpLogBackend for OpLog {
     }
 
     fn mark_batch_undone(&self, batch: &OpBatch) -> Result<OpBatch> {
-        OpLog::mark_batch_undone(self, batch)
+        self.update_batch_undone_state(batch, true)
     }
 
     fn mark_batch_redone(&self, batch: &OpBatch) -> Result<OpBatch> {
-        OpLog::mark_batch_redone(self, batch)
+        self.update_batch_undone_state(batch, false)
     }
 
     fn coalesce_batches(&self, primary_batch_id: u64, secondary_batch_id: u64) -> Result<OpBatch> {
-        OpLog::coalesce_batches(self, primary_batch_id, secondary_batch_id)
+        if primary_batch_id == secondary_batch_id {
+            let mut batches =
+                self.collect_batches_scoped(1, |batch| batch.id == primary_batch_id, None)?;
+            return batches.pop().ok_or_else(|| {
+                HeddleError::Config(format!("oplog batch {primary_batch_id} not found"))
+            });
+        }
+
+        let _lock = self.write_lock()?;
+        let mut packed = self.load_fresh_for_write()?;
+        let mut matching_indices = Vec::new();
+        let mut saw_primary = false;
+        let mut saw_secondary = false;
+
+        for (idx, entry) in packed.entries.iter().enumerate() {
+            let batch_id = if entry.batch_id == 0 {
+                entry.id
+            } else {
+                entry.batch_id
+            };
+            if batch_id == primary_batch_id {
+                saw_primary = true;
+                matching_indices.push(idx);
+            } else if batch_id == secondary_batch_id {
+                saw_secondary = true;
+                matching_indices.push(idx);
+            }
+        }
+
+        if !saw_primary || !saw_secondary {
+            return Err(HeddleError::Config(format!(
+                "cannot coalesce missing oplog batch(es): primary={primary_batch_id}, secondary={secondary_batch_id}"
+            )));
+        }
+
+        matching_indices.sort_by_key(|idx| packed.entries[*idx].id);
+        for (batch_index, entry_idx) in matching_indices.iter().copied().enumerate() {
+            let entry = &mut packed.entries[entry_idx];
+            entry.batch_id = primary_batch_id;
+            entry.batch_index = batch_index as u32;
+        }
+
+        packed.save()?;
+        let entries = matching_indices
+            .into_iter()
+            .map(|idx| packed.entries[idx].clone())
+            .collect::<Vec<_>>();
+        *self.cached.lock().unwrap() = Some(PackedOpLogIndex::open(&self.oplog_path())?);
+
+        Ok(OpBatch {
+            id: primary_batch_id,
+            entries,
+        })
     }
 }

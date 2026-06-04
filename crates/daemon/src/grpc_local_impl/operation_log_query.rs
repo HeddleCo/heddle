@@ -15,7 +15,7 @@ use grpc::heddle::v1::{
     operation_log_query_service_server::OperationLogQueryService,
 };
 use objects::{error::Result as HeddleResult, object::ChangeId};
-use oplog::{OpEntry, OpLog, OpRecord};
+use oplog::{OpEntry, OpLog, OpLogBackend, OpRecord};
 use refs::operation_index::{IndexedOperation, OperationLogIndex, OperationLogQuery};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};

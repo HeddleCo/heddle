@@ -1093,8 +1093,10 @@ fn ensure_thread_worktree_undo_safe(repo: &Repository, batches: &[OpBatch]) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use oplog::OpLogBackend;
     use tempfile::TempDir;
+
+    use super::*;
 
     fn record(
         id: &str,

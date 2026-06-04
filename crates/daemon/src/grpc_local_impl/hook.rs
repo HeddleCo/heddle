@@ -181,8 +181,6 @@ impl HookService for LocalHookService {
             &client_op,
             "hook.register_hook",
             &body,
-            |hook: &ProtoHook| hook.encode_to_vec(),
-            |bytes| ProtoHook::decode(&bytes[..]).map_err(|e| Status::internal(e.to_string())),
             || async move {
                 if req.name.trim().is_empty() {
                     return Err(Status::invalid_argument("hook name must not be empty"));
@@ -229,8 +227,6 @@ impl HookService for LocalHookService {
             &client_op,
             "hook.deregister_hook",
             &body,
-            |resp: &DeleteResponse| resp.encode_to_vec(),
-            |bytes| DeleteResponse::decode(&bytes[..]).map_err(|e| Status::internal(e.to_string())),
             || async move {
                 let mut registry = load_registry(&heddle_dir)?;
                 let before = registry.hooks.len();
@@ -322,11 +318,6 @@ impl HookService for LocalHookService {
             &client_op,
             "hook.respond_to_hook",
             &body,
-            |resp: &RespondToHookResponse| resp.encode_to_vec(),
-            |bytes| {
-                RespondToHookResponse::decode(&bytes[..])
-                    .map_err(|e| Status::internal(e.to_string()))
-            },
             move || async move {
                 if req.hook_event_id.trim().is_empty() {
                     return Err(Status::invalid_argument("hook_event_id must not be empty"));

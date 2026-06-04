@@ -15,7 +15,7 @@ use objects::{
     object::{Agent, Blob, ChangeId, ContentHash, EntryType, FileMode, Principal, ThreadName, Tree, TreeEntry},
     worktree::should_ignore as should_ignore_path,
 };
-use oplog::{OpBatch, OpRecord};
+use oplog::{OpBatch, OpLogBackend, OpRecord};
 use repo::{Repository, RepositoryCapability, git_worktree_status::GitWorktreeEntryState};
 use serde::Serialize;
 
