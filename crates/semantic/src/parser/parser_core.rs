@@ -17,8 +17,28 @@ pub struct ParsedFile {
 }
 
 impl ParsedFile {
-    /// Parse a file's contents.
+    /// Parse a file's contents. Returns `None` when the parser declines OR the
+    /// resulting tree contains any error node — the driver uses this strict form
+    /// for the three merge inputs so an unparseable side routes to the text
+    /// fallback.
     pub fn parse(source: impl Into<String>, language: Language) -> Option<Self> {
+        Self::parse_inner(source, language, true)
+    }
+
+    /// Like [`ParsedFile::parse`] but tolerant of error nodes: returns the
+    /// (error-recovered) tree even when `has_error()`. Used by the heddle#484
+    /// output-boundary conservation floor, which must extract whatever items the
+    /// reconstructed output contains — benign recovery noise (e.g. a stray `;`
+    /// from a deleted single-line item) must not be mistaken for a dropped item.
+    pub(crate) fn parse_allow_errors(source: impl Into<String>, language: Language) -> Option<Self> {
+        Self::parse_inner(source, language, false)
+    }
+
+    fn parse_inner(
+        source: impl Into<String>,
+        language: Language,
+        reject_errors: bool,
+    ) -> Option<Self> {
         let source = source.into();
         let lang = language.parser()?;
 
@@ -26,7 +46,7 @@ impl ParsedFile {
         parser.set_language(&lang).ok()?;
         let tree = parser.parse(&source, None)?;
 
-        if tree.root_node().has_error() {
+        if reject_errors && tree.root_node().has_error() {
             return None;
         }
 

@@ -19,7 +19,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use merge::{text_hunk_merge_with_markers, ConflictMarkers, MergeOutcome};
 
-use super::items::{ContainerSpan, FileSegments, Item, ItemKey, ItemKind};
+use super::items::{segment_file, ContainerSpan, FileSegments, Item, ItemKey, ItemKind};
+use crate::parser::{Language, ParsedFile};
 
 /// Three sides of the merge: `[base, ours, theirs]`. Each per-iteration
 /// segment contribution is indexed by [`Side`] so emission tracking can
@@ -45,7 +46,17 @@ const N_SIDES: usize = 3;
 /// (heddle#468 r5: the duplicate-import class the positional path produced).
 type MatchKey = (ItemKey, usize);
 
+/// An instance-tagged structural-scope chain: each level pairs a container name
+/// with the source-order ordinal of the concrete span it sits in (see
+/// [`Item::struct_scope_inst`]).
+type InstChain = Vec<(String, usize)>;
+
+/// An item's conservation identity for the heddle#484 output-boundary floor:
+/// its [`ItemKey`] plus the instance-tagged container chain it sits in.
+type TaggedItem = (ItemKey, InstChain);
+
 /// Stitch three sides together via per-item resolution + inter-item hunk merge.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn reconstruct_merged_file(
     base: &str,
     ours: &str,
@@ -53,6 +64,7 @@ pub(crate) fn reconstruct_merged_file(
     base_segments: &FileSegments,
     ours_segments: &FileSegments,
     theirs_segments: &FileSegments,
+    language: Language,
     markers: ConflictMarkers<'_>,
 ) -> MergeOutcome {
     // Per-side match keys walked in source order. Each item gets a
@@ -333,13 +345,174 @@ pub(crate) fn reconstruct_merged_file(
     reconcile_trailing_newline(&mut output, sides);
 
     if total_conflicts == 0 {
-        MergeOutcome::Clean(output)
+        // Model-independent safety floor (heddle#484). Every prior round
+        // (r1/r2/r3) fixed a *model-internal* re-derivation of container-
+        // instance identity, and each was defeated by the next file
+        // arrangement. This check sits at the OUTPUT boundary and is blind to
+        // the instance machinery: re-parse the bytes we are about to return
+        // and assert they conserve the item set + container nesting the merge
+        // resolved to emit. Any reconstruction defect — present or future —
+        // that drops, duplicates, moves, or collapses/splits a container
+        // instance fails the check, and we fall back to a textual conflict
+        // instead of returning a silently-wrong clean merge. A conflict the
+        // user resolves is safe; a silent structural collapse is the P0.
+        if output_conserves_structure(
+            &output,
+            language,
+            &item_emit_order,
+            &resolved,
+            &struct_scope_inst_of,
+        ) {
+            MergeOutcome::Clean(output)
+        } else {
+            text_hunk_merge_with_markers(
+                base.as_bytes(),
+                ours.as_bytes(),
+                theirs.as_bytes(),
+                markers,
+            )
+        }
     } else {
         MergeOutcome::Conflicts {
             merged_bytes_with_markers: output,
             conflict_count: total_conflicts,
         }
     }
+}
+
+/// Output-boundary safety floor (heddle#484): re-parse the reconstructed
+/// `output` and verify it conserves the item set + container nesting the merge
+/// resolved to emit. Returns `true` when conservation holds (safe to return
+/// `Clean`), `false` when the output dropped, duplicated, moved an item, or
+/// collapsed/split a container instance — in which case the caller MUST fall
+/// back to a textual conflict.
+///
+/// # The invariant (precise)
+///
+/// Let `E` be the *expected emitted set*: every NON-`use` item the merge placed
+/// with bytes (`item_emit_order` filtered to keys whose `resolved` entry holds
+/// `Some(bytes)`), each tagged by its `ItemKey` and instance-annotated scope
+/// chain (`struct_scope_inst_of`). Let `O` be the items found by re-parsing
+/// `output` with the SAME extraction the driver uses ([`segment_file`]),
+/// likewise NON-`use` and tagged by `(ItemKey, struct_scope_inst)`.
+///
+/// Conservation holds iff, after [`canonicalize_instance_chains`] normalizes
+/// both sides' instance ordinals by first-appearance in output/source order,
+/// the `(ItemKey, canonical-chain)` **multisets are equal**:
+///
+/// * the `ItemKey` component enforces **item-set conservation** — no non-`use`
+///   item dropped, duplicated, or moved to a different-named scope;
+/// * the canonical-chain component enforces **container / nesting
+///   conservation** — two items share a chain iff they physically sit in the
+///   same container instance, so a collapse (two instances → one) or split
+///   (one → two) changes a chain and breaks multiset equality. This is exactly
+///   the r1/r2/r3 class.
+///
+/// Canonicalization is required because the ordinals in `E` are base-anchored
+/// (3-way aligned) while a fresh re-parse numbers instances per-file in source
+/// order; only the *partition* of items into instances is invariant, not the
+/// absolute ordinal values. Normalizing both by first-appearance makes
+/// structurally-identical reconstructions compare equal while any reparenting
+/// compares unequal.
+///
+/// `use` items are EXCLUDED on both sides: their `ItemKey::name` is rekeyed
+/// across the three sides by `canonicalize_use_keys` (a 3-way leaf-set union)
+/// and cannot be recovered from a single-file re-parse, and a single resolved
+/// `use` component can emit several declarations — so the resolved-unit ↔
+/// re-parsed-declaration mapping is not 1:1. Their conservation is the
+/// separately-hardened set-valued `resolve_use_component` path (heddle#468).
+///
+/// # Why conservation, not a `has_error` gate, is the trigger
+///
+/// The re-parse is error-TOLERANT ([`ParsedFile::parse_allow_errors`]): the
+/// driver already guarantees all three INPUTS parse cleanly, but a clean
+/// reconstruction can carry benign error-recovery noise — e.g. a deleted
+/// single-line method leaves a stray `;` empty statement that tree-sitter flags
+/// as an error even though every surviving item is present and correctly
+/// nested. Gating on `has_error` would conflict that genuinely-clean merge (a
+/// false positive). Conservation is the real guarantee: a structural collapse
+/// that produces an unparseable file (Bug 2/3's unclosed / stray delimiters)
+/// still fails conservation, because tree-sitter's error recovery re-nests or
+/// duplicates the swallowed items and the recovered `(key, chain)` multiset no
+/// longer matches `E`.
+fn output_conserves_structure(
+    output: &[u8],
+    language: Language,
+    item_emit_order: &[MatchKey],
+    resolved: &BTreeMap<MatchKey, (Option<Vec<u8>>, usize)>,
+    struct_scope_inst_of: &BTreeMap<MatchKey, InstChain>,
+) -> bool {
+    // Expected emitted set, in output order.
+    let mut expected: Vec<TaggedItem> = Vec::new();
+    for key in item_emit_order {
+        if key.0.kind == ItemKind::Use {
+            continue;
+        }
+        if let Some((Some(_), _)) = resolved.get(key) {
+            let chain = struct_scope_inst_of.get(key).cloned().unwrap_or_default();
+            expected.push((key.0.clone(), chain));
+        }
+    }
+
+    // Re-parse the output with the SAME extraction the driver uses, tolerating
+    // error nodes (see the doc comment): tree-sitter's recovery still surfaces
+    // a structural collapse as a conservation mismatch below. Non-UTF-8 output
+    // or a parser that can't be built can't be checked at all — trip the floor.
+    let Ok(text) = std::str::from_utf8(output) else {
+        return false;
+    };
+    let Some(parsed) = ParsedFile::parse_allow_errors(text, language) else {
+        return false;
+    };
+    let seg = segment_file(&parsed);
+    let mut actual: Vec<TaggedItem> = Vec::new();
+    for item in &seg.items {
+        if item.key.kind == ItemKind::Use {
+            continue;
+        }
+        actual.push((item.key.clone(), item.struct_scope_inst.clone()));
+    }
+
+    let mut e = canonicalize_instance_chains(&expected);
+    let mut a = canonicalize_instance_chains(&actual);
+    e.sort();
+    a.sort();
+    e == a
+}
+
+/// Renumber the instance ordinals in a sequence of `(key, instance-chain)` by
+/// first-appearance within each `(canonical-parent, container-name)` group, in
+/// the order the items appear. Two differently-numbered but structurally-
+/// identical chains then compare equal: only the *partition* of items into
+/// instances (and their order) matters, not the absolute ordinal values, which
+/// differ between the base-anchored emit metadata and a fresh re-parse. Each
+/// level is canonicalized against its already-canonicalized parent, so the
+/// normalization is consistent depth-by-depth.
+fn canonicalize_instance_chains(seq: &[TaggedItem]) -> Vec<TaggedItem> {
+    // (canonical-parent, name, original-ordinal) -> canonical ordinal.
+    let mut remap: BTreeMap<(InstChain, String, usize), usize> = BTreeMap::new();
+    // (canonical-parent, name) -> next free canonical ordinal.
+    let mut next: BTreeMap<(InstChain, String), usize> = BTreeMap::new();
+    let mut out = Vec::with_capacity(seq.len());
+    for (key, chain) in seq {
+        let mut canon: InstChain = Vec::with_capacity(chain.len());
+        for (name, ord) in chain {
+            let parent = canon.clone();
+            let remap_key = (parent.clone(), name.clone(), *ord);
+            let canon_ord = if let Some(&c) = remap.get(&remap_key) {
+                c
+            } else {
+                let slot = next.entry((parent.clone(), name.clone())).or_insert(0);
+                let c = *slot;
+                *slot += 1;
+                remap.insert(remap_key, c);
+                c
+            };
+            canon.push((name.clone(), canon_ord));
+        }
+        out.push((key.clone(), canon));
+    }
+    out
 }
 
 /// Walk a side's items in source order and tag each with its
@@ -987,4 +1160,153 @@ fn emit_addadd_conflict(
     out.extend_from_slice(markers.theirs.as_bytes());
     out.extend_from_slice(eol);
     out
+}
+
+#[cfg(test)]
+mod floor_tests {
+    //! Unit tests for the heddle#484 output-boundary safety floor
+    //! ([`output_conserves_structure`]). They exercise the floor directly with
+    //! a crafted "emit plan" vs a chosen output byte string, so a deliberate
+    //! reconstruction fault (collapse / drop / unparseable) can be injected
+    //! without needing the model to actually regress.
+    use super::*;
+
+    /// Build the `(item_emit_order, resolved, struct_scope_inst_of)` triple the
+    /// floor consumes, treating every item in `src` as if the merge placed it
+    /// verbatim (the shape of a faithful reconstruction whose output IS `src`).
+    #[allow(clippy::type_complexity)]
+    fn plan(
+        src: &str,
+        language: Language,
+    ) -> (
+        Vec<MatchKey>,
+        BTreeMap<MatchKey, (Option<Vec<u8>>, usize)>,
+        BTreeMap<MatchKey, InstChain>,
+    ) {
+        let parsed = ParsedFile::parse(src, language).expect("plan source must parse");
+        let seg = segment_file(&parsed);
+        let mks = build_match_keys(&seg);
+        let mut order = Vec::new();
+        let mut resolved: BTreeMap<MatchKey, (Option<Vec<u8>>, usize)> = BTreeMap::new();
+        let mut sinst: BTreeMap<MatchKey, InstChain> = BTreeMap::new();
+        for (mk, item) in mks.iter().zip(seg.items.iter()) {
+            order.push(mk.clone());
+            let bytes = src.as_bytes()[item.start_byte..item.end_byte].to_vec();
+            resolved.insert(mk.clone(), (Some(bytes), 0));
+            sinst.insert(mk.clone(), item.struct_scope_inst.clone());
+        }
+        (order, resolved, sinst)
+    }
+
+    #[test]
+    fn floor_is_noop_on_faithful_output() {
+        // The output byte-for-byte matches the plan: conservation must hold so
+        // a correct merge stays Clean (no false positive).
+        let src = "impl Foo {\n    fn a() {}\n}\nimpl Foo {\n    fn b() {}\n}\n";
+        let (order, resolved, sinst) = plan(src, Language::Rust);
+        assert!(output_conserves_structure(
+            src.as_bytes(),
+            Language::Rust,
+            &order,
+            &resolved,
+            &sinst
+        ));
+    }
+
+    #[test]
+    fn floor_is_noop_on_faithful_output_with_top_level_between_reopens() {
+        // A top-level item separates two reopened `impl Foo` blocks — the
+        // heddle#484 P1 shape. A faithful reconstruction conserves it.
+        let src = "impl Foo {\n    fn a() {}\n}\nfn x() {}\nimpl Foo {\n    fn b() {}\n}\n";
+        let (order, resolved, sinst) = plan(src, Language::Rust);
+        assert!(output_conserves_structure(
+            src.as_bytes(),
+            Language::Rust,
+            &order,
+            &resolved,
+            &sinst
+        ));
+    }
+
+    #[test]
+    fn floor_catches_container_collapse() {
+        // The plan resolves TWO distinct `impl Foo` instances (a in #0, b in
+        // #1). A regression collapses them into a single `impl Foo` holding
+        // both methods. The canonical instance chains differ (b moves from
+        // Foo#1 to Foo#0), so conservation fails → the caller falls back to a
+        // textual conflict instead of returning the silently-collapsed merge.
+        let src = "impl Foo {\n    fn a() {}\n}\nimpl Foo {\n    fn b() {}\n}\n";
+        let collapsed = "impl Foo {\n    fn a() {}\n    fn b() {}\n}\n";
+        let (order, resolved, sinst) = plan(src, Language::Rust);
+        assert!(!output_conserves_structure(
+            collapsed.as_bytes(),
+            Language::Rust,
+            &order,
+            &resolved,
+            &sinst
+        ));
+    }
+
+    #[test]
+    fn floor_catches_dropped_item() {
+        let src = "fn a() {}\nfn b() {}\n";
+        let dropped = "fn a() {}\n";
+        let (order, resolved, sinst) = plan(src, Language::Rust);
+        assert!(!output_conserves_structure(
+            dropped.as_bytes(),
+            Language::Rust,
+            &order,
+            &resolved,
+            &sinst
+        ));
+    }
+
+    #[test]
+    fn floor_catches_duplicated_item() {
+        let src = "fn a() {}\n";
+        let duplicated = "fn a() {}\nfn a() {}\n";
+        let (order, resolved, sinst) = plan(src, Language::Rust);
+        assert!(!output_conserves_structure(
+            duplicated.as_bytes(),
+            Language::Rust,
+            &order,
+            &resolved,
+            &sinst
+        ));
+    }
+
+    #[test]
+    fn floor_catches_item_moved_to_different_scope() {
+        // Plan: `fn b` sits inside `impl Foo`. Output strands it at top level.
+        let src = "impl Foo {\n    fn b() {}\n}\n";
+        let moved = "impl Foo {\n}\nfn b() {}\n";
+        let (order, resolved, sinst) = plan(src, Language::Rust);
+        assert!(!output_conserves_structure(
+            moved.as_bytes(),
+            Language::Rust,
+            &order,
+            &resolved,
+            &sinst
+        ));
+    }
+
+    #[test]
+    fn floor_catches_unparseable_collapse() {
+        // An unparseable output that ALSO collapses structure: the closing `}`
+        // of the first `impl Foo` is missing, so both methods land in one impl.
+        // Error-tolerant re-parse recovers the items; the recovered chains
+        // (b moved from Foo#1 to Foo#0) break conservation. This is the Bug 2/3
+        // shape (unclosed delimiter) caught via conservation, not a has_error
+        // gate.
+        let src = "impl Foo {\n    fn a() {}\n}\nimpl Foo {\n    fn b() {}\n}\n";
+        let unclosed = "impl Foo {\n    fn a() {}\n    fn b() {}\n";
+        let (order, resolved, sinst) = plan(src, Language::Rust);
+        assert!(!output_conserves_structure(
+            unclosed.as_bytes(),
+            Language::Rust,
+            &order,
+            &resolved,
+            &sinst
+        ));
+    }
 }

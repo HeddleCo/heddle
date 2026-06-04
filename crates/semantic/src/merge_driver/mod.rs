@@ -137,6 +137,7 @@ pub fn semantic_three_way_merge(
         &base_segments,
         &ours_segments,
         &theirs_segments,
+        language,
         markers,
     )
 }
