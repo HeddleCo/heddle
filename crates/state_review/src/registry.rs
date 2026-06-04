@@ -8,52 +8,6 @@ use semantic::parser::FunctionDef;
 
 use crate::config::ReviewSignalsConfig;
 
-/// Stable identifier for a risk-signal module. Used by the budgeter to
-/// group results and by the health surface to track per-module fire
-/// rates without depending on the module's runtime version.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ModuleId {
-    Novelty,
-    TestReachability,
-    PatternDeviation,
-    InvariantAdjacency,
-    SelfFlaggedUncertainty,
-}
-
-impl ModuleId {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Novelty => "novelty.tree_sitter",
-            Self::TestReachability => "test_reachability.tree_sitter",
-            Self::PatternDeviation => "pattern_deviation.tree_sitter",
-            Self::InvariantAdjacency => "invariant_adjacency",
-            Self::SelfFlaggedUncertainty => "self_flagged_uncertainty",
-        }
-    }
-}
-
-/// Pure-computation contract every signal module implements. The trait
-/// uses a free function rather than `&self` so registries can be `static`
-/// arrays of fn pointers — see [`ALL_MODULES`].
-pub trait RiskSignalModule {
-    /// Stable identifier. Used by budgeting and health surfaces.
-    const ID: ModuleId;
-    /// Wire version of this module's output schema. Bump on breaking
-    /// changes to the [`RiskSignal`] shape this module produces.
-    const VERSION: u32;
-
-    /// Compute signals for the given `(prior, new)` state transition.
-    /// MUST be pure: no I/O, no clock, no env lookups. The `ctx`
-    /// argument carries any parsed-file caches the caller wants to
-    /// reuse across modules.
-    fn compute(
-        prior: &State,
-        new: &State,
-        cfg: &ReviewSignalsConfig,
-        ctx: &SemanticContext,
-    ) -> Vec<RiskSignal>;
-}
-
 /// Bundle of pre-extracted function lists per file, keyed by repo-relative
 /// path. The caller parses + extracts once per review pass and shares this
 /// across modules so tree-sitter work is amortised. An empty context is

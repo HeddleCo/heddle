@@ -12,7 +12,6 @@ use std::io::Read;
 use crate::delta::{DeltaDecoder, DeltaEncoder, MAX_DELTA_OUTPUT_SIZE};
 
 const COMPRESSED_HEADER_LEN: usize = 9;
-const LEGACY_COMPRESSED_HEADER_LEN: usize = 5;
 const MAX_DECOMPRESSED_SIZE: u64 = 256 * 1024 * 1024;
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 
@@ -237,7 +236,7 @@ fn compress_delta(
 ///
 /// Returns the decompressed data, or original data if uncompressed.
 pub fn decompress(data: &[u8]) -> Result<Vec<u8>, CompressionError> {
-    if data.len() < LEGACY_COMPRESSED_HEADER_LEN {
+    if data.len() < COMPRESSED_HEADER_LEN {
         // Too short for header, assume uncompressed
         return Ok(data.to_vec());
     }
@@ -247,17 +246,8 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>, CompressionError> {
 
     match compression_type {
         CompressionType::None => {
-            let offset = if data.len() >= COMPRESSED_HEADER_LEN {
-                COMPRESSED_HEADER_LEN
-            } else {
-                LEGACY_COMPRESSED_HEADER_LEN
-            };
-            let expected_size = if offset == COMPRESSED_HEADER_LEN {
-                read_u64_size(data)?
-            } else {
-                read_u32_size(data)?
-            };
-            let payload = data[offset..].to_vec();
+            let expected_size = read_u64_size(data)?;
+            let payload = data[COMPRESSED_HEADER_LEN..].to_vec();
             validate_decompressed_len(expected_size, payload.len())?;
             Ok(payload)
         }
@@ -277,7 +267,7 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>, CompressionError> {
 #[cfg(test)]
 /// Decompress delta-encoded data.
 fn decompress_delta(delta_data: &[u8], base: &[u8]) -> Result<Vec<u8>, CompressionError> {
-    if delta_data.len() < LEGACY_COMPRESSED_HEADER_LEN {
+    if delta_data.len() < COMPRESSED_HEADER_LEN {
         return Err(CompressionError::CorruptedData(
             "Delta data too short".to_string(),
         ));
@@ -297,7 +287,7 @@ fn decompress_delta(delta_data: &[u8], base: &[u8]) -> Result<Vec<u8>, Compressi
 
 /// Check if data is compressed (has compression header).
 pub fn is_compressed(data: &[u8]) -> bool {
-    if data.len() < LEGACY_COMPRESSED_HEADER_LEN {
+    if data.len() < COMPRESSED_HEADER_LEN {
         return false;
     }
 
@@ -315,19 +305,16 @@ pub fn is_compressed(data: &[u8]) -> bool {
 /// where reading the full blob would dominate. Only the first 9 bytes
 /// of the input are consulted.
 pub fn header_uncompressed_size(data: &[u8]) -> Option<u64> {
-    if data.len() < LEGACY_COMPRESSED_HEADER_LEN {
+    if data.len() < COMPRESSED_HEADER_LEN {
         return None;
     }
     match CompressionType::from_u8(data[0])? {
-        CompressionType::Zstd => match zstd_header_len(data)? {
-            COMPRESSED_HEADER_LEN => {
-                u64::from_be_bytes(data[1..COMPRESSED_HEADER_LEN].try_into().ok()?).into()
-            }
-            LEGACY_COMPRESSED_HEADER_LEN => Some(u32::from_be_bytes(
-                data[1..LEGACY_COMPRESSED_HEADER_LEN].try_into().ok()?,
-            ) as u64),
-            _ => None,
-        },
+        CompressionType::Zstd => {
+            zstd_header_len(data)?;
+            Some(u64::from_be_bytes(
+                data[1..COMPRESSED_HEADER_LEN].try_into().ok()?,
+            ))
+        }
         CompressionType::None | CompressionType::Delta => None,
     }
 }
@@ -335,38 +322,23 @@ pub fn header_uncompressed_size(data: &[u8]) -> Option<u64> {
 #[cfg(test)]
 /// Get compression info from header.
 fn compression_info(data: &[u8]) -> Option<(CompressionType, u64)> {
-    if data.len() < LEGACY_COMPRESSED_HEADER_LEN {
+    if data.len() < COMPRESSED_HEADER_LEN {
         return None;
     }
 
     let compression_type = CompressionType::from_u8(data[0])?;
-    let uncompressed_size = if data.len() >= COMPRESSED_HEADER_LEN {
-        u64::from_be_bytes(data[1..COMPRESSED_HEADER_LEN].try_into().ok()?)
-    } else {
-        u32::from_be_bytes(data[1..LEGACY_COMPRESSED_HEADER_LEN].try_into().ok()?) as u64
-    };
+    let uncompressed_size = u64::from_be_bytes(data[1..COMPRESSED_HEADER_LEN].try_into().ok()?);
 
     Some((compression_type, uncompressed_size))
 }
 
 fn decompress_zstd_with_header(data: &[u8]) -> Result<Vec<u8>, CompressionError> {
-    if has_magic_at(data, COMPRESSED_HEADER_LEN, ZSTD_MAGIC) {
-        return try_decompress_zstd(data, COMPRESSED_HEADER_LEN, read_u64_size);
-    }
-
-    if has_magic_at(data, LEGACY_COMPRESSED_HEADER_LEN, ZSTD_MAGIC) {
-        return try_decompress_zstd(data, LEGACY_COMPRESSED_HEADER_LEN, read_u32_size);
-    }
-
     try_decompress_zstd(data, COMPRESSED_HEADER_LEN, read_u64_size)
-        .or_else(|_| try_decompress_zstd(data, LEGACY_COMPRESSED_HEADER_LEN, read_u32_size))
 }
 
 fn zstd_header_len(data: &[u8]) -> Option<usize> {
     if has_magic_at(data, COMPRESSED_HEADER_LEN, ZSTD_MAGIC) {
         Some(COMPRESSED_HEADER_LEN)
-    } else if has_magic_at(data, LEGACY_COMPRESSED_HEADER_LEN, ZSTD_MAGIC) {
-        Some(LEGACY_COMPRESSED_HEADER_LEN)
     } else {
         None
     }
@@ -391,17 +363,7 @@ fn decompress_delta_with_header(
     delta_data: &[u8],
     base: &[u8],
 ) -> Result<Vec<u8>, CompressionError> {
-    if let Ok(result) = try_decompress_delta(delta_data, base, COMPRESSED_HEADER_LEN, read_u64_size)
-    {
-        return Ok(result);
-    }
-
-    try_decompress_delta(
-        delta_data,
-        base,
-        LEGACY_COMPRESSED_HEADER_LEN,
-        read_u32_size,
-    )
+    try_decompress_delta(delta_data, base, COMPRESSED_HEADER_LEN, read_u64_size)
 }
 
 #[cfg(test)]
@@ -441,24 +403,6 @@ fn read_u64_size(data: &[u8]) -> Result<u64, CompressionError> {
         u64::from_be_bytes(data[1..COMPRESSED_HEADER_LEN].try_into().map_err(|_| {
             CompressionError::CorruptedData("compression header truncated".to_string())
         })?);
-    validate_size(recorded_size)?;
-    Ok(recorded_size)
-}
-
-fn read_u32_size(data: &[u8]) -> Result<u64, CompressionError> {
-    if data.len() < LEGACY_COMPRESSED_HEADER_LEN {
-        return Err(CompressionError::CorruptedData(
-            "compression header truncated".to_string(),
-        ));
-    }
-
-    let recorded_size = u32::from_be_bytes(
-        data[1..LEGACY_COMPRESSED_HEADER_LEN]
-            .try_into()
-            .map_err(|_| {
-                CompressionError::CorruptedData("compression header truncated".to_string())
-            })?,
-    ) as u64;
     validate_size(recorded_size)?;
     Ok(recorded_size)
 }

@@ -39,15 +39,6 @@ pub fn claude_slug_for(cwd: &Path) -> String {
         .collect()
 }
 
-/// Enumerate every `.jsonl` under `~/.claude/projects/<slug>` (or the
-/// override given). Returns an empty vec if the dir doesn't exist —
-/// absence of transcripts is normal (first-time users, other CLIs).
-pub fn claude_sessions_for(claude_root: &Path, cwd: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let slug = claude_slug_for(cwd);
-    let dir = claude_root.join("projects").join(slug);
-    list_jsonl(&dir)
-}
-
 /// Enumerate every Claude session under `~/.claude/projects`.
 ///
 /// Used when callers need to match across sibling worktrees/checkouts of the
@@ -75,22 +66,6 @@ pub fn codex_sessions(
     walk_jsonl_recursive(&codex_root.join("archived_sessions"), &mut out)?;
     if let Some(cutoff) = since {
         out.retain(|p| filename_timestamp(p).is_none_or(|ts| ts >= cutoff));
-    }
-    out.sort();
-    Ok(out)
-}
-
-fn list_jsonl(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-            out.push(path);
-        }
     }
     out.sort();
     Ok(out)
@@ -166,31 +141,6 @@ mod tests {
             claude_slug_for(Path::new("/Users/foo/dev/heddle/.claude/worktrees/xyz")),
             "-Users-foo-dev-heddle--claude-worktrees-xyz"
         );
-    }
-
-    #[test]
-    fn claude_sessions_returns_empty_when_dir_missing() {
-        let tmp = TempDir::new().unwrap();
-        let got = claude_sessions_for(tmp.path(), Path::new("/no/such/cwd")).unwrap();
-        assert!(got.is_empty());
-    }
-
-    #[test]
-    fn claude_sessions_finds_jsonl_and_skips_others() {
-        let tmp = TempDir::new().unwrap();
-        let cwd = Path::new("/repo");
-        let dir = tmp.path().join("projects").join(claude_slug_for(cwd));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("a.jsonl"), "x").unwrap();
-        std::fs::write(dir.join("b.jsonl"), "y").unwrap();
-        std::fs::write(dir.join("notes.md"), "ignored").unwrap();
-
-        let got = claude_sessions_for(tmp.path(), cwd).unwrap();
-        let names: Vec<_> = got
-            .iter()
-            .map(|p| p.file_name().unwrap().to_owned())
-            .collect();
-        assert_eq!(names, vec!["a.jsonl", "b.jsonl"]);
     }
 
     #[test]

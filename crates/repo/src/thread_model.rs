@@ -295,8 +295,6 @@ pub struct ThreadIntegrationPolicy {
     pub manual_resolution_state: Option<String>,
 }
 
-pub type ThreadLifecycleState = ThreadState;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadRecord {
     pub id: String,
@@ -422,13 +420,6 @@ impl ThreadRecord {
         ThreadId::new_unchecked(self.id.clone())
     }
 
-    pub fn ref_name(&self) -> &str {
-        &self.thread
-    }
-
-    pub fn lifecycle_state(&self) -> &ThreadState {
-        &self.state
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
