@@ -50,7 +50,7 @@ use objects::object::{ChangeId, ThreadName};
 use oplog::{IsolationKey, OpRecord};
 use refs::RefExpectation;
 use repo::{
-    Repository, Thread, ThreadManager, ThreadMode,
+    Thread, ThreadManager, ThreadMode,
     atomic::{AtomicMutation, StagedCommit, Tx},
 };
 
@@ -548,66 +548,6 @@ fn remove_self_created_dir(abs_path: &Path, claim: Option<TargetDir>) -> HeddleR
     }
 }
 
-/// CAS-guarded rollback of the thread-ref forward (heddle#356 cid 3333881583).
-///
-/// The forward set the ref to `set_value` (the start's base state). Undo it
-/// ONLY if the ref STILL points there: restore the prior value, or delete a ref
-/// this start created. If a concurrent process advanced/changed the ref after
-/// our forward (a concurrent start or crash-recovery), leave their write in
-/// place — an unconditional reset/delete would clobber it.
-fn cas_guarded_ref_rollback(
-    repo: &Repository,
-    name: &ThreadName,
-    set_value: ChangeId,
-    restore_to: Option<ChangeId>,
-) -> HeddleResult<()> {
-    // Compare-before-write: bail without touching the ref if it no longer holds
-    // the value our forward set.
-    if repo.refs().get_thread(name)? != Some(set_value) {
-        return Ok(());
-    }
-    let result = match restore_to {
-        Some(prior) => repo
-            .refs()
-            .set_thread_cas(name, RefExpectation::Value(set_value), &prior),
-        None => repo
-            .refs()
-            .delete_thread_cas(name, RefExpectation::Value(set_value)),
-    };
-    match result {
-        Ok(()) => Ok(()),
-        // Lost the race between the read above and this CAS: a concurrent writer
-        // advanced the ref. The expectation guard means we wrote nothing — leave
-        // their advance intact (the whole point of the guard).
-        Err(HeddleError::Conflict(_)) => Ok(()),
-        Err(other) => Err(other),
-    }
-}
-
-/// Restore the thread manifest sidecar to its captured pre-start snapshot:
-/// rewrite the prior `manifest.toml` bytes if one existed, or remove the
-/// directory this start created. Restoring (not blind-deleting) preserves an
-/// OLD manifest left by a prior materialization of a reused thread ref
-/// (heddle#356 cid 3333881561).
-fn restore_thread_manifest(
-    heddle_dir: &Path,
-    thread: &str,
-    prior: Option<Vec<u8>>,
-) -> HeddleResult<()> {
-    match prior {
-        Some(bytes) => {
-            let path = repo::thread_manifest::manifest_path(heddle_dir, thread);
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(HeddleError::from)?;
-            }
-            std::fs::write(&path, bytes).map_err(HeddleError::from)
-        }
-        None => repo::thread_manifest::remove_thread_manifest_dir(heddle_dir, thread)
-            .map(|_| ())
-            .map_err(HeddleError::from),
-    }
-}
-
 /// A fully all-or-nothing `thread start` (the bytes-on-disk + virtualized
 /// write-path). Holds owned inputs the surrounding `start_thread` precomputed
 /// from reads; `apply` performs the staged writes and registers each effect's
@@ -703,7 +643,9 @@ impl StartThread {
                             &base_state,
                         )
                     },
-                    move || cas_guarded_ref_rollback(repo, &inv_name, base_state, Some(existing)),
+                    move || {
+                        repo.cas_guarded_thread_ref_rollback(&inv_name, base_state, Some(existing))
+                    },
                 )?;
             }
             None => {
@@ -714,16 +656,12 @@ impl StartThread {
                         repo.refs()
                             .set_thread_cas(&fwd_name, RefExpectation::Missing, &base_state)
                     },
-                    move || cas_guarded_ref_rollback(repo, &inv_name, base_state, None),
+                    move || repo.cas_guarded_thread_ref_rollback(&inv_name, base_state, None),
                 )?;
-                // The domain commit record. `manager_snapshot = None` matches the
-                // pre-migration `cmd_start` (the record is written below, so
-                // there is nothing to snapshot yet — heddle#23 r2).
-                oplog.push(OpRecord::ThreadCreateV2 {
-                    name: self.name.clone(),
-                    state: base_state,
-                    manager_snapshot: None,
-                });
+                // The domain commit record (shape owned by the repo). The record
+                // is written below by the converge step, so there is nothing to
+                // snapshot at construction time (heddle#23 r2).
+                oplog.push(repo.thread_create_op_record(&self.name, base_state));
             }
         }
         Ok(())
@@ -789,7 +727,7 @@ impl StartThread {
                 let path = repo::thread_manifest::manifest_path(repo.heddle_dir(), &cap_name);
                 Ok(std::fs::read(&path).ok())
             },
-            move |prior| restore_thread_manifest(repo.heddle_dir(), &inv_name, prior),
+            move |prior| repo.restore_thread_manifest(&inv_name, prior),
             move || {
                 #[cfg(all(test, unix))]
                 maybe_swap_target_leaf(TargetSwapPoint::BeforeManifest, &abs)?;
@@ -1560,8 +1498,9 @@ mod tests {
     /// snapshot (a stale manifest from a reused thread ref), not blind-delete.
     #[test]
     fn restore_thread_manifest_restores_prior_and_removes_when_absent() {
-        let temp = TempDir::new().unwrap();
-        let heddle_dir = temp.path();
+        let (temp, repo, _state) = repo_with_state(&[]);
+        let _ = &temp;
+        let heddle_dir = repo.heddle_dir();
 
         // Prior = Some: an OLD manifest existed. The forward overwrote it; the
         // inverse must restore the OLD bytes, not the forward's, and not delete.
@@ -1570,7 +1509,7 @@ mod tests {
         std::fs::write(&path, b"OLD").unwrap();
         let prior = std::fs::read(&path).ok();
         std::fs::write(&path, b"NEW").unwrap();
-        restore_thread_manifest(heddle_dir, "foo", prior).unwrap();
+        repo.restore_thread_manifest("foo", prior).unwrap();
         assert_eq!(
             std::fs::read(&path).unwrap(),
             b"OLD",
@@ -1581,7 +1520,7 @@ mod tests {
         let path2 = repo::thread_manifest::manifest_path(heddle_dir, "bar");
         std::fs::create_dir_all(path2.parent().unwrap()).unwrap();
         std::fs::write(&path2, b"NEW").unwrap();
-        restore_thread_manifest(heddle_dir, "bar", None).unwrap();
+        repo.restore_thread_manifest("bar", None).unwrap();
         assert!(
             std::fs::symlink_metadata(&path2).is_err(),
             "rollback of a freshly-created manifest must remove it"
@@ -1602,7 +1541,8 @@ mod tests {
         // Brand-new case (restore_to = None → would otherwise delete). A
         // concurrent writer advanced the ref past our forward value → leave it.
         repo.refs().set_thread(&name, &advanced).unwrap();
-        cas_guarded_ref_rollback(&repo, &name, base, None).unwrap();
+        repo.cas_guarded_thread_ref_rollback(&name, base, None)
+            .unwrap();
         assert_eq!(
             repo.refs().get_thread(&name).unwrap(),
             Some(advanced),
@@ -1611,7 +1551,8 @@ mod tests {
 
         // Brand-new case, ref still holds our forward value → delete it.
         repo.refs().set_thread(&name, &base).unwrap();
-        cas_guarded_ref_rollback(&repo, &name, base, None).unwrap();
+        repo.cas_guarded_thread_ref_rollback(&name, base, None)
+            .unwrap();
         assert_eq!(
             repo.refs().get_thread(&name).unwrap(),
             None,
@@ -1620,7 +1561,8 @@ mod tests {
 
         // Re-start case (restore_to = Some(prior)). Concurrent advance → leave.
         repo.refs().set_thread(&name, &advanced).unwrap();
-        cas_guarded_ref_rollback(&repo, &name, base, Some(prior)).unwrap();
+        repo.cas_guarded_thread_ref_rollback(&name, base, Some(prior))
+            .unwrap();
         assert_eq!(
             repo.refs().get_thread(&name).unwrap(),
             Some(advanced),
@@ -1629,7 +1571,8 @@ mod tests {
 
         // Re-start case, ref still holds our forward value → restore prior.
         repo.refs().set_thread(&name, &base).unwrap();
-        cas_guarded_ref_rollback(&repo, &name, base, Some(prior)).unwrap();
+        repo.cas_guarded_thread_ref_rollback(&name, base, Some(prior))
+            .unwrap();
         assert_eq!(
             repo.refs().get_thread(&name).unwrap(),
             Some(prior),
