@@ -16,14 +16,17 @@ use super::{
     merge::merge_thread_into_current,
     operator_core::OperatorCommandOutput,
     operator_loop::primary_next_action,
-    next_action::{NextActionValidationContext, write_validated_json_stdout},
+    next_action::{NextActionValidationContext, write_command_json},
     ready_cmd::worktree_dirty,
     snapshot::{SnapshotAgentOverrides, create_snapshot},
     thread_cmd::{load_thread, refresh_thread, refresh_thread_freshness, thread_not_found_advice},
     thread_landing::{land_command_for_thread, land_command_with_push_target},
 };
 use crate::{
-    cli::{Cli, render::shell_quote, should_output_json, style, worktree_status_options},
+    cli::{
+        Cli, output_is_compact, render::shell_quote, should_output_json, style,
+        worktree_status_options,
+    },
     config::UserConfig,
 };
 
@@ -42,6 +45,12 @@ pub struct ThreadResolveOutput {
     #[serde(flatten)]
     pub operator: OperatorCommandOutput,
     pub thread: String,
+}
+
+impl super::compact::CompactProjection for ThreadResolveOutput {
+    fn compact(&self) -> super::compact::CompactOutput {
+        <OperatorCommandOutput as super::compact::CompactProjection>::compact(&self.operator)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -762,8 +771,9 @@ fn emit_thread_resolve(
     output: &ThreadResolveOutput,
 ) -> Result<()> {
     if should_output_json(cli, None) {
-        write_validated_json_stdout(
+        write_command_json(
             output,
+            output_is_compact(cli),
             NextActionValidationContext::new(&["thread", "resolve"], repo.capability()),
         )?;
     } else {

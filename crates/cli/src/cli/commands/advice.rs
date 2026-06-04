@@ -302,6 +302,23 @@ impl RecoveryAdvice {
         }
     }
 
+    pub fn json_compact_unsupported(command: &str) -> Self {
+        Self {
+            kind: "json_compact_unsupported",
+            error: format!("--output json-compact is not supported by `heddle {command}`"),
+            hint: "Use `--output json` for the full machine contract, or choose a command that exposes a compact decision surface.".to_string(),
+            unsafe_condition: "the command has no compact decision-surface projection".to_string(),
+            would_change: "falling back to the full JSON contract would leak non-decision-surface fields under json-compact".to_string(),
+            preserved: "no command body was executed".to_string(),
+            primary_command: format!("heddle {command} --output json"),
+            recovery_commands: vec![
+                format!("heddle {command} --output json"),
+                "heddle commands --output json".to_string(),
+            ],
+            extra_json_fields: Map::new(),
+        }
+    }
+
     pub(crate) fn machine_contract_drift(
         error: impl Into<String>,
         unsafe_condition: impl Into<String>,

@@ -105,6 +105,8 @@ pub(crate) struct StatusOutput {
     promotion_suggested: bool,
     impact_categories: Vec<ThreadImpactCategory>,
     heavy_impact_paths: Vec<String>,
+    #[serde(skip)]
+    changed_paths: Vec<String>,
     changed_path_count: usize,
     worktree_changed_path_count: usize,
     thread_changed_path_count: usize,
@@ -589,6 +591,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
             promotion_suggested: false,
             impact_categories: Vec::new(),
             heavy_impact_paths: Vec::new(),
+            changed_paths: changes_paths(&changes).into_iter().collect(),
             changed_path_count: 0,
             worktree_changed_path_count: changes_path_count(&changes),
             thread_changed_path_count: 0,
@@ -820,6 +823,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
             .as_ref()
             .map(|thread| thread.heavy_impact_paths.clone())
             .unwrap_or_default(),
+        changed_paths: Vec::new(),
         changed_path_count: thread_summary
             .as_ref()
             .map(|thread| thread.changed_paths.len())
@@ -1036,6 +1040,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         // same thread/instant (heddle#306). The verification/dirty-worktree
         // blocker is a health signal, surfaced via `coordination_status` above.
         thread_state: output.thread_state,
+        changed_paths: changed_paths(thread_summary.as_ref(), &output.changes),
         changed_path_count: if trust.verified {
             changed_path_count(thread_summary.as_ref(), &output.changes)
         } else {
@@ -1102,6 +1107,7 @@ impl super::compact::CompactProjection for StatusOutput {
         compact.blockers = self.blockers.clone();
         compact.next_action = next_action;
         compact.next_action_template = next_action_template;
+        compact.changed_paths = Some(self.changed_paths.clone());
         compact.changed_path_count = Some(self.changed_path_count);
         compact
     }
@@ -1114,6 +1120,7 @@ impl super::compact::CompactProjection for PlainGitStatusOutput {
         let mut compact = super::compact::CompactOutput::new(self.output_kind);
         compact.next_action = next_action;
         compact.next_action_template = next_action_template;
+        compact.changed_paths = Some(changes_paths(&self.changes).into_iter().collect());
         compact.changed_path_count = Some(self.changed_path_count);
         compact
     }
@@ -1961,6 +1968,20 @@ fn changed_path_count(
     paths.extend(changes.added.iter().cloned());
     paths.extend(changes.deleted.iter().cloned());
     paths.len()
+}
+
+fn changed_paths(
+    thread: Option<&super::thread::ThreadSummary>,
+    changes: &ChangesInfo,
+) -> Vec<String> {
+    let mut paths = BTreeSet::new();
+    if let Some(thread) = thread {
+        paths.extend(thread.changed_paths.iter().cloned());
+    }
+    paths.extend(changes.modified.iter().cloned());
+    paths.extend(changes.added.iter().cloned());
+    paths.extend(changes.deleted.iter().cloned());
+    paths.into_iter().collect()
 }
 
 fn changes_path_count(changes: &ChangesInfo) -> usize {

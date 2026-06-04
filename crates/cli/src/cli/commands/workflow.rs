@@ -22,14 +22,14 @@ use super::{
     thread_cmd::{
         current_thread, load_thread, refresh_thread, thread_manager, thread_not_found_advice,
     },
-    next_action::{NextActionValidationContext, write_validated_json_stdout},
+    next_action::{NextActionValidationContext, write_command_json, write_full_command_json},
     thread_landing::{land_local_command, switch_thread_command},
 };
 use crate::{
     cli::{
         Cli, ThreadStartArgs, WorkspaceModeArg,
         cli_args::{DelegateArgs, LandArgs, SyncArgs},
-        should_output_json, style, worktree_status_options,
+        output_is_compact, should_output_json, style, worktree_status_options,
     },
     config::UserConfig,
 };
@@ -242,7 +242,7 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
         VerificationClaimPolicy::strict(),
     );
 
-    emit_with_next_action_validation(cli, &repo, &output, &["sync"])
+    write_sync_output(cli, &repo, &output)
 }
 
 pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
@@ -1443,7 +1443,7 @@ fn emit_with_next_action_validation<T: Serialize>(
     emitting_command: &[&str],
 ) -> Result<()> {
     if should_output_json(cli, None) {
-        write_validated_json_stdout(
+        write_full_command_json(
             output,
             NextActionValidationContext::new(emitting_command, repo.capability()),
         )
@@ -1451,6 +1451,31 @@ fn emit_with_next_action_validation<T: Serialize>(
         println!("{}", serde_json::to_string_pretty(output)?);
         Ok(())
     }
+}
+
+impl super::compact::CompactProjection for SyncOutput {
+    fn compact(&self) -> super::compact::CompactOutput {
+        <OperatorCommandOutput as super::compact::CompactProjection>::compact(&self.operator)
+    }
+}
+
+impl super::compact::CompactProjection for LandOutput {
+    fn compact(&self) -> super::compact::CompactOutput {
+        <OperatorCommandOutput as super::compact::CompactProjection>::compact(&self.operator)
+    }
+}
+
+fn write_sync_output(cli: &Cli, repo: &Repository, output: &SyncOutput) -> Result<()> {
+    if should_output_json(cli, None) {
+        write_command_json(
+            output,
+            output_is_compact(cli),
+            NextActionValidationContext::new(&["sync"], repo.capability()),
+        )?;
+    } else {
+        println!("{}", serde_json::to_string_pretty(output)?);
+    }
+    Ok(())
 }
 
 fn non_empty_next_action(action: &str) -> Option<String> {
@@ -1491,8 +1516,9 @@ fn scoped_resolve_list_command(thread: &Thread) -> String {
 
 fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Result<()> {
     if should_output_json(cli, None) {
-        write_validated_json_stdout(
+        write_command_json(
             output,
+            output_is_compact(cli),
             NextActionValidationContext::new(&["land"], repo.capability()),
         )?;
     } else {

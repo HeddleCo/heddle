@@ -85,6 +85,10 @@ fn status_compact_emits_only_decision_surface() {
         compact.get("changed_path_count").is_some(),
         "compact status must carry changed_path_count: {compact}"
     );
+    assert!(
+        compact.get("changed_paths").is_some(),
+        "compact status must carry changed_paths: {compact}"
+    );
     assert_only_compact_keys(&compact, "status");
 
     // Contrast: the full contract still carries the noisy metadata the
@@ -131,5 +135,23 @@ fn json_compact_is_a_valid_output_value() {
         out.status.success(),
         "--output json-compact must parse and run: stderr={}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn json_compact_rejects_commands_without_projection() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).expect("init");
+
+    let out = heddle_output(&["--output", "json-compact", "commands"], Some(temp.path()))
+        .expect("spawn");
+    assert!(
+        !out.status.success(),
+        "compact-less command must reject json-compact"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("json-compact is not supported"),
+        "rejection should explain unsupported compact mode: {stderr}"
     );
 }
