@@ -4,6 +4,6 @@ Heddle discussions are durable asynchronous coordination records in the OSS CLI,
 
 After the repo split, Heddle documentation owns the CLI/local model and cross-repo contracts for collaboration records. Weft server internals and Tapestry web implementation details should live in their own repositories, with Heddle ADRs naming them only where a boundary or protocol contract matters.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Real-time chat in the OSS CLI would make discussions feel immediately collaborative, but it would pull hosted transport, presence, and notification semantics into the local core. State-only notes would preserve locality, but they would not support parallel-agent coordination across threads.

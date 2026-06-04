@@ -44,6 +44,6 @@ Legacy state-attached discussions migrate as collaboration import roots, not as 
 
 `heddle discuss` output should expose migrated legacy history as imported history. JSON includes import source and trust metadata; human detail views show the legacy/import label, while terse list output can keep it compact.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Starting with Weft sync would show hosted collaboration sooner, but it would multiply any mistakes in the local record model. Starting local-first preserves the agreed Heddle boundary and lets the OSS CLI validate the core collaboration semantics before introducing remote cursors, policy filtering over sync, and live hosted delivery.

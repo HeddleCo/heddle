@@ -10,6 +10,6 @@ Hosted rejection or blocked collaboration sync should appear in `status` when it
 
 In the first local discussion slice, `status` should summarize discussions only when they create attention for the current checkout or thread. It should point to `heddle inbox` or `heddle discuss list` for details rather than becoming a discussion list.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Staying silent would preserve output restraint, but users in Git-overlay repos could wrongly assume Git push shared discussions or attention. Warning on every command would be noisy, so the label belongs on orientation and sync-adjacent surfaces.

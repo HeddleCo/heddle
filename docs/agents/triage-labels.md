@@ -1,19 +1,39 @@
 # Triage Labels
 
-The skills speak in terms of five canonical triage roles. This file maps those roles to the actual label strings used in this repo's issue tracker.
+Use only labels that exist in `HeddleCo/heddle`. Do not apply placeholder
+labels from upstream skill templates unless a maintainer creates them first.
 
-| Label in mattpocock/skills | Label in our tracker | Meaning |
+## Existing Labels
+
+| Label | Meaning |
 | --- | --- | --- |
-| `needs-triage` | `needs-triage` | Maintainer needs to evaluate this issue |
-| `needs-info` | `needs-info` | Waiting on reporter for more information |
-| `ready-for-agent` | `ready-for-agent` | Fully specified, ready for an AFK agent |
-| `ready-for-human` | `ready-for-human` | Requires human implementation |
-| `wontfix` | `wontfix` | Will not be actioned |
+| `p0` | Immediate priority or release-blocking failure |
+| `p1` | High-priority work |
+| `p2` | Normal-priority work |
+| `p3` | Low-priority or opportunistic work |
+| `epic` | Umbrella issue that groups related work |
+| `spike` | Research, design, or uncertainty-reduction work |
+| `tdd` | Work should proceed test-first or has explicit test-design value |
+| `blocked` | Cannot proceed until another dependency or decision lands |
+| `bug` | Defect or regression |
+| `enhancement` | New capability or product improvement |
+| `documentation` | Documentation-only work |
+| `question` | Clarification, support, or decision request |
+| `wontfix` | Intentionally not actioned |
+| `duplicate` | Duplicate of another issue |
+| `invalid` | Not actionable in this repository |
+| `good first issue` | Good entry point for a new contributor |
+| `help wanted` | Maintainers welcome outside implementation help |
 
-When a skill mentions a role, use the corresponding label string from this table.
+## Skill Role Mapping
 
-## Additional Labels
+If a skill mentions generic triage roles, map them into the repo vocabulary:
 
-`question` remains available as a general GitHub issue label for support, discussion, or clarification-style issues. Do not use `question` as a replacement for the `needs-info` triage state.
+- `needs-triage`: do not apply a label. Choose a priority label only when the issue already contains enough signal.
+- `needs-info`: use `question` only when the issue is primarily asking for clarification. Otherwise leave a comment requesting the missing information.
+- `ready-for-agent` / `ready-for-human`: do not apply labels. Readiness belongs in the GitHub Project status and issue body, not in this repo's labels.
+- `wontfix`: use `wontfix`.
 
-At setup time, GitHub already had `wontfix` and `question`. The other canonical labels may need to be created in GitHub before automated triage can apply them successfully.
+Project fields such as Status, Priority, Size, Epic, Scope, and DoD Type are
+separate from labels. When a task requires project-field updates, use the
+Project workflow instead of inventing a label.

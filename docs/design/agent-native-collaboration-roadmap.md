@@ -37,6 +37,7 @@ Strong alignment:
 
 - The Project's Ready, In progress, In review, and Done states are practical input to `heddle inbox`: they represent attention, readiness, review state, and recommended next work.
 - Whole-CLI consolidation work aligns with the command-contract foundation; collaboration should reuse the existing command catalog and op-id machinery rather than invent a new agent contract layer.
+- `VisibilityTier` / `StateVisibility` work from #315-#319 and #523 is the shared visibility substrate for collaboration; discussion visibility should consume it instead of growing a parallel model.
 - StateVisibility, self-sovereign auth, signing, Weft hardening, and Tapestry review work align with the planned capability, policy, attestation, and hosted projection layers.
 - Semantic merge correctness and anchor-travel work are prerequisites for trustworthy semantic anchors.
 
@@ -270,7 +271,7 @@ Goal: derive useful local collaboration views from the operation log.
   - `orphaned`
 - Do not make anchor resolver thresholds per-user in v1.
 - Do not depend on hosted services or live language-server state for OSS anchor resolution.
-- Treat the existing anchor-travel decision as a prerequisite. Heddle should wire useful anchor-travel fields into semantic anchor status or explicitly retire them before migrating state-attached discussions.
+- Treat #492, the existing anchor-travel decision, as a prerequisite. Heddle should wire useful anchor-travel fields into semantic anchor status or explicitly retire them before migrating state-attached discussions.
 - Add ambiguous or orphaned anchor attention when anchor status affects actionability.
 
 Exit criteria:

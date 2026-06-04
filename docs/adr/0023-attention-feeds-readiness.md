@@ -12,6 +12,6 @@ A targeted question can stop being an attention item when a later answer cites t
 
 Context annotation conflicts should create attention, but they should block readiness only when the conflicted annotation is linked to the current thread, changed content, or an explicit policy gate. Heddle should not globally block integration because unrelated repository knowledge needs curation.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Ignoring attention during readiness would let agents land work while unresolved coordination blockers exist. Blocking on every open discussion would make durable collaboration too noisy. Severity plus target keeps readiness honest without making discussion volume a workflow tax.

@@ -4,6 +4,6 @@ Discussion IDs are generated UUIDv7 record identifiers, while collaboration oper
 
 Migrated legacy state-attached discussions receive new UUIDv7 discussion IDs. Legacy IDs are preserved as source metadata or lookup aliases when useful, but they do not become canonical repository discussion identity.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Content-addressing the opening operation could derive the discussion ID from immutable data, but it would make record identity depend on opening payload details. Random UUIDs would work, but UUIDv7 gives better ordering and locality for listings, indexes, and sync cursors while keeping the ID opaque.

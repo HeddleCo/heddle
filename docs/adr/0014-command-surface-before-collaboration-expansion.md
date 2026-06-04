@@ -8,6 +8,6 @@ The command catalog should mark collaboration writes as mutating operations and 
 
 Collaboration JSON errors should carry a stable machine-readable code, a human message, the command schema identifier/version, and actionable recovery fields. Stale-head errors return current heads, ambiguous-id errors return candidates, and hosted rejection errors include the hosted rejection code plus retry or hosted-valid-continuation hints when available.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Shipping collaboration commands first would move product direction faster, but it would multiply drift across help, JSON schemas, runtime contracts, command catalog entries, and docs. Tightening the command surface first gives the collaboration expansion a stable CLI API foundation.

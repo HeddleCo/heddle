@@ -4,6 +4,6 @@ Heddle may accept collaboration operations with unknown authors locally as degra
 
 Unknown-author operations create attention items only when they affect current work, hosted sync, or policy-sensitive records. Otherwise they remain visible as low-trust provenance without turning every imported or local-only record into inbox noise.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Requiring configured identity for every local collaboration operation would improve audit quality, but it would break local-first workflows before identity is configured. Treating unknown authors as normal would weaken provenance and hosted policy enforcement.

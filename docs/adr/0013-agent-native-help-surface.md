@@ -6,6 +6,6 @@ First-slice local discussion and inbox help should live in the normal CLI help s
 
 Legacy discussion migration should be discoverable when relevant but not promoted as an everyday workflow. It belongs in advanced or doctor-oriented help because it is transitional repository maintenance, not a daily collaboration action.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Keeping `discuss` and `context` entirely behind advanced help matched the previous restraint principle, but agent-native coordination is now part of the core loop. Promoting every collaboration verb would make first-run help too broad, so `inbox` and `discuss` are the everyday entry points while context and deeper review remain more deliberate.

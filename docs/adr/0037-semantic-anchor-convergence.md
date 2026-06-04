@@ -14,6 +14,6 @@ Concurrent anchor retarget operations survive when the record type can represent
 
 Anchor ambiguity creates an attention item when it affects actionability, such as review comments, blockers, or context annotations tied to changed code. Purely informational ambiguity remains visible on the record without blocking readiness.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Last-writer-wins anchor retargeting would keep views simple, but it would hide ambiguity and make concurrent agent work less trustworthy. Treating every concurrent retarget as a conflict would be noisy when multiple anchors can legitimately describe the same discussion.

@@ -12,6 +12,6 @@ The collaboration operation envelope records the operation capability context fr
 
 When Weft reports that hosted policy or grants changed, the sync result should perform automatic capability refresh and tell the user their permission scope changed. If the refreshed root capability narrows, derived local capability context is automatically capped by the refreshed root so future collaboration operations and sync attempts use policy context that matches current hosted policy.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** A separate Weft-only collaboration channel would simplify live hosted features, but it would make durable discussions feel like a separate product from repository synchronization. Folding collaboration operations into the exact same object lane as source history would blur very different consistency and cursor requirements.

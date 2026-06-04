@@ -60,6 +60,6 @@ If the refreshed root no longer covers a child capability, Heddle preserves the 
 
 Capability refresh events are policy and sync metadata, not collaboration operations. They can produce attention items and diagnostics, and future operations record the refreshed operation capability context, but refresh events do not appear as discussion turns or context annotations unless a user or agent explicitly writes one.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Pure server-issued Biscuits centralize authority but make local derivation and offline policy context weaker. Pure self-sovereign Biscuits work for local-only trust anchors, but they cannot safely authorize hosted collaboration without Weft validating the root scope.

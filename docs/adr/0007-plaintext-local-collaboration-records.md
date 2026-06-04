@@ -8,6 +8,6 @@ Creating a redaction is policy-sensitive. Local Heddle should require an active 
 
 Default human and JSON output for redacted content should show a redaction marker, target operation ID, visible reason or reason code, and actor or policy metadata allowed by the active capability. It should not include suppressed content unless the caller uses an explicit privileged diagnostic or forensic mode.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Encrypting restricted collaboration records locally would provide a stronger security story, but it would require key distribution and merge/search semantics that are not necessary for the first world-class OSS CLI. If local unreadability becomes a requirement, it should be introduced as an explicit encrypted storage mode rather than implied by visibility labels.

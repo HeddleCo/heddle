@@ -8,6 +8,6 @@ Context extraction from discussions can ship after the first local discussion sl
 
 When context extraction creates or updates a context annotation, the annotation operation should cite the source discussion operations it was extracted from. Those references preserve provenance without making the original discussion turns themselves canonical context.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Keeping context annotations only on source states matched the current implementation, but it makes durable knowledge edits behave like source-history mutations. Moving live context to the collaboration log keeps annotations mergeable and queryable while preserving historical context views on states.

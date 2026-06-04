@@ -6,6 +6,6 @@ The local collaboration log uses Heddle-native content-addressed storage, append
 
 `doctor` may automatically rebuild disposable collaboration indexes and materialized views. It does not repair durable operation bytes by guesswork. If operation bytes are invalid or missing, `doctor` reports or quarantines the problem and points to restore or explicit import rather than synthesizing history.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** SQLite would make querying and indexing straightforward, but it would introduce a second local source-of-truth model for core OSS behavior. Heddle-native storage keeps collaboration aligned with content addressing, fsck/doctor repair, and the longer-term direction of owning core dependencies.

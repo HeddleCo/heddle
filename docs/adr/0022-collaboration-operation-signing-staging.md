@@ -16,6 +16,6 @@ Operation signatures cover the canonical operation envelope, not sync metadata. 
 
 When signatures are present, operation capability context is signed because it is part of the canonical operation envelope and provenance claim. Hosted acceptance context remains unsigned sync metadata.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Requiring signatures immediately would strengthen integrity, but it would block the local storage and merge model on signing plumbing. Never signing collaboration operations would leave agent coordination weaker than source history, which conflicts with Heddle's provenance direction.

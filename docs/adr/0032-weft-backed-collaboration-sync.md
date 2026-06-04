@@ -40,6 +40,6 @@ Invalid collaboration artifacts do not sync to Weft as collaboration operations.
 
 Hosted collaboration sync should have an explicit redaction and policy-suppression story before broad rollout. Weft should not rely on local users rewriting or deleting append-only collaboration operations to handle accidentally sensitive content.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Letting every Heddle remote transport carry collaboration would make the feature feel more universal, but it would blur policy, capability, live coordination, and hosted product boundaries. Weft-backed sync keeps collaboration tied to the Heddle-hosted value proposition.

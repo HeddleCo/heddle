@@ -16,6 +16,6 @@ Routine collaboration `fsck` should recompute operation IDs from canonical bytes
 
 Collaboration `doctor` may rebuild derived indexes and views, recreate missing idempotency metadata from durable operations when unambiguous, and quarantine malformed artifacts for diagnostics. It must not invent replacement operation bytes, silently delete locally valid operations, or rewrite content-addressed operation envelopes.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Storing collaboration operations under `.heddle/objects/` would align them with content addressing, but it would blur source-history objects with collaboration metadata. Storing them under `.heddle/oplog/` would reuse an append log, but it would confuse collaboration history with undo/redo history. A dedicated root keeps the boundary clear while staying Heddle-native.

@@ -12,6 +12,6 @@ Live updates merge through the same operation-log convergence path as push/pull.
 
 Presence, typing indicators, and similar live UI affordances are not collaboration records. They may become ephemeral hosted UI data later, but Heddle live sync should deliver durable operations and sync state rather than chat transport state.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Requiring manual push/pull for every discussion turn would preserve a simple sync model, but it would make hosted Heddle feel less collaborative than the product intends. Treating live updates as a separate chat transport would fragment the model, so live delivery remains a transport over the same collaboration operations.

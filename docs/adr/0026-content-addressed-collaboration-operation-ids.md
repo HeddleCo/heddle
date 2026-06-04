@@ -28,6 +28,6 @@ Independent actors submitting the same visible content with the same anchor and 
 
 Collaboration idempotency keys are operational metadata. Normal human-facing discussion output shows the resulting operation ID, actor, timestamp, turn kind, and content; idempotency keys appear only in verbose/debug JSON and `fsck`/`doctor` diagnostics.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Random IDs would be simple and avoid duplicate-content edge cases, but they would not provide the same deduplication, idempotent retry, and tamper-evidence properties as Heddle's content-addressed model. If intentionally duplicate operations need distinction, the operation envelope can include a nonce.

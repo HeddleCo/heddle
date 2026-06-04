@@ -38,6 +38,6 @@ If a malformed operation is encountered, Heddle fails that operation loudly and 
 
 Malformed collaboration bytes are retained as invalid collaboration artifacts for diagnostics or quarantine, not treated as valid collaboration operations. `doctor` may quarantine or move them, but should not silently delete bytes that may explain corruption or attack attempts.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Latest-document storage would be simpler to query, but it would make causality, audit, idempotent retry, and concurrent edits weaker. Per-field last-write-wins state would hide the sequence of decisions that matters for review and agent coordination.

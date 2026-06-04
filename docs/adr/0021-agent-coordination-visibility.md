@@ -2,6 +2,11 @@
 
 Agent coordination discussions are visible by default to the delegating human or policy scope that authorized the agent. Agents may create restricted discussions only when their active capability permits it; Heddle should not create invisible durable agent side channels outside explicit policy.
 
+Collaboration visibility must consume the shared E5 visibility substrate
+tracked by #315-#319 and #523. Discussion and agent-coordination visibility
+project into `VisibilityTier` / `StateVisibility` rather than defining a
+parallel tier enum or hosted policy model.
+
 Agent task assignment is operational metadata for v1, not a collaboration operation. It drives execution policy and local runner behavior, including whether offline continuation is allowed. Collaboration operations may reference the agent/task identity for provenance, but the assignment itself does not become durable repository collaboration history unless a later design makes synced task delegation a first-class collaboration record.
 
 Local task assignment metadata should use a versioned local id/envelope so future runner-policy changes do not break provenance grouping. Local task assignment ids should be opaque UUIDv7 values: sortable and collision-resistant without embedding task meaning. Human-readable task meaning belongs in task metadata or discussion titles. This versioning remains operational metadata; the collaboration operation schema only records opaque local task provenance when available.
@@ -102,6 +107,6 @@ Task provenance inspection should live under `doctor` or an advanced `actor expl
 
 If Heddle later adds a handoff command, local task provenance should be optional context for that workflow rather than the handoff itself. The handoff turn remains collaboration content authored under capability policy; task provenance can prefill context or attach allowed provenance, but the handoff body should stand on its own.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Private agent-only coordination could reduce noise, but it would weaken human oversight and trust. Ephemeral model scratch can remain outside Heddle; once an agent writes a discussion, it becomes durable collaboration history under the relevant capability policy.

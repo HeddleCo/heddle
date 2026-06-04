@@ -10,6 +10,6 @@ A v1 operation and a v2 operation that decode to the same current in-memory oper
 
 Schema tests should pin version numbers, round-trip the latest schema, map each historical schema into the current model, reject unsupported versions, prove legacy shapes do not decode as current by accident, and maintain golden canonical byte/hash fixtures for representative operation kinds.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Reusing the oplog implementation directly would bring a proven pattern, but its rewrite-to-latest migration behavior conflicts with content-addressed collaboration operation identity. Storing only current Rust serde enum bytes would be simpler, but it would make enum reordering, field reshaping, and accidental defaulting part of the durable compatibility contract. JSON would be easier to inspect manually, but canonical MessagePack keeps the local store compact and closer to existing Heddle binary storage while still allowing JSON as an adapter.

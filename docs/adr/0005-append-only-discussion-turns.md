@@ -16,6 +16,6 @@ Only the operation that opens a discussion record may omit causal parents by def
 
 Concurrent discussion turns do not create a conflict state. They survive as sibling turns and are deterministically ordered for display. Conflict states are reserved for operations whose claims are mutually incompatible, such as competing resolutions or incompatible visibility or anchor changes.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Editable message bodies would match common chat tools, but they require additional CRDT text or last-write-wins edit semantics and weaken provenance. Hosted products may later add narrow presentation affordances, but the durable OSS record remains append-only.

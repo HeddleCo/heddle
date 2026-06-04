@@ -4,11 +4,19 @@ How the engineering skills should consume this repo's domain documentation and e
 
 ## Layout
 
-This is a single-context repo for the mattpocock engineering skills:
+This is the Heddle CLI/local model repository. Agent skills should treat this
+repo as the source of truth for Heddle-native version-control concepts,
+cross-repo collaboration contracts, and local CLI behavior.
 
 - **Domain glossary**: `CONTEXT.md` at the repo root.
 - **Architecture decisions**: `docs/adr/`.
 - **Repo operating guidance**: `AGENTS.md` and the relevant files under `.agents/`.
+- **Implementation roadmaps and design notes**: `docs/design/`.
+
+After the repo split, Weft server internals and Tapestry web routes live in
+their sibling repositories. Heddle docs may describe their contracts and
+boundaries, but agents should not use stale Heddle-side hosted/web notes as
+implementation guidance for those repos.
 
 `CONTEXT.md` and `docs/adr/` are created lazily. If they do not exist, proceed silently unless the current work resolves a domain term or an architectural decision worth recording.
 
@@ -16,11 +24,11 @@ This is a single-context repo for the mattpocock engineering skills:
 
 Read `AGENTS.md` first. Then read the `.agents/*.md` files relevant to the work area, such as:
 
-- `.agents/architecture.md` for workspace layout, core patterns, hosted layers, web routes, packfiles, agent checkouts, and formal specs.
+- `.agents/architecture.md` for Heddle workspace layout, core local patterns, packfiles, agent checkouts, and formal specs.
 - `.agents/rust-guidelines.md` for Rust style, error handling, dependency, security, and performance rules.
-- `.agents/common-tasks.md` for command, object, spec, state-machine, hosted, API, and web-page workflows.
+- `.agents/common-tasks.md` for Heddle command, object, spec, and state-machine workflows.
 - `.agents/testing.md` and `.agents/formal-specs.md` for test and Quint verification expectations.
-- `.agents/hosted-operations.md` for hosted namespace, grant, content API, and deployment guidance.
+- `.agents/hosted-operations.md` for hosted namespace, grant, content API, and Heddle/Weft boundary guidance.
 - `.agents/agent-workflows.md` for thread, actor, session, checkout, and attribution guidance.
 - `.agents/code-review.md` and `.agents/review-pitfalls.md` for review methodology and known false-positive traps.
 - `.agents/web-copy.md` when editing web copy or user-facing hosted product surfaces.

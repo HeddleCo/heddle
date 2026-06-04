@@ -16,6 +16,6 @@ The first model treats capability scope as abstract permissions or predicates ov
 
 The formal model should use Quint if that remains Heddle's formal-spec convention. Collaboration should fit the existing verification practice rather than introduce a second modeling tool.
 
-**Status:** accepted
+**Status:** proposed
 
 **Considered Options:** Relying only on implementation tests would move faster, but it would make the CRDT claim less defensible. Requiring a full formal model before any local discussion work would delay learning about command and storage ergonomics unnecessarily.
