@@ -61,7 +61,7 @@ crates/
   repo/      # repository operations and helpers
   refs/      # threads, markers, HEAD, packed refs
   oplog/     # undo/redo oplog logic
-  heddle-bridge/    # Git interoperability
+  cli/src/bridge/   # Git interoperability (module within the cli crate)
   semantic/  # semantic diff and parser-heavy analysis
   ...
 docs/             # architecture, hosted model, roadmap, future-state plans
@@ -308,10 +308,10 @@ Core state machines are specified in `specs/quint/` and mirrored by Rust propert
 
 ## Related Documentation
 
-- `SPEC.md` - formal behavior and storage/protocol truth
-- `docs/HOSTED_NAMESPACES.md` - hosted namespace and grant model
-- `docs/HOSTED_ADMIN.md` - hosted admin commands and API usage
-- `docs/ENTERPRISE_BACKEND_ROADMAP.md` - hosted platform roadmap
-- `docs/RUNNERS_AND_BUILDS.md` - hosted workflow and automation direction
-- `docs/LINE_PROVENANCE_PLAN.md` - provenance status and next-step roadmap
+- `SPEC.md` in the sibling **weft** repo - formal behavior and storage/protocol truth
+- `docs/HOSTED_NAMESPACES.md` in the sibling **weft** repo - hosted namespace and grant model
+- `docs/HOSTED_ADMIN.md` in the sibling **weft** repo - hosted admin commands and API usage
+- `docs/ENTERPRISE_BACKEND_ROADMAP.md` in the sibling **weft** repo - hosted platform roadmap
+- `docs/RUNNERS_AND_BUILDS.md` in the sibling **weft** repo - hosted workflow and automation direction
+- `docs/LINE_PROVENANCE_PLAN.md` in the sibling **weft** repo - provenance status and next-step roadmap
 - `PRODUCT_SPEC.md` in the sibling **tapestry** repo - hosted web product scope and surface plan

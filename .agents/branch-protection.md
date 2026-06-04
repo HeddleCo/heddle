@@ -236,17 +236,18 @@ diff touches crypto. Most-restrictive cumulative.
 
 ## Server-side touchpoints
 
-The hosted server moved to the sibling **weft** repo; the paths below are
-relative to that repo's server crate.
+The hosted server moved to the sibling **weft** repo; the `src/...` paths below
+are relative to that repo's server crate (`crates/weft-server/`), and the schema
+path is relative to the weft repo root.
 
 | Concern | File |
 |---|---|
 | Glob matcher | `src/access/glob.rs` |
 | Gate evaluator | `src/access/merge_gate.rs` |
 | Policy + group SQL | `src/pg_registry.rs` |
-| Admin RPC handlers | `src/server/grpc_hosted_impl/admin.rs` |
-| Approval RPC handlers | `src/server/grpc_hosted_impl/user.rs` |
-| Schema | `migrations/006_thread_policies.sql` |
+| Policy + group admin RPC handlers | `src/server/grpc_hosted_impl/user.rs` (e.g. `create_thread_policy`, `create_approval_group`) |
+| Approval RPC handlers | `src/server/grpc_hosted_impl/user.rs` (e.g. `approve_thread`, `revoke_approval`) |
+| Schema | `migrations/003_governance.sql` |
 
 The whole role-inheritance + group-membership lattice fits in two
 helpers (`role_satisfies`, `namespace_covers`) and a recursive CTE

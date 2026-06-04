@@ -101,9 +101,9 @@ Match the pattern in `cli/src/cli/cli_args/commands_review.rs` for arg structs +
 
 ## Storage + replication
 
-- The local object store gets a new content type for `Redaction` objects. Same loose+packed strategy as Blob/Tree/State.
-- Sync protocol (the replication wire format, now in the sibling **weft** repo's repo-gRPC impl — verify) needs to handle `Redaction` propagation. Pulling a state pulls any redactions on its blobs.
-- `bridge git export` (in `crates/heddle-bridge`) must replace redacted-blob materialization with the stub when exporting to Git. The downstream Git commit then carries the stub, not the secret — even on push to GitHub.
+- The shared object/proto model stays in this repo: `crates/proto/src/object_graph.rs` defines `ObjectType::Redaction` and `crates/proto/src/native_pack.rs` carries the redaction pack handling. The local object store gets a new content type for `Redaction` objects. Same loose+packed strategy as Blob/Tree/State.
+- Sync protocol (only the replication/server wire format moved — it now lives in the sibling **weft** repo at `crates/weft-server/src/server/grpc_hosted_impl/sync.rs`) needs to handle `Redaction` propagation. Pulling a state pulls any redactions on its blobs.
+- `bridge git export` (in `crates/cli/src/bridge/git_export.rs`) must replace redacted-blob materialization with the stub when exporting to Git. The downstream Git commit then carries the stub, not the secret — even on push to GitHub.
 - `heddle maintenance gc --prune` should NEVER GC a `Redaction` even if its referenced blob has been purged. The tombstone is structurally permanent.
 
 ## Signing
@@ -162,11 +162,11 @@ A reviewer can answer "yes" to all of:
 | CLI args | `crates/cli/src/cli/cli_args/commands_redact.rs` (new) |
 | CLI command handlers | `crates/cli/src/cli/commands/redact.rs`, `purge.rs` (new) |
 | Materialization stub renderer | `crates/repo/src/materialize.rs` or wherever `read_file` lives — verify |
-| Replication | repo-gRPC impl in the sibling **weft** repo |
-| Bridge git stub-on-export | `crates/heddle-bridge/src/export.rs` (verify path) |
+| Replication | sibling **weft** repo, `crates/weft-server/src/server/grpc_hosted_impl/sync.rs` |
+| Bridge git stub-on-export | `crates/cli/src/bridge/git_export.rs` |
 | Property tests | `tests/property/redact_purge.rs` |
 | CLI integration tests | `crates/cli/tests/redact_purge.rs` |
-| Capability rules | Biscuit rule pack in the sibling **weft** repo |
+| Capability rules | sibling **weft** repo, `crates/weft-server/src/biscuit/rules.biscuit` |
 | `CLAIMS.md` (in the sibling **tapestry** repo) | Add `heddle redact apply` + `heddle purge apply` as shipped after this lands |
 
 Once shipped, update the /security Scene 05 page in the sibling **tapestry** repo to drop its PLANNED label and reference the real CLI.

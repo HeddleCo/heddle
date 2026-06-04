@@ -11,7 +11,7 @@ crates/
   repo/       # repository operations and helpers
   refs/       # threads, markers, HEAD, packed refs
   oplog/      # undo/redo oplog logic
-  heddle-bridge/     # Git interoperability
+  cli/src/bridge/    # Git interoperability (module within the cli crate)
   semantic/   # semantic diff and parser-heavy analysis
   ...
 docs/              # architecture, hosted model, roadmap, future-state plans

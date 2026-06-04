@@ -150,5 +150,8 @@ docker run --rm heddle-enterprise-backend:test --help
 The SvelteKit web product moved to the sibling **tapestry** repo and is no longer
 part of this workspace. Run its dev/build/check commands (`bun install`,
 `bun run dev`, `bun run build`, `npx svelte-check`) and configure its `.env`
-(`HEDDLE_API_URL`, `HEDDLE_API_TOKEN`, `HEDDLE_SERVER_BISCUIT_PRIVATE_KEY`) from
-within the tapestry repo. The hosted Rust server it talks to lives in **weft**.
+(`HEDDLE_API_URL`, `HEDDLE_API_TOKEN`) from within the tapestry repo. The hosted
+Rust server it talks to lives in **weft**; its server secrets — including the
+Biscuit signing keypair (`HEDDLE_SERVER_BISCUIT_PRIVATE_KEY` /
+`HEDDLE_SERVER_BISCUIT_PUBLIC_KEYS`) — belong in weft's hosted config, not
+tapestry's web `.env`.

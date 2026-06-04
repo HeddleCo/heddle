@@ -52,7 +52,7 @@ When making changes:
 
 ## Hosted Backend Changes
 
-1. Read `SPEC.md`, `docs/HOSTED_ADMIN.md`, and `docs/HOSTED_NAMESPACES.md` first
+1. Read `SPEC.md`, `docs/HOSTED_ADMIN.md`, and `docs/HOSTED_NAMESPACES.md` in the sibling **weft** repo first
 2. Keep durable metadata in Postgres and object content in shared object storage
 3. Prefer external/shared admission-control state for horizontally scaled behavior
 4. Add targeted tests for hosted authz, admin surfaces, and feature-gated Postgres paths
