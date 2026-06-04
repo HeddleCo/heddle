@@ -4,7 +4,6 @@
 mod analysis_aggregate;
 mod analysis_classify;
 mod analysis_functions;
-mod analysis_graph;
 mod analysis_imports;
 mod analysis_renames;
 pub mod analysis_similarity;
@@ -19,7 +18,6 @@ pub use analysis_aggregate::{
 pub use analysis_classify::{classify_modification, classify_modification_with_confidence};
 pub use analysis_functions::detect_function_changes;
 pub(crate) use analysis_functions::detect_function_changes_with_parsed;
-pub use analysis_graph::{BlastRadius, CallGraph, CallGraphNode, FunctionKey};
 pub(crate) use analysis_imports::detect_import_changes_with_parsed;
 pub use analysis_imports::{detect_import_changes, detect_import_changes_with_manifest};
 pub use analysis_renames::detect_file_renames;
