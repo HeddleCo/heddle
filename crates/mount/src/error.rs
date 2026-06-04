@@ -108,3 +108,25 @@ fn stale_errno() -> i32 {
 fn stale_errno() -> i32 {
     116
 }
+
+/// Best-effort stringification of a `catch_unwind` panic payload.
+/// Recovers the common `&'static str` / `String` panic messages and
+/// falls back to a placeholder for anything else. Shared by the
+/// per-OS shell guard wrappers (FUSE / FSKit / ProjFS), which each
+/// catch panics across an `extern "C"` frame and log the message.
+/// Gated to the union of the shell backends so a no-shell build (which
+/// compiles none of the callers) doesn't trip `dead_code`.
+#[cfg(any(
+    all(target_os = "linux", feature = "fuse"),
+    all(target_os = "macos", feature = "fskit"),
+    all(target_os = "windows", feature = "projfs"),
+))]
+pub(crate) fn panic_payload_str(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
+}

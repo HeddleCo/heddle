@@ -27,9 +27,7 @@
 //! disables, unset uses the built-in default — currently empty).
 
 use std::{
-    env,
     ffi::OsStr,
-    fs,
     path::{Path, PathBuf},
 };
 
@@ -38,9 +36,8 @@ use syn::{
     Attribute, ImplItemFn, ItemFn, ItemMod, Meta, MetaList, Token, parse::Parser,
     punctuated::Punctuated, visit::Visit,
 };
-use walkdir::WalkDir;
 
-const DEFAULT_SEARCH_DIRS: &[&str] = &["crates"];
+use crate::asserter::{for_each_rs_file, read_allowlist, read_search_dirs};
 
 /// The raw ledger-registration method. Any call to a method of this name outside
 /// the atomic module is a hit (over-approximating toward flagging is the safe
@@ -56,7 +53,10 @@ vars: HEDDLE_LEDGER_ENCAP_SEARCH_DIRS, HEDDLE_LEDGER_ENCAP_ALLOWLIST)"
         );
     }
 
-    check(&read_search_dirs(), &read_allowlist())
+    check(
+        &read_search_dirs("HEDDLE_LEDGER_ENCAP_SEARCH_DIRS"),
+        &read_allowlist("HEDDLE_LEDGER_ENCAP_ALLOWLIST"),
+    )
 }
 
 /// The testable core: scan `search_dirs`, filter hits by `allowlist`, print
@@ -105,21 +105,6 @@ HEDDLE_LEDGER_ENCAP_ALLOWLIST with a one-line justification."
     Ok(())
 }
 
-fn read_search_dirs() -> Vec<PathBuf> {
-    match env::var("HEDDLE_LEDGER_ENCAP_SEARCH_DIRS") {
-        Ok(value) if !value.is_empty() => value.split(':').map(PathBuf::from).collect(),
-        _ => DEFAULT_SEARCH_DIRS.iter().map(PathBuf::from).collect(),
-    }
-}
-
-fn read_allowlist() -> Vec<String> {
-    match env::var("HEDDLE_LEDGER_ENCAP_ALLOWLIST") {
-        Ok(value) if value.is_empty() => Vec::new(),
-        Ok(value) => value.split(';').map(str::to_string).collect(),
-        Err(_) => Vec::new(),
-    }
-}
-
 #[derive(Debug)]
 struct Hit {
     path: PathBuf,
@@ -128,32 +113,12 @@ struct Hit {
 }
 
 fn scan_dir(dir: &Path, hits: &mut Vec<Hit>, files_scanned: &mut usize) -> Result<()> {
-    if !dir.exists() {
-        return Ok(());
-    }
-    for entry in WalkDir::new(dir).follow_links(false) {
-        let entry = entry.with_context(|| format!("walkdir under {}", dir.display()))?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if path.extension().and_then(OsStr::to_str) != Some("rs") {
-            continue;
-        }
-        // The atomic module IS the ledger's home — `step`/`enroll`/
-        // `enroll_whole_op` legitimately call `on_rewind` there.
-        if is_atomic_module_path(path) {
-            continue;
-        }
-        // Tests legitimately drive the raw primitive to exercise ledger
-        // behavior; skip them.
-        if is_test_path(path) {
-            continue;
-        }
-        let source =
-            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        *files_scanned += 1;
-        let file = syn::parse_file(&source).with_context(|| format!("parse {}", path.display()))?;
+    // Skip the atomic module (the ledger's home, where `step`/`enroll`/
+    // `enroll_whole_op` legitimately call `on_rewind`) and test code
+    // (which drives the raw primitive to exercise ledger behavior).
+    let skip = |path: &Path| is_atomic_module_path(path) || is_test_path(path);
+    for_each_rs_file(dir, files_scanned, skip, |path, source| {
+        let file = syn::parse_file(source).with_context(|| format!("parse {}", path.display()))?;
         let lines: Vec<&str> = source.lines().collect();
         let mut visitor = Finder {
             path: path.to_path_buf(),
@@ -161,8 +126,8 @@ fn scan_dir(dir: &Path, hits: &mut Vec<Hit>, files_scanned: &mut usize) -> Resul
             hits,
         };
         visitor.visit_file(&file);
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// True iff the path is inside the atomic module (`.../repo/src/atomic/...`),

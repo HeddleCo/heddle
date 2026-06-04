@@ -33,36 +33,13 @@ pub struct RiskSignalBlob {
     pub signals: Vec<RiskSignal>,
 }
 
-impl RiskSignalBlob {
-    pub const FORMAT_VERSION: u8 = 1;
-
-    pub fn new(signals: Vec<RiskSignal>) -> Self {
-        Self {
-            format_version: Self::FORMAT_VERSION,
-            signals,
-        }
-    }
-
-    pub fn encode(&self) -> Result<Vec<u8>, RiskSignalError> {
-        rmp_serde::to_vec(self).map_err(|err| RiskSignalError::Encoding(err.to_string()))
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, RiskSignalError> {
-        let blob: Self = rmp_serde::from_slice(bytes)
-            .map_err(|err| RiskSignalError::Encoding(err.to_string()))?;
-        blob.validate()?;
-        Ok(blob)
-    }
-
-    pub fn validate(&self) -> Result<(), RiskSignalError> {
-        if self.format_version != Self::FORMAT_VERSION {
-            return Err(RiskSignalError::UnsupportedVersion(self.format_version));
-        }
-        for signal in &self.signals {
-            signal.validate()?;
-        }
-        Ok(())
-    }
+versioned_msgpack_blob! {
+    blob: RiskSignalBlob,
+    item: RiskSignal,
+    field: signals,
+    error: RiskSignalError,
+    codec_err: Encoding,
+    version: 1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

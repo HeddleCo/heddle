@@ -26,17 +26,14 @@
 //! needed because the AST walker doesn't visit doc-comments.
 
 use std::{
-    env,
     ffi::OsStr,
-    fs,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, bail};
 use syn::{Expr, ExprMethodCall, Stmt, visit::Visit};
-use walkdir::WalkDir;
 
-const DEFAULT_SEARCH_DIRS: &[&str] = &["crates"];
+use crate::asserter::{for_each_rs_file, read_allowlist, read_search_dirs};
 
 pub fn run(args: Vec<String>) -> Result<()> {
     if let Some(arg) = args.first() {
@@ -45,8 +42,8 @@ pub fn run(args: Vec<String>) -> Result<()> {
         );
     }
 
-    let search_dirs = read_search_dirs();
-    let allowlist = read_allowlist();
+    let search_dirs = read_search_dirs("HEDDLE_ASSERTER_SEARCH_DIRS");
+    let allowlist = read_allowlist("HEDDLE_ASSERTER_ALLOWLIST");
 
     let mut hits: Vec<Hit> = Vec::new();
     let mut files_scanned = 0usize;
@@ -88,21 +85,6 @@ one-line justification."
     Ok(())
 }
 
-fn read_search_dirs() -> Vec<PathBuf> {
-    match env::var("HEDDLE_ASSERTER_SEARCH_DIRS") {
-        Ok(value) if !value.is_empty() => value.split(':').map(PathBuf::from).collect(),
-        _ => DEFAULT_SEARCH_DIRS.iter().map(PathBuf::from).collect(),
-    }
-}
-
-fn read_allowlist() -> Vec<String> {
-    match env::var("HEDDLE_ASSERTER_ALLOWLIST") {
-        Ok(value) if value.is_empty() => Vec::new(),
-        Ok(value) => value.split(';').map(str::to_string).collect(),
-        Err(_) => Vec::new(),
-    }
-}
-
 #[derive(Debug)]
 struct Hit {
     path: PathBuf,
@@ -112,27 +94,8 @@ struct Hit {
 }
 
 fn scan_dir(dir: &Path, hits: &mut Vec<Hit>, files_scanned: &mut usize) -> Result<()> {
-    if !dir.exists() {
-        // Mirror the shell asserter: a non-existent search dir is a no-op,
-        // not an error. The mutation harness sometimes points at empty trees.
-        return Ok(());
-    }
-    for entry in WalkDir::new(dir).follow_links(false) {
-        let entry = entry.with_context(|| format!("walkdir under {}", dir.display()))?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if path.extension().and_then(OsStr::to_str) != Some("rs") {
-            continue;
-        }
-        if is_test_path(path) {
-            continue;
-        }
-        let source =
-            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        *files_scanned += 1;
-        let file = syn::parse_file(&source).with_context(|| format!("parse {}", path.display()))?;
+    for_each_rs_file(dir, files_scanned, is_test_path, |path, source| {
+        let file = syn::parse_file(source).with_context(|| format!("parse {}", path.display()))?;
         let lines: Vec<&str> = source.lines().collect();
         let mut visitor = Finder {
             path: path.to_path_buf(),
@@ -140,8 +103,8 @@ fn scan_dir(dir: &Path, hits: &mut Vec<Hit>, files_scanned: &mut usize) -> Resul
             hits,
         };
         visitor.visit_file(&file);
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Tests legitimately exercise the bug class — skip them. This formalizes the
