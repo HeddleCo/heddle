@@ -116,7 +116,7 @@ fn merge_region(
     // same-name container keeps an identity distinct from the matched base
     // block (the heddle#484 r3 cross-side class). See [`build_aligned_match_keys`].
     let (base_mks, ours_mks, theirs_mks) =
-        build_aligned_match_keys(base_items, ours_items, theirs_items);
+        build_aligned_match_keys(base_items, ours_items, theirs_items, sides);
 
     let base_map: BTreeMap<MatchKey, &Item> = base_mks
         .iter()
@@ -304,13 +304,23 @@ fn child_key_set(item: &Item) -> BTreeSet<&ItemKey> {
 ///    alone mis-pairs a prepended `impl Foo` (occurrence 0) with base's
 ///    `impl Foo` (occurrence 0) — the r3 collapse; overlap alignment pairs by
 ///    what the block actually contains, so identity survives reordering.
-/// 2. **Positional fallback (no content signal).** A block that found no
-///    overlap — an EMPTY container, or one whose children were fully replaced —
-///    claims the next UNUSED base block of its key in base source order. Only
-///    when no unused base block of that key remains is it a genuinely-new
-///    container → fresh discriminator above the base range. Without this an
-///    empty same-key container minted fresh, its base slot resolved as deleted,
-///    and a clean one-sided edit corrupted (heddle#490 r1 / Codex P1).
+/// 2. **Header-anchored positional fallback (no content signal).** A block that
+///    found no overlap — an EMPTY container, or one whose children were fully
+///    replaced — aligns to the UNUSED base block of its key whose *header*
+///    bytes (`[start_byte, body.inner_start)`, which absorb leading metadata:
+///    attributes, decorators, and separator comments — see
+///    [`super::items::leading_metadata_start`]) byte-match it; failing a header
+///    match, the next unused base block in source order. Only when no unused
+///    base block of that key remains is it a genuinely-new container → fresh
+///    discriminator above the base range. The header anchor is what pins a
+///    *surviving* zero-overlap block to its TRUE base occurrence even when an
+///    earlier same-key block was deleted on that side: "next unused" alone
+///    grabs the earliest free slot (0), so deleting the first block and editing
+///    the second mis-mapped the survivor to slot 0, treated slot 1 as deleted,
+///    and wove its separator/trivia onto the wrong block (heddle#490 r2 /
+///    Codex P1). Without *any* fallback an empty same-key container minted
+///    fresh, its base slot resolved as deleted, and a clean one-sided edit
+///    corrupted (heddle#490 r1).
 ///
 /// For leaves (no children) every overlap is 0 and the leaf path applies a
 /// plain positional occurrence index directly.
@@ -318,6 +328,7 @@ fn build_aligned_match_keys(
     base: &[Item],
     ours: &[Item],
     theirs: &[Item],
+    sides: SideSources<'_>,
 ) -> (Vec<MatchKey>, Vec<MatchKey>, Vec<MatchKey>) {
     // A key is a "container key" if any instance on any side carries a body.
     let mut container_keys: BTreeSet<ItemKey> = BTreeSet::new();
@@ -333,10 +344,10 @@ fn build_aligned_match_keys(
     // container is its source-order index within the key group).
     let base_mks = build_match_keys(base);
 
-    let align = |side: &[Item]| -> Vec<MatchKey> {
+    let align = |side: &[Item], side_src: &str| -> Vec<MatchKey> {
         // base container instances per key: (base discriminator, &base item),
-        // in base source order (so the positional fallback below claims the
-        // *earliest* unused base slot).
+        // in base source order (so the positional fallback below scans the
+        // *earliest* unused base slot first).
         let mut base_by_key: BTreeMap<&ItemKey, Vec<(usize, &Item)>> = BTreeMap::new();
         for (i, it) in base.iter().enumerate() {
             if container_keys.contains(&it.key) {
@@ -383,18 +394,46 @@ fn build_aligned_match_keys(
             }
         }
 
-        // Pass 2 — positional fallback for the no-content-signal case + leaves.
-        // A container that found no overlap > 0 in pass 1 (an EMPTY container,
-        // or one whose children were fully replaced so it overlaps no base
-        // block) claims the NEXT UNUSED base candidate of its key in base
-        // source order — a bounded positional alignment to its base slot. Only
-        // when no unused base candidate of that key remains is the block a
-        // genuinely-new container beyond base's count → mint a fresh
-        // discriminator above the base range. Without this fallback every
-        // zero-overlap same-key container minted fresh, its base slot resolved
-        // as deleted, and a clean one-sided edit of an empty block corrupted
-        // (heddle#490 r1 / Codex P1). This is a narrow fallback for the
-        // zero-overlap case, NOT a return to the per-everything ordinal model.
+        // Pass 2a — header-anchored alignment for the no-content-signal case.
+        // A container left unresolved by pass 1 (an EMPTY container, or one
+        // whose children were fully replaced so it overlaps no base block)
+        // claims the earliest UNUSED base candidate of its key whose HEADER
+        // bytes byte-match it. The header is `[start_byte, body.inner_start)`,
+        // which absorbs the block's leading metadata — attributes, decorators,
+        // and separator comments (see [`super::items::leading_metadata_start`])
+        // — so a SURVIVING block that kept its preceding comment re-anchors to
+        // the exact base occurrence that comment belonged to. This pins the
+        // survivor to its TRUE base slot even when an earlier same-key block was
+        // deleted on this side, and even under a reorder: "next unused" alone
+        // grabbed slot 0 and wove the deleted slot's separator onto the survivor
+        // (heddle#490 r2). Header matching runs as a PRIORITY pass — before the
+        // source-order scan below — so a newly-prepended block (no header match)
+        // can't greedily steal the slot a surviving block needs.
+        for (pos, it) in side.iter().enumerate() {
+            if !container_keys.contains(&it.key) || disc_of[pos].is_some() {
+                continue;
+            }
+            let it_header = align_header_bytes(it, side_src);
+            let used_set = used.entry(&it.key).or_default();
+            if let Some(cands) = base_by_key.get(&it.key)
+                && let Some((d, _)) = cands.iter().find(|(d, b)| {
+                    !used_set.contains(d) && align_header_bytes(b, sides.base) == it_header
+                })
+            {
+                used_set.insert(*d);
+                disc_of[pos] = Some(*d);
+            }
+        }
+
+        // Pass 2b — source-order fallback + leaves. Any container still
+        // unresolved (indistinguishable headers, or no header match) claims the
+        // next UNUSED base candidate of its key in base source order; only when
+        // none remains is it a genuinely-new container beyond base's count →
+        // fresh discriminator above the base range. When headers are
+        // indistinguishable, either slot choice is byte-equivalent (identical
+        // separators), so no corruption can result. This stays a narrow fallback
+        // for the zero-overlap case, NOT a return to the per-everything ordinal
+        // model. Leaves get a plain positional occurrence index.
         let mut out = Vec::with_capacity(side.len());
         for (pos, it) in side.iter().enumerate() {
             if container_keys.contains(&it.key) {
@@ -427,8 +466,8 @@ fn build_aligned_match_keys(
         out
     };
 
-    let ours_mks = align(ours);
-    let theirs_mks = align(theirs);
+    let ours_mks = align(ours, sides.ours);
+    let theirs_mks = align(theirs, sides.theirs);
     (base_mks, ours_mks, theirs_mks)
 }
 
@@ -594,6 +633,22 @@ fn whole_bytes<'a>(item: &Item, src: &'a str) -> &'a [u8] {
 fn header_bytes<'a>(item: &Item, src: &'a str) -> &'a [u8] {
     let inner_start = item.body.as_ref().expect("container").inner_start;
     &src.as_bytes()[item.start_byte..inner_start]
+}
+
+/// Header bytes used to anchor a zero-overlap container to its base occurrence
+/// in pass 2 of [`build_aligned_match_keys`]. For a real container this is
+/// [`header_bytes`] — everything before the body delimiter, which absorbs the
+/// item's leading metadata (attributes / decorators / separator comments) and
+/// so identifies which base block a surviving block came from. For an opaque
+/// (too-deeply-nested) container carried as a `body: None` leaf, fall back to
+/// the whole byte span so the comparison stays total instead of panicking on
+/// the missing body.
+fn align_header_bytes<'a>(item: &Item, src: &'a str) -> &'a [u8] {
+    if item.body.is_some() {
+        header_bytes(item, src)
+    } else {
+        whole_bytes(item, src)
+    }
 }
 
 /// Footer bytes of a container item: `[body.inner_end, end_byte)` — usually

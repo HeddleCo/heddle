@@ -5564,6 +5564,179 @@ fn repro_490_r1_modify_vs_delete_empty_container_conflicts() {
     assert!(text.contains("<<<<<<<") && text.contains(">>>>>>>"), "missing conflict markers:\n{text}");
 }
 
+// =====================================================================
+// heddle#490 r2 / Codex P1: zero-overlap container alignment must respect
+// the TRUE base OCCURRENCE, not "first unused slot".
+//
+// r1's positional fallback claimed the next UNUSED base discriminator in
+// source order. When a side DELETES an earlier same-key zero-overlap container
+// and edits a later one, that grabs slot 0 for the survivor instead of its true
+// base occurrence (1): base slot 1 is then treated as deleted and its
+// separator/leading trivia woven onto the wrong block (moved/duplicated), or a
+// spurious conflict is raised. The fix aligns a zero-overlap block to the base
+// candidate whose HEADER bytes (which absorb leading metadata — separator
+// comments, attributes) byte-match it, run as a PRIORITY pass before the
+// source-order scan so a surviving block re-anchors to its true slot even under
+// delete-earlier / prepend / reorder. The class backstop is the input-grounded
+// conservation floor (`conserves_inputs`): any residual mis-alignment that
+// drops/invents/mis-nests an item, or fails to re-parse, routes to a textual
+// CONFLICT rather than silent corruption (floor contract guards below).
+// =====================================================================
+
+#[test]
+fn repro_490_r2_delete_earlier_edit_later_zero_overlap_separator_not_moved() {
+    // The r2 fail-pre/pass-post witness. base: two EMPTY `impl Foo {}` blocks
+    // separated by a comment, which binds as the SECOND block's leading
+    // metadata. ours DELETES the first block and adds a method to the second;
+    // theirs edits the separator comment. The survivor must keep its identity as
+    // base's SECOND occurrence so ours's method and theirs's separator edit
+    // combine cleanly, the first block is deleted, and the separator is neither
+    // moved onto the wrong block nor duplicated. Pre-fix the survivor (zero
+    // child overlap) claimed the earliest unused base slot (0); base slot 1 was
+    // treated as deleted and its separator wove onto the wrong block — a
+    // spurious conflict. Header-anchored alignment re-pins the survivor to slot
+    // 1 by its `// sep` leading metadata.
+    let base = "impl Foo {}\n// sep\nimpl Foo {}\n";
+    let ours = "// sep\nimpl Foo {\n    fn m(&self) {}\n}\n";
+    let theirs = "impl Foo {}\n// edited sep\nimpl Foo {}\n";
+    let merged = assert_conformant(base, ours, theirs);
+    assert_eq!(
+        merged.matches("impl Foo").count(),
+        1,
+        "block dropped/duplicated:\n{merged}"
+    );
+    assert!(merged.contains("fn m(&self) {}"), "ours method lost:\n{merged}");
+    assert!(merged.contains("// edited sep"), "theirs separator edit lost:\n{merged}");
+    assert_eq!(
+        merged.matches("sep").count(),
+        1,
+        "separator moved/duplicated:\n{merged}"
+    );
+}
+
+#[test]
+fn repro_490_r2_prepend_zero_overlap_keeps_survivor_base_slot() {
+    // Add-earlier variant. ours PREPENDS a new empty same-key container above the
+    // base block; theirs edits the base block. The prepended block must take a
+    // FRESH slot while the surviving base block keeps slot 0 — matched by its
+    // `// orig` leading comment. Header anchoring runs before the source-order
+    // scan, so the new (header-mismatched) block can't greedily steal slot 0.
+    let base = "// orig\nimpl Foo {}\n";
+    let ours = "impl Foo {}\n\n// orig\nimpl Foo {}\n";
+    let theirs = "// orig\nimpl Foo {\n    fn m(&self) {}\n}\n";
+    let merged = assert_conformant(base, ours, theirs);
+    assert_eq!(
+        merged.matches("impl Foo").count(),
+        2,
+        "block dropped/duplicated:\n{merged}"
+    );
+    assert!(merged.contains("fn m(&self) {}"), "theirs method lost:\n{merged}");
+    // The method lands on the `// orig` (base) block; the comment survives once.
+    assert_eq!(merged.matches("// orig").count(), 1, "comment moved/duplicated:\n{merged}");
+    assert!(
+        merged.find("// orig").unwrap() < merged.find("fn m(&self) {}").unwrap(),
+        "method escaped the original block:\n{merged}"
+    );
+}
+
+#[test]
+fn repro_490_r2_reorder_zero_overlap_blocks_keep_identity_by_header() {
+    // Reorder variant. Two empty same-key blocks distinguished only by their
+    // leading comments. ours SWAPS their order; theirs adds a method to the
+    // `// a` block. Header anchoring keeps each block's identity through the
+    // reorder, so theirs's method lands on the `// a` block and nothing is
+    // dropped, duplicated, or mis-merged.
+    let base = "// a\nimpl Foo {}\n\n// b\nimpl Foo {}\n";
+    let ours = "// b\nimpl Foo {}\n\n// a\nimpl Foo {}\n";
+    let theirs = "// a\nimpl Foo {\n    fn am(&self) {}\n}\n\n// b\nimpl Foo {}\n";
+    let merged = assert_conformant(base, ours, theirs);
+    assert_eq!(
+        merged.matches("impl Foo").count(),
+        2,
+        "block dropped/duplicated:\n{merged}"
+    );
+    assert!(merged.contains("fn am(&self) {}"), "theirs method lost:\n{merged}");
+    // The method stays bound to the `// a` block, not `// b`.
+    assert!(
+        merged.find("// a").unwrap() < merged.find("fn am(&self) {}").unwrap()
+            && merged.find("fn am(&self) {}").unwrap() < merged.find("// b").unwrap(),
+        "method bound to the wrong block:\n{merged}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// heddle#490 floor contract guards. `conserves_inputs` is the input-grounded
+// output-boundary backstop: after a CLEAN reconstruction it re-parses the
+// output and checks item-set + nesting conservation against the RAW INPUTS
+// (never the merge's own resolved metadata, which could encode the very
+// mistake). A re-parse failure or a conservation violation routes the merge to
+// the textual conflict path — so a residual mis-alignment surfaces as a CONFLICT
+// the user resolves, never a silent collapse. These pin its contract directly;
+// the "no false positives, all correct merges stay clean byte-identical"
+// guarantee is enforced by the whole ported harness above staying green.
+// ---------------------------------------------------------------------
+
+#[test]
+fn floor_490_conserves_inputs_rejects_unparseable_output() {
+    use crate::parser::{Language, ParsedFile};
+    let base = ParsedFile::parse("fn a() {}\n", Language::Rust).unwrap();
+    let ours = ParsedFile::parse("fn a() {}\n\nfn b() {}\n", Language::Rust).unwrap();
+    let theirs = ParsedFile::parse("fn a() {}\n", Language::Rust).unwrap();
+    // Unbalanced braces — the shape a structural collapse would emit.
+    let corrupt = b"fn a() { fn b() {\n";
+    assert!(
+        !super::conserves_inputs(corrupt, Language::Rust, &base, &ours, &theirs),
+        "floor must reject an unparseable clean output"
+    );
+}
+
+#[test]
+fn floor_490_conserves_inputs_rejects_invented_or_misnested_item() {
+    use crate::parser::{Language, ParsedFile};
+    // Every input keeps `m` INSIDE `impl Foo` (identity [Foo], Fn, m). An output
+    // that floats `m` to the top level invents identity ([], Fn, m) no input
+    // had — a child escaping its container. The floor must reject it.
+    let src = "impl Foo {\n    fn m(&self) {}\n}\n";
+    let base = ParsedFile::parse(src, Language::Rust).unwrap();
+    let ours = ParsedFile::parse(src, Language::Rust).unwrap();
+    let theirs = ParsedFile::parse(src, Language::Rust).unwrap();
+    let misnested = b"fn m(&self) {}\n\nimpl Foo {}\n";
+    assert!(
+        !super::conserves_inputs(misnested, Language::Rust, &base, &ours, &theirs),
+        "floor must reject an item escaped to a scope no input had"
+    );
+}
+
+#[test]
+fn floor_490_conserves_inputs_allows_legitimate_deletion() {
+    use crate::parser::{Language, ParsedFile};
+    // A clean one-sided deletion: ours drops `b`. The floor is a SUBSET relation
+    // (not equality), so the deletion is allowed — no false positive.
+    let base = ParsedFile::parse("fn a() {}\n\nfn b() {}\n", Language::Rust).unwrap();
+    let ours = ParsedFile::parse("fn a() {}\n", Language::Rust).unwrap();
+    let theirs = ParsedFile::parse("fn a() {}\n\nfn b() {}\n", Language::Rust).unwrap();
+    let deleted = b"fn a() {}\n";
+    assert!(
+        super::conserves_inputs(deleted, Language::Rust, &base, &ours, &theirs),
+        "floor must accept a clean deletion"
+    );
+}
+
+#[test]
+fn floor_490_conserves_inputs_allows_within_line_edit_recombination() {
+    use crate::parser::{Language, ParsedFile};
+    // A within-line merge that recombines bytes from both sides. The floor keys
+    // on item IDENTITY, not line text, so the recombined body is allowed.
+    let base = ParsedFile::parse("fn a() { let x = 1; }\n", Language::Rust).unwrap();
+    let ours = ParsedFile::parse("fn a() { let x = 2; }\n", Language::Rust).unwrap();
+    let theirs = ParsedFile::parse("fn a() { let y = 1; }\n", Language::Rust).unwrap();
+    let edited = b"fn a() { let x = 2; let y = 1; }\n";
+    assert!(
+        super::conserves_inputs(edited, Language::Rust, &base, &ours, &theirs),
+        "floor must accept an edit recombination"
+    );
+}
+
 
 // C++ `namespace N {…} namespace N {…}` is the same close-the-class shape in
 // another language; gated behind `lang-cpp` (extended-languages) since the cpp
