@@ -41,6 +41,13 @@ pub enum ObjectType {
     /// the *redacted blob*, since `Repository`'s sidecar store is
     /// indexed that way.
     Redaction,
+    /// A `StateVisibilityBlob` sidecar — the rmp-encoded record(s)
+    /// declaring a non-public audience tier for a specific state. Keyed
+    /// on the wire by `ObjectId::ChangeId` of the *state*, since the
+    /// per-state sidecar store is indexed that way. Like `Redaction`, it
+    /// is a sidecar record that lives outside the content-addressed pack
+    /// and ships via the per-object transfer path, not the pack.
+    StateVisibility,
 }
 
 #[derive(Debug, Clone, Default)]

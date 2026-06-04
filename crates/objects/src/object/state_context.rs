@@ -6,6 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::object::hash::{ChangeId, ContentHash};
+use crate::object::visibility_tier::VisibilityTier;
 
 const FILE_TARGET_ROOT: &str = "__files";
 const STATE_TARGET_ROOT: &str = "__states";
@@ -30,46 +31,15 @@ pub struct Annotation {
     pub supersedes_rewrite_pct: Option<u32>,
     // --- tail-only optional fields below; new fields go here. ---
     /// Visibility scope. Pre-W1 annotations have no field on disk; rmp-serde
-    /// fills the default ([`AnnotationVisibility::Public`]), preserving the
+    /// fills the default ([`VisibilityTier::Public`]), preserving the
     /// pre-existing meaning ("annotations are publicly visible").
     #[serde(default)]
-    pub visibility: AnnotationVisibility,
+    pub visibility: VisibilityTier,
     /// Back-pointer set when this annotation was produced by resolving a
     /// discussion. Lets viewers jump from the annotation back to the
     /// discussion that produced it.
     #[serde(default)]
     pub resolved_from_discussion: Option<String>,
-}
-
-/// Visibility scope for an annotation. Determines which audiences see it on
-/// read paths and during bridge export.
-///
-/// `Public` is the default — that matches pre-W1 behavior, where every
-/// annotation was effectively public, so legacy data decodes unchanged.
-/// External references (annotations that point to external systems) inherit
-/// the scope of their parent annotation.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AnnotationVisibility {
-    #[default]
-    Public,
-    Internal,
-    TeamScoped {
-        team_id: String,
-    },
-    Restricted {
-        scope_label: String,
-    },
-}
-
-impl AnnotationVisibility {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Public => "public",
-            Self::Internal => "internal",
-            Self::TeamScoped { .. } => "team_scoped",
-            Self::Restricted { .. } => "restricted",
-        }
-    }
 }
 
 /// A single revision of a logical annotation.
@@ -196,7 +166,7 @@ impl Annotation {
             }],
             supersedes_annotation_id: None,
             supersedes_rewrite_pct: None,
-            visibility: AnnotationVisibility::default(),
+            visibility: VisibilityTier::default(),
             resolved_from_discussion: None,
         }
     }

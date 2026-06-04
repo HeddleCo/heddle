@@ -8,7 +8,7 @@
 //! footer can report a count and the web page can show "N annotations
 //! hidden by your audience tier".
 //!
-//! The mapping from [`AnnotationVisibility`] to [`AudienceTier`] is the
+//! The mapping from [`VisibilityTier`] to [`AudienceTier`] is the
 //! single source of truth for "who sees what":
 //!
 //! | annotation visibility    | shown to `Internal` | `Public` | `Team(X)`               | `Restricted` |
@@ -24,7 +24,7 @@
 
 use std::str::FromStr;
 
-use objects::object::{Annotation, AnnotationVisibility};
+use objects::object::{Annotation, VisibilityTier};
 
 /// Audience reading the annotation set. Matches the CLI's
 /// `--audience <internal|public|team:NAME>` flag and the web's payload-
@@ -131,10 +131,10 @@ pub fn filter_for_audience_with_drops<'a>(
             kept.push(ann);
         } else {
             match &ann.visibility {
-                AnnotationVisibility::Public => {}
-                AnnotationVisibility::Internal => drops.internal += 1,
-                AnnotationVisibility::TeamScoped { .. } => drops.team += 1,
-                AnnotationVisibility::Restricted { .. } => drops.restricted += 1,
+                VisibilityTier::Public => {}
+                VisibilityTier::Internal => drops.internal += 1,
+                VisibilityTier::TeamScoped { .. } => drops.team += 1,
+                VisibilityTier::Restricted { .. } => drops.restricted += 1,
             }
         }
     }
@@ -145,37 +145,37 @@ pub fn filter_for_audience_with_drops<'a>(
 /// out so the borrowing and dropping variants share the exact same
 /// rules — drift between them would be invisible at the call site and
 /// catastrophic for the bridge export footer.
-fn visible(visibility: &AnnotationVisibility, audience: &AudienceTier) -> bool {
+fn visible(visibility: &VisibilityTier, audience: &AudienceTier) -> bool {
     match (visibility, audience) {
         // Public is universally visible.
-        (AnnotationVisibility::Public, _) => true,
+        (VisibilityTier::Public, _) => true,
         // Internal sees everything (internal viewers are the trusted set).
         (_, AudienceTier::Internal) => true,
         // Internal annotations to a public/restricted viewer are hidden.
-        (AnnotationVisibility::Internal, AudienceTier::Public)
-        | (AnnotationVisibility::Internal, AudienceTier::Restricted(_)) => false,
+        (VisibilityTier::Internal, AudienceTier::Public)
+        | (VisibilityTier::Internal, AudienceTier::Restricted(_)) => false,
         // Internal annotations to a team viewer are visible — the team
         // is part of the workspace-internal trusted set. (Public-only
         // export still hides them via the previous arm.)
-        (AnnotationVisibility::Internal, AudienceTier::Team(_)) => true,
+        (VisibilityTier::Internal, AudienceTier::Team(_)) => true,
         // Team-scoped: visible only to that exact team.
-        (AnnotationVisibility::TeamScoped { team_id }, AudienceTier::Team(name)) => team_id == name,
-        (AnnotationVisibility::TeamScoped { .. }, _) => false,
+        (VisibilityTier::TeamScoped { team_id }, AudienceTier::Team(name)) => team_id == name,
+        (VisibilityTier::TeamScoped { .. }, _) => false,
         // Restricted: visible only to a viewer holding the matching label.
         (
-            AnnotationVisibility::Restricted { scope_label },
+            VisibilityTier::Restricted { scope_label },
             AudienceTier::Restricted(viewer_label),
         ) => scope_label == viewer_label,
-        (AnnotationVisibility::Restricted { .. }, _) => false,
+        (VisibilityTier::Restricted { .. }, _) => false,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use objects::object::{Annotation, AnnotationScope, AnnotationStatus, AnnotationVisibility};
+    use objects::object::{Annotation, AnnotationScope, AnnotationStatus, VisibilityTier};
 
-    fn ann(id: &str, vis: AnnotationVisibility) -> Annotation {
+    fn ann(id: &str, vis: VisibilityTier) -> Annotation {
         Annotation {
             annotation_id: id.into(),
             scope: AnnotationScope::File,
@@ -191,17 +191,17 @@ mod tests {
     #[test]
     fn public_audience_sees_only_public() {
         let anns = vec![
-            ann("a", AnnotationVisibility::Public),
-            ann("b", AnnotationVisibility::Internal),
+            ann("a", VisibilityTier::Public),
+            ann("b", VisibilityTier::Internal),
             ann(
                 "c",
-                AnnotationVisibility::TeamScoped {
+                VisibilityTier::TeamScoped {
                     team_id: "infra".into(),
                 },
             ),
             ann(
                 "d",
-                AnnotationVisibility::Restricted {
+                VisibilityTier::Restricted {
                     scope_label: "legal".into(),
                 },
             ),
@@ -222,11 +222,11 @@ mod tests {
     #[test]
     fn internal_audience_sees_everything() {
         let anns = vec![
-            ann("a", AnnotationVisibility::Public),
-            ann("b", AnnotationVisibility::Internal),
+            ann("a", VisibilityTier::Public),
+            ann("b", VisibilityTier::Internal),
             ann(
                 "c",
-                AnnotationVisibility::Restricted {
+                VisibilityTier::Restricted {
                     scope_label: "legal".into(),
                 },
             ),
@@ -241,18 +241,18 @@ mod tests {
         let anns = vec![
             ann(
                 "infra",
-                AnnotationVisibility::TeamScoped {
+                VisibilityTier::TeamScoped {
                     team_id: "infra".into(),
                 },
             ),
             ann(
                 "design",
-                AnnotationVisibility::TeamScoped {
+                VisibilityTier::TeamScoped {
                     team_id: "design".into(),
                 },
             ),
-            ann("public", AnnotationVisibility::Public),
-            ann("internal", AnnotationVisibility::Internal),
+            ann("public", VisibilityTier::Public),
+            ann("internal", VisibilityTier::Internal),
         ];
         let (kept, drops) =
             filter_for_audience_with_drops(&anns, &AudienceTier::Team("infra".into()));
@@ -270,18 +270,18 @@ mod tests {
         let anns = vec![
             ann(
                 "legal",
-                AnnotationVisibility::Restricted {
+                VisibilityTier::Restricted {
                     scope_label: "legal".into(),
                 },
             ),
             ann(
                 "security",
-                AnnotationVisibility::Restricted {
+                VisibilityTier::Restricted {
                     scope_label: "security".into(),
                 },
             ),
-            ann("public", AnnotationVisibility::Public),
-            ann("internal", AnnotationVisibility::Internal),
+            ann("public", VisibilityTier::Public),
+            ann("internal", VisibilityTier::Internal),
         ];
         let (kept, drops) =
             filter_for_audience_with_drops(&anns, &AudienceTier::Restricted("legal".into()));
@@ -319,8 +319,8 @@ mod tests {
     #[test]
     fn borrowing_filter_matches_drop_filter_kept_set() {
         let anns = vec![
-            ann("a", AnnotationVisibility::Public),
-            ann("b", AnnotationVisibility::Internal),
+            ann("a", VisibilityTier::Public),
+            ann("b", VisibilityTier::Internal),
         ];
         let kept_only = filter_for_audience(&anns, &AudienceTier::Public);
         let (kept_drops, _) = filter_for_audience_with_drops(&anns, &AudienceTier::Public);

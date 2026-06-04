@@ -20,7 +20,7 @@ use grpc::heddle::v1::{
     discussion_service_server::DiscussionService,
 };
 use objects::object::{
-    AnnotationVisibility, Blob, ChangeId, Discussion, DiscussionResolution, DiscussionTurn,
+    VisibilityTier, Blob, ChangeId, Discussion, DiscussionResolution, DiscussionTurn,
     DiscussionsBlob, Principal, State, SymbolAnchor,
 };
 use prost::Message;
@@ -47,23 +47,23 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// Wire vocabulary mirrors `AnnotationVisibility::as_str`. Empty / unknown
+/// Wire vocabulary mirrors `VisibilityTier::as_str`. Empty / unknown
 /// strings collapse to `Public` (the proto convention is "empty means
 /// default"). `team_scoped` and `restricted` round-trip through this path
 /// without an associated label — they're admitted for forward-compat with
 /// the namespace policy override path; callers wanting a labelled value
 /// must go through a richer surface that doesn't yet exist on this RPC.
-fn parse_visibility(s: &str) -> AnnotationVisibility {
+fn parse_visibility(s: &str) -> VisibilityTier {
     match s {
-        "internal" => AnnotationVisibility::Internal,
-        "team_scoped" => AnnotationVisibility::TeamScoped {
+        "internal" => VisibilityTier::Internal,
+        "team_scoped" => VisibilityTier::TeamScoped {
             team_id: String::new(),
         },
-        "restricted" => AnnotationVisibility::Restricted {
+        "restricted" => VisibilityTier::Restricted {
             scope_label: String::new(),
         },
         // "public", "", or anything else.
-        _ => AnnotationVisibility::Public,
+        _ => VisibilityTier::Public,
     }
 }
 

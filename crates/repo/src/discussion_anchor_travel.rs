@@ -236,7 +236,7 @@ mod tests {
             resolution: DiscussionResolution::Open,
             body_changed_since_open: false,
             orphaned: false,
-            visibility: objects::object::AnnotationVisibility::default(),
+            visibility: objects::object::VisibilityTier::default(),
             resolved_annotation_id: None,
         }
     }

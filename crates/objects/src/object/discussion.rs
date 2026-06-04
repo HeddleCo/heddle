@@ -14,8 +14,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::object::{
-    hash::ChangeId, state_attribution::Principal, state_context::AnnotationVisibility,
-    state_review::SymbolAnchor,
+    hash::ChangeId, state_attribution::Principal, state_review::SymbolAnchor,
+    visibility_tier::VisibilityTier,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,7 +61,7 @@ pub struct Discussion {
     pub orphaned: bool,
     /// Inherits from namespace policy unless explicitly overridden.
     #[serde(default)]
-    pub visibility: AnnotationVisibility,
+    pub visibility: VisibilityTier,
     /// Bidirectional link populated when [`DiscussionResolution::ResolvedIntoAnnotation`]
     /// fires. Lets viewers jump from the discussion to the annotation it
     /// produced (and vice versa, via a back-pointer on the annotation).
@@ -180,7 +180,7 @@ mod tests {
             resolution: DiscussionResolution::Open,
             body_changed_since_open: false,
             orphaned: false,
-            visibility: AnnotationVisibility::default(),
+            visibility: VisibilityTier::default(),
             resolved_annotation_id: None,
         }
     }

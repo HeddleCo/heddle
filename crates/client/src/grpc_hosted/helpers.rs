@@ -106,7 +106,8 @@ pub(super) fn parse_object_id(
     obj_type: ObjectType,
 ) -> Result<ObjectId, ProtocolError> {
     match obj_type {
-        ObjectType::State => Ok(ObjectId::ChangeId(
+        // State and its per-state visibility sidecar are both keyed by ChangeId.
+        ObjectType::State | ObjectType::StateVisibility => Ok(ObjectId::ChangeId(
             ChangeId::parse(value).map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
         )),
         ObjectType::Blob | ObjectType::Tree | ObjectType::Action | ObjectType::Redaction => {
@@ -124,6 +125,7 @@ pub(super) fn parse_object_type(value: &str) -> Result<ObjectType, ProtocolError
         "state" => Ok(ObjectType::State),
         "action" => Ok(ObjectType::Action),
         "redaction" => Ok(ObjectType::Redaction),
+        "state_visibility" => Ok(ObjectType::StateVisibility),
         _ => Err(ProtocolError::InvalidState(format!(
             "unknown object type: {value}"
         ))),
@@ -164,6 +166,7 @@ pub(super) fn object_type_name(obj_type: ObjectType) -> &'static str {
         ObjectType::State => "state",
         ObjectType::Action => "action",
         ObjectType::Redaction => "redaction",
+        ObjectType::StateVisibility => "state_visibility",
     }
 }
 

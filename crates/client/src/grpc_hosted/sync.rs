@@ -50,6 +50,7 @@ pub struct PullObjectMix {
     pub states: usize,
     pub actions: usize,
     pub redactions: usize,
+    pub state_visibilities: usize,
 }
 
 impl PullObjectMix {
@@ -60,11 +61,17 @@ impl PullObjectMix {
             ObjectType::State => self.states += 1,
             ObjectType::Action => self.actions += 1,
             ObjectType::Redaction => self.redactions += 1,
+            ObjectType::StateVisibility => self.state_visibilities += 1,
         }
     }
 
     pub fn total(&self) -> usize {
-        self.blobs + self.trees + self.states + self.actions + self.redactions
+        self.blobs
+            + self.trees
+            + self.states
+            + self.actions
+            + self.redactions
+            + self.state_visibilities
     }
 }
 
