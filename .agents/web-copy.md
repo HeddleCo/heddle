@@ -1,6 +1,6 @@
 # Web Copy Guidelines
 
-This document captures the copywriting principles and patterns established for Heddle's web presence. Apply these whenever editing `web/src/` content.
+This document captures the copywriting principles and patterns established for Heddle's web presence. The web product now lives in the sibling **tapestry** repo; apply these whenever editing its content.
 
 ---
 
@@ -190,7 +190,7 @@ Heddle's web copy may speak about the future, but it must do so accurately.
 
 - **Shipped** - implemented and safe to describe as current behavior
 - **Foundation in place** - partially implemented or structurally supported, but not yet a complete user-facing product surface
-- **Planned** - clearly intended future-state documented in `docs/` or `web/PRODUCT_SPEC.md`
+- **Planned** - clearly intended future-state documented in `docs/` or the tapestry repo's product spec
 
 ### Rules for future-state copy
 
@@ -261,27 +261,27 @@ The final line of any section should close with the reader's identity, not a fea
 
 ## Key files for web copy
 
-All user-facing copy lives in:
+All user-facing copy lives in the sibling **tapestry** repo. Paths below are relative to that repo's root:
 
 | File | What it controls |
 |------|-----------------|
-| `web/src/lib/content.ts` | Hero stats, capabilities, product pillars, scene labels |
-| `web/src/lib/components/HeddleSequence.svelte` | Hero H1, lede, feature cards, stable CTA |
-| `web/src/lib/components/MarketingHeader.svelte` | Nav CTA label |
-| `web/src/lib/components/MarketingFooter.svelte` | Tagline, status line, nav links |
-| `web/src/routes/+page.svelte` | Page title, meta description, request-access section |
-| `web/src/routes/request-access/+page.svelte` | Dedicated access form copy |
-| `web/src/routes/product/+page.svelte` | Product page sections and pillars |
-| `web/src/routes/namespaces/+page.svelte` | Namespaces marketing page |
-| `web/src/routes/security/+page.svelte` | Security page hero and cards |
-| `web/src/routes/app/agents/+page.svelte` | Agents page descriptions |
-| `web/src/routes/app/namespaces/+page.svelte` | App namespaces description |
-| `web/src/routes/app/worktrees/+page.svelte` | Worktrees description and arch note |
-| `web/src/routes/app/activity/+page.svelte` | Activity feed description |
-| `web/src/routes/app/admin/+page.svelte` | Admin landing and cards |
-| `web/src/routes/app/admin/grants/+page.svelte` | Grants admin description |
-| `web/src/routes/app/admin/repositories/+page.svelte` | Repos admin description |
-| `web/src/lib/components/DashboardContent.svelte` | Dashboard empty states |
+| `src/lib/content.ts` | Hero stats, capabilities, product pillars, scene labels |
+| `src/lib/components/HeddleSequence.svelte` | Hero H1, lede, feature cards, stable CTA |
+| `src/lib/components/MarketingHeader.svelte` | Nav CTA label |
+| `src/lib/components/MarketingFooter.svelte` | Tagline, status line, nav links |
+| `src/routes/+page.svelte` | Page title, meta description, request-access section |
+| `src/routes/request-access/+page.svelte` | Dedicated access form copy |
+| `src/routes/product/+page.svelte` | Product page sections and pillars |
+| `src/routes/namespaces/+page.svelte` | Namespaces marketing page |
+| `src/routes/security/+page.svelte` | Security page hero and cards |
+| `src/routes/app/agents/+page.svelte` | Agents page descriptions |
+| `src/routes/app/namespaces/+page.svelte` | App namespaces description |
+| `src/routes/app/worktrees/+page.svelte` | Worktrees description and arch note |
+| `src/routes/app/activity/+page.svelte` | Activity feed description |
+| `src/routes/app/admin/+page.svelte` | Admin landing and cards |
+| `src/routes/app/admin/grants/+page.svelte` | Grants admin description |
+| `src/routes/app/admin/repositories/+page.svelte` | Repos admin description |
+| `src/lib/components/DashboardContent.svelte` | Dashboard empty states |
 
 ---
 
