@@ -41,7 +41,7 @@ struct StashShowOutput {
 }
 
 pub fn cmd_stash(cli: &Cli, command: StashCommands) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
 
     match command {
         StashCommands::Push { message } => cmd_stash_push(cli, &repo, message),

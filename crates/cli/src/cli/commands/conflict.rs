@@ -59,7 +59,7 @@ pub async fn run(cli: &Cli, command: &ConflictCommands) -> Result<()> {
 }
 
 async fn run_list(cli: &Cli) -> Result<()> {
-    let repo = open_repo(cli)?;
+    let repo = cli.open_repo()?;
     if let Some(merge_state) = repo.merge_state_manager().load()? {
         let view = active_merge_conflict_view(&merge_state);
         render_conflict_list(cli, &repo, &view, true)?;
@@ -129,7 +129,7 @@ fn active_merge_conflict_view(merge_state: &MergeState) -> ConflictListOutput {
 }
 
 async fn run_show(cli: &Cli, args: &ConflictShowArgs) -> Result<()> {
-    let repo = open_repo(cli)?;
+    let repo = cli.open_repo()?;
     if let Some(merge_state) = repo.merge_state_manager().load()? {
         return render_active_merge_conflict(cli, &repo, &merge_state, args);
     }
@@ -246,17 +246,6 @@ fn render_active_merge_conflict(
         println!("  next: {}", view.next_action);
     }
     Ok(())
-}
-
-fn open_repo(cli: &Cli) -> Result<Repository> {
-    let cwd;
-    let repo_path = if let Some(path) = cli.repo.as_ref() {
-        path
-    } else {
-        cwd = std::env::current_dir().context("get current working directory")?;
-        &cwd
-    };
-    Repository::open(repo_path).context("open Heddle repository")
 }
 
 fn load_head_conflicts(repo: &Repository) -> Result<StructuredConflict> {

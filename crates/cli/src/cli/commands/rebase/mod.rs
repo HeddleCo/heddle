@@ -60,7 +60,7 @@ pub fn cmd_rebase(
     // metadata-recorded worktree so commits are replayed into the
     // thread's actual checkout. See `Repository::active_worktree_path`
     // for fallback semantics.
-    let cwd_repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let cwd_repo = cli.open_repo()?;
     let target_path = cwd_repo.active_worktree_path()?;
     let repo = if target_path == *cwd_repo.root() {
         cwd_repo

@@ -328,40 +328,11 @@ pub struct CommandRuntimeContract {
     pub supports_op_id: bool,
     pub persists_op_id: bool,
     pub uses_bootstrap_op_id_store: bool,
-    pub mutates: bool,
-    pub observe_only: bool,
     pub help_visibility: &'static str,
     pub help_rank: u16,
     pub surface: &'static str,
     pub canonical_command: Option<&'static str>,
-    pub canonical_kind: Option<&'static str>,
-    pub canonical_note: Option<&'static str>,
-    pub advertised_action: Option<AdvertisedAction>,
-    pub feature_gate: Option<&'static str>,
-    pub exit_codes: &'static [(u8, &'static str)],
-    pub side_effects: Vec<&'static str>,
-    pub side_effect_class: &'static str,
-    pub first_run_behavior: &'static str,
     pub json_kind: &'static str,
-    pub schema_verbs: &'static [&'static str],
-    pub documented_schema_verbs: &'static [&'static str],
-    pub opaque_schema_verbs: &'static [&'static str],
-    pub may_initialize: bool,
-    pub may_import_git: bool,
-    pub may_write_worktree: bool,
-    pub may_move_ref: bool,
-    pub destructive_requires_force: bool,
-    pub writes_heddle_refs: bool,
-    pub writes_git_refs: bool,
-    pub writes_worktree: bool,
-    pub writes_config: bool,
-    pub writes_hooks: bool,
-    pub network_io: bool,
-    pub daemon_process: bool,
-    pub object_gc: bool,
-    pub external_command: bool,
-    pub requires_git_executable: bool,
-    pub destructive_data: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -752,41 +723,12 @@ const READ_JSON_OR_JSONL: CommandContract = CommandContract {
 };
 
 const MUTATING: CommandContract = CommandContract {
-    supports_json: true,
     mutates: true,
     supports_op_id: true,
-    persists_op_id: false,
     observe_only: false,
-    may_initialize: false,
-    may_import_git: false,
-    may_write_worktree: false,
     may_move_ref: true,
-    destructive_requires_force: false,
     writes_heddle_refs: true,
-    writes_git_refs: false,
-    writes_worktree: false,
-    writes_config: false,
-    writes_hooks: false,
-    network_io: false,
-    daemon_process: false,
-    object_gc: false,
-    external_command: false,
-    requires_git_executable: false,
-    destructive_data: false,
-    json_kind: "json",
-    json_discriminators: &[],
-    schema_verbs: &[],
-    documented_schema_verbs: &[],
-    opaque_schema_verbs: &[],
-    surface: "native",
-    help_visibility: "advanced",
-    help_rank: 1000,
-    canonical_command: None,
-    canonical_kind: None,
-    canonical_note: None,
-    advertised_action: None,
-    feature_gate: None,
-    exit_codes: &[],
+    ..READ_JSON
 };
 
 const MUTATING_NO_OP_ID: CommandContract = CommandContract {
@@ -3340,40 +3282,11 @@ fn runtime_contract(
         supports_op_id: contract.supports_op_id,
         persists_op_id: contract.persists_op_id,
         uses_bootstrap_op_id_store: uses_bootstrap_op_id_store(contract),
-        mutates: contract.mutates,
-        observe_only: contract.observe_only,
         help_visibility: contract.help_visibility,
         help_rank: contract.help_rank,
         surface: contract.surface,
         canonical_command: contract.canonical_command,
-        canonical_kind: contract.canonical_kind,
-        canonical_note: contract.canonical_note,
-        advertised_action: contract.advertised_action,
-        feature_gate: contract.feature_gate,
-        exit_codes: contract.exit_codes,
-        side_effects: side_effects(contract),
-        side_effect_class: side_effect_class(contract),
-        first_run_behavior: first_run_behavior(contract),
         json_kind: contract.json_kind,
-        schema_verbs: contract.schema_verbs,
-        documented_schema_verbs: contract.documented_schema_verbs,
-        opaque_schema_verbs: contract.opaque_schema_verbs,
-        may_initialize: contract.may_initialize,
-        may_import_git: contract.may_import_git,
-        may_write_worktree: contract.may_write_worktree,
-        may_move_ref: contract.may_move_ref,
-        destructive_requires_force: contract.destructive_requires_force,
-        writes_heddle_refs: contract.writes_heddle_refs,
-        writes_git_refs: contract.writes_git_refs,
-        writes_worktree: contract.writes_worktree,
-        writes_config: contract.writes_config,
-        writes_hooks: contract.writes_hooks,
-        network_io: contract.network_io,
-        daemon_process: contract.daemon_process,
-        object_gc: contract.object_gc,
-        external_command: contract.external_command,
-        requires_git_executable: contract.requires_git_executable,
-        destructive_data: contract.destructive_data,
     }
 }
 
@@ -5588,17 +5501,6 @@ mod tests {
         assert_eq!(runtime.help_visibility, entry.help_visibility);
         assert_eq!(runtime.help_rank, entry.help_rank);
         assert_eq!(runtime.surface, entry.surface);
-        assert_eq!(runtime.side_effect_class, entry.side_effect_class);
-        assert_eq!(
-            runtime.side_effects,
-            entry
-                .side_effects
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-        );
-        assert!(runtime.destructive_requires_force);
-        assert!(runtime.writes_worktree);
     }
 
     #[test]

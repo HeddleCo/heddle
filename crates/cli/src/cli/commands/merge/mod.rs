@@ -191,7 +191,7 @@ pub fn cmd_merge(
     semantic: bool,
     git_commit: bool,
 ) -> Result<()> {
-    let cwd_repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let cwd_repo = cli.open_repo()?;
     let target_path = cwd_repo.active_worktree_path()?;
     let repo = if target_path == *cwd_repo.root() {
         cwd_repo

@@ -128,7 +128,7 @@ fn thread_head_state(repo: &Repository, thread: &str) -> Result<String> {
 }
 
 pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let source_state = thread_head_state(&repo, &args.source)?;
     let (mut client, repo_path) = open_heddle_client(&repo, &args.remote).await?;
     let approval = client
@@ -176,7 +176,7 @@ pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()
 }
 
 pub async fn cmd_thread_approvals(cli: &Cli, args: ThreadApprovalsArgs) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let (mut client, repo_path) = open_heddle_client(&repo, &args.remote).await?;
     let approvals = client
         .list_thread_approvals(&repo_path, &args.source, &args.target)
@@ -239,7 +239,7 @@ pub async fn cmd_thread_approvals(cli: &Cli, args: ThreadApprovalsArgs) -> Resul
 }
 
 pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArgs) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let (mut client, _repo_path) = open_heddle_client(&repo, &args.remote).await?;
     client.revoke_approval(&args.id).await?;
     if should_output_json(cli, Some(repo.config())) {
@@ -256,7 +256,7 @@ pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArg
 }
 
 pub async fn cmd_thread_check_merge(cli: &Cli, args: ThreadCheckMergeArgs) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let source_state = thread_head_state(&repo, &args.source)?;
     let (mut client, repo_path) = open_heddle_client(&repo, &args.remote).await?;
     let resp = client

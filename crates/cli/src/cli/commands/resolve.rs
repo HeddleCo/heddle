@@ -34,7 +34,7 @@ pub fn cmd_resolve(
     force: bool,
     abort: bool,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let merge_manager = repo.merge_state_manager();
 
     if abort {

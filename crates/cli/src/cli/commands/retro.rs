@@ -147,7 +147,7 @@ struct UndoEntry {
 }
 
 pub async fn cmd_retro(cli: &Cli, options: RetroCommandOptions) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let head_state = repo.current_state()?;
 
     let (since_id, since_ts) = resolve_since_bound(&repo, options.since.as_deref(), &head_state)?;

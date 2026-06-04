@@ -8,7 +8,6 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, anyhow};
-use repo::Repository;
 use semantic::analysis::{
     HotEventKind, HotSpotKey, HotSpotKeyValue, HotSpotParams, analyze_hot_spots,
 };
@@ -58,7 +57,7 @@ fn cmd_semantic_hot(
     top: usize,
     include_actors: bool,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
 
     // Resolve `from` (or HEAD) to a concrete ChangeId. Walking from
     // HEAD is the common case; allowing an explicit state lets users

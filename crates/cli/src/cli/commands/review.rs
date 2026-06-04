@@ -10,7 +10,7 @@ use grpc::heddle::v1::{
     ReviewScope as ProtoReviewScope, SignStateRequest, signal_service_server::SignalService,
     state_review_service_server::StateReviewService,
 };
-use repo::{HistoryQuery, Repository, operation_dedup::OperationDedupStore};
+use repo::{HistoryQuery, operation_dedup::OperationDedupStore};
 use serde::Serialize;
 
 use super::{
@@ -251,7 +251,7 @@ fn render_text(out: &ReviewShowOutput, all_signals: bool) {
 async fn run_sign(cli: &Cli, args: &ReviewSignArgs) -> Result<()> {
     use grpc::heddle::v1::review_scope::{Scope, SymbolList, WholeChange};
     let svc = open_state_review_service(cli)?;
-    let state_id_bytes = resolve_state_id_bytes(&open_repo(cli)?, &args.state)?;
+    let state_id_bytes = resolve_state_id_bytes(&cli.open_repo()?, &args.state)?;
     let scope_inner = if args.symbols.is_empty() {
         Scope::WholeChange(WholeChange {})
     } else {
@@ -316,7 +316,7 @@ async fn run_sign(cli: &Cli, args: &ReviewSignArgs) -> Result<()> {
 
 async fn run_next(cli: &Cli, args: &ReviewNextArgs) -> Result<()> {
     let svc = open_state_review_service(cli)?;
-    let repo = open_repo(cli)?;
+    let repo = cli.open_repo()?;
     let head = repo.head().context("read HEAD")?.ok_or_else(|| {
         anyhow!(RecoveryAdvice::repository_no_head_capture_first(
             "review next"
@@ -470,25 +470,17 @@ async fn run_health(cli: &Cli, args: &ReviewHealthArgs) -> Result<()> {
 }
 
 fn open_state_review_service(cli: &Cli) -> Result<LocalStateReviewService> {
-    let repo = open_repo(cli)?;
+    let repo = cli.open_repo()?;
     let dedup = OperationDedupStore::open(repo.heddle_dir()).context("open dedup store")?;
     let inner = GrpcLocalService::new(Arc::new(repo), Arc::new(dedup));
     Ok(LocalStateReviewService::new(inner))
 }
 
 fn open_signal_service(cli: &Cli) -> Result<LocalSignalService> {
-    let repo = open_repo(cli)?;
+    let repo = cli.open_repo()?;
     let dedup = OperationDedupStore::open(repo.heddle_dir()).context("open dedup store")?;
     let inner = GrpcLocalService::new(Arc::new(repo), Arc::new(dedup));
     Ok(LocalSignalService::new(inner))
-}
-
-fn open_repo(cli: &Cli) -> Result<Repository> {
-    let root = match cli.repo.as_ref() {
-        Some(repo) => repo.clone(),
-        None => std::env::current_dir().context("get current working directory")?,
-    };
-    Repository::open(&root).context("open Heddle repository")
 }
 
 fn signal_view(s: &grpc::heddle::v1::RiskSignal) -> SignalView {
@@ -528,7 +520,7 @@ fn opt_string(s: String) -> Option<String> {
 }
 
 fn resolve_state(cli: &Cli, explicit: Option<&str>) -> Result<Vec<u8>> {
-    let repo = open_repo(cli)?;
+    let repo = cli.open_repo()?;
     if let Some(s) = explicit {
         // Routes through the canonical resolver so short/full IDs and
         // marker names all work — matches `heddle log --output json` output.

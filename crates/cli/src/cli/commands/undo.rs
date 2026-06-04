@@ -99,7 +99,7 @@ pub fn cmd_undo(
     preview: bool,
     allow_redact_undo: bool,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
 
     if list && preview {
         return Err(anyhow!(undo_mode_conflict_advice()));
@@ -274,7 +274,7 @@ pub fn cmd_undo(
 }
 
 pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
 
     // Serialize against concurrent undo/redo (mirror of `cmd_undo`; heddle#355
     // cid 3330867776).

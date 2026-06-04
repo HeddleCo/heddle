@@ -125,7 +125,7 @@ fn detected_harness_argv_impl() -> Option<Vec<String>> {
 }
 
 pub fn cmd_harness_bridge(cli: &Cli) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let user_config = UserConfig::load_default().unwrap_or_default();
     let mut runtime = HarnessBridgeRuntime::new(repo, user_config);
 

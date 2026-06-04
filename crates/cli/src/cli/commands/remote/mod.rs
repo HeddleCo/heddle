@@ -163,7 +163,7 @@ pub async fn cmd_push(
     all_threads: bool,
     mirror: Option<String>,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     if remote.is_none() && resolved_default_remote_name(&repo)?.is_none() {
         return Err(anyhow!(RecoveryAdvice::remote_not_configured("push")));
     }

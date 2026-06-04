@@ -118,7 +118,7 @@ impl LineInfo {
 }
 
 pub fn cmd_blame(cli: &Cli, file: String, state: Option<String>, show_context: bool) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
 
     let target_state_id = if let Some(state_id) = state {
         if matches!(state_id.as_str(), "HEAD" | "@") && repo.current_state()?.is_none() {

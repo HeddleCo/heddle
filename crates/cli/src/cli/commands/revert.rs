@@ -30,7 +30,7 @@ pub fn cmd_revert(
     message: Option<String>,
     no_commit: bool,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
 
     let target_id = resolve_state_id(&repo, &state_spec)?;
 

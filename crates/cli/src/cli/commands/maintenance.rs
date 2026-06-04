@@ -8,7 +8,7 @@ use crate::cli::{
 };
 
 pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
-    let repo = repo::Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let options = worktree_status_options(Some(repo.config()));
 
     match command {

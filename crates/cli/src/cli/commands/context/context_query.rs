@@ -41,7 +41,7 @@ pub async fn cmd_context_get(
     tag: Option<String>,
     r#ref: Option<String>,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
     let target = super::resolve_target(&repo, path, state)?;
     let Some(context_root) = &state_obj.context else {
@@ -72,7 +72,7 @@ pub async fn cmd_context_list(
     r#ref: Option<String>,
     include_superseded: bool,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
     let Some(context_root) = &state_obj.context else {
         if should_output_json(cli, None) {
@@ -150,7 +150,7 @@ pub async fn cmd_context_history(
     annotation_id: String,
     r#ref: Option<String>,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
     let context_root = state_obj
         .context
@@ -217,7 +217,7 @@ pub async fn cmd_context_check(
     tag: Option<String>,
     r#ref: Option<String>,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
     let context_root = state_obj
         .context
@@ -352,7 +352,7 @@ pub async fn cmd_context_check(
 }
 
 pub async fn cmd_context_suggest(cli: &Cli, r#ref: Option<String>, limit: usize) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
     let suggestions = repo.suggest_context_targets(&state_obj, limit)?;
 
@@ -398,7 +398,7 @@ pub async fn cmd_context_suggest(cli: &Cli, r#ref: Option<String>, limit: usize)
 }
 
 pub async fn cmd_context_audit(cli: &Cli, r#ref: Option<String>) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
     let Some(context_root) = &state_obj.context else {
         if should_output_json(cli, None) {

@@ -20,7 +20,7 @@ use crate::{
 
 pub fn cmd_purge(cli: &Cli, command: PurgeCommands) -> Result<()> {
     let _user = UserConfig::load_default().unwrap_or_default();
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     match command {
         PurgeCommands::Apply(args) => cmd_purge_apply(cli, &repo, args),
         PurgeCommands::List(args) => cmd_purge_list(cli, &repo, args),

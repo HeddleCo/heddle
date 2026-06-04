@@ -100,7 +100,7 @@ pub fn run_local_idempotency_if_requested(
                 .context("open bootstrap op-id dedup store")?,
         )
     } else {
-        let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+        let repo = cli.open_repo()?;
         let bootstrap_scope = bootstrap_op_id_scope_for_root(repo.root().to_path_buf())?;
         let bootstrap_store =
             OperationDedupStore::open(bootstrap_op_id_store_dir(&bootstrap_scope))

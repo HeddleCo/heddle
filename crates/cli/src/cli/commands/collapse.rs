@@ -7,7 +7,6 @@ use anyhow::Result;
 use objects::object::State;
 use oplog::OpRecord;
 use refs::{Head, RefExpectation, RefUpdate};
-use repo::Repository;
 use serde::Serialize;
 
 use super::{
@@ -43,7 +42,7 @@ pub fn cmd_collapse(
     into: String,
     confidence: Option<f32>,
 ) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let json = should_output_json(cli, Some(repo.config()));
 
     if states.is_empty() {

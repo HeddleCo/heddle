@@ -427,7 +427,7 @@ fn render_plain_git_status(cli: &Cli, output: &PlainGitStatusOutput, short: bool
 
 pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput> {
     let repo_open_start = Instant::now();
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let repo_open_ms = repo_open_start.elapsed().as_millis();
     let body_start = Instant::now();
     let as_json = should_output_json(cli, Some(repo.config()));
@@ -2265,8 +2265,7 @@ struct HostedPresenceWatch {
 #[cfg(feature = "client")]
 impl HostedPresenceWatch {
     async fn connect_if_configured(cli: &Cli) -> Option<Self> {
-        let cwd = std::env::current_dir().ok()?;
-        let repo = Repository::open(cli.repo.as_ref().unwrap_or(&cwd)).ok()?;
+        let repo = cli.open_repo().ok()?;
         let upstream = repo.config().hosted.upstream_url.as_deref()?.trim();
         let namespace = repo.config().hosted.namespace.as_deref()?.trim();
         if upstream.is_empty() || namespace.is_empty() {

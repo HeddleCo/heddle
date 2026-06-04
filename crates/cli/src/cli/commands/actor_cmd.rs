@@ -272,7 +272,7 @@ pub async fn cmd_actor_spawn(
     if let Some(name) = thread.as_deref() {
         ThreadId::new(name).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
     }
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
 
     let base_state = repo.head()?.ok_or_else(|| {
         anyhow!(RecoveryAdvice::repository_no_head_capture_first(
@@ -421,7 +421,7 @@ pub async fn cmd_actor_spawn(
 }
 
 pub async fn cmd_actor_list(cli: &Cli, active_only: bool) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let registry = AgentRegistry::new(repo.heddle_dir());
 
     let mut entries = registry.list()?;
@@ -473,7 +473,7 @@ pub async fn cmd_actor_list(cli: &Cli, active_only: bool) -> Result<()> {
 }
 
 pub async fn cmd_actor_show(cli: &Cli, session_id: Option<String>) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let registry = AgentRegistry::new(repo.heddle_dir());
     let entry = resolve_actor_entry(&repo, &registry, session_id.as_deref())?;
 
@@ -532,7 +532,7 @@ pub async fn cmd_actor_show(cli: &Cli, session_id: Option<String>) -> Result<()>
 }
 
 pub async fn cmd_actor_done(cli: &Cli, session_id: Option<String>) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let registry = AgentRegistry::new(repo.heddle_dir());
     let entry = resolve_actor_entry(&repo, &registry, session_id.as_deref())?;
     registry.update_status(&entry.session_id, AgentStatus::Complete)?;
@@ -577,7 +577,7 @@ fn actor_done_recommended_action(thread: &str, coordination_status: &str) -> Opt
 }
 
 pub async fn cmd_actor_explain(cli: &Cli, session_id: Option<String>) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
     let registry = AgentRegistry::new(repo.heddle_dir());
     let entry = match resolve_actor_entry(&repo, &registry, session_id.as_deref()) {
         Ok(entry) => entry,

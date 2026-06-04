@@ -2,7 +2,7 @@
 //! Index command - inspect and manage the worktree index.
 
 use anyhow::Result;
-use repo::{Repository, WorktreeIndex};
+use repo::WorktreeIndex;
 use serde::Serialize;
 
 use crate::cli::{Cli, should_output_json};
@@ -23,7 +23,7 @@ struct IndexOutput {
 }
 
 pub fn cmd_index(cli: &Cli, dump: bool) -> Result<()> {
-    let repo = Repository::open(cli.repo.as_ref().unwrap_or(&std::env::current_dir()?))?;
+    let repo = cli.open_repo()?;
 
     let index_path = repo.root().join(".heddle/state").join("index.bin");
     let journal_path = repo.root().join(".heddle/state").join("index.journal");
