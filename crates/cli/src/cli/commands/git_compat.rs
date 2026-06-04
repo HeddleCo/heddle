@@ -1345,7 +1345,7 @@ pub async fn cmd_switch_compat(cli: &Cli, args: SwitchArgs) -> Result<()> {
             "heddle switch <thread> --print-cd-path",
             vec![
                 "heddle switch <thread> --print-cd-path".to_string(),
-                "heddle checkout <state>".to_string(),
+                "heddle switch <state>".to_string(),
             ],
         )));
     }

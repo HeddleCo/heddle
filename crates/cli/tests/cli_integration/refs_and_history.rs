@@ -407,10 +407,10 @@ fn test_cli_compare_shows_differences() {
     std::fs::write(temp.path().join("file.txt"), "version2").unwrap();
     heddle(&["capture", "-m", "State B"], Some(temp.path())).unwrap();
 
-    let output = heddle(&["compare", "HEAD~1", "HEAD"], Some(temp.path())).unwrap();
+    let output = heddle(&["diff", "HEAD~1", "HEAD"], Some(temp.path())).unwrap();
     assert!(
-        output.contains("Comparing") || output.contains("file.txt"),
-        "Compare should show differences: {}",
+        output.contains("file.txt"),
+        "diff should show differences: {}",
         output
     );
 }

@@ -1,21 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
+#[cfg(feature = "git-overlay")]
 use anyhow::Result;
-use repo::Repository;
-use serde::Serialize;
 
 #[cfg(feature = "git-overlay")]
 use crate::cli::style;
+#[cfg(feature = "git-overlay")]
 use crate::cli::{Cli, should_output_json};
-
-#[derive(Debug, Serialize)]
-struct VersionOutput {
-    version: &'static str,
-    profile: &'static str,
-    features: Vec<&'static str>,
-    git_version: Option<String>,
-    repository_capability: Option<String>,
-    repository_root: Option<String>,
-}
 
 #[cfg(feature = "git-overlay")]
 pub fn cmd_git_overlay_guide(cli: &Cli) -> Result<()> {
@@ -94,101 +84,4 @@ pub fn cmd_git_overlay_guide(cli: &Cli) -> Result<()> {
     println!();
     println!("When unsure, run {}", style::bold("heddle verify"));
     Ok(())
-}
-
-pub fn cmd_version(cli: &Cli, verbose: bool) -> Result<()> {
-    let as_json = should_output_json(cli, None);
-    if !verbose && !as_json {
-        return render_version_short();
-    }
-
-    let git_version = None;
-
-    let repo_path = cli.repo.clone().or_else(|| std::env::current_dir().ok());
-    let repo = repo_path.and_then(|path| Repository::open(path).ok());
-    let repository_capability = repo
-        .as_ref()
-        .map(|repo| repo.capability_label().to_string());
-    let repository_root = repo.as_ref().map(|repo| repo.root().display().to_string());
-
-    let output = VersionOutput {
-        version: env!("CARGO_PKG_VERSION"),
-        profile: if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "release"
-        },
-        features: enabled_features(),
-        git_version,
-        repository_capability,
-        repository_root,
-    };
-
-    if as_json {
-        return render_version_json(&output);
-    }
-
-    render_version_text(&output)
-}
-
-fn render_version_short() -> Result<()> {
-    println!("heddle {}", env!("CARGO_PKG_VERSION"));
-    Ok(())
-}
-
-fn render_version_json(output: &VersionOutput) -> Result<()> {
-    println!("{}", serde_json::to_string(output)?);
-    Ok(())
-}
-
-fn render_version_text(output: &VersionOutput) -> Result<()> {
-    println!("Heddle {}", output.version);
-    println!("Build profile: {}", output.profile);
-    println!("Features: {}", output.features.join(", "));
-    if let Some(git_version) = &output.git_version {
-        println!("Git binary: {git_version}");
-    } else {
-        println!("Git binary: not required");
-    }
-    if let Some(capability) = &output.repository_capability {
-        println!("Repository: {capability}");
-    } else {
-        println!("Repository: not inside a Heddle/Git worktree");
-    }
-    if let Some(root) = &output.repository_root {
-        println!("Root: {root}");
-    }
-    Ok(())
-}
-
-// Each cfg-conditional push expands to either `features.push(...)` or
-// nothing depending on which features are enabled at compile time.
-// Clippy's `vec_init_then_push` would have us collapse these into a
-// single `vec![...]`, but that would force every variant to be either
-// always-present or unconditional. Suppress the lint at this site.
-#[allow(clippy::vec_init_then_push)]
-fn enabled_features() -> Vec<&'static str> {
-    let mut features = Vec::new();
-    #[cfg(feature = "client")]
-    features.push("client");
-    #[cfg(feature = "ingest")]
-    features.push("ingest");
-    #[cfg(feature = "local")]
-    features.push("local");
-    #[cfg(feature = "mount")]
-    features.push("mount");
-    #[cfg(feature = "observability")]
-    features.push("observability");
-    #[cfg(feature = "s3")]
-    features.push("s3");
-    #[cfg(feature = "semantic")]
-    features.push("semantic");
-    #[cfg(feature = "semantic-extended")]
-    features.push("semantic-extended");
-    #[cfg(feature = "zstd")]
-    features.push("zstd");
-    if features.is_empty() {
-        features.push("none");
-    }
-    features
 }

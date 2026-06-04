@@ -1574,7 +1574,7 @@ fn render_status_details(output: &StatusOutput, verbose: bool) {
     // human-facing text surface — a typical session emits 5-7 lines of
     // it before the user sees their actual changed paths. Hide behind
     // `-v`; everything here is still in `--output json` and
-    // `heddle diagnose -v`.
+    // `heddle doctor -v`.
     if verbose {
         if let Some(session_id) = &output.session_id {
             if !emitted {

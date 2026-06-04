@@ -1539,8 +1539,11 @@ impl Repository {
                 kind: OperationKind::Bisect,
                 in_progress: true,
                 state: "in-progress".to_string(),
+                // The `bisect` verb was removed in the whole-CLI consolidation
+                // (heddle#473); a lingering BISECT_STATE can only come from an
+                // older binary, and the only valid recovery now is to abort.
                 message: "Heddle bisect is in progress".to_string(),
-                next_action: "heddle bisect good <state> or heddle bisect bad <state>".to_string(),
+                next_action: "heddle abort".to_string(),
             }));
         }
 

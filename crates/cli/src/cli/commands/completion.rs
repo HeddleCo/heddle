@@ -8,7 +8,7 @@ use clap_complete::{Shell, generate};
 use super::advice::RecoveryAdvice;
 use crate::cli::Cli;
 
-pub fn cmd_completion(_cli: &Cli, shell: String) -> Result<()> {
+pub fn cmd_completion(shell: String) -> Result<()> {
     let mut cmd = Cli::command();
 
     match shell.as_str() {
@@ -26,7 +26,7 @@ pub fn cmd_completion(_cli: &Cli, shell: String) -> Result<()> {
                 "completion_shell_unsupported",
                 format!("Unsupported shell: {shell}. Supported shells: bash, zsh, fish"),
                 "Use one of: bash, zsh, fish.",
-                "heddle completion bash",
+                "heddle shell completion bash",
             )));
         }
     }

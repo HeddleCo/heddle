@@ -8,7 +8,6 @@ mod advice;
 mod agent;
 mod agent_cmd;
 mod attempt;
-mod bisect;
 mod blame;
 #[cfg(feature = "git-overlay")]
 mod bridge;
@@ -18,7 +17,6 @@ mod clean;
 mod clone;
 mod collapse;
 mod command_catalog;
-mod compare;
 mod completion;
 mod conflict;
 mod context;
@@ -80,7 +78,6 @@ mod start_atomic;
 mod stash;
 mod stash_ops;
 mod status;
-mod store_cmd;
 mod thread;
 #[cfg(feature = "client")]
 mod thread_approval;
@@ -115,7 +112,6 @@ pub use agent_cmd::{
     cmd_agent_release, cmd_agent_reserve,
 };
 pub use attempt::cmd_attempt;
-pub use bisect::cmd_bisect;
 pub use blame::cmd_blame;
 #[cfg(feature = "git-overlay")]
 pub use bridge::cmd_bridge_git;
@@ -135,7 +131,6 @@ pub use command_catalog::{
     command_surface, command_uses_bootstrap_op_id_store, observe_only_root_commands,
     root_commands_for_advanced_help, root_commands_for_help_visibility,
 };
-pub use compare::cmd_compare;
 pub use completion::cmd_completion;
 pub use conflict::run as cmd_conflict;
 pub use context::{
@@ -181,7 +176,6 @@ pub use monitor::cmd_monitor;
 pub use operator_loop::{cmd_abort, cmd_continue, cmd_sync_smart};
 #[cfg(feature = "git-overlay")]
 pub use oss::cmd_git_overlay_guide;
-pub use oss::cmd_version;
 pub use purge::cmd_purge;
 pub use query::run as cmd_query;
 pub use ready_cmd::cmd_ready;
@@ -205,7 +199,6 @@ pub use snapshot::{SnapshotAgentOverrides, cmd_snapshot};
 pub use stack::cmd_stack;
 pub use stash::cmd_stash;
 pub use status::cmd_status;
-pub use store_cmd::cmd_store;
 pub use thread::{cmd_start, cmd_thread_show};
 pub use thread_cmd::cmd_thread;
 pub use thread_shaping::{

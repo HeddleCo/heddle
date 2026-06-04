@@ -49,7 +49,7 @@ and assume the discipline holds.
    `--preview` mode); those are documented as conditional.
 3. **No leakage of unrelated context.** Bridge import-hint information
    lives only in `heddle bridge git status --output json` (and the
-   comprehensive `heddle diagnose --output json`). Per-command outputs do not
+   comprehensive `heddle doctor --output json`). Per-command outputs do not
    carry it. Transports do not silently piggy-back state.
 4. **Empty collections serialize as `[]` / `{}`, not omitted.** An
    empty `blockers: []` is more useful than a missing field, and the
@@ -90,8 +90,8 @@ specifiers. Pass any of them — they all resolve to the same change ID:
   thread's tip.
 * **Thread name** — resolves to that thread's tip.
 
-Verbs covered: `show`, `diff`, `compare`, `revert`, `cherry-pick`,
-`goto`, `bisect`, `blame --state`, `log --since`, `review show`,
+Verbs covered: `show`, `diff`, `revert`, `cherry-pick`,
+`goto`, `blame --state`, `log --since`, `review show`,
 `review sign`, `discuss open|list|resolve --state`, `retro --since`.
 The `heddle log --output json` `change_id` field is the canonical short form
 that downstream verbs consume.
@@ -189,37 +189,37 @@ in-progress operation.
       "status": "available",
       "verified_scope": "everyday_and_agent",
       "advanced_scope": "advanced_internal_admin",
-      "summary": "211 command(s), 181 JSON command(s), 108 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 38 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 59 accepted opaque schema(s) outside clean verification",
-      "catalog_commands_total": 211,
-      "catalog_mutating_commands_total": 108,
-      "json_commands_total": 181,
-      "json_mutating_commands_total": 107,
-      "json_commands_with_schema": 122,
-      "json_commands_with_accepted_opaque_schema": 59,
+      "summary": "196 command(s), 168 JSON command(s), 100 mutating command(s), 99 mutating JSON command(s); verified everyday/agent machine surface has 38 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 51 accepted opaque schema(s) outside clean verification",
+      "catalog_commands_total": 196,
+      "catalog_mutating_commands_total": 100,
+      "json_commands_total": 168,
+      "json_mutating_commands_total": 99,
+      "json_commands_with_schema": 117,
+      "json_commands_with_accepted_opaque_schema": 51,
       "json_commands_without_schema": 0,
       "verified_scope_json_commands_total": 38,
       "verified_scope_json_commands_with_schema": 38,
       "verified_scope_json_commands_with_accepted_opaque_schema": 0,
       "verified_scope_json_commands_without_schema": 0,
-      "advanced_scope_json_commands_total": 143,
-      "advanced_scope_json_commands_with_accepted_opaque_schema": 59,
-      "mutating_commands_total": 107,
-      "mutating_commands_with_schema": 75,
-      "mutating_commands_with_accepted_opaque_schema": 32,
+      "advanced_scope_json_commands_total": 130,
+      "advanced_scope_json_commands_with_accepted_opaque_schema": 51,
+      "mutating_commands_total": 99,
+      "mutating_commands_with_schema": 73,
+      "mutating_commands_with_accepted_opaque_schema": 26,
       "mutating_commands_without_schema": 0,
       "verified_scope_mutating_commands_total": 23,
       "verified_scope_mutating_commands_with_schema": 23,
       "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
       "verified_scope_mutating_commands_without_schema": 0,
-      "advanced_scope_mutating_commands_total": 84,
-      "advanced_scope_mutating_commands_with_accepted_opaque_schema": 32,
-      "schema_verbs_total": 183,
-      "documented_schema_verbs_total": 183,
+      "advanced_scope_mutating_commands_total": 76,
+      "advanced_scope_mutating_commands_with_accepted_opaque_schema": 26,
+      "schema_verbs_total": 170,
+      "documented_schema_verbs_total": 170,
       "undocumented_schema_verbs_total": 0,
-      "opaque_schema_verbs_total": 59,
-      "accepted_opaque_schema_verbs_total": 59,
+      "opaque_schema_verbs_total": 51,
+      "accepted_opaque_schema_verbs_total": 51,
       "unaccepted_opaque_schema_verbs_total": 0,
-      "supports_op_id_total": 103,
+      "supports_op_id_total": 95,
       "jsonl_commands_total": 5,
       "missing_schema_examples": [],
       "missing_mutating_schema_examples": [],
@@ -2127,7 +2127,6 @@ instead of treating it as a global catalog option.
     "heddle commit -m \"...\"",
     "heddle ready -m \"...\"",
     "heddle stash push -m \"...\"",
-    "heddle bisect good <state> or heddle bisect bad <state>",
     "heddle remote add <name> <url>",
     "heddle clone <remote> <path>",
     "heddle clone <remote> <new-path>",
@@ -2237,20 +2236,9 @@ Hidden integration relay output is registered as a generic object payload.
 
 ---
 
-## `heddle gc --output json`
+## `heddle maintenance index --output json`
 
-Hidden maintenance garbage-collection output is registered as a generic object
-payload.
-
-```json
-{"status": "ok"}
-```
-
----
-
-## `heddle index --output json`
-
-Hidden index inspection emits one concrete JSON value. `--dump` places the
+Maintenance index inspection emits one concrete JSON value. `--dump` places the
 human-readable dump text in `dump` instead of writing a second stdout payload.
 
 ```json
@@ -2267,40 +2255,6 @@ human-readable dump text in `dump` instead of writing a second stdout payload.
   "journal_replay_ms": 0,
   "dump": null
 }
-```
-
----
-
-## `heddle maintenance index --output json`
-
-Maintenance index inspection uses the same concrete payload as the hidden
-`index` alias.
-
-```json
-{
-  "output_kind": "index",
-  "present": true,
-  "path": "/repo/.heddle/state/index.bin",
-  "file_entries": 12,
-  "directory_entries": 4,
-  "untracked_directory_entries": 1,
-  "snapshot_bytes": 1024,
-  "journal_bytes": 128,
-  "journal_ops": 3,
-  "journal_replay_ms": 0,
-  "dump": null
-}
-```
-
----
-
-## `heddle monitor --output json`
-
-Hidden read-only maintenance helpers are schema-backed for command-catalog
-coverage.
-
-```json
-{"status": "ok"}
 ```
 
 ---
@@ -2398,8 +2352,11 @@ List every runtime schema verb and the subset enforced by
 
 ## `heddle doctor --output json`
 
-Doctor is the same comprehensive health report as `diagnose`; both
-include the shared verification report and the primary recovery command.
+Doctor is the comprehensive health report; it includes the shared
+verification report and the primary recovery command. This is the one
+place outside `bridge git status` where `git_overlay_import_hint` is part
+of the JSON contract — doctor is the catch-all health surface and its job
+is to surface every relevant signal for the operator.
 
 ```json
 {
@@ -2464,7 +2421,7 @@ catalog-wide schema coverage.
   "output_kind": "doctor_schemas",
   "status": "available",
   "verified": true,
-  "summary": "211 command(s), 181 JSON command(s), 108 mutating command(s), 107 mutating JSON command(s); verified everyday/agent machine surface has 38 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 59 accepted opaque schema(s) outside clean verification",
+  "summary": "196 command(s), 168 JSON command(s), 100 mutating command(s), 99 mutating JSON command(s); verified everyday/agent machine surface has 38 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 51 accepted opaque schema(s) outside clean verification",
   "recommended_action": null,
   "recovery_commands": [],
   "registered_verbs": ["status", "verify", "try"],
@@ -2477,30 +2434,30 @@ catalog-wide schema coverage.
     "status": "available",
     "verified_scope": "everyday_and_agent",
     "advanced_scope": "advanced_internal_admin",
-    "catalog_commands_total": 211,
-    "catalog_mutating_commands_total": 108,
-    "json_commands_total": 181,
-    "json_mutating_commands_total": 107,
-    "json_commands_with_schema": 122,
-    "json_commands_with_accepted_opaque_schema": 59,
+    "catalog_commands_total": 196,
+    "catalog_mutating_commands_total": 100,
+    "json_commands_total": 168,
+    "json_mutating_commands_total": 99,
+    "json_commands_with_schema": 117,
+    "json_commands_with_accepted_opaque_schema": 51,
     "json_commands_without_schema": 0,
     "verified_scope_json_commands_total": 38,
     "verified_scope_json_commands_with_schema": 38,
     "verified_scope_json_commands_with_accepted_opaque_schema": 0,
     "verified_scope_json_commands_without_schema": 0,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 59,
-    "mutating_commands_total": 107,
-    "mutating_commands_with_schema": 75,
-    "mutating_commands_with_accepted_opaque_schema": 32,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 51,
+    "mutating_commands_total": 99,
+    "mutating_commands_with_schema": 73,
+    "mutating_commands_with_accepted_opaque_schema": 26,
     "mutating_commands_without_schema": 0,
     "verified_scope_mutating_commands_total": 23,
     "verified_scope_mutating_commands_with_schema": 23,
     "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
     "verified_scope_mutating_commands_without_schema": 0,
-    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 32,
+    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 26,
     "undocumented_schema_verbs_total": 0,
-    "opaque_schema_verbs_total": 59,
-    "accepted_opaque_schema_verbs_total": 59,
+    "opaque_schema_verbs_total": 51,
+    "accepted_opaque_schema_verbs_total": 51,
     "unaccepted_opaque_schema_verbs_total": 0,
     "missing_schema_examples": [],
     "missing_mutating_schema_examples": [],
@@ -2538,23 +2495,6 @@ surface, not repository state.
     "heddle undo",
     "heddle verify"
   ]
-}
-```
-
----
-
-## `heddle version --output json`
-
-Build and environment context for bug reports and agent harnesses.
-
-```json
-{
-  "version": "0.2.4",
-  "profile": "debug",
-  "features": ["local", "semantic", "zstd"],
-  "git_version": null,
-  "repository_capability": "git-overlay",
-  "repository_root": "/work/project"
 }
 ```
 
@@ -2810,21 +2750,6 @@ shape when the target resolves as a state rather than a thread.
 
 ---
 
-## `heddle checkout --output json`
-
-Git-shaped alias for `switch`. State checkouts use the same shape
-as `goto`.
-
-```json
-{
-  "target": "hd-sqr398dvx9ay",
-  "intent": "capture parser fix",
-  "message": "Now at: hd-sqr398dvx9ay"
-}
-```
-
----
-
 ## `heddle bridge git reconcile --output json`
 
 Preview or apply a ref reconciliation between Git and Heddle.
@@ -2932,56 +2857,11 @@ Apply the inverse of a state. With `--no-commit`, `change_id` is
 
 ---
 
-## `heddle diagnose --output json`
-
-Comprehensive doctor-style report. This is the one place outside
-`bridge git status` where `git_overlay_import_hint` is part of the
-JSON contract — diagnose is the catch-all health surface and its job
-is to surface every relevant signal for the operator.
-
-Top-level fields: `repository`, `repository_capability`,
-`storage_model`, `hosted_enabled`, `git_overlay_import_hint` (object
-or `null`), `operation`, `remote_tracking`, `thread`, `state`,
-`changes`, `workspace`, `health`, `recommended_action`,
-`recommended_action_template`, `recovery_commands`, `profile`. All
-fields are required; `Option<...>` fields serialize as explicit `null`.
-
-```json
-{
-  "repository": "/work/project",
-  "repository_capability": "git-overlay",
-  "storage_model": "git+heddle-sidecar",
-  "hosted_enabled": false,
-  "git_overlay_import_hint": null,
-  "operation": null,
-  "remote_tracking": null,
-  "thread": null,
-  "state": null,
-  "changes": {"modified": [], "added": [], "deleted": []},
-  "workspace": {"thread_count": 0},
-  "health": {"status": "clean"},
-  "recommended_action": "",
-  "recovery_commands": [],
-  "profile": null
-}
-```
-
----
-
 ## Additional runtime schema samples
 
 Every verified everyday/agent runtime schema is a concrete machine-contract
 mirror. Advanced/internal/admin opaque entries are counted separately
 outside clean verification coverage.
-
-`heddle bisect start|good|bad|reset --output json` emit (each carries
-`output_kind` set to the snake-cased subcommand, e.g. `bisect_start`,
-`bisect_good`). The `start` payload is just the discriminator and status;
-`good`/`bad` also carry a `commit` field for the marked state:
-
-```json
-{"output_kind": "bisect_start", "status": "started"}
-```
 
 `heddle blame --output json` emits structured attribution that mirrors
 `log` / `show`: each line (and each entry in `origins`) carries a
@@ -3012,12 +2892,6 @@ true` and `status` is `"applied"`:
 
 ```json
 {"change_id": "hd-collapsed123", "collapsed": 3, "message": "collapse feature checkpoints", "parents": ["hd-base123"]}
-```
-
-`heddle compare --output json` emits:
-
-```json
-{"base": "hd-base123", "target": "hd-target456", "files_changed": 2, "files": [{"path": "src/lib.rs", "status": "modified"}]}
 ```
 
 `heddle conflict list|show --output json` emit:
@@ -3155,25 +3029,17 @@ count:
 {"hotspots": [{"path": "src/lib.rs", "score": 0.87, "reasons": ["changed often"]}]}
 ```
 
-`heddle store warm --output json` emits:
-
-```json
-{"warmed": true, "objects_loaded": 42, "bytes_loaded": 8192}
-```
-
----
-
 ## Other verbs
 
 The following verbs also emit `--output json`. Their shapes follow the same
 discipline; see the corresponding handler in `crates/cli/src/cli/commands/`:
 
-`heddle blame`, `heddle bisect`, `heddle checkpoint`, `heddle cherry-pick`,
-`heddle clean`, `heddle clone`, `heddle collapse`, `heddle compare`,
+`heddle blame`, `heddle checkpoint`, `heddle cherry-pick`,
+`heddle clean`, `heddle clone`, `heddle collapse`,
 `heddle conflict show`, `heddle context get/set`, `heddle diff`,
 `heddle discuss`, `heddle doctor docs`, `heddle fetch`, `heddle fork`,
 `heddle fsck`, `heddle goto`, `heddle init`, `heddle integration`,
-`heddle maintenance`, `heddle merge`, `heddle monitor`, `heddle ready`,
+`heddle maintenance`, `heddle merge`, `heddle ready`,
 `heddle rebase`, `heddle remote`, `heddle resolve`, `heddle retro`,
 `heddle session`, `heddle capture`,
 `heddle support`, `heddle thread show/start`,
@@ -3188,7 +3054,7 @@ Each of these:
 - Serializes empty collections as `[]` / `{}`.
 - Does not carry `git_overlay_import_hint` or `missing_branches`
   payloads; those live only in `heddle bridge git status` and
-  `heddle diagnose`.
+  `heddle doctor`.
 
 ---
 

@@ -65,12 +65,11 @@ schema_registry! {
     (&["commit"], CommitSchema),
     (&["checkpoint"], CheckpointSchema),
     (&["undo"], UndoSchema),
-    (&["redo"], UndoSchema),
     (&["clean"], CleanSchema),
     (&["diff"], DiffSchema),
     (&["goto"], GotoSchema),
     (&["branch"], BranchCompatSchema),
-    (&["switch", "checkout"], SwitchCheckoutSchema),
+    (&["switch"], SwitchCheckoutSchema),
     (&["merge --preview"], MergePreviewSchema),
     (&["ready"], ReadySchema),
     (&["land"], LandSchema),
@@ -131,7 +130,6 @@ schema_registry! {
     (&["stash list"], StashListSchema),
     (&["stash show"], StashShowSchema),
     (&["revert"], RevertSchema),
-    (&["diagnose"], DiagnoseSchema),
     (&["doctor"], DiagnoseSchema),
     (&["doctor docs"], DoctorDocsSchema),
     (&["doctor schemas"], DoctorSchemasSchema),
@@ -150,13 +148,12 @@ schema_registry! {
     (&["session segment"], SessionSegmentEnvelopeSchema),
     (&["session list"], SessionListSchema),
     (&["git-overlay"], GitOverlayGuideSchema),
-    (&["version"], VersionSchema),
     (&["watch"], WatchLineSchema),
     (&["try"], TrySchema),
     (&["blame"], BlameSchema),
     (&["fsck"], FsckSchema),
     (&["resolve"], ResolveSchema),
-    (&["index", "maintenance index"], IndexSchema),
+    (&["maintenance index"], IndexSchema),
     (&["error"], ErrorEnvelopeSchema),
 }
 
@@ -2470,16 +2467,6 @@ pub struct GitOverlayGuideSchema {
     pub topic: String,
     pub summary: String,
     pub steps: Vec<String>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct VersionSchema {
-    pub version: String,
-    pub profile: String,
-    pub features: Vec<String>,
-    pub git_version: Option<String>,
-    pub repository_capability: Option<String>,
-    pub repository_root: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

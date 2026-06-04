@@ -22,22 +22,22 @@ use cli::{
         commands::{
             LogCommandOptions, RetroCommandOptions, SnapshotAgentOverrides, build_command_catalog,
             cmd_abort, cmd_actor_done, cmd_actor_explain, cmd_actor_list, cmd_actor_show,
-            cmd_actor_spawn, cmd_adopt, cmd_agent, cmd_attempt, cmd_bisect, cmd_blame,
+            cmd_actor_spawn, cmd_adopt, cmd_agent, cmd_attempt, cmd_blame,
             cmd_branch_compat, cmd_capture_split, cmd_checkpoint, cmd_cherry_pick, cmd_clean,
-            cmd_clone, cmd_collapse, cmd_commands, cmd_commit_compat, cmd_compare, cmd_completion,
+            cmd_clone, cmd_collapse, cmd_commands, cmd_commit_compat,
             cmd_conflict, cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get,
             cmd_context_history, cmd_context_list, cmd_context_rm, cmd_context_set,
             cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
             cmd_daemon_status, cmd_daemon_stop, cmd_delegate, cmd_diagnose, cmd_diff, cmd_discuss,
-            cmd_doctor_docs, cmd_doctor_schemas, cmd_fetch, cmd_fork, cmd_fsck, cmd_gc, cmd_goto,
-            cmd_harness_bridge, cmd_hook, cmd_index, cmd_init, cmd_integration, cmd_log,
-            cmd_maintenance, cmd_marker, cmd_merge, cmd_monitor, cmd_pull, cmd_push, cmd_query,
+            cmd_doctor_docs, cmd_doctor_schemas, cmd_fetch, cmd_fork, cmd_fsck, cmd_goto,
+            cmd_harness_bridge, cmd_hook, cmd_init, cmd_integration, cmd_log,
+            cmd_maintenance, cmd_marker, cmd_merge, cmd_pull, cmd_push, cmd_query,
             cmd_ready, cmd_rebase, cmd_redo, cmd_remote, cmd_resolve, cmd_retro, cmd_revert,
             cmd_review, cmd_run, cmd_schemas, cmd_session_end, cmd_session_list,
             cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell, cmd_land,
-            cmd_show, cmd_snapshot, cmd_stack, cmd_start, cmd_stash, cmd_status, cmd_store,
+            cmd_show, cmd_snapshot, cmd_stack, cmd_start, cmd_stash, cmd_status,
             cmd_switch_compat, cmd_sync_smart, cmd_thread, cmd_thread_show, cmd_transaction,
-            cmd_try, cmd_undo, cmd_verify, cmd_version, cmd_watch, cmd_workspace,
+            cmd_try, cmd_undo, cmd_verify, cmd_watch, cmd_workspace,
             command_runtime_contract_for_command, print_error_with_hint,
             print_parse_error_json_envelope,
         },
@@ -284,10 +284,6 @@ async fn async_main() -> Result<()> {
 
         Commands::Watch(args) => cmd_watch(&cli, args.clone()).await,
 
-        Commands::Diagnose(DiagnoseArgs { profile }) => {
-            cmd_diagnose(&cli, DiagnoseArgs { profile: *profile })
-        }
-
         Commands::Verify => cmd_verify(&cli, cli.verbose > 0),
 
         Commands::Doctor(args) => match &args.command {
@@ -307,8 +303,6 @@ async fn async_main() -> Result<()> {
 
         #[cfg(feature = "git-overlay")]
         Commands::GitOverlay => cmd_git_overlay_guide(&cli),
-
-        Commands::Version => cmd_version(&cli, cli.verbose > 0),
 
         Commands::Commands(args) => cmd_commands(&cli, args),
 
@@ -509,9 +503,7 @@ async fn async_main() -> Result<()> {
 
         Commands::Branch(args) => cmd_branch_compat(&cli, args.clone()).await,
 
-        Commands::Switch(args) | Commands::Checkout(args) => {
-            cmd_switch_compat(&cli, args.clone()).await
-        }
+        Commands::Switch(args) => cmd_switch_compat(&cli, args.clone()).await,
 
         Commands::Revert(RevertArgs {
             state,
@@ -521,13 +513,18 @@ async fn async_main() -> Result<()> {
 
         Commands::Undo(UndoArgs {
             steps,
+            redo,
             list,
             depth,
             preview,
             allow_redact_undo,
-        }) => cmd_undo(&cli, *steps, *list, *depth, *preview, *allow_redact_undo),
-
-        Commands::Redo { steps, preview } => cmd_redo(&cli, *steps, *preview),
+        }) => {
+            if *redo {
+                cmd_redo(&cli, *steps, *preview)
+            } else {
+                cmd_undo(&cli, *steps, *list, *depth, *preview, *allow_redact_undo)
+            }
+        }
 
         Commands::Fetch { remote, all } => cmd_fetch(&cli, remote.clone(), *all).await,
 
@@ -545,12 +542,6 @@ async fn async_main() -> Result<()> {
             into,
             confidence,
         }) => cmd_collapse(&cli, states.clone(), into.clone(), *confidence),
-
-        Commands::Compare {
-            state_a,
-            state_b,
-            semantic,
-        } => cmd_compare(&cli, state_a.clone(), state_b.clone(), *semantic),
 
         Commands::Marker { command } => cmd_marker(&cli, command.clone()),
 
@@ -739,18 +730,6 @@ async fn async_main() -> Result<()> {
         #[cfg(feature = "semantic")]
         Commands::Semantic { command } => cmd_semantic(&cli, command.clone()),
 
-        Commands::Completion { shell } => cmd_completion(&cli, shell.clone()),
-
-        Commands::Gc {
-            prune,
-            aggressive,
-            dry_run,
-        } => cmd_gc(&cli, *prune, *aggressive, *dry_run),
-
-        Commands::Index { dump } => cmd_index(&cli, *dump),
-
-        Commands::Monitor { paths, serve } => cmd_monitor(&cli, *paths, *serve),
-
         Commands::Daemon { command } => match command {
             DaemonCommands::Serve => cmd_daemon_serve(&cli),
             DaemonCommands::Status => cmd_daemon_status(&cli),
@@ -777,15 +756,11 @@ async fn async_main() -> Result<()> {
 
         Commands::Maintenance { command } => cmd_maintenance(&cli, command.clone()),
 
-        Commands::Store { command } => cmd_store(&cli, command.clone()),
-
         Commands::Blame {
             file,
             state,
             context,
         } => cmd_blame(&cli, file.clone(), state.clone(), *context),
-
-        Commands::Bisect { command } => cmd_bisect(&cli, command.clone()),
 
         Commands::CherryPick {
             commit,

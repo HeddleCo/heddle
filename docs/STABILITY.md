@@ -233,7 +233,7 @@ on open issues in `HeddleCo/heddle` with the corresponding label:
 
 Tradeoff: tighter S1 (e.g. zero open) makes the gate punitive —
 every CLI verb has at least one edge case, and the marginal harm of
-"`heddle compare` is slow on a 10 GB tree" is not "do not bet the
+"`heddle diff` is slow on a 10 GB tree" is not "do not bet the
 company on this". Looser S0 (e.g. "documented") is not acceptable —
 a data-corruption bug with a documented workaround is still a data-
 corruption bug.
@@ -246,7 +246,7 @@ maintainer, written before this gate fires.
 
 <TBD: maintainer> — no soak harness exists today. Proposed: a
 **24-hour** soak that runs `heddle commit` / `heddle undo` /
-`heddle redo` in a loop against a synthetic
+`heddle undo --redo` in a loop against a synthetic
 repository, asserts that no `fsck` errors appear at the end, asserts
 that the oplog is replayable from zero, and asserts that
 `heddle maintenance gc --prune` does not delete anything reachable.

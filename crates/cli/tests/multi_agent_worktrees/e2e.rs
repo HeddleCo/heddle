@@ -1566,7 +1566,7 @@ fn undo_is_scoped_to_the_current_thread() {
         search_snapshot["change_id"].as_str().unwrap()
     );
 
-    heddle(&["redo"], Some(&auth_path)).unwrap();
+    heddle(&["undo", "--redo"], Some(&auth_path)).unwrap();
     assert!(
         auth_path.join("auth.rs").exists(),
         "redo should restore the auth thread state"

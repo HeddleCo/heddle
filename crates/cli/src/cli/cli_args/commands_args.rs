@@ -528,12 +528,16 @@ Not undoable (file a follow-up if you need one):
   - cross-worktree shared-backend undo (no worktree registry yet; single-
                                         worktree usage is the supported
                                         configuration for 0.3)
-  - redo across CLI invocations       (use `heddle redo` in the same shell)
+  - redo across CLI invocations       (use `heddle undo --redo` in the same shell)
 ")]
 pub struct UndoArgs {
     /// Undo N operations.
     #[arg(short = 'n', long, default_value = "1")]
     pub steps: usize,
+
+    /// Redo previously undone operations instead of undoing.
+    #[arg(long)]
+    pub redo: bool,
 
     /// List recent operations without undoing.
     #[arg(long)]

@@ -5,7 +5,6 @@ mod cli_base;
 mod commands_advanced;
 mod commands_agent;
 mod commands_args;
-mod commands_bisect;
 #[cfg(feature = "git-overlay")]
 mod commands_bridge;
 mod commands_context;
@@ -46,7 +45,6 @@ pub use commands_args::{
     ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs, TryArgs, UndoArgs, WatchArgs,
     WorkspaceModeArg,
 };
-pub use commands_bisect::BisectCommands;
 #[cfg(feature = "git-overlay")]
 pub use commands_bridge::{BridgeCommands, GitCommands, GitSource};
 pub use commands_context::ContextCommands;
@@ -61,7 +59,7 @@ pub use commands_integration::{
 #[cfg(feature = "client")]
 pub use commands_main::PresenceCommands;
 pub use commands_main::{
-    ActorCommands, Commands, DaemonCommands, MaintenanceCommands, SessionCommands, StoreCommands,
+    ActorCommands, Commands, DaemonCommands, MaintenanceCommands, SessionCommands,
 };
 pub use commands_marker::MarkerCommands;
 pub use commands_query::QueryArgs;

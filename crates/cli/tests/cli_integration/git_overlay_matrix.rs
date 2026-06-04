@@ -1,6 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
 
+/// The `bisect` verb was removed in the whole-CLI consolidation (heddle#473),
+/// but the operation-status layer still detects a lingering `BISECT_STATE`
+/// file (from older binaries) as an in-progress Heddle operation. These tests
+/// exercise that detection + the continue/abort/undo guardrails, so they seed
+/// the state file directly instead of through the (now removed) verb.
+fn seed_heddle_bisect_state(path: &std::path::Path) {
+    // A real stale BISECT_STATE only ever exists inside an initialized Heddle
+    // overlay, so bootstrap one first — opening a bare `.heddle` that holds
+    // only the marker file is not a valid repository.
+    heddle(&["init"], Some(path)).expect("heddle init for bisect fixture");
+    std::fs::write(path.join(".heddle").join("BISECT_STATE"), "{}\n")
+        .expect("seed BISECT_STATE");
+}
+
 fn init_git_repo_with_branch(path: &std::path::Path, branch: &str) {
     let status = Command::new("git")
         .arg("init")
@@ -924,7 +938,7 @@ fn git_overlay_matrix_plain_git_no_commit_bootstrap_commands() {
             && !bridge_text.contains("run `heddle adopt`"),
         "unborn bridge status text should not recommend invalid adoption: {bridge_text}"
     );
-    let diagnose = json(temp.path(), &["diagnose", "--output", "json"]);
+    let diagnose = json(temp.path(), &["doctor", "--output", "json"]);
     assert_eq!(diagnose["recommended_action"], "heddle init");
     assert_eq!(diagnose["git_overlay_import_hint"], Value::Null);
 
@@ -949,7 +963,7 @@ fn git_overlay_matrix_plain_git_no_commit_bootstrap_commands() {
 
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    let diagnose = json(temp.path(), &["diagnose", "--output", "json"]);
+    let diagnose = json(temp.path(), &["doctor", "--output", "json"]);
     assert_git_overlay_basics(&diagnose);
     assert_eq!(diagnose["thread"]["name"], "trunk");
 
@@ -1115,7 +1129,7 @@ fn git_overlay_matrix_verify_tracks_plain_init_import_clean_loop() {
     assert_eq!(thread_show["verification"]["status"], "needs_import");
     assert_eq!(thread_show["recommended_action"], "heddle adopt --ref main");
     assert_verify_check_rows(&thread_show["verification"]);
-    let diagnose = json(temp.path(), &["diagnose", "--output", "json"]);
+    let diagnose = json(temp.path(), &["doctor", "--output", "json"]);
     assert_eq!(diagnose["verification"]["verified"], false);
     assert_eq!(diagnose["verification"]["status"], "needs_import");
     assert_eq!(
@@ -1156,7 +1170,7 @@ fn git_overlay_matrix_verify_tracks_plain_init_import_clean_loop() {
         !verify_text.contains("not checked"),
         "clean verify text should render all proof rows as checked: {verify_text}"
     );
-    let diagnose = json(temp.path(), &["diagnose", "--output", "json"]);
+    let diagnose = json(temp.path(), &["doctor", "--output", "json"]);
     assert_eq!(diagnose["output_kind"], "diagnose");
     assert_eq!(diagnose["verification"]["verified"], true);
     assert_eq!(diagnose["verification"]["status"], "clean");
@@ -2100,7 +2114,7 @@ fn git_overlay_matrix_observe_only_contract_preserves_plain_git_repo() {
         .expect("catalog commands should be an array");
     let cases: &[(&str, &[&str])] = &[
         ("status", &["status", "--output", "json"]),
-        ("diagnose", &["diagnose", "--output", "json"]),
+        ("doctor", &["doctor", "--output", "json"]),
         ("doctor", &["doctor", "--output", "json"]),
         (
             "bridge git status",
@@ -2674,7 +2688,7 @@ fn git_overlay_matrix_undo_after_push_recommends_publish_undo_not_pull() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|command| command == "heddle redo"),
+            .any(|command| command == "heddle undo --redo"),
         "undo should also name the restore-the-work option: {undo}"
     );
 
@@ -3218,7 +3232,7 @@ fn git_overlay_matrix_undo_preview_refuses_active_operation_like_real_undo() {
     let commit = json(temp.path(), &["--output", "json", "commit", "-m", "change"]);
     assert_eq!(commit["output_kind"], "commit");
 
-    heddle(&["bisect", "start"], Some(temp.path())).unwrap();
+    seed_heddle_bisect_state(temp.path());
     let git_before = git_ref_snapshot(temp.path());
     let status_before = json(temp.path(), &["--output", "json", "status"]);
     assert_eq!(status_before["operation"]["kind"], "bisect");
@@ -3254,7 +3268,7 @@ fn git_overlay_matrix_undo_preview_refuses_active_operation_like_real_undo() {
     );
     assert_eq!(
         preview_envelope["primary_command"],
-        "heddle bisect good <state> or heddle bisect bad <state>"
+        "heddle abort"
     );
     assert_eq!(
         git_ref_snapshot(temp.path()),
@@ -4314,7 +4328,7 @@ fn git_overlay_matrix_subdirectory_dirty_commands() {
             .any(|value| value == "new.txt")
     );
 
-    let diagnose = json(&nested, &["diagnose", "--output", "json"]);
+    let diagnose = json(&nested, &["doctor", "--output", "json"]);
     assert_eq!(diagnose["changes"]["total"], 2);
 
     let show = json(&nested, &["show", "HEAD", "--output", "json"]);
@@ -4475,10 +4489,10 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
         "log should still succeed after plain git commits: {log}"
     );
 
-    let compare = json(temp.path(), &["compare", "HEAD", "HEAD"]);
-    assert_eq!(compare["summary"]["total"], 0);
+    let same_state_diff = json(temp.path(), &["diff", "HEAD", "HEAD"]);
+    assert_eq!(same_state_diff["stats"]["files_changed"], 0);
 
-    let diagnose = json(temp.path(), &["diagnose", "--output", "json"]);
+    let diagnose = json(temp.path(), &["doctor", "--output", "json"]);
     assert_eq!(
         diagnose["changes"]["total"], 0,
         "diagnose must not resurrect stale Heddle-vs-state paths when Git is clean but import is needed: {diagnose}"
@@ -4498,7 +4512,7 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
     let dirty_status = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(dirty_status["changed_path_count"], 1);
     assert_eq!(dirty_status["verification"]["worktree_state"], "dirty");
-    let dirty_diagnose = json(temp.path(), &["diagnose", "--output", "json"]);
+    let dirty_diagnose = json(temp.path(), &["doctor", "--output", "json"]);
     assert_eq!(
         dirty_diagnose["changes"]["total"], 1,
         "diagnose should show the same current Git dirty set as status under needs_import: {dirty_diagnose}"
@@ -4879,7 +4893,7 @@ fn git_overlay_matrix_non_main_default_branch_commands() {
     let status = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(status["thread"], "develop");
 
-    let diagnose = json(temp.path(), &["diagnose", "--output", "json"]);
+    let diagnose = json(temp.path(), &["doctor", "--output", "json"]);
     assert_eq!(diagnose["thread"]["name"], "develop");
 
     let thread_list = json(temp.path(), &["thread", "list", "--output", "json"]);
@@ -5045,7 +5059,7 @@ fn git_overlay_matrix_detached_at_tag_status_commands() {
         "status should remain usable when detached at a tag: {status}"
     );
 
-    let diagnose = json(temp.path(), &["diagnose", "--output", "json"]);
+    let diagnose = json(temp.path(), &["doctor", "--output", "json"]);
     assert_git_overlay_basics(&diagnose);
 
     let show = json(temp.path(), &["show", "HEAD", "--output", "json"]);
@@ -5111,8 +5125,8 @@ fn git_overlay_matrix_no_commit_first_run_durability_commands() {
     init_git_repo_with_branch(temp.path(), "trunk");
     std::fs::write(temp.path().join("checkpoint.txt"), "first run").unwrap();
 
-    let compare = json(temp.path(), &["compare", "HEAD", "HEAD"]);
-    assert_eq!(compare["summary"]["total"], 0);
+    let same_state_diff = json(temp.path(), &["diff", "HEAD", "HEAD"]);
+    assert_eq!(same_state_diff["stats"]["files_changed"], 0);
 
     let ready = json(temp.path(), &["--output", "json", "ready"]);
     assert_eq!(ready["thread_state"], "active");
@@ -6237,7 +6251,7 @@ fn git_overlay_matrix_ship_undo_restores_git_and_heddle_together() {
 
     std::fs::write(temp.path().join("local-dirty.txt"), "local dirty\n").unwrap();
     let redo_refusal =
-        heddle_output(&["--output", "json", "redo"], Some(temp.path())).expect("redo should run");
+        heddle_output(&["--output", "json", "undo", "--redo"], Some(temp.path())).expect("redo should run");
     assert!(!redo_refusal.status.success(), "dirty redo should refuse");
     let stderr = String::from_utf8_lossy(&redo_refusal.stderr);
     let envelope: Value = serde_json::from_str(stderr.trim())
@@ -6254,7 +6268,7 @@ fn git_overlay_matrix_ship_undo_restores_git_and_heddle_together() {
     );
 
     std::fs::remove_file(temp.path().join("local-dirty.txt")).unwrap();
-    let redo = json(temp.path(), &["--output", "json", "redo"]);
+    let redo = json(temp.path(), &["--output", "json", "undo", "--redo"]);
     assert_eq!(redo["action"], "redo");
     assert_eq!(redo["status"], "completed");
     assert_eq!(redo["verification"]["verified"], true);
@@ -6822,8 +6836,8 @@ fn git_overlay_matrix_manual_git_merge_commit_after_bootstrap_commands() {
         "log should stay coherent after a manual Git merge commit: {log}"
     );
 
-    let compare = json(temp.path(), &["compare", "HEAD", "HEAD"]);
-    assert_eq!(compare["summary"]["total"], 0);
+    let same_state_diff = json(temp.path(), &["diff", "HEAD", "HEAD"]);
+    assert_eq!(same_state_diff["stats"]["files_changed"], 0);
 
     let ready = json(temp.path(), &["--output", "json", "ready"]);
     assert!(
@@ -7178,7 +7192,7 @@ fn git_overlay_matrix_rebase_and_cherry_pick_sequences_remain_coherent() {
         "status should stay coherent during rebase conflict: {status}"
     );
 
-    let diagnose = json(rebase_repo.path(), &["diagnose", "--output", "json"]);
+    let diagnose = json(rebase_repo.path(), &["doctor", "--output", "json"]);
     assert_eq!(diagnose["repository_capability"], "git-overlay");
 
     let worktree = json(
@@ -7707,7 +7721,7 @@ fn git_overlay_matrix_in_progress_operations_surface_consistently() {
         status["operation"]["next_action"],
         "heddle bridge git status"
     );
-    let diagnose = json(rebase_repo.path(), &["diagnose", "--output", "json"]);
+    let diagnose = json(rebase_repo.path(), &["doctor", "--output", "json"]);
     assert_eq!(diagnose["operation"]["kind"], "rebase");
     let workspace = json(
         rebase_repo.path(),
@@ -7758,15 +7772,14 @@ fn git_overlay_matrix_in_progress_operations_surface_consistently() {
     std::fs::write(bisect_repo.path().join("tracked.txt"), "base\n").unwrap();
     git_commit_all(bisect_repo.path(), "seed branch");
     let _ = json(bisect_repo.path(), &["status", "--output", "json"]);
-    heddle(&["bisect", "start"], Some(bisect_repo.path())).unwrap();
+    seed_heddle_bisect_state(bisect_repo.path());
     let bisect_status = json(bisect_repo.path(), &["status", "--output", "json"]);
     assert_eq!(bisect_status["operation"]["scope"], "heddle");
     assert_eq!(bisect_status["operation"]["kind"], "bisect");
     assert_eq!(
         bisect_status["operation"]["next_action"],
-        "heddle bisect good <state> or heddle bisect bad <state>"
+        "heddle abort"
     );
-    heddle(&["bisect", "reset"], Some(bisect_repo.path())).unwrap();
 }
 
 #[test]
@@ -8044,7 +8057,7 @@ fn git_overlay_matrix_sync_and_primary_guidance_prefer_heddle_verbs() {
     assert_eq!(status_before["remote_tracking"]["behind"], 1);
     assert_eq!(status_before["recommended_action"], "heddle pull");
 
-    let diagnose_before = json(temp.path(), &["diagnose", "--output", "json"]);
+    let diagnose_before = json(temp.path(), &["doctor", "--output", "json"]);
     assert_eq!(
         diagnose_before["health"]["recommended_action"],
         "heddle pull"
@@ -8228,12 +8241,12 @@ fn git_overlay_matrix_continue_handles_each_supported_operation_state() {
     std::fs::write(heddle_bisect.path().join("tracked.txt"), "base\n").unwrap();
     git_commit_all(heddle_bisect.path(), "seed branch");
     let _ = json(heddle_bisect.path(), &["status", "--output", "json"]);
-    heddle(&["bisect", "start"], Some(heddle_bisect.path())).unwrap();
+    seed_heddle_bisect_state(heddle_bisect.path());
     let blocked_heddle_bisect = json(heddle_bisect.path(), &["--output", "json", "continue"]);
     assert_eq!(blocked_heddle_bisect["status"], "blocked");
     assert_eq!(
         blocked_heddle_bisect["recommended_action"],
-        "heddle bisect good <state> or heddle bisect bad <state>"
+        "heddle abort"
     );
 
     let git_bisect = TempDir::new().unwrap();
@@ -8270,7 +8283,7 @@ fn git_overlay_matrix_abort_handles_each_supported_operation_state() {
     std::fs::write(heddle_bisect.path().join("tracked.txt"), "base\n").unwrap();
     git_commit_all(heddle_bisect.path(), "seed branch");
     let _ = json(heddle_bisect.path(), &["status", "--output", "json"]);
-    heddle(&["bisect", "start"], Some(heddle_bisect.path())).unwrap();
+    seed_heddle_bisect_state(heddle_bisect.path());
     let aborted_heddle_bisect = json(heddle_bisect.path(), &["--output", "json", "abort"]);
     assert_eq!(aborted_heddle_bisect["status"], "aborted");
     assert!(json(heddle_bisect.path(), &["status", "--output", "json"])["operation"].is_null());
@@ -8410,7 +8423,7 @@ fn git_overlay_matrix_operator_states_survive_reopen_and_keep_guidance_consisten
     start_conflicted_heddle_merge(temp.path());
 
     let status = json(temp.path(), &["status", "--output", "json"]);
-    let diagnose = json(temp.path(), &["diagnose", "--output", "json"]);
+    let diagnose = json(temp.path(), &["doctor", "--output", "json"]);
     let thread_show = json(
         temp.path(),
         &["thread", "show", "feature", "--output", "json"],

@@ -91,7 +91,7 @@ extract time.
 - Added a no-`git` everyday machine-stream regression covering Git-overlay
   `init`, `status`, `capture`, `checkpoint`, `log`, `show`, `diagnose`,
   `ready`, and `diff` with `NO_COLOR=1`.
-- Fixed `heddle version --repo <path> --verbose --output json` so bug-context output
+- Fixed `heddle doctor --repo <path> --verbose --output json` so bug-context output
   reports the explicitly requested repository instead of the process cwd.
 - Classified resolve/continue-style no-operation failures as
   `operation_not_in_progress` with an actionable `heddle status` hint, and

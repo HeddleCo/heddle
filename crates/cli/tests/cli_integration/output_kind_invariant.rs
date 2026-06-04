@@ -54,7 +54,6 @@ const SWEPT: &[&str] = &[
     "clone",
     "diff",
     "undo",
-    "redo",
     "thread list",
     "thread show",
     "workspace show",
@@ -103,10 +102,6 @@ const SWEPT: &[&str] = &[
     "review next",
     "review health",
     "cherry-pick",
-    "bisect start",
-    "bisect good",
-    "bisect bad",
-    "bisect reset",
 ];
 
 /// The catalog itself advertises its container kind as `"kind":
@@ -145,9 +140,7 @@ const UNSWEPT_TODO: &[&str] = &[
     "bridge git pull",
     "bridge git push",
     "bridge git reason",
-    "checkout",
     "collapse",
-    "compare",
     "conflict list",
     "conflict show",
     "continue",
@@ -155,18 +148,15 @@ const UNSWEPT_TODO: &[&str] = &[
     "daemon status",
     "daemon stop",
     "delegate",
-    "diagnose",
     "doctor",
     "fetch",
     "fsck",
-    "gc",
     "git-overlay",
     "harness-bridge",
     "hook events",
     "hook install",
     "hook list",
     "hook uninstall",
-    "index",
     "inspect",
     "integration doctor",
     "integration install",
@@ -185,7 +175,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "marker list",
     "marker show",
     "merge",
-    "monitor",
     "pull",
     "push",
     "query",
@@ -212,7 +201,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "stash pop",
     "stash push",
     "start",
-    "store warm",
     "switch",
     "sync",
     "thread absorb",
@@ -236,7 +224,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "transaction commit",
     "transaction status",
     "try",
-    "version",
     "watch",
     "workspace",
 ];
@@ -639,9 +626,6 @@ fn runtime_invocation_args(display: &str) -> Option<(&'static [&'static str], bo
         "review health" => Some((&["review", "health"], true)),
         // `fork` succeeds in an init'd repo (forks the empty initial state).
         "fork" => Some((&["fork"], true)),
-        // `bisect start` accepts a no-state init and emits its session.
-        "bisect start" => Some((&["bisect", "start"], true)),
-        "bisect reset" => Some((&["bisect", "reset"], true)),
         _ => None,
     }
 }
@@ -768,7 +752,6 @@ fn head_change_id(dir: &std::path::Path) -> String {
 /// match or the invariant test fails demanding it.
 fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
     let case = match output_kind {
-        "bisect_start" => (init_fixture(), sv(&["bisect", "start"])),
         "clean" => {
             let t = init_fixture();
             std::fs::write(t.path().join("untracked.txt"), "junk").unwrap();

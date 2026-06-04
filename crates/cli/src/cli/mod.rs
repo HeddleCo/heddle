@@ -14,7 +14,7 @@ pub mod transaction_sentinel;
 #[cfg(feature = "client")]
 pub use cli_args::PresenceCommands;
 pub use cli_args::{
-    ActorCommands, AdoptArgs, AgentCommands, AttemptArgs, BisectCommands, BranchArgs,
+    ActorCommands, AdoptArgs, AgentCommands, AttemptArgs, BranchArgs,
     CheckpointArgs, Cli, CloneArgs, CollapseArgs, Commands, CommitArgs, ContextCommands,
     DaemonCommands, DiagnoseArgs, DiffArgs, DoctorArgs, DoctorCommands, DoctorDocsArgs,
     HookCommands, HookInstallSource, InitArgs, IntegrationCommands, IntegrationInstallArgs,
@@ -24,7 +24,7 @@ pub use cli_args::{
     RedactTrustCommands, RedactTrustListArgs, RedactTrustRemoveArgs, RemoteCommands, ResolveArgs,
     RetroArgs, RevertArgs, RunArgs, SessionCommands, SessionEndArgs, SessionListArgs,
     SessionSegmentArgs, SessionShowArgs, SessionStartArgs, ShellCommands, ShellKind, SnapshotArgs,
-    StackArgs, StackCommands, StashCommands, StoreCommands, SwitchArgs, ThreadAbsorbArgs,
+    StackArgs, StackCommands, StashCommands, SwitchArgs, ThreadAbsorbArgs,
     ThreadCleanupArgs, ThreadCommands, ThreadDropArgs, ThreadListArgs, ThreadMoveArgs,
     ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs, ThreadResolveArgs, ThreadShowArgs,
     ThreadStartArgs, TryArgs, UndoArgs, WatchArgs, WorkspaceCommands, WorkspaceModeArg,

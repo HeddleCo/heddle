@@ -604,7 +604,7 @@ fn render_diagnose(cli: &Cli, output: &DiagnoseOutput) {
         }
         // Agent-machinery (session / harness IDs) behind `-v` — these
         // are load-bearing for orchestrators reading JSON but pure
-        // noise for humans running `heddle diagnose`.
+        // noise for humans running `heddle doctor`.
         if cli.verbose > 0 {
             if let Some(session_id) = &thread.session_id {
                 println!("Session: {session_id}");

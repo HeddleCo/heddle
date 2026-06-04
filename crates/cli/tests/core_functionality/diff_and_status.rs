@@ -336,8 +336,12 @@ fn test_native_status_warms_helper_for_second_run() {
 
     let mut helper_ready = false;
     for _ in 0..10 {
-        let output =
-            heddle_with_env(&["monitor", "--output", "json"], Some(temp.path()), &envs).unwrap();
+        let output = heddle_with_env(
+            &["maintenance", "monitor", "--output", "json"],
+            Some(temp.path()),
+            &envs,
+        )
+        .unwrap();
         let monitor: Value = serde_json::from_str(&output).unwrap();
         if monitor["backend"] == "native-helper" {
             assert_eq!(monitor["status"], "usable");

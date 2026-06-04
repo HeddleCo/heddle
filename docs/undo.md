@@ -54,7 +54,7 @@ own, are destructive by design, or need a substrate change we haven't shipped:
   `.heddle/refstore` (the `heddle start --path` setup) can step on each
   other's threads. 0.3 supports single-worktree usage only; cross-
   worktree safety is filed as a follow-up. See the design doc.
-- **Redo across CLI invocations** — `heddle redo` works within the same shell
+- **Redo across CLI invocations** — `heddle undo --redo` works within the same shell
   session but is not yet persisted across processes.
 
 ## Safety contracts
@@ -124,7 +124,7 @@ Run `heddle undo --help` for the curated list with examples and the explicit
 - `OpRecord::Checkpoint` is defined but no current code path emits it; the
   variant exists for the agent-frequent-saves work in flight. When it lands
   it will need its own inverse arm in `undo_apply.rs`.
-- **Redact redo is unsupported.** `heddle redo` of a previously-undone
+- **Redact redo is unsupported.** `heddle undo --redo` of a previously-undone
   `Redact` refuses with a clear error: the `OpRecord::Redact` entry doesn't
   preserve the full `Redaction` record (reason, redactor, signature) needed
   to faithfully re-apply, so any "redo" path would invent the missing

@@ -240,64 +240,17 @@ fn test_maintenance_run_creates_or_refreshes_sidecars_in_simple_repo() {
     );
 }
 
-/// `heddle store warm` should: (a) succeed on a fresh repo with no
-/// blobs (everything `already_loose` because there's nothing to
-/// promote), (b) succeed on a packed-and-pruned repo (promote N
-/// blobs), (c) be idempotent on a second invocation.
+/// The top-level `store` group was removed in the whole-CLI consolidation
+/// (#473). `store warm` is slated to re-home under `maintenance` in a later
+/// phase; for now the verb must error as unknown.
 #[test]
-fn test_store_warm_promotes_packed_repo_and_is_idempotent() {
+fn test_store_group_is_removed() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
-
-    // Stage a few small files and snapshot to populate blobs.
-    for i in 0..3 {
-        fs::write(
-            temp.path().join(format!("warm-{i}.txt")),
-            format!("warm-pass payload {i}"),
-        )
-        .unwrap();
-    }
-    heddle_must_succeed(&["capture", "-m", "warm-test"], temp.path());
-
-    // Pack + prune so blobs live only in a packfile.
-    heddle_must_succeed(&["gc", "--prune"], temp.path());
-
-    // First warm: should report some `promoted` count and 0 errors.
-    let first = heddle_must_succeed(&["--output", "json", "store", "warm"], temp.path());
-    let first_json: Value = serde_json::from_str(&first).expect("warm output should be JSON");
-    let first_promoted = first_json
-        .get("promoted")
-        .and_then(Value::as_u64)
-        .expect("warm output should include 'promoted'");
-    let first_errors = first_json
-        .get("errors")
-        .and_then(Value::as_u64)
-        .expect("warm output should include 'errors'");
-    assert_eq!(first_errors, 0, "first warm should have no errors: {first}");
+    let result = heddle(&["store", "warm"], Some(temp.path()));
     assert!(
-        first_promoted > 0,
-        "first warm on packed repo should promote at least one blob: {first}"
-    );
-
-    // Second warm: idempotent — every blob already loose+uncompressed.
-    let second = heddle_must_succeed(&["--output", "json", "store", "warm"], temp.path());
-    let second_json: Value =
-        serde_json::from_str(&second).expect("second warm output should be JSON");
-    let second_promoted = second_json
-        .get("promoted")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    let second_already = second_json
-        .get("already_loose")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    assert_eq!(
-        second_promoted, 0,
-        "idempotent second warm must not promote: {second}"
-    );
-    assert!(
-        second_already >= first_promoted,
-        "second warm should report all blobs already_loose ({second_already} >= {first_promoted})"
+        result.is_err(),
+        "the `store` group should be an unknown verb after #473"
     );
 }
 

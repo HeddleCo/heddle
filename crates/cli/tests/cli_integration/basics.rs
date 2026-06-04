@@ -715,7 +715,7 @@ fn test_cli_diagnose_in_plain_git_repo_uses_git_baseline() {
     std::fs::write(temp.path().join("tracked.txt"), "tracked but modified").unwrap();
     std::fs::write(temp.path().join("plain.txt"), "new file").unwrap();
 
-    let output = heddle(&["diagnose", "--output", "json"], Some(temp.path())).unwrap();
+    let output = heddle(&["doctor", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["repository_capability"], "plain-git");
     assert_eq!(parsed["git_overlay_health"]["status"], "needs_init");
@@ -939,26 +939,26 @@ fn test_cli_compare_in_plain_git_repo_bootstraps_from_git_overlay_head() {
     std::fs::write(temp.path().join("tracked.txt"), "tracked but modified").unwrap();
 
     let output = heddle(
-        &["--output", "json", "compare", "HEAD", "HEAD"],
+        &["--output", "json", "diff", "HEAD", "HEAD"],
         Some(temp.path()),
     )
     .unwrap();
-    // `compare` emits JSON now; assert the schema is present and
-    // resolved a state on both sides instead of grepping for legacy
-    // human-text markers.
+    // `diff` (which absorbed `compare`) emits JSON; assert the schema is
+    // present and resolved a state on both sides instead of grepping for
+    // legacy human-text markers.
     let parsed: Value = serde_json::from_str(&output)
-        .unwrap_or_else(|err| panic!("compare output should be JSON: {err}; raw: {output}"));
+        .unwrap_or_else(|err| panic!("diff output should be JSON: {err}; raw: {output}"));
     assert!(
-        parsed["state_a"].as_str().is_some(),
-        "compare must resolve state_a: {output}"
+        parsed["from_state"].as_str().is_some(),
+        "diff must resolve from_state: {output}"
     );
     assert!(
-        parsed["state_b"].as_str().is_some(),
-        "compare must resolve state_b: {output}"
+        parsed["to_state"].as_str().is_some(),
+        "diff must resolve to_state: {output}"
     );
     assert!(
-        parsed["summary"].is_object(),
-        "compare must include a summary block: {output}"
+        parsed["stats"].is_object(),
+        "diff must include a stats block: {output}"
     );
 }
 
@@ -1035,14 +1035,14 @@ fn test_cli_compare_head_head_bootstraps_in_plain_git_repo() {
     heddle_adopt(temp.path());
 
     let output = heddle(
-        &["--output", "json", "compare", "HEAD", "HEAD"],
+        &["--output", "json", "diff", "HEAD", "HEAD"],
         Some(temp.path()),
     )
     .unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(
-        parsed["summary"]["total"], 0,
-        "compare HEAD HEAD should succeed and be empty: {parsed}"
+        parsed["stats"]["files_changed"], 0,
+        "diff HEAD HEAD should succeed and be empty: {parsed}"
     );
 }
 
@@ -1447,12 +1447,12 @@ fn test_cli_compare_mapped_git_tag_resolves_without_import_loop() {
     git(&["tag", "v1.0.0"], temp.path());
 
     let output = heddle(
-        &["compare", "HEAD", "v1.0.0", "--output", "json"],
+        &["diff", "HEAD", "v1.0.0", "--output", "json"],
         Some(temp.path()),
     )
     .unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
-    assert_eq!(parsed["summary"]["total"], 0);
+    assert_eq!(parsed["stats"]["files_changed"], 0);
     assert_eq!(
         parsed["changes"]
             .as_array()
@@ -1590,11 +1590,11 @@ fn test_cli_diagnose_tracks_git_branch_switch_after_bootstrap() {
     git_commit_all(temp.path(), "seed branch");
     git(&["branch", "support/diagnose-switch"], temp.path());
 
-    let _ = heddle(&["diagnose", "--output", "json"], Some(temp.path())).unwrap();
+    let _ = heddle(&["doctor", "--output", "json"], Some(temp.path())).unwrap();
     git(&["checkout", "support/diagnose-switch"], temp.path());
     std::fs::write(temp.path().join("diag.txt"), "dirty").unwrap();
 
-    let output = heddle(&["diagnose", "--output", "json"], Some(temp.path())).unwrap();
+    let output = heddle(&["doctor", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert_eq!(parsed["repository_capability"], "plain-git");
     assert_eq!(parsed["git_overlay_health"]["status"], "needs_init");
@@ -3002,7 +3002,7 @@ fn test_cli_undo_redo() {
     assert_eq!(head_after_undo["thread"].as_str().unwrap_or(""), "main");
     assert_eq!(undo_id, first_id, "Undo should move to previous state");
 
-    assert!(heddle(&["redo"], Some(temp.path())).is_ok());
+    assert!(heddle(&["undo", "--redo"], Some(temp.path())).is_ok());
     let head_after_redo = status_json(temp.path());
     let redo_id = head_after_redo["state"]["change_id"]
         .as_str()

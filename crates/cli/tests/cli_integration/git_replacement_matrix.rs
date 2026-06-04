@@ -190,7 +190,7 @@ fn git_replacement_matrix_fresh_git_read_commands_without_git_on_path() {
     );
 
     for args in [
-        &["diagnose", "--output", "json"][..],
+        &["doctor", "--output", "json"][..],
         &["doctor", "--output", "json"],
         &["bridge", "git", "status", "--output", "json"],
         &["thread", "list", "--output", "json"],
@@ -572,7 +572,7 @@ fn git_replacement_matrix_everyday_save_read_machine_streams_without_git_on_path
     for args in [
         &["--output", "json", "log"][..],
         &["--output", "json", "show", "HEAD"],
-        &["--output", "json", "diagnose"],
+        &["--output", "json", "doctor"],
         &["--output", "json", "ready"],
     ] {
         let parsed = assert_clean_json_without_git(args, temp.path());
@@ -952,8 +952,8 @@ fn git_replacement_matrix_undo_preserves_recovery_marker_for_absorbed_edit() {
         "recovery handle must pin the pre-undo (friction) heddle state"
     );
 
-    // And `redo` round-trips the absorbed content back into the worktree.
-    let redo = assert_clean_json_without_git(&["--output", "json", "redo"], &work);
+    // And `undo --redo` round-trips the absorbed content back into the worktree.
+    let redo = assert_clean_json_without_git(&["--output", "json", "undo", "--redo"], &work);
     assert_eq!(redo["action"], "redo");
     assert_eq!(
         std::fs::read_to_string(work.join("story.txt")).unwrap(),

@@ -165,28 +165,6 @@ fn branch_delete_does_not_recommend_deleted_thread() {
 }
 
 #[test]
-fn checkout_dash_b_guides_to_heddle_thread_flow() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
-    heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
-
-    let output = heddle_output(
-        &["checkout", "-b", "try-git-muscle", "--output", "text"],
-        Some(temp.path()),
-    )
-    .expect("invoke checkout -b");
-    assert!(!output.status.success(), "checkout -b should be guided");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("heddle checkout -b")
-            && stderr.contains("heddle start try-git-muscle --path ../try-git-muscle")
-            && !stderr.contains("unexpected argument"),
-        "checkout -b should produce Heddle-native guidance instead of a generic clap error: {stderr}"
-    );
-}
-
-#[test]
 fn switch_dash_c_guides_to_heddle_thread_flow() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
@@ -367,7 +345,7 @@ fn core_json_surfaces_use_verification_not_trust() {
 
     for (label, args) in [
         ("status", &["status", "--output", "json"][..]),
-        ("diagnose", &["diagnose", "--output", "json"]),
+        ("doctor", &["doctor", "--output", "json"]),
         ("workspace show", &["workspace", "show", "--output", "json"]),
         ("thread list", &["thread", "list", "--output", "json"]),
     ] {
@@ -1031,7 +1009,7 @@ fn confidence_parse_errors_fail_loudly_in_json_mode() {
 
 #[test]
 fn explicit_json_for_text_only_command_uses_contract_advice() {
-    let output = heddle_output(&["--output", "json", "completion", "bash"], None).expect("invoke");
+    let output = heddle_output(&["--output", "json", "shell", "completion", "bash"], None).expect("invoke");
     assert!(
         !output.status.success(),
         "text-only command should reject explicit JSON"
@@ -1055,7 +1033,7 @@ fn explicit_json_for_text_only_command_uses_contract_advice() {
     assert!(
         envelope["error"]
             .as_str()
-            .is_some_and(|error| error.contains("heddle completion")),
+            .is_some_and(|error| error.contains("heddle shell completion")),
         "contract advice should use the typed refusal envelope: {stderr}"
     );
 }
@@ -1308,8 +1286,8 @@ fn command_catalog_exposes_agent_metadata_for_options() {
 
     let completion = commands
         .iter()
-        .find(|entry| entry["display"] == "completion")
-        .expect("completion should be cataloged");
+        .find(|entry| entry["display"] == "shell completion")
+        .expect("shell completion should be cataloged");
     assert_eq!(completion["supports_json"], false);
     assert_eq!(completion["json_kind"], "none");
 }
@@ -3092,7 +3070,6 @@ fn core_loop_schemas_are_discoverable() {
         "agent list",
         "branch",
         "switch",
-        "checkout",
         "bridge git reconcile",
         "remote list",
         "remote show",
@@ -3128,8 +3105,6 @@ fn core_loop_schemas_are_discoverable() {
         "thread show",
         "try",
         "undo",
-        "redo",
-        "version",
         "watch",
     ] {
         let mut args = vec!["schemas"];
@@ -3321,7 +3296,7 @@ fn core_git_overlay_json_surfaces_emit_one_machine_value() {
         ("commands", vec!["commands", "--output", "json"]),
         ("schemas status", vec!["schemas", "status"]),
         ("status", vec!["status", "--output", "json"]),
-        ("diagnose", vec!["diagnose", "--output", "json"]),
+        ("doctor", vec!["doctor", "--output", "json"]),
         ("doctor", vec!["doctor", "--output", "json"]),
         ("verify", vec!["verify", "--output", "json"]),
         (
@@ -4190,7 +4165,7 @@ fn emitted_first_run_recommended_actions_parse_through_clap() {
 
     for args in [
         vec!["status", "--output", "json"],
-        vec!["diagnose", "--output", "json"],
+        vec!["doctor", "--output", "json"],
         vec!["verify", "--output", "json"],
         vec!["bridge", "git", "status", "--output", "json"],
         vec!["thread", "list", "--output", "json"],
@@ -4204,7 +4179,7 @@ fn emitted_first_run_recommended_actions_parse_through_clap() {
     heddle(&["init"], Some(temp.path())).unwrap();
     for args in [
         vec!["status", "--output", "json"],
-        vec!["diagnose", "--output", "json"],
+        vec!["doctor", "--output", "json"],
         vec!["verify", "--output", "json"],
         vec!["bridge", "git", "status", "--output", "json"],
         vec!["thread", "list", "--output", "json"],
@@ -4910,17 +4885,17 @@ fn empty_undo_redo_refuse_with_typed_advice() {
 
     for (args, kind, label) in [
         (
-            ["--output", "json", "undo"],
+            &["--output", "json", "undo"][..],
             "nothing_to_undo",
             "Nothing to undo",
         ),
         (
-            ["--output", "json", "redo"],
+            &["--output", "json", "undo", "--redo"][..],
             "nothing_to_redo",
             "Nothing to redo",
         ),
     ] {
-        let output = heddle_output(&args, Some(temp.path())).expect("invoke undo/redo");
+        let output = heddle_output(args, Some(temp.path())).expect("invoke undo/redo");
         assert!(!output.status.success(), "{label} should fail");
         let stderr = std::str::from_utf8(&output.stderr).unwrap();
         let envelope: Value =
@@ -5232,39 +5207,6 @@ fn goto_missing_state_uses_typed_advice() {
             .is_some_and(|hint| hint.contains("heddle log")),
         "goto missing state hint should name history inspection: {stderr}"
     );
-}
-
-#[test]
-fn bisect_good_bad_without_operation_use_typed_advice() {
-    let temp = TempDir::new().unwrap();
-    heddle(&["init"], Some(temp.path())).unwrap();
-
-    for args in [
-        ["--output", "json", "bisect", "good", "HEAD"],
-        ["--output", "json", "bisect", "bad", "HEAD"],
-    ] {
-        let output = heddle_output(&args, Some(temp.path())).expect("invoke bisect mark");
-        assert!(
-            !output.status.success(),
-            "bisect mark without an operation should fail"
-        );
-        let stderr = std::str::from_utf8(&output.stderr).unwrap();
-        let envelope: Value =
-            serde_json::from_str(stderr).expect("bisect recovery should emit JSON envelope");
-        assert_eq!(envelope["kind"], "no_bisect_in_progress");
-        assert!(
-            envelope["error"]
-                .as_str()
-                .is_some_and(|error| error.contains("No bisect in progress")),
-            "error should name the missing operation: {envelope}"
-        );
-        assert!(
-            envelope["hint"]
-                .as_str()
-                .is_some_and(|hint| hint.contains("heddle bisect start")),
-            "hint should name the start command: {envelope}"
-        );
-    }
 }
 
 #[test]
@@ -6405,46 +6347,26 @@ fn profile_env_writes_timings_to_stderr_without_polluting_json_stdout() {
     );
 }
 
+/// The `version` verb was folded into the global `--version` flag in the
+/// whole-CLI consolidation (#473). `--version` prints the bare version and
+/// exits; the verb no longer exists.
 #[test]
-fn version_verbose_reports_bug_context() {
+fn version_flag_reports_version() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    let text = heddle(
-        &["--output", "text", "version", "--verbose"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    let text = heddle(&["--version"], Some(temp.path())).unwrap();
     assert!(
-        text.contains("Heddle "),
-        "version should identify Heddle: {text}"
-    );
-    assert!(
-        text.contains("Build profile:"),
-        "verbose version should show build profile: {text}"
-    );
-    assert!(
-        text.contains("Git binary: not required"),
-        "verbose version should show Git-binary independence: {text}"
-    );
-    assert!(
-        text.contains("Repository:"),
-        "verbose version should show repository capability: {text}"
+        text.contains(env!("CARGO_PKG_VERSION")),
+        "--version should print the version: {text}"
     );
 
-    let json = heddle(
-        &["version", "--verbose", "--output", "json"],
-        Some(temp.path()),
-    )
-    .unwrap();
-    let parsed: Value = serde_json::from_str(&json).expect("version JSON should parse");
-    assert_eq!(parsed["version"], env!("CARGO_PKG_VERSION"));
-    assert!(parsed["features"].as_array().is_some());
-
-    let terse_json = heddle(&["version", "--output", "json"], Some(temp.path())).unwrap();
-    let terse: Value = serde_json::from_str(&terse_json)
-        .expect("version --output json should parse without --verbose");
-    assert_eq!(terse["version"], env!("CARGO_PKG_VERSION"));
+    // The old `version` subcommand must now error as unknown.
+    let output = heddle_output(&["version"], Some(temp.path())).expect("invoke");
+    assert!(
+        !output.status.success(),
+        "the `version` verb should be removed after #473"
+    );
 }
 
 #[test]
@@ -6656,34 +6578,6 @@ feature
         std::fs::read_to_string(repo.join("app.txt")).unwrap(),
         "base\nfeature\n",
         "undo --preview must not modify the worktree"
-    );
-}
-
-#[test]
-fn version_verbose_honors_explicit_repo_path() {
-    let temp = TempDir::new().unwrap();
-    let repo = temp.path().join("explicit repo");
-    std::fs::create_dir_all(&repo).unwrap();
-    heddle(&["--repo", repo.to_str().expect("utf8 path"), "init"], None).unwrap();
-
-    let json = heddle(
-        &[
-            "--repo",
-            repo.to_str().expect("utf8 path"),
-            "version",
-            "--verbose",
-            "--output",
-            "json",
-        ],
-        None,
-    )
-    .unwrap();
-    let parsed: Value = serde_json::from_str(&json).expect("version JSON should parse");
-    assert_eq!(parsed["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(
-        parsed["repository_root"].as_str(),
-        Some(repo.to_str().expect("utf8 path")),
-        "version --repo should report the explicitly requested repository: {json}"
     );
 }
 
@@ -7631,7 +7525,7 @@ fn narrow_no_color_text_outputs_cover_everyday_read_surfaces() {
     );
     assert_text_surface(
         temp.path(),
-        vec!["--quiet", "--output", "text", "diagnose"],
+        vec!["--quiet", "--output", "text", "doctor"],
         &["Doctor", "Health:"],
     );
     assert_text_surface(
@@ -10114,8 +10008,8 @@ fn agent_reserve_reports_path_for_existing_materialized_thread() {
 fn index_json_emits_one_value_even_for_hidden_compat_alias() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).expect("init");
-    let index = json_value(temp.path(), &["index", "--output", "json"]);
-    assert_schema_declares_runtime_top_level(&["index"], &index);
+    let index = json_value(temp.path(), &["maintenance", "index", "--output", "json"]);
+    assert_schema_declares_runtime_top_level(&["maintenance", "index"], &index);
     assert_schema_declares_runtime_top_level(&["maintenance", "index"], &index);
     assert_eq!(index["output_kind"], "index");
     assert!(
@@ -10127,7 +10021,7 @@ fn index_json_emits_one_value_even_for_hidden_compat_alias() {
         "index JSON should include file entry count: {index}"
     );
 
-    let dump = json_value(temp.path(), &["index", "--dump", "--output", "json"]);
+    let dump = json_value(temp.path(), &["maintenance", "index", "--dump", "--output", "json"]);
     assert_eq!(dump["output_kind"], "index");
     assert!(
         dump["dump"]
@@ -11115,7 +11009,6 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
     for verb in [
         "branch",
         "switch",
-        "checkout",
         "bridge git reconcile",
         "capture",
         "commit",
@@ -11175,7 +11068,6 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
         "doctor docs",
         "doctor schemas",
         "git-overlay",
-        "version",
         "watch",
         "try",
         "blame",

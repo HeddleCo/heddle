@@ -27,7 +27,7 @@ fn test_redo_without_undo() {
     heddle_must_succeed(&["init"], temp.path());
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle_must_succeed(&["capture", "-m", "Initial"], temp.path());
-    let result = heddle(&["redo"], Some(temp.path()));
+    let result = heddle(&["undo", "--redo"], Some(temp.path()));
     assert!(result.is_err());
 }
 
@@ -542,7 +542,7 @@ fn test_undo_captures_pre_undo_state_into_recovery_marker() {
     );
 
     // (b) `redo` restores the captured content (round-trips the worktree).
-    heddle_must_succeed(&["redo"], temp.path());
+    heddle_must_succeed(&["undo", "--redo"], temp.path());
     assert_eq!(
         std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
         "FRICTION ONE\nFRICTION TWO\n",
@@ -876,7 +876,7 @@ fn test_redo_ff_merge_restores_head_and_thread_ref() {
     heddle_must_succeed(&["undo"], temp.path());
     assert_eq!(head_short(temp.path()), main_tip_before);
 
-    heddle_must_succeed(&["redo"], temp.path());
+    heddle_must_succeed(&["undo", "--redo"], temp.path());
     assert_eq!(
         head_short(temp.path()),
         feature_tip_before,
@@ -949,7 +949,7 @@ fn test_redo_ff_merge_pins_recorded_tip_when_source_advances() {
     );
 
     heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    heddle_must_succeed(&["redo"], temp.path());
+    heddle_must_succeed(&["undo", "--redo"], temp.path());
 
     // The recorded FF target — not feature's current tip — is what redo must
     // restore. HEAD and the `main` thread ref both end at the original FF SHA.
@@ -1014,7 +1014,7 @@ fn test_redo_ff_merge_succeeds_when_source_deleted() {
     // `thread drop <name> --delete-thread` by `translate_legacy_args`.
     heddle_must_succeed(&["thread", "delete", "feature"], temp.path());
 
-    heddle_must_succeed(&["redo"], temp.path());
+    heddle_must_succeed(&["undo", "--redo"], temp.path());
 
     assert_eq!(
         head_short(temp.path()),
@@ -1076,7 +1076,7 @@ fn test_redo_ff_merge_refuses_when_post_target_state_missing() {
     // a live-resolve fallback.)
     heddle_must_succeed(&["thread", "delete", "feature"], temp.path());
 
-    let err = heddle(&["redo"], Some(temp.path()))
+    let err = heddle(&["undo", "--redo"], Some(temp.path()))
         .expect_err("redo must refuse when the FF target state is missing");
     let lower = err.to_lowercase();
     assert!(
@@ -1536,7 +1536,7 @@ fn test_redo_of_undone_redact_refuses() {
     // Redo refuses with a message that names Redact + points the user
     // at re-running `heddle redact apply`.
     let err =
-        heddle(&["redo"], Some(temp.path())).expect_err("redo of an undone Redact must refuse");
+        heddle(&["undo", "--redo"], Some(temp.path())).expect_err("redo of an undone Redact must refuse");
     let lower = err.to_lowercase();
     assert!(
         lower.contains("redact"),
@@ -1809,7 +1809,7 @@ fn test_redo_preview_refuses_redact_chain() {
     heddle(&["undo", "--allow-redact-undo"], Some(temp.path()))
         .expect("undo of Redact must succeed with --allow-redact-undo");
 
-    let err = heddle(&["redo", "--preview"], Some(temp.path()))
+    let err = heddle(&["undo", "--redo", "--preview"], Some(temp.path()))
         .expect_err("redo --preview of an undone Redact must refuse");
     let lower = err.to_lowercase();
     assert!(
@@ -2068,7 +2068,7 @@ fn test_redo_thread_create_restores_manager_record() {
     };
 
     heddle_must_succeed(&["undo"], temp.path());
-    heddle_must_succeed(&["redo"], temp.path());
+    heddle_must_succeed(&["undo", "--redo"], temp.path());
 
     let repo = Repository::open(temp.path()).unwrap();
 
@@ -2529,7 +2529,7 @@ fn test_redo_rebase_pins_recorded_tip_when_source_advances() {
     assert_ne!(feature_at_rebase, feature_advanced);
 
     heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    heddle_must_succeed(&["redo"], temp.path());
+    heddle_must_succeed(&["undo", "--redo"], temp.path());
     assert_eq!(
         head_short(temp.path()),
         feature_at_rebase,
@@ -2580,7 +2580,7 @@ fn test_redo_pull_pins_recorded_tip_when_source_advances() {
     std::fs::write(source.path().join("a.txt"), "v3").unwrap();
     heddle_must_succeed(&["capture", "-m", "source v3"], source.path());
 
-    heddle_must_succeed(&["redo"], target.path());
+    heddle_must_succeed(&["undo", "--redo"], target.path());
     assert_eq!(
         head_short(target.path()),
         main_after_second_pull,
@@ -2706,7 +2706,7 @@ fn test_redo_rebase_replay_multi_commit_restores_post_rebase_tip() {
     let after_rebase = head_short(temp.path());
 
     heddle_must_succeed(&["undo"], temp.path());
-    heddle_must_succeed(&["redo"], temp.path());
+    heddle_must_succeed(&["undo", "--redo"], temp.path());
     assert_eq!(
         head_short(temp.path()),
         after_rebase,
@@ -2998,7 +2998,7 @@ fn test_redo_rebase_continue_restores_manual_resolution_tip() {
         "single undo of a conflict-paused rebase must restore HEAD to pre-rebase tip"
     );
 
-    heddle_must_succeed(&["redo"], temp.path());
+    heddle_must_succeed(&["undo", "--redo"], temp.path());
     assert_eq!(
         head_short(temp.path()),
         after_rebase,
