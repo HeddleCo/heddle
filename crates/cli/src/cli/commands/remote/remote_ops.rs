@@ -9,13 +9,11 @@ use std::{borrow::Cow, collections::BTreeMap, fs, path::Path};
 use anyhow::{Context, Result};
 use gix::bstr::{BStr, BString};
 #[cfg(feature = "client")]
-use heddle_client::grpc_hosted::PullMaterialization;
+use heddle_client::grpc_hosted::{HostedAuthMode, PullMaterialization};
 use objects::{
     fs_atomic::write_file_atomic,
     object::{ChangeId, ThreadName, Tree},
 };
-#[cfg(feature = "client")]
-use proto::AuthToken;
 use refs::Head;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
@@ -296,8 +294,6 @@ pub async fn cmd_pull(
     super::preflight_native_remote_transport(&repo, remote.as_deref(), "pull")?;
 
     let user_config = UserConfig::load_default()?;
-    #[cfg(feature = "client")]
-    let mut token = user_config.remote_token()?;
     #[cfg(not(feature = "client"))]
     let token = user_config.remote_token()?;
     #[cfg(feature = "client")]
@@ -306,18 +302,6 @@ pub async fn cmd_pull(
     #[cfg(not(feature = "client"))]
     let (target, _server_key) =
         resolve_remote_with_key(&repo, remote.as_deref()).map_err(anyhow::Error::msg)?;
-
-    // Fall back to the credential store if no token was provided via env/config.
-    #[cfg(feature = "client")]
-    let mut credential_proof_key: Option<String> = None;
-    #[cfg(feature = "client")]
-    if token.is_none()
-        && let Some(ref key) = server_key
-        && let Ok(Some(cred)) = heddle_client::credentials::resolve_credential_for_server(key)
-    {
-        token = Some(AuthToken::new(cred.token, "credential-store"));
-        credential_proof_key = cred.private_key_pem;
-    }
 
     let remote_thread = thread.unwrap_or_else(|| "main".to_string());
     let local_thread_name = local_thread.as_deref();
@@ -341,9 +325,7 @@ pub async fn cmd_pull(
                     addr,
                     repo_path: repo_path.as_deref(),
                     user_config: &user_config,
-                    token,
                     server_key,
-                    credential_proof_key,
                     remote_thread: &remote_thread,
                     local_thread: local_thread_name,
                     lazy,
@@ -500,17 +482,13 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
     let repo_path = options
         .repo_path
         .context("network remotes must include a hosted repository path")?;
-    let mut config = options.user_config.heddle_client_config(options.token)?;
-    if let Some(key) = options.server_key {
-        config = config.with_server_key(key);
-    }
-    if let Some(pem) = options.credential_proof_key
-        && config.auth_proof_key_pem.is_none()
-    {
-        config = config.with_auth_proof_key_pem(pem);
-    }
-    let mut client = HostedGrpcClient::connect(options.addr, &config).await?;
-    client.auto_rotate_if_needed().await;
+    let mut client = HostedGrpcClient::open_session(
+        options.addr,
+        options.user_config,
+        options.server_key,
+        HostedAuthMode::CredentialFallback,
+    )
+    .await?;
 
     if !should_output_json(options.cli, Some(repo.config())) {
         println!(
@@ -1261,9 +1239,7 @@ struct PullNetworkOptions<'a> {
     addr: SocketAddr,
     repo_path: Option<&'a str>,
     user_config: &'a UserConfig,
-    token: Option<AuthToken>,
     server_key: Option<String>,
-    credential_proof_key: Option<String>,
     remote_thread: &'a str,
     local_thread: Option<&'a str>,
     lazy: bool,

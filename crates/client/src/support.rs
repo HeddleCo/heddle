@@ -16,7 +16,7 @@ use serde::Serialize;
 use weft_client_shim::{CliContext, HostedRecoveryAdvice};
 
 use crate::{
-    grpc_hosted::HostedGrpcClient,
+    grpc_hosted::{HostedAuthMode, HostedGrpcClient},
     support_args::{SupportCommands, SupportGrantArgs, SupportListArgs, SupportRevokeArgs},
 };
 
@@ -117,14 +117,7 @@ async fn open_client(repo: &Repository, remote: &str) -> Result<HostedGrpcClient
         }
     };
     let user_config = UserConfig::load_default()?;
-    let token = user_config.remote_token()?;
-    let mut config = user_config.heddle_client_config(token)?;
-    if let Some(key) = server_key {
-        config = config.with_server_key(key);
-    }
-    let mut client = HostedGrpcClient::connect(addr, &config).await?;
-    client.auto_rotate_if_needed().await;
-    Ok(client)
+    HostedGrpcClient::open_session(addr, &user_config, server_key, HostedAuthMode::ConfigToken).await
 }
 
 /// Parse a TTL string like `"24h"`, `"30m"`, `"4d"`, or a bare number

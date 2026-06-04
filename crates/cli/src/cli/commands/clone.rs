@@ -1220,7 +1220,10 @@ async fn clone_network(
     server_key: Option<String>,
     endpoint_spec: String,
 ) -> Result<()> {
-    use crate::{client::HostedGrpcClient, config::UserConfig};
+    use crate::{
+        client::{HostedAuthMode, HostedSession},
+        config::UserConfig,
+    };
 
     let CloneOptions {
         thread,
@@ -1239,10 +1242,7 @@ async fn clone_network(
     // filesystem/repo mutation such as `create_dir_all`, `Repository::init`,
     // state writes, or ref publishes. A rejected security config must leave
     // no partial on-disk artifact.
-    let mut config = user_config.heddle_client_config(None)?;
-    if let Some(key) = server_key {
-        config = config.with_server_key(key);
-    }
+    let session = HostedSession::build(&user_config, server_key, HostedAuthMode::ConfigToken)?;
     let repo_path = repo_path.context("network remotes must include a hosted repository path")?;
 
     let mut cleanup = CloneDestinationCleanup::new(local_path);
@@ -1253,8 +1253,7 @@ async fn clone_network(
     // Initialize the local repository only after TLS/auth prevalidation.
     let local_repo = Repository::init(local_path)?;
 
-    let mut client = HostedGrpcClient::connect(addr, &config).await?;
-    client.auto_rotate_if_needed().await;
+    let mut client = session.connect(addr).await?;
 
     if should_output_json(cli, Some(local_repo.config())) {
         println!(

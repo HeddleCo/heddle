@@ -11,7 +11,7 @@ use objects::{
 use proto::ProtocolError;
 use repo::{BlobHydrator, Repository};
 
-use super::HostedGrpcClient;
+use super::{HostedAuthMode, HostedGrpcClient, HostedSession};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PullMaterialization {
@@ -217,11 +217,15 @@ impl HydrationBridge {
         let user_config = cli_shared::UserConfig::load_default().map_err(|err| {
             HeddleError::Config(format!("lazy hosted hydrator: load user config: {err}"))
         })?;
-        let client_config = user_config.heddle_client_config(None).map_err(|err| {
-            HeddleError::Config(format!(
-                "lazy hosted hydrator: load TLS/auth client config: {err}"
-            ))
-        })?;
+        // Build + validate the session config on this thread so a rejected
+        // TLS/auth config surfaces synchronously, before the worker thread is
+        // spawned. The worker connects + rotates through `session.connect`.
+        let session = HostedSession::build(&user_config, None, HostedAuthMode::ConfigToken)
+            .map_err(|err| {
+                HeddleError::Config(format!(
+                    "lazy hosted hydrator: load TLS/auth client config: {err}"
+                ))
+            })?;
 
         // Build the worker thread first so the bridge can store the
         // tx side immediately. The worker's runtime + client are
@@ -252,21 +256,17 @@ impl HydrationBridge {
                 };
 
                 let connect_result = runtime.block_on(async {
-                    let mut client = HostedGrpcClient::connect(addr, &client_config)
-                        .await
-                        .map_err(|err: ProtocolError| {
-                            HeddleError::Config(format!(
-                                "lazy hosted hydrator: connect to '{endpoint_for_thread}' \
-                                 (resolved to {addr}): {err}",
-                            ))
-                        })?;
-                    // Rotate the cached token if it's near expiry. The
-                    // other hosted entry points (clone, fetch, remote ops,
-                    // thread_approval) do this immediately after connect;
-                    // matching the pattern keeps lazy hydration reliable
-                    // across process boundaries when the persisted token
-                    // is stale at first use.
-                    client.auto_rotate_if_needed().await;
+                    // `session.connect` connects and runs mandatory rotation
+                    // together — the same seam every other hosted entry point
+                    // (clone, fetch, push, pull, support, approval) opens
+                    // through — so a process whose cached token has slipped
+                    // past expiry recovers on first lazy hydrate.
+                    let client = session.connect(addr).await.map_err(|err: ProtocolError| {
+                        HeddleError::Config(format!(
+                            "lazy hosted hydrator: connect to '{endpoint_for_thread}' \
+                             (resolved to {addr}): {err}",
+                        ))
+                    })?;
                     Ok::<_, HeddleError>(client)
                 });
                 let mut client = match connect_result {
@@ -880,36 +880,23 @@ mod register_factory_tests {
 
 #[cfg(test)]
 mod connect_path_tests {
-    //! Source-presence test for the round-3 credential-rotation fix.
-    //! The lazy hydration connect path must call `auto_rotate_if_needed`
-    //! immediately after `HostedGrpcClient::connect` to match the pattern
-    //! every other hosted entry point (clone, fetch, remote ops,
-    //! thread_approval) uses; without it, a process whose cached token
-    //! has slipped past expiry hits an auth failure on first lazy
-    //! hydrate even though the rotation data is on disk.
-    //!
-    //! A spy-based behavioural test would require restructuring the
-    //! client to accept an injected rotation hook; this presence test
-    //! is the lighter-weight equivalent and surfaces a regression if a
-    //! future refactor silently drops the rotation call.
+    //! Source-presence test for the credential-rotation invariant. Lazy
+    //! hydration must open its session through the shared `HostedSession`
+    //! seam — whose `connect` connects and rotates together (guarded by a
+    //! source-presence test in `session.rs`) — rather than connecting by
+    //! hand and risking a dropped rotation. Without rotation, a process
+    //! whose cached token has slipped past expiry hits an auth failure on
+    //! first lazy hydrate even though the rotation data is on disk.
     #[test]
-    fn lazy_hosted_connect_rotates_credentials_if_needed() {
+    fn lazy_hosted_connect_opens_session_through_rotating_seam() {
         let source = include_str!("hydration.rs");
-        let connect_idx = source
-            .find("HostedGrpcClient::connect(addr, &client_config)")
-            .expect("hydration.rs must call HostedGrpcClient::connect with the resolved addr");
-        let after_connect = &source[connect_idx..];
-        let rotate_offset = after_connect
-            .find("auto_rotate_if_needed")
-            .expect("auto_rotate_if_needed must appear in hydration.rs");
-        // Bound the search: the rotation call must be in the same async
-        // block as the connect, not in some unrelated section of the
-        // file. 1200 chars is generous for the connect/rotate pair plus
-        // the surrounding error handling and inline doc comments.
         assert!(
-            rotate_offset < 1200,
-            "auto_rotate_if_needed must follow HostedGrpcClient::connect within the \
-             same async block (found {rotate_offset} chars later)",
+            source.contains("HostedSession::build(&user_config, None, HostedAuthMode::ConfigToken)"),
+            "hydration.rs must build its session through the shared HostedSession seam",
+        );
+        assert!(
+            source.contains("session.connect(addr)"),
+            "hydration.rs must connect via HostedSession::connect, which owns rotation",
         );
     }
 }

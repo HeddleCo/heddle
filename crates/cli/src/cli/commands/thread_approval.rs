@@ -28,7 +28,7 @@ use crate::{
         },
         should_output_json,
     },
-    client::HostedGrpcClient,
+    client::{HostedAuthMode, HostedGrpcClient},
     config::UserConfig,
     remote::{RemoteTarget, resolve_remote_with_key},
 };
@@ -111,17 +111,9 @@ async fn open_heddle_client(
     };
 
     let user_config = UserConfig::load_default()?;
-    // If a token isn't in the user-level config, the per-server
-    // credential file (looked up via `server_key`) supplies it. Pass
-    // whatever the user-level config has and let `with_server_key`
-    // resolve the rest.
-    let token = user_config.remote_token()?;
-    let mut config = user_config.heddle_client_config(token)?;
-    if let Some(key) = server_key {
-        config = config.with_server_key(key);
-    }
-    let mut client = HostedGrpcClient::connect(addr, &config).await?;
-    client.auto_rotate_if_needed().await;
+    let client =
+        HostedGrpcClient::open_session(addr, &user_config, server_key, HostedAuthMode::ConfigToken)
+            .await?;
     Ok((client, repo_path))
 }
 
