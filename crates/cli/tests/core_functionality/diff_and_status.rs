@@ -335,7 +335,9 @@ fn test_native_status_warms_helper_for_second_run() {
     assert!(!second.contains("file.txt"));
 
     let mut helper_ready = false;
-    for _ in 0..10 {
+    // The native fsmonitor helper spawns asynchronously; under CI load the
+    // original 500ms window (10 × 50ms) was too tight and flaked. Allow ~6s.
+    for _ in 0..60 {
         let output = heddle_with_env(
             &["maintenance", "monitor", "--output", "json"],
             Some(temp.path()),
@@ -348,7 +350,7 @@ fn test_native_status_warms_helper_for_second_run() {
             helper_ready = true;
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
     assert!(
