@@ -12,9 +12,10 @@ use crate::{ObjectId, ObjectInfo, ObjectType, ProtocolError, Result, load_object
 /// each decoded pack object is separately capped at 1 GiB in the pack
 /// reader. A 2 GiB compressed pack is materially above normal hosted
 /// sync use while still preventing an untrusted server from growing the
-/// in-memory receive buffer without limit. The receive path should move
-/// to temp-file spooling plus `install_pack_streaming` once that install
-/// API can report installed ids to callers that need them.
+/// in-memory receive buffer without limit. The receive path can now move
+/// to temp-file spooling plus `install_pack_streaming` — that install API
+/// reports the installed ids the receiver needs, so only the spooling of
+/// the receive buffer itself remains.
 pub const MAX_RECEIVED_PACK_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Maximum hosted native-pack index accepted by the receive primitive.
@@ -28,7 +29,6 @@ pub const MAX_RECEIVED_PACK_INDEX_SIZE: u64 = 256 * 1024 * 1024;
 pub struct NativePackBundle {
     pub pack_data: Vec<u8>,
     pub index_data: Vec<u8>,
-    pub ids: Vec<PackObjectId>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -52,7 +52,6 @@ pub fn build_native_pack(
     objects: &[ObjectInfo],
 ) -> Result<NativePackBundle> {
     let mut builder = PackBuilder::new(sync_pack_compression());
-    let mut ids = Vec::with_capacity(objects.len());
 
     for info in objects {
         // Redactions are sidecar records (live outside `.heddle/objects/`
@@ -64,7 +63,6 @@ pub fn build_native_pack(
         }
         let object = load_object_data(store, &info.id, info.obj_type)?;
         let pack_id = to_pack_object_id(&object.id);
-        ids.push(pack_id);
         builder.add_id(pack_id, to_pack_object_type(object.obj_type)?, object.data);
     }
 
@@ -72,7 +70,6 @@ pub fn build_native_pack(
     Ok(NativePackBundle {
         pack_data,
         index_data,
-        ids,
     })
 }
 
@@ -214,7 +211,7 @@ fn to_pack_object_type(obj_type: ObjectType) -> Result<PackObjectType> {
 mod tests {
     use objects::{
         object::Blob,
-        store::{FsStore, ObjectStore},
+        store::{FsStore, ObjectStore, pack::PackObjectId},
     };
     use tempfile::TempDir;
 
@@ -334,7 +331,7 @@ mod tests {
         let installed_ids =
             install_received_pack(&dest_store, &state.pack_data, &state.index_data).unwrap();
 
-        assert_eq!(installed_ids, bundle.ids);
+        assert_eq!(installed_ids, vec![PackObjectId::Hash(hash)]);
         let installed_blob = dest_store.get_blob(&hash).unwrap().unwrap();
         assert_eq!(installed_blob.content(), blob.content());
     }

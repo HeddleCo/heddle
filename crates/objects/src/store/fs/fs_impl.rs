@@ -100,6 +100,24 @@ fn validate_action_serialized(data: &[u8], id: ActionId) -> Result<Action> {
     validate_loaded_action(&id, action)
 }
 
+/// Validate every entry in a pack against its tagged id (checksum
+/// validation) and return the installed id list. This is the shared
+/// validated core for both install seams: the byte-buffer install
+/// (`install_pack`) and the memory-bounded temp-file install
+/// (`install_pack_streaming`) both run their pack through here, so
+/// both apply the same checksum validation and report the same
+/// installed ids regardless of how the bytes reach the store.
+fn validate_and_list_pack(reader: &crate::store::pack::PackReader) -> Result<Vec<PackObjectId>> {
+    let ids = reader.list_ids();
+    for id in &ids {
+        let Some((obj_type, data)) = reader.get_object_bytes(id)? else {
+            continue;
+        };
+        validate_pack_entry(id, obj_type, data.as_ref())?;
+    }
+    Ok(ids)
+}
+
 fn validate_pack_entry(id: &PackObjectId, obj_type: ObjectType, data: &[u8]) -> Result<()> {
     match (id, obj_type) {
         (PackObjectId::Hash(hash), ObjectType::Blob) => validate_blob_bytes(data, *hash),
@@ -906,14 +924,9 @@ impl ObjectStore for FsStore {
     #[instrument(skip(self, pack_data, index_data))]
     fn install_pack(&self, pack_data: &[u8], index_data: &[u8]) -> Result<Vec<PackObjectId>> {
         let reader = crate::store::pack::PackReader::from_slice(pack_data, index_data)?;
-        let ids = reader.list_ids();
-        for id in &ids {
-            let Some((obj_type, data)) = reader.get_object_bytes(id)? else {
-                continue;
-            };
-            validate_pack_entry(id, obj_type, data.as_ref())?;
-        }
+        let ids = validate_and_list_pack(&reader)?;
         self.install_pack_files(pack_data, index_data)?;
+        self.clear_recent_object_caches();
         Ok(ids)
     }
 
@@ -927,8 +940,18 @@ impl ObjectStore for FsStore {
         &self,
         pack_path: &std::path::Path,
         index_path: &std::path::Path,
-    ) -> Result<()> {
-        self.install_pack_files_streaming(pack_path, index_path)
+    ) -> Result<Vec<PackObjectId>> {
+        // Validate + list ids through the same core as the byte-buffer
+        // seam, but via an mmap-backed reader so the pack is never
+        // copied into the heap — the memory-bounded promise survives.
+        // Drop the reader (releasing the mmap) before the rename so
+        // the file move isn't racing an open mapping.
+        let ids = {
+            let reader = crate::store::pack::PackReader::open(pack_path, index_path)?;
+            validate_and_list_pack(&reader)?
+        };
+        self.install_pack_files_streaming(pack_path, index_path)?;
+        Ok(ids)
     }
 
     #[instrument(skip(self))]

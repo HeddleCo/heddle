@@ -166,7 +166,7 @@ impl ObjectStore for AnyStore {
         &self,
         pack_path: &std::path::Path,
         index_path: &std::path::Path,
-    ) -> Result<()> {
+    ) -> Result<Vec<pack::PackObjectId>> {
         any_store_dispatch!(self, install_pack_streaming(pack_path, index_path))
     }
     fn pack_objects(&self, aggressive: bool) -> Result<(u64, u64)> {
@@ -466,24 +466,24 @@ pub trait ObjectStore: Send + Sync {
     /// have been moved or removed depending on the backend; callers
     /// shouldn't continue to rely on them.
     ///
-    /// Returns nothing — callers that need the list of installed ids
-    /// can read the freshly-installed pack via the store. Most
-    /// callers (including `Importer`) already track inserted ids
-    /// out-of-band via the sha map and don't need a return value.
+    /// Returns the ids of the installed objects — the same set
+    /// `install_pack` reports for the equivalent byte-buffer install,
+    /// so callers (e.g. native sync) read the installed ids off the
+    /// install result instead of tracking them out-of-band.
     fn install_pack_streaming(
         &self,
         pack_path: &std::path::Path,
         index_path: &std::path::Path,
-    ) -> Result<()> {
+    ) -> Result<Vec<pack::PackObjectId>> {
         let pack_data = std::fs::read(pack_path).map_err(StoreError::from)?;
         let index_data = std::fs::read(index_path).map_err(StoreError::from)?;
-        self.install_pack(&pack_data, &index_data)?;
+        let ids = self.install_pack(&pack_data, &index_data)?;
         // Default impl: clean up the staged files. Override
         // implementations that move/rename should not call super and
         // should manage the file lifecycle themselves.
         let _ = std::fs::remove_file(pack_path);
         let _ = std::fs::remove_file(index_path);
-        Ok(())
+        Ok(ids)
     }
 
     fn pack_objects(&self, aggressive: bool) -> Result<(u64, u64)> {
