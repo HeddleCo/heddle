@@ -50,7 +50,7 @@ CLI / Web UI
   -> immutable objects and hosted control-plane metadata
 ```
 
-Heddle is no longer best understood as a single `src/` tree. The repository is a Cargo workspace with separate crates for the local/client CLI, core types, repository helpers, refs, oplog, server, semantic analysis, bridge functionality, and the hosted server/admin binary.
+Heddle is no longer best understood as a single `src/` tree. The repository is a Cargo workspace with separate crates for the local/client CLI, core types, repository helpers, refs, oplog, semantic analysis, and bridge functionality. (The hosted server and admin binary moved to the sibling **weft** repo — see below.)
 
 ## Workspace Structure
 
