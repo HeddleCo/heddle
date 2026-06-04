@@ -25,6 +25,11 @@ struct AuthLogoutOutput {
     output_kind: &'static str,
     server: String,
     removed: bool,
+    /// Whether a device signing identity recorded for this server (heddle#482)
+    /// was removed. `false` when none was linked; on a removal failure logout
+    /// errors instead of emitting this output, so a `true` here always means
+    /// the logged-out private key is no longer on disk.
+    device_identity_removed: bool,
 }
 
 #[derive(Serialize)]
@@ -166,15 +171,29 @@ async fn cmd_auth_login(server: &str, no_browser: bool) -> Result<()> {
 fn cmd_auth_logout(ctx: &dyn CliContext, server: Option<&str>) -> Result<()> {
     let server = resolve_server(server)?;
     credentials::remove_server_credential(&server)?;
+
+    // Remove the device signing identity `auth login` recorded for THIS server
+    // (heddle#482). Fail-closed: if a matching device key is on disk but can't
+    // be removed, surface the error rather than reporting a clean logout while
+    // the logged-out private key — which `signing_signer()` would keep
+    // preferring for every capture — still persists.
+    let device_identity_removed = repo::identity::unlink_device_key(&server).map_err(|error| {
+        anyhow::anyhow!("failed to remove device signing identity for {server}: {error}")
+    })?;
+
     if ctx.should_output_json(None) {
         let output = AuthLogoutOutput {
             output_kind: "auth_logout",
             server,
             removed: true,
+            device_identity_removed,
         };
         println!("{}", serde_json::to_string(&output)?);
     } else {
         println!("Credentials removed for {server}.");
+        if device_identity_removed {
+            println!("Device signing identity removed.");
+        }
     }
     Ok(())
 }

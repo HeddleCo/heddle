@@ -394,6 +394,66 @@ mod tests {
         });
     }
 
+    /// login → capture (device-signed) → logout → capture (local-signed):
+    /// `auth logout` unlinks the device identity so the next capture stops
+    /// signing with the logged-out device key and falls back to the per-repo
+    /// local key (heddle#482). Pre-fix, logout left `device-identity.toml` on
+    /// disk, so this post-logout capture would still carry the device key —
+    /// the gap this test pins shut. Reuses the same handle to also confirm the
+    /// per-sign (uncached) resolution picks up the removal mid-session.
+    #[test]
+    fn logout_unlinks_device_key_so_capture_falls_back_to_local() {
+        let home = TempDir::new().expect("home temp");
+        with_signing_home(home.path(), || {
+            let (temp, repo) = setup_repo();
+
+            // Simulate `auth login --server grpc.S`: link a device key.
+            let device = Ed25519Signer::generate().expect("device key");
+            let device_pubkey = hex::encode(device.public_key());
+            crate::identity::link_device_key(
+                device.public_key(),
+                &device.to_pem().expect("device pem"),
+                "grpc.S",
+            )
+            .expect("link device key");
+
+            // Post-login capture signs with the device key.
+            std::fs::write(temp.path().join("a.txt"), "a").expect("write");
+            let signed_in = repo.snapshot(Some("in".to_string()), None).expect("capture");
+            assert_eq!(
+                sig_pubkey(&signed_in),
+                device_pubkey,
+                "post-login capture uses the device key",
+            );
+
+            // Simulate `auth logout grpc.S`: unlink the device identity.
+            let removed =
+                crate::identity::unlink_device_key("grpc.S").expect("unlink device key");
+            assert!(removed, "logout removes the matching-server device identity");
+
+            // Subsequent capture on the SAME handle no longer uses the device
+            // key — it falls back to the per-repo local key (a distinct key),
+            // which still verifies.
+            std::fs::write(temp.path().join("b.txt"), "b").expect("write");
+            let signed_out = repo.snapshot(Some("out".to_string()), None).expect("capture");
+            assert_ne!(
+                sig_pubkey(&signed_out),
+                device_pubkey,
+                "post-logout capture must not sign with the logged-out device key",
+            );
+            assert_eq!(
+                repo.verify_state_signature(&signed_out.change_id)
+                    .expect("verify"),
+                SignatureStatus::Valid,
+            );
+
+            // Logout is idempotent: a second one finds nothing to remove.
+            let again =
+                crate::identity::unlink_device_key("grpc.S").expect("idempotent unlink");
+            assert!(!again, "second logout finds nothing to remove");
+        });
+    }
+
     #[test]
     fn signature_survives_semantic_merge() {
         let home = TempDir::new().expect("home temp");

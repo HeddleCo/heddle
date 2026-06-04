@@ -101,6 +101,54 @@ pub fn link_device_key(
     write_device(&device_identity_path(), &identity)
 }
 
+/// Remove the recorded device signing identity when it belongs to `server` —
+/// the inverse of [`link_device_key`], called by `heddle auth logout`.
+///
+/// Reads the device identity's recorded `server` and deletes
+/// `<heddle_home>/device-identity.toml` only when it matches the logged-out
+/// server; a device identity bound to a *different* server is left intact.
+/// Returns `true` if a matching identity was removed, `false` if there was
+/// nothing to remove (no file, or it belongs to another server).
+///
+/// Fail-closed (heddle#482): if a matching identity file is present but cannot
+/// be deleted, the error propagates so the logout reports the device key as
+/// still on disk rather than falsely claiming a clean removal. Leaving it would
+/// let [`resolve_signer`] keep preferring the logged-out private key for every
+/// subsequent capture.
+pub fn unlink_device_key(server: &str) -> std::io::Result<bool> {
+    unlink_device_key_at(&device_identity_path(), server)
+}
+
+fn unlink_device_key_at(path: &Path, server: &str) -> std::io::Result<bool> {
+    let Some(identity) = read_device_record(path)? else {
+        return Ok(false);
+    };
+    if identity.server != server {
+        return Ok(false);
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        // Lost a race with another remover — the key is gone, which is the goal.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Read the device-identity record at `path` for the logout/unlink decision,
+/// WITHOUT the signing-path permission gate. [`load_device`] refuses an
+/// insecure (group/world-readable) file because it must not be *trusted* for
+/// signing; logout instead needs to *remove* it, and an exposed key is all the
+/// more reason to delete it. Returns `None` when the file is absent.
+fn read_device_record(path: &Path) -> std::io::Result<Option<DeviceIdentity>> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => toml::from_str(&contents).map(Some).map_err(|error| {
+            std::io::Error::other(format!("parsing {}: {error}", path.display()))
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Resolve the active signing key: the device key if one has been linked,
 /// otherwise the per-repo local key (minted on first call). Returns `None`
 /// only when no key can be produced (e.g. an unwritable home), so the caller
@@ -438,6 +486,145 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
             .expect("tighten perms");
         assert!(load_local(&path).expect("re-secured identity loads").is_some());
+    }
+
+    fn write_device_for(path: &Path, server: &str) -> Ed25519Signer {
+        let signer = Ed25519Signer::generate().expect("device keypair");
+        write_device(
+            path,
+            &DeviceIdentity {
+                public_key: hex::encode(signer.public_key()),
+                private_key_pem: signer.to_pem().expect("device pem"),
+                server: server.to_string(),
+                linked_at: now_rfc3339(),
+            },
+        )
+        .expect("write device identity");
+        signer
+    }
+
+    /// `auth logout S` removes the device identity recorded for `S`, and the
+    /// resolver then falls back to the per-repo local key — the logged-out
+    /// device key no longer signs (heddle#482). Pre-fix, logout never touched
+    /// `device-identity.toml`, so the device key persisted and kept signing.
+    #[test]
+    fn unlink_removes_matching_server_device_identity_then_falls_back_to_local() {
+        let temp = TempDir::new().expect("temp dir");
+        let local = temp.path().join("identity.toml");
+        let device = temp.path().join("device-identity.toml");
+
+        let device_signer = write_device_for(&device, "grpc.S");
+        let device_pubkey = hex::encode(device_signer.public_key());
+
+        // Before logout the resolver prefers the device key.
+        let pre = resolve_signer(&local, &device).expect("device signer");
+        assert_eq!(hex::encode(pre.public_key()), device_pubkey);
+
+        // Logout for the matching server removes the device identity.
+        let removed = unlink_device_key_at(&device, "grpc.S").expect("unlink");
+        assert!(removed, "matching-server device identity must be removed");
+        assert!(!device.exists(), "device-identity file must be gone after logout");
+
+        // The resolver now mints/uses the per-repo local key (a distinct key),
+        // so the logged-out device key can no longer sign new states.
+        let post = resolve_signer(&local, &device).expect("local signer");
+        assert_ne!(
+            hex::encode(post.public_key()),
+            device_pubkey,
+            "after logout the device key must no longer sign; resolver falls back to local",
+        );
+    }
+
+    /// Logging out of a *different* server must not remove another server's
+    /// device identity (heddle#482) — the unlink is gated on the recorded
+    /// `server` field matching.
+    #[test]
+    fn unlink_leaves_non_matching_server_device_identity_intact() {
+        let temp = TempDir::new().expect("temp dir");
+        let device = temp.path().join("device-identity.toml");
+
+        let device_signer = write_device_for(&device, "grpc.S");
+        let device_pubkey = hex::encode(device_signer.public_key());
+
+        let removed = unlink_device_key_at(&device, "grpc.OTHER").expect("unlink");
+        assert!(
+            !removed,
+            "logging out of a different server must not remove this device identity",
+        );
+        assert!(device.exists(), "non-matching device identity must remain on disk");
+
+        let still = load_device(&device).expect("load").expect("present");
+        assert_eq!(still.public_key, device_pubkey);
+        assert_eq!(still.server, "grpc.S");
+    }
+
+    /// Logout is a no-op (returns `false`, no error) when there is no device
+    /// identity to remove — e.g. a device that only ever used the local key.
+    #[test]
+    fn unlink_is_noop_when_no_device_identity() {
+        let temp = TempDir::new().expect("temp dir");
+        let device = temp.path().join("device-identity.toml");
+        let removed = unlink_device_key_at(&device, "grpc.S").expect("unlink");
+        assert!(!removed, "nothing to remove when no device identity exists");
+    }
+
+    /// Probe whether the test runs as root: root bypasses unix directory
+    /// permission bits, so the read-only-dir simulation below can't actually
+    /// block a removal. Detect by checking if a `0o500` dir is still writable.
+    #[cfg(unix)]
+    fn running_as_root() -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        let probe = TempDir::new().expect("probe temp");
+        let locked = probe.path().join("locked");
+        std::fs::create_dir(&locked).expect("probe dir");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500))
+            .expect("lock probe");
+        let writable = std::fs::write(locked.join("x"), b"x").is_ok();
+        let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700));
+        writable
+    }
+
+    /// Fail-closed (heddle#482): when a device identity matches the logged-out
+    /// server but its file cannot be removed (here: a read-only parent dir),
+    /// `unlink_device_key` returns an error and leaves the file in place, so
+    /// logout surfaces the incompleteness instead of falsely reporting a clean
+    /// removal while the private key is still on disk.
+    #[cfg(unix)]
+    #[test]
+    fn unlink_fails_closed_when_matching_file_cannot_be_removed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if running_as_root() {
+            // Root bypasses the read-only-dir guard; this simulation only holds
+            // for an unprivileged user. The happy-path + no-op tests still
+            // cover removal semantics under root.
+            return;
+        }
+
+        let temp = TempDir::new().expect("temp dir");
+        let dir = temp.path().join("home");
+        std::fs::create_dir(&dir).expect("home dir");
+        let device = dir.join("device-identity.toml");
+        write_device_for(&device, "grpc.S");
+
+        // Read-only parent dir: the file is still readable (r-x) but cannot be
+        // unlinked (removal needs write on the directory).
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).expect("lock dir");
+
+        let result = unlink_device_key_at(&device, "grpc.S");
+
+        // Restore perms before asserting so the TempDir can clean up.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .expect("restore perms");
+
+        assert!(
+            result.is_err(),
+            "a matching device key that cannot be removed must surface an error, not a clean removal",
+        );
+        assert!(
+            device.exists(),
+            "the logged-out key is still on disk after the failed removal",
+        );
     }
 
     /// The device-identity load path enforces the same permission gate, so a
