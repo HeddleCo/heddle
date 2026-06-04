@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use merge::{text_hunk_merge_with_markers, ConflictMarkers, MergeOutcome};
 
-use super::items::{FileSegments, Item, ItemKey, ItemKind};
+use super::items::{inter_ranges, FileSegments, Item, ItemKey, ItemKind};
 
 /// Three sides of the merge: `[base, ours, theirs]`. Each per-iteration
 /// segment contribution is indexed by [`Side`] so emission tracking can
@@ -45,7 +45,11 @@ const N_SIDES: usize = 3;
 /// (heddle#468 r5: the duplicate-import class the positional path produced).
 type MatchKey = (ItemKey, usize);
 
-/// Stitch three sides together via per-item resolution + inter-item hunk merge.
+/// Stitch three sides together via recursive per-region tree merge.
+///
+/// The whole file is the outermost region; each matched container body is a
+/// nested region merged the same way ([`merge_region`]). The trailing-newline
+/// reconcile + outcome wrapping happen once, here, around the top-level merge.
 pub(crate) fn reconstruct_merged_file(
     base: &str,
     ours: &str,
@@ -55,185 +59,23 @@ pub(crate) fn reconstruct_merged_file(
     theirs_segments: &FileSegments,
     markers: ConflictMarkers<'_>,
 ) -> MergeOutcome {
-    // Per-side match keys walked in source order. Each item gets a
-    // (ItemKey, occurrence_within_side) tuple — see [`MatchKey`].
-    let base_mks = build_match_keys(base_segments);
-    let ours_mks = build_match_keys(ours_segments);
-    let theirs_mks = build_match_keys(theirs_segments);
-
-    // Build (match-key -> item) maps per side for matching. Duplicates
-    // no longer collide because each occurrence has a distinct
-    // `MatchKey`.
-    let base_map: BTreeMap<MatchKey, &Item> = base_mks
-        .iter()
-        .zip(base_segments.items.iter())
-        .map(|(mk, i)| (mk.clone(), i))
-        .collect();
-    let ours_map: BTreeMap<MatchKey, &Item> = ours_mks
-        .iter()
-        .zip(ours_segments.items.iter())
-        .map(|(mk, i)| (mk.clone(), i))
-        .collect();
-    let theirs_map: BTreeMap<MatchKey, &Item> = theirs_mks
-        .iter()
-        .zip(theirs_segments.items.iter())
-        .map(|(mk, i)| (mk.clone(), i))
-        .collect();
-
-    let all_keys: BTreeSet<&MatchKey> = base_map
-        .keys()
-        .chain(ours_map.keys())
-        .chain(theirs_map.keys())
-        .collect();
-
-    // Resolve every match-key independently. Each resolution yields
-    // either (Some(merged_bytes), conflict_count) or `None` if both
-    // sides removed the item.
-    let mut resolved: BTreeMap<MatchKey, (Option<Vec<u8>>, usize)> = BTreeMap::new();
-    let mut total_conflicts = 0usize;
-
-    // Whole-file source bundle: lets `resolve_item` slice per-item
-    // bytes AND carries a whole-file `EolPolicy` used by the trailing
-    // newline path (`reconcile_trailing_newline`) and as a fallback by
-    // the marker path (`emit_addadd_conflict`) when the conflicting
-    // item bodies carry zero EOL observations (Codex r8, cid
-    // 3256283857). The marker path otherwise weights its policy on
-    // the items' own bytes so a CRLF item in a majority-LF file gets
-    // CRLF markers (Codex r2 P2 on PR #193, cid 3291860840).
+    // Whole-file source bundle: lets `resolve_item` slice per-item bytes AND
+    // carries a whole-file `EolPolicy` used by the trailing newline path
+    // (`reconcile_trailing_newline`) and as a fallback by the marker path
+    // (`emit_addadd_conflict`) when the conflicting item bodies carry zero
+    // EOL observations (Codex r8, cid 3256283857).
     let sides = SideSources::new(base, ours, theirs);
 
-    // Non-`use` items: per-item positional resolution, matched by
-    // (key, occurrence). `use` items are skipped here — their content is
-    // NEVER decided by positional occurrence index (the heddle#468 r5 bug
-    // class). They are resolved below as whole leaf-components.
-    for key in &all_keys {
-        if key.0.kind == ItemKind::Use {
-            continue;
-        }
-        let resolution = resolve_item(
-            sides,
-            base_map.get(*key).copied(),
-            ours_map.get(*key).copied(),
-            theirs_map.get(*key).copied(),
-            markers,
-        );
-        total_conflicts += resolution.1;
-        resolved.insert((*key).clone(), resolution);
-    }
-
-    // `use` items: resolve each canonical leaf-component as ONE set-valued
-    // unit. After `canonicalize_use_keys`, every declaration in a component
-    // shares one `ItemKey`, so a side may contribute SEVERAL items to it
-    // (e.g. base `use a::Bar;` widened by theirs to `use a::{Bar, Baz};`
-    // while ours adds a separate `use a::Baz;`). Occurrence-matching those
-    // items positionally emitted both the widened group AND the standalone
-    // leaf — a duplicate import, no conflict (heddle#468, Codex r5 on PR
-    // #477). Comparing full component leaf-SETS instead makes the whole
-    // class impossible: the verdict lands on the component's first slot and
-    // every later slot emits nothing, so the component is resolved exactly
-    // once regardless of how many declarations each side spells it across.
-    let mut use_components: BTreeMap<ItemKey, [Vec<&Item>; 3]> = BTreeMap::new();
-    for (side, seg) in [base_segments, ours_segments, theirs_segments]
-        .iter()
-        .enumerate()
-    {
-        for item in &seg.items {
-            if item.key.kind == ItemKind::Use {
-                use_components
-                    .entry(item.key.clone())
-                    .or_insert_with(|| [Vec::new(), Vec::new(), Vec::new()])[side]
-                    .push(item);
-            }
-        }
-    }
-    for (key, [base_items, ours_items, theirs_items]) in &use_components {
-        let (bytes, conflicts) =
-            resolve_use_component(sides, base_items, ours_items, theirs_items, markers);
-        total_conflicts += conflicts;
-        resolved.insert((key.clone(), 0), (bytes, conflicts));
-        // Higher-occurrence slots of this component exist only so the
-        // inter-item segment weaver can place the surrounding whitespace;
-        // they carry no item bytes (the verdict above is the whole unit).
-        let slots = base_items.len().max(ours_items.len()).max(theirs_items.len());
-        for occ in 1..slots {
-            resolved.insert((key.clone(), occ), (None, 0));
-        }
-    }
-
-    let item_emit_order = compute_item_emit_order(&base_mks, &ours_mks, &theirs_mks, &all_keys);
-
-    // For each side, record each item's index so we can look up the
-    // inter-item segment that preceded it in source.
-    let side_idx_maps = [
-        match_key_index(&base_mks),
-        match_key_index(&ours_mks),
-        match_key_index(&theirs_mks),
-    ];
-    let side_ranges = [
-        base_segments.inter_item_ranges(),
-        ours_segments.inter_item_ranges(),
-        theirs_segments.inter_item_ranges(),
-    ];
-    let side_sources = [base, ours, theirs];
-
-    // Per-side set of inter-item range indices already emitted into
-    // `output`. A side's range is contributed to at most one slot —
-    // either the per-item preceding-segment merge for an item the
-    // side has, the bridging slot for an item the side lacks (next
-    // item the side has owns this range too — so the first occupant
-    // wins), or the postamble. Without this tracking the same range
-    // can be pulled into multiple slots — both Codex r2 P2 #2
-    // (leading-added-item preamble duplication) and P1 #2 (zero-items
-    // side postamble duplication) are this single shape.
-    let mut emitted: [BTreeSet<usize>; N_SIDES] =
-        [BTreeSet::new(), BTreeSet::new(), BTreeSet::new()];
-
-    // Walk emit_order. For each item, emit:
-    //   1. The inter-item segment that PRECEDED it in each side. When
-    //      the side has the item, that's the side's range immediately
-    //      before; when it doesn't, the "bridging" range (the range in
-    //      the side that spans where this item would be in emit order)
-    //      stands in. Either way, a range is only contributed if it
-    //      hasn't already been emitted on a prior iteration.
-    //   2. The merged item bytes.
-    // After the last item, emit the postamble (each side's final range,
-    // skipped per-side if already consumed).
-    let mut output: Vec<u8> = Vec::new();
-
-    for (emit_idx, key) in item_emit_order.iter().enumerate() {
-        let mut segs: [Option<&str>; N_SIDES] = [None, None, None];
-        for s in 0..N_SIDES {
-            let r = side_range_for_emit(&side_idx_maps[s], key, &item_emit_order, emit_idx);
-            if emitted[s].insert(r) {
-                segs[s] = Some(inter_slice(side_sources[s], &side_ranges[s], r));
-            }
-        }
-        let (seg_bytes, seg_conflicts) = merge_segment(segs[0], segs[1], segs[2], markers);
-        output.extend_from_slice(&seg_bytes);
-        total_conflicts += seg_conflicts;
-
-        if let Some((Some(item_bytes), _)) = resolved.get(key) {
-            output.extend_from_slice(item_bytes);
-        }
-    }
-
-    // Postamble: each side's last range, but only if that range
-    // wasn't already pulled in as a bridge above (the zero-items-side
-    // shape from P1 #2).
-    let mut post: [Option<&str>; N_SIDES] = [None, None, None];
-    for s in 0..N_SIDES {
-        let last = side_ranges[s].len() - 1;
-        if emitted[s].insert(last) {
-            post[s] = Some(inter_slice(side_sources[s], &side_ranges[s], last));
-        }
-    }
-    let (post_bytes, post_conflicts) = merge_segment(post[0], post[1], post[2], markers);
-    // Only emit the postamble if it adds bytes — otherwise we risk
-    // duplicating the trailing newline already in the last item's bytes.
-    if !post_bytes.is_empty() {
-        output.extend_from_slice(&post_bytes);
-    }
-    total_conflicts += post_conflicts;
+    let (mut output, total_conflicts) = merge_region(
+        sides,
+        &base_segments.items,
+        &ours_segments.items,
+        &theirs_segments.items,
+        (0, base_segments.source_len),
+        (0, ours_segments.source_len),
+        (0, theirs_segments.source_len),
+        markers,
+    );
 
     reconcile_trailing_newline(&mut output, sides);
 
@@ -247,12 +89,188 @@ pub(crate) fn reconstruct_merged_file(
     }
 }
 
-/// Walk a side's items in source order and tag each with its
-/// per-key occurrence index — 0 for the first item with that key, 1
-/// for the second, and so on. Length matches `seg.items.len()`.
-fn build_match_keys(seg: &FileSegments) -> Vec<MatchKey> {
+/// Merge one *region* — a list of sibling items occupying `[start, end)` on
+/// each side — into a byte string + conflict count. Called on the whole file
+/// at top level and, recursively (via [`resolve_container`]), on each matched
+/// container body. Recursion depth is bounded by the container-nesting cap in
+/// [`super::items`], so it cannot overflow the stack.
+///
+/// The algorithm is the heddle#68/#468 weave, generalized to a region:
+/// resolve each item by `MatchKey`, compute an emit order, and weave the
+/// per-side inter-item segments (including a container body's own braces,
+/// which live in its region's preamble/postamble) back between the items.
+#[allow(clippy::too_many_arguments)]
+fn merge_region(
+    sides: SideSources<'_>,
+    base_items: &[Item],
+    ours_items: &[Item],
+    theirs_items: &[Item],
+    base_bounds: (usize, usize),
+    ours_bounds: (usize, usize),
+    theirs_bounds: (usize, usize),
+    markers: ConflictMarkers<'_>,
+) -> (Vec<u8>, usize) {
+    // Per-side match keys in source order — (ItemKey, discriminator) tuples.
+    // Leaves use a positional occurrence index; container instances are
+    // aligned to base by child-key overlap so a prepended/appended/reordered
+    // same-name container keeps an identity distinct from the matched base
+    // block (the heddle#484 r3 cross-side class). See [`build_aligned_match_keys`].
+    let (base_mks, ours_mks, theirs_mks) =
+        build_aligned_match_keys(base_items, ours_items, theirs_items);
+
+    let base_map: BTreeMap<MatchKey, &Item> = base_mks
+        .iter()
+        .zip(base_items.iter())
+        .map(|(mk, i)| (mk.clone(), i))
+        .collect();
+    let ours_map: BTreeMap<MatchKey, &Item> = ours_mks
+        .iter()
+        .zip(ours_items.iter())
+        .map(|(mk, i)| (mk.clone(), i))
+        .collect();
+    let theirs_map: BTreeMap<MatchKey, &Item> = theirs_mks
+        .iter()
+        .zip(theirs_items.iter())
+        .map(|(mk, i)| (mk.clone(), i))
+        .collect();
+
+    let all_keys: BTreeSet<&MatchKey> = base_map
+        .keys()
+        .chain(ours_map.keys())
+        .chain(theirs_map.keys())
+        .collect();
+
+    let mut resolved: BTreeMap<MatchKey, (Option<Vec<u8>>, usize)> = BTreeMap::new();
+    let mut total_conflicts = 0usize;
+
+    // Non-`use` items: per-item positional resolution, matched by
+    // (key, occurrence). A matched *container* recurses into its body via
+    // `resolve_node` → `resolve_container`; a leaf is a byte 3-way merge.
+    // `use` items are skipped here — their content is NEVER decided by
+    // positional occurrence index (the heddle#468 r5 bug class). They are
+    // resolved below as whole leaf-components.
+    for key in &all_keys {
+        if key.0.kind == ItemKind::Use {
+            continue;
+        }
+        let resolution = resolve_node(
+            sides,
+            base_map.get(*key).copied(),
+            ours_map.get(*key).copied(),
+            theirs_map.get(*key).copied(),
+            markers,
+        );
+        total_conflicts += resolution.1;
+        resolved.insert((*key).clone(), resolution);
+    }
+
+    // `use` items at THIS level: resolve each canonical leaf-component as ONE
+    // set-valued unit (the heddle#468 r5 fix). After `canonicalize_use_keys`,
+    // every declaration in a component shares one `ItemKey`; comparing full
+    // component leaf-SETS rather than occurrence positions makes the
+    // duplicate-import class impossible. Components are scoped to the region
+    // because the `ItemKey` carries the enclosing scope, so uses in different
+    // containers never group together.
+    let mut use_components: BTreeMap<ItemKey, [Vec<&Item>; 3]> = BTreeMap::new();
+    for (side, items) in [base_items, ours_items, theirs_items].iter().enumerate() {
+        for item in *items {
+            if item.key.kind == ItemKind::Use {
+                use_components
+                    .entry(item.key.clone())
+                    .or_insert_with(|| [Vec::new(), Vec::new(), Vec::new()])[side]
+                    .push(item);
+            }
+        }
+    }
+    for (key, [base_uses, ours_uses, theirs_uses]) in &use_components {
+        let (bytes, conflicts) =
+            resolve_use_component(sides, base_uses, ours_uses, theirs_uses, markers);
+        total_conflicts += conflicts;
+        resolved.insert((key.clone(), 0), (bytes, conflicts));
+        // Higher-occurrence slots of this component exist only so the
+        // inter-item segment weaver can place the surrounding whitespace;
+        // they carry no item bytes (the verdict above is the whole unit).
+        let slots = base_uses.len().max(ours_uses.len()).max(theirs_uses.len());
+        for occ in 1..slots {
+            resolved.insert((key.clone(), occ), (None, 0));
+        }
+    }
+
+    let item_emit_order = compute_item_emit_order(&base_mks, &ours_mks, &theirs_mks, &all_keys);
+
+    let side_idx_maps = [
+        match_key_index(&base_mks),
+        match_key_index(&ours_mks),
+        match_key_index(&theirs_mks),
+    ];
+    let side_ranges = [
+        inter_ranges(base_items, base_bounds.0, base_bounds.1),
+        inter_ranges(ours_items, ours_bounds.0, ours_bounds.1),
+        inter_ranges(theirs_items, theirs_bounds.0, theirs_bounds.1),
+    ];
+    let side_sources = [sides.base, sides.ours, sides.theirs];
+
+    // Per-side set of inter-item range indices already emitted. A side's
+    // range is contributed to at most one slot (see the Codex r2 P2 #2 /
+    // P1 #2 duplication shapes the tracking prevents).
+    let mut emitted: [BTreeSet<usize>; N_SIDES] =
+        [BTreeSet::new(), BTreeSet::new(), BTreeSet::new()];
+
+    let mut output: Vec<u8> = Vec::new();
+
+    for key in &item_emit_order {
+        let mut segs: [Option<&str>; N_SIDES] = [None, None, None];
+        for s in 0..N_SIDES {
+            // A side contributes the gap PRECEDING `key` only if it actually
+            // has `key`. A side that lacks `key` (an item added on another
+            // side, or one this side deleted) contributes nothing for this
+            // slot — its surrounding content flows with its own items and its
+            // trailing content stays in the postamble. Bridging a lacking
+            // side to "the gap after its nearest prior item" used to pull the
+            // postamble (or a mid-sequence gap) in early, duplicating it —
+            // the heddle#484 Bug 1 (`// MARK` woven twice) / Bug 2 (module
+            // duplicated) class.
+            if let Some(&r) = side_idx_maps[s].get(key)
+                && emitted[s].insert(r)
+            {
+                segs[s] = Some(inter_slice(side_sources[s], &side_ranges[s], r));
+            }
+        }
+        let (seg_bytes, seg_conflicts) = merge_segment(segs[0], segs[1], segs[2], markers);
+        output.extend_from_slice(&seg_bytes);
+        total_conflicts += seg_conflicts;
+
+        if let Some((Some(item_bytes), _)) = resolved.get(key) {
+            output.extend_from_slice(item_bytes);
+        }
+    }
+
+    // Postamble: each side's last range (a container body's closing brace +
+    // indentation lives here), but only if it wasn't already pulled in as a
+    // bridge above and adds bytes (avoids duplicating a trailing newline
+    // already in the last item's bytes — the top-level P1 #2 shape).
+    let mut post: [Option<&str>; N_SIDES] = [None, None, None];
+    for s in 0..N_SIDES {
+        let last = side_ranges[s].len() - 1;
+        if emitted[s].insert(last) {
+            post[s] = Some(inter_slice(side_sources[s], &side_ranges[s], last));
+        }
+    }
+    let (post_bytes, post_conflicts) = merge_segment(post[0], post[1], post[2], markers);
+    if !post_bytes.is_empty() {
+        output.extend_from_slice(&post_bytes);
+    }
+    total_conflicts += post_conflicts;
+
+    (output, total_conflicts)
+}
+
+/// Walk a side's items in source order and tag each with its per-key
+/// occurrence index — 0 for the first item with that key, 1 for the second,
+/// and so on. Length matches `items.len()`.
+fn build_match_keys(items: &[Item]) -> Vec<MatchKey> {
     let mut counters: BTreeMap<ItemKey, usize> = BTreeMap::new();
-    seg.items
+    items
         .iter()
         .map(|item| {
             let n = counters.entry(item.key.clone()).or_insert(0);
@@ -261,6 +279,103 @@ fn build_match_keys(seg: &FileSegments) -> Vec<MatchKey> {
             (item.key.clone(), occurrence)
         })
         .collect()
+}
+
+/// Immediate child-key set of a container item (empty for leaves). Used to
+/// align container instances across sides by content overlap.
+fn child_key_set(item: &Item) -> BTreeSet<&ItemKey> {
+    match &item.body {
+        Some(body) => body.items.iter().map(|c| &c.key).collect(),
+        None => BTreeSet::new(),
+    }
+}
+
+/// Build the three sides' `MatchKey` lists with cross-side-consistent
+/// discriminators.
+///
+/// Leaves get a per-side positional occurrence index — base's first `foo`
+/// pairs with ours's first `foo`, the existing heddle#68 scheme. **Container
+/// instances** (same `(kind, name, scope)`, multiple blocks) instead anchor to
+/// base by *immediate child-key overlap*: each ours/theirs block is paired with
+/// the base block whose children it most overlaps, inheriting that base block's
+/// discriminator; a block matching no base block (a prepended/appended new
+/// container) gets a fresh discriminator above the base range. Positional
+/// occurrence alone mis-pairs a prepended `impl Foo` (occurrence 0) with base's
+/// `impl Foo` (occurrence 0) — the r3 collapse; overlap alignment pairs by what
+/// the block actually contains, so identity survives reordering. For leaves
+/// (no children) every overlap is 0, so this degenerates to positional.
+fn build_aligned_match_keys(
+    base: &[Item],
+    ours: &[Item],
+    theirs: &[Item],
+) -> (Vec<MatchKey>, Vec<MatchKey>, Vec<MatchKey>) {
+    // A key is a "container key" if any instance on any side carries a body.
+    let mut container_keys: BTreeSet<ItemKey> = BTreeSet::new();
+    for items in [base, ours, theirs] {
+        for it in items {
+            if it.body.is_some() {
+                container_keys.insert(it.key.clone());
+            }
+        }
+    }
+
+    // Base is the anchor: plain positional occurrence (its discriminator for a
+    // container is its source-order index within the key group).
+    let base_mks = build_match_keys(base);
+
+    let align = |side: &[Item]| -> Vec<MatchKey> {
+        // base container instances per key: (base discriminator, &base item).
+        let mut base_by_key: BTreeMap<&ItemKey, Vec<(usize, &Item)>> = BTreeMap::new();
+        for (i, it) in base.iter().enumerate() {
+            if container_keys.contains(&it.key) {
+                base_by_key.entry(&it.key).or_default().push((base_mks[i].1, it));
+            }
+        }
+        let mut used: BTreeMap<&ItemKey, BTreeSet<usize>> = BTreeMap::new();
+        let mut leaf_occ: BTreeMap<&ItemKey, usize> = BTreeMap::new();
+        let mut fresh: BTreeMap<&ItemKey, usize> = BTreeMap::new();
+
+        let mut out = Vec::with_capacity(side.len());
+        for it in side {
+            if container_keys.contains(&it.key) {
+                let childset = child_key_set(it);
+                let used_set = used.entry(&it.key).or_default();
+                let mut best: Option<(usize, usize)> = None; // (overlap, base disc)
+                if let Some(cands) = base_by_key.get(&it.key) {
+                    for (disc, bitem) in cands {
+                        if used_set.contains(disc) {
+                            continue;
+                        }
+                        let overlap = childset.intersection(&child_key_set(bitem)).count();
+                        if overlap > 0 && best.is_none_or(|(o, _)| overlap > o) {
+                            best = Some((overlap, *disc));
+                        }
+                    }
+                }
+                let disc = if let Some((_, d)) = best {
+                    used_set.insert(d);
+                    d
+                } else {
+                    let base_count = base_by_key.get(&it.key).map_or(0, Vec::len);
+                    let f = fresh.entry(&it.key).or_insert(0);
+                    let d = base_count + *f;
+                    *f += 1;
+                    d
+                };
+                out.push((it.key.clone(), disc));
+            } else {
+                let occ = leaf_occ.entry(&it.key).or_insert(0);
+                let d = *occ;
+                *occ += 1;
+                out.push((it.key.clone(), d));
+            }
+        }
+        out
+    };
+
+    let ours_mks = align(ours);
+    let theirs_mks = align(theirs);
+    (base_mks, ours_mks, theirs_mks)
 }
 
 fn match_key_index(mks: &[MatchKey]) -> BTreeMap<MatchKey, usize> {
@@ -273,31 +388,6 @@ fn match_key_index(mks: &[MatchKey]) -> BTreeMap<MatchKey, usize> {
 fn inter_slice<'a>(source: &'a str, ranges: &[(usize, usize)], idx: usize) -> &'a str {
     let (start, end) = ranges[idx];
     &source[start..end]
-}
-
-/// Pick the inter-item range index that represents `key`'s preceding
-/// segment on one side. If the side has `key`, that's the range
-/// immediately before it. If not, the bridging range is used: the
-/// range in the side that spans `key`'s position in `emit_order`. The
-/// bridging range is found by walking left in `emit_order` to the
-/// nearest prior key the side does have, then taking the range after
-/// that key's item; if no prior key exists, the side's preamble
-/// (range 0) bridges.
-fn side_range_for_emit(
-    side_idx_map: &BTreeMap<MatchKey, usize>,
-    key: &MatchKey,
-    emit_order: &[MatchKey],
-    emit_idx: usize,
-) -> usize {
-    if let Some(i) = side_idx_map.get(key) {
-        return *i;
-    }
-    for j in (0..emit_idx).rev() {
-        if let Some(i) = side_idx_map.get(&emit_order[j]) {
-            return i + 1;
-        }
-    }
-    0
 }
 
 /// 3-way merge a single inter-item segment. Handles "side doesn't have
@@ -438,6 +528,199 @@ impl EolPolicy {
         }
         b"\n"
     }
+}
+
+/// Whole byte span of an item on a side.
+fn whole_bytes<'a>(item: &Item, src: &'a str) -> &'a [u8] {
+    &src.as_bytes()[item.start_byte..item.end_byte]
+}
+
+/// Header bytes of a container item: `[start_byte, body.inner_start)` — e.g.
+/// `impl Foo ` (everything before the body delimiter).
+fn header_bytes<'a>(item: &Item, src: &'a str) -> &'a [u8] {
+    let inner_start = item.body.as_ref().expect("container").inner_start;
+    &src.as_bytes()[item.start_byte..inner_start]
+}
+
+/// Footer bytes of a container item: `[body.inner_end, end_byte)` — usually
+/// empty (the body node ends at the item end).
+fn footer_bytes<'a>(item: &Item, src: &'a str) -> &'a [u8] {
+    let inner_end = item.body.as_ref().expect("container").inner_end;
+    &src.as_bytes()[inner_end..item.end_byte]
+}
+
+/// Dispatch a match-key resolution to the container or leaf path. A key is
+/// consistently a container or a leaf across sides (its `ItemKind` is part of
+/// the key), so the kind on any present side decides.
+fn resolve_node(
+    sides: SideSources<'_>,
+    base_item: Option<&Item>,
+    ours_item: Option<&Item>,
+    theirs_item: Option<&Item>,
+    markers: ConflictMarkers<'_>,
+) -> (Option<Vec<u8>>, usize) {
+    let is_container = base_item
+        .or(ours_item)
+        .or(theirs_item)
+        .is_some_and(|i| i.body.is_some());
+    if is_container {
+        resolve_container(sides, base_item, ours_item, theirs_item, markers)
+    } else {
+        resolve_item(sides, base_item, ours_item, theirs_item, markers)
+    }
+}
+
+/// Resolve a matched *container* by merging on the tree: header + recursively
+/// merged body + footer. The byte-identical fast paths (unchanged side defers,
+/// both-sides-identical dedup, clean delete) avoid recursion and keep the
+/// container's bytes verbatim; only a genuine cross-side divergence recurses
+/// into the body. Because two distinct same-name containers are distinct
+/// `MatchKey`s (by occurrence), an added/prepended/appended container is never
+/// conflated with a matched one — the heddle#484 collapse class is impossible
+/// by construction.
+fn resolve_container(
+    sides: SideSources<'_>,
+    base_item: Option<&Item>,
+    ours_item: Option<&Item>,
+    theirs_item: Option<&Item>,
+    markers: ConflictMarkers<'_>,
+) -> (Option<Vec<u8>>, usize) {
+    match (base_item, ours_item, theirs_item) {
+        (None, None, None) => (None, 0),
+        // Added on one side only — take it verbatim.
+        (None, Some(o), None) => (Some(whole_bytes(o, sides.ours).to_vec()), 0),
+        (None, None, Some(t)) => (Some(whole_bytes(t, sides.theirs).to_vec()), 0),
+        // Both sides added a same-key container. Byte-identical → dedup;
+        // otherwise merge their bodies structurally with an empty base so
+        // disjoint additions inside the new container combine cleanly (and a
+        // divergent header/child conflicts).
+        (None, Some(o), Some(t)) => {
+            let ow = whole_bytes(o, sides.ours);
+            let tw = whole_bytes(t, sides.theirs);
+            if ow == tw {
+                (Some(ow.to_vec()), 0)
+            } else {
+                merge_container_3way(sides, None, o, t, markers)
+            }
+        }
+        // Existed in base, removed on both sides → clean delete.
+        (Some(_), None, None) => (None, 0),
+        // Modify/delete: clean delete when the modifying side preserved base;
+        // conflict (whole container) otherwise.
+        (Some(b), Some(o), None) => {
+            let bw = whole_bytes(b, sides.base);
+            let ow = whole_bytes(o, sides.ours);
+            if bw == ow {
+                (None, 0)
+            } else {
+                materialize_outcome(text_hunk_merge_with_markers(bw, ow, &[], markers))
+            }
+        }
+        (Some(b), None, Some(t)) => {
+            let bw = whole_bytes(b, sides.base);
+            let tw = whole_bytes(t, sides.theirs);
+            if bw == tw {
+                (None, 0)
+            } else {
+                materialize_outcome(text_hunk_merge_with_markers(bw, &[], tw, markers))
+            }
+        }
+        // 3-way modify. Unchanged side defers; both-identical dedups;
+        // otherwise merge header + body + footer structurally.
+        (Some(b), Some(o), Some(t)) => {
+            let bw = whole_bytes(b, sides.base);
+            let ow = whole_bytes(o, sides.ours);
+            let tw = whole_bytes(t, sides.theirs);
+            if ow == bw {
+                (Some(tw.to_vec()), 0)
+            } else if tw == bw || ow == tw {
+                (Some(ow.to_vec()), 0)
+            } else {
+                merge_container_3way(sides, Some(b), o, t, markers)
+            }
+        }
+    }
+}
+
+/// Merge a container that genuinely diverged across sides: 3-way merge its
+/// header text, recurse [`merge_region`] over its body children, 3-way merge
+/// its footer text, and concatenate. `base` is `None` for the add/add case
+/// (an empty base body, against which both sides' children are additions).
+fn merge_container_3way(
+    sides: SideSources<'_>,
+    base: Option<&Item>,
+    ours: &Item,
+    theirs: &Item,
+    markers: ConflictMarkers<'_>,
+) -> (Option<Vec<u8>>, usize) {
+    let (header, hc) = merge3_text(
+        base.map(|b| header_bytes(b, sides.base)),
+        header_bytes(ours, sides.ours),
+        header_bytes(theirs, sides.theirs),
+        markers,
+    );
+
+    let ob = ours.body.as_ref().expect("container");
+    let tb = theirs.body.as_ref().expect("container");
+    // Empty base body uses bounds (0, 0): always valid for `sides.base`
+    // regardless of how short it is, and yields a single empty preamble so
+    // both sides' children weave in as additions.
+    let (base_children, base_bounds): (&[Item], (usize, usize)) = match base {
+        Some(b) => {
+            let bb = b.body.as_ref().expect("container");
+            (&bb.items, (bb.inner_start, bb.inner_end))
+        }
+        None => (&[], (0, 0)),
+    };
+    let (body, bc) = merge_region(
+        sides,
+        base_children,
+        &ob.items,
+        &tb.items,
+        base_bounds,
+        (ob.inner_start, ob.inner_end),
+        (tb.inner_start, tb.inner_end),
+        markers,
+    );
+
+    let (footer, fc) = merge3_text(
+        base.map(|b| footer_bytes(b, sides.base)),
+        footer_bytes(ours, sides.ours),
+        footer_bytes(theirs, sides.theirs),
+        markers,
+    );
+
+    let mut out = header;
+    out.extend_from_slice(&body);
+    out.extend_from_slice(&footer);
+    (Some(out), hc + bc + fc)
+}
+
+/// 3-way merge a slice of bytes (a container header/footer). `base` is `None`
+/// for add/add (treated as empty). Equal-sides dedup and unchanged-side defer
+/// short-circuit; otherwise fall through to the text hunk merge.
+fn merge3_text(
+    base: Option<&[u8]>,
+    ours: &[u8],
+    theirs: &[u8],
+    markers: ConflictMarkers<'_>,
+) -> (Vec<u8>, usize) {
+    if ours == theirs {
+        return (ours.to_vec(), 0);
+    }
+    if let Some(b) = base {
+        if ours == b {
+            return (theirs.to_vec(), 0);
+        }
+        if theirs == b {
+            return (ours.to_vec(), 0);
+        }
+    }
+    let b = base.unwrap_or(&[]);
+    materialize_segment(
+        text_hunk_merge_with_markers(b, ours, theirs, markers),
+        std::str::from_utf8(b).unwrap_or(""),
+    )
 }
 
 /// Resolve a single item's 3-way merge. Returns `(Some(bytes), n_conflicts)`

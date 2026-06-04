@@ -115,7 +115,7 @@ pub fn semantic_three_way_merge(
         }
     }
 
-    reconstruct_merged_file(
+    let outcome = reconstruct_merged_file(
         base_text,
         ours_text,
         theirs_text,
@@ -123,7 +123,71 @@ pub fn semantic_three_way_merge(
         &ours_segments,
         &theirs_segments,
         markers,
-    )
+    );
+
+    // Input-grounded safety net (heddle#490 P3 floor). The tree model makes
+    // silent structural collapse impossible *by construction*, but a cheap
+    // conservation check against the INPUTS — not the merge's own resolved
+    // metadata — is kept as defense-in-depth: if a CLEAN merge ever fails to
+    // re-parse or invents an item/nesting no input had, route to the textual
+    // path instead of emitting the corruption. A conflict the user resolves is
+    // safe; a silent collapse is the P0. Only CLEAN outcomes are checked — a
+    // conflict already surfaces the ambiguity.
+    if let MergeOutcome::Clean(output) = &outcome
+        && !conserves_inputs(output, language, &base_parsed, &ours_parsed, &theirs_parsed)
+    {
+        return text_hunk_merge_with_markers(base, ours, theirs, markers);
+    }
+    outcome
+}
+
+/// Whether a clean `output` conserves the structure of its inputs. Re-parses
+/// the output and checks, against the three inputs (re-segmented raw so `use`
+/// keys compare on the same footing as the output's):
+///
+/// 1. **Re-parse** — a clean merge that yields an unparseable file is a
+///    corruption (catches a collapse's unbalanced delimiters).
+/// 2. **Item-identity subset** — every `(scope, kind, name)` in the output
+///    must appear in some input; the merge may not invent an item or move one
+///    into a scope no contributing side gave it (catches mis-nesting / a child
+///    escaping its container).
+///
+/// Both checks are deletion-safe (a subset relation, not equality), so a
+/// legitimate clean merge with deletions passes; and edit-safe (they key on
+/// item identity, not line text), so a within-line edit that recombines bytes
+/// passes. The line-duplication class the harness pins (Bug 1's doubled
+/// postamble) is excluded by construction in the tree model and covered by the
+/// ported conformance tests, so it needs no production line-budget check.
+fn conserves_inputs(
+    output: &[u8],
+    language: Language,
+    base_parsed: &ParsedFile,
+    ours_parsed: &ParsedFile,
+    theirs_parsed: &ParsedFile,
+) -> bool {
+    use std::collections::BTreeSet;
+
+    let Ok(out_text) = std::str::from_utf8(output) else {
+        return false;
+    };
+    let Some(out_parsed) = ParsedFile::parse(out_text, language) else {
+        return false;
+    };
+
+    type Identity = (Vec<String>, items::ItemKind, String);
+    let collect = |seg: &items::FileSegments, set: &mut BTreeSet<Identity>| {
+        items::visit_items(&seg.items, &mut |i| {
+            set.insert((i.key.scope.clone(), i.key.kind, i.key.name.clone()));
+        });
+    };
+
+    let mut allowed: BTreeSet<Identity> = BTreeSet::new();
+    for parsed in [base_parsed, ours_parsed, theirs_parsed] {
+        collect(&segment_file(parsed), &mut allowed);
+    }
+    let mut got: BTreeSet<Identity> = BTreeSet::new();
+    collect(&segment_file(&out_parsed), &mut got);
+    got.is_subset(&allowed)
 }
 
 /// Strategy a merge call should use for content reconciliation.

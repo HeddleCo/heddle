@@ -60,44 +60,70 @@ pub(crate) struct Item {
     /// add/add resolution in [`super::reconstruct`] then dedups only on exact
     /// bytes and conflicts on every other difference.
     pub use_identity: Option<UseIdentity>,
+    /// `Some` when this item is a *container* — an `impl` / `mod` / `trait` /
+    /// namespace / class whose body holds nested child items. Carrying the
+    /// parse-tree parent→child edge here (a shallow tree, not a flat list) is
+    /// the heddle#490 fix: the merger pairs and reconstructs containers
+    /// structurally via [`ItemKey`] matching + recursion, so container
+    /// identity and nesting are never re-derived from byte offsets (the
+    /// flatten-then-re-derive class that produced the heddle#484 P0). `None`
+    /// for leaf items (functions, structs, `use`, …) and for containers
+    /// nested past [`CONTAINER_DEPTH_LIMIT`], which merge as one opaque byte
+    /// blob.
+    pub body: Option<ContainerBody>,
 }
 
-/// The result of segmenting a file: items in source order, exposed via the
-/// `items` accessor; the underlying source byte length stashed for
-/// reconstruction.
+/// The body of a container item. `inner_start`/`inner_end` are the byte span
+/// of the body node (the delimiters `{` / `}` fall *inside* this span for
+/// brace languages); `items` are the nested children in source order.
+///
+/// The container's *header* is `[Item::start_byte, inner_start)` (e.g.
+/// `impl Foo `), its *footer* is `[inner_end, Item::end_byte)` (usually
+/// empty). The braces are woven as the body region's preamble/postamble by
+/// [`super::reconstruct`], so no `{`/`}` is ever synthesized or trimmed.
+#[derive(Clone, Debug)]
+pub(crate) struct ContainerBody {
+    pub inner_start: usize,
+    pub inner_end: usize,
+    pub items: Vec<Item>,
+}
+
+/// The result of segmenting a file: top-level items in source order (each
+/// container item carries its nested children), plus the source byte length
+/// stashed for reconstruction.
 #[derive(Clone, Debug)]
 pub(crate) struct FileSegments {
     pub items: Vec<Item>,
     pub source_len: usize,
 }
 
-impl FileSegments {
-    /// Slices of inter-item content. Length is `items.len() + 1`. The first
-    /// slice is the preamble (before the first item); the last is the
-    /// postamble (after the last item); middle slices sit between consecutive
-    /// items.
-    pub fn inter_item_ranges(&self) -> Vec<(usize, usize)> {
-        let mut out = Vec::with_capacity(self.items.len() + 1);
-        let mut cursor = 0usize;
-        for item in &self.items {
-            out.push((cursor, item.start_byte));
-            cursor = item.end_byte;
-        }
-        out.push((cursor, self.source_len));
-        out
+/// Inter-item slices for a list of sibling items occupying the byte region
+/// `[region_start, region_end)`. Length is `items.len() + 1`: the first slice
+/// is the preamble (region_start → first item), the last is the postamble
+/// (last item → region_end), middle slices sit between consecutive items.
+/// Used both at file scope and recursively for each container body.
+pub(crate) fn inter_ranges(
+    items: &[Item],
+    region_start: usize,
+    region_end: usize,
+) -> Vec<(usize, usize)> {
+    let mut out = Vec::with_capacity(items.len() + 1);
+    let mut cursor = region_start;
+    for item in items {
+        out.push((cursor, item.start_byte));
+        cursor = item.end_byte;
     }
+    out.push((cursor, region_end));
+    out
 }
 
-/// Extract items from a parsed file. Public for the `debug_items` hatch and
-/// for `segment_file`.
+/// Extract items from a parsed file as a shallow tree (containers carry their
+/// children). Extraction itself is iterative (bounded stack regardless of
+/// nesting depth — heddle#114 r1 P2); the tree is then assembled
+/// non-recursively from the flat pre-order list by byte containment.
 pub(crate) fn extract_items(parsed: &ParsedFile) -> Vec<Item> {
-    let mut items = Vec::new();
-    let root = parsed.root_node();
-    collect_items(parsed.language, &parsed.source, root, &[], &mut items);
-    // Items can be reported in any DFS order; ensure source order for
-    // deterministic reconstruction.
-    items.sort_by_key(|item| item.start_byte);
-    items
+    let raws = collect_raw_items(parsed.language, &parsed.source, parsed.root_node());
+    assemble_tree(raws)
 }
 
 /// Top-level entry: segment a parsed file into items + record the source
@@ -116,25 +142,45 @@ pub(crate) fn segment_file(parsed: &ParsedFile) -> FileSegments {
 /// trips on pathological / synthetic input.
 const MAX_TRAVERSAL_DEPTH: usize = 256;
 
-fn collect_items(
-    language: Language,
-    source: &str,
-    root: Node<'_>,
-    base_scope: &[String],
-    out: &mut Vec<Item>,
-) {
-    // Iterative DFS over the AST. Avoids the unbounded recursion shape
-    // a deeply-parseable file could otherwise trigger — collect_items
-    // used to recurse for every container body AND every unclassified
-    // wrapper node, so a synthetic 50k-deep tree would blow the stack
-    // even though tree-sitter itself parses it iteratively. Each stack
-    // entry is (node-whose-children-to-walk, scope-at-that-node,
-    // depth-from-root); the depth guard bails out beyond
-    // `MAX_TRAVERSAL_DEPTH` rather than running unbounded work.
-    let base_rc: Rc<Vec<String>> = Rc::new(base_scope.to_vec());
-    let mut stack: Vec<(Node<'_>, Rc<Vec<String>>, usize)> = vec![(root, Rc::clone(&base_rc), 0)];
+/// Cap on *container* nesting carried into the merge tree. A container nested
+/// deeper than this is emitted as an opaque leaf (`body: None`, whole byte
+/// range) whose contents merge as text rather than being recursed into. This
+/// bounds the recursion depth of [`super::reconstruct`]'s tree walk so it
+/// cannot overflow the stack on pathological nesting (the heddle#114 r1 P2
+/// 128 KiB / 2000-module guard). Real Rust/C++/Java code never nests
+/// `impl`/`mod`/`class` blocks anywhere near this deep.
+const CONTAINER_DEPTH_LIMIT: usize = 8;
 
-    while let Some((node, scope, depth)) = stack.pop() {
+/// A flat, pre-tree extraction record. Collected iteratively (bounded stack);
+/// [`assemble_tree`] folds the list into the nested [`Item`] tree by byte
+/// containment.
+struct RawItem {
+    key: ItemKey,
+    start_byte: usize,
+    end_byte: usize,
+    use_identity: Option<UseIdentity>,
+    /// `Some((inner_start, inner_end))` when this record is a container we
+    /// recursed into; `None` for leaves and for opaque (too-deep) containers.
+    container: Option<(usize, usize)>,
+}
+
+/// Iterative DFS over the AST producing a flat list of [`RawItem`]s. Avoids
+/// the unbounded recursion a deeply-parseable file could otherwise trigger —
+/// extraction used to recurse for every container body AND every unclassified
+/// wrapper node, so a synthetic 50k-deep tree would blow the stack even
+/// though tree-sitter itself parses iteratively. Each stack entry is
+/// `(node-whose-children-to-walk, scope, ast_depth, container_depth)`;
+/// `ast_depth` bails the whole walk past [`MAX_TRAVERSAL_DEPTH`], while
+/// `container_depth` stops *recursing into* container bodies past
+/// [`CONTAINER_DEPTH_LIMIT`] (such a container is recorded as an opaque leaf).
+fn collect_raw_items(language: Language, source: &str, root: Node<'_>) -> Vec<RawItem> {
+    let mut out: Vec<RawItem> = Vec::new();
+    let empty: Rc<Vec<String>> = Rc::new(Vec::new());
+    // (node, scope, ast_depth, container_depth)
+    let mut stack: Vec<(Node<'_>, Rc<Vec<String>>, usize, usize)> =
+        vec![(root, Rc::clone(&empty), 0, 0)];
+
+    while let Some((node, scope, depth, cdepth)) = stack.pop() {
         if depth > MAX_TRAVERSAL_DEPTH {
             continue;
         }
@@ -148,10 +194,27 @@ fn collect_items(
                     signature_hash,
                     extra_scope,
                 } = classified;
+                let start_byte = leading_metadata_start(language, source, child);
                 if let Some(body) = container_body {
-                    let mut next_scope = (*scope).clone();
-                    next_scope.push(name);
-                    stack.push((body, Rc::new(next_scope), depth + 1));
+                    let recurse = cdepth < CONTAINER_DEPTH_LIMIT;
+                    let item_key = ItemKey {
+                        kind,
+                        name: name.clone(),
+                        scope: (*scope).clone(),
+                        signature_hash,
+                    };
+                    out.push(RawItem {
+                        key: item_key,
+                        start_byte,
+                        end_byte: child.end_byte(),
+                        use_identity: None,
+                        container: recurse.then(|| (body.start_byte(), body.end_byte())),
+                    });
+                    if recurse {
+                        let mut next_scope = (*scope).clone();
+                        next_scope.push(name);
+                        stack.push((body, Rc::new(next_scope), depth + 1, cdepth + 1));
+                    }
                 } else {
                     let mut item_scope = (*scope).clone();
                     item_scope.extend(extra_scope);
@@ -166,19 +229,88 @@ fn collect_items(
                         scope: item_scope,
                         signature_hash,
                     };
-                    let start_byte = leading_metadata_start(language, source, child);
-                    out.push(Item {
+                    out.push(RawItem {
                         key: item_key,
                         start_byte,
                         end_byte: child.end_byte(),
                         use_identity,
+                        container: None,
                     });
                 }
             } else {
-                stack.push((child, Rc::clone(&scope), depth + 1));
+                stack.push((child, Rc::clone(&scope), depth + 1, cdepth));
             }
         }
     }
+    out
+}
+
+/// Fold a flat pre-order [`RawItem`] list into the nested [`Item`] tree by
+/// byte containment. Non-recursive (an explicit stack of open containers), so
+/// it is stack-safe regardless of nesting; the resulting tree depth is bounded
+/// by [`CONTAINER_DEPTH_LIMIT`] (deeper containers were recorded as opaque
+/// leaves). The parse tree guarantees proper nesting, so a simple
+/// "close any container that ends before this item starts, then attach"
+/// sweep over start-sorted records reconstructs the parent→child edges.
+fn assemble_tree(mut raws: Vec<RawItem>) -> Vec<Item> {
+    raws.sort_by_key(|r| r.start_byte);
+
+    let mut top: Vec<Item> = Vec::new();
+    // Open containers: (partially-built container Item, its accumulated
+    // children, its inner_end). The deepest-open container is last.
+    let mut open: Vec<(Item, Vec<Item>, usize)> = Vec::new();
+
+    fn attach(item: Item, open: &mut [(Item, Vec<Item>, usize)], top: &mut Vec<Item>) {
+        match open.last_mut() {
+            Some((_, children, _)) => children.push(item),
+            None => top.push(item),
+        }
+    }
+
+    fn close_one(open: &mut Vec<(Item, Vec<Item>, usize)>, top: &mut Vec<Item>) {
+        let (mut container, children, inner_end) = open.pop().unwrap();
+        if let Some(body) = container.body.as_mut() {
+            debug_assert_eq!(body.inner_end, inner_end);
+            body.items = children;
+        }
+        attach(container, open, top);
+    }
+
+    for raw in raws {
+        while open.last().is_some_and(|(_, _, end)| raw.start_byte >= *end) {
+            close_one(&mut open, &mut top);
+        }
+        match raw.container {
+            Some((inner_start, inner_end)) => {
+                let item = Item {
+                    key: raw.key,
+                    start_byte: raw.start_byte,
+                    end_byte: raw.end_byte,
+                    use_identity: raw.use_identity,
+                    body: Some(ContainerBody {
+                        inner_start,
+                        inner_end,
+                        items: Vec::new(),
+                    }),
+                };
+                open.push((item, Vec::new(), inner_end));
+            }
+            None => {
+                let item = Item {
+                    key: raw.key,
+                    start_byte: raw.start_byte,
+                    end_byte: raw.end_byte,
+                    use_identity: raw.use_identity,
+                    body: None,
+                };
+                attach(item, &mut open, &mut top);
+            }
+        }
+    }
+    while !open.is_empty() {
+        close_one(&mut open, &mut top);
+    }
+    top
 }
 
 /// Rekey every `use` item across the three sides so two declarations
@@ -232,51 +364,76 @@ pub(crate) fn canonicalize_use_keys(
     // Poison gate: any unanalyzable `use` on any side disqualifies the
     // whole region from the leaf union. Collapse every `use` item onto one
     // key so the conservative whole-region merge runs instead.
-    let poisoned = [&*base, &*ours, &*theirs].iter().any(|seg| {
-        seg.items
-            .iter()
-            .any(|item| matches!(item.use_identity, Some(UseIdentity::Unanalyzable)))
-    });
+    let mut poisoned = false;
+    for seg in [&*base, &*ours, &*theirs] {
+        visit_items(&seg.items, &mut |item| {
+            if matches!(item.use_identity, Some(UseIdentity::Unanalyzable)) {
+                poisoned = true;
+            }
+        });
+    }
     if poisoned {
         for seg in [base, ours, theirs] {
-            for item in &mut seg.items {
+            visit_items_mut(&mut seg.items, &mut |item| {
                 if item.use_identity.is_some() {
                     item.key.name = USE_POISON_KEY.to_string();
                 }
-            }
+            });
         }
         return;
     }
 
     let mut uf = LeafUnionFind::default();
     for seg in [&*base, &*ours, &*theirs] {
-        for item in &seg.items {
+        visit_items(&seg.items, &mut |item| {
             let Some(UseIdentity::Plain(leaves)) = &item.use_identity else {
-                continue;
+                return;
             };
             let mut leaf_iter = leaves.iter();
             let Some(first) = leaf_iter.next() else {
-                continue;
+                return;
             };
             let anchor = uf.intern(first);
             for leaf in leaf_iter {
                 let node = uf.intern(leaf);
                 uf.union(anchor, node);
             }
-        }
+        });
     }
 
     let canonical = uf.component_min_label();
     for seg in [base, ours, theirs] {
-        for item in &mut seg.items {
+        visit_items_mut(&mut seg.items, &mut |item| {
             let Some(UseIdentity::Plain(leaves)) = &item.use_identity else {
-                continue;
+                return;
             };
             if let Some(first) = leaves.first()
                 && let Some(name) = canonical.get(first)
             {
                 item.key.name = name.clone();
             }
+        });
+    }
+}
+
+/// Pre-order visit of every item in `items` and, recursively, every item in
+/// each container body. Recursion depth is bounded by
+/// [`CONTAINER_DEPTH_LIMIT`].
+pub(crate) fn visit_items<'a>(items: &'a [Item], f: &mut impl FnMut(&'a Item)) {
+    for item in items {
+        f(item);
+        if let Some(body) = &item.body {
+            visit_items(&body.items, f);
+        }
+    }
+}
+
+/// Mutable [`visit_items`].
+fn visit_items_mut(items: &mut [Item], f: &mut impl FnMut(&mut Item)) {
+    for item in items {
+        f(item);
+        if let Some(body) = &mut item.body {
+            visit_items_mut(&mut body.items, f);
         }
     }
 }
