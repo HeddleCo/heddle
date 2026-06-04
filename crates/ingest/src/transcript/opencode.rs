@@ -124,7 +124,7 @@ pub fn load(opencode_home: &Path, repo_root: &Path) -> Vec<Transcript> {
     let total = sessions.len();
     let matching: Vec<_> = sessions
         .into_iter()
-        .filter(|s| directory_matches(&s.directory, repo_root))
+        .filter(|s| super::repo_matches_checkout(&s.directory, repo_root))
         .collect();
     debug!(
         total_sessions = total,
@@ -147,7 +147,11 @@ pub fn load(opencode_home: &Path, repo_root: &Path) -> Vec<Transcript> {
     out
 }
 
-fn open_read_only(path: &Path) -> rusqlite::Result<Connection> {
+/// Open an OpenCode SQLite file read-only. URI mode + the `?mode=ro`
+/// query param keep us from ever taking a write lock on a DB a running
+/// `opencode` may be mid-write on. Shared with the reasoning harvester so
+/// both readers open the DB identically.
+pub(crate) fn open_read_only(path: &Path) -> rusqlite::Result<Connection> {
     // URI mode lets rusqlite handle WAL sidecars the way SQLite expects.
     // The `?mode=ro` query param is belt-and-braces alongside the flag.
     let uri = format!("file:{}?mode=ro", path.display());
@@ -218,13 +222,6 @@ fn fetch_sessions(conn: &Connection) -> rusqlite::Result<Vec<SessionRow>> {
         })
     })?;
     rows.collect()
-}
-
-/// `true` if `dir` is inside `repo_root`, or `repo_root` is inside `dir`.
-/// Mirrors [`super::cwd_inside`] so repo-root/crates and crates/child-dir
-/// sessions both match.
-fn directory_matches(dir: &Path, repo_root: &Path) -> bool {
-    super::repo_matches_checkout(dir, repo_root)
 }
 
 fn load_session(conn: &Connection, s: &SessionRow, db_path: &Path) -> rusqlite::Result<Transcript> {

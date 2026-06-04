@@ -34,12 +34,11 @@
 //!
 //! # Scope
 //!
-//! Claude is supported end-to-end. Codex support is scaffolded (same
-//! candidate pipeline) but the message reader for Codex rollouts is a
-//! stub — Codex rollouts emit reasoning as prose paragraphs without the
-//! Claude block taxonomy, and the signal is noisier. Landing Codex
-//! properly is follow-up work; the [`harvest_from_codex_events`]
-//! function is a placeholder so the shape is clear.
+//! Claude, Codex, and OpenCode are all supported end-to-end. Each format
+//! exposes one shared low-level [`StreamEvent`](crate::transcript::stream)
+//! walk (in the canonical transcript module) that both the `Transcript`
+//! builder and this harvester consume, so the parse/cwd/tool-gate
+//! machinery lives once per format and the two consumers can't drift.
 
 use std::{
     collections::VecDeque,
@@ -48,7 +47,6 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use objects::object::AnnotationKind;
-use serde::Deserialize;
 use tracing::debug;
 
 use crate::{
@@ -367,72 +365,37 @@ pub fn harvest(t: &Transcript, params: &HarvestParams) -> crate::Result<Vec<Harv
 }
 
 fn harvest_claude(path: &Path, params: &HarvestParams) -> crate::Result<Vec<HarvestedCandidate>> {
-    let text = std::fs::read_to_string(path).map_err(|e| {
-        IngestError::Io(std::io::Error::new(
-            e.kind(),
-            format!("reading claude session {}: {e}", path.display()),
-        ))
-    })?;
-    // Two passes: first collect the ordered assistant events, then scan
-    // them with a small look-ahead queue for target resolution.
-    let mut events: Vec<AssistantEvent> = Vec::new();
-    for raw in text.lines() {
-        if raw.trim().is_empty() {
-            continue;
-        }
-        let Ok(e) = serde_json::from_str::<ClaudeRawEvent>(raw) else {
-            continue;
-        };
-        if e.event_type.as_deref() != Some("assistant") {
-            continue;
-        }
-        let Some(msg) = e.message else {
-            continue;
-        };
-        let Some(content) = msg.content else {
-            continue;
-        };
-        let Some(ts) = e.timestamp else { continue };
-
-        let mut texts: Vec<String> = Vec::new();
-        let mut files: Vec<PathBuf> = Vec::new();
-        for b in content.blocks() {
-            match b.block_type.as_deref() {
-                Some("text") => {
-                    if let Some(s) = b.text.as_deref()
-                        && !s.trim().is_empty()
-                    {
-                        texts.push(s.to_string());
-                    }
-                }
-                Some("tool_use") => {
-                    if let Some(input) = b.input.as_ref() {
-                        let path_str = input
-                            .file_path
-                            .as_deref()
-                            .or(input.notebook_path.as_deref());
-                        if let Some(p) = path_str {
-                            files.push(PathBuf::from(p));
-                        }
-                    }
-                }
-                // `thinking` blocks are redacted at write-time; the
-                // `thinking` string is empty. Nothing to harvest.
-                _ => {}
-            }
-        }
-        if !texts.is_empty() || !files.is_empty() {
-            events.push(AssistantEvent {
-                timestamp: ts,
-                texts,
-                files,
-            });
-        }
-    }
-
+    let text = crate::transcript::stream::read_session_text(path, "claude session")?;
+    let events = assistant_events(crate::transcript::claude::stream_events(&text, path));
     let out = harvest_from_events(&events, params);
     debug!(path = %path.display(), candidates = out.len(), "claude harvest");
     Ok(out)
+}
+
+/// Project a shared format event stream into the harvester's
+/// [`AssistantEvent`]s. An event contributes one `AssistantEvent` when it
+/// has a timestamp and carries either assistant prose or file touches —
+/// the same gate both the Claude and Codex harvesters used to apply
+/// inline. File-touch kinds are dropped; only the paths matter for target
+/// resolution.
+fn assistant_events(
+    stream: Vec<crate::transcript::stream::StreamEvent>,
+) -> Vec<AssistantEvent> {
+    let mut out = Vec::new();
+    for ev in stream {
+        let Some(timestamp) = ev.timestamp else {
+            continue;
+        };
+        if ev.texts.is_empty() && ev.touches.is_empty() {
+            continue;
+        }
+        out.push(AssistantEvent {
+            timestamp,
+            texts: ev.texts,
+            files: ev.touches.into_iter().map(|t| t.path).collect(),
+        });
+    }
+    out
 }
 
 /// Provider-agnostic stage 1 once events are normalized. Both Claude and
@@ -611,13 +574,9 @@ fn harvest_opencode(
     session_id: &str,
     params: &HarvestParams,
 ) -> crate::Result<Vec<HarvestedCandidate>> {
-    use rusqlite::{Connection, OpenFlags};
-    let uri = format!("file:{}?mode=ro", db_path.display());
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI;
-    let conn = Connection::open_with_flags(&uri, flags).map_err(|e| {
+    let conn = crate::transcript::opencode::open_read_only(db_path).map_err(|e| {
         IngestError::Other(format!("opening opencode db {}: {e}", db_path.display()))
     })?;
-    let _ = conn.busy_timeout(std::time::Duration::from_millis(500));
 
     // Order by `(message_id, time_created, id)` so all parts of a single
     // assistant message arrive contiguously and within the message in the
@@ -723,144 +682,9 @@ fn harvest_opencode(
 ///    and `encrypted_content` is opaque. We skip them. There's nothing
 ///    we can extract that we don't already see in `message` events.
 ///
-/// `cwd` is tracked across `session_meta` and `turn_context` events so
-/// shell tokens that resolve relative to the current workdir get
-/// stamped against the right path.
 fn harvest_codex(path: &Path, params: &HarvestParams) -> crate::Result<Vec<HarvestedCandidate>> {
-    use serde_json::Value;
-    let text = std::fs::read_to_string(path).map_err(|e| {
-        IngestError::Io(std::io::Error::new(
-            e.kind(),
-            format!("reading codex rollout {}: {e}", path.display()),
-        ))
-    })?;
-
-    let mut current_cwd: Option<PathBuf> = None;
-    let mut events: Vec<AssistantEvent> = Vec::new();
-
-    for raw in text.lines() {
-        if raw.trim().is_empty() {
-            continue;
-        }
-        let Ok(event) = serde_json::from_str::<CodexRawEvent>(raw) else {
-            continue;
-        };
-        let Some(ts) = event.timestamp else {
-            continue;
-        };
-
-        match event.event_type.as_deref() {
-            Some("session_meta") => {
-                if let Some(p) = event.payload.as_ref()
-                    && current_cwd.is_none()
-                    && let Some(c) = p.get("cwd").and_then(Value::as_str)
-                {
-                    current_cwd = Some(PathBuf::from(c));
-                }
-            }
-            Some("turn_context") => {
-                // Mid-session workdir switch — later commands resolve
-                // against this cwd.
-                if let Some(p) = event.payload.as_ref()
-                    && let Some(c) = p.get("cwd").and_then(Value::as_str)
-                {
-                    current_cwd = Some(PathBuf::from(c));
-                }
-            }
-            Some("response_item") => {
-                let Some(p) = event.payload.as_ref() else {
-                    continue;
-                };
-                let payload_type = p.get("type").and_then(Value::as_str).unwrap_or("");
-                match payload_type {
-                    "message" => {
-                        // Only assistant turns carry harvest-able prose.
-                        // User and developer messages are inputs we don't
-                        // want to mistake for the model's reasoning.
-                        if p.get("role").and_then(Value::as_str) != Some("assistant") {
-                            continue;
-                        }
-                        let texts = collect_codex_message_texts(p);
-                        if !texts.is_empty() {
-                            events.push(AssistantEvent {
-                                timestamp: ts,
-                                texts,
-                                files: Vec::new(),
-                            });
-                        }
-                    }
-                    "function_call" => {
-                        // Only `exec_command` ever resolves to file
-                        // touches; the loader uses the same gate.
-                        let name = p.get("name").and_then(Value::as_str).unwrap_or("");
-                        if name != "exec_command" {
-                            continue;
-                        }
-                        let Some(args_str) = p.get("arguments").and_then(Value::as_str) else {
-                            continue;
-                        };
-                        let Ok(args_json) = serde_json::from_str::<Value>(args_str) else {
-                            continue;
-                        };
-                        let Some(cmd) = args_json.get("cmd").and_then(Value::as_str) else {
-                            continue;
-                        };
-                        // Per-call workdir override falls back to the
-                        // session's running cwd.
-                        let base_cwd: Option<PathBuf> = args_json
-                            .get("workdir")
-                            .and_then(Value::as_str)
-                            .map(PathBuf::from)
-                            .or_else(|| current_cwd.clone());
-                        let mut touches = Vec::new();
-                        crate::transcript::codex::extract_shell_touches(
-                            cmd,
-                            ts,
-                            base_cwd.as_deref(),
-                            &mut touches,
-                        );
-                        let files: Vec<PathBuf> = touches.into_iter().map(|t| t.path).collect();
-                        if !files.is_empty() {
-                            events.push(AssistantEvent {
-                                timestamp: ts,
-                                texts: Vec::new(),
-                                files,
-                            });
-                        }
-                    }
-                    "custom_tool_call" => {
-                        let name = p.get("name").and_then(Value::as_str).unwrap_or("");
-                        if name != "apply_patch" {
-                            continue;
-                        }
-                        let Some(input) = p.get("input").and_then(Value::as_str) else {
-                            continue;
-                        };
-                        let mut touches = Vec::new();
-                        crate::transcript::codex::extract_shell_touches(
-                            input,
-                            ts,
-                            current_cwd.as_deref(),
-                            &mut touches,
-                        );
-                        let files: Vec<PathBuf> = touches.into_iter().map(|t| t.path).collect();
-                        if !files.is_empty() {
-                            events.push(AssistantEvent {
-                                timestamp: ts,
-                                texts: Vec::new(),
-                                files,
-                            });
-                        }
-                    }
-                    // `reasoning` events: server-redacted, content=null.
-                    // Anything else: not a harvestable shape.
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
-
+    let text = crate::transcript::stream::read_session_text(path, "codex rollout")?;
+    let events = assistant_events(crate::transcript::codex::stream_events(&text, path));
     let out = harvest_from_events(&events, params);
     debug!(
         path = %path.display(),
@@ -869,44 +693,6 @@ fn harvest_codex(path: &Path, params: &HarvestParams) -> crate::Result<Vec<Harve
         "codex harvest"
     );
     Ok(out)
-}
-
-/// Pull every `output_text` block out of a Codex assistant message
-/// payload. Codex's content array can in principle carry other types
-/// (`refusal`, future tool-result variants); we ignore those and only
-/// surface the text the model actually showed the user.
-fn collect_codex_message_texts(payload: &serde_json::Value) -> Vec<String> {
-    let Some(content) = payload.get("content").and_then(|c| c.as_array()) else {
-        return Vec::new();
-    };
-    let mut out = Vec::with_capacity(content.len());
-    for block in content {
-        if block.get("type").and_then(|t| t.as_str()) != Some("output_text") {
-            continue;
-        }
-        let Some(text) = block.get("text").and_then(|t| t.as_str()) else {
-            continue;
-        };
-        if !text.trim().is_empty() {
-            out.push(text.to_string());
-        }
-    }
-    out
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct CodexRawEvent {
-    #[serde(rename = "type")]
-    event_type: Option<String>,
-    timestamp: Option<DateTime<Utc>>,
-    payload: Option<serde_json::Value>,
-}
-
-/// Public hook for a later Codex reader — kept as a named no-op so
-/// downstream callers can feature-detect.
-#[doc(hidden)]
-pub fn harvest_from_codex_events(_path: &Path) -> Vec<HarvestedCandidate> {
-    Vec::new()
 }
 
 // ---------- Keep: trim + score + seal ----------
@@ -1191,58 +977,6 @@ struct AssistantEvent {
     timestamp: DateTime<Utc>,
     texts: Vec<String>,
     files: Vec<PathBuf>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ClaudeRawEvent {
-    #[serde(rename = "type")]
-    event_type: Option<String>,
-    timestamp: Option<DateTime<Utc>>,
-    message: Option<ClaudeRawMessage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ClaudeRawMessage {
-    /// Polymorphic, mirroring [`super::transcript::claude::RawContent`].
-    /// Most assistant turns are typed-block arrays; a non-trivial fraction
-    /// (and almost every user turn) flatten to a plain string. We model
-    /// both so the harvester doesn't drop events whose content is a
-    /// string — a regression that lost roughly half of all assistant
-    /// turns when the field was typed as `Vec<ClaudeRawBlock>`.
-    content: Option<ClaudeRawContent>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum ClaudeRawContent {
-    Text(String),
-    Blocks(Vec<ClaudeRawBlock>),
-}
-
-impl ClaudeRawContent {
-    /// Empty slice for the string case so the harvest loop iterates
-    /// uniformly. Strings carry no `tool_use` so they produce no
-    /// candidates either way; we lose nothing by treating them as empty.
-    fn blocks(&self) -> &[ClaudeRawBlock] {
-        match self {
-            ClaudeRawContent::Blocks(b) => b.as_slice(),
-            ClaudeRawContent::Text(_) => &[],
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct ClaudeRawBlock {
-    #[serde(rename = "type")]
-    block_type: Option<String>,
-    text: Option<String>,
-    input: Option<ClaudeRawToolInput>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ClaudeRawToolInput {
-    file_path: Option<String>,
-    notebook_path: Option<String>,
 }
 
 #[cfg(test)]
