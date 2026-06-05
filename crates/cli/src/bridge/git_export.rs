@@ -9,7 +9,7 @@ use objects::{
     error::HeddleError,
     object::{ChangeId, ContentHash, FileMode, ThreadName},
 };
-use repo::Repository as HeddleRepository;
+use repo::{AudienceTier, Repository as HeddleRepository, visible};
 
 use crate::bridge::{
     git_core::{
@@ -24,7 +24,14 @@ use crate::bridge::{
 
 const SUBMODULE_PREFIX: &str = "heddle-submodule:";
 
-/// Export a single state to Git.
+/// Export a single state to Git for `audience`.
+///
+/// Returns `Ok(None)` — **absence** — when the state's effective visibility
+/// tier is not visible to `audience`: the public mirror never mints a Git
+/// commit (no stub, no partial tree) for an embargoed state (spike §5.0/§5.3).
+/// The caller realizes downward-closure by also withholding any state whose
+/// parent was withheld, so an embargoed commit *and its descendants* stay
+/// absent from the mirror.
 pub(crate) fn export_state(
     mapping: &mut SyncMapping,
     heddle_repo: &HeddleRepository,
@@ -32,11 +39,22 @@ pub(crate) fn export_state(
     state_id: &ChangeId,
     identity: Option<&LocalGitIdentity>,
     message_override: Option<&str>,
-) -> GitResult<gix::hash::ObjectId> {
+    audience: &AudienceTier,
+) -> GitResult<Option<gix::hash::ObjectId>> {
     let state = heddle_repo
         .store()
         .get_state(state_id)?
         .ok_or(GitBridgeError::StateNotFound(*state_id))?;
+
+    // Audience-aware minting. The visibility decision lives here, at the state
+    // walk where the `ChangeId` is in scope — never in the blob-keyed
+    // `export_tree` (no `ChangeId`/audience).
+    let tier = heddle_repo
+        .effective_visibility_tier(state_id)
+        .map_err(|e| GitBridgeError::Git(format!("resolve visibility for {state_id}: {e:#}")))?;
+    if !visible(&tier, audience) {
+        return Ok(None);
+    }
 
     let git_tree_oid = export_tree(heddle_repo, repo, &state.tree)?;
     // R6: emit the W2 footer on every exported commit. The footer is
@@ -90,7 +108,7 @@ pub(crate) fn export_state(
             parent_oids,
         )
         .map_err(git_err)?;
-    Ok(commit.id)
+    Ok(Some(commit.id))
 }
 
 /// Export a Heddle tree to Git.
@@ -198,7 +216,17 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     bridge.build_existing_mapping(None)?;
     let identity = git_config_identity_with_global_fallback(bridge.heddle_repo.root())?;
 
+    // The Git bridge publishes the PUBLIC mirror — the export audience is
+    // always `Public`. Per-commit visibility is enforced here, in the OSS
+    // bridge, by emitting absence (the authoritative wire serve gate is weft's
+    // job, spike §10 #4).
+    let audience = AudienceTier::Public;
+
     let sorted_states = bridge.sort_states_topologically(&states)?;
+    // Reachable set, used to tell a withheld parent (absent from the mapping
+    // but present in this export) apart from a genuinely-missing shallow
+    // boundary (absent from both).
+    let reachable: HashSet<ChangeId> = sorted_states.iter().copied().collect();
     let repo = bridge.open_git_repo()?;
     bridge.mapping.retain_git_objects(&repo);
     bridge.seed_git_checkpoint_mappings_from_checkout(&repo)?;
@@ -221,18 +249,46 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
             // ref-reachability, not by membership in the walked set.
             continue;
         }
+
+        // Downward-closure (spike §5.0): withhold a state whose parent was
+        // itself withheld for this audience. Processed in topo order, so a
+        // parent's mapped-ness is already decided. A parent absent from the
+        // mapping but present in `reachable` was withheld → withhold this
+        // child too (and, transitively, all its descendants). A parent absent
+        // from both is a shallow boundary (public-by-absence) — let the mint
+        // proceed exactly as before.
+        let parent_withheld = bridge
+            .heddle_repo
+            .store()
+            .get_state(&state_id)?
+            .map(|state| {
+                state
+                    .parents
+                    .iter()
+                    .any(|p| reachable.contains(p) && bridge.mapping.get_git(p).is_none())
+            })
+            .unwrap_or(false);
+        if parent_withheld {
+            continue;
+        }
+
         let message_override = bridge
             .commit_message_overrides
             .get(&state_id)
             .map(String::as_str);
-        let git_oid = export_state(
+        let Some(git_oid) = export_state(
             &mut bridge.mapping,
             bridge.heddle_repo,
             &repo,
             &state_id,
             identity.as_ref(),
             message_override,
-        )?;
+            &audience,
+        )?
+        else {
+            // Embargoed for this audience — emit absence (no commit minted).
+            continue;
+        };
         bridge.mapping.insert(state_id, git_oid);
         newly_minted.insert(git_oid);
 
@@ -275,16 +331,27 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         }
     };
     for track_name in threads {
-        if let Some(state_id) = bridge.heddle_repo.refs().get_thread(&ThreadName::new(&track_name))?
-            && let Some(git_oid) = bridge.mapping.get_git(&state_id)
-        {
-            sync_track_to_branch(&repo, &track_name, git_oid)?;
-            stats.threads_synced += 1;
-            stats.branches.push(ExportedRef {
-                name: track_name.clone(),
-                tip: git_oid,
-            });
-        }
+        let Some(tip) = bridge.heddle_repo.refs().get_thread(&ThreadName::new(&track_name))? else {
+            continue;
+        };
+        // Frontier-before-ref-sync (spike §5.3): lag refs/heads/<track> to the
+        // maximal SERVED ancestor-or-self of the raw thread tip, never the raw
+        // tip itself. An embargoed tip — or a tip descended from an embargoed
+        // commit — is absent from the public branch; the branch stops at the
+        // last commit whose entire ancestry is visible to this audience.
+        // (Tags and `refs/notes/heddle` need no separate gate: a withheld
+        // state is never minted, so it has no mapped OID for a tag to name or
+        // a note to annotate.)
+        let Some(git_oid) = frontier_git_oid(bridge.heddle_repo, &bridge.mapping, tip)? else {
+            // The whole line is embargoed to its root — emit absence.
+            continue;
+        };
+        sync_track_to_branch(&repo, &track_name, git_oid)?;
+        stats.threads_synced += 1;
+        stats.branches.push(ExportedRef {
+            name: track_name.clone(),
+            tip: git_oid,
+        });
     }
 
     if thread.is_none() {
@@ -338,6 +405,45 @@ fn is_remote_tracking_thread_name(thread: &str, remote_names: &HashSet<String>) 
         return false;
     };
     !branch.is_empty() && remote_names.contains(remote)
+}
+
+/// The Git OID the public branch should lag to for a thread whose raw tip is
+/// `tip`: the maximal **served** ancestor-or-self of `tip`. A state is served
+/// iff it was minted (present in the mapping) — and minting is downward-closed
+/// (`export_scoped` withholds any state with a withheld ancestor), so the
+/// mapped set is exactly the served set. Returns `None` when no ancestor of
+/// `tip` is served (the whole line is embargoed to its root → absence).
+fn frontier_git_oid(
+    heddle_repo: &HeddleRepository,
+    mapping: &SyncMapping,
+    tip: ChangeId,
+) -> GitResult<Option<gix::hash::ObjectId>> {
+    let mut visited = HashSet::new();
+    let mut stack = vec![tip];
+    let mut frontier: Vec<ChangeId> = Vec::new();
+    while let Some(id) = stack.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        // Stop at the first served (mapped) state on each downward path: that
+        // is a maximal served ancestor — its own served ancestors are
+        // dominated by it, so we do not descend past it.
+        if mapping.get_git(&id).is_some() {
+            frontier.push(id);
+            continue;
+        }
+        if let Some(state) = heddle_repo.store().get_state(&id)? {
+            stack.extend(state.parents.iter().copied());
+        }
+    }
+    // A linear thread yields exactly one maximal served state. A merge whose
+    // embargo splits the DAG can leave an antichain of ≥2 maximal served
+    // states; advertising each sibling line under its own ref is the
+    // multi-root work deferred to issues #4/#5. Until then the branch lags
+    // deterministically (lowest ChangeId) — never published from a raw
+    // embargoed tip — and the other lines are absent from this branch.
+    let chosen = frontier.into_iter().min_by_key(|c| c.to_string_full());
+    Ok(chosen.and_then(|c| mapping.get_git(&c)))
 }
 
 fn reachable_states(

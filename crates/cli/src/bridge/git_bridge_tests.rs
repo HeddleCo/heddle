@@ -2804,3 +2804,78 @@ fn import_honors_legacy_heddle_change_id_trailer() {
         "Phase B: legacy trailer change_ids must round-trip"
     );
 }
+
+#[test]
+fn export_lags_public_branch_to_frontier_emitting_absence_for_embargoed_tip() {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    // A real principal so snapshot states carry a non-Unknown attribution and
+    // the bridge can mint Git commits without an external identity fallback.
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    // Build a linear thread: public base A, then tip B.
+    std::fs::write(heddle_temp.path().join("a.txt"), b"base\n").unwrap();
+    repo.snapshot(Some("base".into()), None).unwrap();
+    let state_a = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+
+    std::fs::write(heddle_temp.path().join("b.txt"), b"embargoed fix\n").unwrap();
+    repo.snapshot(Some("fix".into()), None).unwrap();
+    let state_b = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+    assert_ne!(state_a, state_b);
+
+    // Embargo the tip B (strictest Private tier). Downward-closure leaves the
+    // public frontier at A.
+    repo.put_state_visibility(StateVisibility {
+        state: state_b,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Grace Hopper".into(),
+            email: "grace@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+
+    let mut bridge = GitBridge::new(&repo);
+    let stats = export_all(&mut bridge).expect("export");
+
+    // The embargoed tip is never minted into the public mirror (absence) ...
+    assert!(
+        bridge.mapping.get_git(&state_b).is_none(),
+        "embargoed tip must not be minted into the public mirror"
+    );
+    let oid_a = bridge
+        .mapping
+        .get_git(&state_a)
+        .expect("public base A must be minted");
+    // ... and refs/heads/main lags to A, never the raw embargoed tip B.
+    let main = stats
+        .branches
+        .iter()
+        .find(|b| b.name == "main")
+        .expect("main branch must be exported");
+    assert_eq!(
+        main.tip, oid_a,
+        "public branch must lag to the visibility frontier (A), not the embargoed tip"
+    );
+}
