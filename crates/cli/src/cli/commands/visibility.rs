@@ -80,17 +80,21 @@ fn cmd_visibility_set(cli: &Cli, repo: &Repository, args: VisibilitySetArgs) -> 
         signature: None,
         supersedes: None,
     };
-    // Snapshot the whole per-state sidecar before/after the put so undo can
-    // restore the before-image and redo the after-image (PR #529 P1).
-    let prior = repo.get_state_visibility_bytes_for_state(&state)?;
-    let record_id = repo.put_state_visibility(record)?;
-    let new = repo.get_state_visibility_bytes_for_state(&state)?;
+    // The locked put captures the whole per-state sidecar before AND after the
+    // write, atomically under the repo write lock (PR #529 P1 r5): the
+    // before-image is the record the put actually overwrote — never a stale
+    // pre-lock read a racing put could invalidate. Undo restores the prior,
+    // redo the new.
+    let outcome = repo.put_state_visibility(record)?;
     let scope = repo.op_scope();
     repo.oplog().record_state_visibility_set(
         &state,
-        &record_id,
+        &outcome.id,
         &tier,
-        VisibilitySidecarSnapshots { prior, new },
+        VisibilitySidecarSnapshots {
+            prior: outcome.prior_sidecar,
+            new: outcome.new_sidecar,
+        },
         Some(&scope),
     )?;
 
@@ -99,7 +103,7 @@ fn cmd_visibility_set(cli: &Cli, repo: &Repository, args: VisibilitySetArgs) -> 
         state: state.short(),
         tier: tier.as_str().to_string(),
         label: tier_label(&tier).map(str::to_string),
-        record_id: record_id.short(),
+        record_id: outcome.id.short(),
         declarer: format!("{} <{}>", declarer.name, declarer.email),
         declared_at: declared_at.to_rfc3339(),
         supersedes: None,
@@ -118,23 +122,14 @@ fn cmd_visibility_promote(
         .into_tier(args.label)
         .map_err(|msg| anyhow!(msg))?;
 
-    // A promotion supersedes the current effective declaration, so one must
-    // exist. The content id of that record is what the new record points at.
-    let existing = repo.get_state_visibility_for_state(&state)?;
-    let superseded = match existing.latest() {
-        Some(latest) => repo.state_visibility_record_id(latest)?,
-        None => {
-            return Err(anyhow!(
-                "state '{}' has no visibility record to promote (it is public-by-absence)",
-                args.state
-            ));
-        }
-    };
-
     let declarer = repo
         .get_principal()
         .with_context(|| "resolve current principal")?;
     let declared_at = Utc::now();
+    // `supersedes` is resolved INSIDE the locked put — the record the promotion
+    // supersedes and the captured before-image come from one race-free view of
+    // the sidecar (PR #529 P1 r5). A promotion must supersede an existing
+    // declaration, so a public-by-absence state (no record) is an error.
     let record = StateVisibility {
         state,
         tier: tier.clone(),
@@ -142,18 +137,24 @@ fn cmd_visibility_promote(
         declarer: declarer.clone(),
         declared_at,
         signature: None,
-        supersedes: Some(superseded),
+        supersedes: None,
     };
-    let prior = repo.get_state_visibility_bytes_for_state(&state)?;
-    let record_id = repo.put_state_visibility(record)?;
-    let new = repo.get_state_visibility_bytes_for_state(&state)?;
+    let outcome = repo.promote_state_visibility(record)?.ok_or_else(|| {
+        anyhow!(
+            "state '{}' has no visibility record to promote (it is public-by-absence)",
+            args.state
+        )
+    })?;
     let scope = repo.op_scope();
     repo.oplog().record_state_visibility_promote(
         &state,
-        &superseded,
-        &record_id,
+        &outcome.superseded,
+        &outcome.put.id,
         &tier,
-        VisibilitySidecarSnapshots { prior, new },
+        VisibilitySidecarSnapshots {
+            prior: outcome.put.prior_sidecar,
+            new: outcome.put.new_sidecar,
+        },
         Some(&scope),
     )?;
 
@@ -162,10 +163,10 @@ fn cmd_visibility_promote(
         state: state.short(),
         tier: tier.as_str().to_string(),
         label: tier_label(&tier).map(str::to_string),
-        record_id: record_id.short(),
+        record_id: outcome.put.id.short(),
         declarer: format!("{} <{}>", declarer.name, declarer.email),
         declared_at: declared_at.to_rfc3339(),
-        supersedes: Some(superseded.short()),
+        supersedes: Some(outcome.superseded.short()),
     };
     emit_mutation(cli, repo, &output, "promoted")
 }

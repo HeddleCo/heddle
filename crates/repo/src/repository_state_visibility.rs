@@ -38,6 +38,33 @@ use oplog::OpRecord;
 use crate::namespace_policy::{VisibilityResolutionContext, resolve_default_visibility};
 use crate::repository::Repository;
 
+/// Outcome of a visibility put that captured its before/after images
+/// **atomically under the write lock** (heddle#317 / PR #529 P1 r5). The
+/// before-image is the sidecar the put actually overwrote — read inside the
+/// same critical section as the write — so no caller can read a stale prior
+/// before locking and record a before-image that a racing put has already
+/// invalidated (which would make undo delete the racer's record). `id` is the
+/// content id of the persisted record; `prior_sidecar`/`new_sidecar` are the
+/// full per-state sidecar bytes before/after (`None` = public-by-absence),
+/// feeding the oplog's undo/redo targets directly.
+#[derive(Debug, Clone)]
+pub struct PutVisibilityOutcome {
+    pub id: ContentHash,
+    pub prior_sidecar: Option<Vec<u8>>,
+    pub new_sidecar: Option<Vec<u8>>,
+}
+
+/// Outcome of a promotion: the underlying [`PutVisibilityOutcome`] plus the
+/// content id of the record the promotion superseded. The superseded record is
+/// resolved **under the same write lock** as the put (heddle#317 r5), so the
+/// supersede pointer and the captured before-image describe one consistent
+/// snapshot of the sidecar — never a torn read across a racing append.
+#[derive(Debug, Clone)]
+pub struct PromoteVisibilityOutcome {
+    pub put: PutVisibilityOutcome,
+    pub superseded: ContentHash,
+}
+
 /// The automatic capture-time default-visibility binding, staged for folding
 /// into a snapshot's own commit batch (heddle#317 / PR #529 P1). Produced by
 /// [`Repository::stage_default_visibility_binding`]; the sidecar has already
@@ -75,7 +102,7 @@ impl Repository {
     /// `false`. This holds whether the Public put is fresh or supersedes a
     /// prior private record — no caller can leave a Public record that makes
     /// a public state read as non-public.
-    pub fn put_state_visibility(&self, record: StateVisibility) -> Result<ContentHash> {
+    pub fn put_state_visibility(&self, record: StateVisibility) -> Result<PutVisibilityOutcome> {
         // Serialize the full read-modify-write behind the repo write lock so
         // concurrent appends on the same state can't clobber each other.
         let _lock = self
@@ -83,6 +110,24 @@ impl Repository {
             .write()
             .with_context(|| "acquire repo write lock for state-visibility put")?;
         self.put_state_visibility_locked(record)
+    }
+
+    /// Like [`put_state_visibility`](Self::put_state_visibility) but a no-op when
+    /// the state already carries any visibility record. The existence test and
+    /// the write are ONE locked critical section, so a concurrent `visibility
+    /// set` landing between "is it absent?" and "write the default" cannot be
+    /// clobbered — the guard sees the racer's record and skips (heddle#317 r5).
+    /// Returns `Ok(None)` when a record already existed, else the put outcome.
+    /// This is the atomic primitive the capture-time default binding stands on.
+    pub fn put_state_visibility_if_absent(
+        &self,
+        record: StateVisibility,
+    ) -> Result<Option<PutVisibilityOutcome>> {
+        let _lock = self
+            .locker()
+            .write()
+            .with_context(|| "acquire repo write lock for if-absent state-visibility put")?;
+        self.put_state_visibility_locked_if_absent(record)
     }
 
     /// Lock-free body of [`put_state_visibility`](Self::put_state_visibility).
@@ -93,27 +138,44 @@ impl Repository {
     /// chokepoint, which writes the capture-time default-visibility binding
     /// while still holding the snapshot write lock (heddle#317 / PR #529 P1),
     /// calls this directly instead of the lock-taking wrapper.
+    ///
+    /// **Atomic before-image capture (PR #529 P1 r5).** This reads the existing
+    /// sidecar bytes (the before-image), appends the record, and writes the new
+    /// bytes — all in one critical section the lock holder owns — then returns
+    /// both images in a [`PutVisibilityOutcome`]. Recording the before-image
+    /// here, rather than from a pre-lock read at the call site, closes the
+    /// TOCTOU where a racing put invalidates a stale pre-read prior and undo
+    /// then deletes the racer's record.
     pub(crate) fn put_state_visibility_locked(
         &self,
         record: StateVisibility,
-    ) -> Result<ContentHash> {
+    ) -> Result<PutVisibilityOutcome> {
         record
             .validate()
             .with_context(|| "validate state-visibility record before put")?;
         let state = record.state;
+        let path = self.state_visibility_path_for_state(&state);
+
+        // Capture the before-image UNDER THE LOCK: this is the record the put
+        // actually overwrites, the oplog's undo target. No call site reads it
+        // before locking, so it can never be a stale pre-read.
+        let prior_sidecar = self.get_state_visibility_bytes_for_state(&state)?;
 
         let id = state_visibility_content_hash(&record)?;
         let mut existing = self.get_state_visibility_for_state(&state)?;
 
         for existing_record in &existing.records {
             if state_visibility_content_hash(existing_record)? == id {
-                return Ok(id);
+                // Dedup no-op: nothing written, so before == after.
+                return Ok(PutVisibilityOutcome {
+                    id,
+                    new_sidecar: prior_sidecar.clone(),
+                    prior_sidecar,
+                });
             }
         }
 
         existing.push(record);
-
-        let path = self.state_visibility_path_for_state(&state);
 
         // Absence ≡ public: if the effective (latest) tier is public, drop the
         // state back to public-by-absence by removing the sidecar rather than
@@ -128,7 +190,11 @@ impl Repository {
                     format!("remove state-visibility sidecar '{}'", path.display())
                 })?;
             }
-            return Ok(id);
+            return Ok(PutVisibilityOutcome {
+                id,
+                prior_sidecar,
+                new_sidecar: None,
+            });
         }
 
         let bytes = existing
@@ -138,7 +204,59 @@ impl Repository {
             fs::create_dir_all(parent).with_context(|| format!("create '{}'", parent.display()))?;
         }
         write_file_atomic(&path, &bytes).with_context(|| format!("write '{}'", path.display()))?;
-        Ok(id)
+        Ok(PutVisibilityOutcome {
+            id,
+            prior_sidecar,
+            new_sidecar: Some(bytes),
+        })
+    }
+
+    /// Lock-free body of
+    /// [`put_state_visibility_if_absent`](Self::put_state_visibility_if_absent).
+    /// The caller **must already hold the repo write lock** (see
+    /// [`put_state_visibility_locked`](Self::put_state_visibility_locked) for why
+    /// the snapshot chokepoint calls the locked body directly). The existence
+    /// test runs inside the caller's critical section, immediately before the
+    /// write, so the absent → write decision is atomic.
+    pub(crate) fn put_state_visibility_locked_if_absent(
+        &self,
+        record: StateVisibility,
+    ) -> Result<Option<PutVisibilityOutcome>> {
+        if self
+            .get_state_visibility_for_state(&record.state)
+            .with_context(|| "read existing visibility for if-absent put")?
+            .has_record()
+        {
+            return Ok(None);
+        }
+        Ok(Some(self.put_state_visibility_locked(record)?))
+    }
+
+    /// Append a superseding visibility record, resolving the record it
+    /// supersedes **under the same write lock** as the put (heddle#317 r5). The
+    /// caller supplies a record whose `supersedes` is a placeholder; this reads
+    /// the current latest record, sets `supersedes` to its content id, and runs
+    /// the locked read-modify-write — so the supersede pointer and the captured
+    /// before-image come from one consistent, race-free view of the sidecar.
+    /// Returns `Ok(None)` when the state is public-by-absence (nothing to
+    /// promote); the caller maps that to a user-facing error.
+    pub fn promote_state_visibility(
+        &self,
+        record: StateVisibility,
+    ) -> Result<Option<PromoteVisibilityOutcome>> {
+        let _lock = self
+            .locker()
+            .write()
+            .with_context(|| "acquire repo write lock for state-visibility promote")?;
+        let existing = self.get_state_visibility_for_state(&record.state)?;
+        let Some(latest) = existing.latest() else {
+            return Ok(None);
+        };
+        let superseded = state_visibility_content_hash(latest)?;
+        let mut record = record;
+        record.supersedes = Some(superseded);
+        let put = self.put_state_visibility_locked(record)?;
+        Ok(Some(PromoteVisibilityOutcome { put, superseded }))
     }
 
     /// Return the raw rmp-encoded `StateVisibilityBlob` bytes for the given
@@ -319,13 +437,6 @@ impl Repository {
         if tier == VisibilityTier::Public {
             return Ok(None);
         }
-        if self
-            .get_state_visibility_for_state(state)
-            .with_context(|| "read existing visibility before capture-time binding")?
-            .has_record()
-        {
-            return Ok(None);
-        }
 
         let declarer = self
             .get_principal()
@@ -339,24 +450,29 @@ impl Repository {
             signature: None,
             supersedes: None,
         };
-        // A fresh state has no prior record (guarded above), so the before-image
-        // is public-by-absence; capture the after-image for redo.
-        let prior_sidecar = None;
-        let id = if lock_held {
-            self.put_state_visibility_locked(record)?
+        // Bind ONLY if the state is record-free, with the existence test and the
+        // write fused into one locked critical section (heddle#317 r5). A racing
+        // `visibility set` that lands between the two would otherwise be clobbered
+        // by an unconditional default-bind; `if_absent` skips instead, and a skip
+        // (Ok(None)) stages no oplog entry. The captured before-image is the one
+        // the locked write actually overwrote — for a record-free state, None.
+        let outcome = if lock_held {
+            self.put_state_visibility_locked_if_absent(record)?
         } else {
-            self.put_state_visibility(record)?
+            self.put_state_visibility_if_absent(record)?
         };
-        let new_sidecar = self.get_state_visibility_bytes_for_state(state)?;
+        let Some(outcome) = outcome else {
+            return Ok(None);
+        };
         Ok(Some(DefaultVisibilityBinding {
             record: OpRecord::StateVisibilitySet {
                 state: *state,
-                record_id: id,
+                record_id: outcome.id,
                 tier,
-                prior_sidecar: prior_sidecar.clone(),
-                new_sidecar,
+                prior_sidecar: outcome.prior_sidecar.clone(),
+                new_sidecar: outcome.new_sidecar,
             },
-            prior_sidecar,
+            prior_sidecar: outcome.prior_sidecar,
         }))
     }
 
@@ -430,6 +546,22 @@ mod tests {
     fn fresh_repo() -> (TempDir, Repository) {
         let dir = TempDir::new().unwrap();
         let repo = Repository::init_default(dir.path()).unwrap();
+        (dir, repo)
+    }
+
+    /// A repo whose `[review.discussion] default_visibility` is pinned to
+    /// `tier_toml`, so the capture-time binding resolves a non-public default.
+    fn repo_with_default(tier_toml: &str) -> (TempDir, Repository) {
+        let dir = TempDir::new().unwrap();
+        Repository::init_default(dir.path()).unwrap();
+        std::fs::write(
+            dir.path().join(".heddle/config.toml"),
+            format!(
+                "[repository]\nversion = 1\n\n[review.discussion]\ndefault_visibility = {tier_toml}\n"
+            ),
+        )
+        .unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
         (dir, repo)
     }
 
@@ -563,8 +695,8 @@ mod tests {
         let (_dir, repo) = fresh_repo();
         let state = ChangeId::from_bytes([7u8; 16]);
         let record = sample_record(state, VisibilityTier::Internal);
-        let id1 = repo.put_state_visibility(record.clone()).expect("put");
-        let id2 = repo.put_state_visibility(record).expect("re-put");
+        let id1 = repo.put_state_visibility(record.clone()).expect("put").id;
+        let id2 = repo.put_state_visibility(record).expect("re-put").id;
         assert_eq!(id1, id2, "identical record must return the same id");
 
         let stored = repo
@@ -589,7 +721,7 @@ mod tests {
                 scope_label: "embargo".into(),
             },
         );
-        let first_id = repo.put_state_visibility(first).expect("put first");
+        let first_id = repo.put_state_visibility(first).expect("put first").id;
         let second = StateVisibility {
             tier: VisibilityTier::Internal,
             declared_at: Utc.with_ymd_and_hms(2026, 6, 2, 9, 0, 0).unwrap(),
@@ -720,7 +852,7 @@ mod tests {
                 scope_label: "embargo".into(),
             },
         );
-        let private_id = repo.put_state_visibility(private).expect("put private");
+        let private_id = repo.put_state_visibility(private).expect("put private").id;
         assert!(
             repo.has_visibility_for_state(&state)
                 .expect("has visibility"),
@@ -745,5 +877,153 @@ mod tests {
             !repo.state_visibility_path_for_state(&state).exists(),
             "supersede-to-Public must remove the sidecar entirely"
         );
+    }
+
+    #[test]
+    fn racing_visibility_sets_capture_true_prior_under_lock() {
+        // The TOCTOU this closes: a call site that read its before-image BEFORE
+        // taking the write lock could record a stale prior. Sequence A-reads /
+        // B-writes / A-writes then has A record prior == None, so undoing A
+        // DELETES B's independent record. The primitive now captures the
+        // before-image UNDER the lock — it is the record actually present when
+        // the locked write runs — so A's recorded prior is B's record, not a
+        // stale None. Deterministic: drive the two puts through the primitive in
+        // order; the returned prior is what the call site records in the oplog.
+        let (_dir, repo) = fresh_repo();
+        let state = ChangeId::from_bytes([99u8; 16]);
+
+        // B's write lands first, onto a record-free state.
+        let b = StateVisibility {
+            declared_at: Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap(),
+            ..sample_record(
+                state,
+                VisibilityTier::TeamScoped {
+                    team_id: "infra".into(),
+                },
+            )
+        };
+        let b_out = repo.put_state_visibility(b).expect("B put");
+        assert!(
+            b_out.prior_sidecar.is_none(),
+            "B writes onto a fresh state, so its before-image is public-by-absence"
+        );
+        let after_b = repo
+            .get_state_visibility_bytes_for_state(&state)
+            .expect("read after B");
+        assert_eq!(
+            b_out.new_sidecar, after_b,
+            "B's after-image must equal the bytes actually on disk after B's write"
+        );
+
+        // A's write lands AFTER B's. Its recorded prior must be B's record.
+        let a = StateVisibility {
+            declared_at: Utc.with_ymd_and_hms(2026, 6, 1, 12, 1, 0).unwrap(),
+            ..sample_record(state, VisibilityTier::Internal)
+        };
+        let a_out = repo.put_state_visibility(a).expect("A put");
+        assert_eq!(
+            a_out.prior_sidecar, after_b,
+            "A's recorded prior must be the record actually present (B's), captured \
+             under the lock — never a stale pre-read None"
+        );
+        assert!(
+            a_out.prior_sidecar.is_some(),
+            "A's before-image must not be the stale pre-read None the TOCTOU produced"
+        );
+
+        // Prove the payoff: undoing A (restore its prior) leaves B's record
+        // intact rather than deleting the whole sidecar.
+        repo.restore_state_visibility_sidecar(&state, a_out.prior_sidecar.clone())
+            .expect("undo A by restoring its captured prior");
+        let restored = repo
+            .get_state_visibility_for_state(&state)
+            .expect("read after undo");
+        assert_eq!(
+            restored.records.len(),
+            1,
+            "undoing A must leave exactly B's record — not delete B's sidecar"
+        );
+        assert_eq!(
+            restored.latest().unwrap().tier,
+            VisibilityTier::TeamScoped {
+                team_id: "infra".into()
+            },
+            "the record surviving undo-of-A must be B's team-scoped declaration"
+        );
+    }
+
+    #[test]
+    fn bind_default_visibility_if_absent_is_atomic() {
+        // The capture-time default binding must NOT overwrite a record that
+        // already exists when it runs, and the existence test must live inside
+        // the write lock (heddle#317 r5). Models a `visibility set` that landed
+        // before the bind: bind sees the record, skips, and stages no oplog
+        // entry. Driven end-to-end through `stage_default_visibility_binding`.
+        let (_dir, repo) = repo_with_default("\"Internal\"");
+        let state = ChangeId::from_bytes([77u8; 16]);
+
+        // A user (or a racer) already set a team-scoped tier on this state.
+        let existing = sample_record(
+            state,
+            VisibilityTier::TeamScoped {
+                team_id: "sec".into(),
+            },
+        );
+        repo.put_state_visibility(existing.clone())
+            .expect("seed existing record");
+        let bytes_before = repo
+            .get_state_visibility_bytes_for_state(&state)
+            .expect("read existing bytes");
+
+        let staged = repo
+            .stage_default_visibility_binding(&state, false)
+            .expect("bind on an already-recorded state");
+        assert!(
+            staged.is_none(),
+            "bind must not bind over an existing record — and stages no oplog entry"
+        );
+        assert_eq!(
+            bytes_before,
+            repo.get_state_visibility_bytes_for_state(&state)
+                .expect("read bytes after bind"),
+            "the user's existing record must be untouched by a skipped bind"
+        );
+        let stored = repo
+            .get_state_visibility_for_state(&state)
+            .expect("read stored");
+        assert_eq!(stored.records.len(), 1, "no spurious second record appended");
+        assert_eq!(
+            stored.records[0], existing,
+            "bind must not overwrite the user's declared tier"
+        );
+
+        // On a genuinely record-free state, bind DOES write and stage a record
+        // whose before-image is public-by-absence.
+        let fresh = ChangeId::from_bytes([78u8; 16]);
+        let staged = repo
+            .stage_default_visibility_binding(&fresh, false)
+            .expect("bind on a fresh state")
+            .expect("a record-free state must bind the default");
+        assert!(
+            staged.prior_sidecar.is_none(),
+            "a fresh state's before-image is public-by-absence (None)"
+        );
+        assert!(
+            repo.has_visibility_for_state(&fresh)
+                .expect("has visibility on bound state"),
+            "the default tier must now be bound on the fresh state"
+        );
+        match staged.record {
+            OpRecord::StateVisibilitySet {
+                tier, prior_sidecar, ..
+            } => {
+                assert_eq!(tier, VisibilityTier::Internal, "bound the configured default");
+                assert!(
+                    prior_sidecar.is_none(),
+                    "the staged oplog record's before-image is None for a fresh state"
+                );
+            }
+            other => panic!("bind must stage a StateVisibilitySet record, got {other:?}"),
+        }
     }
 }
