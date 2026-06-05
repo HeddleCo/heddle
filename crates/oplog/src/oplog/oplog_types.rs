@@ -13,6 +13,15 @@ use serde::{Deserialize, Serialize};
 pub enum IsolationKey {
     Thread(String),
     LocalHead { scope: String },
+    /// Per-state visibility key (heddle#317). Every `StateVisibilitySet` /
+    /// `StateVisibilityPromote` record on a state contributes this key, so a
+    /// visibility mutation on state `S` conflicts with an in-flight undo/redo of
+    /// a visibility batch that also touched `S`. Without it a visibility record
+    /// would contribute no isolation key, and an undo could restore an older
+    /// `prior_sidecar` over a concurrently-committed newer visibility record,
+    /// silently discarding it. Keyed by the state's `ChangeId`, so visibility
+    /// mutations on *different* states never spuriously conflict.
+    StateVisibility(ChangeId),
 }
 
 /// The oplog generation and logical keys a transaction observed before apply.
@@ -432,15 +441,21 @@ pub fn isolation_keys_for_record(record: &OpRecord, scope: Option<&str>) -> BTre
                 });
             }
         }
+        // Visibility mutations contribute a per-state key (heddle#317 inv 3) so
+        // an undo/redo of a visibility batch on `state` conflicts with any
+        // concurrent visibility mutation on the SAME state, and never silently
+        // overwrites a newer record with a stale `prior_sidecar`.
+        OpRecord::StateVisibilitySet { state, .. }
+        | OpRecord::StateVisibilityPromote { state, .. } => {
+            keys.insert(IsolationKey::StateVisibility(*state));
+        }
         OpRecord::MarkerCreate { .. }
         | OpRecord::MarkerDelete { .. }
         | OpRecord::TransactionAbort { .. }
         | OpRecord::ConflictResolved { .. }
         | OpRecord::TransactionCommit { .. }
         | OpRecord::Redact { .. }
-        | OpRecord::Purge { .. }
-        | OpRecord::StateVisibilitySet { .. }
-        | OpRecord::StateVisibilityPromote { .. } => {}
+        | OpRecord::Purge { .. } => {}
     }
     keys
 }

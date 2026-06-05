@@ -3945,36 +3945,25 @@ impl ContentAddressedMount {
 
         // Invariant A (heddle#317): a mount-captured state is a freshly created
         // state too, so it must inherit the configured default visibility tier
-        // through the same chokepoint the repo capture path uses. Resolve + write
-        // the sidecar BEFORE the commit (no lock held here, so the sidecar write
-        // takes the repo lock itself) and FOLD the resulting
-        // `OpRecord::StateVisibilitySet` into the snapshot's own batch (PR #529
-        // P1), so one `heddle undo` reverts the snapshot and its auto-applied
-        // default together — never a separate trailing batch. Public default is a
-        // no-op (absence ≡ public ⇒ no record to fold).
-        let visibility_record = self
-            .inner
-            .repo
-            .stage_default_visibility_binding(&change_id, false)
-            .map_err(|e| {
-                MountError::Store(objects::error::HeddleError::Io(std::io::Error::other(
-                    format!("{e:#}"),
-                )))
-            })?
-            .map(|binding| binding.record)
-            .into_iter()
-            .collect::<Vec<_>>();
-
+        // through the same chokepoint the repo capture path uses, FOLDED into the
+        // snapshot's own batch (PR #529 P1) so one `heddle undo` reverts the
+        // snapshot and its auto-applied default together — never a separate
+        // trailing batch. The fold-and-rewind chokepoint stages the sidecar
+        // BEFORE the commit and rewinds it if the commit fails (invariant 2), so
+        // a failed mount capture never leaves an orphaned non-public sidecar. The
+        // mount path holds no repo lock, so it passes `lock_held = false`; a
+        // public default folds nothing (absence ≡ public).
+        //
         // Step 3 + 3a unified: advance the served thread and record the
         // `OpRecord::Snapshot` **record-first** through the write chokepoint
         // (heddle#354 r8).
         self.inner
             .repo
-            .commit_snapshot_atomic_with_records(
+            .commit_snapshot_atomic_with_capture_visibility(
                 &change_id,
                 Some(prev_head_change_id),
                 Some(&served_thread),
-                visibility_record,
+                false,
             )
             .map_err(MountError::Store)?;
 

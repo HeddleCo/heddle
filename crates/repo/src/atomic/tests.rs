@@ -7,7 +7,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 use objects::error::{HeddleError, Result};
-use objects::object::{ChangeId, MarkerName, ThreadName};
+use objects::object::{ChangeId, ContentHash, MarkerName, ThreadName, VisibilityTier};
 use oplog::{
     ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpLogBackend, OpRecord,
     isolation_keys_for_record,
@@ -65,6 +65,25 @@ fn commit_marker(transaction_id: &str, op_count: u32) -> OpRecord {
     OpRecord::TransactionCommit {
         transaction_id: transaction_id.to_string(),
         op_count,
+    }
+}
+
+fn visibility_set_on(state: ChangeId) -> OpRecord {
+    OpRecord::StateVisibilitySet {
+        state,
+        record_id: ContentHash::from_bytes([7u8; 32]),
+        tier: VisibilityTier::Internal,
+        prior_sidecar: None,
+        new_sidecar: Some(vec![1, 2, 3]),
+    }
+}
+
+fn visibility_precondition(since_head_id: u64, state: ChangeId) -> IsolationPrecondition {
+    let mut keys = BTreeSet::new();
+    keys.insert(IsolationKey::StateVisibility(state));
+    IsolationPrecondition {
+        since_head_id,
+        keys,
     }
 }
 
@@ -899,6 +918,100 @@ fn conditional_commit_allows_different_thread_tail() {
         )
         .unwrap();
     assert!(matches!(outcome, ConditionalCommitOutcome::Committed(_)));
+}
+
+#[test]
+fn visibility_records_contribute_per_state_isolation_key() {
+    // Invariant 3 foundation: a StateVisibilitySet/Promote on state S touches
+    // the per-state key StateVisibility(S) — and only that state's key, so
+    // mutations on distinct states never spuriously conflict.
+    let s = ChangeId::generate();
+    let other = ChangeId::generate();
+
+    let set_keys = isolation_keys_for_record(&visibility_set_on(s), Some("scope"));
+    assert!(set_keys.contains(&IsolationKey::StateVisibility(s)));
+    assert!(!set_keys.contains(&IsolationKey::StateVisibility(other)));
+
+    let promote = OpRecord::StateVisibilityPromote {
+        state: s,
+        superseded: ContentHash::from_bytes([2u8; 32]),
+        record_id: ContentHash::from_bytes([3u8; 32]),
+        tier: VisibilityTier::Public,
+        prior_sidecar: Some(vec![9]),
+        new_sidecar: None,
+    };
+    let promote_keys = isolation_keys_for_record(&promote, Some("scope"));
+    assert!(promote_keys.contains(&IsolationKey::StateVisibility(s)));
+}
+
+#[test]
+fn undo_cannot_discard_concurrent_visibility_change() {
+    // Invariant 3 — a visibility mutation on state S carries a per-state
+    // isolation key, so an in-flight undo of a visibility batch on S conflicts
+    // with a concurrently-committed newer visibility record on S: the undo is
+    // rejected (serialized), never allowed to restore an older prior_sidecar
+    // over the newer record. Modeled at the conditional-commit layer the undo
+    // executor commits through.
+    let (_t, repo) = test_repo();
+    let state = ChangeId::generate();
+
+    // A visibility batch B1 on S commits (the batch the undo targets).
+    repo.oplog()
+        .record_batch(vec![visibility_set_on(state)])
+        .unwrap();
+
+    // The undo of B1 snapshots the head HERE and declares S's visibility key
+    // (the executor derives this from B1's records via isolation_keys_for_record).
+    let since = repo.oplog().head_id().unwrap();
+    let precondition = visibility_precondition(since, state);
+
+    // A concurrent visibility change on S commits AFTER the undo's snapshot.
+    repo.oplog()
+        .record_batch(vec![visibility_set_on(state)])
+        .unwrap();
+
+    // The undo's conditional commit must detect the conflict and refuse.
+    let outcome = repo
+        .oplog()
+        .record_batch_exactly_once_if_unchanged(
+            vec![commit_marker("undo:batch:1", 1)],
+            Some(&repo.op_scope()),
+            "undo:batch:1",
+            &precondition,
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            ConditionalCommitOutcome::IsolationConflict {
+                key: IsolationKey::StateVisibility(s),
+                ..
+            } if s == state
+        ),
+        "a concurrent visibility change on S must block the undo: {outcome:?}"
+    );
+
+    // Control: a concurrent visibility change on a DIFFERENT state does NOT
+    // block the undo — visibility mutations on distinct states are independent.
+    let since_ctrl = repo.oplog().head_id().unwrap();
+    let precondition_ctrl = visibility_precondition(since_ctrl, state);
+    let other = ChangeId::generate();
+    repo.oplog()
+        .record_batch(vec![visibility_set_on(other)])
+        .unwrap();
+    let outcome_ctrl = repo
+        .oplog()
+        .record_batch_exactly_once_if_unchanged(
+            vec![commit_marker("undo:batch:ctrl", 1)],
+            Some(&repo.op_scope()),
+            "undo:batch:ctrl",
+            &precondition_ctrl,
+        )
+        .unwrap();
+    assert!(
+        matches!(outcome_ctrl, ConditionalCommitOutcome::Committed(_)),
+        "a visibility change on a DIFFERENT state must NOT block the undo: {outcome_ctrl:?}"
+    );
 }
 
 #[test]

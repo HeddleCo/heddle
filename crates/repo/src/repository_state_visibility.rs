@@ -294,6 +294,25 @@ impl Repository {
                     // no oplog append.
                     return Ok(None);
                 };
+                // Invariant 4 — promote monotonicity. `promote` is an *opening*
+                // transition: the target must be STRICTLY less restrictive than
+                // the current effective tier. A narrowing or lateral (same-rank,
+                // e.g. a different team/scope label) change is rejected here so it
+                // cannot masquerade as a promotion; it must go through `set`. The
+                // ordering is defined by
+                // [`VisibilityTier::restrictiveness_rank`]. Checked under the
+                // write lock so the `latest` we validate against is the same one
+                // the put supersedes — no torn read across a racing append.
+                if !record.tier.is_strictly_less_restrictive_than(&latest.tier) {
+                    anyhow::bail!(
+                        "cannot promote state {} from '{}' to '{}': promote only opens \
+                         visibility (target must be strictly less restrictive). Use \
+                         `visibility set` for a narrowing or lateral change.",
+                        record.state.to_string_full(),
+                        latest.tier.as_str(),
+                        record.tier.as_str(),
+                    );
+                }
                 let superseded = state_visibility_content_hash(latest)?;
                 record.supersedes = Some(superseded);
                 Some(superseded)
@@ -304,10 +323,48 @@ impl Repository {
         let tier = record.tier.clone();
         let put = self.put_state_visibility_locked(record)?;
 
-        // Append the audit entry WHILE STILL HOLDING the repo write lock — never
-        // after releasing it. This is the r6 invariant: a concurrent mutation
-        // cannot interleave its own sidecar write + append between this put and
-        // this append, so the two logs stay in the same order.
+        // Invariant 1 — atomic / all-or-nothing. The sidecar is now written but
+        // the audit entry hasn't been appended. Append WHILE STILL HOLDING the
+        // repo write lock (the r6 ordering invariant: no concurrent mutation can
+        // interleave its sidecar write + append between this put and this
+        // append). If the append fails, roll the sidecar back to its captured
+        // before-image so no path ever leaves a changed sidecar with no matching
+        // `OpRecord`. Both the append and the rollback run inside this same
+        // critical section, so the half-applied state is never observable.
+        if let Err(append_err) = self.append_visibility_audit(&state, &put, &tier, superseded) {
+            self.restore_state_visibility_sidecar(&state, put.prior_sidecar.clone())
+                .with_context(|| {
+                    format!(
+                        "roll back visibility sidecar for {} after the audit append failed",
+                        state.to_string_full()
+                    )
+                })?;
+            return Err(append_err);
+        }
+
+        Ok(Some(VisibilityCommitOutcome { put, superseded }))
+    }
+
+    /// Append the visibility audit `OpRecord` for a just-written sidecar put.
+    /// The single place a visibility-mutation audit entry is appended for the
+    /// explicit `set`/`promote` transaction — the caller (
+    /// [`commit_state_visibility`](Self::commit_state_visibility)) must already
+    /// hold the repo write lock, and rolls the sidecar back if this returns
+    /// `Err` (invariant 1). `superseded = Some(_)` emits a `Promote` record,
+    /// `None` a `Set`.
+    fn append_visibility_audit(
+        &self,
+        state: &ChangeId,
+        put: &PutVisibilityOutcome,
+        tier: &VisibilityTier,
+        superseded: Option<ContentHash>,
+    ) -> Result<()> {
+        // Test seam (heddle#317): deterministically fail the append AFTER the
+        // sidecar write to exercise the invariant-1 rollback path.
+        #[cfg(test)]
+        if take_visibility_commit_fault(VisibilityCommitFault::Append) {
+            anyhow::bail!("injected visibility audit-append failure");
+        }
         let scope = self.op_scope();
         let snapshots = VisibilitySidecarSnapshots {
             prior: put.prior_sidecar.clone(),
@@ -315,24 +372,23 @@ impl Repository {
         };
         match superseded {
             None => self.oplog().record_state_visibility_set(
-                &state,
+                state,
                 &put.id,
-                &tier,
+                tier,
                 snapshots,
                 Some(&scope),
             ),
             Some(superseded) => self.oplog().record_state_visibility_promote(
-                &state,
+                state,
                 &superseded,
                 &put.id,
-                &tier,
+                tier,
                 snapshots,
                 Some(&scope),
             ),
         }
-        .with_context(|| "append state-visibility audit entry under repo write lock")?;
-
-        Ok(Some(VisibilityCommitOutcome { put, superseded }))
+        .map(|_| ())
+        .with_context(|| "append state-visibility audit entry under repo write lock")
     }
 
     /// Return the raw rmp-encoded `StateVisibilityBlob` bytes for the given
@@ -595,6 +651,55 @@ impl Repository {
         self.state_visibility_dir()
             .join(format!("{}.bin", state.to_string_full()))
     }
+}
+
+/// Deterministic fault points for the visibility-mutation transaction
+/// (heddle#317). Test-only — each arms a single one-shot failure so the
+/// invariant-1 (append) and invariant-2 (snapshot-commit) rollback paths can be
+/// exercised without a real I/O failure. Thread-local + one-shot mirrors the
+/// `SnapshotFault` hook in `repository_snapshot.rs`.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VisibilityCommitFault {
+    /// Fail the explicit `set`/`promote` oplog append after the sidecar write
+    /// (invariant 1).
+    Append,
+    /// Fail the folded snapshot-batch commit after staging the capture-time
+    /// default-visibility binding (invariant 2).
+    SnapshotCommit,
+}
+
+#[cfg(test)]
+thread_local! {
+    static VISIBILITY_COMMIT_FAULT: std::cell::Cell<Option<VisibilityCommitFault>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Run `body` with `fault` armed; the fault is cleared afterward so it never
+/// leaks into a later test on the same thread.
+#[cfg(test)]
+pub(crate) fn with_visibility_commit_fault<T>(
+    fault: VisibilityCommitFault,
+    body: impl FnOnce() -> T,
+) -> T {
+    VISIBILITY_COMMIT_FAULT.with(|f| f.set(Some(fault)));
+    let out = body();
+    VISIBILITY_COMMIT_FAULT.with(|f| f.set(None));
+    out
+}
+
+/// Consume the armed fault iff it matches `fault` (one-shot). Returns `true`
+/// when the caller should fail.
+#[cfg(test)]
+pub(crate) fn take_visibility_commit_fault(fault: VisibilityCommitFault) -> bool {
+    VISIBILITY_COMMIT_FAULT.with(|f| {
+        if f.get() == Some(fault) {
+            f.set(None);
+            true
+        } else {
+            false
+        }
+    })
 }
 
 /// Content hash of a single visibility record. The hash covers the
@@ -1281,6 +1386,210 @@ mod tests {
         assert_eq!(
             sets[0].new, on_disk,
             "the audit entry's after-image equals the durable sidecar"
+        );
+    }
+
+    #[test]
+    fn append_failure_rolls_back_sidecar() {
+        // Invariant 1 — atomic / all-or-nothing. If the oplog audit append fails
+        // AFTER the sidecar write, the sidecar must be rolled back to its
+        // before-image so no path leaves a changed sidecar with no matching
+        // OpRecord. Driven by a deterministic append fault.
+        let (_dir, repo) = fresh_repo();
+
+        // Arm 1: a fresh (public-by-absence) state. Rollback removes the sidecar.
+        let fresh = ChangeId::from_bytes([66u8; 16]);
+        let record = sample_record(fresh, VisibilityTier::Internal);
+        let err = with_visibility_commit_fault(VisibilityCommitFault::Append, || {
+            repo.commit_state_visibility(record, VisibilityCommitKind::Set)
+        })
+        .expect_err("the injected append failure must surface as an error");
+        assert!(
+            format!("{err:#}").contains("injected visibility audit-append failure"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            !repo.state_visibility_path_for_state(&fresh).exists(),
+            "a failed append on a fresh state must leave NO orphaned sidecar"
+        );
+        assert!(
+            !repo.has_visibility_for_state(&fresh).expect("has visibility"),
+            "the state must read public-by-absence after the rollback"
+        );
+        assert!(
+            recorded_visibility_sets(&repo).is_empty(),
+            "a rolled-back commit must record no audit entry"
+        );
+
+        // Arm 2: a state already carrying a record. Rollback restores THAT
+        // record exactly, not absence.
+        let seeded = ChangeId::from_bytes([67u8; 16]);
+        repo.commit_state_visibility(
+            sample_record(
+                seeded,
+                VisibilityTier::TeamScoped {
+                    team_id: "infra".into(),
+                },
+            ),
+            VisibilityCommitKind::Set,
+        )
+        .expect("seed commit succeeds")
+        .expect("a set always commits");
+        let before = repo
+            .get_state_visibility_bytes_for_state(&seeded)
+            .expect("read seeded bytes");
+        let sets_before = recorded_visibility_sets(&repo).len();
+
+        let second = StateVisibility {
+            declared_at: Utc.with_ymd_and_hms(2026, 6, 2, 9, 0, 0).unwrap(),
+            ..sample_record(seeded, VisibilityTier::Internal)
+        };
+        let err = with_visibility_commit_fault(VisibilityCommitFault::Append, || {
+            repo.commit_state_visibility(second, VisibilityCommitKind::Set)
+        })
+        .expect_err("the injected append failure must surface");
+        assert!(
+            format!("{err:#}").contains("injected visibility audit-append failure"),
+            "unexpected error: {err:#}"
+        );
+        assert_eq!(
+            before,
+            repo.get_state_visibility_bytes_for_state(&seeded)
+                .expect("read after rollback"),
+            "rollback must restore the prior sidecar bytes exactly"
+        );
+        assert_eq!(
+            recorded_visibility_sets(&repo).len(),
+            sets_before,
+            "the rolled-back commit must add no audit entry"
+        );
+    }
+
+    #[test]
+    fn mount_commit_failure_rewinds_visibility_binding() {
+        // Invariant 2 — mount-path rollback parity. A non-public default binds a
+        // sidecar BEFORE the snapshot batch commits; if the commit fails the
+        // staged sidecar must be rewound so no orphaned non-public sidecar is
+        // left for a state whose snapshot batch never committed. Driven through
+        // the fold-and-rewind chokepoint with a deterministic commit fault.
+        let (_dir, repo) = repo_with_default("\"Internal\"");
+        let state = ChangeId::from_bytes([88u8; 16]);
+        assert!(
+            !repo.has_visibility_for_state(&state).expect("has visibility"),
+            "the state starts public-by-absence"
+        );
+
+        let err = with_visibility_commit_fault(VisibilityCommitFault::SnapshotCommit, || {
+            repo.commit_snapshot_atomic_with_capture_visibility(&state, None, None, false)
+        })
+        .expect_err("the injected snapshot-commit failure must surface");
+        assert!(
+            format!("{err:#}").contains("injected snapshot-commit failure"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            !repo.state_visibility_path_for_state(&state).exists(),
+            "a failed snapshot commit must rewind the staged visibility sidecar — no orphan"
+        );
+        assert!(
+            !repo.has_visibility_for_state(&state).expect("has visibility"),
+            "the state must read public-by-absence again after the rewind"
+        );
+    }
+
+    #[test]
+    fn promote_rejects_more_restrictive_target() {
+        // Invariant 4 — promote monotonicity. `promote` may only OPEN: the target
+        // must be strictly less restrictive than the current effective tier. A
+        // narrowing or lateral (same-rank) change is rejected with a clear error
+        // and must go through `set`.
+        let (_dir, repo) = fresh_repo();
+        let state = ChangeId::from_bytes([90u8; 16]);
+
+        // Seed a restricted (most-restrictive) record.
+        repo.commit_state_visibility(
+            sample_record(
+                state,
+                VisibilityTier::Restricted {
+                    scope_label: "embargo".into(),
+                },
+            ),
+            VisibilityCommitKind::Set,
+        )
+        .expect("seed restricted")
+        .expect("a set always commits");
+
+        // Opening promote (restricted -> internal) succeeds.
+        repo.commit_state_visibility(
+            sample_record(state, VisibilityTier::Internal),
+            VisibilityCommitKind::Promote,
+        )
+        .expect("opening promote succeeds")
+        .expect("a valid promote commits");
+        assert_eq!(
+            repo.get_state_visibility_for_state(&state)
+                .expect("read")
+                .latest()
+                .expect("a record")
+                .tier,
+            VisibilityTier::Internal,
+            "the opening promote is the effective tier"
+        );
+
+        // Narrowing promote (internal -> restricted) is rejected — and writes
+        // nothing.
+        let bytes_before = repo
+            .get_state_visibility_bytes_for_state(&state)
+            .expect("read before rejected promote");
+        let err = repo
+            .commit_state_visibility(
+                sample_record(
+                    state,
+                    VisibilityTier::Restricted {
+                        scope_label: "embargo".into(),
+                    },
+                ),
+                VisibilityCommitKind::Promote,
+            )
+            .expect_err("a narrowing promote must be rejected");
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("strictly less restrictive"),
+            "the rejection must explain the monotonicity rule: {chain}"
+        );
+        assert_eq!(
+            bytes_before,
+            repo.get_state_visibility_bytes_for_state(&state)
+                .expect("read after rejected promote"),
+            "a rejected promote must not mutate the sidecar"
+        );
+
+        // Lateral promote (same rank, different team label) is also rejected.
+        repo.commit_state_visibility(
+            sample_record(
+                state,
+                VisibilityTier::TeamScoped {
+                    team_id: "infra".into(),
+                },
+            ),
+            VisibilityCommitKind::Set,
+        )
+        .expect("set team-scoped")
+        .expect("a set always commits");
+        let err = repo
+            .commit_state_visibility(
+                sample_record(
+                    state,
+                    VisibilityTier::TeamScoped {
+                        team_id: "security".into(),
+                    },
+                ),
+                VisibilityCommitKind::Promote,
+            )
+            .expect_err("a lateral (same-rank) promote must be rejected");
+        assert!(
+            format!("{err:#}").contains("strictly less restrictive"),
+            "unexpected error: {err:#}"
         );
     }
 }

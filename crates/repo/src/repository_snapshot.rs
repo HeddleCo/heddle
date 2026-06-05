@@ -797,25 +797,28 @@ impl Repository {
 
         // Fold the automatic capture-time default-visibility binding into the
         // merge's own batch (heddle#317 / PR #529 P1) when the in-progress-merge
-        // capture branch asked for it. That caller holds the snapshot write lock,
-        // so the sidecar write runs lock-held.
-        let extra = if fold_default_visibility {
-            self.stage_default_visibility_binding(&state.change_id, true)
-                .map_err(|e| HeddleError::Io(std::io::Error::other(format!("{e:#}"))))?
-                .map(|binding| binding.record)
-                .into_iter()
-                .collect()
+        // capture branch asked for it, routing through the fold-and-rewind
+        // chokepoint so the staged sidecar is rewound if the commit fails
+        // (invariant 2). That caller holds the snapshot write lock, so the
+        // sidecar write runs lock-held (`lock_held = true`). Direct merge callers
+        // (`merge` verb, thread refresh, signing tests) pass
+        // `fold_default_visibility = false` and keep their no-auto-binding
+        // behavior — a plain record-first commit (heddle#354 r8).
+        if fold_default_visibility {
+            self.commit_snapshot_atomic_with_capture_visibility(
+                &state.change_id,
+                Some(first_parent),
+                thread.as_ref(),
+                true,
+            )?;
         } else {
-            Vec::new()
-        };
-
-        // Record-first through the write chokepoint (heddle#354 r8).
-        self.commit_snapshot_atomic_with_records(
-            &state.change_id,
-            Some(first_parent),
-            thread.as_ref(),
-            extra,
-        )?;
+            self.commit_snapshot_atomic_with_records(
+                &state.change_id,
+                Some(first_parent),
+                thread.as_ref(),
+                Vec::new(),
+            )?;
+        }
 
         Ok(state)
     }
