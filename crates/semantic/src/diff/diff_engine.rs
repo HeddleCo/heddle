@@ -388,6 +388,97 @@ mod tests {
     }
 
     #[test]
+    fn over_budget_tail_degrades_to_file_level_not_dropped() {
+        // Five modified files, ~200 bytes each. The 350-byte budget is crossed
+        // while loading f1, so f2..f4 are the over-budget tail: they must NOT be
+        // loaded, but must STILL appear in `result.changes` as conservative
+        // file-level fallback entries (classification None) — not omitted.
+        let body = "a".repeat(100);
+        let file_changes = FileChangeSet::from(vec![
+            ("f0.rs".to_string(), DiffKind::Modified),
+            ("f1.rs".to_string(), DiffKind::Modified),
+            ("f2.rs".to_string(), DiffKind::Modified),
+            ("f3.rs".to_string(), DiffKind::Modified),
+            ("f4.rs".to_string(), DiffKind::Modified),
+        ]);
+        let cache = SemanticParseCache::default();
+        let options = SemanticDiffOptions {
+            budget: SemanticBudget {
+                max_total_bytes: 350,
+                ..SemanticBudget::default()
+            },
+            ..SemanticDiffOptions::default()
+        };
+
+        let old_loads = Cell::new(0usize);
+        let new_loads = Cell::new(0usize);
+
+        let engine = SemanticEngine::new(
+            file_changes,
+            |_path| {
+                old_loads.set(old_loads.get() + 1);
+                Ok(Some(body.clone()))
+            },
+            |_path| {
+                new_loads.set(new_loads.get() + 1);
+                Ok(Some(body.clone()))
+            },
+            &options,
+            &cache,
+        );
+
+        let result = engine.full().expect("semantic diff should succeed");
+
+        // Every changed file is represented, including the over-budget tail.
+        for name in ["f0.rs", "f1.rs", "f2.rs", "f3.rs", "f4.rs"] {
+            assert!(
+                result.changes.iter().any(|change| matches!(
+                    change,
+                    objects::object::SemanticChange::FileModified { path, .. }
+                        if path == Path::new(name)
+                )),
+                "changed file {name} must appear in result.changes (not dropped): {:?}",
+                result.changes
+            );
+        }
+
+        // The over-budget tail degrades to file-level fallback (classification
+        // None), while the loaded prefix carries semantic detail (Some).
+        let classification_of = |name: &str| {
+            result.changes.iter().find_map(|change| match change {
+                objects::object::SemanticChange::FileModified {
+                    path,
+                    classification,
+                    ..
+                } if path == Path::new(name) => Some(classification.is_some()),
+                _ => None,
+            })
+        };
+        assert_eq!(classification_of("f0.rs"), Some(true), "loaded prefix keeps detail");
+        assert_eq!(classification_of("f1.rs"), Some(true), "loaded prefix keeps detail");
+        for name in ["f2.rs", "f3.rs", "f4.rs"] {
+            assert_eq!(
+                classification_of(name),
+                Some(false),
+                "over-budget tail {name} must be conservative file-level fallback"
+            );
+        }
+
+        // The tail's content was never loaded — only the prefix + tipping file.
+        assert_eq!(old_loads.get(), 2, "tail files must not be loaded");
+        assert_eq!(new_loads.get(), 2, "tail files must not be loaded");
+
+        assert!(
+            result
+                .fallback_reasons
+                .iter()
+                .any(|r| matches!(r, SemanticFallbackReason::TotalByteBudgetExceeded { .. })),
+            "byte-budget fallback reason must still be recorded: {:?}",
+            result.fallback_reasons
+        );
+    }
+
+    #[test]
     fn pure_function_body_diff_does_not_load_dependency_manifest() {
         let file_changes = FileChangeSet::from(vec![("lib.rs".to_string(), DiffKind::Modified)]);
         let cache = SemanticParseCache::default();
