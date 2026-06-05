@@ -44,6 +44,7 @@ mod thread_stack;
 mod thread_storage;
 mod worktree_ignore;
 pub mod worktree_index;
+pub mod visibility;
 mod worktree_state;
 mod worktree_status_options;
 
@@ -77,6 +78,10 @@ pub use repository::{
     is_synthetic_root,
 };
 pub use repository_redaction::{PurgeOutcome, RemoveRedactionOutcome};
+pub use visibility::{
+    AudienceParseError, AudienceTier, ScopeDropCounts, filter_for_audience,
+    filter_for_audience_with_drops,
+};
 pub use session_storage::SessionManager;
 pub use snapshot_metadata::{
     ABSENT_CONFIDENCE_DISPLAY, ThreadMetadataRefresh, classify_impact_categories,

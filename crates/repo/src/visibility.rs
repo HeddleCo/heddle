@@ -295,6 +295,49 @@ mod tests {
     }
 
     #[test]
+    fn private_visible_only_to_matching_restricted_audience() {
+        let vis = VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        };
+        // The one authorized scope sees it.
+        assert!(visible(&vis, &AudienceTier::Restricted("sec-embargo".into())));
+        // A non-matching restricted label does not.
+        assert!(!visible(&vis, &AudienceTier::Restricted("legal".into())));
+    }
+
+    #[test]
+    fn private_is_hidden_even_from_the_all_seeing_internal_audience() {
+        // The whole point of Private over Restricted: the otherwise
+        // all-seeing Internal audience is denied. The Private arm MUST sit
+        // above the `(_, Internal) => true` arm.
+        let vis = VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        };
+        assert!(!visible(&vis, &AudienceTier::Internal));
+        assert!(!visible(&vis, &AudienceTier::Public));
+        assert!(!visible(&vis, &AudienceTier::Team("infra".into())));
+    }
+
+    #[test]
+    fn private_drops_are_counted_and_internal_audience_keeps_restricted() {
+        let anns = vec![
+            ann("public", VisibilityTier::Public),
+            ann(
+                "private",
+                VisibilityTier::Private {
+                    scope_label: "sec-embargo".into(),
+                },
+            ),
+        ];
+        // Even the all-seeing Internal audience drops the Private annotation.
+        let (kept, drops) = filter_for_audience_with_drops(&anns, &AudienceTier::Internal);
+        let ids: Vec<&str> = kept.iter().map(|a| a.annotation_id.as_str()).collect();
+        assert_eq!(ids, vec!["public"]);
+        assert_eq!(drops.private, 1);
+        assert_eq!(drops.total(), 1);
+    }
+
+    #[test]
     fn parse_audience_strings() {
         assert_eq!(
             "internal".parse::<AudienceTier>().unwrap(),
