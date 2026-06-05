@@ -75,8 +75,9 @@ fn cmd_visibility_set(cli: &Cli, repo: &Repository, args: VisibilitySetArgs) -> 
         embargo_until: None,
         declarer: declarer.clone(),
         // Placeholder: `commit_state_visibility` (re)stamps `declared_at` UNDER
-        // the write lock so the selection key orders with the commit, never a
-        // before-lock value. Read the authoritative timestamp back from the
+        // the write lock (audit/display only) and sets `supersedes` from the
+        // under-lock chain head — that pointer, not this timestamp, decides which
+        // record is effective. Read the authoritative values back from the
         // outcome below.
         declared_at: Utc::now(),
         signature: None,
@@ -131,8 +132,9 @@ fn cmd_visibility_promote(
         tier: tier.clone(),
         embargo_until: None,
         declarer: declarer.clone(),
-        // Placeholder: re-stamped under the write lock by
-        // `commit_state_visibility`; read back from the outcome below.
+        // Placeholder: re-stamped (audit-only) and given its `supersedes` chain
+        // pointer under the write lock by `commit_state_visibility`; read back
+        // from the outcome below.
         declared_at: Utc::now(),
         signature: None,
         supersedes: None,
@@ -165,7 +167,7 @@ fn cmd_visibility_promote(
 fn cmd_visibility_show(cli: &Cli, repo: &Repository, args: VisibilityShowArgs) -> Result<()> {
     let state = resolve_state(repo, &args.state)?;
     let blob = repo.get_state_visibility_for_state(&state)?;
-    let effective = blob.latest();
+    let effective = blob.latest()?;
     let tier = effective
         .map(|r| r.tier.clone())
         .unwrap_or(VisibilityTier::Public);
@@ -241,7 +243,7 @@ fn cmd_visibility_list(cli: &Cli, repo: &Repository, _args: VisibilityListArgs) 
     for (state, blob) in &listing {
         // Only states with a non-public effective tier reach disk, but read
         // the effective record defensively rather than the raw first entry.
-        let Some(latest) = blob.latest() else {
+        let Some(latest) = blob.latest()? else {
             continue;
         };
         if latest.tier == VisibilityTier::Public {

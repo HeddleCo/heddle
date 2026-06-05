@@ -79,10 +79,10 @@ pub struct VisibilityCommitOutcome {
     pub put: PutVisibilityOutcome,
     pub superseded: Option<ContentHash>,
     /// The `declared_at` the commit stamped on the record **under the write
-    /// lock** (heddle#317 / PR #529 P1 final). Authoritative — callers must read
+    /// lock** (heddle#317 / PR #529 P1). Audit/display field — callers must read
     /// the effective timestamp from here, never from the value they passed in
-    /// (which the commit overwrites), so the displayed timestamp matches the
-    /// one that orders the record.
+    /// (which the commit overwrites). It does NOT decide which record is
+    /// effective; the supersede chain does (see [`StateVisibilityBlob::latest`]).
     pub declared_at: chrono::DateTime<Utc>,
 }
 
@@ -217,7 +217,7 @@ impl Repository {
         // Absence ≡ public: if the effective (latest) tier is public, drop the
         // state back to public-by-absence by removing the sidecar rather than
         // persisting a record that would classify a public state as non-public.
-        let effective_public = match existing.latest() {
+        let effective_public = match existing.latest()? {
             Some(latest) => latest.tier == VisibilityTier::Public,
             None => true,
         };
@@ -307,23 +307,33 @@ impl Repository {
             .with_context(|| "acquire repo write lock for state-visibility commit")?;
 
         let mut record = record;
-        // Stamp `declared_at` UNDER the write lock (heddle#317 / PR #529 P1
-        // final). The selection key `StateVisibilityBlob::latest` orders on must
-        // be established inside the serializing critical section, so for two
-        // overlapping local ops the timestamp order equals the commit / oplog-
-        // append order: the LAST committed record is the effective one. A value
-        // captured before the lock could let an earlier-started-but-later-
-        // committed op win `latest()` while appending its record last, so `show`
-        // would disagree with the oplog. (Cross-host records keep their
-        // originating host's `declared_at`; they arrive via
+        // Stamp `declared_at` UNDER the write lock (heddle#317 / PR #529 P1).
+        // This is now an AUDIT/DISPLAY field only — selection is by the
+        // supersede chain below, never wall-clock — but stamping it under the
+        // lock keeps the recorded timestamp monotonic with the commit / oplog-
+        // append order so the audit trail reads consistently. (Cross-host
+        // records keep their originating host's `declared_at`; they arrive via
         // `accept_wire_state_visibility`, which never reaches this stamp.)
         let declared_at = Utc::now();
         record.declared_at = declared_at;
+
+        // Read the current chain head UNDER the write lock and link the new
+        // record onto it: `record.supersedes` points at the head's content hash.
+        // This is what makes `StateVisibilityBlob::latest` resolve to the
+        // LAST-committed record by the content-intrinsic supersede chain rather
+        // than by wall-clock `declared_at` — for two locally-serialized commits
+        // the second reads the first as the head and supersedes it. BOTH `set`
+        // and `promote` link the chain; only `promote` additionally enforces the
+        // monotonicity rule and emits a `Promote` audit record (`set` keeps
+        // emitting a `Set` record — `superseded` stays `None` for it).
+        let existing = self.get_state_visibility_for_state(&record.state)?;
+        let prior_head = existing.latest()?;
+        let prior_head_id = prior_head.map(state_visibility_content_hash).transpose()?;
+
         let superseded = match kind {
             VisibilityCommitKind::Set => None,
             VisibilityCommitKind::Promote => {
-                let existing = self.get_state_visibility_for_state(&record.state)?;
-                let Some(latest) = existing.latest() else {
+                let Some(latest) = prior_head else {
                     // Public-by-absence: nothing to promote, no sidecar write,
                     // no oplog append.
                     return Ok(None);
@@ -335,7 +345,7 @@ impl Repository {
                 // cannot masquerade as a promotion; it must go through `set`. The
                 // ordering is defined by
                 // [`VisibilityTier::restrictiveness_rank`]. Checked under the
-                // write lock so the `latest` we validate against is the same one
+                // write lock so the `latest` we validate against is the same head
                 // the put supersedes — no torn read across a racing append.
                 if !record.tier.is_strictly_less_restrictive_than(&latest.tier) {
                     anyhow::bail!(
@@ -347,11 +357,16 @@ impl Repository {
                         record.tier.as_str(),
                     );
                 }
-                let superseded = state_visibility_content_hash(latest)?;
-                record.supersedes = Some(superseded);
-                Some(superseded)
+                // A promote supersedes the current head (which is `prior_head_id`,
+                // already computed under this lock).
+                prior_head_id
             }
         };
+
+        // Link the chain for BOTH kinds from the under-lock head read. The CLI
+        // passes `supersedes: None`; the authoritative pointer is established
+        // here so a `set` onto an existing record also extends the chain.
+        record.supersedes = prior_head_id;
 
         let state = record.state;
         let tier = record.tier.clone();
@@ -501,7 +516,7 @@ impl Repository {
     pub fn has_visibility_for_state(&self, state: &ChangeId) -> Result<bool> {
         Ok(self
             .get_state_visibility_for_state(state)?
-            .latest()
+            .latest()?
             .is_some_and(|r| r.tier != VisibilityTier::Public))
     }
 
@@ -627,13 +642,14 @@ impl Repository {
             tier: tier.clone(),
             embargo_until: None,
             declarer,
-            // Stamp `declared_at` UNDER the write lock (heddle#317 / PR #529 P1
-            // final) so the default binding's timestamp orders with its commit /
-            // oplog-append, never a before-lock value — the same invariant the
-            // explicit `set`/`promote` commit holds. A later `visibility set`
-            // accreting onto this binding then always carries a strictly later
-            // under-lock stamp, so `latest()` resolves to the last-committed
-            // record.
+            // Stamp `declared_at` UNDER the write lock (heddle#317 / PR #529 P1).
+            // Audit/display only — selection is by the supersede chain, not
+            // wall-clock — but stamping it under the lock keeps the recorded
+            // timestamp monotonic with commit order. This binding is the chain
+            // GENESIS: it writes only when the state is record-free (if-absent),
+            // so there is no prior head to supersede and `supersedes` is `None`.
+            // A later `visibility set` reads THIS record as the head under the
+            // lock and supersedes it, so `latest()` then resolves to the set.
             declared_at: Utc::now(),
             signature: None,
             supersedes: None,
@@ -797,16 +813,14 @@ pub(crate) fn take_visibility_commit_fault(fault: VisibilityCommitFault) -> bool
     })
 }
 
-/// Content hash of a single visibility record. The hash covers the
-/// rmp-encoded bytes of a one-element [`StateVisibilityBlob`], so the id
-/// format is stable across schema additions that extend the container.
+/// Content hash of a single visibility record. Delegates to the canonical
+/// [`StateVisibility::content_hash`] so the supersede-chain pointers this write
+/// path stores and the head resolution [`StateVisibilityBlob::latest`] performs
+/// are computed by exactly one hashing scheme — they can never drift apart.
 fn state_visibility_content_hash(record: &StateVisibility) -> Result<ContentHash> {
-    let single = StateVisibilityBlob::new(vec![record.clone()]);
-    let bytes = single
-        .encode()
-        .with_context(|| "encode single state-visibility for content addressing")?;
-    let digest = blake3::hash(&bytes);
-    Ok(ContentHash::from_bytes(*digest.as_bytes()))
+    record
+        .content_hash()
+        .with_context(|| "content-address single state-visibility record")
 }
 
 #[cfg(test)]
@@ -1010,8 +1024,12 @@ mod tests {
             .get_state_visibility_for_state(&state)
             .expect("read back");
         assert_eq!(stored.records.len(), 2);
-        // `latest` resolves the effective tier by declared_at.
-        assert_eq!(stored.latest().unwrap().tier, VisibilityTier::Internal);
+        // `latest` resolves the effective tier by the supersede chain: the
+        // second record supersedes the first, so it is the head.
+        assert_eq!(
+            stored.latest().unwrap().unwrap().tier,
+            VisibilityTier::Internal
+        );
     }
 
     #[test]
@@ -1220,7 +1238,7 @@ mod tests {
             "undoing A must leave exactly B's record — not delete B's sidecar"
         );
         assert_eq!(
-            restored.latest().unwrap().tier,
+            restored.latest().unwrap().unwrap().tier,
             VisibilityTier::TeamScoped {
                 team_id: "infra".into()
             },
@@ -1412,7 +1430,7 @@ mod tests {
             "undoing B must leave exactly A's record — not public-by-absence"
         );
         assert_eq!(
-            restored.latest().unwrap().tier,
+            restored.latest().unwrap().unwrap().tier,
             VisibilityTier::TeamScoped {
                 team_id: "infra".into()
             },
@@ -1422,17 +1440,15 @@ mod tests {
 
     #[test]
     fn last_committed_visibility_set_wins_under_concurrency() {
-        // The final-round invariant: `latest()` must resolve to the LAST-COMMITTED
-        // record, matching the oplog append order — never an earlier-started op
-        // that happens to carry a later mint-time `declared_at`. Two overlapping
-        // `visibility set`s on the same state: A is "minted" first (its passed-in
-        // declared_at is EARLIER) but B commits FIRST and A commits LAST. Because
-        // `commit_state_visibility` re-stamps `declared_at` UNDER the write lock,
-        // A — the last committed — gets the later timestamp, so `latest()` returns
-        // A's tier and A's oplog entry is appended last. Pre-fix the mint-time
-        // declared_at decided the winner, so B (later mint time) would have won
-        // `latest()` while A's record was appended last — `show` disagreeing with
-        // the oplog.
+        // The invariant: `latest()` must resolve to the LAST-COMMITTED record,
+        // matching the oplog append order. Two overlapping `visibility set`s on
+        // the same state: A is "minted" first (its passed-in declared_at is
+        // EARLIER) but B commits FIRST and A commits LAST. A, committed last,
+        // reads B as the under-lock head and supersedes it, so A is the chain
+        // head `latest()` returns — by the content-intrinsic supersede chain,
+        // not wall-clock. A's oplog entry is appended last too, so `show` and the
+        // oplog agree. (`declared_at` is still re-stamped under the lock for a
+        // monotonic audit trail, asserted below, but no longer decides the pick.)
         let (_dir, repo) = fresh_repo();
         let state = ChangeId::from_bytes([57u8; 16]);
 
@@ -1476,11 +1492,11 @@ mod tests {
             .expect("read back");
         assert_eq!(stored.records.len(), 2, "both records accreted");
         assert_eq!(
-            stored.latest().expect("a record").tier,
+            stored.latest().unwrap().expect("a record").tier,
             VisibilityTier::TeamScoped {
                 team_id: "infra".into()
             },
-            "the effective tier must be A's (last committed), not B's later-mint-time tier"
+            "the effective tier must be A's (last committed / chain head), not B's"
         );
 
         // And it matches the oplog append order: A's audit entry is appended LAST.
@@ -1493,6 +1509,71 @@ mod tests {
         assert_eq!(
             sets[1].record_id, a_out.put.id,
             "A's audit entry is appended last (committed last) — matching latest()"
+        );
+    }
+
+    #[test]
+    fn last_committed_wins_via_supersede_chain() {
+        // The WRITE path links the chain under the lock: the SECOND `visibility
+        // set` to commit reads the first as the under-lock head and supersedes
+        // it, so it becomes the chain head that `latest()` resolves to — by the
+        // content-hash chain, not wall-clock. A plain `set` (not just `promote`)
+        // now extends the chain; before the fix it left `supersedes` unset, so
+        // two `set`s both looked like heads and selection fell back to a
+        // wall-clock tie-break. (Pure wall-clock independence of `latest()` is
+        // pinned by the objects-crate `latest_ignores_wall_clock_declared_at`.)
+        let (_dir, repo) = fresh_repo();
+        let state = ChangeId::from_bytes([58u8; 16]);
+
+        let a_out = repo
+            .commit_state_visibility(
+                sample_record(state, VisibilityTier::Internal),
+                VisibilityCommitKind::Set,
+            )
+            .expect("commit A")
+            .expect("a set always commits");
+        let b_out = repo
+            .commit_state_visibility(
+                sample_record(
+                    state,
+                    VisibilityTier::TeamScoped {
+                        team_id: "infra".into(),
+                    },
+                ),
+                VisibilityCommitKind::Set,
+            )
+            .expect("commit B")
+            .expect("a set always commits");
+
+        let stored = repo
+            .get_state_visibility_for_state(&state)
+            .expect("read back");
+        assert_eq!(
+            stored.records.len(),
+            2,
+            "both set records accreted onto the state"
+        );
+
+        // B (last committed) supersedes the under-lock prior head A — proving a
+        // plain `set` extends the chain from the locked read.
+        let b_record = stored
+            .records
+            .iter()
+            .find(|r| state_visibility_content_hash(r).expect("hash") == b_out.put.id)
+            .expect("B's record is present in the blob");
+        assert_eq!(
+            b_record.supersedes,
+            Some(a_out.put.id),
+            "a `set` committed onto an existing record must supersede the under-lock head"
+        );
+
+        // `latest()` resolves to the chain head B — the last committed.
+        assert_eq!(
+            stored.latest().unwrap().expect("a record").tier,
+            VisibilityTier::TeamScoped {
+                team_id: "infra".into()
+            },
+            "the supersede-chain head (last-committed B) is the effective tier"
         );
     }
 
@@ -1701,6 +1782,7 @@ mod tests {
             repo.get_state_visibility_for_state(&state)
                 .expect("read")
                 .latest()
+                .unwrap()
                 .expect("a record")
                 .tier,
             VisibilityTier::Internal,
