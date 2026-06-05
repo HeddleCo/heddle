@@ -297,9 +297,28 @@ impl Repository {
     }
 
     /// Materialize a tree to the filesystem.
+    ///
+    /// Crate-private on purpose: this blob-keyed primitive carries no
+    /// `ChangeId`/audience, so it cannot apply the visibility gate. External
+    /// callers serving a *named committed state* to a checkout must go through
+    /// [`Repository::checkout_state_gated`] (gated); callers applying a
+    /// *locally-computed* tree (a merge/cherry-pick result) use
+    /// [`Repository::materialize_computed_tree`]. Keeping this one inside the
+    /// crate is what makes "every state checkout is gated" true by
+    /// construction rather than by remembering to add a check (#316 Finding 2).
     #[instrument(skip(self, tree), fields(dir = %dir.display(), entries = tree.len()))]
-    pub fn materialize_tree(&self, tree: &Tree, dir: &Path) -> Result<()> {
+    pub(crate) fn materialize_tree(&self, tree: &Tree, dir: &Path) -> Result<()> {
         self.materialize_tree_seeded(tree, dir).map(|_| ())
+    }
+
+    /// Materialize a *locally-computed* tree to `dir` — a merge or cherry-pick
+    /// result that is not a single named committed state and so carries no
+    /// audience to gate against. The operator already holds every byte the
+    /// computation combined; this is a working-tree write, not a serve to an
+    /// audience. For serving a named state to a checkout, use
+    /// [`Repository::checkout_state_gated`] instead.
+    pub fn materialize_computed_tree(&self, tree: &Tree, dir: &Path) -> Result<()> {
+        self.materialize_tree(tree, dir)
     }
 
     pub(crate) fn materialize_tree_seeded(

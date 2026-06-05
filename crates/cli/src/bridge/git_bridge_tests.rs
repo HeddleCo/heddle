@@ -2879,3 +2879,157 @@ fn export_lags_public_branch_to_frontier_emitting_absence_for_embargoed_tip() {
         "public branch must lag to the visibility frontier (A), not the embargoed tip"
     );
 }
+
+/// #316 / PR #528 Finding 1: a commit exported while PUBLIC, then later marked
+/// `Private`, must NOT keep being served on the next export. The stale
+/// ChangeId→OID mapping is rebuilt from the notes/sidecar every run, so the
+/// export must re-validate current visibility and retract the public branch
+/// down to the served frontier (here, the still-public base A).
+#[test]
+fn export_retracts_branch_when_public_commit_is_later_embargoed() {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    // Linear thread: public base A, then public tip B.
+    std::fs::write(heddle_temp.path().join("a.txt"), b"base\n").unwrap();
+    repo.snapshot(Some("base".into()), None).unwrap();
+    let state_a = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+    std::fs::write(heddle_temp.path().join("b.txt"), b"fix\n").unwrap();
+    repo.snapshot(Some("fix".into()), None).unwrap();
+    let state_b = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+
+    // Export run 1 — both public. The branch advertises the tip B.
+    let mut bridge = GitBridge::new(&repo);
+    let run1 = export_all(&mut bridge).expect("first export");
+    let oid_a = bridge.mapping.get_git(&state_a).expect("A minted");
+    let oid_b = bridge.mapping.get_git(&state_b).expect("B minted");
+    let run1_main = run1
+        .branches
+        .iter()
+        .find(|b| b.name == "main")
+        .expect("main exported");
+    assert_eq!(run1_main.tip, oid_b, "run 1 branch advertises the public tip B");
+
+    // B is embargoed AFTER it was already exported public.
+    repo.put_state_visibility(StateVisibility {
+        state: state_b,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Grace Hopper".into(),
+            email: "grace@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+
+    // Export run 2 — the stale B→OID mapping is rebuilt from notes, but the
+    // re-validation purge drops it and the branch is retracted to A.
+    let run2 = export_all(&mut bridge).expect("second export");
+    let run2_main = run2
+        .branches
+        .iter()
+        .find(|b| b.name == "main")
+        .expect("main re-exported");
+    assert_eq!(
+        run2_main.tip, oid_a,
+        "run 2 must lag the public branch to A, retracting the now-embargoed B"
+    );
+    assert!(
+        bridge.mapping.get_git(&state_b).is_none(),
+        "the now-Private B must be purged from the served mapping"
+    );
+
+    // The mirror ref itself no longer serves B.
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    let mut main_ref = mirror
+        .find_reference("refs/heads/main")
+        .expect("main ref present");
+    let tip = main_ref.peel_to_id().unwrap().detach();
+    assert_eq!(tip, oid_a, "refs/heads/main must point at A after retraction");
+    assert_ne!(tip, oid_b, "refs/heads/main must not keep serving embargoed B");
+}
+
+/// #316 / PR #528 Finding 1 (root case): when the WHOLE line is embargoed to
+/// its root after a prior public export, the stale public branch must be
+/// deleted, not left pointing at the now-embargoed commit.
+#[test]
+fn export_deletes_branch_when_whole_line_is_later_embargoed() {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    // A single public state on main.
+    std::fs::write(heddle_temp.path().join("a.txt"), b"only\n").unwrap();
+    repo.snapshot(Some("only".into()), None).unwrap();
+    let state_a = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+
+    let mut bridge = GitBridge::new(&repo);
+    export_all(&mut bridge).expect("first export");
+    assert!(
+        bridge.mapping.get_git(&state_a).is_some(),
+        "A minted while public"
+    );
+
+    // Embargo EVERY state on the line — including the seeded root — so the
+    // whole line is embargoed to its root and no served ancestor remains.
+    for state in repo.store().list_states().unwrap() {
+        repo.put_state_visibility(StateVisibility {
+            state,
+            tier: VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+            embargo_until: None,
+            declarer: Principal {
+                name: "Grace Hopper".into(),
+                email: "grace@example.com".into(),
+            },
+            declared_at: Utc::now(),
+            signature: None,
+            supersedes: None,
+        })
+        .unwrap();
+    }
+
+    let run2 = export_all(&mut bridge).expect("second export");
+    assert!(
+        run2.branches.iter().all(|b| b.name != "main"),
+        "main must not be advertised once the whole line is embargoed"
+    );
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    assert!(
+        mirror.find_reference("refs/heads/main").is_err(),
+        "the stale public branch must be deleted, not left serving the embargoed commit"
+    );
+}

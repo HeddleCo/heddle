@@ -505,6 +505,23 @@ impl SyncMapping {
         self.heddle_to_git.contains_key(change_id)
     }
 
+    /// Drop the mapping for `change_id`, clearing both directions and any
+    /// lossy-import entries for the now-unmapped Git object. Returns the Git
+    /// OID that was mapped, if any.
+    ///
+    /// The export visibility purge calls this to remove a state whose
+    /// effective tier is no longer served by the export audience. Without it,
+    /// a stale ChangeId→OID mapping (minted while the state was public, kept
+    /// alive by the notes/sidecar rebuild on the next export) makes the
+    /// frontier walk and the tag/note sync treat a now-embargoed commit as
+    /// served — leaking it via `refs/heads/<thread>` or a tag.
+    pub(crate) fn remove(&mut self, change_id: &ChangeId) -> Option<ObjectId> {
+        let git_oid = self.heddle_to_git.remove(change_id)?;
+        self.git_to_heddle.remove(&git_oid);
+        self.git_lossy_entries.remove(&git_oid);
+        Some(git_oid)
+    }
+
     /// Check if a mapping exists for a Git object id.
     pub fn has_git(&self, git_oid: ObjectId) -> bool {
         self.git_to_heddle.contains_key(&git_oid)

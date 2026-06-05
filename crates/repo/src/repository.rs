@@ -99,7 +99,7 @@ pub use repository_maintenance::{
 pub use repository_materialization::WarmCanonicalStoreStats;
 pub use repository_partial_fetch::MissingBlob;
 pub use repository_snapshot::{SnapshotExecution, SnapshotProfile};
-pub use repository_thread_materialize::ThreadCaptureOutcome;
+pub use repository_thread_materialize::{CheckoutMaterialization, ThreadCaptureOutcome};
 pub use repository_tree::{TreeBuildProfile, WorktreeCompareProfile};
 pub use repository_worktree_status::{UntrackedSet, UntrackedSubtree, WorktreeStatusDetailed};
 use serde::{Deserialize, Serialize};

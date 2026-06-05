@@ -5,6 +5,7 @@ use objects::store::ObjectStore;
 use std::collections::HashSet;
 
 use gix::bstr::ByteSlice;
+use gix::refs::transaction::PreviousValue;
 use objects::{
     error::HeddleError,
     object::{ChangeId, ContentHash, FileMode, ThreadName},
@@ -14,8 +15,9 @@ use repo::{AudienceTier, Repository as HeddleRepository, visible};
 use crate::bridge::{
     git_core::{
         GitBridge, GitBridgeError, GitResult, LocalGitIdentity, SyncMapping,
-        count_exported_commits, git_config_identity_with_global_fallback, git_err,
-        principal_is_default_unknown,
+        count_exported_commits, delete_reference_if_present,
+        git_config_identity_with_global_fallback, git_err, principal_is_default_unknown,
+        set_reference,
     },
     git_notes,
     git_sync::{sync_marker_to_tag, sync_track_to_branch},
@@ -231,6 +233,23 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     bridge.mapping.retain_git_objects(&repo);
     bridge.seed_git_checkpoint_mappings_from_checkout(&repo)?;
 
+    // Re-validate the served set against CURRENT visibility before anything
+    // treats a mapping as "already served". A state minted while public in a
+    // prior export can be marked under-tier later; `build_existing_mapping`
+    // rebuilds its stale ChangeId→OID mapping from the notes/sidecar every run,
+    // so without this purge the frontier walk, the note re-write, and the tag
+    // sync would all keep serving the now-embargoed commit. Purging is
+    // downward-closed: a still-visible state whose ancestor is embargoed is
+    // withheld too (its Git commit chains to the embargoed one). After this,
+    // `mapping` == the served set, exactly what `frontier_git_oid` assumes.
+    let embargoed_oids = purge_unserved_mappings(
+        bridge.heddle_repo,
+        &mut bridge.mapping,
+        &sorted_states,
+        &reachable,
+        &audience,
+    )?;
+
     // Git OIDs minted during this run. Used below to partition the copied
     // ref set into newly-written vs already-mapped — so the "newly" count
     // is a subset of the same walk that produces the total, never a
@@ -339,33 +358,72 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         // tip itself. An embargoed tip — or a tip descended from an embargoed
         // commit — is absent from the public branch; the branch stops at the
         // last commit whose entire ancestry is visible to this audience.
-        // (Tags and `refs/notes/heddle` need no separate gate: a withheld
-        // state is never minted, so it has no mapped OID for a tag to name or
-        // a note to annotate.)
-        let Some(git_oid) = frontier_git_oid(bridge.heddle_repo, &bridge.mapping, tip)? else {
-            // The whole line is embargoed to its root — emit absence.
-            continue;
-        };
-        sync_track_to_branch(&repo, &track_name, git_oid)?;
-        stats.threads_synced += 1;
-        stats.branches.push(ExportedRef {
-            name: track_name.clone(),
-            tip: git_oid,
-        });
+        let branch_ref = format!("refs/heads/{track_name}");
+        let existing = branch_tip_oid(&repo, &branch_ref);
+        // A prior export may have advertised this branch at a commit that has
+        // since been embargoed (it is now in `embargoed_oids`). Lagging the
+        // branch down to the served frontier is then a deliberate
+        // non-fast-forward rewind — distinct from the divergence the
+        // fast-forward guard exists to catch, so we force it. When the branch
+        // tip is NOT one of ours-now-embargoed we keep the FF guard.
+        let retracting = existing.is_some_and(|oid| embargoed_oids.contains(&oid));
+        match frontier_git_oid(bridge.heddle_repo, &bridge.mapping, tip)? {
+            Some(git_oid) => {
+                if retracting {
+                    set_reference(
+                        &repo,
+                        &branch_ref,
+                        git_oid,
+                        PreviousValue::Any,
+                        "heddle: retract embargoed thread frontier",
+                    )?;
+                } else {
+                    sync_track_to_branch(&repo, &track_name, git_oid)?;
+                }
+                stats.threads_synced += 1;
+                stats.branches.push(ExportedRef {
+                    name: track_name.clone(),
+                    tip: git_oid,
+                });
+            }
+            None => {
+                // The whole line is embargoed to its root. If a prior export
+                // left a public branch serving a now-embargoed commit, retract
+                // it; otherwise emit absence.
+                if retracting {
+                    delete_reference_if_present(&repo, &branch_ref)?;
+                }
+            }
+        }
     }
 
     if thread.is_none() {
         let markers = bridge.heddle_repo.refs().list_markers()?;
         for marker_name in markers {
-            if let Some(state_id) = bridge.heddle_repo.refs().get_marker(&marker_name)?
-                && let Some(git_oid) = bridge.mapping.get_git(&state_id)
-            {
-                sync_marker_to_tag(&repo, &marker_name, git_oid)?;
-                stats.markers_synced += 1;
-                stats.tags.push(ExportedRef {
-                    name: marker_name.to_string(),
-                    tip: git_oid,
-                });
+            let Some(state_id) = bridge.heddle_repo.refs().get_marker(&marker_name)? else {
+                continue;
+            };
+            match bridge.mapping.get_git(&state_id) {
+                Some(git_oid) => {
+                    sync_marker_to_tag(&repo, &marker_name, git_oid)?;
+                    stats.markers_synced += 1;
+                    stats.tags.push(ExportedRef {
+                        name: marker_name.to_string(),
+                        tip: git_oid,
+                    });
+                }
+                None => {
+                    // The marker's state is no longer served (embargoed, or
+                    // withheld for a withheld ancestor). A tag is a
+                    // ref-publishing site just like a branch: retract one left
+                    // pointing at a now-embargoed commit from a prior export.
+                    let tag_ref = format!("refs/tags/{marker_name}");
+                    let stale =
+                        branch_tip_oid(&repo, &tag_ref).is_some_and(|oid| embargoed_oids.contains(&oid));
+                    if stale {
+                        delete_reference_if_present(&repo, &tag_ref)?;
+                    }
+                }
             }
         }
     }
@@ -407,12 +465,62 @@ fn is_remote_tracking_thread_name(thread: &str, remote_names: &HashSet<String>) 
     !branch.is_empty() && remote_names.contains(remote)
 }
 
+/// Purge from `mapping` every reachable state whose effective visibility is no
+/// longer served by `audience`, and return the Git OIDs that were dropped so
+/// the caller can retract any ref still pointing at them.
+///
+/// A state can be minted while public and only later marked under-tier; its
+/// stale ChangeId→OID mapping is rebuilt from the notes/sidecar on every
+/// export, so the served set must be re-derived against CURRENT visibility
+/// here rather than trusted from the mapping. The purge is downward-closed: a
+/// still-visible state is unserved if any reachable ancestor is unserved,
+/// because its minted Git commit chains to the ancestor's (now-embargoed)
+/// commit. `sorted_states` is topological (parents before children), so a
+/// parent's served-ness is decided before its child is examined.
+fn purge_unserved_mappings(
+    heddle_repo: &HeddleRepository,
+    mapping: &mut SyncMapping,
+    sorted_states: &[ChangeId],
+    reachable: &HashSet<ChangeId>,
+    audience: &AudienceTier,
+) -> GitResult<HashSet<gix::hash::ObjectId>> {
+    let mut served: HashSet<ChangeId> = HashSet::new();
+    let mut purged: HashSet<gix::hash::ObjectId> = HashSet::new();
+    for state_id in sorted_states {
+        let tier = heddle_repo.effective_visibility_tier(state_id).map_err(|e| {
+            GitBridgeError::Git(format!("resolve visibility for {state_id}: {e:#}"))
+        })?;
+        // A parent outside `reachable` is a shallow boundary (public-by-absence,
+        // treated as served); a reachable parent must itself be served.
+        let parents_served = match heddle_repo.store().get_state(state_id)? {
+            Some(state) => state
+                .parents
+                .iter()
+                .all(|p| !reachable.contains(p) || served.contains(p)),
+            None => true,
+        };
+        if visible(&tier, audience) && parents_served {
+            served.insert(*state_id);
+        } else if let Some(oid) = mapping.remove(state_id) {
+            purged.insert(oid);
+        }
+    }
+    Ok(purged)
+}
+
+/// Resolve `ref_name` to its tip commit OID in the mirror, or `None` when the
+/// ref is absent or unpeelable.
+fn branch_tip_oid(repo: &gix::Repository, ref_name: &str) -> Option<gix::hash::ObjectId> {
+    let mut reference = repo.find_reference(ref_name).ok()?;
+    reference.peel_to_id().ok().map(|id| id.detach())
+}
+
 /// The Git OID the public branch should lag to for a thread whose raw tip is
 /// `tip`: the maximal **served** ancestor-or-self of `tip`. A state is served
-/// iff it was minted (present in the mapping) — and minting is downward-closed
-/// (`export_scoped` withholds any state with a withheld ancestor), so the
-/// mapped set is exactly the served set. Returns `None` when no ancestor of
-/// `tip` is served (the whole line is embargoed to its root → absence).
+/// iff it is present in the mapping — `purge_unserved_mappings` runs first to
+/// drop any mapped-but-now-embargoed state (and its descendants), so the mapped
+/// set is exactly the served set. Returns `None` when no ancestor of `tip` is
+/// served (the whole line is embargoed to its root → absence).
 fn frontier_git_oid(
     heddle_repo: &HeddleRepository,
     mapping: &SyncMapping,

@@ -37,6 +37,19 @@ use objects::object::VisibilityTier;
 /// checked-out state's tier is not visible to the operator's audience.
 const COURTESY_STUB_FILENAME: &str = "HEDDLE-EMBARGO.txt";
 
+/// Outcome of the visibility-gated checkout chokepoint
+/// [`Repository::checkout_state_gated`].
+#[derive(Clone, Debug)]
+pub enum CheckoutMaterialization {
+    /// The state was visible to the audience: its real tree was materialized
+    /// to `dest`. Carries the resolved tree so callers can populate a manifest
+    /// without a second store lookup.
+    Materialized { tree: Tree },
+    /// The state was under-tier for the audience: the operator-local courtesy
+    /// stub was written to `dest` and the tracked bytes withheld.
+    Withheld { tier: VisibilityTier },
+}
+
 /// Outcome of [`Repository::capture_thread_from_disk`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThreadCaptureOutcome {
@@ -84,79 +97,93 @@ impl Repository {
             .get_state(&change_id)?
             .ok_or_else(|| HeddleError::Config(format!("state for {thread} missing")))?;
 
-        // Operator-local courtesy stub. The visibility decision is made HERE,
-        // at the state walk where the `ChangeId` and the audience are both in
-        // scope — never down in the blob-keyed `materialize_tree`/`export_tree`
-        // (which carry no `ChangeId`/audience). When the checked-out state's
-        // tier is not visible to this audience, render a short placeholder
-        // instead of its tracked content. This is a working-tree courtesy on
-        // bytes the operator already holds, NOT a security boundary and NOT a
-        // public-mirror surface — the public mirror emits absence (spike §5.3).
-        let tier = self
-            .effective_visibility_tier(&change_id)
-            .map_err(|e| HeddleError::Config(format!("resolve visibility for {thread}: {e:#}")))?;
+        // Route through the single visibility-gated checkout chokepoint, which
+        // either materializes the real tree or writes the operator-local
+        // courtesy stub. The manifest is this method's own concern (it lives
+        // outside the checkout dir), so it is written here based on the gate
+        // outcome — not in the chokepoint, which `write_isolated_checkout` also
+        // calls without wanting a thread manifest.
+        match self.checkout_state_gated(&change_id, &state, dest, audience)? {
+            CheckoutMaterialization::Withheld { tier } => {
+                // Manifest reflects disk truth: no tracked files were
+                // materialized (the placeholder is untracked). `tree_hash`
+                // still names the real embargoed state's tree so the sidecar
+                // identifies which state this checkout stands in for.
+                let manifest =
+                    ThreadManifest::new(change_id, state.tree, canonical_worktree_path(dest));
+                write_manifest(self.heddle_dir(), thread, &manifest).map_err(HeddleError::Io)?;
+                debug!(
+                    thread = %thread,
+                    state_id = %change_id,
+                    tier = tier.as_str(),
+                    "thread checkout rendered courtesy stub (under-tier for audience)"
+                );
+                Ok(manifest)
+            }
+            CheckoutMaterialization::Materialized { tree } => {
+                let mut manifest =
+                    ThreadManifest::new(change_id, state.tree, canonical_worktree_path(dest));
+                populate_manifest_from_tree(self, &tree, dest, "", &mut manifest.files)?;
+                write_manifest(self.heddle_dir(), thread, &manifest).map_err(HeddleError::Io)?;
+                debug!(
+                    thread = %thread,
+                    state_id = %change_id,
+                    files = manifest.files.len(),
+                    "thread materialized"
+                );
+                Ok(manifest)
+            }
+        }
+    }
+
+    /// THE visibility-gated checkout chokepoint. Resolve `change_id`'s
+    /// effective tier against `audience` and either materialize its real tree
+    /// to `dest` (visible) or write the operator-local courtesy stub and
+    /// withhold the tracked bytes (under-tier).
+    ///
+    /// Every path that serves a *named committed state*'s content to a local
+    /// checkout MUST funnel through here — `materialize_thread` and the CLI's
+    /// `write_isolated_checkout` (`heddle start --path`) both do — so the
+    /// visibility gate cannot be bypassed by a caller reaching for the raw,
+    /// blob-keyed `materialize_tree`. The decision is made HERE, where the
+    /// `ChangeId` and the audience are both in scope; `materialize_tree`
+    /// carries neither and so cannot make it. `materialize_tree` stays the
+    /// primitive for *computed* trees (merge/cherry-pick results), which are
+    /// not a single named state and carry no audience.
+    ///
+    /// The courtesy stub is a working-tree convenience on bytes the operator
+    /// already holds — NOT a security boundary and NOT a public-mirror surface
+    /// (the public mirror emits absence, spike §5.3).
+    pub fn checkout_state_gated(
+        &self,
+        change_id: &ChangeId,
+        state: &State,
+        dest: &Path,
+        audience: &AudienceTier,
+    ) -> Result<CheckoutMaterialization> {
+        let tier = self.effective_visibility_tier(change_id).map_err(|e| {
+            HeddleError::Config(format!("resolve visibility for {change_id}: {e:#}"))
+        })?;
         if !visible(&tier, audience) {
-            return self.materialize_courtesy_stub(thread, dest, change_id, &state, &tier);
+            fs::create_dir_all(dest).map_err(HeddleError::Io)?;
+            let embargo_until = self
+                .effective_state_visibility(change_id)
+                .map_err(|e| {
+                    HeddleError::Config(format!("resolve visibility for {change_id}: {e:#}"))
+                })?
+                .and_then(|record| record.embargo_until);
+            let stub = courtesy_stub_text(&tier, embargo_until);
+            fs::write(dest.join(COURTESY_STUB_FILENAME), stub.as_bytes())
+                .map_err(HeddleError::Io)?;
+            return Ok(CheckoutMaterialization::Withheld { tier });
         }
 
         let tree = self
             .store()
             .get_tree(&state.tree)?
-            .ok_or_else(|| HeddleError::Config(format!("tree for {thread} missing")))?;
-
+            .ok_or_else(|| HeddleError::Config(format!("tree for {change_id} missing")))?;
         self.materialize_tree(&tree, dest)?;
-
-        let mut manifest =
-            ThreadManifest::new(change_id, state.tree, canonical_worktree_path(dest));
-        populate_manifest_from_tree(self, &tree, dest, "", &mut manifest.files)?;
-
-        write_manifest(self.heddle_dir(), thread, &manifest).map_err(HeddleError::Io)?;
-
-        debug!(
-            thread = %thread,
-            state_id = %change_id,
-            files = manifest.files.len(),
-            "thread materialized"
-        );
-        Ok(manifest)
-    }
-
-    /// Render the operator-local courtesy placeholder for a state whose tier
-    /// is not visible to the checkout audience. Writes a single short text
-    /// file naming the tier (and promotion date, if scheduled) in place of
-    /// the tracked content, and a manifest with no tracked files — the real
-    /// tree's bytes are intentionally withheld from this checkout. The
-    /// placeholder is a working-tree convenience for the holder; it never
-    /// travels (the public mirror emits absence, not a stub — spike §5.3).
-    fn materialize_courtesy_stub(
-        &self,
-        thread: &str,
-        dest: &Path,
-        change_id: ChangeId,
-        state: &State,
-        tier: &VisibilityTier,
-    ) -> Result<ThreadManifest> {
-        fs::create_dir_all(dest).map_err(HeddleError::Io)?;
-        let embargo_until = self
-            .effective_state_visibility(&change_id)
-            .map_err(|e| HeddleError::Config(format!("resolve visibility for {thread}: {e:#}")))?
-            .and_then(|record| record.embargo_until);
-        let stub = courtesy_stub_text(tier, embargo_until);
-        fs::write(dest.join(COURTESY_STUB_FILENAME), stub.as_bytes()).map_err(HeddleError::Io)?;
-
-        // Manifest reflects disk truth: no tracked files were materialized
-        // (the placeholder is untracked). `tree_hash` still names the real
-        // embargoed state's tree so the sidecar identifies which state this
-        // checkout stands in for.
-        let manifest = ThreadManifest::new(change_id, state.tree, canonical_worktree_path(dest));
-        write_manifest(self.heddle_dir(), thread, &manifest).map_err(HeddleError::Io)?;
-        debug!(
-            thread = %thread,
-            state_id = %change_id,
-            tier = tier.as_str(),
-            "thread checkout rendered courtesy stub (under-tier for audience)"
-        );
-        Ok(manifest)
+        Ok(CheckoutMaterialization::Materialized { tree })
     }
 
     /// Write the [`ThreadManifest`] sidecar for a worktree that's
