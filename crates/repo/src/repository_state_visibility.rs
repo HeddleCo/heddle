@@ -243,24 +243,34 @@ impl Repository {
         resolve_default_visibility(&ctx)
     }
 
-    /// Invariant A — immutable-at-capture (spike #266 §5.4).
+    /// Invariant A — immutable-at-creation (spike #266 §5.4).
     ///
-    /// Bind the inherited default tier to a brand-new state *at capture time*:
+    /// Bind the inherited default tier to a brand-new state *at creation time*:
     /// resolve the chain once, and persist any resolution more restrictive than
     /// public as the state's initial [`StateVisibility`] record (plus an
     /// `OpRecord::StateVisibilitySet` audit entry). A public resolution stays
     /// record-free (absence ≡ public). Resolving here — not at first serve —
     /// means a `[namespace]`/repo default that later drifts more-open cannot
-    /// retroactively expose an already-captured state.
+    /// retroactively expose an already-created state.
+    ///
+    /// This is the single decision site for default visibility. Every snapshot
+    /// creator funnels through the snapshot chokepoint
+    /// ([`snapshot_with_attribution_profiled`](Self::snapshot_with_attribution_profiled)
+    /// / [`snapshot_tree_with_attribution_profiled`](Self::snapshot_tree_with_attribution_profiled),
+    /// plus the mount capture path), so capture, cherry-pick, revert, and
+    /// daemon/mount captures all inherit the configured default by construction
+    /// rather than each call site re-binding (and one of them leaking when it
+    /// forgets to).
     ///
     /// Idempotent: a state that already carries a visibility record is left
     /// untouched, so a re-capture that mints the same `ChangeId` never
-    /// double-binds. Returns the new record's id when one was written.
+    /// double-binds, and a caller that explicitly set a tier before this runs is
+    /// respected. Returns the new record's id when one was written.
     ///
-    /// Must be called *outside* the snapshot write lock (the capture path holds
-    /// it across `snapshot_with_attribution_profiled`); this method takes the
-    /// repo write lock itself via [`Self::put_state_visibility`].
-    pub fn bind_capture_visibility(&self, state: &ChangeId) -> Result<Option<ContentHash>> {
+    /// Must be called *outside* the snapshot write lock (the chokepoint releases
+    /// it before binding); this method takes the repo write lock itself via
+    /// [`Self::put_state_visibility`].
+    pub fn bind_default_visibility(&self, state: &ChangeId) -> Result<Option<ContentHash>> {
         let tier = self.resolve_capture_default_visibility();
         if tier == VisibilityTier::Public {
             return Ok(None);

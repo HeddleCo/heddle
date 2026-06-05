@@ -506,8 +506,30 @@ impl Repository {
     }
 
     /// Create a snapshot with profiling details for the hot path.
-    #[instrument(skip(self, attribution), fields(intent = ?intent, confidence))]
+    ///
+    /// Snapshot chokepoint (heddle#317, PR #529): EVERY worktree-snapshot
+    /// creator — capture, cherry-pick, revert, retro — funnels through here, so
+    /// the configured default visibility tier is bound to the freshly created
+    /// state at this single site via [`bind_default_visibility`](Self::bind_default_visibility).
+    /// Binding here rather than per call site means no creator can leak a state
+    /// public when the repo default is non-public by forgetting to re-bind.
+    /// The bind runs after the locked body returns (and drops the write lock it
+    /// held), because the binding takes that same lock itself.
     pub fn snapshot_with_attribution_profiled(
+        &self,
+        intent: Option<String>,
+        confidence: Option<f32>,
+        attribution: Attribution,
+    ) -> Result<SnapshotExecution> {
+        let execution =
+            self.snapshot_with_attribution_profiled_locked(intent, confidence, attribution)?;
+        self.bind_default_visibility(&execution.state.change_id)
+            .map_err(|e| HeddleError::Io(std::io::Error::other(format!("{e:#}"))))?;
+        Ok(execution)
+    }
+
+    #[instrument(skip(self, attribution), fields(intent = ?intent, confidence))]
+    fn snapshot_with_attribution_profiled_locked(
         &self,
         intent: Option<String>,
         confidence: Option<f32>,
@@ -588,8 +610,26 @@ impl Repository {
     /// the worktree. Used by Git-overlay staged-index commits, where
     /// the desired snapshot is the Git index boundary and the worktree
     /// may intentionally still contain unstaged files.
-    #[instrument(skip(self, tree, attribution), fields(intent = ?intent, confidence))]
+    ///
+    /// Routes through the same default-visibility chokepoint as
+    /// [`snapshot_with_attribution_profiled`](Self::snapshot_with_attribution_profiled):
+    /// a Git-overlay capture must inherit the configured default tier too.
     pub fn snapshot_tree_with_attribution_profiled(
+        &self,
+        tree: Tree,
+        intent: Option<String>,
+        confidence: Option<f32>,
+        attribution: Attribution,
+    ) -> Result<SnapshotExecution> {
+        let execution = self
+            .snapshot_tree_with_attribution_profiled_locked(tree, intent, confidence, attribution)?;
+        self.bind_default_visibility(&execution.state.change_id)
+            .map_err(|e| HeddleError::Io(std::io::Error::other(format!("{e:#}"))))?;
+        Ok(execution)
+    }
+
+    #[instrument(skip(self, tree, attribution), fields(intent = ?intent, confidence))]
+    fn snapshot_tree_with_attribution_profiled_locked(
         &self,
         tree: Tree,
         intent: Option<String>,

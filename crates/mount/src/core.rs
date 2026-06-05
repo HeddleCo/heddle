@@ -3947,6 +3947,20 @@ impl ContentAddressedMount {
             .commit_snapshot_atomic(&change_id, Some(prev_head_change_id), Some(&served_thread))
             .map_err(MountError::Store)?;
 
+        // Invariant A (heddle#317): a mount-captured state is a freshly created
+        // state too, so it must inherit the configured default visibility tier
+        // through the same chokepoint binding the repo capture path uses. Runs
+        // after the atomic commit's write lock is released — the binding takes
+        // that lock itself. Public default is a no-op (absence ≡ public).
+        self.inner
+            .repo
+            .bind_default_visibility(&change_id)
+            .map_err(|e| {
+                MountError::Store(objects::error::HeddleError::Io(std::io::Error::other(
+                    format!("{e:#}"),
+                )))
+            })?;
+
         // Step 3b: refresh the active thread record's metadata
         // (changed paths, heavy-impact paths, freshness, etc).
         // Resolution is by the repo's execution-root path, so

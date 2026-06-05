@@ -50,6 +50,16 @@ fn capture_state(temp: &Path, message: &str) -> String {
         .to_string()
 }
 
+/// The change id of the current HEAD state (newest in the log).
+fn latest_state(temp: &Path) -> String {
+    let raw = heddle(&["--output", "json", "log", "--limit", "1"], Some(temp)).unwrap();
+    let value: Value = serde_json::from_str(&raw).unwrap();
+    value["states"][0]["change_id"]
+        .as_str()
+        .expect("log --output json should expose change_id")
+        .to_string()
+}
+
 fn show_json(temp: &Path, state: &str) -> Value {
     let raw = heddle(
         &["--output", "json", "visibility", "show", state],
@@ -87,6 +97,77 @@ fn invariant_a_captured_tier_unchanged_when_default_drifts_public() {
     );
     assert_eq!(after["label"], "embargo");
     assert_eq!(after["effective_public"], false);
+}
+
+#[test]
+fn capture_still_applies_default_visibility() {
+    // Capture funnels through the snapshot chokepoint where default visibility
+    // is now bound; a non-public default must still stamp the captured state.
+    let (temp, _) = init_and_capture("secret");
+    set_repo_default_visibility(temp.path(), "\"Internal\"");
+    let state = capture_state(temp.path(), "captured internal");
+
+    let show = show_json(temp.path(), &state);
+    assert_eq!(
+        show["tier"], "internal",
+        "capture must inherit the configured non-public default: {show}"
+    );
+    assert_eq!(show["effective_public"], false);
+}
+
+#[test]
+fn cherry_pick_state_gets_default_visibility() {
+    // PR #529 P1: the default-visibility binding was only on the `capture`
+    // call site, so cherry-pick created a state left public even under a
+    // non-public default. Now it funnels through the snapshot chokepoint.
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    fs::write(temp.path().join("note.txt"), b"base").unwrap();
+    heddle(&["capture", "-m", "first"], Some(temp.path())).expect("capture first");
+    let first = latest_state(temp.path());
+
+    fs::write(temp.path().join("note.txt"), b"modified").unwrap();
+    heddle(&["capture", "-m", "second"], Some(temp.path())).expect("capture second");
+
+    // Pin a restrictive default, then cherry-pick the earlier state. The new
+    // snapshot it commits must inherit the restricted tier — not stay public.
+    set_repo_default_visibility(temp.path(), "{ Restricted = { scope_label = \"embargo\" } }");
+    heddle(&["cherry-pick", &first], Some(temp.path())).expect("cherry-pick");
+
+    let new_state = latest_state(temp.path());
+    let show = show_json(temp.path(), &new_state);
+    assert_eq!(
+        show["tier"], "restricted",
+        "cherry-picked state must inherit the restricted default via the chokepoint: {show}"
+    );
+    assert_eq!(show["effective_public"], false);
+}
+
+#[test]
+fn revert_state_gets_default_visibility() {
+    // Sibling of the cherry-pick leak: a revert creates a new state too, and
+    // must inherit the configured non-public default through the chokepoint.
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    fs::write(temp.path().join("note.txt"), b"base").unwrap();
+    heddle(&["capture", "-m", "first"], Some(temp.path())).expect("capture first");
+
+    fs::write(temp.path().join("note.txt"), b"modified").unwrap();
+    heddle(&["capture", "-m", "second"], Some(temp.path())).expect("capture second");
+    let second = latest_state(temp.path());
+
+    set_repo_default_visibility(temp.path(), "\"Internal\"");
+    heddle(&["revert", &second], Some(temp.path())).expect("revert");
+
+    let new_state = latest_state(temp.path());
+    let show = show_json(temp.path(), &new_state);
+    assert_eq!(
+        show["tier"], "internal",
+        "reverted state must inherit the internal default via the chokepoint: {show}"
+    );
+    assert_eq!(show["effective_public"], false);
 }
 
 #[test]
