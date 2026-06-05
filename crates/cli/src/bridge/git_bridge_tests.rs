@@ -2970,6 +2970,98 @@ fn export_retracts_branch_when_public_commit_is_later_embargoed() {
     assert_ne!(tip, oid_b, "refs/heads/main must not keep serving embargoed B");
 }
 
+/// #316 / PR #528 r3 Finding 2: when a public commit is later embargoed, the
+/// purge drops its ChangeId→OID mapping AND its `refs/notes/heddle` entry must
+/// be retracted too. `collect_ref_updates` copies `refs/notes/*` to the mirror
+/// alongside branches and tags, so a note left for a withheld commit keeps
+/// publishing that commit's metadata (change_id, agent, status) even after the
+/// branch was retracted — a metadata leak. The note for a still-served commit
+/// must survive.
+#[test]
+fn export_retracts_note_for_retracted_commit() {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    // Linear thread: public base A, then public tip B.
+    std::fs::write(heddle_temp.path().join("a.txt"), b"base\n").unwrap();
+    repo.snapshot(Some("base".into()), None).unwrap();
+    let state_a = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+    std::fs::write(heddle_temp.path().join("b.txt"), b"fix\n").unwrap();
+    repo.snapshot(Some("fix".into()), None).unwrap();
+    let state_b = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+
+    // Export run 1 — both public. Notes get written for A and B.
+    let mut bridge = GitBridge::new(&repo);
+    export_all(&mut bridge).expect("first export");
+    let oid_a = bridge.mapping.get_git(&state_a).expect("A minted");
+    let oid_b = bridge.mapping.get_git(&state_b).expect("B minted");
+    {
+        let mirror = bridge.open_git_repo().expect("open mirror");
+        assert!(
+            crate::bridge::git_notes::read_note(&mirror, oid_a)
+                .unwrap()
+                .is_some(),
+            "A must carry a note after run 1"
+        );
+        assert!(
+            crate::bridge::git_notes::read_note(&mirror, oid_b)
+                .unwrap()
+                .is_some(),
+            "B must carry a note after run 1"
+        );
+    }
+
+    // B is embargoed AFTER it was already exported public.
+    repo.put_state_visibility(StateVisibility {
+        state: state_b,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Grace Hopper".into(),
+            email: "grace@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+
+    // Export run 2 — B is purged and its note must be retracted; A's note,
+    // still served, must remain.
+    export_all(&mut bridge).expect("second export");
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    assert!(
+        crate::bridge::git_notes::read_note(&mirror, oid_b)
+            .unwrap()
+            .is_none(),
+        "run 2 must retract the note for the now-embargoed B (no metadata leak)"
+    );
+    assert!(
+        crate::bridge::git_notes::read_note(&mirror, oid_a)
+            .unwrap()
+            .is_some(),
+        "A is still served — its note must survive the retraction"
+    );
+}
+
 /// #316 / PR #528 Finding 1 (root case): when the WHOLE line is embargoed to
 /// its root after a prior public export, the stale public branch must be
 /// deleted, not left pointing at the now-embargoed commit.

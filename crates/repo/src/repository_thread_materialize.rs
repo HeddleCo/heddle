@@ -35,7 +35,7 @@ use objects::object::VisibilityTier;
 
 /// Filename of the operator-local courtesy placeholder written when a
 /// checked-out state's tier is not visible to the operator's audience.
-const COURTESY_STUB_FILENAME: &str = "HEDDLE-EMBARGO.txt";
+pub(crate) const COURTESY_STUB_FILENAME: &str = "HEDDLE-EMBARGO.txt";
 
 /// Outcome of the visibility-gated checkout chokepoint
 /// [`Repository::checkout_state_gated`].
@@ -108,9 +108,13 @@ impl Repository {
                 // Manifest reflects disk truth: no tracked files were
                 // materialized (the placeholder is untracked). `tree_hash`
                 // still names the real embargoed state's tree so the sidecar
-                // identifies which state this checkout stands in for.
-                let manifest =
+                // identifies which state this checkout stands in for. The
+                // `withheld` flag marks this as a non-capturable checkout so a
+                // later `capture` can't pull the stub in (or wipe the withheld
+                // tree) — heddle#316.
+                let mut manifest =
                     ThreadManifest::new(change_id, state.tree, canonical_worktree_path(dest));
+                manifest.withheld = true;
                 write_manifest(self.heddle_dir(), thread, &manifest).map_err(HeddleError::Io)?;
                 debug!(
                     thread = %thread,
@@ -363,6 +367,20 @@ impl Repository {
 
         let existing_manifest =
             read_manifest(self.heddle_dir(), thread).map_err(HeddleError::Io)?;
+
+        // 0a. Withheld checkouts are non-capturable. A withheld checkout holds
+        //     only the operator-local courtesy stub (the tracked bytes were
+        //     withheld because the state's tier is not visible to the
+        //     materializing audience). Capturing it would either pull the stub
+        //     in as tracked content or — worse — build an empty tree (the stub
+        //     is ignored, see `ignore_patterns`) and commit it, wiping the
+        //     withheld state's real files. The operator cannot capture content
+        //     they were never served, so refuse with a no-op and leave the
+        //     thread head where it is (heddle#316).
+        if existing_manifest.as_ref().is_some_and(|m| m.withheld) {
+            debug!(thread = %thread, "thread capture skipped (withheld checkout)");
+            return Ok(ThreadCaptureOutcome::NoOp);
+        }
 
         // 0. Fast no-op via the stat-cache. If every file in the
         //    manifest still exists with the same `(inode, mtime,
@@ -1003,6 +1021,79 @@ mod tests {
         assert!(dest.join("secret.rs").exists());
         assert!(!dest.join(COURTESY_STUB_FILENAME).exists());
         assert!(manifest.files.contains_key("secret.rs"));
+    }
+
+    /// #316 / PR #528 r3 Finding 1: materializing an under-tier checkout writes
+    /// the courtesy stub and marks the manifest `withheld`. A subsequent
+    /// capture of that checkout must be a NO-OP — it must NOT pull the stub in
+    /// as tracked content, and (crucially) must NOT commit an empty tree that
+    /// wipes the withheld state's real files. The thread head stays put.
+    #[test]
+    fn capture_skips_embargo_courtesy_stub() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("secret.rs"), b"fn exploit() {}\n").unwrap();
+        repo.snapshot(Some("embargoed fix".into()), None).unwrap();
+        embargo_state_with_tier(
+            &repo,
+            VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+        );
+
+        let dest_holder = TempDir::new().unwrap();
+        let dest = dest_holder.path().join("out");
+        // Under-tier audience → only the stub lands; no real bytes, empty files.
+        let manifest = repo
+            .materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
+        assert!(
+            dest.join(COURTESY_STUB_FILENAME).exists(),
+            "stub must be written for the under-tier checkout"
+        );
+        assert!(manifest.files.is_empty(), "no tracked files in a stub checkout");
+        assert!(manifest.withheld, "manifest must mark the checkout withheld");
+
+        let head_before = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("head");
+
+        // Capture the withheld checkout.
+        let outcome = repo.capture_thread_from_disk("main", &dest).unwrap();
+        assert_eq!(
+            outcome,
+            ThreadCaptureOutcome::NoOp,
+            "a withheld checkout is non-capturable"
+        );
+
+        // Thread head must not have moved.
+        let head_after = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("head");
+        assert_eq!(
+            head_before, head_after,
+            "withheld capture must not advance the thread head"
+        );
+
+        // The thread's tree is still the real embargoed tree: it contains the
+        // withheld content and NOT the courtesy stub.
+        let head_state = repo.store().get_state(&head_after).unwrap().unwrap();
+        let tree = repo.store().get_tree(&head_state.tree).unwrap().unwrap();
+        assert!(
+            !tree
+                .entries()
+                .iter()
+                .any(|e| e.name == COURTESY_STUB_FILENAME),
+            "captured tree must never contain the courtesy stub"
+        );
+        assert!(
+            tree.entries().iter().any(|e| e.name == "secret.rs"),
+            "the withheld real content must remain intact in the thread"
+        );
     }
 
     /// `record_thread_manifest` should write a manifest sidecar that

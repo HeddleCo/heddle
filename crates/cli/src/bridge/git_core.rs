@@ -1175,7 +1175,22 @@ impl<'a> GitBridge<'a> {
                 .map_err(|_| GitBridgeError::CommitNotFound(record.git_commit.clone()))?;
 
             self.mapping.insert(change_id, git_oid);
-            if super::git_notes::read_note(mirror_repo, git_oid)?.is_none()
+            // Only publish a note for a state served to the public mirror.
+            // `collect_ref_updates` copies `refs/notes/*`, so writing a note for
+            // a now-embargoed checkpoint here would leak that commit's metadata
+            // even though no branch/tag serves it. `export_scoped`'s
+            // purge+retract closes this for the all-states export, but a scoped
+            // export never examines an out-of-thread checkpoint — so gate the
+            // note at its source, symmetric with `export_state`'s minting gate
+            // (heddle#316). The Git bridge always publishes the Public mirror.
+            let tier = self
+                .heddle_repo
+                .effective_visibility_tier(&change_id)
+                .map_err(|e| {
+                    GitBridgeError::Git(format!("resolve visibility for {change_id}: {e:#}"))
+                })?;
+            if repo::visible(&tier, &repo::AudienceTier::Public)
+                && super::git_notes::read_note(mirror_repo, git_oid)?.is_none()
                 && let Some(state) = self.heddle_repo.store().get_state(&change_id)?
             {
                 let note = super::git_notes::HeddleNote::from_state(&state);

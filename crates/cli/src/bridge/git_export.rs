@@ -327,13 +327,45 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     let note_targets: Vec<(ChangeId, gix::hash::ObjectId)> =
         bridge.mapping.iter().map(|(c, o)| (*c, *o)).collect();
     for (change_id, git_oid) in note_targets {
-        if git_notes::read_note(&repo, git_oid)?.is_none()
+        // Gate the backfill on visibility, symmetric with the mint
+        // (`export_state`) and checkpoint-seed note writes. For an all-states
+        // export the post-purge mapping is already served-only, but a scoped
+        // export's mapping still carries out-of-thread entries the purge never
+        // examined — without this check the backfill would re-publish a note
+        // for an embargoed commit `collect_ref_updates` then copies to the
+        // mirror (heddle#316). No note-write site may emit metadata for an
+        // unserved commit.
+        let tier = bridge
+            .heddle_repo
+            .effective_visibility_tier(&change_id)
+            .map_err(|e| {
+                GitBridgeError::Git(format!("resolve visibility for {change_id}: {e:#}"))
+            })?;
+        if visible(&tier, &audience)
+            && git_notes::read_note(&repo, git_oid)?.is_none()
             && let Some(state) = bridge.heddle_repo.store().get_state(&change_id)?
         {
             let note = git_notes::HeddleNote::from_state(&state);
             git_notes::write_note(&repo, git_oid, &note)?;
         }
     }
+
+    // Retract the notes for every commit purged from the served set. The
+    // mirror copies `refs/notes/*` (`collect_ref_updates`) alongside the
+    // branches and tags, so a note left for a now-embargoed commit keeps
+    // leaking that commit's metadata even after its branch/tag were retracted.
+    // This is the notes-ref sibling of the branch/tag retraction above
+    // (heddle#316). Guard the degenerate case where a still-served state maps
+    // to the same git OID by retracting only OIDs absent from the served
+    // mapping.
+    let served_oids: HashSet<gix::hash::ObjectId> =
+        bridge.mapping.iter().map(|(_, oid)| *oid).collect();
+    let notes_to_retract: HashSet<gix::hash::ObjectId> = embargoed_oids
+        .iter()
+        .copied()
+        .filter(|oid| !served_oids.contains(oid))
+        .collect();
+    git_notes::remove_notes(&repo, &notes_to_retract)?;
 
     let threads: Vec<String> = match thread {
         Some(thread) => vec![thread.to_string()],

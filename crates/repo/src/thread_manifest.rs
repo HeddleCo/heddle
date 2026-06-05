@@ -68,6 +68,18 @@ pub struct ThreadManifest {
     /// else (skip both). Canonicalized at write time so symlink /
     /// `./` traversal differences don't cause a false miss.
     pub worktree_path: PathBuf,
+    /// `true` when this checkout was *withheld*: the state's visibility
+    /// tier was not visible to the materializing audience, so only the
+    /// operator-local courtesy stub was written and the tracked bytes
+    /// withheld (`files` is therefore empty while `tree_hash` still
+    /// names the real, unserved state's tree). Capture must refuse a
+    /// withheld checkout — the operator holds none of the real content,
+    /// so a capture could only either pull the stub in as tracked
+    /// content or commit an empty tree that wipes the withheld state.
+    /// `#[serde(default)]` keeps pre-existing manifests readable as
+    /// `false` (they were ordinary materializations). See heddle#316.
+    #[serde(default)]
+    pub withheld: bool,
     /// Per-file stat-cache. Key is the worktree-relative path with
     /// forward-slash separators (so a manifest moves between macOS
     /// and Linux without rewriting). Value is the snapshot of
@@ -95,6 +107,7 @@ impl ThreadManifest {
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
             worktree_path,
+            withheld: false,
             files: BTreeMap::new(),
         }
     }
