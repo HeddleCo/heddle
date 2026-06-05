@@ -26,6 +26,7 @@ mod repository_signals;
 mod repository_state_visibility;
 pub use repository_state_visibility::{
     DefaultVisibilityBinding, PutVisibilityOutcome, VisibilityCommitKind, VisibilityCommitOutcome,
+    VisibilitySidecarRestore,
 };
 mod session_storage;
 pub mod snapshot_metadata;

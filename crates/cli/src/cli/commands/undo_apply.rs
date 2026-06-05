@@ -23,7 +23,7 @@ use oplog::{IsolationKey, OpBatch, OpEntry, OpLogBackend, OpRecord, isolation_ke
 use refs::Head;
 use repo::{
     CommitGraphIndex, Repository, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
-    ThreadState,
+    ThreadState, VisibilitySidecarRestore,
     atomic::{AtomicMutation, DeferredMutation, StagedCommit, Tx},
     refresh_thread_freshness,
 };
@@ -499,30 +499,58 @@ impl<'a> EntrySteps<'_, 'a> {
         )
     }
 
-    /// Restore the per-state visibility sidecar to an absolute snapshot
-    /// (`Some(bytes)` rewrites the sidecar, `None` removes it →
-    /// public-by-absence). NON-atomic write-or-delete: the capture snapshots
-    /// the whole current sidecar and registers a restore-to-snapshot BEFORE the
-    /// forward, so a later transaction failure unwinds a partially-applied
-    /// restore. Undo passes the op's `prior_sidecar`; redo its `new_sidecar`.
+    /// Restore the per-state visibility sidecar from `expected_current` to
+    /// `target` as part of the undo/redo transaction (heddle#317 r7). Undo
+    /// passes `expected_current = new_sidecar` (the op's after-image, what should
+    /// be on disk) and `target = prior_sidecar`; redo passes them swapped.
+    ///
+    /// Unlike the other reversible writes, a visibility-sidecar mutation has a
+    /// concurrent counterpart — `heddle visibility set`/`promote`'s
+    /// `commit_state_visibility` — that writes the SAME existing state's sidecar
+    /// under the repo write lock. So both directions route through
+    /// [`Repository::restore_state_visibility_sidecar_if_unchanged`], which takes
+    /// that same lock and re-checks the current sidecar before writing:
+    ///
+    ///   * FORWARD (`step`, all-or-nothing under the lock): write `target` only if
+    ///     the current sidecar still equals `expected_current`. If a concurrent
+    ///     commit already superseded it, ABORT the transaction (a `Conflict`)
+    ///     rather than clobbering the newer record — the forward writes nothing, so
+    ///     `step` registers no inverse for an effect that did not happen.
+    ///   * INVERSE (rollback): restore back to `expected_current`, but again only
+    ///     if OUR write (`target`) is still the current sidecar. If a concurrent
+    ///     commit superseded our write between the forward and the rollback, the
+    ///     re-check leaves that newer record in place — closing the TOCTOU where the
+    ///     transaction's own rewind (running after the isolation conflict was
+    ///     detected) overwrote a concurrently-committed record.
     fn restore_visibility_sidecar(
         &mut self,
         state: ChangeId,
-        snapshot: Option<Vec<u8>>,
+        expected_current: Option<Vec<u8>>,
+        target: Option<Vec<u8>>,
     ) -> HeddleResult<()> {
         let repo = self.repo();
-        self.step_nonatomic(
-            move || {
-                repo.get_state_visibility_bytes_for_state(&state)
-                    .map_err(apply_error)
+        // The inverse undoes the forward's write: after the forward wrote
+        // `target`, the current sidecar should be `target`, and the rollback
+        // restores it back to `expected_current` — but only if our write still
+        // stands (re-checked under the lock, same as the forward).
+        let inverse_expected = target.clone();
+        let inverse_target = expected_current.clone();
+        self.step(
+            move || match repo
+                .restore_state_visibility_sidecar_if_unchanged(&state, &expected_current, target)
+                .map_err(apply_error)?
+            {
+                VisibilitySidecarRestore::Applied => Ok(()),
+                VisibilitySidecarRestore::Superseded => Err(visibility_superseded_conflict(&state)),
             },
-            move |captured| {
-                repo.restore_state_visibility_sidecar(&state, captured)
-                    .map_err(apply_error)
-            },
             move || {
-                repo.restore_state_visibility_sidecar(&state, snapshot)
-                    .map_err(apply_error)
+                repo.restore_state_visibility_sidecar_if_unchanged(
+                    &state,
+                    &inverse_expected,
+                    inverse_target,
+                )
+                .map(|_| ())
+                .map_err(apply_error)
             },
         )
     }
@@ -696,25 +724,31 @@ fn apply_undo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         } => {
             apply_git_checkpoint_undo(steps, branch, previous_git_oid.as_deref(), new_git_oid)?;
         }
-        // Visibility set/promote undo: restore the per-state sidecar to the
-        // before-image captured on the op (`prior_sidecar`). Both set and
-        // promote restore the same way — the whole sidecar is snapshotted
-        // around the put, so the inverse is "put the prior bytes back" whether
-        // the forward appended a first record or a superseding one. `None`
-        // means the state was public-by-absence before the op, so the sidecar
-        // is removed and `has_visibility_for_state` reports false again. Closes
-        // PR #529 P1: the old no-op left the oplog and sidecar divergent.
+        // Visibility set/promote undo: restore the per-state sidecar from the
+        // op's after-image (`new_sidecar`, what should currently be on disk)
+        // back to the before-image (`prior_sidecar`). Both set and promote
+        // restore the same way — the whole sidecar is snapshotted around the
+        // put, so the inverse is "put the prior bytes back" whether the forward
+        // appended a first record or a superseding one. `None` means the state
+        // was public-by-absence before the op, so the sidecar is removed and
+        // `has_visibility_for_state` reports false again. The restore is
+        // conflict-rechecked under the repo write lock (heddle#317 r7): a
+        // concurrent `visibility set`/`promote` that already superseded
+        // `new_sidecar` aborts the undo instead of being clobbered. Closes PR
+        // #529 P1: the old no-op left the oplog and sidecar divergent.
         OpRecord::StateVisibilitySet {
             state,
             prior_sidecar,
+            new_sidecar,
             ..
         }
         | OpRecord::StateVisibilityPromote {
             state,
             prior_sidecar,
+            new_sidecar,
             ..
         } => {
-            steps.restore_visibility_sidecar(*state, prior_sidecar.clone())?;
+            steps.restore_visibility_sidecar(*state, new_sidecar.clone(), prior_sidecar.clone())?;
         }
         // No undo inverse: these records don't move a ref the undo chain
         // restores, or their reversal is irreversible / handled outside the
@@ -900,17 +934,27 @@ fn apply_redo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         //     EphemeralThreadCollapse: forensic / TTL records, no ref to replay.
         //   - RemoteThreadUpdate / RemoteThreadDelete / UndoRecoveryUpdate:
         //     reconcile-class bookkeeping refs, outside the user redo chain.
-        // Visibility set/promote redo: re-apply the after-image captured on
-        // the op (`new_sidecar`). Undo restored the sidecar to `prior_sidecar`;
-        // redo writes it back to exactly the post-put bytes (or removes it when
-        // the op resolved to public-by-absence). Symmetric with the undo arm.
+        // Visibility set/promote redo: re-apply the after-image captured on the
+        // op (`new_sidecar`). Undo restored the sidecar to `prior_sidecar`; redo
+        // writes it back to exactly the post-put bytes (or removes it when the op
+        // resolved to public-by-absence). Symmetric with the undo arm: it expects
+        // the current sidecar to be `prior_sidecar` (what the undo restored) and
+        // conflict-rechecks under the repo write lock before writing
+        // `new_sidecar`, so a concurrent `visibility set`/`promote` that
+        // superseded `prior_sidecar` aborts the redo instead of being clobbered.
         OpRecord::StateVisibilitySet {
-            state, new_sidecar, ..
+            state,
+            prior_sidecar,
+            new_sidecar,
+            ..
         }
         | OpRecord::StateVisibilityPromote {
-            state, new_sidecar, ..
+            state,
+            prior_sidecar,
+            new_sidecar,
+            ..
         } => {
-            steps.restore_visibility_sidecar(*state, new_sidecar.clone())?;
+            steps.restore_visibility_sidecar(*state, prior_sidecar.clone(), new_sidecar.clone())?;
         }
         OpRecord::Fork { .. }
         | OpRecord::Collapse { .. }
@@ -1670,6 +1714,20 @@ fn remove_thread_manager_record(steps: &mut EntrySteps, thread_name: &str) -> He
 /// foresee — whose rewind has already restored the pre-operation state.
 fn apply_error(err: anyhow::Error) -> HeddleError {
     HeddleError::Conflict(format!("{err:#}"))
+}
+
+/// The conflict surfaced when an undo/redo visibility-sidecar restore finds the
+/// sidecar already superseded by a concurrent `visibility set`/`promote`
+/// (heddle#317 r7). Aborting the transaction here — rather than overwriting the
+/// newer record — is what makes the lock-serialized restore safe: the rewind
+/// then leaves the concurrently-committed record intact.
+fn visibility_superseded_conflict(state: &ChangeId) -> HeddleError {
+    HeddleError::Conflict(format!(
+        "cannot undo/redo visibility on state {}: a concurrent `visibility set`/`promote` \
+         superseded the sidecar. The newer record is preserved; re-run undo/redo after \
+         refreshing.",
+        state.to_string_full()
+    ))
 }
 
 /// Acquire the per-repository undo/redo serialization lock, held across the
@@ -3391,6 +3449,167 @@ mod atomic_tests {
         assert!(
             repo.get_redaction(&redaction_id).unwrap().is_some(),
             "the exact redaction record is back on disk"
+        );
+    }
+
+    /// Build a `StateVisibility` record for an existing state with an explicit
+    /// timestamp (so distinct records on the same state get distinct content
+    /// hashes and accrete rather than dedup).
+    fn visibility_record(
+        state: ChangeId,
+        tier: objects::object::VisibilityTier,
+        ts: i64,
+    ) -> objects::object::StateVisibility {
+        objects::object::StateVisibility {
+            state,
+            tier,
+            embargo_until: None,
+            declarer: objects::object::Principal {
+                name: "Grace Hopper".to_string(),
+                email: "grace@example.com".to_string(),
+            },
+            declared_at: chrono::DateTime::from_timestamp(ts, 0).unwrap(),
+            signature: None,
+            supersedes: None,
+        }
+    }
+
+    /// heddle#317 r7 — the undo/redo restore must be serialized with a concurrent
+    /// `visibility set`/`promote` so it can never clobber a newer committed
+    /// record. A visibility set A on state S is committed and selected for undo;
+    /// then a concurrent set C commits on S (through the same locked transaction),
+    /// superseding A. Running the undo of A drives its restore through the repo
+    /// write lock, which re-checks the current sidecar: C no longer matches A's
+    /// recorded after-image, so the undo ABORTS instead of restoring A's stale
+    /// before-image over C. C survives.
+    #[test]
+    fn concurrent_set_during_undo_is_not_clobbered() {
+        use objects::object::VisibilityTier;
+
+        let (_temp, repo, s1, _s2) = repo_with_two_snapshots();
+        let scope = repo.op_scope();
+        let state = s1;
+
+        // Commit visibility A on the state — the op the undo will target.
+        repo.commit_state_visibility(
+            visibility_record(state, VisibilityTier::Internal, 1_700_000_000),
+            repo::VisibilityCommitKind::Set,
+        )
+        .expect("commit A")
+        .expect("a set always commits");
+
+        // Select A's undo batch (its StateVisibilitySet op) BEFORE C lands.
+        let batches = repo.oplog().undo_batches_scoped(1, Some(&scope)).unwrap();
+        assert!(
+            batches[0]
+                .entries
+                .iter()
+                .any(|e| matches!(e.operation, OpRecord::StateVisibilitySet { .. })),
+            "the newest undoable batch is the visibility set"
+        );
+
+        // A concurrent `visibility set` C commits FIRST (through the locked
+        // transaction), superseding A on disk.
+        repo.commit_state_visibility(
+            visibility_record(
+                state,
+                VisibilityTier::TeamScoped {
+                    team_id: "infra".to_string(),
+                },
+                1_700_000_060,
+            ),
+            repo::VisibilityCommitKind::Set,
+        )
+        .expect("commit C")
+        .expect("a set always commits");
+        let after_c = repo
+            .get_state_visibility_bytes_for_state(&state)
+            .expect("read sidecar after C");
+        assert!(after_c.is_some(), "C is on disk");
+
+        // Undo A: the restore takes the repo write lock, re-checks, sees C
+        // superseded A's after-image, and aborts rather than clobbering C.
+        let recovery = repo.head().unwrap();
+        let generation = repo.oplog().head_id().unwrap();
+        let txid = undo_redo_transaction_id("undo", &scope, generation, &batches);
+        let result = repo::atomic::execute(&repo, UndoOp::new(batches, recovery, txid));
+        assert!(
+            result.is_err(),
+            "the undo must abort on the superseding concurrent visibility commit"
+        );
+
+        // C survives untouched — the undo did NOT restore A's stale before-image.
+        assert_eq!(
+            repo.get_state_visibility_bytes_for_state(&state).unwrap(),
+            after_c,
+            "the newer concurrent visibility record C must survive the aborted undo"
+        );
+        assert!(
+            repo.has_visibility_for_state(&state).unwrap(),
+            "the state stays non-public (C's tier), not dropped to public-by-absence"
+        );
+    }
+
+    /// heddle#317 r7 — with NO concurrent writer, an undo→redo of a visibility op
+    /// still round-trips through the locked, conflict-rechecked restore: undo
+    /// drops the state back to public-by-absence and redo restores exactly the
+    /// op's after-image. Guards against the lock/re-check regressing normal
+    /// undo/redo.
+    #[test]
+    fn undo_redo_visibility_roundtrip_still_works() {
+        use objects::object::VisibilityTier;
+
+        let (_temp, repo, s1, _s2) = repo_with_two_snapshots();
+        let scope = repo.op_scope();
+        let state = s1;
+        assert!(
+            !repo.has_visibility_for_state(&state).unwrap(),
+            "the state starts public-by-absence"
+        );
+
+        // Commit visibility A.
+        repo.commit_state_visibility(
+            visibility_record(state, VisibilityTier::Internal, 1_700_000_000),
+            repo::VisibilityCommitKind::Set,
+        )
+        .expect("commit A")
+        .expect("a set always commits");
+        let after_set = repo
+            .get_state_visibility_bytes_for_state(&state)
+            .expect("read A");
+        assert!(after_set.is_some(), "A is on disk");
+
+        // Undo A: the sidecar drops back to public-by-absence.
+        let recovery = repo.head().unwrap();
+        let undo_batches = repo.oplog().undo_batches_scoped(1, Some(&scope)).unwrap();
+        let generation = repo.oplog().head_id().unwrap();
+        let txid = undo_redo_transaction_id("undo", &scope, generation, &undo_batches);
+        repo::atomic::execute(&repo, UndoOp::new(undo_batches, recovery, txid))
+            .expect("undo succeeds with no concurrent writer");
+        assert!(
+            !repo.has_visibility_for_state(&state).unwrap(),
+            "undo restored public-by-absence"
+        );
+        assert!(
+            repo.get_state_visibility_bytes_for_state(&state)
+                .unwrap()
+                .is_none(),
+            "the sidecar was removed by the undo"
+        );
+
+        // Redo A: the sidecar comes back to exactly A's bytes.
+        let redo_batches = repo.oplog().redo_batches_scoped(1, Some(&scope)).unwrap();
+        let generation = repo.oplog().head_id().unwrap();
+        let txid = undo_redo_transaction_id("redo", &scope, generation, &redo_batches);
+        repo::atomic::execute(&repo, RedoOp::new(redo_batches, txid)).expect("redo succeeds");
+        assert_eq!(
+            repo.get_state_visibility_bytes_for_state(&state).unwrap(),
+            after_set,
+            "redo restored exactly A's sidecar bytes"
+        );
+        assert!(
+            repo.has_visibility_for_state(&state).unwrap(),
+            "the state is non-public again after redo"
         );
     }
 }

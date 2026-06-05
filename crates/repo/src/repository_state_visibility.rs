@@ -80,6 +80,19 @@ pub struct VisibilityCommitOutcome {
     pub superseded: Option<ContentHash>,
 }
 
+/// Outcome of a conflict-rechecked undo/redo visibility-sidecar restore
+/// ([`Repository::restore_state_visibility_sidecar_if_unchanged`], heddle#317 r7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisibilitySidecarRestore {
+    /// The current sidecar still matched `expected_current`; it was rewritten to
+    /// the restore target under the repo write lock.
+    Applied,
+    /// A concurrent `visibility set`/`promote` superseded the sidecar (current
+    /// bytes no longer match `expected_current`); nothing was written, so the
+    /// newer record survives and the caller must abort/skip the restore.
+    Superseded,
+}
+
 /// The automatic capture-time default-visibility binding, staged for folding
 /// into a snapshot's own commit batch (heddle#317 / PR #529 P1). Produced by
 /// [`Repository::stage_default_visibility_binding`]; the sidecar has already
@@ -638,6 +651,47 @@ impl Repository {
             }
         }
         Ok(())
+    }
+
+    /// Restore the per-state visibility sidecar to `target` **only if** the
+    /// current on-disk sidecar still equals `expected_current`, with the
+    /// read → compare → write run as ONE critical section under the SAME repo
+    /// write lock [`commit_state_visibility`](Self::commit_state_visibility)
+    /// holds (heddle#317 / PR #529 P1 r7).
+    ///
+    /// This is the undo/redo restore writer. The plain
+    /// [`restore_state_visibility_sidecar`](Self::restore_state_visibility_sidecar)
+    /// rewrites unconditionally and is safe only where the caller already serializes
+    /// against concurrent commits (the explicit `set`/`promote` rollback holds the
+    /// lock; the snapshot-binding rewind targets a brand-new, not-yet-shared state).
+    /// The undo/redo restore mutates an EXISTING state's sidecar OUTSIDE that lock,
+    /// so a concurrent `visibility set`/`promote` could be physically clobbered —
+    /// either by the forward restore or by the transaction's rollback running
+    /// after the conflict was already detected. Folding the conflict re-check and
+    /// the write into one locked section closes that TOCTOU: if the current sidecar
+    /// no longer matches `expected_current` (a concurrent commit superseded it),
+    /// nothing is written and [`VisibilitySidecarRestore::Superseded`] is returned
+    /// so the caller aborts/skips instead of overwriting the newer record. The
+    /// oplog isolation key (invariant 3) still rejects the transaction at commit;
+    /// this adds the physical serialization that detection alone cannot provide.
+    pub fn restore_state_visibility_sidecar_if_unchanged(
+        &self,
+        state: &ChangeId,
+        expected_current: &Option<Vec<u8>>,
+        target: Option<Vec<u8>>,
+    ) -> Result<VisibilitySidecarRestore> {
+        let _lock = self.locker().write().with_context(|| {
+            "acquire repo write lock for undo/redo visibility sidecar restore"
+        })?;
+        let current = self.get_state_visibility_bytes_for_state(state)?;
+        if &current != expected_current {
+            // A concurrent visibility commit superseded the sidecar since the
+            // undo/redo captured its expected image. Leave that newer record in
+            // place — never clobber it with the stale restore target.
+            return Ok(VisibilitySidecarRestore::Superseded);
+        }
+        self.restore_state_visibility_sidecar(state, target)?;
+        Ok(VisibilitySidecarRestore::Applied)
     }
 
     /// `<heddle_dir>/visibility/` — root of the per-state visibility store.
