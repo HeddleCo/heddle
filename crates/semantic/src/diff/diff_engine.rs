@@ -26,6 +26,14 @@ use crate::{
     parser::{Language, ParsedFile},
 };
 
+/// Outcome of loading changed-file content under the byte budget: the files
+/// loaded within budget, plus the unloaded `overflow` tail past the cutoff
+/// (path + kind only) that the caller degrades to file-level entries.
+struct LoadOutcome {
+    loaded: Vec<LoadedChange>,
+    overflow: FileChangeSet,
+}
+
 pub(crate) struct SemanticEngine<'a, F, G>
 where
     F: FnMut(&Path) -> Result<Option<String>, anyhow::Error>,
@@ -124,7 +132,7 @@ where
             return Ok(output);
         }
 
-        let loaded = self.load_changes(&mut output.fallback_reasons)?;
+        let LoadOutcome { loaded, overflow } = self.load_changes(&mut output.fallback_reasons)?;
         output.changes = build_file_level_changes(&loaded);
         output.file_renames = detect_renames(&loaded, self.options);
         apply_renames(&mut output.changes, &output.file_renames);
@@ -146,6 +154,15 @@ where
                 &output.file_renames,
             ));
             suppress_redundant_file_modified(&mut output.changes);
+        }
+
+        // The over-budget tail was intentionally not loaded (the perf win), but
+        // every changed file must still appear in `result.changes`. Degrade the
+        // unloaded tail to conservative file-level entries via the same path the
+        // changed-file-count budget uses — built from the raw change (path +
+        // kind), with no old/new content loaded.
+        if !overflow.is_empty() {
+            output.changes.extend(fallback_file_changes(&overflow));
         }
 
         output.aggregated = aggregate.then(|| aggregate_changes(output.changes.clone()));
@@ -196,16 +213,20 @@ where
     fn load_changes(
         &mut self,
         fallback_reasons: &mut Vec<SemanticFallbackReason>,
-    ) -> Result<Vec<LoadedChange>, anyhow::Error> {
-        let mut loaded = Vec::with_capacity(self.file_changes.len());
+    ) -> Result<LoadOutcome, anyhow::Error> {
+        let raw: Vec<&objects::object::FileChange> = self.file_changes.iter().collect();
+        let mut loaded = Vec::with_capacity(raw.len());
         let mut total_bytes = 0usize;
-        for change in &self.file_changes {
+        let mut cutoff = raw.len();
+        for (index, change) in raw.iter().enumerate() {
             // Enforce the byte budget *before* loading the next file: once the
             // cumulative total has crossed the cap we stop, leaving the rest of
             // the corpus unloaded rather than paying the I/O + allocation for
             // files we are about to discard. The file that tips the running
-            // total over the cap is the last one loaded.
+            // total over the cap is the last one loaded; everything from here on
+            // is the overflow tail that degrades to file-level entries.
             if total_bytes > self.options.budget.max_total_bytes {
+                cutoff = index;
                 break;
             }
             let path = PathBuf::from(&change.path);
@@ -220,11 +241,19 @@ where
             total_bytes += old_content.as_ref().map_or(0, String::len)
                 + new_content.as_ref().map_or(0, String::len);
             loaded.push(LoadedChange::new(
-                change.clone(),
+                (*change).clone(),
                 path,
                 old_content,
                 new_content,
             ));
+        }
+
+        // Retain the unloaded tail so the caller can degrade it to conservative
+        // file-level entries instead of dropping those changed files. No content
+        // is read for these — only their path + kind survives.
+        let mut overflow = FileChangeSet::new();
+        for change in &raw[cutoff..] {
+            overflow.push((*change).clone());
         }
 
         if total_bytes > self.options.budget.max_total_bytes {
@@ -233,7 +262,7 @@ where
                 actual: total_bytes,
             });
         }
-        Ok(loaded)
+        Ok(LoadOutcome { loaded, overflow })
     }
 
     fn parse_files(
