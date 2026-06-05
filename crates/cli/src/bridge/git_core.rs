@@ -880,6 +880,15 @@ impl<'a> GitBridge<'a> {
             validate_ref_updates_fast_forward(&target_repo, updates)?;
         }
         apply_ref_updates(&target_repo, updates, log_message)?;
+        // Propagate retractions to the destination. `apply_ref_updates` only
+        // WRITES the surviving refs; it never DELETES one that disappeared from
+        // the served mirror. So a branch/tag/note exported while public and then
+        // retracted (whole line → Private, marker retargeted, line rebased away)
+        // would keep pointing at now-private commits at the destination. Diffing
+        // the destination's heddle-managed refs against the served mirror and
+        // deleting the difference closes that leak for every ref family
+        // (heddle#316 CLASS 2).
+        reconcile_destination_ref_deletions(&mirror_repo, &target_repo)?;
         Ok(())
     }
 
@@ -2581,6 +2590,41 @@ fn commit_is_descendant_of(
         }
     }
     Ok(false)
+}
+
+/// Make the destination's heddle-managed refs equal the served mirror's refs by
+/// DELETING every destination ref that is absent from the served mirror set.
+/// The retraction sibling of [`apply_ref_updates`] (which only writes survivors)
+/// — together they enforce "destination heddle-managed refs == served mirror
+/// refs" on every export/push (heddle#316 CLASS 2).
+///
+/// "Heddle-managed" is exactly the namespaces the mirror exports — branches
+/// (`refs/heads/*`), tags (`refs/tags/*`) and notes (`refs/notes/*`), the same
+/// set [`collect_ref_updates`] enumerates. Refs OUTSIDE those namespaces
+/// (`refs/remotes/*`, `refs/stash`, bespoke namespaces, ...) are never touched,
+/// so a ref heddle does not own at the destination is left alone. Covers all
+/// three families the mirror-side retraction covers so this is not a per-family
+/// drip.
+///
+/// The served set is the FULL mirror ref set (`collect_ref_updates(mirror)`),
+/// deliberately NOT the caller's possibly-scope-filtered `updates`: a scoped
+/// push must delete only genuinely-retracted refs, never a still-served sibling
+/// that simply fell outside the push scope.
+fn reconcile_destination_ref_deletions(
+    mirror_repo: &gix::Repository,
+    target_repo: &gix::Repository,
+) -> GitResult<()> {
+    let served: HashSet<String> = collect_ref_updates(mirror_repo)?
+        .iter()
+        .map(full_ref_name)
+        .collect();
+    for dest_ref in collect_ref_updates(target_repo)? {
+        let full = full_ref_name(&dest_ref);
+        if !served.contains(&full) {
+            delete_reference_if_present(target_repo, &full)?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn apply_ref_updates(

@@ -15,7 +15,7 @@
 use chrono::{DateTime, Utc};
 use objects::store::ObjectStore;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -171,8 +171,23 @@ impl Repository {
         let tier = self.effective_visibility_tier(change_id).map_err(|e| {
             HeddleError::Config(format!("resolve visibility for {change_id}: {e:#}"))
         })?;
+        let canonical = canonical_worktree_path(dest);
         if !visible(&tier, audience) {
             fs::create_dir_all(dest).map_err(HeddleError::Io)?;
+            // Reconcile the root DOWN to the withheld tier: every tracked leaf a
+            // prior materialize of this root wrote must be removed, so the
+            // checkout holds ONLY the courtesy stub — never the very bytes the
+            // gate is withholding. `keep` is empty (the withheld tier permits no
+            // tracked content). `must_remove` additionally names the withheld
+            // state's own tree leaves, so the leak is closed even when no prior
+            // manifest survives for this root (a sibling worktree clobbered it).
+            // The stub itself is untracked and so never in either set (heddle#316
+            // CLASS 1).
+            let mut withheld_leaves = BTreeSet::new();
+            if let Some(tree) = self.store().get_tree(&state.tree)? {
+                collect_tree_leaf_paths(self, &tree, "", &mut withheld_leaves)?;
+            }
+            self.reconcile_materialized_root(dest, &canonical, &BTreeSet::new(), &withheld_leaves)?;
             let embargo_until = self
                 .effective_state_visibility(change_id)
                 .map_err(|e| {
@@ -185,11 +200,8 @@ impl Repository {
             // Record the withheld status keyed by THIS worktree root, not by
             // thread — a sibling worktree of the same thread materialized at a
             // visible tier must keep its own capturable status (heddle#316).
-            crate::thread_manifest::mark_withheld_checkout(
-                self.heddle_dir(),
-                &canonical_worktree_path(dest),
-            )
-            .map_err(HeddleError::Io)?;
+            crate::thread_manifest::mark_withheld_checkout(self.heddle_dir(), &canonical)
+                .map_err(HeddleError::Io)?;
             return Ok(CheckoutMaterialization::Withheld { tier });
         }
 
@@ -198,24 +210,97 @@ impl Repository {
             .get_tree(&state.tree)?
             .ok_or_else(|| HeddleError::Config(format!("tree for {change_id} missing")))?;
         self.materialize_tree(&tree, dest)?;
+        // Reconcile the root UP to the served tier: `materialize_tree` wrote the
+        // real tree's leaves but does NOT remove a stale leaf a prior
+        // materialize of a *different* tree left at this root. `keep` is the set
+        // of leaves the served tree just wrote — any prior tracked leaf NOT in
+        // it is removed, so the root holds exactly this tier's content
+        // (heddle#316 CLASS 1).
+        let mut served_leaves = BTreeSet::new();
+        collect_tree_leaf_paths(self, &tree, "", &mut served_leaves)?;
+        self.reconcile_materialized_root(dest, &canonical, &served_leaves, &BTreeSet::new())?;
         // This root now holds real served bytes: clear any stale withheld marker
         // a prior under-tier materialize of the same root may have left, so it
         // can't suppress this worktree's capture (heddle#316).
-        crate::thread_manifest::clear_withheld_checkout(
-            self.heddle_dir(),
-            &canonical_worktree_path(dest),
-        )
-        .map_err(HeddleError::Io)?;
+        crate::thread_manifest::clear_withheld_checkout(self.heddle_dir(), &canonical)
+            .map_err(HeddleError::Io)?;
         // Remove any leftover courtesy stub a prior under-tier materialize of the
-        // same root wrote: `materialize_tree` only writes tracked leaves, so the
-        // stub would otherwise linger on disk. Cosmetic — capture ignores it —
-        // but an authorized re-materialize should leave a clean tree (heddle#316).
+        // same root wrote: the stub is untracked, so the reconcile leaf-removal
+        // above leaves it in place. Cosmetic — capture ignores it — but an
+        // authorized re-materialize should leave a clean tree (heddle#316).
         match fs::remove_file(dest.join(COURTESY_STUB_FILENAME)) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(HeddleError::Io(e)),
         }
         Ok(CheckoutMaterialization::Materialized { tree })
+    }
+
+    /// Reconcile the worktree root at `dest` so it holds EXACTLY the content the
+    /// target tier permits, regardless of what a prior materialization of the
+    /// same root left behind. THE single chokepoint both branches of
+    /// [`Repository::checkout_state_gated`] funnel through to enforce the
+    /// invariant by construction rather than via two opposite one-off cleanups
+    /// (heddle#316 CLASS 1).
+    ///
+    /// Removes every tracked leaf that (a) a prior materialization recorded for
+    /// this root in its [`ThreadManifest`] (keyed by canonical `worktree_path`,
+    /// thread-independent) UNION (b) the caller's `must_remove` set — MINUS the
+    /// `keep` set the target tier permits. Removal is guarded per file
+    /// (`NotFound` ignored) and empty ancestor directories it leaves behind are
+    /// pruned via `remove_dir` (which fails on non-empty dirs, so untracked
+    /// siblings keep their directory alive).
+    ///
+    /// Never blanket-`rm -rf`s: only paths sourced from the manifest /
+    /// `must_remove` are touched, so user-untracked files and `.git`/heddle
+    /// metadata are never removed.
+    fn reconcile_materialized_root(
+        &self,
+        dest: &Path,
+        canonical_root: &Path,
+        keep: &BTreeSet<String>,
+        must_remove: &BTreeSet<String>,
+    ) -> Result<()> {
+        let mut to_remove: BTreeSet<String> = must_remove.clone();
+        if let Some(prior) =
+            crate::thread_manifest::manifest_for_worktree_root(self.heddle_dir(), canonical_root)
+                .map_err(HeddleError::Io)?
+        {
+            to_remove.extend(prior.files.keys().cloned());
+        }
+
+        let mut prune_dirs: BTreeSet<PathBuf> = BTreeSet::new();
+        for rel in &to_remove {
+            if keep.contains(rel) {
+                continue;
+            }
+            let path = dest.join(rel);
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(HeddleError::Io(e)),
+            }
+            // Collect ancestor directories (within `dest`) so the now-empty ones
+            // left by the removed leaf can be pruned after the pass.
+            let mut parent = path.parent();
+            while let Some(p) = parent {
+                if p == dest || !p.starts_with(dest) {
+                    break;
+                }
+                prune_dirs.insert(p.to_path_buf());
+                parent = p.parent();
+            }
+        }
+
+        // Prune deepest-first so a parent only sees its children already gone.
+        // `remove_dir` errors on a non-empty dir, which we ignore — that is
+        // exactly how an untracked sibling keeps its directory.
+        let mut dirs: Vec<PathBuf> = prune_dirs.into_iter().collect();
+        dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+        for d in dirs {
+            let _ = fs::remove_dir(&d);
+        }
+        Ok(())
     }
 
     /// Write the [`ThreadManifest`] sidecar for a worktree that's
@@ -538,6 +623,42 @@ fn courtesy_stub_text(tier: &VisibilityTier, embargo_until: Option<DateTime<Utc>
     }
     out.push_str("# This placeholder is a local courtesy; the bytes are not in this checkout.\n");
     out
+}
+
+/// Collect every blob/symlink leaf path (worktree-relative, forward-slash
+/// joined) reachable from `tree` into `out`. Used by the checkout reconcile
+/// step to enumerate the tracked content a tier serves (the `keep` set on the
+/// visible path) or withholds (the `must_remove` set on the withheld path),
+/// without touching disk — the path set is derived purely from the tree.
+fn collect_tree_leaf_paths(
+    repo: &Repository,
+    tree: &Tree,
+    rel_prefix: &str,
+    out: &mut BTreeSet<String>,
+) -> Result<()> {
+    use objects::object::EntryType;
+    for entry in tree.entries() {
+        let rel_path = if rel_prefix.is_empty() {
+            entry.name.clone()
+        } else {
+            format!("{rel_prefix}/{}", entry.name)
+        };
+        match entry.entry_type {
+            EntryType::Tree => {
+                let subtree = repo.store().get_tree(&entry.hash)?.ok_or_else(|| {
+                    HeddleError::Config(format!(
+                        "subtree {} missing while collecting leaf paths for {rel_path}",
+                        entry.hash
+                    ))
+                })?;
+                collect_tree_leaf_paths(repo, &subtree, &rel_path, out)?;
+            }
+            EntryType::Blob | EntryType::Symlink => {
+                out.insert(rel_path);
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn populate_manifest_from_tree(
@@ -1110,6 +1231,200 @@ mod tests {
             !dest.join(COURTESY_STUB_FILENAME).exists(),
             "the stale courtesy stub must be removed on the authorized re-materialize"
         );
+    }
+
+    /// #316 / PR #528 r7 CLASS 1 (the leak): a root first materialized for an
+    /// AUTHORIZED audience (real tree on disk) and then re-materialized
+    /// UNDER-TIER must end up holding ONLY the courtesy stub — none of the prior
+    /// visible tree's tracked bytes may remain next to the stub, or the checkout
+    /// still contains exactly the content the gate is supposed to withhold. The
+    /// reconcile step removes the prior tracked leaves (including nested ones)
+    /// and prunes the directories they leave empty.
+    #[test]
+    fn visible_then_withheld_root_has_only_stub() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("secret.rs"), b"fn exploit() {}\n").unwrap();
+        fs::create_dir_all(repo_dir.path().join("nested")).unwrap();
+        fs::write(repo_dir.path().join("nested/inner.rs"), b"fn inner() {}\n").unwrap();
+        repo.snapshot(Some("embargoed fix".into()), None).unwrap();
+        embargo_state_with_tier(
+            &repo,
+            VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+        );
+
+        let dest_holder = TempDir::new().unwrap();
+        let dest = dest_holder.path().join("out");
+
+        // Visible materialize: the real tree lands — the very bytes a later
+        // under-tier materialize must withhold.
+        repo.materialize_thread(
+            "main",
+            &dest,
+            &AudienceTier::Restricted("sec-embargo".into()),
+        )
+        .unwrap();
+        assert!(dest.join("secret.rs").exists());
+        assert!(dest.join("nested/inner.rs").exists());
+
+        // Under-tier re-materialize of the SAME root — the leak case.
+        repo.materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
+
+        assert!(
+            dest.join(COURTESY_STUB_FILENAME).exists(),
+            "withheld checkout must hold the courtesy stub"
+        );
+        assert!(
+            !dest.join("secret.rs").exists(),
+            "the prior visible tree's bytes must NOT remain next to the stub"
+        );
+        assert!(
+            !dest.join("nested/inner.rs").exists(),
+            "nested tracked leaves must be removed too"
+        );
+        // ONLY the stub remains: every prior tracked leaf — and the now-empty
+        // directories they lived in — are gone.
+        let remaining: Vec<_> = fs::read_dir(&dest)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "withheld root must contain only the courtesy stub, got {remaining:?}"
+        );
+        assert_eq!(remaining[0].to_str().unwrap(), COURTESY_STUB_FILENAME);
+    }
+
+    /// #316 / PR #528 r7 CLASS 1 (r6 transition, as a matrix member): a root
+    /// first materialized UNDER-TIER (stub) and then re-materialized for an
+    /// AUTHORIZED audience must hold the real tree and NO stale stub.
+    #[test]
+    fn withheld_then_visible_root_has_real_tree_no_stub() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("secret.rs"), b"fn exploit() {}\n").unwrap();
+        repo.snapshot(Some("embargoed fix".into()), None).unwrap();
+        embargo_state_with_tier(
+            &repo,
+            VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+        );
+
+        let dest_holder = TempDir::new().unwrap();
+        let dest = dest_holder.path().join("out");
+
+        repo.materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
+        assert!(dest.join(COURTESY_STUB_FILENAME).exists());
+        assert!(!dest.join("secret.rs").exists());
+
+        let manifest = repo
+            .materialize_thread(
+                "main",
+                &dest,
+                &AudienceTier::Restricted("sec-embargo".into()),
+            )
+            .unwrap();
+        assert!(
+            dest.join("secret.rs").exists(),
+            "authorized re-materialize must write the real tree"
+        );
+        assert!(manifest.files.contains_key("secret.rs"));
+        assert!(
+            !dest.join(COURTESY_STUB_FILENAME).exists(),
+            "the stale courtesy stub must be removed on the authorized re-materialize"
+        );
+    }
+
+    /// #316 / PR #528 r7 CLASS 1 (visible→visible): re-materializing a root at a
+    /// NEW visible tree must leave exactly that tree — a leaf dropped from the
+    /// new tree must not linger from the prior materialize. `materialize_tree`
+    /// writes the new leaves but does not remove a now-absent prior leaf; the
+    /// reconcile step closes that gap.
+    #[test]
+    fn visible_then_visible_refreshes_tree() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("keep.rs"), b"keep\n").unwrap();
+        fs::write(repo_dir.path().join("stale.rs"), b"stale\n").unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+
+        let dest_holder = TempDir::new().unwrap();
+        let dest = dest_holder.path().join("out");
+        repo.materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
+        assert!(dest.join("keep.rs").exists());
+        assert!(dest.join("stale.rs").exists());
+
+        // Advance the thread head in the MAIN repo (snapshot walks repo.root,
+        // not `dest`, so the dest manifest's worktree_path stays = dest and is
+        // NOT refreshed here): drop stale.rs, add fresh.rs.
+        fs::remove_file(repo_dir.path().join("stale.rs")).unwrap();
+        fs::write(repo_dir.path().join("fresh.rs"), b"fresh\n").unwrap();
+        repo.snapshot(Some("advance".into()), None).unwrap();
+
+        // Re-materialize the SAME root at the new (still visible) head.
+        repo.materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
+        assert!(dest.join("keep.rs").exists(), "an unchanged leaf stays");
+        assert!(dest.join("fresh.rs").exists(), "the new leaf is written");
+        assert!(
+            !dest.join("stale.rs").exists(),
+            "a leaf dropped from the new tree must not linger from the prior materialize"
+        );
+        assert!(
+            !dest.join(COURTESY_STUB_FILENAME).exists(),
+            "a visible re-materialize writes no stub"
+        );
+    }
+
+    /// #316 / PR #528 r7 CLASS 1 (withheld→withheld): two under-tier
+    /// materializes of the same root leave only the stub each time, and capture
+    /// stays a no-op.
+    #[test]
+    fn withheld_then_withheld_stays_withheld() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("secret.rs"), b"fn exploit() {}\n").unwrap();
+        repo.snapshot(Some("embargoed fix".into()), None).unwrap();
+        embargo_state_with_tier(
+            &repo,
+            VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+        );
+
+        let dest_holder = TempDir::new().unwrap();
+        let dest = dest_holder.path().join("out");
+
+        repo.materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
+        assert!(dest.join(COURTESY_STUB_FILENAME).exists());
+        assert!(!dest.join("secret.rs").exists());
+
+        // Second under-tier materialize of the same root: still only the stub.
+        repo.materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
+        let remaining: Vec<_> = fs::read_dir(&dest)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "withheld root must contain only the courtesy stub, got {remaining:?}"
+        );
+        assert_eq!(remaining[0].to_str().unwrap(), COURTESY_STUB_FILENAME);
+        assert!(!dest.join("secret.rs").exists());
+
+        // Capture of the still-withheld root is a no-op.
+        let outcome = repo.capture_thread_from_disk("main", &dest).unwrap();
+        assert_eq!(outcome, ThreadCaptureOutcome::NoOp);
     }
 
     /// #316 / PR #528 r3 Finding 1: materializing an under-tier checkout writes

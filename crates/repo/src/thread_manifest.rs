@@ -311,6 +311,76 @@ pub fn read_manifest(heddle_dir: &Path, thread: &str) -> io::Result<Option<Threa
     Ok(Some(manifest))
 }
 
+/// Find the thread manifest whose recorded `worktree_path` equals
+/// `canonical_worktree_root`, regardless of which thread name it lives under.
+///
+/// Keyed by the **canonical worktree root**, not the thread name, because the
+/// checkout reconcile step needs to know which tracked leaves a *prior*
+/// materialization left at a root so a now-withheld re-materialize can remove
+/// exactly those — and that prior materialization may have been a different
+/// thread checked out at the same path. Returns `Ok(None)` when no manifest
+/// records this root (a first-ever materialize, or one whose manifest was
+/// since clobbered by a sibling worktree of the same thread). Malformed or
+/// schema-mismatched manifests are skipped rather than erroring — the reconcile
+/// caller treats "no recoverable record" as "nothing to remove".
+pub fn manifest_for_worktree_root(
+    heddle_dir: &Path,
+    canonical_worktree_root: &Path,
+) -> io::Result<Option<ThreadManifest>> {
+    let threads_dir = heddle_dir.join("threads");
+    let mut found = None;
+    find_manifest_for_root(&threads_dir, canonical_worktree_root, &mut found)?;
+    Ok(found)
+}
+
+/// Depth-first walk under `cur` looking for a `manifest.toml` whose
+/// `worktree_path` matches `root_match`. Stops at the first match. Mirrors
+/// [`walk_thread_manifests`]'s structure but parses the full manifest (not a
+/// summary) and short-circuits on the path predicate.
+fn find_manifest_for_root(
+    cur: &Path,
+    root_match: &Path,
+    out: &mut Option<ThreadManifest>,
+) -> io::Result<()> {
+    if out.is_some() {
+        return Ok(());
+    }
+    let entries = match fs::read_dir(cur) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(enrich_fs_error(cur, "listing", e)),
+    };
+    let mut subdirs = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        let path = entry.path();
+        if ft.is_dir() {
+            subdirs.push(path);
+        } else if ft.is_file() && entry.file_name() == "manifest.toml" {
+            // Parse directly rather than reconstructing the thread name and
+            // routing through `read_manifest`: we match on `worktree_path`, so
+            // the thread name is irrelevant here. Skip anything unparseable or
+            // schema-stale — the reconcile caller is conservative by design.
+            if let Ok(text) = fs::read_to_string(&path)
+                && let Ok(manifest) = toml::from_str::<ThreadManifest>(&text)
+                && manifest.schema_version == SCHEMA_VERSION
+                && manifest.worktree_path == root_match
+            {
+                *out = Some(manifest);
+                return Ok(());
+            }
+        }
+    }
+    for sub in subdirs {
+        find_manifest_for_root(&sub, root_match, out)?;
+        if out.is_some() {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
 /// Delete the on-disk manifest directory for `thread`. Used by
 /// `heddle thread drop` to keep the materialized-thread inventory
 /// (`heddle status` / `heddle daemon status`) in sync with the live

@@ -3315,3 +3315,244 @@ fn export_deletes_tag_when_marker_retargeted_to_private() {
         "the old tag tip A remains served; deletion is not driven by an embargo of A"
     );
 }
+
+/// #316 / PR #528 r7 CLASS 2 (the leak): a branch exported to a real
+/// DESTINATION while public, then retracted (whole line embargoed), must be
+/// DELETED at the destination — not left pointing at now-private commits. The
+/// mirror-side retraction already deletes the branch from the internal mirror;
+/// the destination-sync step only ever WROTE the surviving refs and never
+/// computed deletions, so the destination kept the stale branch. The
+/// delete-set reconciliation closes that leak.
+#[test]
+fn export_propagates_branch_deletion_to_destination() {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    std::fs::write(heddle_temp.path().join("a.txt"), b"only\n").unwrap();
+    repo.snapshot(Some("only".into()), None).unwrap();
+
+    // Export to a real destination while public — the destination gets main.
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    let mut bridge = GitBridge::new(&repo);
+    bridge.export_to_path(&dest_path).expect("first export");
+    assert!(
+        gix::open(&dest_path)
+            .expect("open dest")
+            .find_reference("refs/heads/main")
+            .is_ok(),
+        "destination must advertise main while the line is public"
+    );
+
+    // Embargo the WHOLE line — including the seeded root — so no served frontier
+    // remains and the mirror deletes refs/heads/main.
+    for state in repo.store().list_states().unwrap() {
+        repo.put_state_visibility(StateVisibility {
+            state,
+            tier: VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+            embargo_until: None,
+            declarer: Principal {
+                name: "Grace Hopper".into(),
+                email: "grace@example.com".into(),
+            },
+            declared_at: Utc::now(),
+            signature: None,
+            supersedes: None,
+        })
+        .unwrap();
+    }
+
+    // Re-export to the SAME destination: the stale branch must be DELETED there.
+    bridge.export_to_path(&dest_path).expect("second export");
+    assert!(
+        gix::open(&dest_path)
+            .expect("reopen dest")
+            .find_reference("refs/heads/main")
+            .is_err(),
+        "retracting the line must DELETE refs/heads/main at the destination, not leave it serving now-private commits"
+    );
+}
+
+/// #316 / PR #528 r7 CLASS 2: the delete-set covers TAGS and the NOTES
+/// namespace too, so it is not a heads-only fix. A marker tag retracted from
+/// the mirror must be deleted at the destination; a stale heddle-managed notes
+/// ref absent from the served mirror must be deleted; and the embargoed
+/// commit's note ENTRY must no longer be readable at the destination.
+#[test]
+fn export_propagates_tag_and_note_deletion() {
+    use chrono::Utc;
+    use objects::object::{Attribution, Principal, State, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    // A public state on main that stays public throughout — so main never
+    // rewinds (a rewind would trip the export's fast-forward guard, a separate
+    // concern from this test).
+    std::fs::write(heddle_temp.path().join("main.txt"), b"trunk\n").unwrap();
+    repo.snapshot(Some("trunk".into()), None).unwrap();
+
+    // A SEPARATE public state R, pinned by marker v1.0 and independent of main,
+    // so embargoing it later deletes the tag and retracts its note without
+    // touching main's tip.
+    let r = {
+        let store = repo.store();
+        let blob = store.put_blob(&Blob::from_slice(b"release\n")).expect("blob");
+        let tree = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("release.txt".to_string(), blob, false).expect("entry"),
+            ]))
+            .expect("tree");
+        let state = State::new(
+            tree,
+            Vec::new(),
+            Attribution::human(Principal::new("Grace Hopper", "grace@example.com")),
+        );
+        store.put_state(&state).expect("put R");
+        state
+    };
+    repo.refs()
+        .create_marker(&MarkerName::new("v1.0"), &r.change_id)
+        .expect("create marker at R");
+
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    let mut bridge = GitBridge::new(&repo);
+    bridge.export_to_path(&dest_path).expect("first export");
+    let oid_r = bridge.mapping.get_git(&r.change_id).expect("R minted");
+
+    {
+        let dest = gix::open(&dest_path).expect("open dest");
+        assert!(
+            dest.find_reference("refs/tags/v1.0").is_ok(),
+            "destination must have the tag while public"
+        );
+        assert!(
+            crate::bridge::git_notes::read_note(&dest, oid_r)
+                .unwrap()
+                .is_some(),
+            "destination must carry R's note while public"
+        );
+        // Plant a stale heddle-managed notes ref the served mirror will never
+        // have, to exercise the NOTES namespace of the delete-set directly.
+        set_reference(
+            &dest,
+            "refs/notes/legacy",
+            oid_r,
+            PreviousValue::Any,
+            "test: stale heddle-managed notes ref",
+        )
+        .expect("plant stale notes ref");
+    }
+
+    // Embargo R → the mirror deletes the tag and retracts R's note entry. main
+    // is independent of R, so it is untouched (no rewind).
+    repo.put_state_visibility(StateVisibility {
+        state: r.change_id,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Grace Hopper".into(),
+            email: "grace@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+
+    bridge.export_to_path(&dest_path).expect("second export");
+
+    let dest = gix::open(&dest_path).expect("reopen dest");
+    assert!(
+        dest.find_reference("refs/tags/v1.0").is_err(),
+        "retracting the marker must DELETE refs/tags/v1.0 at the destination"
+    );
+    assert!(
+        dest.find_reference("refs/notes/legacy").is_err(),
+        "a stale heddle-managed notes ref absent from the served mirror must be DELETED at the destination"
+    );
+    assert!(
+        crate::bridge::git_notes::read_note(&dest, oid_r)
+            .unwrap()
+            .is_none(),
+        "the embargoed commit's note must no longer be readable at the destination"
+    );
+    assert!(
+        dest.find_reference("refs/heads/main").is_ok(),
+        "the still-public main branch must survive the reconciliation"
+    );
+}
+
+/// #316 / PR #528 r7 CLASS 2: the delete-set is scoped strictly to the
+/// heddle-managed namespaces (`refs/heads/*`, `refs/tags/*`, `refs/notes/*`).
+/// A ref the destination holds OUTSIDE those namespaces is foreign — heddle
+/// does not own it — and must be left untouched by the reconciliation. Refs
+/// that ARE still served must also survive.
+#[test]
+fn export_does_not_delete_foreign_refs() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    std::fs::write(heddle_temp.path().join("a.txt"), b"only\n").unwrap();
+    repo.snapshot(Some("only".into()), None).unwrap();
+    let state_a = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    let mut bridge = GitBridge::new(&repo);
+    bridge.export_to_path(&dest_path).expect("first export");
+    let oid_a = bridge.mapping.get_git(&state_a).expect("A minted");
+
+    // Plant a foreign ref in a namespace heddle does not manage.
+    {
+        let dest = gix::open(&dest_path).expect("open dest");
+        set_reference(
+            &dest,
+            "refs/keep/backup",
+            oid_a,
+            PreviousValue::Any,
+            "test: foreign ref heddle does not own",
+        )
+        .expect("plant foreign ref");
+    }
+
+    // Re-export with nothing retracted (main still public).
+    bridge.export_to_path(&dest_path).expect("second export");
+
+    let dest = gix::open(&dest_path).expect("reopen dest");
+    assert!(
+        dest.find_reference("refs/keep/backup").is_ok(),
+        "a foreign ref outside heddle-managed namespaces must be left untouched"
+    );
+    assert!(
+        dest.find_reference("refs/heads/main").is_ok(),
+        "a still-served heddle branch must survive the reconciliation"
+    );
+}
