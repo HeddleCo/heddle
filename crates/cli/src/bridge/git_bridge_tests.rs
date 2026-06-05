@@ -3589,7 +3589,7 @@ fn export_propagates_tag_and_note_deletion() {
         )
         .expect("plant stale notes ref");
         let mut exported = read_exported_refs(&dest).expect("read exported-refs record");
-        exported.insert("refs/notes/legacy".to_string());
+        exported.insert("refs/notes/legacy".to_string(), oid_r);
         write_exported_refs(&dest, &exported).expect("record legacy as heddle-exported");
     }
 
@@ -4044,5 +4044,304 @@ fn foreign_ref_on_url_remote_survives() {
     assert!(
         remote.find_reference("refs/heads/main").is_ok(),
         "a still-served heddle branch must survive the reconciliation"
+    );
+}
+
+/// #316 / PR #528 r12: a destination tip advanced OUT OF BAND past heddle's
+/// last-published tip — a descendant of the served frontier that heddle never
+/// published, then fetched into the mirror — must NOT be force-overwritten. r11
+/// treated ANY `old`-descends-from-`new` topology as a heddle-owned embargo
+/// rewind and forced it, clobbering the remote's newer linear commit (data
+/// loss). The force is now gated on heddle-OWNERSHIP (the exported-refs record):
+/// an out-of-band descendant is `Diverged` — FF-rejected unless `--force` — so
+/// the destination's newer commit survives. Covers local-path AND URL/network.
+#[test]
+fn out_of_band_destination_descendant_not_force_overwritten() {
+    use crate::bridge::git_core::GitBridgeError;
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    // A single public tip B heddle publishes to its destinations.
+    std::fs::write(heddle_temp.path().join("a.txt"), b"base\n").unwrap();
+    repo.snapshot(Some("base".into()), None).unwrap();
+    std::fs::write(heddle_temp.path().join("b.txt"), b"fix\n").unwrap();
+    repo.snapshot(Some("fix".into()), None).unwrap();
+    let state_b = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+
+    let mut bridge = GitBridge::new(&repo);
+
+    // ---- local-path destination ----
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    bridge
+        .export_to_path(&dest_path)
+        .expect("first export publishes B (local)");
+    let oid_b = bridge.mapping.get_git(&state_b).expect("B minted");
+
+    // Out-of-band advance: a NEW commit C on top of B, written to BOTH the mirror
+    // (the user fetched it, so it is a resolvable descendant of the served
+    // frontier — the exact topology that fooled r11) AND the destination (its
+    // branch moves to C). Identical inputs ⇒ identical oid in both repos.
+    let oid_c = {
+        let mirror = bridge.open_git_repo().expect("open mirror");
+        let in_mirror =
+            commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "out-of-band", &[oid_b]);
+        let dest = gix::open(&dest_path).expect("open dest");
+        let in_dest = commit_with_tree(
+            &dest,
+            Some("refs/heads/main"),
+            empty_tree_oid(&dest),
+            "out-of-band",
+            &[oid_b],
+        );
+        assert_eq!(
+            in_mirror, in_dest,
+            "C must be the same commit in mirror and destination"
+        );
+        in_mirror
+    };
+
+    // A plain export must NOT clobber C: heddle never published it, so the move is
+    // Diverged (FF-rejected), not a heddle-owned rewind.
+    let err = bridge.export_to_path(&dest_path).expect_err(
+        "out-of-band descendant must be FF-rejected at the local destination, not force-overwritten",
+    );
+    assert!(
+        matches!(err, GitBridgeError::NonFastForwardRef { .. }),
+        "expected a non-fast-forward rejection, got: {err:?}"
+    );
+    {
+        let dest = gix::open(&dest_path).expect("reopen dest");
+        let tip = dest
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_id()
+            .unwrap()
+            .detach();
+        assert_eq!(
+            tip, oid_c,
+            "the out-of-band commit must survive — heddle must not force-overwrite it"
+        );
+    }
+
+    // `--force` is the explicit escape hatch: it DOES overwrite C back to B.
+    bridge
+        .push_with_scope_force(
+            dest_path.to_str().expect("dest path"),
+            GitPushScope::AllThreads,
+            true,
+        )
+        .expect("--force overrides the FF guard at the local destination");
+    {
+        let dest = gix::open(&dest_path).expect("reopen dest");
+        let tip = dest
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_id()
+            .unwrap()
+            .detach();
+        assert_eq!(
+            tip, oid_b,
+            "--force rewinds the local destination to the served frontier B"
+        );
+    }
+
+    // ---- URL/network destination ----
+    let remote_root = TempDir::new().expect("remote root");
+    let _remote_repo = init_named_bare_git_repo(&remote_root, "remote.git");
+    let daemon = GitDaemon::spawn_push(remote_root.path());
+    let url = daemon.url("remote.git");
+
+    bridge.push(&url).expect("first network push publishes B");
+    {
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        let tip = remote
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_id()
+            .unwrap()
+            .detach();
+        assert_eq!(tip, oid_b, "remote advertises the published tip B");
+    }
+
+    // Out-of-band advance on the wire remote to the SAME C (already in the mirror).
+    {
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        let in_remote = commit_with_tree(
+            &remote,
+            Some("refs/heads/main"),
+            empty_tree_oid(&remote),
+            "out-of-band",
+            &[oid_b],
+        );
+        assert_eq!(in_remote, oid_c, "C must be the same commit on the wire remote");
+    }
+
+    // Plain network push must likewise refuse to clobber C.
+    let err = bridge.push(&url).expect_err(
+        "out-of-band descendant must be FF-rejected on the URL/network remote too",
+    );
+    assert!(
+        matches!(err, GitBridgeError::NonFastForwardRef { .. }),
+        "expected a non-fast-forward rejection on the wire, got: {err:?}"
+    );
+    {
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
+        let tip = remote
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_id()
+            .unwrap()
+            .detach();
+        assert_eq!(
+            tip, oid_c,
+            "the out-of-band commit must survive on the URL/network remote"
+        );
+    }
+}
+
+/// #316 / PR #528 r12: the r11 behavior is PRESERVED — a tip heddle ITSELF
+/// published, then embargoed, IS force-rewound to the served frontier at every
+/// destination. The r12 ownership gate authorizes the force precisely because the
+/// destination tip equals heddle's recorded published tip; only out-of-band tips
+/// heddle never published are spared (see
+/// [`out_of_band_destination_descendant_not_force_overwritten`]). Covers
+/// local-path AND URL/network.
+#[test]
+fn heddle_published_tip_embargo_rewind_still_forced() {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    // Linear thread: public base A, then public tip B — both heddle-published.
+    std::fs::write(heddle_temp.path().join("a.txt"), b"base\n").unwrap();
+    repo.snapshot(Some("base".into()), None).unwrap();
+    let state_a = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+    std::fs::write(heddle_temp.path().join("b.txt"), b"fix\n").unwrap();
+    repo.snapshot(Some("fix".into()), None).unwrap();
+    let state_b = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+
+    let mut bridge = GitBridge::new(&repo);
+
+    // Publish B to BOTH a local-path destination and a URL/network remote.
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    bridge
+        .export_to_path(&dest_path)
+        .expect("first export publishes B (local)");
+
+    let remote_root = TempDir::new().expect("remote root");
+    let _remote_repo = init_named_bare_git_repo(&remote_root, "remote.git");
+    let daemon = GitDaemon::spawn_push(remote_root.path());
+    let url = daemon.url("remote.git");
+    bridge.push(&url).expect("first network push publishes B");
+
+    let oid_a = bridge.mapping.get_git(&state_a).expect("A minted");
+    let oid_b = bridge.mapping.get_git(&state_b).expect("B minted");
+    {
+        let dest = gix::open(&dest_path).expect("open dest");
+        assert_eq!(
+            dest.find_reference("refs/heads/main")
+                .unwrap()
+                .peel_to_id()
+                .unwrap()
+                .detach(),
+            oid_b,
+            "local destination advertises the published tip B"
+        );
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        assert_eq!(
+            remote
+                .find_reference("refs/heads/main")
+                .unwrap()
+                .peel_to_id()
+                .unwrap()
+                .detach(),
+            oid_b,
+            "remote advertises the published tip B"
+        );
+    }
+
+    // Embargo only B; parent A stays served. The served frontier lags to A — a
+    // deliberate heddle-OWNED rewind: the destination tip (B) equals heddle's
+    // recorded published tip, so the force is authorized at every destination.
+    repo.put_state_visibility(StateVisibility {
+        state: state_b,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Grace Hopper".into(),
+            email: "grace@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+
+    bridge
+        .export_to_path(&dest_path)
+        .expect("second export must FORCE the heddle-owned embargo rewind (local)");
+    bridge
+        .push(&url)
+        .expect("second network push must FORCE the heddle-owned embargo rewind (network)");
+
+    let dest = gix::open(&dest_path).expect("reopen dest");
+    let tip = dest
+        .find_reference("refs/heads/main")
+        .unwrap()
+        .peel_to_id()
+        .unwrap()
+        .detach();
+    assert_eq!(
+        tip, oid_a,
+        "local destination must be force-rewound to the served ancestor A"
+    );
+    assert_ne!(
+        tip, oid_b,
+        "local destination must not keep advertising the embargoed tip B"
+    );
+
+    let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
+    let rtip = remote
+        .find_reference("refs/heads/main")
+        .unwrap()
+        .peel_to_id()
+        .unwrap()
+        .detach();
+    assert_eq!(
+        rtip, oid_a,
+        "URL/network remote must be force-rewound to the served ancestor A"
+    );
+    assert_ne!(
+        rtip, oid_b,
+        "URL/network remote must not keep advertising the embargoed tip B"
     );
 }

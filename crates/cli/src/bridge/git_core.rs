@@ -2608,10 +2608,14 @@ fn commit_is_descendant_of(
 }
 
 /// Filename, under a destination repo's git dir, of heddle's record of which
-/// full ref names it has exported to THAT destination. A heddle-owned sidecar
-/// (git ignores unknown files in the git dir), one full ref name per line. Lives
+/// full ref names it has exported to THAT destination, AND the tip OID heddle
+/// last published for each. A heddle-owned sidecar (git ignores unknown files in
+/// the git dir), one `<full ref name> <published tip oid>` pair per line. Lives
 /// WITH the destination so the delete-set can be scoped to refs heddle actually
-/// wrote here — never the raw destination namespace (heddle#316 CLASS 2).
+/// wrote here — never the raw destination namespace (heddle#316 CLASS 2) — and
+/// so the force decision can prove a rewind is heddle-OWNED, not an out-of-band
+/// advance, by matching the destination tip against the recorded published tip
+/// (heddle#316 r12).
 const HEDDLE_EXPORTED_REFS_FILE: &str = "heddle-exported-refs";
 
 /// Directory, under heddle's OWN dir, holding the per-URL-remote exported-refs
@@ -2639,43 +2643,72 @@ fn network_exported_refs_path(heddle_dir: &Path, url: &gix::Url) -> PathBuf {
         .join(format!("{key}.refs"))
 }
 
-/// The set of full ref names heddle has previously exported to the destination
-/// whose record lives at `path`. `Ok(empty)` when no record exists yet — a first
-/// export, OR a destination heddle wrote to before this record existed. Returning
-/// empty (rather than assuming the destination's current heddle-namespace refs
-/// were heddle's) is the conservative choice: it can never delete a foreign ref
-/// on the first export after this code lands.
-fn read_exported_refs_at(path: &Path) -> GitResult<HashSet<String>> {
+/// The full ref names heddle has previously exported to the destination whose
+/// record lives at `path`, each mapped to the tip OID heddle last published for
+/// it. `Ok(empty)` when no record exists yet — a first export, OR a destination
+/// heddle wrote to before this record existed. Returning empty (rather than
+/// assuming the destination's current heddle-namespace refs were heddle's) is the
+/// conservative choice: it can never delete a foreign ref — nor force-overwrite a
+/// destination tip — on the first export after this code lands.
+fn read_exported_refs_at(path: &Path) -> GitResult<HashMap<String, ObjectId>> {
     match fs::read_to_string(path) {
-        Ok(text) => Ok(text
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_string)
-            .collect()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashSet::new()),
+        Ok(text) => {
+            let mut map = HashMap::new();
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                // `<full ref name> <published tip oid>`. The tip is the OID heddle
+                // last published for that ref here — the ownership token the force
+                // decision consults (heddle#316 r12). A pre-r12 legacy record
+                // stored only the name; parse its tip when present and fall back to
+                // null otherwise. A null tip can never equal a live `old`, so a
+                // legacy ref is never force-rewound (the safe direction) while it
+                // still participates in the delete-set.
+                let mut parts = line.split_whitespace();
+                let Some(name) = parts.next() else {
+                    continue;
+                };
+                let tip = parts
+                    .next()
+                    .and_then(|token| token.parse::<ObjectId>().ok())
+                    .unwrap_or_else(|| ObjectId::null(ObjectHashKind::Sha1));
+                map.insert(name.to_string(), tip);
+            }
+            Ok(map)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
         Err(e) => Err(GitBridgeError::Io(e)),
     }
 }
 
-/// Persist `refs` (full ref names) as heddle's exported-refs record at `path`.
-/// Atomic temp+rename so a torn write can't surface a half-record.
-fn write_exported_refs_at(path: &Path, refs: &HashSet<String>) -> GitResult<()> {
+/// Persist `refs` (full ref name → published tip OID) as heddle's exported-refs
+/// record at `path`. Atomic temp+rename so a torn write can't surface a
+/// half-record.
+fn write_exported_refs_at(path: &Path, refs: &HashMap<String, ObjectId>) -> GitResult<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut sorted: Vec<&str> = refs.iter().map(String::as_str).collect();
-    sorted.sort_unstable();
-    let body = sorted.join("\n");
+    let mut sorted: Vec<(&str, &ObjectId)> =
+        refs.iter().map(|(name, tip)| (name.as_str(), tip)).collect();
+    sorted.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    let body = sorted
+        .iter()
+        .map(|(name, tip)| format!("{name} {tip}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, body)?;
     fs::rename(&tmp, path)?;
     Ok(())
 }
 
-/// The set of full ref names heddle has previously exported to `target_repo`
-/// (the local-path destination record). See [`read_exported_refs_at`].
-pub(crate) fn read_exported_refs(target_repo: &gix::Repository) -> GitResult<HashSet<String>> {
+/// Heddle's exported-refs record for `target_repo` (full ref name → last-published
+/// tip OID), the local-path destination record. See [`read_exported_refs_at`].
+pub(crate) fn read_exported_refs(
+    target_repo: &gix::Repository,
+) -> GitResult<HashMap<String, ObjectId>> {
     read_exported_refs_at(&exported_refs_manifest_path(target_repo))
 }
 
@@ -2683,7 +2716,7 @@ pub(crate) fn read_exported_refs(target_repo: &gix::Repository) -> GitResult<Has
 /// [`write_exported_refs_at`].
 pub(crate) fn write_exported_refs(
     target_repo: &gix::Repository,
-    refs: &HashSet<String>,
+    refs: &HashMap<String, ObjectId>,
 ) -> GitResult<()> {
     write_exported_refs_at(&exported_refs_manifest_path(target_repo), refs)
 }
@@ -2701,10 +2734,14 @@ enum RefMove {
     Create,
     /// `new` descends from `old` — an ordinary fast-forward.
     FastForward,
-    /// `old` descends from `new` — a deliberate backward rewind: the served
+    /// `old` descends from `new` AND `old` is the tip heddle itself last
+    /// published here — a deliberate backward rewind heddle OWNS: the served
     /// frontier was lagged down to an ancestor because the prior tip (or a
     /// descendant of `new`) was embargoed/retracted. MUST be forced through at
     /// every destination, exactly as the mirror-side branch rewind forces it.
+    /// Topology alone does NOT qualify: a destination tip advanced OUT OF BAND
+    /// past heddle's last-published tip also descends from `new`, but is
+    /// [`Diverged`](RefMove::Diverged), never force-overwritten (heddle#316 r12).
     Rewind,
     /// `old` and `new` share no ancestor line (or `old` is unresolvable here) —
     /// the divergence the fast-forward guard exists to catch.
@@ -2717,10 +2754,20 @@ enum RefMove {
 /// but not from the object DB). The single place that distinguishes a deliberate
 /// embargo rewind from a fork, so both push destinations force the former and
 /// reject the latter identically.
+///
+/// `recorded_tip` is the tip heddle last published for this ref at THIS
+/// destination (from its exported-refs record), or `None` when heddle has no
+/// record of publishing it here. A backward rewind is FORCED only when heddle
+/// owns the tip being rewound — `recorded_tip == Some(old)`. Topology alone is
+/// insufficient: a destination tip advanced OUT OF BAND past heddle's
+/// last-published tip (then fetched into the mirror) ALSO descends from `new`,
+/// but heddle never published it, so it is [`RefMove::Diverged`] and must not be
+/// force-overwritten (heddle#316 r12).
 fn classify_ref_move(
     repo: &gix::Repository,
     old: Option<ObjectId>,
     new: ObjectId,
+    recorded_tip: Option<ObjectId>,
 ) -> GitResult<RefMove> {
     let Some(old) = old else {
         return Ok(RefMove::Create);
@@ -2736,12 +2783,19 @@ fn classify_ref_move(
     if commit_is_descendant_of(repo, new, old)? {
         return Ok(RefMove::FastForward);
     }
-    // A backward rewind is `old` reaching `new`. `old` is the destination's prior
-    // tip — a commit heddle previously published, so its objects survive in the
-    // mirror (the embargo purge drops the ChangeId→OID mapping, never the object).
-    // If `old` is NOT resolvable here, we cannot prove a rewind: treat it as the
-    // divergence the FF guard catches.
-    if repo.find_commit(old).is_ok() && commit_is_descendant_of(repo, old, new)? {
+    // A backward rewind is `old` reaching `new`. Forcing it past the FF guard is
+    // authorized ONLY when heddle OWNS the rewind: `old` is exactly the tip heddle
+    // itself last published for this ref here (per the exported-refs record). A
+    // destination tip heddle did NOT publish — an out-of-band descendant the user
+    // advanced and fetched into the mirror — is never force-overwritten; it falls
+    // through to `Diverged` (FF-rejected unless the user passes `--force`), so its
+    // newer commit survives. `old`'s objects survive in the mirror because heddle
+    // published it (the embargo purge drops the ChangeId→OID mapping, never the
+    // object); if `old` is NOT resolvable here we cannot prove a rewind anyway.
+    if recorded_tip == Some(old)
+        && repo.find_commit(old).is_ok()
+        && commit_is_descendant_of(repo, old, new)?
+    {
         return Ok(RefMove::Rewind);
     }
     Ok(RefMove::Diverged)
@@ -2772,8 +2826,10 @@ struct DestinationReconcilePlan {
     /// Previously-exported refs the mirror no longer serves AND that still exist
     /// at the destination — to delete. Scoped to heddle-owned refs (never foreign).
     deletes: Vec<PlannedRefDelete>,
-    /// The exported-refs record to persist for this destination after the push.
-    new_manifest: HashSet<String>,
+    /// The exported-refs record to persist for this destination after the push:
+    /// full ref name → the tip heddle just published (or, for a still-served ref
+    /// this push left out of scope, its previously-recorded tip).
+    new_manifest: HashMap<String, ObjectId>,
 }
 
 /// Build the served-frontier reconciliation plan shared by the local-path and
@@ -2790,22 +2846,27 @@ struct DestinationReconcilePlan {
 ///   still-served sibling that merely fell outside its scope.
 /// * `old_at_destination` — the destination's current ref tips (full name → oid).
 /// * `previously_exported` — heddle's record of what it exported to THIS
-///   destination; the delete-set and foreign-ref scoping derive from it.
+///   destination (full ref name → last-published tip OID); the delete-set,
+///   foreign-ref scoping, AND the force-vs-divergence decision all derive from
+///   it — one ownership notion for both delete and force (heddle#316 r12).
 /// * `force` — the user's explicit `--force`: additionally forces a true fork.
 fn plan_destination_reconcile(
     mirror_repo: &gix::Repository,
     written: &[RefUpdate],
     served_full_names: &HashSet<String>,
     old_at_destination: &HashMap<String, ObjectId>,
-    previously_exported: &HashSet<String>,
+    previously_exported: &HashMap<String, ObjectId>,
     force: bool,
 ) -> GitResult<DestinationReconcilePlan> {
     let mut writes = Vec::new();
     for update in written {
         let full = full_ref_name(update);
         let old = old_at_destination.get(&full).copied();
+        // The tip heddle last published for this ref here — the ownership token
+        // that authorizes forcing a backward rewind (heddle#316 r12).
+        let recorded_tip = previously_exported.get(&full).copied();
         let proceed = if matches!(update.namespace, RefNamespace::Branch | RefNamespace::Note) {
-            match classify_ref_move(mirror_repo, old, update.target)? {
+            match classify_ref_move(mirror_repo, old, update.target, recorded_tip)? {
                 RefMove::Unchanged => false,
                 RefMove::Create | RefMove::FastForward | RefMove::Rewind => true,
                 RefMove::Diverged => {
@@ -2840,7 +2901,7 @@ fn plan_destination_reconcile(
     // delete op only when the destination still has the ref; a ref already absent
     // there needs no op but still drops out of the record below.
     let mut deletes = Vec::new();
-    for full in previously_exported {
+    for full in previously_exported.keys() {
         if !served_full_names.contains(full)
             && let Some(old) = old_at_destination.get(full).copied()
         {
@@ -2852,14 +2913,19 @@ fn plan_destination_reconcile(
     }
 
     // New record = previously-exported refs STILL served (a retracted one drops
-    // out — it was deleted above), plus the refs this push just wrote. Bounded to
-    // refs heddle owns at this destination, so a foreign ref can never enter the
-    // record and thus can never join a future delete-set.
-    let mut new_manifest: HashSet<String> = previously_exported
-        .intersection(served_full_names)
-        .cloned()
+    // out — it was deleted above), keeping their recorded published tip, plus the
+    // refs this push just wrote (whose published tip becomes the served frontier
+    // we wrote). Bounded to refs heddle owns at this destination, so a foreign ref
+    // can never enter the record and thus can never join a future delete-set —
+    // nor be mistaken for a heddle-owned tip a future rewind could force over.
+    let mut new_manifest: HashMap<String, ObjectId> = previously_exported
+        .iter()
+        .filter(|(full, _)| served_full_names.contains(*full))
+        .map(|(full, tip)| (full.clone(), *tip))
         .collect();
-    new_manifest.extend(written.iter().map(full_ref_name));
+    for update in written {
+        new_manifest.insert(full_ref_name(update), update.target);
+    }
 
     Ok(DestinationReconcilePlan {
         writes,
