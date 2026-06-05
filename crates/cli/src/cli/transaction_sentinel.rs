@@ -255,6 +255,49 @@ buffered_ops = []
         assert!(feature_after.buffered_ops.is_empty());
     }
 
+    /// The CLI must persist the sentinel through the same atomic
+    /// write-tmp-then-rename protocol the daemon uses
+    /// (`objects::fs_atomic::write_file_atomic`), not a plain in-place
+    /// `fs::write`. A plain write truncates and rewrites the *same*
+    /// inode, so a crash mid-write leaves a torn `<id>.toml` — a state
+    /// `daemon::transaction_replay` is not designed to recover. The
+    /// atomic rename publishes a *fresh* inode, leaving the old file
+    /// intact until the rename commits. Inode replacement is the
+    /// observable signature of that rename, and is root-proof (unlike a
+    /// permission-based probe).
+    #[cfg(unix)]
+    #[test]
+    fn append_publishes_fresh_inode_proving_atomic_rename() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (_t, repo) = fresh_repo();
+        let dir = repo.heddle_dir().join("state").join("transactions");
+        write_sentinel(&dir, "tx-main", "main", "active");
+        let path = dir.join("tx-main.toml");
+
+        let ino_before = fs::metadata(&path).unwrap().ino();
+        let updated = append_op_to_active_for_thread(&repo, "main", "capture");
+        assert_eq!(updated, vec!["tx-main".to_string()]);
+        let ino_after = fs::metadata(&path).unwrap().ino();
+
+        assert_ne!(
+            ino_before, ino_after,
+            "sentinel must be published via atomic rename (fresh inode), \
+             not rewritten in place"
+        );
+
+        // The rename must leave no orphan temp file behind in the
+        // sentinel directory — replay treats stray entries as
+        // interrupted-write orphans.
+        let stray: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .filter(|n| n != "tx-main.toml")
+            .collect();
+        assert!(stray.is_empty(), "atomic write left orphans: {stray:?}");
+    }
+
     #[test]
     fn append_appends_in_order() {
         let (_t, repo) = fresh_repo();
