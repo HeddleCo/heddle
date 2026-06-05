@@ -52,12 +52,17 @@ pub fn run(
         return Vec::new();
     }
 
-    // For each function in the changed-files set (here: every function
-    // since we don't compute the diff). Compare to the rest of the
-    // corpus. Fire when max similarity is below `1 - tolerance`.
+    // For each function in the changed-files set, compare to the rest of the
+    // full-repo corpus. Fire when max similarity is below `1 - tolerance`.
+    // The corpus stays whole (so "unique in the repo" is measured against
+    // every function), but we only *evaluate and report* functions that live
+    // in a changed file — novelty is a diff-scoped signal, not a repo scan.
     let novelty_threshold = 1.0 - tolerance;
     let mut out = Vec::new();
-    for (path, fn_def) in &corpus {
+    for (path, fn_def) in corpus
+        .iter()
+        .filter(|(path, _)| ctx.changed_paths.contains(path))
+    {
         let max_sim = corpus
             .iter()
             .filter(|(p, f)| !(p == path && f.name == fn_def.name))

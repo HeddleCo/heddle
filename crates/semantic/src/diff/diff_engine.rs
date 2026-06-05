@@ -200,6 +200,14 @@ where
         let mut loaded = Vec::with_capacity(self.file_changes.len());
         let mut total_bytes = 0usize;
         for change in &self.file_changes {
+            // Enforce the byte budget *before* loading the next file: once the
+            // cumulative total has crossed the cap we stop, leaving the rest of
+            // the corpus unloaded rather than paying the I/O + allocation for
+            // files we are about to discard. The file that tips the running
+            // total over the cap is the last one loaded.
+            if total_bytes > self.options.budget.max_total_bytes {
+                break;
+            }
             let path = PathBuf::from(&change.path);
             let old_content = match change.kind {
                 DiffKind::Deleted | DiffKind::Modified => (self.load_old)(&path)?,
