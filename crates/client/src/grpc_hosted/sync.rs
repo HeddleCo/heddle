@@ -1973,6 +1973,7 @@ mod tests {
             repo.get_state_visibility_for_state(&state_id)
                 .expect("load sidecar")
                 .latest()
+                .expect("resolve visibility")
                 .is_none(),
             "an oversized sidecar must never be installed"
         );

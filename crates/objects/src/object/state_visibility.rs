@@ -104,6 +104,21 @@ impl StateVisibility {
             _ => Ok(()),
         }
     }
+
+    /// Content-addressed id of this record: `blake3` over the canonical
+    /// rmp-encoded bytes of a one-element [`StateVisibilityBlob`]. This is the
+    /// id a superseding record stores in its [`supersedes`](Self::supersedes)
+    /// pointer, and the key [`StateVisibilityBlob::latest`] resolves the
+    /// supersede chain by — so the write path (which sets `supersedes` from the
+    /// under-lock head) and the read path (which walks the chain) agree by
+    /// construction. The id covers the single record's bytes embedded in the
+    /// versioned envelope, so it stays stable across schema additions that only
+    /// extend the container.
+    pub fn content_hash(&self) -> Result<ContentHash, StateVisibilityError> {
+        let single = StateVisibilityBlob::new(vec![self.clone()]);
+        let bytes = single.encode()?;
+        Ok(ContentHash::from_bytes(*blake3::hash(&bytes).as_bytes()))
+    }
 }
 
 /// On-disk blob containing all visibility records for a single state. One
@@ -141,10 +156,53 @@ impl StateVisibilityBlob {
         !self.records.is_empty()
     }
 
-    /// The effective record: the most recent declaration by `declared_at`.
-    /// Pure over the persisted records, never wall-clock.
-    pub fn latest(&self) -> Option<&StateVisibility> {
-        self.records.iter().max_by_key(|r| r.declared_at)
+    /// The effective record: the **head of the supersede DAG** — the record in
+    /// this blob that no other record supersedes — resolved purely from the
+    /// records' content-intrinsic [`supersedes`](StateVisibility::supersedes)
+    /// pointers, **never** from wall-clock `declared_at`.
+    ///
+    /// Each locally-committed declaration links onto the prior head it read
+    /// under the repo write lock — its `supersedes` points at that head's
+    /// content hash (heddle#317 / PR #529 P1) — so for serialized local writes
+    /// the chain is linear and the head is the **last-committed** record,
+    /// independent of clock skew or whatever order the timestamps happen to
+    /// carry. `declared_at` is an audit/display field only. This also fixes a
+    /// latent cross-host bug: wall-clock cannot order records replicated across
+    /// hosts whose clocks disagree, but the content-hash chain can.
+    ///
+    /// **Fork tie-break (concurrent / cross-host).** Two records can supersede
+    /// the *same* prior with neither superseding the other — a genuine
+    /// concurrent fork, e.g. two hosts that diverged. Both are heads. To make
+    /// every replica resolve the SAME effective record without consulting
+    /// wall-clock, the tie is broken by the **lexicographically greatest record
+    /// content hash** — a content-intrinsic, host-independent key. Cycles are
+    /// cryptographically unconstructable (a record's hash covers its
+    /// `supersedes` pointer, so no record can supersede one minted after it), so
+    /// a non-empty blob always has at least one head.
+    pub fn latest(&self) -> Result<Option<&StateVisibility>, StateVisibilityError> {
+        // Every content hash referenced by some record's `supersedes` pointer.
+        // A record whose own hash appears here has been superseded — it is not
+        // the head.
+        let superseded: std::collections::HashSet<ContentHash> =
+            self.records.iter().filter_map(|r| r.supersedes).collect();
+
+        let mut head: Option<(&StateVisibility, ContentHash)> = None;
+        for record in &self.records {
+            let hash = record.content_hash()?;
+            if superseded.contains(&hash) {
+                continue;
+            }
+            // Among multiple heads (a fork), keep the greatest content hash so
+            // the pick is deterministic and host-independent.
+            let take = match &head {
+                Some((_, best)) => hash > *best,
+                None => true,
+            };
+            if take {
+                head = Some((record, hash));
+            }
+        }
+        Ok(head.map(|(record, _)| record))
     }
 }
 
@@ -250,15 +308,89 @@ mod tests {
     }
 
     #[test]
-    fn latest_picks_the_most_recent() {
+    fn latest_resolves_the_supersede_chain_head() {
+        // The effective record is the head of the supersede chain — the record
+        // no other record supersedes — not the most recent by wall-clock.
         let early = record(VisibilityTier::Internal);
+        let early_id = early.content_hash().unwrap();
         let late = StateVisibility {
             declared_at: Utc.with_ymd_and_hms(2026, 6, 2, 9, 0, 0).unwrap(),
-            tier: VisibilityTier::Public,
+            supersedes: Some(early_id),
             ..record(VisibilityTier::Public)
         };
         let blob = StateVisibilityBlob::new(vec![early, late.clone()]);
-        assert_eq!(blob.latest().unwrap(), &late);
+        assert_eq!(blob.latest().unwrap().unwrap(), &late);
+    }
+
+    #[test]
+    fn latest_ignores_wall_clock_declared_at() {
+        // A record with a strictly LATER declared_at but EARLIER in the
+        // supersede chain must NOT be selected — the chain head wins regardless
+        // of wall-clock. This is the bug class the redesign closes: selection is
+        // content-intrinsic, so it can't be skewed by timestamps (or clock
+        // disagreement across hosts).
+        let head_tier = VisibilityTier::TeamScoped {
+            team_id: "infra".into(),
+        };
+        // The genesis carries the LATEST timestamp...
+        let early_in_chain = StateVisibility {
+            declared_at: Utc.with_ymd_and_hms(2030, 1, 1, 0, 0, 0).unwrap(),
+            ..record(VisibilityTier::Internal)
+        };
+        let early_id = early_in_chain.content_hash().unwrap();
+        // ...the chain head supersedes it but carries an EARLIER timestamp.
+        let head = StateVisibility {
+            declared_at: Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap(),
+            supersedes: Some(early_id),
+            ..record(head_tier.clone())
+        };
+        let blob = StateVisibilityBlob::new(vec![early_in_chain, head.clone()]);
+        let latest = blob.latest().unwrap().unwrap();
+        assert_eq!(latest, &head);
+        assert_eq!(
+            latest.tier, head_tier,
+            "the chain head wins even though its declared_at is the earlier of the two"
+        );
+    }
+
+    #[test]
+    fn concurrent_fork_resolves_deterministically() {
+        // Two records supersede the SAME prior with neither superseding the
+        // other — a genuine concurrent fork (e.g. two hosts). latest() must pick
+        // the SAME head on every replica via the content-intrinsic tie-break
+        // (greatest content hash), never wall-clock and never input order.
+        let genesis = record(VisibilityTier::Internal);
+        let genesis_id = genesis.content_hash().unwrap();
+        let fork_a = StateVisibility {
+            declared_at: Utc.with_ymd_and_hms(2026, 6, 2, 9, 0, 0).unwrap(),
+            supersedes: Some(genesis_id),
+            ..record(VisibilityTier::TeamScoped {
+                team_id: "host-a".into(),
+            })
+        };
+        let fork_b = StateVisibility {
+            declared_at: Utc.with_ymd_and_hms(2026, 6, 3, 9, 0, 0).unwrap(),
+            supersedes: Some(genesis_id),
+            ..record(VisibilityTier::TeamScoped {
+                team_id: "host-b".into(),
+            })
+        };
+        // The deterministic winner is the head with the greater content hash.
+        let expected = if fork_a.content_hash().unwrap() > fork_b.content_hash().unwrap() {
+            fork_a.clone()
+        } else {
+            fork_b.clone()
+        };
+        // Resolved identically regardless of the order the records appear in.
+        let blob1 =
+            StateVisibilityBlob::new(vec![genesis.clone(), fork_a.clone(), fork_b.clone()]);
+        let blob2 = StateVisibilityBlob::new(vec![genesis, fork_b, fork_a]);
+        assert_eq!(blob1.latest().unwrap().unwrap(), &expected);
+        assert_eq!(
+            blob2.latest().unwrap().unwrap(),
+            &expected,
+            "the fork must resolve to the same head independent of record order"
+        );
     }
 
     #[test]

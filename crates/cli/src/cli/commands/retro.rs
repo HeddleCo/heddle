@@ -267,7 +267,9 @@ pub async fn cmd_retro(cli: &Cli, options: RetroCommandOptions) -> Result<()> {
                 | OpRecord::GitCheckpoint { .. }
                 | OpRecord::RemoteThreadUpdate { .. }
                 | OpRecord::RemoteThreadDelete { .. }
-                | OpRecord::UndoRecoveryUpdate { .. } => {}
+                | OpRecord::UndoRecoveryUpdate { .. }
+                | OpRecord::StateVisibilitySet { .. }
+                | OpRecord::StateVisibilityPromote { .. } => {}
             }
         }
     }
@@ -367,7 +369,9 @@ fn find_recent_turn_ts(repo: &Repository) -> Result<Option<DateTime<Utc>>> {
                 | OpRecord::GitCheckpoint { .. }
                 | OpRecord::RemoteThreadUpdate { .. }
                 | OpRecord::RemoteThreadDelete { .. }
-                | OpRecord::UndoRecoveryUpdate { .. } => continue,
+                | OpRecord::UndoRecoveryUpdate { .. }
+                | OpRecord::StateVisibilitySet { .. }
+                | OpRecord::StateVisibilityPromote { .. } => continue,
             };
             if let Some(state) = repo.store().get_state(&new_state)?
                 && let Some(intent) = state.intent.as_deref()

@@ -28,8 +28,9 @@ pub use cli_args::{
     StackArgs, StackCommands, StashCommands, SwitchArgs, ThreadAbsorbArgs,
     ThreadCleanupArgs, ThreadCommands, ThreadDropArgs, ThreadListArgs, ThreadMoveArgs,
     ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs, ThreadResolveArgs, ThreadShowArgs,
-    ThreadStartArgs, TryArgs, UndoArgs, WatchArgs, WorkspaceCommands, WorkspaceModeArg,
-    WorkspaceShowArgs,
+    ThreadStartArgs, TryArgs, UndoArgs, VisibilityCommands, VisibilityListArgs,
+    VisibilityPromoteArgs, VisibilitySetArgs, VisibilityShowArgs, VisibilityTierArg, WatchArgs,
+    WorkspaceCommands, WorkspaceModeArg, WorkspaceShowArgs,
 };
 #[cfg(feature = "client")]
 pub use cli_args::{AuthCommands, SupportCommands};

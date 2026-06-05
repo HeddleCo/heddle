@@ -4,7 +4,7 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use chrono::{DateTime, Utc};
-use objects::object::{ChangeId, ContentHash, OperationId, Principal};
+use objects::object::{ChangeId, ContentHash, OperationId, Principal, VisibilityTier};
 use serde::{Deserialize, Serialize};
 
 /// Logical key used by conditional transaction commits to detect intervening
@@ -13,6 +13,15 @@ use serde::{Deserialize, Serialize};
 pub enum IsolationKey {
     Thread(String),
     LocalHead { scope: String },
+    /// Per-state visibility key (heddle#317). Every `StateVisibilitySet` /
+    /// `StateVisibilityPromote` record on a state contributes this key, so a
+    /// visibility mutation on state `S` conflicts with an in-flight undo/redo of
+    /// a visibility batch that also touched `S`. Without it a visibility record
+    /// would contribute no isolation key, and an undo could restore an older
+    /// `prior_sidecar` over a concurrently-committed newer visibility record,
+    /// silently discarding it. Keyed by the state's `ChangeId`, so visibility
+    /// mutations on *different* states never spuriously conflict.
+    StateVisibility(ChangeId),
 }
 
 /// The oplog generation and logical keys a transaction observed before apply.
@@ -306,6 +315,54 @@ pub enum OpRecord {
     /// so one update variant suffices. Local (per-checkout) ref —
     /// reconciles within its own `op_scope`.
     UndoRecoveryUpdate { state: ChangeId },
+    /// A visibility tier was declared on a state (heddle#317). Audit-trail
+    /// companion to the per-state `StateVisibility` sidecar record: the
+    /// sidecar is the authoritative effective tier; this oplog entry records
+    /// who bound it and when. Emitted both by `heddle visibility set` and by
+    /// the Invariant-A capture-time binding (spike #266 §5.4).
+    ///
+    /// Reversible: `prior_sidecar`/`new_sidecar` carry the FULL per-state
+    /// visibility sidecar bytes (or `None` for public-by-absence) immediately
+    /// before and after the put. Undo restores `prior_sidecar`, redo restores
+    /// `new_sidecar` — both absolute write-or-remove, mirroring the redaction
+    /// sidecar capture-restore. Without the before-image the undo path could
+    /// only no-op, leaving the oplog and the sidecar divergent (PR #529 P1).
+    StateVisibilitySet {
+        state: ChangeId,
+        /// Content id of the persisted `StateVisibility` record.
+        record_id: ContentHash,
+        /// The tier declared.
+        tier: VisibilityTier,
+        /// Full sidecar bytes before the put (`None` = public-by-absence).
+        /// Undo target.
+        #[serde(default)]
+        prior_sidecar: Option<Vec<u8>>,
+        /// Full sidecar bytes after the put (`None` = public-by-absence).
+        /// Redo target.
+        #[serde(default)]
+        new_sidecar: Option<Vec<u8>>,
+    },
+    /// A state's visibility was promoted to a less-restrictive tier by
+    /// appending a superseding `StateVisibility` record (heddle#317).
+    /// Reversible the same way as [`StateVisibilitySet`](Self::StateVisibilitySet):
+    /// `prior_sidecar`/`new_sidecar` snapshot the whole sidecar around the put.
+    StateVisibilityPromote {
+        state: ChangeId,
+        /// The prior record this promotion supersedes.
+        superseded: ContentHash,
+        /// Content id of the new, superseding record.
+        record_id: ContentHash,
+        /// The tier promoted to.
+        tier: VisibilityTier,
+        /// Full sidecar bytes before the put (`None` = public-by-absence).
+        /// Undo target.
+        #[serde(default)]
+        prior_sidecar: Option<Vec<u8>>,
+        /// Full sidecar bytes after the put (`None` = public-by-absence).
+        /// Redo target.
+        #[serde(default)]
+        new_sidecar: Option<Vec<u8>>,
+    },
 }
 
 /// The logical isolation keys touched by one committed record.
@@ -383,6 +440,14 @@ pub fn isolation_keys_for_record(record: &OpRecord, scope: Option<&str>) -> BTre
                     scope: scope.to_string(),
                 });
             }
+        }
+        // Visibility mutations contribute a per-state key (heddle#317 inv 3) so
+        // an undo/redo of a visibility batch on `state` conflicts with any
+        // concurrent visibility mutation on the SAME state, and never silently
+        // overwrites a newer record with a stale `prior_sidecar`.
+        OpRecord::StateVisibilitySet { state, .. }
+        | OpRecord::StateVisibilityPromote { state, .. } => {
+            keys.insert(IsolationKey::StateVisibility(*state));
         }
         OpRecord::MarkerCreate { .. }
         | OpRecord::MarkerDelete { .. }
@@ -531,6 +596,12 @@ impl OpRecord {
             OpRecord::UndoRecoveryUpdate { state } => {
                 format!("set undo-recovery -> {}", state.short())
             }
+            OpRecord::StateVisibilitySet { state, tier, .. } => {
+                format!("set visibility {} -> {}", state.short(), tier.as_str())
+            }
+            OpRecord::StateVisibilityPromote { state, tier, .. } => {
+                format!("promote visibility {} -> {}", state.short(), tier.as_str())
+            }
         }
     }
 }
@@ -604,6 +675,8 @@ op_verb_catalog! {
     RemoteThreadUpdate => ("remote_thread_update", checkpoint = false),
     RemoteThreadDelete => ("remote_thread_delete", checkpoint = false),
     UndoRecoveryUpdate => ("undo_recovery_update", checkpoint = false),
+    StateVisibilitySet => ("state_visibility_set", checkpoint = false),
+    StateVisibilityPromote => ("state_visibility_promote", checkpoint = false),
 }
 
 impl OpRecord {
@@ -690,7 +763,9 @@ impl OpRecord {
             | OpRecord::GitCheckpoint { .. }
             | OpRecord::RemoteThreadUpdate { .. }
             | OpRecord::RemoteThreadDelete { .. }
-            | OpRecord::UndoRecoveryUpdate { .. } => Vec::new(),
+            | OpRecord::UndoRecoveryUpdate { .. }
+            | OpRecord::StateVisibilitySet { .. }
+            | OpRecord::StateVisibilityPromote { .. } => Vec::new(),
         }
     }
 
@@ -723,7 +798,9 @@ impl OpRecord {
             | OpRecord::GitCheckpoint { .. }
             | OpRecord::RemoteThreadUpdate { .. }
             | OpRecord::RemoteThreadDelete { .. }
-            | OpRecord::UndoRecoveryUpdate { .. } => Vec::new(),
+            | OpRecord::UndoRecoveryUpdate { .. }
+            | OpRecord::StateVisibilitySet { .. }
+            | OpRecord::StateVisibilityPromote { .. } => Vec::new(),
         }
     }
 
@@ -756,7 +833,9 @@ impl OpRecord {
             | OpRecord::GitCheckpoint { .. }
             | OpRecord::RemoteThreadUpdate { .. }
             | OpRecord::RemoteThreadDelete { .. }
-            | OpRecord::UndoRecoveryUpdate { .. } => None,
+            | OpRecord::UndoRecoveryUpdate { .. }
+            | OpRecord::StateVisibilitySet { .. }
+            | OpRecord::StateVisibilityPromote { .. } => None,
         }
     }
 
@@ -789,7 +868,9 @@ impl OpRecord {
             | OpRecord::GitCheckpoint { .. }
             | OpRecord::RemoteThreadUpdate { .. }
             | OpRecord::RemoteThreadDelete { .. }
-            | OpRecord::UndoRecoveryUpdate { .. } => RedactionUndoClass::Other,
+            | OpRecord::UndoRecoveryUpdate { .. }
+            | OpRecord::StateVisibilitySet { .. }
+            | OpRecord::StateVisibilityPromote { .. } => RedactionUndoClass::Other,
         }
     }
 
@@ -823,7 +904,9 @@ impl OpRecord {
             | OpRecord::GitCheckpoint { .. }
             | OpRecord::RemoteThreadUpdate { .. }
             | OpRecord::RemoteThreadDelete { .. }
-            | OpRecord::UndoRecoveryUpdate { .. } => None,
+            | OpRecord::UndoRecoveryUpdate { .. }
+            | OpRecord::StateVisibilitySet { .. }
+            | OpRecord::StateVisibilityPromote { .. } => None,
         }
     }
 }
@@ -889,7 +972,7 @@ impl OpBatch {
 #[cfg(test)]
 mod verb_catalog_tests {
     use super::*;
-    use objects::object::{ChangeId, ContentHash};
+    use objects::object::{ChangeId, ContentHash, VisibilityTier};
 
     fn cid() -> ChangeId {
         ChangeId::from_bytes([7; 16])
@@ -935,7 +1018,9 @@ mod verb_catalog_tests {
             | OpRecord::GitCheckpoint { .. }
             | OpRecord::RemoteThreadUpdate { .. }
             | OpRecord::RemoteThreadDelete { .. }
-            | OpRecord::UndoRecoveryUpdate { .. } => {}
+            | OpRecord::UndoRecoveryUpdate { .. }
+            | OpRecord::StateVisibilitySet { .. }
+            | OpRecord::StateVisibilityPromote { .. } => {}
         }
         vec![
             sample,
@@ -1040,6 +1125,21 @@ mod verb_catalog_tests {
                 state: cid(),
             },
             OpRecord::UndoRecoveryUpdate { state: cid() },
+            OpRecord::StateVisibilitySet {
+                state: cid(),
+                record_id: hash(),
+                tier: VisibilityTier::Internal,
+                prior_sidecar: None,
+                new_sidecar: Some(vec![1, 2, 3]),
+            },
+            OpRecord::StateVisibilityPromote {
+                state: cid(),
+                superseded: hash(),
+                record_id: hash(),
+                tier: VisibilityTier::Public,
+                prior_sidecar: Some(vec![4, 5]),
+                new_sidecar: None,
+            },
         ]
     }
 

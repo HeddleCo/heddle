@@ -1062,6 +1062,7 @@ fn try_three_way_merge_refresh(
                 None,
                 attribution,
                 None,
+                false,
             )?;
             parent_repo
                 .refs()

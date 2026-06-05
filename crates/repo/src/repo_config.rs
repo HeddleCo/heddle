@@ -4,6 +4,7 @@
 use std::{io::Read, path::Path};
 
 use objects::fs_atomic::write_file_atomic;
+use objects::object::VisibilityTier;
 use serde::{Deserialize, Serialize};
 
 use super::Result;
@@ -81,6 +82,25 @@ pub struct TrustedKey {
 pub struct ReviewConfig {
     #[serde(default)]
     pub signals: ReviewSignalsToml,
+    #[serde(default)]
+    pub discussion: DiscussionConfig,
+}
+
+/// `[review.discussion]` config section. Houses the repo-wide default
+/// visibility tier — the second tier of the resolution chain in
+/// [`crate::namespace_policy::resolve_default_visibility`] (namespace policy
+/// overrides this; this overrides the hard-coded `Internal` fallback). The
+/// capture path binds the resolved tier to each new state at capture time
+/// (Invariant A, spike #266 §5.4).
+///
+/// Defaults to [`VisibilityTier::Public`] so the common case stays
+/// record-free (absence ≡ public) and existing behavior is unchanged: only a
+/// repo that explicitly pins a more-restrictive default makes capture persist
+/// an initial `StateVisibility` record.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DiscussionConfig {
+    #[serde(default)]
+    pub default_visibility: VisibilityTier,
 }
 
 /// TOML representation of `[review.signals]`. Re-serialised into the

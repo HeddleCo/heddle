@@ -11,7 +11,7 @@ use super::{
     AgentCommands, CheckpointArgs, ConflictCommands, ContextCommands,
     DiscussCommands, HookCommands, IntegrationCommands, MarkerCommands, PurgeCommands, QueryArgs,
     RedactCommands, RemoteCommands, ReviewCommands, ShellCommands, StackArgs, StashCommands,
-    ThreadCommands, TransactionCommands, WorkspaceCommands,
+    ThreadCommands, TransactionCommands, VisibilityCommands, WorkspaceCommands,
     commands_args::{
         ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AdoptArgs,
         AttemptArgs, BranchArgs, CloneArgs, CollapseArgs, CommandCatalogArgs, CommitArgs,
@@ -366,6 +366,18 @@ Examples:
     Purge {
         #[command(subcommand)]
         command: PurgeCommands,
+    },
+
+    /// Declare and inspect a state's audience visibility tier.
+    ///
+    /// `heddle visibility set` binds a tier to a state; `promote` lifts it to
+    /// a less-restrictive tier via a superseding record; `show` reports the
+    /// effective tier; `list` enumerates non-public states. Capture binds the
+    /// inherited `[review.discussion] default_visibility` automatically
+    /// (Invariant A) — these verbs are the explicit operator overrides.
+    Visibility {
+        #[command(subcommand)]
+        command: VisibilityCommands,
     },
 
     /// Revert changes from a state.
