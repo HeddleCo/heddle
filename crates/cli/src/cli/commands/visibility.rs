@@ -12,8 +12,7 @@
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use objects::object::{ChangeId, StateVisibility, VisibilityTier};
-use oplog::{OpLogBackend, VisibilitySidecarSnapshots};
-use repo::Repository;
+use repo::{Repository, VisibilityCommitKind};
 use serde::Serialize;
 
 use crate::cli::{
@@ -80,30 +79,22 @@ fn cmd_visibility_set(cli: &Cli, repo: &Repository, args: VisibilitySetArgs) -> 
         signature: None,
         supersedes: None,
     };
-    // The locked put captures the whole per-state sidecar before AND after the
-    // write, atomically under the repo write lock (PR #529 P1 r5): the
-    // before-image is the record the put actually overwrote — never a stale
-    // pre-lock read a racing put could invalidate. Undo restores the prior,
-    // redo the new.
-    let outcome = repo.put_state_visibility(record)?;
-    let scope = repo.op_scope();
-    repo.oplog().record_state_visibility_set(
-        &state,
-        &outcome.id,
-        &tier,
-        VisibilitySidecarSnapshots {
-            prior: outcome.prior_sidecar,
-            new: outcome.new_sidecar,
-        },
-        Some(&scope),
-    )?;
+    // One combined primitive writes the sidecar AND appends the
+    // `OpRecord::StateVisibilitySet` audit entry under a SINGLE repo write lock
+    // (PR #529 P1 r6), so two concurrent `visibility set`/`promote` commands can
+    // never append their oplog records out of sidecar-write order. The locked put
+    // also captures the whole per-state sidecar before AND after the write (r5),
+    // so undo restores the prior and redo the new. `Set` always commits.
+    let outcome = repo
+        .commit_state_visibility(record, VisibilityCommitKind::Set)?
+        .expect("a visibility set always commits");
 
     let output = VisibilityMutationOutput {
         output_kind: "visibility_set",
         state: state.short(),
         tier: tier.as_str().to_string(),
         label: tier_label(&tier).map(str::to_string),
-        record_id: outcome.id.short(),
+        record_id: outcome.put.id.short(),
         declarer: format!("{} <{}>", declarer.name, declarer.email),
         declared_at: declared_at.to_rfc3339(),
         supersedes: None,
@@ -126,10 +117,13 @@ fn cmd_visibility_promote(
         .get_principal()
         .with_context(|| "resolve current principal")?;
     let declared_at = Utc::now();
-    // `supersedes` is resolved INSIDE the locked put — the record the promotion
-    // supersedes and the captured before-image come from one race-free view of
-    // the sidecar (PR #529 P1 r5). A promotion must supersede an existing
-    // declaration, so a public-by-absence state (no record) is an error.
+    // `supersedes` is resolved INSIDE the combined primitive, under the same
+    // repo write lock that writes the sidecar and appends the
+    // `OpRecord::StateVisibilityPromote` audit entry (PR #529 P1 r6): the
+    // superseded record, the captured before-image, and the oplog append all
+    // come from one race-free, totally-ordered critical section. A promotion
+    // must supersede an existing declaration, so a public-by-absence state (no
+    // record) is an error.
     let record = StateVisibility {
         state,
         tier: tier.clone(),
@@ -139,24 +133,17 @@ fn cmd_visibility_promote(
         signature: None,
         supersedes: None,
     };
-    let outcome = repo.promote_state_visibility(record)?.ok_or_else(|| {
-        anyhow!(
-            "state '{}' has no visibility record to promote (it is public-by-absence)",
-            args.state
-        )
-    })?;
-    let scope = repo.op_scope();
-    repo.oplog().record_state_visibility_promote(
-        &state,
-        &outcome.superseded,
-        &outcome.put.id,
-        &tier,
-        VisibilitySidecarSnapshots {
-            prior: outcome.put.prior_sidecar,
-            new: outcome.put.new_sidecar,
-        },
-        Some(&scope),
-    )?;
+    let outcome = repo
+        .commit_state_visibility(record, VisibilityCommitKind::Promote)?
+        .ok_or_else(|| {
+            anyhow!(
+                "state '{}' has no visibility record to promote (it is public-by-absence)",
+                args.state
+            )
+        })?;
+    let superseded = outcome
+        .superseded
+        .expect("a promote commit always resolves a superseded record id");
 
     let output = VisibilityMutationOutput {
         output_kind: "visibility_promote",
@@ -166,7 +153,7 @@ fn cmd_visibility_promote(
         record_id: outcome.put.id.short(),
         declarer: format!("{} <{}>", declarer.name, declarer.email),
         declared_at: declared_at.to_rfc3339(),
-        supersedes: Some(outcome.superseded.short()),
+        supersedes: Some(superseded.short()),
     };
     emit_mutation(cli, repo, &output, "promoted")
 }

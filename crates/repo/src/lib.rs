@@ -25,7 +25,7 @@ mod repository_redaction;
 mod repository_signals;
 mod repository_state_visibility;
 pub use repository_state_visibility::{
-    DefaultVisibilityBinding, PromoteVisibilityOutcome, PutVisibilityOutcome,
+    DefaultVisibilityBinding, PutVisibilityOutcome, VisibilityCommitKind, VisibilityCommitOutcome,
 };
 mod session_storage;
 pub mod snapshot_metadata;

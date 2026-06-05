@@ -33,7 +33,7 @@ use objects::{
     lock::RepositoryLockExt,
     object::{ChangeId, ContentHash, StateVisibility, StateVisibilityBlob, VisibilityTier},
 };
-use oplog::OpRecord;
+use oplog::{OpLogBackend, OpRecord, VisibilitySidecarSnapshots};
 
 use crate::namespace_policy::{VisibilityResolutionContext, resolve_default_visibility};
 use crate::repository::Repository;
@@ -54,15 +54,30 @@ pub struct PutVisibilityOutcome {
     pub new_sidecar: Option<Vec<u8>>,
 }
 
-/// Outcome of a promotion: the underlying [`PutVisibilityOutcome`] plus the
-/// content id of the record the promotion superseded. The superseded record is
-/// resolved **under the same write lock** as the put (heddle#317 r5), so the
-/// supersede pointer and the captured before-image describe one consistent
-/// snapshot of the sidecar — never a torn read across a racing append.
+/// Which audit op a [`Repository::commit_state_visibility`] emits — and thus
+/// how it resolves the record under the write lock.
+#[derive(Debug, Clone, Copy)]
+pub enum VisibilityCommitKind {
+    /// `heddle visibility set`: a fresh declaration. Emits
+    /// `OpRecord::StateVisibilitySet`; always commits.
+    Set,
+    /// `heddle visibility promote`: supersede the current latest record with a
+    /// less-restrictive tier. Emits `OpRecord::StateVisibilityPromote`; resolves
+    /// the superseded id **under the same lock** as the put (heddle#317 r5), so
+    /// the supersede pointer and the captured before-image describe one
+    /// consistent snapshot of the sidecar — never a torn read across a racing
+    /// append. A public-by-absence state has nothing to promote, so the commit
+    /// yields `Ok(None)`.
+    Promote,
+}
+
+/// Outcome of a [`Repository::commit_state_visibility`]: the sidecar put's
+/// before/after images and content id, plus the content id of the record a
+/// promotion superseded (`None` for a `Set`).
 #[derive(Debug, Clone)]
-pub struct PromoteVisibilityOutcome {
+pub struct VisibilityCommitOutcome {
     pub put: PutVisibilityOutcome,
-    pub superseded: ContentHash,
+    pub superseded: Option<ContentHash>,
 }
 
 /// The automatic capture-time default-visibility binding, staged for folding
@@ -232,31 +247,92 @@ impl Repository {
         Ok(Some(self.put_state_visibility_locked(record)?))
     }
 
-    /// Append a superseding visibility record, resolving the record it
-    /// supersedes **under the same write lock** as the put (heddle#317 r5). The
-    /// caller supplies a record whose `supersedes` is a placeholder; this reads
-    /// the current latest record, sets `supersedes` to its content id, and runs
-    /// the locked read-modify-write — so the supersede pointer and the captured
-    /// before-image come from one consistent, race-free view of the sidecar.
-    /// Returns `Ok(None)` when the state is public-by-absence (nothing to
+    /// Commit a visibility mutation as ONE serialized unit: write the per-state
+    /// sidecar AND append its `OpRecord` audit entry **while holding a single
+    /// repo write lock** (heddle#317 / PR #529 P1 r6).
+    ///
+    /// Pre-r6 the CLI wrote the sidecar under the repo lock, RELEASED it, then
+    /// appended the oplog entry under the separate `oplog.lock`. Two overlapping
+    /// `visibility set`/`promote` commands could therefore append their oplog
+    /// records in the OPPOSITE order to their sidecar writes: if B's sidecar
+    /// landed after A's, but B's oplog append raced ahead of A's, undo would
+    /// treat A as the latest op and restore A's (`None`) before-image — deleting
+    /// B's record and silently dropping the state to public-by-absence. Holding
+    /// ONE lock across both steps totally orders concurrent mutations, so the
+    /// oplog-append order always matches the sidecar-write order.
+    ///
+    /// **Lock ordering (heddle#317 r6).** This acquires the repo write lock
+    /// FIRST, then the oplog append takes `oplog.lock` — the same nesting order
+    /// the snapshot chokepoint uses (`snapshot_with_attribution_profiled_locked`
+    /// holds the repo write lock across `apply`'s sidecar write and the atomic
+    /// batch commit). No path holds `oplog.lock` across a repo-lock acquisition
+    /// (the oplog crate sits below `repo` and never reaches for the repo lock),
+    /// so the nesting cannot deadlock.
+    ///
+    /// `Set` always commits. `Promote` resolves the superseded record under the
+    /// lock and returns `Ok(None)` on a public-by-absence state (nothing to
     /// promote); the caller maps that to a user-facing error.
-    pub fn promote_state_visibility(
+    pub fn commit_state_visibility(
         &self,
         record: StateVisibility,
-    ) -> Result<Option<PromoteVisibilityOutcome>> {
+        kind: VisibilityCommitKind,
+    ) -> Result<Option<VisibilityCommitOutcome>> {
+        // ONE write lock spans the sidecar write AND the oplog append below, so
+        // concurrent visibility mutations are totally ordered.
         let _lock = self
             .locker()
             .write()
-            .with_context(|| "acquire repo write lock for state-visibility promote")?;
-        let existing = self.get_state_visibility_for_state(&record.state)?;
-        let Some(latest) = existing.latest() else {
-            return Ok(None);
-        };
-        let superseded = state_visibility_content_hash(latest)?;
+            .with_context(|| "acquire repo write lock for state-visibility commit")?;
+
         let mut record = record;
-        record.supersedes = Some(superseded);
+        let superseded = match kind {
+            VisibilityCommitKind::Set => None,
+            VisibilityCommitKind::Promote => {
+                let existing = self.get_state_visibility_for_state(&record.state)?;
+                let Some(latest) = existing.latest() else {
+                    // Public-by-absence: nothing to promote, no sidecar write,
+                    // no oplog append.
+                    return Ok(None);
+                };
+                let superseded = state_visibility_content_hash(latest)?;
+                record.supersedes = Some(superseded);
+                Some(superseded)
+            }
+        };
+
+        let state = record.state;
+        let tier = record.tier.clone();
         let put = self.put_state_visibility_locked(record)?;
-        Ok(Some(PromoteVisibilityOutcome { put, superseded }))
+
+        // Append the audit entry WHILE STILL HOLDING the repo write lock — never
+        // after releasing it. This is the r6 invariant: a concurrent mutation
+        // cannot interleave its own sidecar write + append between this put and
+        // this append, so the two logs stay in the same order.
+        let scope = self.op_scope();
+        let snapshots = VisibilitySidecarSnapshots {
+            prior: put.prior_sidecar.clone(),
+            new: put.new_sidecar.clone(),
+        };
+        match superseded {
+            None => self.oplog().record_state_visibility_set(
+                &state,
+                &put.id,
+                &tier,
+                snapshots,
+                Some(&scope),
+            ),
+            Some(superseded) => self.oplog().record_state_visibility_promote(
+                &state,
+                &superseded,
+                &put.id,
+                &tier,
+                snapshots,
+                Some(&scope),
+            ),
+        }
+        .with_context(|| "append state-visibility audit entry under repo write lock")?;
+
+        Ok(Some(VisibilityCommitOutcome { put, superseded }))
     }
 
     /// Return the raw rmp-encoded `StateVisibilityBlob` bytes for the given
@@ -1025,5 +1101,186 @@ mod tests {
             }
             other => panic!("bind must stage a StateVisibilitySet record, got {other:?}"),
         }
+    }
+
+    /// A `StateVisibilitySet` audit entry's identity + sidecar snapshots, pulled
+    /// from the oplog for ordering assertions.
+    struct RecordedVisibilitySet {
+        record_id: ContentHash,
+        prior: Option<Vec<u8>>,
+        new: Option<Vec<u8>>,
+    }
+
+    /// Collect every `StateVisibilitySet` audit entry, in chronological (entry
+    /// id) order.
+    fn recorded_visibility_sets(repo: &Repository) -> Vec<RecordedVisibilitySet> {
+        let mut entries = repo.oplog().recent(1000).expect("read oplog");
+        entries.sort_by_key(|e| e.id);
+        entries
+            .iter()
+            .filter_map(|e| match &e.operation {
+                OpRecord::StateVisibilitySet {
+                    record_id,
+                    prior_sidecar,
+                    new_sidecar,
+                    ..
+                } => Some(RecordedVisibilitySet {
+                    record_id: *record_id,
+                    prior: prior_sidecar.clone(),
+                    new: new_sidecar.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn concurrent_visibility_sets_oplog_order_matches_sidecar_order() {
+        // The r6 invariant: the combined primitive writes the sidecar AND appends
+        // the oplog entry under ONE repo write lock, so two `visibility set`
+        // commands committed in order A-then-B append their oplog records in that
+        // SAME order. Pre-r6 the sidecar write and the oplog append took separate
+        // locks, so B's append could race ahead of A's; undo would then treat A as
+        // the latest op, restore A's `None` before-image, and DELETE B's record.
+        // Deterministic: sequence the two commits through the primitive; assert the
+        // recorded oplog order is [A, B] (B latest) and B's before-image is A's
+        // record, so undoing B restores A — not public-by-absence.
+        let (_dir, repo) = fresh_repo();
+        let state = ChangeId::from_bytes([55u8; 16]);
+
+        // A commits first, onto a record-free state.
+        let a = StateVisibility {
+            declared_at: Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap(),
+            ..sample_record(
+                state,
+                VisibilityTier::TeamScoped {
+                    team_id: "infra".into(),
+                },
+            )
+        };
+        let a_out = repo
+            .commit_state_visibility(a, VisibilityCommitKind::Set)
+            .expect("commit A")
+            .expect("a set always commits");
+
+        // B commits second, onto A's record.
+        let b = StateVisibility {
+            declared_at: Utc.with_ymd_and_hms(2026, 6, 1, 12, 1, 0).unwrap(),
+            ..sample_record(state, VisibilityTier::Internal)
+        };
+        let b_out = repo
+            .commit_state_visibility(b, VisibilityCommitKind::Set)
+            .expect("commit B")
+            .expect("a set always commits");
+
+        // The oplog-append order matches the sidecar-write order: A first, B second.
+        let sets = recorded_visibility_sets(&repo);
+        assert_eq!(sets.len(), 2, "exactly two visibility-set audit entries");
+        assert_eq!(
+            sets[0].record_id, a_out.put.id,
+            "A's audit entry is recorded first"
+        );
+        assert_eq!(
+            sets[1].record_id, b_out.put.id,
+            "B's audit entry is recorded second (B latest)"
+        );
+
+        // B's recorded before-image is A's on-disk record — never a stale `None`.
+        assert_eq!(
+            sets[1].prior, a_out.put.new_sidecar,
+            "B's oplog before-image must be A's record, not a stale public-by-absence"
+        );
+        assert!(
+            sets[1].prior.is_some(),
+            "B's before-image must not be the stale None the out-of-order race produced"
+        );
+        assert_eq!(
+            b_out.put.prior_sidecar, a_out.put.new_sidecar,
+            "B's put captured A's record as its before-image, under the same lock"
+        );
+
+        // Undo B by restoring its captured prior: A survives, the state stays
+        // A's tier — undoing B does NOT delete A's record.
+        repo.restore_state_visibility_sidecar(&state, b_out.put.prior_sidecar.clone())
+            .expect("undo B by restoring its captured prior");
+        let restored = repo
+            .get_state_visibility_for_state(&state)
+            .expect("read after undo");
+        assert_eq!(
+            restored.records.len(),
+            1,
+            "undoing B must leave exactly A's record — not public-by-absence"
+        );
+        assert_eq!(
+            restored.latest().unwrap().tier,
+            VisibilityTier::TeamScoped {
+                team_id: "infra".into()
+            },
+            "the record surviving undo-of-B must be A's team-scoped declaration"
+        );
+    }
+
+    #[test]
+    fn visibility_set_sidecar_and_oplog_are_one_locked_section() {
+        // The combined primitive returns only after BOTH the sidecar write and the
+        // oplog append are durable — there is no observable window where the
+        // sidecar exists but its audit entry is missing (the r6 single-locked-section
+        // guarantee). The lock window can't be opened without a real race, so assert
+        // the post-return invariant: once the primitive returns, the sidecar is on
+        // disk AND a matching StateVisibilitySet audit entry exists alongside it.
+        let (_dir, repo) = fresh_repo();
+        let state = ChangeId::from_bytes([56u8; 16]);
+
+        // Before the commit: no sidecar, no audit entry.
+        assert!(
+            !repo.state_visibility_path_for_state(&state).exists(),
+            "no sidecar before the commit"
+        );
+        assert!(
+            recorded_visibility_sets(&repo).is_empty(),
+            "no visibility-set audit entry before the commit"
+        );
+
+        let record = sample_record(
+            state,
+            VisibilityTier::Restricted {
+                scope_label: "embargo".into(),
+            },
+        );
+        let outcome = repo
+            .commit_state_visibility(record, VisibilityCommitKind::Set)
+            .expect("commit")
+            .expect("a set always commits");
+
+        // After return: the sidecar is durable and equals the put's after-image.
+        let on_disk = repo
+            .get_state_visibility_bytes_for_state(&state)
+            .expect("read sidecar bytes");
+        assert!(
+            on_disk.is_some(),
+            "the sidecar must be on disk once the primitive returns"
+        );
+        assert_eq!(
+            on_disk, outcome.put.new_sidecar,
+            "the durable sidecar equals the put's after-image"
+        );
+
+        // AND the matching audit entry is durable in the SAME observable state:
+        // the primitive never returns with the sidecar written but the oplog entry
+        // absent — the two are one locked unit.
+        let sets = recorded_visibility_sets(&repo);
+        assert_eq!(
+            sets.len(),
+            1,
+            "exactly one visibility-set audit entry must accompany the sidecar"
+        );
+        assert_eq!(
+            sets[0].record_id, outcome.put.id,
+            "the audit entry names the put"
+        );
+        assert_eq!(
+            sets[0].new, on_disk,
+            "the audit entry's after-image equals the durable sidecar"
+        );
     }
 }
