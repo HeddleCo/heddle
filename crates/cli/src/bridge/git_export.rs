@@ -233,28 +233,90 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     bridge.mapping.retain_git_objects(&repo);
     bridge.seed_git_checkpoint_mappings_from_checkout(&repo)?;
 
-    // Re-validate the served set against CURRENT visibility before anything
-    // treats a mapping as "already served". A state minted while public in a
-    // prior export can be marked under-tier later; `build_existing_mapping`
-    // rebuilds its stale ChangeId→OID mapping from the notes/sidecar every run,
-    // so without this purge the frontier walk, the note re-write, and the tag
-    // sync would all keep serving the now-embargoed commit. Purging is
-    // downward-closed: a still-visible state whose ancestor is embargoed is
-    // withheld too (its Git commit chains to the embargoed one). After this,
-    // `mapping` == the served set, exactly what `frontier_git_oid` assumes.
-    // Snapshot EVERY mapped target before the purge mutates the mapping: these
-    // are exactly the commits that may already carry a `refs/notes/*` entry in
-    // the mirror, so the notes-ref retraction below must consider all of them —
-    // including the in-scope states the purge is about to drop AND the
-    // out-of-thread targets a scoped purge never examines (heddle#316).
+    // The desired/actual ref sets span the WHOLE mirror, not just this export's
+    // scoped thread: a prior all-thread export can leave `refs/heads`/`refs/tags`
+    // for OTHER threads/markers whose commits — or their ancestors — were later
+    // marked Private. Reconciling only the scoped thread would keep serving those
+    // now-embargoed commits via the other thread's branch (heddle#316 cross-thread
+    // embargo leak). So purge + project + reconcile over every heddle-managed
+    // thread/marker regardless of scope; the mint loop below stays scoped (only the
+    // requested thread's new commits are minted), so widening changes WHICH refs
+    // are reconciled, never what gets created.
+    let remote_names = git_remote_names(bridge.heddle_repo);
+    let threads: Vec<String> = {
+        let mut all: Vec<String> = bridge
+            .heddle_repo
+            .refs()
+            .list_threads()?
+            .into_iter()
+            .filter(|thread| !is_remote_tracking_thread_name(thread, &remote_names))
+            .map(|t| t.to_string())
+            .collect();
+        // A scoped export's own thread may be a remote-tracking name the filter
+        // drops; keep it so the requested thread is always reconciled.
+        if let Some(t) = thread
+            && !all.iter().any(|x| x == t)
+        {
+            all.push(t.to_string());
+        }
+        all
+    };
+    let markers: Vec<MarkerName> = bridge.heddle_repo.refs().list_markers()?;
+
+    // Roots of the whole-mirror served frontier: every reconciled thread's tip and
+    // every marker's state. Purging over their reachable closure (below) drops any
+    // out-of-scope commit whose tier — or an ancestor's — is now unserved, so
+    // `project_desired_refs` lags those branches/tags correctly even on a scoped
+    // export (heddle#316).
+    let mut frontier_roots: Vec<ChangeId> = Vec::new();
+    for track_name in &threads {
+        if let Some(tip) = bridge
+            .heddle_repo
+            .refs()
+            .get_thread(&ThreadName::new(track_name))?
+        {
+            frontier_roots.push(tip);
+        }
+    }
+    for marker_name in &markers {
+        if let Some(state_id) = bridge.heddle_repo.refs().get_marker(marker_name)? {
+            frontier_roots.push(state_id);
+        }
+    }
+    let frontier_reachable = reachable_states(bridge.heddle_repo, &frontier_roots)?;
+
+    // Re-validate the served set against CURRENT visibility before anything treats
+    // a mapping as "already served". A state minted while public in a prior export
+    // can be marked under-tier later; `build_existing_mapping` rebuilds its stale
+    // ChangeId→OID mapping from the notes/sidecar every run, so without this purge
+    // the frontier walk, the note re-write, and the tag sync would all keep serving
+    // the now-embargoed commit. Purging is downward-closed: a still-visible state
+    // whose ancestor is embargoed is withheld too (its Git commit chains to the
+    // embargoed one). The purge spans the mint set UNION the whole-mirror frontier,
+    // so a scoped export still drops an out-of-scope thread's now-embargoed tip; for
+    // an all-thread export the frontier ⊆ the mint set and this reduces to the prior
+    // behavior. After this, `mapping` == the served set across every reconciled ref,
+    // exactly what `frontier_git_oid` assumes.
+    // Snapshot EVERY mapped target before the purge mutates the mapping: these are
+    // exactly the commits that may already carry a `refs/notes/*` entry in the
+    // mirror, so the notes-ref retraction below must consider all of them —
+    // including the states the purge is about to drop AND any orphaned mapping a
+    // deleted thread left behind, which no current-ref frontier reaches (heddle#316).
     let pre_purge_targets: Vec<(ChangeId, gix::hash::ObjectId)> =
         bridge.mapping.iter().map(|(c, o)| (*c, *o)).collect();
 
+    let purge_reachable: HashSet<ChangeId> = sorted_states
+        .iter()
+        .copied()
+        .chain(frontier_reachable.iter().copied())
+        .collect();
+    let purge_sorted =
+        bridge.sort_states_topologically(&purge_reachable.iter().copied().collect::<Vec<_>>())?;
     let embargoed_oids = purge_unserved_mappings(
         bridge.heddle_repo,
         &mut bridge.mapping,
-        &sorted_states,
-        &reachable,
+        &purge_sorted,
+        &purge_reachable,
         &audience,
     )?;
 
@@ -331,13 +393,14 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     // The downward-closure served set across EVERY note target — the pre-purge
     // mapping (commits that may already carry a note in the mirror) UNION the
     // current post-mint mapping (served states + freshly minted commits),
-    // computed over the FULL ancestry of all of them. A scoped export's
-    // `purge_unserved_mappings` only walks the current thread's reachable
-    // states, so without this an out-of-thread note target whose direct tier is
-    // public but whose ancestor became Private would slip past both the backfill
-    // gate and the retraction below. This is the SAME rule the branch frontier
-    // uses, applied to notes (heddle#316). For an all-states export it reduces
-    // to the post-purge served set, so behavior there is unchanged.
+    // computed over the FULL ancestry of all of them. The branch purge is
+    // ref-rooted (it walks the whole-mirror frontier of current thread tips +
+    // markers), so it never examines an ORPHANED mapping a deleted thread left
+    // behind; without this closure such a commit's note — public-tier but with a
+    // now-Private ancestor — would slip past both the backfill gate and the
+    // retraction below. This is the SAME served rule the branch frontier uses,
+    // applied to notes (heddle#316). For an all-states export it reduces to the
+    // post-purge served set, so behavior there is unchanged.
     let note_target_roots: Vec<ChangeId> = pre_purge_targets
         .iter()
         .map(|(c, _)| *c)
@@ -361,12 +424,13 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         bridge.mapping.iter().map(|(c, o)| (*c, *o)).collect();
     for (change_id, git_oid) in note_targets {
         // Gate the backfill on the downward-closure served set, not the commit's
-        // DIRECT tier. A scoped export's mapping carries out-of-thread entries
-        // the purge never examined; gating on direct visibility alone would
-        // re-publish a note for a public commit whose ancestor became Private —
-        // a commit the branch downward-closure withholds. `note_served` is the
-        // same served notion the branch frontier uses, so no note-write site can
-        // emit metadata for an unserved commit (heddle#316).
+        // DIRECT tier. The mapping can carry orphaned entries (a deleted thread's
+        // commits) the ref-rooted purge never examined; gating on direct
+        // visibility alone would re-publish a note for a public commit whose
+        // ancestor became Private — a commit the branch downward-closure
+        // withholds. `note_served` is the same served notion the branch frontier
+        // uses, so no note-write site can emit metadata for an unserved commit
+        // (heddle#316).
         if note_served.contains(&change_id)
             && git_notes::read_note(&repo, git_oid)?.is_none()
             && let Some(state) = bridge.heddle_repo.store().get_state(&change_id)?
@@ -382,10 +446,10 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     // unserved commit keeps leaking its metadata even after its branch/tag were
     // retracted. This is the notes-ref sibling of the branch/tag retraction
     // above (heddle#316). Considering EVERY pre-purge target — not just the
-    // scoped `embargoed_oids` — is what closes the scoped-export leak: an
-    // out-of-thread commit whose ancestor is embargoed is unserved here exactly
-    // as its branch would be. Guard the degenerate case where a still-served
-    // state maps to the same git OID by keeping any OID a served target maps to.
+    // `embargoed_oids` the ref-rooted purge dropped — catches an orphaned note an
+    // ancestor embargo stranded on a deleted thread's commit. Guard the
+    // degenerate case where a still-served state maps to the same git OID by
+    // keeping any OID a served target maps to.
     let served_note_oids: HashSet<gix::hash::ObjectId> = pre_purge_targets
         .iter()
         .copied()
@@ -400,29 +464,6 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         .filter(|oid| !served_note_oids.contains(oid))
         .collect();
     git_notes::remove_notes(&repo, &notes_to_retract)?;
-
-    let threads: Vec<String> = match thread {
-        Some(thread) => vec![thread.to_string()],
-        None => {
-            let remote_names = git_remote_names(bridge.heddle_repo);
-            bridge
-                .heddle_repo
-                .refs()
-                .list_threads()?
-                .into_iter()
-                .filter(|thread| !is_remote_tracking_thread_name(thread, &remote_names))
-                .map(|t| t.to_string())
-                .collect()
-        }
-    };
-    // Markers ride only on an all-threads export; a scoped export leaves tags
-    // untouched. Empty for a scoped export ⇒ the projection emits no tag entries
-    // and the tag reconcile below is a no-op.
-    let markers: Vec<MarkerName> = if thread.is_none() {
-        bridge.heddle_repo.refs().list_markers()?
-    } else {
-        Vec::new()
-    };
 
     // THE PROJECTION (heddle#316 r13): the desired heddle-owned ref-set for this
     // audience — heads lagged to the served frontier, tags at served markers — as
@@ -439,6 +480,16 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     // advance, FORCES only a deliberate embargo retract (the prior tip is now
     // embargoed), and DELETES a head the projection dropped (its line has no
     // served frontier — embargoed-to-root, or reset/rebased onto a Private root).
+    //
+    // A scoped export reconciles every CURRENT thread (heddle#316) so it RETRACTS
+    // an out-of-scope thread's branch whose commit became embargoed — but it only
+    // MATERIALIZES (creates) the branch it was scoped to. An out-of-scope thread
+    // with no existing mirror branch is left absent: a scoped export must not
+    // publish a brand-new branch for a thread the caller did not ask to export
+    // (that would also strand a stale ref if the thread is later dropped — the
+    // #289 dropped-thread contract). A branch can only "keep serving" an embargoed
+    // commit if it already EXISTS, and existing branches are still rewound/deleted
+    // below, so this skips nothing that could leak.
     for track_name in &threads {
         if bridge
             .heddle_repo
@@ -450,9 +501,15 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
             continue;
         }
         let branch_ref = format!("refs/heads/{track_name}");
+        let in_scope = thread.is_none() || thread == Some(track_name.as_str());
         match desired.get(&branch_ref).copied() {
             Some(git_oid) => {
                 let existing = branch_tip_oid(&repo, &branch_ref);
+                if existing.is_none() && !in_scope {
+                    // Out-of-scope served thread with no mirror branch yet: a
+                    // scoped export retracts, it does not materialize.
+                    continue;
+                }
                 let retracting = existing.is_some_and(|oid| embargoed_oids.contains(&oid));
                 if retracting {
                     set_reference(
@@ -480,8 +537,10 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         }
     }
 
-    // Reconcile the mirror's tags to the desired set (all-threads only; `markers`
-    // is empty for a scoped export, so this loop does nothing there).
+    // Reconcile the mirror's tags to the desired set. `markers` spans the whole
+    // mirror (heddle#316), so a scoped export also retracts an EXISTING tag whose
+    // marker's state became unserved — but, symmetric with heads above, it does
+    // not materialize a brand-new tag (markers ride on an all-thread export).
     for marker_name in &markers {
         if bridge.heddle_repo.refs().get_marker(marker_name)?.is_none() {
             continue;
@@ -489,6 +548,11 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         let tag_ref = format!("refs/tags/{marker_name}");
         match desired.get(&tag_ref).copied() {
             Some(git_oid) => {
+                if thread.is_some() && repo.find_reference(&tag_ref).is_err() {
+                    // Scoped export, served marker with no mirror tag yet: retract
+                    // only, do not materialize.
+                    continue;
+                }
                 sync_marker_to_tag(&repo, marker_name, git_oid)?;
                 stats.markers_synced += 1;
                 stats.tags.push(ExportedRef {

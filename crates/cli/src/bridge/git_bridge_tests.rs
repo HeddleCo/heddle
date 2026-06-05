@@ -3187,6 +3187,127 @@ fn scoped_export_retracts_note_for_commit_with_embargoed_ancestor() {
     );
 }
 
+/// #316 / PR #528 r14: a SCOPED export must reconcile cross-thread embargo. A
+/// prior all-thread export publishes threads `alpha` and `beta`; then a commit
+/// reachable ONLY via `beta` is marked Private. A scoped export of `alpha` (not
+/// `beta`) must STILL rewind `beta`'s `refs/heads/` off the now-embargoed commit:
+/// the mirror reconcile spans the WHOLE mirror's served frontier, not just the
+/// export's scoped thread. `alpha`'s own ref is left untouched.
+#[test]
+fn scoped_export_reconciles_cross_thread_embargo() {
+    use chrono::Utc;
+    use objects::object::{Attribution, Principal, State, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let put_state = |content: &[u8], parents: Vec<ChangeId>| -> State {
+        let store = repo.store();
+        let blob_hash = store
+            .put_blob(&Blob::from_slice(content))
+            .expect("put blob");
+        let tree_hash = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
+            .expect("put tree");
+        let state = State::new(
+            tree_hash,
+            parents,
+            Attribution::human(Principal::new("Alice", "alice@example.com")),
+        );
+        store.put_state(&state).expect("put state");
+        state
+    };
+
+    // Two independent lines (no shared ancestry).
+    // alpha: A0 → A1 (both public). beta: B0 → B1 → B2 (all public).
+    let state_a0 = put_state(b"a0\n", Vec::new());
+    let state_a1 = put_state(b"a1\n", vec![state_a0.change_id]);
+    repo.refs()
+        .set_thread(&ThreadName::new("alpha"), &state_a1.change_id)
+        .expect("set alpha to A1");
+    let state_b0 = put_state(b"b0\n", Vec::new());
+    let state_b1 = put_state(b"b1\n", vec![state_b0.change_id]);
+    let state_b2 = put_state(b"b2\n", vec![state_b1.change_id]);
+    repo.refs()
+        .set_thread(&ThreadName::new("beta"), &state_b2.change_id)
+        .expect("set beta to B2");
+
+    // Run 1 — everything public, all-thread export. Both branches published.
+    let mut bridge = GitBridge::new(&repo);
+    let run1 = export_all(&mut bridge).expect("first export");
+    let oid_a1 = bridge
+        .mapping
+        .get_git(&state_a1.change_id)
+        .expect("A1 minted while public");
+    let oid_b0 = bridge
+        .mapping
+        .get_git(&state_b0.change_id)
+        .expect("B0 minted while public");
+    let oid_b2 = bridge
+        .mapping
+        .get_git(&state_b2.change_id)
+        .expect("B2 minted while public");
+    assert!(
+        run1.branches
+            .iter()
+            .any(|b| b.name == "beta" && b.tip == oid_b2),
+        "run 1 advertises beta at its public tip B2"
+    );
+
+    // Embargo B1 — a commit reachable ONLY via beta. Downward closure withholds
+    // B1 and its descendant B2; B0 stays served.
+    repo.put_state_visibility(StateVisibility {
+        state: state_b1.change_id,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Alice".into(),
+            email: "alice@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+
+    // Run 2 — SCOPED to alpha, which does NOT reach beta. The mirror reconcile
+    // must STILL rewind beta off the embargoed commit; alpha is untouched.
+    export_current_thread(&mut bridge, "alpha").expect("scoped export");
+    let mirror = bridge.open_git_repo().expect("open mirror");
+
+    // beta rewound to its served frontier B0 — the embargoed B1/B2 are no longer
+    // reachable from any mirror ref.
+    let beta_tip = mirror
+        .find_reference("refs/heads/beta")
+        .expect("beta still present at its served frontier")
+        .peel_to_id()
+        .expect("peel beta")
+        .detach();
+    assert_eq!(
+        beta_tip, oid_b0,
+        "scoped alpha export must rewind beta off the embargoed commit to B0"
+    );
+    assert_ne!(
+        beta_tip, oid_b2,
+        "beta must not keep serving the now-embargoed tip B2"
+    );
+
+    // alpha's own ref is unaffected by the scoped export.
+    let alpha_tip = mirror
+        .find_reference("refs/heads/alpha")
+        .expect("alpha present")
+        .peel_to_id()
+        .expect("peel alpha")
+        .detach();
+    assert_eq!(
+        alpha_tip, oid_a1,
+        "scoped export must leave its own thread's ref at A1"
+    );
+}
+
 /// #316 / PR #528 Finding 1 (root case): when the WHOLE line is embargoed to
 /// its root after a prior public export, the stale public branch must be
 /// deleted, not left pointing at the now-embargoed commit.
