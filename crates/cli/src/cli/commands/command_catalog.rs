@@ -4438,6 +4438,16 @@ mod tests {
             &["transaction", "status", "tx-1"],
         ),
         sample(&["verify"], &["verify"]),
+        sample(
+            &["visibility", "set"],
+            &["visibility", "set", "HEAD", "--tier", "internal"],
+        ),
+        sample(
+            &["visibility", "promote"],
+            &["visibility", "promote", "HEAD", "--tier", "internal"],
+        ),
+        sample(&["visibility", "show"], &["visibility", "show", "HEAD"]),
+        sample(&["visibility", "list"], &["visibility", "list"]),
         sample(&["try"], &["try", "true"]),
         sample(&["undo"], &["undo"]),
         sample(&["watch"], &["watch"]),
@@ -5269,6 +5279,13 @@ mod tests {
                 "thread list",
                 "thread show",
                 "verify",
+                // heddle#317 added the `visibility` verb family; each leaf
+                // advertises a JSON discriminator, so the wire-format-stable
+                // list is extended here per the documentation rule above.
+                "visibility set",
+                "visibility promote",
+                "visibility show",
+                "visibility list",
                 // `undo` advertises two output_kinds on one command path —
                 // `undo` and `undo_list` (`--list`) — so its path appears twice,
                 // mirroring how `clone` appears twice above. The former `redo`

@@ -868,6 +868,45 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             (t, sv(&["review", "next"]))
         }
         "review_health" => (init_fixture(), sv(&["review", "health"])),
+        "visibility_set" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("a.txt"), "base").unwrap();
+            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            (t, sv(&["visibility", "set", "HEAD", "--tier", "internal"]))
+        }
+        "visibility_promote" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("a.txt"), "base").unwrap();
+            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            heddle(
+                &["visibility", "set", "HEAD", "--tier", "restricted", "--label", "secret"],
+                Some(t.path()),
+            )
+            .expect("visibility set");
+            (t, sv(&["visibility", "promote", "HEAD", "--tier", "internal"]))
+        }
+        "visibility_show" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("a.txt"), "base").unwrap();
+            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            heddle(
+                &["visibility", "set", "HEAD", "--tier", "internal"],
+                Some(t.path()),
+            )
+            .expect("visibility set");
+            (t, sv(&["visibility", "show", "HEAD"]))
+        }
+        "visibility_list" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("a.txt"), "base").unwrap();
+            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            heddle(
+                &["visibility", "set", "HEAD", "--tier", "internal"],
+                Some(t.path()),
+            )
+            .expect("visibility set");
+            (t, sv(&["visibility", "list"]))
+        }
         _ => return None,
     };
     Some(case)
