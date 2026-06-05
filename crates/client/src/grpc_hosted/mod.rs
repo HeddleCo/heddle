@@ -73,7 +73,14 @@ impl HostedGrpcClient {
             .map_err(|err| ProtocolError::AuthenticationFailed(err.to_string()))?;
         let transport = helpers::HostedTransportPolicy::from_client_config(config);
         Ok(Self {
-            inner: RepoSyncServiceClient::new(channel.clone()),
+            // Bound the single-shot, server-controlled sidecar allocation at
+            // the gRPC decode boundary: tonic rejects an oversized inbound
+            // `PullMessage` before its `redactions_blob`/`state_visibility_blob`
+            // `Vec<u8>` is ever materialized. The post-decode
+            // `check_received_transfer_blob_size` calls are kept as cheap
+            // defense-in-depth, but this is the load-bearing guard.
+            inner: RepoSyncServiceClient::new(channel.clone())
+                .max_decoding_message_size(proto::MAX_PULL_DECODE_MESSAGE_SIZE),
             user: HostedUserServiceClient::new(channel.clone()),
             auth: AuthServiceClient::new(channel.clone()),
             content: ContentServiceClient::new(channel),
