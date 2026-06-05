@@ -404,6 +404,47 @@ impl Repository {
         Ok(manifest)
     }
 
+    /// Record a WITHHELD-consistent manifest sidecar for a worktree whose
+    /// checkout was withheld — the base state's visibility tier was not visible
+    /// to the materializing audience, so [`Repository::checkout_state_gated`]
+    /// wrote ONLY the operator-local courtesy stub and the tracked bytes were
+    /// never materialized.
+    ///
+    /// Mirrors the withheld arm of [`Repository::materialize_thread`]: `tree_hash`
+    /// still names the real (unserved) state's tree so the sidecar identifies
+    /// which state the stub stands in for, but `files` is empty (no tracked leaf
+    /// is on disk) and `withheld = true`. Crucially this does NOT walk/stat the
+    /// real tree against `dest` the way [`Repository::record_thread_manifest`]
+    /// does — those files were intentionally not materialized, so stat-ing them
+    /// would record phantom stat-cache entries (or fail) against a checkout that
+    /// holds only the stub. The CLI's atomic `start` path calls this instead of
+    /// `record_thread_manifest` when the checkout came back withheld, so a start
+    /// on a Private base produces a withheld checkout + a consistent manifest
+    /// rather than erroring (heddle#316 / PR #528 r9 Finding 3).
+    #[instrument(skip(self), fields(thread = %thread, dest = %dest.display(), state = %state_id))]
+    pub fn record_withheld_thread_manifest(
+        &self,
+        thread: &str,
+        state_id: &ChangeId,
+        dest: &Path,
+    ) -> Result<ThreadManifest> {
+        let state = self
+            .store()
+            .get_state(state_id)?
+            .ok_or_else(|| HeddleError::Config(format!("state {state_id} missing")))?;
+        let mut manifest =
+            ThreadManifest::new(*state_id, state.tree, canonical_worktree_path(dest));
+        manifest.withheld = true;
+        crate::thread_manifest::write_manifest(self.heddle_dir(), thread, &manifest)
+            .map_err(HeddleError::Io)?;
+        debug!(
+            thread = %thread,
+            state_id = %state_id,
+            "withheld thread manifest recorded post-materialize"
+        );
+        Ok(manifest)
+    }
+
     /// The staged domain commit record for a brand-new materialized-thread
     /// start. The repo owns the op-record shape so callers don't reconstruct
     /// `OpRecord::ThreadCreateV2`'s fields. `manager_snapshot` is `None`: the
@@ -1561,6 +1602,90 @@ mod tests {
             "the prior visible tree's secret must be GONE even though the per-thread manifest was clobbered"
         );
         let remaining: Vec<_> = fs::read_dir(&root_a)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "withheld root must contain only the courtesy stub, got {remaining:?}"
+        );
+        assert_eq!(remaining[0].to_str().unwrap(), COURTESY_STUB_FILENAME);
+    }
+
+    /// #316 / PR #528 r9 FINDING 4: close the per-root `.leaves`-staleness CLASS.
+    /// `capture_thread_from_disk` rewrites `manifest.toml` but used to leave the
+    /// clobber-proof per-root `.leaves` record untouched, so a captured-but-
+    /// later-withheld leaf leaked. Sequence: a visible checkout holding `{a}`;
+    /// the user adds `b` and captures (head advances, `.leaves` MUST refresh to
+    /// `{a, b}`); the thread then advances to a state whose tree drops `b` and is
+    /// embargoed; re-materializing the SAME root WITHHELD against that state must
+    /// leave ONLY the stub — `b` (on disk from the capture) must be GONE, not
+    /// leaked next to the stub. The withheld state's own tree lacks `b`, so only
+    /// a `.leaves` record the capture refreshed can drive `b`'s removal.
+    #[test]
+    fn capture_refreshes_materialized_leaves() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+
+        // S1 (visible): tracked `a.txt`.
+        fs::write(repo_dir.path().join("a.txt"), b"alpha\n").unwrap();
+        repo.snapshot(Some("seed a".into()), None).unwrap();
+
+        // Materialize root R visible (Internal) at S1 → disk {a.txt},
+        // .leaves(R) = {a.txt}.
+        let holder = TempDir::new().unwrap();
+        let root = holder.path().join("root");
+        repo.materialize_thread("main", &root, &AudienceTier::Internal)
+            .unwrap();
+        assert!(root.join("a.txt").exists());
+
+        // User adds `b.txt` in R and captures → head advances to S2 = {a, b}.
+        // The capture MUST refresh the per-root `.leaves` record to include
+        // `b.txt` (the class-fix: capture rewrites the manifest AND `.leaves`).
+        fs::write(root.join("b.txt"), b"beta\n").unwrap();
+        match repo.capture_thread_from_disk("main", &root).unwrap() {
+            ThreadCaptureOutcome::Captured { .. } => {}
+            ThreadCaptureOutcome::NoOp => panic!("adding b.txt must produce a real capture"),
+        }
+        let leaves = crate::thread_manifest::read_materialized_leaves(
+            repo.heddle_dir(),
+            &canonical_worktree_path(&root),
+        )
+        .unwrap()
+        .expect("capture must have written a per-root leaves record");
+        assert!(
+            leaves.contains("a.txt") && leaves.contains("b.txt"),
+            "capture must refresh the per-root .leaves record to the captured tree's leaves, got {leaves:?}"
+        );
+
+        // Advance the thread to S3 whose tree LACKS b.txt: snapshot from the main
+        // repo dir (which only holds a.txt and is NOT the materialized worktree,
+        // so the manifest is not refreshed here), then embargo S3 Private.
+        fs::write(repo_dir.path().join("a.txt"), b"alpha v2\n").unwrap();
+        repo.snapshot(Some("drop b, advance".into()), None).unwrap();
+        embargo_state_with_tier(
+            &repo,
+            VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+        );
+
+        // Re-materialize R WITHHELD (Internal under-tier for the Private S3). S3's
+        // own tree has no b.txt, so the withheld reduction can only remove the
+        // capture-added b.txt by sourcing the refreshed per-root record.
+        repo.materialize_thread("main", &root, &AudienceTier::Internal)
+            .unwrap();
+
+        assert!(
+            root.join(COURTESY_STUB_FILENAME).exists(),
+            "withheld checkout must hold the courtesy stub"
+        );
+        assert!(
+            !root.join("b.txt").exists(),
+            "the capture-added leaf must be removed by the withheld reduction, not leaked next to the stub"
+        );
+        let remaining: Vec<_> = fs::read_dir(&root)
             .unwrap()
             .map(|e| e.unwrap().file_name())
             .collect();

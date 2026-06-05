@@ -50,7 +50,7 @@ use objects::object::{ChangeId, ThreadName};
 use oplog::{IsolationKey, OpRecord};
 use refs::RefExpectation;
 use repo::{
-    Thread, ThreadManager, ThreadMode,
+    CheckoutMaterialization, Thread, ThreadManager, ThreadMode,
     atomic::{AtomicMutation, StagedCommit, Tx},
 };
 
@@ -347,6 +347,20 @@ fn claim_from_cell(target_claim: &Cell<Option<TargetDir>>) -> Option<TargetDir> 
     let claim = target_claim.take();
     let snapshot = claim.clone();
     target_claim.set(claim);
+    snapshot
+}
+
+/// Read the checkout-materialization outcome the checkout step recorded, without
+/// consuming it from the cell (take → clone → set back), so a later step (the
+/// manifest stage) can observe whether the checkout was withheld. Mirrors
+/// [`claim_from_cell`]. The cell is set by `stage_checkout`'s forward, which the
+/// executor runs before `stage_manifest`'s forward.
+fn outcome_from_cell(
+    cell: &Cell<Option<CheckoutMaterialization>>,
+) -> Option<CheckoutMaterialization> {
+    let outcome = cell.take();
+    let snapshot = outcome.clone();
+    cell.set(outcome);
     snapshot
 }
 
@@ -674,6 +688,7 @@ impl StartThread {
         &self,
         tx: &mut Tx<'_>,
         target_claim: Rc<Cell<Option<TargetDir>>>,
+        checkout_outcome: Rc<Cell<Option<CheckoutMaterialization>>>,
     ) -> HeddleResult<()> {
         let repo = tx.repo();
         let abs = self.abs_path.clone();
@@ -697,8 +712,14 @@ impl StartThread {
                     ));
                 }
                 let checkout_root = claimed_worktree_path(claim_from_cell(&target_claim), &abs)?;
-                write_isolated_checkout(repo, &checkout_root, &base_state, Some(&name))
-                    .map_err(apply_error)
+                // Record the gate outcome for the manifest stage: a withheld base
+                // means only the courtesy stub is on disk, so the manifest stage
+                // must NOT stat the unmaterialized real tree (heddle#316 r9
+                // Finding 3).
+                let outcome = write_isolated_checkout(repo, &checkout_root, &base_state, Some(&name))
+                    .map_err(apply_error)?;
+                checkout_outcome.set(Some(outcome));
+                Ok(())
             },
         )
     }
@@ -710,6 +731,7 @@ impl StartThread {
         &self,
         tx: &mut Tx<'_>,
         target_claim: Rc<Cell<Option<TargetDir>>>,
+        checkout_outcome: Rc<Cell<Option<CheckoutMaterialization>>>,
     ) -> HeddleResult<()> {
         let repo = tx.repo();
         let abs = self.abs_path.clone();
@@ -732,8 +754,21 @@ impl StartThread {
                 #[cfg(all(test, unix))]
                 maybe_swap_target_leaf(TargetSwapPoint::BeforeManifest, &abs)?;
                 let checkout_root = claimed_worktree_path(claim_from_cell(&target_claim), &abs)?;
-                repo.record_thread_manifest(&fwd_name, &base_state, &checkout_root)
-                    .map(|_| ())
+                // Branch on the checkout outcome recorded by `stage_checkout`. A
+                // WITHHELD base materialized only the courtesy stub, so record a
+                // withheld-consistent manifest (stub-only, no tracked-leaf stat
+                // entries) rather than stat-ing the unmaterialized real tree —
+                // which is what made `heddle start` on a Private base error
+                // (heddle#316 r9 Finding 3). A visible/absent outcome takes the
+                // normal real-tree manifest path.
+                match outcome_from_cell(&checkout_outcome) {
+                    Some(CheckoutMaterialization::Withheld { .. }) => repo
+                        .record_withheld_thread_manifest(&fwd_name, &base_state, &checkout_root)
+                        .map(|_| ()),
+                    _ => repo
+                        .record_thread_manifest(&fwd_name, &base_state, &checkout_root)
+                        .map(|_| ()),
+                }
             },
         )
     }
@@ -933,6 +968,13 @@ impl AtomicMutation for StartThread {
         // leaf (heddle#356 cid 3335052857 / 3335586962).
         let target_claim = Rc::new(Cell::new(None));
 
+        // The checkout-materialization outcome `stage_checkout`'s forward records
+        // and `stage_manifest`'s forward reads (they run in that order). It lets
+        // the manifest stage record a withheld-consistent manifest when the base
+        // state was withheld, instead of stat-ing the unmaterialized real tree
+        // (heddle#316 r9 Finding 3). `None` until the checkout forward runs.
+        let checkout_outcome = Rc::new(Cell::new(None));
+
         // 0. Create the target dir inside the transaction (first, so its removal
         //    inverse runs last and a self-created dir never leaks).
         self.stage_target_dir(tx, Rc::clone(&target_claim))?;
@@ -943,9 +985,9 @@ impl AtomicMutation for StartThread {
         // 2. Mode-specific materialization.
         let linked = match self.thread_mode {
             ThreadMode::Solid | ThreadMode::Materialized => {
-                self.stage_checkout(tx, Rc::clone(&target_claim))?;
+                self.stage_checkout(tx, Rc::clone(&target_claim), Rc::clone(&checkout_outcome))?;
                 if matches!(self.thread_mode, ThreadMode::Materialized) {
-                    self.stage_manifest(tx, Rc::clone(&target_claim))?;
+                    self.stage_manifest(tx, Rc::clone(&target_claim), Rc::clone(&checkout_outcome))?;
                 }
                 if let Some(dir) = self.shared_target_dir.clone() {
                     let applied = self.stage_cargo_config(tx, &dir, Rc::clone(&target_claim))?;
@@ -1119,6 +1161,89 @@ mod tests {
         assert!(
             has_thread_record(&repo, "iso"),
             "thread record should be persisted"
+        );
+    }
+
+    /// #316 / PR #528 r9 Finding 3: `heddle start` on a Private base_state must
+    /// yield a WITHHELD checkout, not error. `write_isolated_checkout` used to
+    /// discard the `CheckoutMaterialization::Withheld` outcome, so the start path
+    /// went on to `record_thread_manifest`, which stats the REAL state tree — but
+    /// those files were intentionally not materialized (only the courtesy stub is
+    /// on disk). With the outcome propagated, the manifest stage records a
+    /// withheld-consistent manifest instead, the start succeeds, and a later
+    /// capture of the withheld checkout is a no-op.
+    #[test]
+    fn start_on_private_base_yields_withheld_checkout_not_error() {
+        use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+        // Mirror the gate's operator-local stub filename (the const is
+        // repo-crate-private).
+        const COURTESY_STUB_FILENAME: &str = "HEDDLE-EMBARGO.txt";
+
+        let (temp, repo, state) = repo_with_state(&[]);
+        // Embargo the base state Private — withheld even from the all-seeing
+        // `Internal` audience the start path materializes under.
+        repo.put_state_visibility(StateVisibility {
+            state,
+            tier: VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+            embargo_until: None,
+            declarer: Principal {
+                name: "Grace Hopper".into(),
+                email: "grace@example.com".into(),
+            },
+            declared_at: chrono::Utc::now(),
+            signature: None,
+            supersedes: None,
+        })
+        .expect("put visibility");
+
+        let checkout = temp.path().join("iso");
+        // Materialized start (so a manifest sidecar is recorded) of a Private
+        // base. Pre-fix this errored; now it must succeed with a withheld
+        // checkout.
+        let out = start_thread(&repo, materialized_args("iso", &checkout, &state, false));
+        assert!(
+            out.is_ok(),
+            "start on a Private base must succeed (withheld checkout), got {:?}",
+            out.err()
+        );
+
+        // The worktree holds the courtesy stub and NONE of the base's tracked
+        // bytes.
+        assert!(
+            checkout.join(COURTESY_STUB_FILENAME).exists(),
+            "a withheld start must write the courtesy stub"
+        );
+        assert!(
+            !checkout.join("a.txt").exists(),
+            "the Private base's tracked bytes must NOT be materialized"
+        );
+
+        // The recorded manifest reflects the withheld checkout: marked withheld,
+        // with NO real-tree stat-cache entries.
+        let manifest = repo::thread_manifest::read_manifest(repo.heddle_dir(), "iso")
+            .unwrap()
+            .expect("manifest must be recorded");
+        assert!(
+            manifest.withheld,
+            "manifest must mark the checkout withheld"
+        );
+        assert!(
+            manifest.files.is_empty(),
+            "withheld manifest must record NO tracked-leaf stat entries, got {:?}",
+            manifest.files.keys().collect::<Vec<_>>()
+        );
+
+        // A capture of the withheld checkout is a no-op (non-capturable).
+        let outcome = repo
+            .capture_thread_from_disk("iso", &checkout)
+            .expect("capture of a withheld checkout must not error");
+        assert_eq!(
+            outcome,
+            repo::ThreadCaptureOutcome::NoOp,
+            "a withheld checkout is non-capturable"
         );
     }
 

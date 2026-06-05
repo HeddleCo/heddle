@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use objects::object::ChangeId;
-use repo::{AudienceTier, Repository};
+use repo::{AudienceTier, CheckoutMaterialization, Repository};
 
 use super::super::advice::RecoveryAdvice;
 
@@ -251,7 +251,7 @@ pub(crate) fn write_isolated_checkout(
     abs_path: &Path,
     base_state: &ChangeId,
     thread: Option<&str>,
-) -> Result<()> {
+) -> Result<CheckoutMaterialization> {
     let heddle_dir = abs_path.join(".heddle");
     if heddle_dir.exists() {
         return Err(anyhow::anyhow!(worktree_target_existing_heddle_advice(
@@ -300,8 +300,15 @@ pub(crate) fn write_isolated_checkout(
     // (#316 / PR #528 Finding 2). Operator-local checkouts use the all-seeing
     // `Internal` audience; a `Private` state is withheld even from `Internal`
     // (fail closed) and the checkout receives the courtesy stub instead.
-    repo.checkout_state_gated(base_state, &state, abs_path, &AudienceTier::Internal)?;
-    Ok(())
+    //
+    // PROPAGATE the gate outcome to the caller (do NOT discard it): when the base
+    // state is withheld, only the courtesy stub is on disk — the real tree was
+    // intentionally not materialized. The atomic start path uses this to record a
+    // WITHHELD-consistent manifest instead of stat-ing the unmaterialized real
+    // tree, so `heddle start` on a Private base yields a withheld checkout rather
+    // than erroring (#316 / PR #528 r9 Finding 3).
+    let outcome = repo.checkout_state_gated(base_state, &state, abs_path, &AudienceTier::Internal)?;
+    Ok(outcome)
 }
 
 fn worktree_target_existing_heddle_advice(path: &Path) -> RecoveryAdvice {

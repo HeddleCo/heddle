@@ -538,10 +538,18 @@ fn materialized_leaves_path(heddle_dir: &Path, canonical_worktree_root: &Path) -
 
 /// Persist `leaves` — the worktree-relative tracked leaf paths a materialize
 /// just left at `canonical_worktree_root` — as the clobber-proof per-root
-/// record. Written on EVERY materialize through the checkout chokepoint (with an
-/// empty set on a withheld materialize, where only the untracked stub remains),
-/// so a later reconcile of the same root knows precisely which prior tracked
-/// leaves to remove even when a sibling worktree of the same thread has
+/// record. Two routes funnel through here, and ONLY these two, so the record
+/// always reflects the actual tracked content at the root:
+///   * the checkout chokepoint ([`Repository::checkout_state_gated`]) on every
+///     materialize — with an empty set on a withheld materialize, where only the
+///     untracked stub remains; and
+///   * [`write_manifest`], which derives the projection from `manifest.files` so
+///     every manifest writer (capture refresh, post-snapshot refresh, the CLI
+///     start `record`) keeps `.leaves` in lockstep with the manifest by
+///     construction.
+///
+/// A later reconcile of the same root therefore knows precisely which prior
+/// tracked leaves to remove even when a sibling worktree of the same thread has
 /// clobbered the per-thread `manifest.toml`. Atomic temp+rename so a torn write
 /// can't surface a half-record (heddle#316 CLASS 1).
 pub fn write_materialized_leaves(
@@ -617,6 +625,24 @@ pub fn write_manifest(
     let tmp = path.with_extension("toml.tmp");
     fs::write(&tmp, text).map_err(|e| enrich_fs_error(&tmp, "writing", e))?;
     fs::rename(&tmp, &path).map_err(|e| enrich_rename_error(&tmp, &path, e))?;
+
+    // Keep the clobber-proof per-root materialized-leaves record in lockstep with
+    // the manifest, BY CONSTRUCTION. The manifest is the source of truth for the
+    // tracked set materialized at `worktree_path`; `.leaves` is its root-keyed
+    // projection that the withheld reduction
+    // ([`Repository::reconcile_materialized_root`]) reads to know which prior
+    // tracked leaves to remove. Deriving + writing it from the SAME call that
+    // writes the manifest is the single sync chokepoint: every manifest writer —
+    // post-capture refresh, post-snapshot refresh, the CLI start `record`, and the
+    // `materialize` paths — updates `.leaves` here, so the two records cannot
+    // drift. A withheld manifest carries empty `files`, so the projection is the
+    // empty set, exactly matching the withheld reduction's own write. The record
+    // is keyed by the canonical worktree root (== `manifest.worktree_path`), so a
+    // sibling worktree of the same thread can never erase it (heddle#316: the
+    // per-root `.leaves` staleness class — capture used to rewrite `manifest.toml`
+    // but never `.leaves`, leaking a captured-then-withheld leaf).
+    let leaves: BTreeSet<String> = manifest.files.keys().cloned().collect();
+    write_materialized_leaves(heddle_dir, &manifest.worktree_path, &leaves)?;
     Ok(())
 }
 
