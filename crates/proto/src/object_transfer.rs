@@ -199,4 +199,39 @@ mod tests {
         assert_eq!(chunk_offset(3, 64), Some(192));
         assert_eq!(chunk_offset(usize::MAX, 2), None);
     }
+
+    #[test]
+    fn received_transfer_blob_at_limit_is_accepted() {
+        check_received_transfer_blob_size(8, 8, "redactions").unwrap();
+    }
+
+    #[test]
+    fn received_transfer_blob_over_limit_is_rejected() {
+        let error = check_received_transfer_blob_size(9, 8, "redactions").unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("redactions blob exceeds receive size limit"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("9 bytes (max 8)"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn received_transfer_blob_caps_are_enforced_against_production_limits() {
+        check_received_transfer_blob_size(
+            MAX_RECEIVED_REDACTIONS_BLOB_SIZE as usize,
+            MAX_RECEIVED_REDACTIONS_BLOB_SIZE,
+            "redactions",
+        )
+        .unwrap();
+        check_received_transfer_blob_size(
+            MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE as usize,
+            MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE,
+            "state-visibility",
+        )
+        .unwrap();
+    }
 }
