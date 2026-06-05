@@ -28,7 +28,7 @@ use crate::bridge::{
         GitPushScope, copy_local_repo_to_bare, delete_reference_if_present, read_exported_refs,
         set_reference, write_exported_refs,
     },
-    git_export::{export_all, export_tree},
+    git_export::{export_all, export_current_thread, export_tree},
     git_import::{import_all, import_all_with_options, import_git_tree},
     git_import_tree::GitTreeImporter,
     git_sync::{sync_branches, sync_tags, sync_track_to_branch},
@@ -3062,6 +3062,110 @@ fn export_retracts_note_for_retracted_commit() {
             .unwrap()
             .is_some(),
         "A is still served — its note must survive the retraction"
+    );
+}
+
+/// #316 / PR #528 r9 FINDING B: a thread-SCOPED export must retract the note
+/// for any mapped out-of-thread commit that is unserved under the SAME
+/// downward-closure rule the branch frontier uses — not just the scoped
+/// `embargoed_oids`. A commit whose DIRECT tier is public but whose ANCESTOR
+/// became Private is not served (its branch would be withheld), yet
+/// `purge_unserved_mappings` only walks the scoped thread's reachable states,
+/// so without the full-target servedness pass its `refs/notes/heddle` entry
+/// stays in the mirror and gets pushed — a notes leak in scoped exports.
+#[test]
+fn scoped_export_retracts_note_for_commit_with_embargoed_ancestor() {
+    use chrono::Utc;
+    use objects::object::{Attribution, Principal, State, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let put_state = |content: &[u8], parents: Vec<ChangeId>| -> State {
+        let store = repo.store();
+        let blob_hash = store
+            .put_blob(&Blob::from_slice(content))
+            .expect("put blob");
+        let tree_hash = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
+            .expect("put tree");
+        let state = State::new(
+            tree_hash,
+            parents,
+            Attribution::human(Principal::new("Alice", "alice@example.com")),
+        );
+        store.put_state(&state).expect("put state");
+        state
+    };
+
+    // main line: public root R → public tip X (X descends from R).
+    let state_r = put_state(b"root\n", Vec::new());
+    let state_x = put_state(b"tip\n", vec![state_r.change_id]);
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &state_x.change_id)
+        .expect("set main to X");
+    // A separate, independent line on thread `other`: public root O.
+    let state_o = put_state(b"other root\n", Vec::new());
+    repo.refs()
+        .set_thread(&ThreadName::new("other"), &state_o.change_id)
+        .expect("set other to O");
+
+    // Run 1 — everything public. Notes get written for R, X, and O.
+    let mut bridge = GitBridge::new(&repo);
+    export_all(&mut bridge).expect("first export");
+    let oid_x = bridge
+        .mapping
+        .get_git(&state_x.change_id)
+        .expect("X minted while public");
+    let oid_o = bridge
+        .mapping
+        .get_git(&state_o.change_id)
+        .expect("O minted while public");
+    {
+        let mirror = bridge.open_git_repo().expect("open mirror");
+        assert!(
+            crate::bridge::git_notes::read_note(&mirror, oid_x)
+                .unwrap()
+                .is_some(),
+            "X must carry a note after run 1"
+        );
+    }
+
+    // Embargo R (X's ANCESTOR) — X's own tier stays public, but downward
+    // closure now withholds X.
+    repo.put_state_visibility(StateVisibility {
+        state: state_r.change_id,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Alice".into(),
+            email: "alice@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+
+    // Run 2 — SCOPED to `other`, which does NOT reach R or X. The scoped purge
+    // never examines X, but the notes-ref retraction must still withhold X's
+    // note because its ancestor R is unserved.
+    export_current_thread(&mut bridge, "other").expect("scoped export");
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    assert!(
+        crate::bridge::git_notes::read_note(&mirror, oid_x)
+            .unwrap()
+            .is_none(),
+        "scoped export must retract X's note (ancestor embargoed) — no notes leak"
+    );
+    assert!(
+        crate::bridge::git_notes::read_note(&mirror, oid_o)
+            .unwrap()
+            .is_some(),
+        "O is served — its note must survive the scoped retraction"
     );
 }
 

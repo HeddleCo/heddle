@@ -242,6 +242,14 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     // downward-closed: a still-visible state whose ancestor is embargoed is
     // withheld too (its Git commit chains to the embargoed one). After this,
     // `mapping` == the served set, exactly what `frontier_git_oid` assumes.
+    // Snapshot EVERY mapped target before the purge mutates the mapping: these
+    // are exactly the commits that may already carry a `refs/notes/*` entry in
+    // the mirror, so the notes-ref retraction below must consider all of them —
+    // including the in-scope states the purge is about to drop AND the
+    // out-of-thread targets a scoped purge never examines (heddle#316).
+    let pre_purge_targets: Vec<(ChangeId, gix::hash::ObjectId)> =
+        bridge.mapping.iter().map(|(c, o)| (*c, *o)).collect();
+
     let embargoed_oids = purge_unserved_mappings(
         bridge.heddle_repo,
         &mut bridge.mapping,
@@ -320,6 +328,31 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         }
     }
 
+    // The downward-closure served set across EVERY note target — the pre-purge
+    // mapping (commits that may already carry a note in the mirror) UNION the
+    // current post-mint mapping (served states + freshly minted commits),
+    // computed over the FULL ancestry of all of them. A scoped export's
+    // `purge_unserved_mappings` only walks the current thread's reachable
+    // states, so without this an out-of-thread note target whose direct tier is
+    // public but whose ancestor became Private would slip past both the backfill
+    // gate and the retraction below. This is the SAME rule the branch frontier
+    // uses, applied to notes (heddle#316). For an all-states export it reduces
+    // to the post-purge served set, so behavior there is unchanged.
+    let note_target_roots: Vec<ChangeId> = pre_purge_targets
+        .iter()
+        .map(|(c, _)| *c)
+        .chain(bridge.mapping.iter().map(|(c, _)| *c))
+        .collect();
+    let note_reachable_vec = reachable_states(bridge.heddle_repo, &note_target_roots)?;
+    let note_reachable: HashSet<ChangeId> = note_reachable_vec.iter().copied().collect();
+    let note_sorted = bridge.sort_states_topologically(&note_reachable_vec)?;
+    let note_served = served_change_ids(
+        bridge.heddle_repo,
+        &note_sorted,
+        &note_reachable,
+        &audience,
+    )?;
+
     // For states whose git_oid was already in the mapping (the SHA-stable
     // path above), make sure the note is present too. This covers two
     // cases: (a) the state was imported from a non-heddle git source and
@@ -327,21 +360,14 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     let note_targets: Vec<(ChangeId, gix::hash::ObjectId)> =
         bridge.mapping.iter().map(|(c, o)| (*c, *o)).collect();
     for (change_id, git_oid) in note_targets {
-        // Gate the backfill on visibility, symmetric with the mint
-        // (`export_state`) and checkpoint-seed note writes. For an all-states
-        // export the post-purge mapping is already served-only, but a scoped
-        // export's mapping still carries out-of-thread entries the purge never
-        // examined — without this check the backfill would re-publish a note
-        // for an embargoed commit `collect_ref_updates` then copies to the
-        // mirror (heddle#316). No note-write site may emit metadata for an
-        // unserved commit.
-        let tier = bridge
-            .heddle_repo
-            .effective_visibility_tier(&change_id)
-            .map_err(|e| {
-                GitBridgeError::Git(format!("resolve visibility for {change_id}: {e:#}"))
-            })?;
-        if visible(&tier, &audience)
+        // Gate the backfill on the downward-closure served set, not the commit's
+        // DIRECT tier. A scoped export's mapping carries out-of-thread entries
+        // the purge never examined; gating on direct visibility alone would
+        // re-publish a note for a public commit whose ancestor became Private —
+        // a commit the branch downward-closure withholds. `note_served` is the
+        // same served notion the branch frontier uses, so no note-write site can
+        // emit metadata for an unserved commit (heddle#316).
+        if note_served.contains(&change_id)
             && git_notes::read_note(&repo, git_oid)?.is_none()
             && let Some(state) = bridge.heddle_repo.store().get_state(&change_id)?
         {
@@ -350,20 +376,28 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         }
     }
 
-    // Retract the notes for every commit purged from the served set. The
-    // mirror copies `refs/notes/*` (`collect_ref_updates`) alongside the
-    // branches and tags, so a note left for a now-embargoed commit keeps
-    // leaking that commit's metadata even after its branch/tag were retracted.
-    // This is the notes-ref sibling of the branch/tag retraction above
-    // (heddle#316). Guard the degenerate case where a still-served state maps
-    // to the same git OID by retracting only OIDs absent from the served
-    // mapping.
-    let served_oids: HashSet<gix::hash::ObjectId> =
-        bridge.mapping.iter().map(|(_, oid)| *oid).collect();
-    let notes_to_retract: HashSet<gix::hash::ObjectId> = embargoed_oids
+    // Retract the notes for every mapped target that is NOT served under the
+    // downward-closure rule. The mirror copies `refs/notes/*`
+    // (`collect_ref_updates`) alongside branches and tags, so a note left for an
+    // unserved commit keeps leaking its metadata even after its branch/tag were
+    // retracted. This is the notes-ref sibling of the branch/tag retraction
+    // above (heddle#316). Considering EVERY pre-purge target — not just the
+    // scoped `embargoed_oids` — is what closes the scoped-export leak: an
+    // out-of-thread commit whose ancestor is embargoed is unserved here exactly
+    // as its branch would be. Guard the degenerate case where a still-served
+    // state maps to the same git OID by keeping any OID a served target maps to.
+    let served_note_oids: HashSet<gix::hash::ObjectId> = pre_purge_targets
         .iter()
         .copied()
-        .filter(|oid| !served_oids.contains(oid))
+        .chain(bridge.mapping.iter().map(|(c, o)| (*c, *o)))
+        .filter(|(c, _)| note_served.contains(c))
+        .map(|(_, oid)| oid)
+        .collect();
+    let notes_to_retract: HashSet<gix::hash::ObjectId> = pre_purge_targets
+        .iter()
+        .filter(|(c, _)| !note_served.contains(c))
+        .map(|(_, oid)| *oid)
+        .filter(|oid| !served_note_oids.contains(oid))
         .collect();
     git_notes::remove_notes(&repo, &notes_to_retract)?;
 
@@ -523,14 +557,38 @@ fn purge_unserved_mappings(
     reachable: &HashSet<ChangeId>,
     audience: &AudienceTier,
 ) -> GitResult<HashSet<gix::hash::ObjectId>> {
-    let mut served: HashSet<ChangeId> = HashSet::new();
+    let served = served_change_ids(heddle_repo, sorted_states, reachable, audience)?;
     let mut purged: HashSet<gix::hash::ObjectId> = HashSet::new();
+    for state_id in sorted_states {
+        if !served.contains(state_id)
+            && let Some(oid) = mapping.remove(state_id)
+        {
+            purged.insert(oid);
+        }
+    }
+    Ok(purged)
+}
+
+/// The downward-closure served set (spike §5.0): a state is served iff it is
+/// visible to `audience` AND every *reachable* parent is itself served. The
+/// topo order of `sorted_states` guarantees a parent's servedness is already
+/// decided when its child is visited. A parent outside `reachable` is a shallow
+/// boundary (public-by-absence, treated as served).
+///
+/// The single notion of "served" shared by the branch-frontier purge and the
+/// notes-ref retraction — so a note can never be published for a commit whose
+/// branch the same rule would withhold (heddle#316).
+fn served_change_ids(
+    heddle_repo: &HeddleRepository,
+    sorted_states: &[ChangeId],
+    reachable: &HashSet<ChangeId>,
+    audience: &AudienceTier,
+) -> GitResult<HashSet<ChangeId>> {
+    let mut served: HashSet<ChangeId> = HashSet::new();
     for state_id in sorted_states {
         let tier = heddle_repo.effective_visibility_tier(state_id).map_err(|e| {
             GitBridgeError::Git(format!("resolve visibility for {state_id}: {e:#}"))
         })?;
-        // A parent outside `reachable` is a shallow boundary (public-by-absence,
-        // treated as served); a reachable parent must itself be served.
         let parents_served = match heddle_repo.store().get_state(state_id)? {
             Some(state) => state
                 .parents
@@ -540,11 +598,9 @@ fn purge_unserved_mappings(
         };
         if visible(&tier, audience) && parents_served {
             served.insert(*state_id);
-        } else if let Some(oid) = mapping.remove(state_id) {
-            purged.insert(oid);
         }
     }
-    Ok(purged)
+    Ok(served)
 }
 
 /// Resolve `ref_name` to its tip commit OID in the mirror, or `None` when the

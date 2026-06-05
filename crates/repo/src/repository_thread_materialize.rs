@@ -171,9 +171,18 @@ impl Repository {
         let tier = self.effective_visibility_tier(change_id).map_err(|e| {
             HeddleError::Config(format!("resolve visibility for {change_id}: {e:#}"))
         })?;
-        let canonical = canonical_worktree_path(dest);
         if !visible(&tier, audience) {
             fs::create_dir_all(dest).map_err(HeddleError::Io)?;
+            // Canonicalize ONLY after the directory exists. `canonical_worktree_path`
+            // falls back to the raw input when `dest` does not yet resolve (a relative
+            // path, or a path through a not-yet-created symlink), so a pre-creation
+            // canonicalize would key the withheld marker and the `.leaves` record on a
+            // path `capture_thread_from_disk` never resolves to at read-time — the read
+            // canonicalizes the now-existing root, misses the marker, and captures a
+            // withheld checkout as a stub-only tree instead of no-oping. Resolving here,
+            // once `create_dir_all` has made `dest` exist, guarantees the write-time
+            // canonical root equals the read-time one (heddle#316).
+            let canonical = canonical_worktree_path(dest);
             // Reconcile the root DOWN to the withheld tier: every tracked leaf a
             // prior materialize of this root wrote must be removed, so the
             // checkout holds ONLY the courtesy stub — never the very bytes the
@@ -222,6 +231,10 @@ impl Repository {
             .get_tree(&state.tree)?
             .ok_or_else(|| HeddleError::Config(format!("tree for {change_id} missing")))?;
         self.materialize_tree(&tree, dest)?;
+        // Canonicalize only now that `materialize_tree` (via `create_dir_all`) has made
+        // `dest` exist — same read/write-root agreement as the withheld branch above
+        // (heddle#316).
+        let canonical = canonical_worktree_path(dest);
         // Reconcile the root UP to the served tier: `materialize_tree` wrote the
         // real tree's leaves but does NOT remove a stale leaf a prior
         // materialize of a *different* tree left at this root. `keep` is the set
@@ -1522,6 +1535,53 @@ mod tests {
         // Capture of the still-withheld root is a no-op.
         let outcome = repo.capture_thread_from_disk("main", &dest).unwrap();
         assert_eq!(outcome, ThreadCaptureOutcome::NoOp);
+    }
+
+    /// #316 / PR #528 r9 FINDING A: the withheld marker (and `.leaves` record)
+    /// must be keyed on the root `capture_thread_from_disk` resolves at
+    /// READ-time, not on a pre-materialization path. `canonical_worktree_path`
+    /// falls back to its raw input when the path does not yet resolve, so a dest
+    /// reached THROUGH a symlink whose leaf does not exist yet canonicalizes to
+    /// the un-resolved `link/out` before the dir is made but to the resolved
+    /// `real/out` after. Pre-fix the marker was written under `link/out` while
+    /// capture looked it up under `real/out` → marker missed → a withheld
+    /// checkout captured as a stub-only tree instead of no-oping.
+    #[cfg(unix)]
+    #[test]
+    fn withheld_marker_keyed_on_canonical_root_for_relative_dest() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("secret.rs"), b"fn exploit() {}\n").unwrap();
+        repo.snapshot(Some("embargoed fix".into()), None).unwrap();
+        embargo_state_with_tier(
+            &repo,
+            VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+        );
+
+        // `dest` travels through a symlink to a not-yet-existing leaf, so a
+        // canonicalize BEFORE the dir is created resolves differently (falls
+        // back to `link/out`) than one AFTER (`real/out`).
+        let dest_holder = TempDir::new().unwrap();
+        let real = dest_holder.path().join("real");
+        fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, dest_holder.path().join("link")).unwrap();
+        let dest = dest_holder.path().join("link").join("out");
+
+        repo.materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
+        assert!(dest.join(COURTESY_STUB_FILENAME).exists());
+        assert!(!dest.join("secret.rs").exists());
+
+        // Capture through the symlinked path must be a NO-OP: the marker was
+        // keyed on the same canonical root (`real/out`) capture resolves.
+        let outcome = repo.capture_thread_from_disk("main", &dest).unwrap();
+        assert_eq!(
+            outcome,
+            ThreadCaptureOutcome::NoOp,
+            "withheld checkout reached via a symlinked path must not be capturable"
+        );
     }
 
     /// #316 / PR #528 r8 HOLE 1: the withheld reduction must NOT depend on the
