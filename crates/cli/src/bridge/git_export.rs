@@ -8,7 +8,7 @@ use gix::bstr::ByteSlice;
 use gix::refs::transaction::PreviousValue;
 use objects::{
     error::HeddleError,
-    object::{ChangeId, ContentHash, FileMode, ThreadName},
+    object::{ChangeId, ContentHash, FileMode, MarkerName, ThreadName},
 };
 use repo::{AudienceTier, Repository as HeddleRepository, visible};
 
@@ -415,26 +415,45 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                 .collect()
         }
     };
-    for track_name in threads {
-        let Some(tip) = bridge.heddle_repo.refs().get_thread(&ThreadName::new(&track_name))? else {
+    // Markers ride only on an all-threads export; a scoped export leaves tags
+    // untouched. Empty for a scoped export ⇒ the projection emits no tag entries
+    // and the tag reconcile below is a no-op.
+    let markers: Vec<MarkerName> = if thread.is_none() {
+        bridge.heddle_repo.refs().list_markers()?
+    } else {
+        Vec::new()
+    };
+
+    // THE PROJECTION (heddle#316 r13): the desired heddle-owned ref-set for this
+    // audience — heads lagged to the served frontier, tags at served markers — as
+    // a pure function of the post-purge served `mapping` + audience + ownership.
+    // Every mirror ref op below (set / forced embargo retract / delete) is DERIVED
+    // from this ONE map, so a ref surface can never drift out of one enforcement
+    // pass while another keeps serving it. The mirror MATERIALIZES this desired
+    // set; downstream `plan_destination_reconcile` then reconciles each
+    // destination against it — one projection, one reconcile, all destinations.
+    let desired = project_desired_refs(bridge.heddle_repo, &bridge.mapping, &threads, &markers)?;
+
+    // Reconcile the mirror's heads to the desired set. The mirror is heddle-owned
+    // (no out-of-band tips), so the apply keeps the FF guard on an ordinary
+    // advance, FORCES only a deliberate embargo retract (the prior tip is now
+    // embargoed), and DELETES a head the projection dropped (its line has no
+    // served frontier — embargoed-to-root, or reset/rebased onto a Private root).
+    for track_name in &threads {
+        if bridge
+            .heddle_repo
+            .refs()
+            .get_thread(&ThreadName::new(track_name))?
+            .is_none()
+        {
+            // A listed thread name with no tip is neither synced nor pruned.
             continue;
-        };
-        // Frontier-before-ref-sync (spike §5.3): lag refs/heads/<track> to the
-        // maximal SERVED ancestor-or-self of the raw thread tip, never the raw
-        // tip itself. An embargoed tip — or a tip descended from an embargoed
-        // commit — is absent from the public branch; the branch stops at the
-        // last commit whose entire ancestry is visible to this audience.
+        }
         let branch_ref = format!("refs/heads/{track_name}");
-        let existing = branch_tip_oid(&repo, &branch_ref);
-        // A prior export may have advertised this branch at a commit that has
-        // since been embargoed (it is now in `embargoed_oids`). Lagging the
-        // branch down to the served frontier is then a deliberate
-        // non-fast-forward rewind — distinct from the divergence the
-        // fast-forward guard exists to catch, so we force it. When the branch
-        // tip is NOT one of ours-now-embargoed we keep the FF guard.
-        let retracting = existing.is_some_and(|oid| embargoed_oids.contains(&oid));
-        match frontier_git_oid(bridge.heddle_repo, &bridge.mapping, tip)? {
+        match desired.get(&branch_ref).copied() {
             Some(git_oid) => {
+                let existing = branch_tip_oid(&repo, &branch_ref);
+                let retracting = existing.is_some_and(|oid| embargoed_oids.contains(&oid));
                 if retracting {
                     set_reference(
                         &repo,
@@ -444,7 +463,7 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                         "heddle: retract embargoed thread frontier",
                     )?;
                 } else {
-                    sync_track_to_branch(&repo, &track_name, git_oid)?;
+                    sync_track_to_branch(&repo, track_name, git_oid)?;
                 }
                 stats.threads_synced += 1;
                 stats.branches.push(ExportedRef {
@@ -453,50 +472,35 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                 });
             }
             None => {
-                // The unifying invariant: a mirror branch exists iff its CURRENT
-                // target resolves to a served frontier. Here it does not — the
-                // thread's tip has no served ancestor-or-self — so any prior ref
-                // is stale and must be deleted unconditionally. Gating on the old
-                // tip being embargoed (r1) missed the sibling case where the
-                // thread was reset/rebased onto an unrelated (or Private) root:
-                // the old public tip is not embargoed, yet it is no longer the
-                // current target. `delete_reference_if_present` is a no-op when
-                // absent, so this also covers the genuine emit-absence case.
+                // Absent from the projection ⇒ no served ancestor-or-self ⇒ any
+                // prior mirror branch is stale. `delete_reference_if_present` is a
+                // no-op when absent, so this also covers genuine emit-absence.
                 delete_reference_if_present(&repo, &branch_ref)?;
             }
         }
     }
 
-    if thread.is_none() {
-        let markers = bridge.heddle_repo.refs().list_markers()?;
-        for marker_name in markers {
-            let Some(state_id) = bridge.heddle_repo.refs().get_marker(&marker_name)? else {
-                continue;
-            };
-            match bridge.mapping.get_git(&state_id) {
-                Some(git_oid) => {
-                    sync_marker_to_tag(&repo, &marker_name, git_oid)?;
-                    stats.markers_synced += 1;
-                    stats.tags.push(ExportedRef {
-                        name: marker_name.to_string(),
-                        tip: git_oid,
-                    });
-                }
-                None => {
-                    // Same invariant as the branch: a mirror tag exists iff its
-                    // CURRENT target resolves to a served frontier. The marker's
-                    // current state is not served — embargoed, withheld for a
-                    // withheld ancestor, or retargeted to a Private state that
-                    // was never minted (absent from the served mapping) — so any
-                    // prior tag is stale and must be deleted unconditionally.
-                    // Gating on the old tag tip being embargoed (r1) missed the
-                    // sibling case where a marker is retargeted to a withheld
-                    // state: the old tip is not embargoed, yet it is no longer
-                    // the current target. `delete_reference_if_present` is a
-                    // no-op when absent.
-                    let tag_ref = format!("refs/tags/{marker_name}");
-                    delete_reference_if_present(&repo, &tag_ref)?;
-                }
+    // Reconcile the mirror's tags to the desired set (all-threads only; `markers`
+    // is empty for a scoped export, so this loop does nothing there).
+    for marker_name in &markers {
+        if bridge.heddle_repo.refs().get_marker(marker_name)?.is_none() {
+            continue;
+        }
+        let tag_ref = format!("refs/tags/{marker_name}");
+        match desired.get(&tag_ref).copied() {
+            Some(git_oid) => {
+                sync_marker_to_tag(&repo, marker_name, git_oid)?;
+                stats.markers_synced += 1;
+                stats.tags.push(ExportedRef {
+                    name: marker_name.to_string(),
+                    tip: git_oid,
+                });
+            }
+            None => {
+                // Absent from the projection ⇒ the marker's state is not served
+                // (embargoed, withheld for a withheld ancestor, or retargeted to a
+                // Private/unminted state) ⇒ any prior mirror tag is stale.
+                delete_reference_if_present(&repo, &tag_ref)?;
             }
         }
     }
@@ -608,6 +612,52 @@ fn served_change_ids(
 fn branch_tip_oid(repo: &gix::Repository, ref_name: &str) -> Option<gix::hash::ObjectId> {
     let mut reference = repo.find_reference(ref_name).ok()?;
     reference.peel_to_id().ok().map(|id| id.detach())
+}
+
+/// Project the DESIRED heddle-owned ref-set for an export: full ref name → its
+/// served target OID. A ref appears iff heddle should publish it now; a ref the
+/// projection omits is one the mirror reconcile must DELETE (its prior export is
+/// stale). This is the single place that decides WHICH refs exist and at WHAT
+/// target — the mirror reconcile, and downstream every destination reconcile,
+/// derive their ops (create / fast-forward / forced rewind / delete / skip) from
+/// this set, so a surface can never silently drop out of one enforcement pass
+/// while another keeps serving it (heddle#316 r13).
+///
+/// * heads — `refs/heads/<thread>` at the maximal SERVED ancestor-or-self of the
+///   thread tip ([`frontier_git_oid`]); a thread whose whole line is unserved is
+///   ABSENT (downward-closed: an embargoed commit and its descendants stay off
+///   the public branch).
+/// * tags — `refs/tags/<marker>` at the marker's served state; a marker whose
+///   state is not served (embargoed, withheld for a withheld ancestor, or
+///   retargeted to a never-minted Private state) is ABSENT.
+///
+/// Notes (`refs/notes/heddle`) are the history-bearing member of the desired set
+/// and are projected by content rebuild (backfill + [`git_notes::remove_notes`])
+/// upstream rather than a target swap, so they are not enumerated here.
+fn project_desired_refs(
+    heddle_repo: &HeddleRepository,
+    mapping: &SyncMapping,
+    threads: &[String],
+    markers: &[MarkerName],
+) -> GitResult<std::collections::HashMap<String, gix::hash::ObjectId>> {
+    let mut desired = std::collections::HashMap::new();
+    for track_name in threads {
+        let Some(tip) = heddle_repo.refs().get_thread(&ThreadName::new(track_name))? else {
+            continue;
+        };
+        if let Some(git_oid) = frontier_git_oid(heddle_repo, mapping, tip)? {
+            desired.insert(format!("refs/heads/{track_name}"), git_oid);
+        }
+    }
+    for marker_name in markers {
+        let Some(state_id) = heddle_repo.refs().get_marker(marker_name)? else {
+            continue;
+        };
+        if let Some(git_oid) = mapping.get_git(&state_id) {
+            desired.insert(format!("refs/tags/{marker_name}"), git_oid);
+        }
+    }
+    Ok(desired)
 }
 
 /// The Git OID the public branch should lag to for a thread whose raw tip is

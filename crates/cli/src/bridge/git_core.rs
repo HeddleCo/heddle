@@ -2,7 +2,7 @@
 //! Core Git bridge types and operations.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fs,
     io::Write,
     num::NonZeroU32,
@@ -2827,29 +2827,37 @@ struct DestinationReconcilePlan {
     /// at the destination — to delete. Scoped to heddle-owned refs (never foreign).
     deletes: Vec<PlannedRefDelete>,
     /// The exported-refs record to persist for this destination after the push:
-    /// full ref name → the tip heddle just published (or, for a still-served ref
-    /// this push left out of scope, its previously-recorded tip).
+    /// full ref name → the tip heddle just published, plus the previously-recorded
+    /// tip for any ref left in place — a still-served ref out of this push's scope
+    /// OR an out-of-band tip whose retraction was skipped (so `--force` can still
+    /// retract it later). A deleted ref drops out; a foreign ref never enters.
     new_manifest: HashMap<String, ObjectId>,
 }
 
 /// Build the served-frontier reconciliation plan shared by the local-path and
-/// URL/network push destinations (heddle#316 r11). The destination's published
-/// refs become the served frontier: retraction DELETES propagate, deliberate
-/// embargo REWINDS are forced past the FF guard, and foreign refs heddle never
-/// exported are left untouched.
+/// URL/network push destinations (heddle#316 r11/r13). The destination's
+/// published refs are a PURE PROJECTION of the served frontier, restricted to
+/// heddle-owned refs: every op — create, fast-forward, forced embargo rewind,
+/// retraction delete, or skip — is DERIVED from ONE pass over the desired-vs-
+/// actual diff, and the heddle-OWNERSHIP token (`recorded_tip == old`) gates
+/// force AND delete UNIFORMLY. There is no separate per-operation enforcement
+/// branch to forget: a destination tip heddle never published is neither
+/// force-rewound NOR deleted (it survives) unless the user passes `--force`.
 ///
 /// * `mirror_repo` — resolves the rewind-vs-fork topology (see
 ///   [`classify_ref_move`]).
-/// * `written` — the (possibly scope-filtered) served refs this push applies.
+/// * `written` — the (possibly scope-filtered) served refs this push applies —
+///   the DESIRED set: each entry is a heddle-owned ref that should exist at the
+///   destination at its served target.
 /// * `served_full_names` — the FULL served mirror ref set (NOT scope-filtered):
-///   the delete-set is computed against this so a scoped push never deletes a
-///   still-served sibling that merely fell outside its scope.
+///   a previously-exported ref still in this set is merely out of THIS push's
+///   scope, so it is left untouched rather than retracted.
 /// * `old_at_destination` — the destination's current ref tips (full name → oid).
 /// * `previously_exported` — heddle's record of what it exported to THIS
-///   destination (full ref name → last-published tip OID); the delete-set,
-///   foreign-ref scoping, AND the force-vs-divergence decision all derive from
-///   it — one ownership notion for both delete and force (heddle#316 r12).
-/// * `force` — the user's explicit `--force`: additionally forces a true fork.
+///   destination (full ref name → last-published tip OID): the foreign-ref
+///   scoping AND the single ownership token for both delete and force.
+/// * `force` — the user's explicit `--force`: additionally forces a true fork
+///   AND authorizes retracting an out-of-band destination tip.
 fn plan_destination_reconcile(
     mirror_repo: &gix::Repository,
     written: &[RefUpdate],
@@ -2858,73 +2866,101 @@ fn plan_destination_reconcile(
     previously_exported: &HashMap<String, ObjectId>,
     force: bool,
 ) -> GitResult<DestinationReconcilePlan> {
+    // The DESIRED ref-set this push lands, indexed by full name → its `RefUpdate`
+    // (the served target + namespace). A name is in `desired` iff the served
+    // frontier wants it published at this destination now.
+    let desired: HashMap<String, &RefUpdate> =
+        written.iter().map(|u| (full_ref_name(u), u)).collect();
+
+    // ONE pass over the union of (desired ∪ previously-exported) names — the
+    // complete desired-vs-actual diff. For each ref the op is derived from the
+    // same three inputs: `desired` (does the served frontier want it, at what
+    // target), `old` (the destination's current tip, out-of-band-aware), and
+    // `recorded` (the tip heddle last published here = the OWNERSHIP token). The
+    // ownership token gates force AND delete identically (heddle#316 r13).
+    let mut names: BTreeSet<String> = desired.keys().cloned().collect();
+    names.extend(previously_exported.keys().cloned());
+
     let mut writes = Vec::new();
-    for update in written {
-        let full = full_ref_name(update);
+    let mut deletes = Vec::new();
+    let mut new_manifest: HashMap<String, ObjectId> = HashMap::new();
+
+    for full in names {
         let old = old_at_destination.get(&full).copied();
-        // The tip heddle last published for this ref here — the ownership token
-        // that authorizes forcing a backward rewind (heddle#316 r12).
-        let recorded_tip = previously_exported.get(&full).copied();
-        let proceed = if matches!(update.namespace, RefNamespace::Branch | RefNamespace::Note) {
-            match classify_ref_move(mirror_repo, old, update.target, recorded_tip)? {
-                RefMove::Unchanged => false,
-                RefMove::Create | RefMove::FastForward | RefMove::Rewind => true,
-                RefMove::Diverged => {
-                    if force {
-                        true
-                    } else {
-                        return Err(GitBridgeError::NonFastForwardRef {
-                            name: full.clone(),
-                            old: old.unwrap_or_else(|| mirror_repo.object_hash().null()),
-                            new: update.target,
-                        });
+        let recorded = previously_exported.get(&full).copied();
+
+        if let Some(update) = desired.get(&full).copied() {
+            // In the desired set: land it at the served target. A ref this push
+            // publishes is heddle-owned at its new target — record it.
+            let proceed = if matches!(update.namespace, RefNamespace::Branch | RefNamespace::Note) {
+                match classify_ref_move(mirror_repo, old, update.target, recorded)? {
+                    RefMove::Unchanged => false,
+                    RefMove::Create | RefMove::FastForward | RefMove::Rewind => true,
+                    RefMove::Diverged => {
+                        if force {
+                            true
+                        } else {
+                            return Err(GitBridgeError::NonFastForwardRef {
+                                name: full.clone(),
+                                old: old.unwrap_or_else(|| mirror_repo.object_hash().null()),
+                                new: update.target,
+                            });
+                        }
                     }
                 }
+            } else {
+                // Tags are not FF-guarded (a tag move is not a linear advance);
+                // they overwrite like the local `PreviousValue::Any` / the wire's
+                // no-FF-check tag path always have. Skip only a true no-op.
+                old != Some(update.target)
+            };
+            if proceed {
+                writes.push(PlannedRefWrite {
+                    full_name: full.clone(),
+                    old,
+                    new: update.target,
+                });
             }
-        } else {
-            // Tags are not FF-guarded (a tag move is not a linear advance); they
-            // overwrite like the local `PreviousValue::Any` / the wire's
-            // no-FF-check tag path always have. Skip only a true no-op.
-            old != Some(update.target)
-        };
-        if proceed {
-            writes.push(PlannedRefWrite {
-                full_name: full,
-                old,
-                new: update.target,
-            });
+            new_manifest.insert(full, update.target);
+            continue;
         }
-    }
 
-    // Delete-set: refs heddle previously exported here that the served mirror no
-    // longer carries — scoped to refs heddle owns (never foreign), per r8. Emit a
-    // delete op only when the destination still has the ref; a ref already absent
-    // there needs no op but still drops out of the record below.
-    let mut deletes = Vec::new();
-    for full in previously_exported.keys() {
-        if !served_full_names.contains(full)
-            && let Some(old) = old_at_destination.get(full).copied()
-        {
-            deletes.push(PlannedRefDelete {
-                full_name: full.clone(),
-                old,
-            });
+        // Not in the desired set for this push.
+        if served_full_names.contains(&full) {
+            // Still served, merely outside this push's scope — leave the
+            // destination ref untouched and keep its recorded ownership token so a
+            // future scoped push never mistakes it for foreign or retracted.
+            if let Some(recorded) = recorded {
+                new_manifest.insert(full, recorded);
+            }
+            continue;
         }
-    }
 
-    // New record = previously-exported refs STILL served (a retracted one drops
-    // out — it was deleted above), keeping their recorded published tip, plus the
-    // refs this push just wrote (whose published tip becomes the served frontier
-    // we wrote). Bounded to refs heddle owns at this destination, so a foreign ref
-    // can never enter the record and thus can never join a future delete-set —
-    // nor be mistaken for a heddle-owned tip a future rewind could force over.
-    let mut new_manifest: HashMap<String, ObjectId> = previously_exported
-        .iter()
-        .filter(|(full, _)| served_full_names.contains(*full))
-        .map(|(full, tip)| (full.clone(), *tip))
-        .collect();
-    for update in written {
-        new_manifest.insert(full_ref_name(update), update.target);
+        // Retracted: the served mirror no longer carries this previously-exported
+        // ref. Delete it — but ONLY through the SAME ownership gate the forced
+        // rewind uses: heddle owns the destination's current tip (`recorded ==
+        // old`), or the user forces. An out-of-band advance heddle never published
+        // is spared (it survives) and KEEPS its ownership token, so a later
+        // `--force` can still retract it (heddle#316 r13).
+        match old {
+            Some(old) if recorded == Some(old) || force => {
+                deletes.push(PlannedRefDelete {
+                    full_name: full,
+                    old,
+                });
+                // Deleted ⇒ no longer owned ⇒ drops from the record.
+            }
+            Some(_) => {
+                // Out-of-band tip heddle never published — skip the delete; retain
+                // ownership so `--force` remains the explicit escape hatch.
+                if let Some(recorded) = recorded {
+                    new_manifest.insert(full, recorded);
+                }
+            }
+            None => {
+                // Already absent at the destination — no op; drops from the record.
+            }
+        }
     }
 
     Ok(DestinationReconcilePlan {

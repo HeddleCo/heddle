@@ -4345,3 +4345,164 @@ fn heddle_published_tip_embargo_rewind_still_forced() {
         "URL/network remote must not keep advertising the embargoed tip B"
     );
 }
+
+/// #316 / PR #528 r13 (the r12-review delete finding): the retraction DELETE must
+/// honor the SAME heddle-ownership gate as the forced rewind. A destination tip
+/// advanced OUT OF BAND past heddle's last-published tip — and then the whole
+/// line embargoed so the branch has no served frontier — must NOT be deleted by a
+/// plain export/push. heddle never published that tip, so it is not heddle's to
+/// retract; deleting it would clobber the user's commit (data loss). r11/r12 gated
+/// FORCE on ownership but the delete-set still fired on ANY previously-exported-
+/// now-unserved ref — the sibling-class miss. The unified desired-vs-actual+
+/// ownership diff now derives delete from the same token (`recorded == old`): the
+/// out-of-band tip survives; `--force` is the explicit escape. Covers local-path
+/// AND URL/network.
+#[test]
+fn out_of_band_advance_after_embargo_not_deleted() {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    // A single public tip B heddle publishes to its destinations.
+    std::fs::write(heddle_temp.path().join("a.txt"), b"base\n").unwrap();
+    repo.snapshot(Some("base".into()), None).unwrap();
+    let state_b = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+
+    let mut bridge = GitBridge::new(&repo);
+
+    // Publish B to BOTH a local-path destination and a URL/network remote BEFORE
+    // the embargo — both must record main as heddle-exported at B.
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    bridge
+        .export_to_path(&dest_path)
+        .expect("first export publishes B (local)");
+    let oid_b = bridge.mapping.get_git(&state_b).expect("B minted");
+
+    let remote_root = TempDir::new().expect("remote root");
+    let _remote_repo = init_named_bare_git_repo(&remote_root, "remote.git");
+    // Park the bare remote's HEAD off main so receive-pack never treats main as
+    // the checked-out branch (matches the retraction-delete URL test).
+    std::fs::write(
+        remote_root.path().join("remote.git").join("HEAD"),
+        b"ref: refs/heads/__heddle_placeholder\n",
+    )
+    .unwrap();
+    let daemon = GitDaemon::spawn_push(remote_root.path());
+    let url = daemon.url("remote.git");
+    bridge.push(&url).expect("first network push publishes B");
+
+    // Out-of-band advance: a NEW commit C on top of B, written to the mirror (a
+    // resolvable descendant of the served frontier), the local destination, AND
+    // the wire remote. Identical inputs ⇒ identical oid in all three.
+    let oid_c = {
+        let mirror = bridge.open_git_repo().expect("open mirror");
+        let in_mirror =
+            commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "out-of-band", &[oid_b]);
+        let dest = gix::open(&dest_path).expect("open dest");
+        let in_dest = commit_with_tree(
+            &dest,
+            Some("refs/heads/main"),
+            empty_tree_oid(&dest),
+            "out-of-band",
+            &[oid_b],
+        );
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        let in_remote = commit_with_tree(
+            &remote,
+            Some("refs/heads/main"),
+            empty_tree_oid(&remote),
+            "out-of-band",
+            &[oid_b],
+        );
+        assert_eq!(in_mirror, in_dest, "C identical in mirror and local destination");
+        assert_eq!(in_mirror, in_remote, "C identical in mirror and wire remote");
+        in_mirror
+    };
+
+    // Embargo the WHOLE line so refs/heads/main has no served frontier — the exact
+    // retraction-delete trigger.
+    for state in repo.store().list_states().unwrap() {
+        repo.put_state_visibility(StateVisibility {
+            state,
+            tier: VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+            embargo_until: None,
+            declarer: Principal {
+                name: "Grace Hopper".into(),
+                email: "grace@example.com".into(),
+            },
+            declared_at: Utc::now(),
+            signature: None,
+            supersedes: None,
+        })
+        .unwrap();
+    }
+
+    // A plain export must NOT delete C at the local destination: the destination's
+    // current tip (C) is not heddle's recorded published tip (B), so the ownership
+    // gate spares it from retraction. Pre-r13 this DELETED C.
+    bridge
+        .export_to_path(&dest_path)
+        .expect("plain export must not error on the out-of-band retraction (local)");
+    {
+        let dest = gix::open(&dest_path).expect("reopen dest");
+        let tip = dest
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_id()
+            .unwrap()
+            .detach();
+        assert_eq!(
+            tip, oid_c,
+            "the out-of-band commit must survive — heddle must not delete a tip it never published (local)"
+        );
+    }
+
+    // Same on the URL/network remote: a plain push must not delete the out-of-band
+    // branch on the wire.
+    bridge
+        .push(&url)
+        .expect("plain network push must not error on the out-of-band retraction");
+    {
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
+        let tip = remote
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_id()
+            .unwrap()
+            .detach();
+        assert_eq!(
+            tip, oid_c,
+            "the out-of-band commit must survive on the URL/network remote too"
+        );
+    }
+
+    // `--force` is the explicit escape: it DOES retract the out-of-band branch.
+    bridge
+        .push_with_scope_force(
+            dest_path.to_str().expect("dest path"),
+            GitPushScope::AllThreads,
+            true,
+        )
+        .expect("--force retracts the out-of-band branch at the local destination");
+    {
+        let dest = gix::open(&dest_path).expect("reopen dest");
+        assert!(
+            dest.find_reference("refs/heads/main").is_err(),
+            "--force deletes the retracted branch even when the destination tip was advanced out of band"
+        );
+    }
+}
