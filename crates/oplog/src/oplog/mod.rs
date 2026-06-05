@@ -13,7 +13,7 @@ mod pg_oplog;
 #[cfg(test)]
 mod oplog_tests;
 
-pub use oplog_backend::OpLogBackend;
+pub use oplog_backend::{OpLogBackend, VisibilitySidecarSnapshots};
 pub use oplog_core::OpLog;
 pub use oplog_types::{
     ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpBatch, OpEntry, OpRecord,

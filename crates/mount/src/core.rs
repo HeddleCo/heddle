@@ -3942,9 +3942,29 @@ impl ContentAddressedMount {
         let change_id = state.change_id;
         let prev_head_change_id = state_snapshot.change_id;
         let served_thread = objects::object::ThreadName::from(self.inner.thread.as_str());
+
+        // Invariant A (heddle#317): a mount-captured state is a freshly created
+        // state too, so it must inherit the configured default visibility tier
+        // through the same chokepoint the repo capture path uses, FOLDED into the
+        // snapshot's own batch (PR #529 P1) so one `heddle undo` reverts the
+        // snapshot and its auto-applied default together — never a separate
+        // trailing batch. The fold-and-rewind chokepoint stages the sidecar
+        // BEFORE the commit and rewinds it if the commit fails (invariant 2), so
+        // a failed mount capture never leaves an orphaned non-public sidecar. The
+        // mount path holds no repo lock, so it passes `lock_held = false`; a
+        // public default folds nothing (absence ≡ public).
+        //
+        // Step 3 + 3a unified: advance the served thread and record the
+        // `OpRecord::Snapshot` **record-first** through the write chokepoint
+        // (heddle#354 r8).
         self.inner
             .repo
-            .commit_snapshot_atomic(&change_id, Some(prev_head_change_id), Some(&served_thread))
+            .commit_snapshot_atomic_with_capture_visibility(
+                &change_id,
+                Some(prev_head_change_id),
+                Some(&served_thread),
+                false,
+            )
             .map_err(MountError::Store)?;
 
         // Step 3b: refresh the active thread record's metadata

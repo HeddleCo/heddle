@@ -14,7 +14,8 @@ use crate::cli::{
     ActorCommands, AgentCommands, Cli, Commands, ContextCommands, DaemonCommands,
     DoctorCommands, HookCommands, IntegrationCommands, MaintenanceCommands, MarkerCommands,
     PurgeCommands, RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands,
-    ShellCommands, StackCommands, StashCommands, ThreadCommands, WorkspaceCommands,
+    ShellCommands, StackCommands, StashCommands, ThreadCommands, VisibilityCommands,
+    WorkspaceCommands,
     cli_args::{
         CommandCatalogArgs, ConflictCommands, DiscussCommands, ReviewCommands, TransactionCommands,
     },
@@ -2417,6 +2418,51 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ],
         ),
     ),
+    entry(&["visibility"], GROUP),
+    entry(
+        &["visibility", "set"],
+        json_discriminators(
+            opaque_schemas(DATA_MUTATION, &["visibility set"]),
+            &[json_discriminator(
+                Some("visibility set"),
+                "output_kind",
+                "visibility_set",
+            )],
+        ),
+    ),
+    entry(
+        &["visibility", "promote"],
+        json_discriminators(
+            opaque_schemas(DATA_MUTATION, &["visibility promote"]),
+            &[json_discriminator(
+                Some("visibility promote"),
+                "output_kind",
+                "visibility_promote",
+            )],
+        ),
+    ),
+    entry(
+        &["visibility", "show"],
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["visibility show"]),
+            &[json_discriminator(
+                Some("visibility show"),
+                "output_kind",
+                "visibility_show",
+            )],
+        ),
+    ),
+    entry(
+        &["visibility", "list"],
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["visibility list"]),
+            &[json_discriminator(
+                Some("visibility list"),
+                "output_kind",
+                "visibility_list",
+            )],
+        ),
+    ),
     entry(
         &["try"],
         documented_schemas(EXTERNAL_WORKTREE_MUTATION, &["try"]),
@@ -3852,6 +3898,12 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             PurgeCommands::Apply(_) => vec!["purge", "apply"],
             PurgeCommands::List(_) => vec!["purge", "list"],
         },
+        Commands::Visibility { command } => match command {
+            VisibilityCommands::Set(_) => vec!["visibility", "set"],
+            VisibilityCommands::Promote(_) => vec!["visibility", "promote"],
+            VisibilityCommands::Show(_) => vec!["visibility", "show"],
+            VisibilityCommands::List(_) => vec!["visibility", "list"],
+        },
         Commands::Revert(_) => vec!["revert"],
         Commands::Undo(_) => vec!["undo"],
         Commands::Redo(_) => vec!["redo"],
@@ -4386,6 +4438,16 @@ mod tests {
             &["transaction", "status", "tx-1"],
         ),
         sample(&["verify"], &["verify"]),
+        sample(
+            &["visibility", "set"],
+            &["visibility", "set", "HEAD", "--tier", "internal"],
+        ),
+        sample(
+            &["visibility", "promote"],
+            &["visibility", "promote", "HEAD", "--tier", "internal"],
+        ),
+        sample(&["visibility", "show"], &["visibility", "show", "HEAD"]),
+        sample(&["visibility", "list"], &["visibility", "list"]),
         sample(&["try"], &["try", "true"]),
         sample(&["undo"], &["undo"]),
         sample(&["watch"], &["watch"]),
@@ -5217,6 +5279,13 @@ mod tests {
                 "thread list",
                 "thread show",
                 "verify",
+                // heddle#317 added the `visibility` verb family; each leaf
+                // advertises a JSON discriminator, so the wire-format-stable
+                // list is extended here per the documentation rule above.
+                "visibility set",
+                "visibility promote",
+                "visibility show",
+                "visibility list",
                 // `undo` advertises two output_kinds on one command path —
                 // `undo` and `undo_list` (`--list`) — so its path appears twice,
                 // mirroring how `clone` appears twice above. The former `redo`

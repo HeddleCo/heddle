@@ -251,7 +251,9 @@ fn load_rebase_state_internal(path: &std::path::Path, for_abort: bool) -> Result
                         | OpRecord::GitCheckpoint { .. }
                         | OpRecord::RemoteThreadUpdate { .. }
                         | OpRecord::RemoteThreadDelete { .. }
-                        | OpRecord::UndoRecoveryUpdate { .. } => {
+                        | OpRecord::UndoRecoveryUpdate { .. }
+                        | OpRecord::StateVisibilitySet { .. }
+                        | OpRecord::StateVisibilityPromote { .. } => {
                             if for_abort {
                                 continue;
                             }

@@ -8,12 +8,23 @@ use std::future::Future;
 
 use objects::{
     error::Result,
-    object::{ChangeId, ContentHash, MarkerName, ThreadName},
+    object::{ChangeId, ContentHash, MarkerName, ThreadName, VisibilityTier},
 };
 
 use super::oplog_types::{
     ConditionalCommitOutcome, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
 };
+
+/// Before/after snapshots of a per-state visibility sidecar, captured around a
+/// `visibility set`/`promote` put. `prior` is the full sidecar bytes before the
+/// put (undo target), `new` the bytes after (redo target); `None` on either side
+/// means public-by-absence. Bundled so the record helpers stay under the
+/// argument-count lint and the undo/redo contract reads as one unit.
+#[derive(Debug, Clone, Default)]
+pub struct VisibilitySidecarSnapshots {
+    pub prior: Option<Vec<u8>>,
+    pub new: Option<Vec<u8>>,
+}
 
 /// Backend-agnostic interface for the operation log.
 ///
@@ -401,6 +412,60 @@ pub trait OpLogBackend: Send + Sync {
             vec![OpRecord::Purge {
                 redaction_id: *redaction_id,
                 blob: *blob,
+            }],
+            scope,
+        )?;
+        Ok(ids[0])
+    }
+
+    /// Record a state-visibility declaration (heddle#317). Audit companion to
+    /// the per-state `StateVisibility` sidecar; emitted by `heddle visibility
+    /// set` and by the Invariant-A capture-time binding. `sidecar` carries the
+    /// full per-state sidecar bytes before/after the put (or `None` for
+    /// public-by-absence) so undo/redo can restore it. `scope` carries the
+    /// repo's `op_scope()` for parity with the other record helpers, even
+    /// though the visibility class touches no refs.
+    fn record_state_visibility_set(
+        &self,
+        state: &ChangeId,
+        record_id: &ContentHash,
+        tier: &VisibilityTier,
+        sidecar: VisibilitySidecarSnapshots,
+        scope: Option<&str>,
+    ) -> Result<u64> {
+        let ids = self.record_batch_scoped(
+            vec![OpRecord::StateVisibilitySet {
+                state: *state,
+                record_id: *record_id,
+                tier: tier.clone(),
+                prior_sidecar: sidecar.prior,
+                new_sidecar: sidecar.new,
+            }],
+            scope,
+        )?;
+        Ok(ids[0])
+    }
+
+    /// Record a state-visibility promotion (heddle#317): a superseding record
+    /// lifted the state to a less-restrictive `tier`. `sidecar` snapshots the
+    /// whole per-state sidecar before/after the put so undo/redo can restore it.
+    fn record_state_visibility_promote(
+        &self,
+        state: &ChangeId,
+        superseded: &ContentHash,
+        record_id: &ContentHash,
+        tier: &VisibilityTier,
+        sidecar: VisibilitySidecarSnapshots,
+        scope: Option<&str>,
+    ) -> Result<u64> {
+        let ids = self.record_batch_scoped(
+            vec![OpRecord::StateVisibilityPromote {
+                state: *state,
+                superseded: *superseded,
+                record_id: *record_id,
+                tier: tier.clone(),
+                prior_sidecar: sidecar.prior,
+                new_sidecar: sidecar.new,
             }],
             scope,
         )?;

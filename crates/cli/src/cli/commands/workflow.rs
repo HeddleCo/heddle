@@ -1243,7 +1243,9 @@ fn op_targets_merge_state(op: &OpRecord, merge_state: &str) -> bool {
         | OpRecord::GitCheckpoint { .. }
         | OpRecord::RemoteThreadUpdate { .. }
         | OpRecord::RemoteThreadDelete { .. }
-        | OpRecord::UndoRecoveryUpdate { .. } => false,
+        | OpRecord::UndoRecoveryUpdate { .. }
+        | OpRecord::StateVisibilitySet { .. }
+        | OpRecord::StateVisibilityPromote { .. } => false,
     }
 }
 

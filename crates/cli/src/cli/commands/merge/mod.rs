@@ -1105,6 +1105,7 @@ pub(crate) fn merge_thread_into_current(
         None,
         attribution.clone(),
         Some(merge_base_id),
+        false,
     )?;
 
     if let Some(entry) = &thread_entry {
@@ -1466,7 +1467,9 @@ fn merge_op_targets_state(op: &OpRecord, state: &ChangeId) -> bool {
         | OpRecord::GitCheckpoint { .. }
         | OpRecord::RemoteThreadUpdate { .. }
         | OpRecord::RemoteThreadDelete { .. }
-        | OpRecord::UndoRecoveryUpdate { .. } => false,
+        | OpRecord::UndoRecoveryUpdate { .. }
+        | OpRecord::StateVisibilitySet { .. }
+        | OpRecord::StateVisibilityPromote { .. } => false,
     }
 }
 

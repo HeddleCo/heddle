@@ -189,44 +189,62 @@ in-progress operation.
       "status": "available",
       "verified_scope": "everyday_and_agent",
       "advanced_scope": "advanced_internal_admin",
-      "summary": "197 command(s), 169 JSON command(s), 101 mutating command(s), 100 mutating JSON command(s); verified everyday/agent machine surface has 38 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 51 accepted opaque schema(s) outside clean verification",
-      "catalog_commands_total": 197,
-      "catalog_mutating_commands_total": 101,
-      "json_commands_total": 169,
-      "json_mutating_commands_total": 100,
+      "summary": "202 command(s), 173 JSON command(s), 103 mutating command(s), 102 mutating JSON command(s); verified everyday/agent machine surface has 38 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 55 accepted opaque schema(s) outside clean verification",
+      "catalog_commands_total": 202,
+      "catalog_mutating_commands_total": 103,
+      "json_commands_total": 173,
+      "json_mutating_commands_total": 102,
       "json_commands_with_schema": 118,
-      "json_commands_with_accepted_opaque_schema": 51,
+      "json_commands_with_accepted_opaque_schema": 55,
       "json_commands_without_schema": 0,
       "verified_scope_json_commands_total": 38,
       "verified_scope_json_commands_with_schema": 38,
       "verified_scope_json_commands_with_accepted_opaque_schema": 0,
       "verified_scope_json_commands_without_schema": 0,
-      "advanced_scope_json_commands_total": 131,
-      "advanced_scope_json_commands_with_accepted_opaque_schema": 51,
-      "mutating_commands_total": 100,
+      "advanced_scope_json_commands_total": 135,
+      "advanced_scope_json_commands_with_accepted_opaque_schema": 55,
+      "mutating_commands_total": 102,
       "mutating_commands_with_schema": 74,
-      "mutating_commands_with_accepted_opaque_schema": 26,
+      "mutating_commands_with_accepted_opaque_schema": 28,
       "mutating_commands_without_schema": 0,
       "verified_scope_mutating_commands_total": 23,
       "verified_scope_mutating_commands_with_schema": 23,
       "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
       "verified_scope_mutating_commands_without_schema": 0,
-      "advanced_scope_mutating_commands_total": 77,
-      "advanced_scope_mutating_commands_with_accepted_opaque_schema": 26,
-      "schema_verbs_total": 172,
-      "documented_schema_verbs_total": 172,
+      "advanced_scope_mutating_commands_total": 79,
+      "advanced_scope_mutating_commands_with_accepted_opaque_schema": 28,
+      "schema_verbs_total": 176,
+      "documented_schema_verbs_total": 176,
       "undocumented_schema_verbs_total": 0,
-      "opaque_schema_verbs_total": 51,
-      "accepted_opaque_schema_verbs_total": 51,
+      "opaque_schema_verbs_total": 55,
+      "accepted_opaque_schema_verbs_total": 55,
       "unaccepted_opaque_schema_verbs_total": 0,
-      "supports_op_id_total": 96,
+      "supports_op_id_total": 98,
       "jsonl_commands_total": 5,
       "missing_schema_examples": [],
       "missing_mutating_schema_examples": [],
       "verified_scope_missing_schema_examples": [],
       "verified_scope_accepted_opaque_schema_examples": [],
-      "advanced_scope_accepted_opaque_schema_examples": ["transaction begin", "transaction abort", "transaction status", "conflict list", "conflict show", "redact apply", "redact list", "redact show"],
-      "accepted_opaque_schema_examples": ["transaction begin", "transaction abort", "transaction status", "conflict list", "conflict show", "redact apply", "redact list", "redact show"],
+      "advanced_scope_accepted_opaque_schema_examples": [
+        "transaction begin",
+        "transaction abort",
+        "transaction status",
+        "conflict list",
+        "conflict show",
+        "redact apply",
+        "redact list",
+        "redact show"
+      ],
+      "accepted_opaque_schema_examples": [
+        "transaction begin",
+        "transaction abort",
+        "transaction status",
+        "conflict list",
+        "conflict show",
+        "redact apply",
+        "redact list",
+        "redact show"
+      ],
       "unaccepted_opaque_schema_examples": [],
       "undocumented_schema_examples": []
     },
@@ -2445,37 +2463,58 @@ catalog-wide schema coverage.
     "status": "available",
     "verified_scope": "everyday_and_agent",
     "advanced_scope": "advanced_internal_admin",
-    "catalog_commands_total": 197,
-    "catalog_mutating_commands_total": 101,
-    "json_commands_total": 169,
-    "json_mutating_commands_total": 100,
+    "summary": "202 command(s), 173 JSON command(s), 103 mutating command(s), 102 mutating JSON command(s); verified everyday/agent machine surface has 38 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 55 accepted opaque schema(s) outside clean verification",
+    "catalog_commands_total": 202,
+    "catalog_mutating_commands_total": 103,
+    "json_commands_total": 173,
+    "json_mutating_commands_total": 102,
     "json_commands_with_schema": 118,
-    "json_commands_with_accepted_opaque_schema": 51,
+    "json_commands_with_accepted_opaque_schema": 55,
     "json_commands_without_schema": 0,
     "verified_scope_json_commands_total": 38,
     "verified_scope_json_commands_with_schema": 38,
     "verified_scope_json_commands_with_accepted_opaque_schema": 0,
     "verified_scope_json_commands_without_schema": 0,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 51,
-    "mutating_commands_total": 100,
+    "advanced_scope_json_commands_total": 135,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 55,
+    "mutating_commands_total": 102,
     "mutating_commands_with_schema": 74,
-    "mutating_commands_with_accepted_opaque_schema": 26,
+    "mutating_commands_with_accepted_opaque_schema": 28,
     "mutating_commands_without_schema": 0,
     "verified_scope_mutating_commands_total": 23,
     "verified_scope_mutating_commands_with_schema": 23,
     "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
     "verified_scope_mutating_commands_without_schema": 0,
-    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 26,
+    "advanced_scope_mutating_commands_total": 79,
+    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 28,
     "undocumented_schema_verbs_total": 0,
-    "opaque_schema_verbs_total": 51,
-    "accepted_opaque_schema_verbs_total": 51,
+    "opaque_schema_verbs_total": 55,
+    "accepted_opaque_schema_verbs_total": 55,
     "unaccepted_opaque_schema_verbs_total": 0,
     "missing_schema_examples": [],
     "missing_mutating_schema_examples": [],
     "verified_scope_missing_schema_examples": [],
     "verified_scope_accepted_opaque_schema_examples": [],
-    "advanced_scope_accepted_opaque_schema_examples": ["transaction begin", "transaction abort", "transaction status", "conflict list", "conflict show", "redact apply", "redact list", "redact show"],
-    "accepted_opaque_schema_examples": ["transaction begin", "transaction abort", "transaction status", "conflict list", "conflict show", "redact apply", "redact list", "redact show"],
+    "advanced_scope_accepted_opaque_schema_examples": [
+      "transaction begin",
+      "transaction abort",
+      "transaction status",
+      "conflict list",
+      "conflict show",
+      "redact apply",
+      "redact list",
+      "redact show"
+    ],
+    "accepted_opaque_schema_examples": [
+      "transaction begin",
+      "transaction abort",
+      "transaction status",
+      "conflict list",
+      "conflict show",
+      "redact apply",
+      "redact list",
+      "redact show"
+    ],
     "unaccepted_opaque_schema_examples": [],
     "undocumented_schema_examples": []
   },
@@ -3020,6 +3059,36 @@ count:
 
 ```json
 {"output_kind": "redact_trust_add", "algorithm": "ed25519", "public_key": "abc123def456", "label": "security"}
+```
+
+`heddle visibility set --output json` emits (each carries `output_kind`
+set to the snake-cased subcommand). `label` is present only for the
+`team-scoped` / `restricted` tiers; `supersedes` is omitted on a first
+declaration:
+
+```json
+{"output_kind": "visibility_set", "state": "hd-sqr398dvx9ay", "tier": "internal", "record_id": "hd-vis123", "declarer": "A. Engineer <a@example.com>", "declared_at": "2026-01-01T00:00:00Z"}
+```
+
+`heddle visibility promote --output json` emits the same shape as `set`,
+with `supersedes` carrying the prior record it replaces:
+
+```json
+{"output_kind": "visibility_promote", "state": "hd-sqr398dvx9ay", "tier": "internal", "record_id": "hd-vis456", "declarer": "A. Engineer <a@example.com>", "declared_at": "2026-01-01T00:00:00Z", "supersedes": "hd-vis123"}
+```
+
+`heddle visibility show --output json` emits the effective tier for one
+state (`effective_public` is true and the declarer fields are omitted when
+no record exists — public-by-absence):
+
+```json
+{"output_kind": "visibility_show", "state": "hd-sqr398dvx9ay", "tier": "internal", "effective_public": false, "declarer": "A. Engineer <a@example.com>", "declared_at": "2026-01-01T00:00:00Z", "record_count": 1}
+```
+
+`heddle visibility list --output json` emits every non-public state:
+
+```json
+{"output_kind": "visibility_list", "states": [{"state": "hd-sqr398dvx9ay", "tier": "internal", "declarer": "A. Engineer <a@example.com>", "declared_at": "2026-01-01T00:00:00Z"}], "count": 1}
 ```
 
 `heddle resolve --output json` emits:
