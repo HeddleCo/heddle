@@ -27,9 +27,13 @@ pub const MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE: u64 = 64 * 1024 * 1024;
 /// sizing the pull-stream gRPC decode limit. Covers the protobuf fields that
 /// wrap a max-size sidecar blob in a `PullMessage` — the oneof tag, the
 /// `blob_hash`/`state_id` string, and the transfer checkpoint — none of which
-/// approach a MiB. Kept generously round so a legitimately-max blob never
-/// trips the decode cap.
-const PULL_DECODE_ENVELOPE_HEADROOM: u64 = 8 * 1024 * 1024;
+/// approach a MiB. Kept deliberately tight (not generously round): the decode
+/// limit is a per-*message* bound, so the unavoidable slop above the precise
+/// per-blob cap equals this headroom. Minimizing it keeps the worst-case
+/// attacker-forced allocation within ~1 MiB of the 64 MiB blob cap; the exact
+/// per-blob cap for that residual window is enforced by the post-decode
+/// `check_received_transfer_blob_size` defense-in-depth check.
+const PULL_DECODE_ENVELOPE_HEADROOM: u64 = 1024 * 1024;
 
 const fn max_u64(a: u64, b: u64) -> u64 {
     if a > b { a } else { b }
