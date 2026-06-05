@@ -109,9 +109,12 @@ impl Repository {
                 // materialized (the placeholder is untracked). `tree_hash`
                 // still names the real embargoed state's tree so the sidecar
                 // identifies which state this checkout stands in for. The
-                // `withheld` flag marks this as a non-capturable checkout so a
-                // later `capture` can't pull the stub in (or wipe the withheld
-                // tree) — heddle#316.
+                // `withheld` flag here is diagnostic only — it records that the
+                // *last* materialize of this thread was withheld, but the
+                // per-thread manifest is clobbered by a sibling worktree of the
+                // same thread. The authoritative, per-worktree non-capturable
+                // signal is the withheld marker written by
+                // `checkout_state_gated`, keyed on the worktree root (heddle#316).
                 let mut manifest =
                     ThreadManifest::new(change_id, state.tree, canonical_worktree_path(dest));
                 manifest.withheld = true;
@@ -179,6 +182,14 @@ impl Repository {
             let stub = courtesy_stub_text(&tier, embargo_until);
             fs::write(dest.join(COURTESY_STUB_FILENAME), stub.as_bytes())
                 .map_err(HeddleError::Io)?;
+            // Record the withheld status keyed by THIS worktree root, not by
+            // thread — a sibling worktree of the same thread materialized at a
+            // visible tier must keep its own capturable status (heddle#316).
+            crate::thread_manifest::mark_withheld_checkout(
+                self.heddle_dir(),
+                &canonical_worktree_path(dest),
+            )
+            .map_err(HeddleError::Io)?;
             return Ok(CheckoutMaterialization::Withheld { tier });
         }
 
@@ -187,6 +198,14 @@ impl Repository {
             .get_tree(&state.tree)?
             .ok_or_else(|| HeddleError::Config(format!("tree for {change_id} missing")))?;
         self.materialize_tree(&tree, dest)?;
+        // This root now holds real served bytes: clear any stale withheld marker
+        // a prior under-tier materialize of the same root may have left, so it
+        // can't suppress this worktree's capture (heddle#316).
+        crate::thread_manifest::clear_withheld_checkout(
+            self.heddle_dir(),
+            &canonical_worktree_path(dest),
+        )
+        .map_err(HeddleError::Io)?;
         Ok(CheckoutMaterialization::Materialized { tree })
     }
 
@@ -377,7 +396,18 @@ impl Repository {
         //     withheld state's real files. The operator cannot capture content
         //     they were never served, so refuse with a no-op and leave the
         //     thread head where it is (heddle#316).
-        if existing_manifest.as_ref().is_some_and(|m| m.withheld) {
+        //
+        //     The withheld status is keyed by THIS worktree root, not by the
+        //     per-thread `manifest.toml` — that single file is clobbered when
+        //     the same thread is materialized into a second worktree, so a
+        //     manifest-level flag would let an under-tier checkout of one
+        //     worktree wrongly suppress an authorized sibling worktree's
+        //     capture. The per-root marker (written by `checkout_state_gated`)
+        //     scopes the suppression to exactly the worktree that was withheld.
+        if crate::thread_manifest::is_withheld_checkout(
+            self.heddle_dir(),
+            &canonical_worktree_path(root),
+        ) {
             debug!(thread = %thread, "thread capture skipped (withheld checkout)");
             return Ok(ThreadCaptureOutcome::NoOp);
         }
@@ -1093,6 +1123,118 @@ mod tests {
         assert!(
             tree.entries().iter().any(|e| e.name == "secret.rs"),
             "the withheld real content must remain intact in the thread"
+        );
+    }
+
+    /// #316 / PR #528 r4: the withheld status must be scoped per *worktree
+    /// root*, not per thread. When one thread is materialized into TWO
+    /// worktrees — an authorized one A (real bytes) and an under-tier one B
+    /// (withheld stub) — the under-tier materialize of B clobbers the single
+    /// per-thread `manifest.toml`. A withheld flag stored there would then
+    /// wrongly suppress a capture of A, silently dropping legitimate work.
+    /// With the per-worktree marker, A captures its real edits and B no-ops.
+    #[test]
+    fn withheld_manifest_is_per_worktree_not_per_thread() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("secret.rs"), b"fn exploit() {}\n").unwrap();
+        repo.snapshot(Some("embargoed fix".into()), None).unwrap();
+        embargo_state_with_tier(
+            &repo,
+            VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+        );
+
+        let holder_a = TempDir::new().unwrap();
+        let worktree_a = holder_a.path().join("authorized");
+        let holder_b = TempDir::new().unwrap();
+        let worktree_b = holder_b.path().join("under-tier");
+
+        // Worktree A: the matching-scope holder gets the real bytes.
+        let manifest_a = repo
+            .materialize_thread(
+                "main",
+                &worktree_a,
+                &AudienceTier::Restricted("sec-embargo".into()),
+            )
+            .unwrap();
+        assert!(worktree_a.join("secret.rs").exists());
+        assert!(manifest_a.files.contains_key("secret.rs"));
+
+        // Edit A so a correct capture produces a NEW state. Without the edit,
+        // capturing unchanged real content is a *legitimate* no-op and wouldn't
+        // distinguish the bug (wrong withheld-suppression) from correct
+        // behaviour.
+        fs::write(worktree_a.join("extra.rs"), b"fn added() {}\n").unwrap();
+
+        let head_before = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("head");
+
+        // Worktree B: under-tier audience → stub only, withheld. This clobbers
+        // the single per-thread `manifest.toml` with B's withheld record.
+        let manifest_b = repo
+            .materialize_thread("main", &worktree_b, &AudienceTier::Internal)
+            .unwrap();
+        assert!(worktree_b.join(COURTESY_STUB_FILENAME).exists());
+        assert!(manifest_b.files.is_empty());
+
+        // Capture A: must capture the real edit — its withheld status is its
+        // own (none), NOT inherited from B's clobbering materialize.
+        let outcome_a = repo.capture_thread_from_disk("main", &worktree_a).unwrap();
+        let captured_state = match outcome_a {
+            ThreadCaptureOutcome::Captured { state_id } => state_id,
+            ThreadCaptureOutcome::NoOp => {
+                panic!("authorized worktree A must capture its real edit, not be suppressed")
+            }
+        };
+        let head_after_a = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("head");
+        assert_ne!(head_before, head_after_a, "capture A must advance the head");
+        assert_eq!(head_after_a, captured_state);
+        // The captured tree carries the edit and the real content, never the stub.
+        let captured_tree = repo
+            .store()
+            .get_tree(
+                &repo
+                    .store()
+                    .get_state(&captured_state)
+                    .unwrap()
+                    .unwrap()
+                    .tree,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(captured_tree.entries().iter().any(|e| e.name == "extra.rs"));
+        assert!(captured_tree.entries().iter().any(|e| e.name == "secret.rs"));
+        assert!(
+            !captured_tree
+                .entries()
+                .iter()
+                .any(|e| e.name == COURTESY_STUB_FILENAME)
+        );
+
+        // Capture B: must be a no-op — its own worktree is withheld.
+        let outcome_b = repo.capture_thread_from_disk("main", &worktree_b).unwrap();
+        assert_eq!(
+            outcome_b,
+            ThreadCaptureOutcome::NoOp,
+            "under-tier worktree B is non-capturable"
+        );
+        let head_after_b = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("head");
+        assert_eq!(
+            head_after_a, head_after_b,
+            "withheld capture of B must not advance the head"
         );
     }
 

@@ -68,16 +68,21 @@ pub struct ThreadManifest {
     /// else (skip both). Canonicalized at write time so symlink /
     /// `./` traversal differences don't cause a false miss.
     pub worktree_path: PathBuf,
-    /// `true` when this checkout was *withheld*: the state's visibility
-    /// tier was not visible to the materializing audience, so only the
-    /// operator-local courtesy stub was written and the tracked bytes
-    /// withheld (`files` is therefore empty while `tree_hash` still
-    /// names the real, unserved state's tree). Capture must refuse a
-    /// withheld checkout — the operator holds none of the real content,
-    /// so a capture could only either pull the stub in as tracked
-    /// content or commit an empty tree that wipes the withheld state.
-    /// `#[serde(default)]` keeps pre-existing manifests readable as
-    /// `false` (they were ordinary materializations). See heddle#316.
+    /// `true` when the *last* materialize of this thread was *withheld*: the
+    /// state's visibility tier was not visible to the materializing audience,
+    /// so only the operator-local courtesy stub was written and the tracked
+    /// bytes withheld (`files` is therefore empty while `tree_hash` still names
+    /// the real, unserved state's tree).
+    ///
+    /// **Diagnostic only.** This is a per-thread field on a single
+    /// `manifest.toml`, so it reflects only whichever worktree was materialized
+    /// last; a sibling worktree of the same thread clobbers it. The
+    /// authoritative, per-worktree-root non-capturable signal that
+    /// `capture_thread_from_disk` actually consults is the withheld *marker*
+    /// (see [`mark_withheld_checkout`] / [`is_withheld_checkout`]), keyed on the
+    /// worktree root so an under-tier checkout of one worktree never suppresses
+    /// an authorized sibling worktree's capture. `#[serde(default)]` keeps
+    /// pre-existing manifests readable as `false`. See heddle#316.
     #[serde(default)]
     pub withheld: bool,
     /// Per-file stat-cache. Key is the worktree-relative path with
@@ -353,6 +358,74 @@ pub fn remove_thread_manifest_dir(heddle_dir: &Path, thread: &str) -> io::Result
         }
     }
     Ok(removed)
+}
+
+/// On-disk location of the *withheld-checkout* marker for the worktree
+/// materialized at `canonical_worktree_root`.
+///
+/// Keyed by the **canonical worktree root**, NOT the thread name. A single
+/// thread can be materialized into more than one worktree at once (e.g. an
+/// authorized checkout at tier-A into one dir and an under-tier checkout into
+/// another). The per-thread `manifest.toml` is a single file that the second
+/// materialize clobbers, so a `withheld` flag stored there cannot distinguish
+/// "this worktree was withheld" from "some sibling worktree of the same thread
+/// was withheld". Keying the marker on the worktree root makes each
+/// materialization's withheld status independent — an under-tier checkout into
+/// worktree B never suppresses a capture of authorized worktree A of the same
+/// thread (heddle#316).
+///
+/// The root is hashed (not embedded) so an arbitrarily long / non-ASCII path
+/// maps to a fixed-length, filesystem-safe filename.
+fn withheld_marker_path(heddle_dir: &Path, canonical_worktree_root: &Path) -> PathBuf {
+    let key = ContentHash::compute_typed(
+        "withheld-checkout",
+        canonical_worktree_root.as_os_str().as_encoded_bytes(),
+    )
+    .to_hex();
+    heddle_dir
+        .join("withheld-checkouts")
+        .join(format!("{key}.marker"))
+}
+
+/// Record that the checkout materialized at `canonical_worktree_root` is
+/// *withheld*: the state's visibility tier was not visible to the materializing
+/// audience, so only the operator-local courtesy stub was written and the
+/// tracked bytes withheld. `capture_thread_from_disk` of this specific worktree
+/// must be a no-op. Keyed per worktree root (see [`withheld_marker_path`]), so a
+/// sibling worktree of the same thread is unaffected. The marker body is the
+/// human-readable root for diagnostics; presence is the signal.
+pub fn mark_withheld_checkout(
+    heddle_dir: &Path,
+    canonical_worktree_root: &Path,
+) -> io::Result<()> {
+    let path = withheld_marker_path(heddle_dir, canonical_worktree_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
+    }
+    fs::write(&path, canonical_worktree_root.to_string_lossy().as_bytes())
+        .map_err(|e| enrich_fs_error(&path, "writing", e))
+}
+
+/// `true` iff the worktree at `canonical_worktree_root` was recorded withheld
+/// by [`mark_withheld_checkout`] and not since cleared.
+pub fn is_withheld_checkout(heddle_dir: &Path, canonical_worktree_root: &Path) -> bool {
+    withheld_marker_path(heddle_dir, canonical_worktree_root).exists()
+}
+
+/// Clear any withheld marker for `canonical_worktree_root`. Called when the
+/// same root is (re)materialized with real, served content, so a stale marker
+/// left by a prior under-tier materialize of that root can't suppress a
+/// now-authorized capture. Idempotent: a missing marker is a no-op success.
+pub fn clear_withheld_checkout(
+    heddle_dir: &Path,
+    canonical_worktree_root: &Path,
+) -> io::Result<()> {
+    let path = withheld_marker_path(heddle_dir, canonical_worktree_root);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(enrich_fs_error(&path, "removing", e)),
+    }
 }
 
 /// Atomically write `manifest` to disk for `thread`. Writes to a
