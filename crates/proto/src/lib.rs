@@ -55,9 +55,10 @@ pub use object_graph::{
     enumerate_state_closure_with_options, is_ancestor,
 };
 pub use object_transfer::{
-    MAX_RECEIVED_REDACTIONS_BLOB_SIZE, MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE, chunk_bounds,
-    chunk_count, chunk_offset, check_received_transfer_blob_size, load_object_data,
-    load_requested_object, store_received_object,
+    MAX_PULL_DECODE_MESSAGE_SIZE, MAX_RECEIVED_REDACTIONS_BLOB_SIZE,
+    MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE, chunk_bounds, chunk_count, chunk_offset,
+    check_received_transfer_blob_size, load_object_data, load_requested_object,
+    store_received_object,
 };
 
 /// Default port for Heddle protocol.

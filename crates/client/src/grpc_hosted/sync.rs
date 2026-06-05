@@ -1845,6 +1845,139 @@ mod tests {
         );
     }
 
+    // A sidecar blob larger than tonic's 4 MiB default decode limit but well
+    // under the 64 MiB receive cap must still decode + install: the raised
+    // `max_decoding_message_size` is the bound, and it isn't set too tight.
+    #[tokio::test]
+    async fn legitimate_large_sidecar_blob_decodes_and_installs() {
+        let (_dir, repo) = temp_repo();
+        let tree_hash = repo.store().put_tree(&Tree::new()).expect("put tree");
+        let state = State::new_snapshot(
+            tree_hash,
+            vec![],
+            Attribution::human(Principal {
+                name: "Grace Hopper".into(),
+                email: "grace@example.com".into(),
+            }),
+        );
+        let state_id = state.change_id;
+        repo.store().put_state(&state).expect("put state");
+
+        // ~8 MiB blob: above tonic's 4 MiB default (which would reject at
+        // decode without the raised limit), below the 64 MiB sidecar cap.
+        let mut record = sample_state_visibility(state_id);
+        record.tier = VisibilityTier::Restricted {
+            scope_label: "x".repeat(8 * 1024 * 1024),
+        };
+        let state_visibility_blob = StateVisibilityBlob::new(vec![record])
+            .encode()
+            .expect("encode large state visibility blob");
+        assert!(
+            state_visibility_blob.len() > 4 * 1024 * 1024,
+            "blob must exceed tonic's 4 MiB default to exercise the raised decode limit"
+        );
+        assert!(
+            (state_visibility_blob.len() as u64) <= proto::MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE,
+            "blob must stay within the legitimate sidecar receive cap"
+        );
+
+        let (mut client, server) = connect_sidecar_only_service(SidecarOnlyPullService {
+            state: state_id,
+            state_visibility_blob,
+        })
+        .await;
+
+        let exchange = tokio::time::timeout(
+            Duration::from_secs(30),
+            client.pull_exchange(
+                &repo,
+                "owner/repo",
+                "main",
+                PullOptions {
+                    local_thread: None,
+                    depth: None,
+                    target_state: Some(state_id),
+                    materialization: PullMaterialization::Full,
+                },
+            ),
+        )
+        .await
+        .expect("large-sidecar pull must not hang")
+        .expect("large but legitimate sidecar pull succeeds");
+        server.abort();
+
+        assert!(exchange.result.success);
+        assert!(
+            repo.get_state_visibility_for_state(&state_id)
+                .expect("load accepted sidecar")
+                .has_record(),
+            "pull must accept a legitimately-large StateVisibility sidecar"
+        );
+    }
+
+    // A sidecar blob beyond the pull-stream decode limit must be rejected at
+    // the gRPC decode boundary — before its `Vec<u8>` is materialized — not by
+    // the cheaper post-decode `check_received_transfer_blob_size` guard.
+    #[tokio::test]
+    async fn oversized_sidecar_blob_rejected_at_grpc_decode_boundary() {
+        let (_dir, repo) = temp_repo();
+        let tree_hash = repo.store().put_tree(&Tree::new()).expect("put tree");
+        let state = State::new_snapshot(
+            tree_hash,
+            vec![],
+            Attribution::human(Principal {
+                name: "Grace Hopper".into(),
+                email: "grace@example.com".into(),
+            }),
+        );
+        let state_id = state.change_id;
+        repo.store().put_state(&state).expect("put state");
+
+        // One byte past the decode limit. Content is irrelevant: decode is
+        // refused before the blob is ever handed to the accept path.
+        let oversized = vec![0u8; proto::MAX_PULL_DECODE_MESSAGE_SIZE + 1];
+        let (mut client, server) = connect_sidecar_only_service(SidecarOnlyPullService {
+            state: state_id,
+            state_visibility_blob: oversized,
+        })
+        .await;
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            client.pull_exchange(
+                &repo,
+                "owner/repo",
+                "main",
+                PullOptions {
+                    local_thread: None,
+                    depth: None,
+                    target_state: Some(state_id),
+                    materialization: PullMaterialization::Full,
+                },
+            ),
+        )
+        .await
+        .expect("oversized-sidecar pull must not hang");
+        server.abort();
+
+        let err = match result {
+            Err(err) => err,
+            Ok(_) => panic!("oversized sidecar PullMessage must be rejected at decode"),
+        };
+        let message = err.to_string();
+        assert!(
+            !message.contains("exceeds receive size limit"),
+            "rejection must come from the decode-size limit, before the post-decode check: {message}"
+        );
+        assert!(
+            repo.get_state_visibility_for_state(&state_id)
+                .expect("load sidecar")
+                .latest()
+                .is_none(),
+            "an oversized sidecar must never be installed"
+        );
+    }
+
     #[derive(Clone)]
     struct StateAndVisibilityPullService {
         state: ChangeId,
