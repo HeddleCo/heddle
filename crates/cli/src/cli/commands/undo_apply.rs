@@ -499,6 +499,34 @@ impl<'a> EntrySteps<'_, 'a> {
         )
     }
 
+    /// Restore the per-state visibility sidecar to an absolute snapshot
+    /// (`Some(bytes)` rewrites the sidecar, `None` removes it →
+    /// public-by-absence). NON-atomic write-or-delete: the capture snapshots
+    /// the whole current sidecar and registers a restore-to-snapshot BEFORE the
+    /// forward, so a later transaction failure unwinds a partially-applied
+    /// restore. Undo passes the op's `prior_sidecar`; redo its `new_sidecar`.
+    fn restore_visibility_sidecar(
+        &mut self,
+        state: ChangeId,
+        snapshot: Option<Vec<u8>>,
+    ) -> HeddleResult<()> {
+        let repo = self.repo();
+        self.step_nonatomic(
+            move || {
+                repo.get_state_visibility_bytes_for_state(&state)
+                    .map_err(apply_error)
+            },
+            move |captured| {
+                repo.restore_state_visibility_sidecar(&state, captured)
+                    .map_err(apply_error)
+            },
+            move || {
+                repo.restore_state_visibility_sidecar(&state, snapshot)
+                    .map_err(apply_error)
+            },
+        )
+    }
+
     /// Run one checkout-repo Git write as a capture-restore step against the
     /// pre-entry [`GitState`] `snapshot`. Git checkpoint entries make several
     /// internal writes; restoring to the absolute pre-entry snapshot is
@@ -668,6 +696,26 @@ fn apply_undo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         } => {
             apply_git_checkpoint_undo(steps, branch, previous_git_oid.as_deref(), new_git_oid)?;
         }
+        // Visibility set/promote undo: restore the per-state sidecar to the
+        // before-image captured on the op (`prior_sidecar`). Both set and
+        // promote restore the same way — the whole sidecar is snapshotted
+        // around the put, so the inverse is "put the prior bytes back" whether
+        // the forward appended a first record or a superseding one. `None`
+        // means the state was public-by-absence before the op, so the sidecar
+        // is removed and `has_visibility_for_state` reports false again. Closes
+        // PR #529 P1: the old no-op left the oplog and sidecar divergent.
+        OpRecord::StateVisibilitySet {
+            state,
+            prior_sidecar,
+            ..
+        }
+        | OpRecord::StateVisibilityPromote {
+            state,
+            prior_sidecar,
+            ..
+        } => {
+            steps.restore_visibility_sidecar(*state, prior_sidecar.clone())?;
+        }
         // No undo inverse: these records don't move a ref the undo chain
         // restores, or their reversal is irreversible / handled outside the
         // oplog replay. Enumerated explicitly (no wildcard) so a new
@@ -694,9 +742,7 @@ fn apply_undo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         | OpRecord::Purge { .. }
         | OpRecord::RemoteThreadUpdate { .. }
         | OpRecord::RemoteThreadDelete { .. }
-        | OpRecord::UndoRecoveryUpdate { .. }
-        | OpRecord::StateVisibilitySet { .. }
-        | OpRecord::StateVisibilityPromote { .. } => {}
+        | OpRecord::UndoRecoveryUpdate { .. } => {}
     }
 
     Ok(())
@@ -854,6 +900,18 @@ fn apply_redo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         //     EphemeralThreadCollapse: forensic / TTL records, no ref to replay.
         //   - RemoteThreadUpdate / RemoteThreadDelete / UndoRecoveryUpdate:
         //     reconcile-class bookkeeping refs, outside the user redo chain.
+        // Visibility set/promote redo: re-apply the after-image captured on
+        // the op (`new_sidecar`). Undo restored the sidecar to `prior_sidecar`;
+        // redo writes it back to exactly the post-put bytes (or removes it when
+        // the op resolved to public-by-absence). Symmetric with the undo arm.
+        OpRecord::StateVisibilitySet {
+            state, new_sidecar, ..
+        }
+        | OpRecord::StateVisibilityPromote {
+            state, new_sidecar, ..
+        } => {
+            steps.restore_visibility_sidecar(*state, new_sidecar.clone())?;
+        }
         OpRecord::Fork { .. }
         | OpRecord::Collapse { .. }
         | OpRecord::Checkpoint { .. }
@@ -865,9 +923,7 @@ fn apply_redo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         | OpRecord::Purge { .. }
         | OpRecord::RemoteThreadUpdate { .. }
         | OpRecord::RemoteThreadDelete { .. }
-        | OpRecord::UndoRecoveryUpdate { .. }
-        | OpRecord::StateVisibilitySet { .. }
-        | OpRecord::StateVisibilityPromote { .. } => {}
+        | OpRecord::UndoRecoveryUpdate { .. } => {}
     }
 
     Ok(())

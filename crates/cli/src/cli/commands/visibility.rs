@@ -12,7 +12,7 @@
 use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use objects::object::{ChangeId, StateVisibility, VisibilityTier};
-use oplog::OpLogBackend;
+use oplog::{OpLogBackend, VisibilitySidecarSnapshots};
 use repo::Repository;
 use serde::Serialize;
 
@@ -80,10 +80,19 @@ fn cmd_visibility_set(cli: &Cli, repo: &Repository, args: VisibilitySetArgs) -> 
         signature: None,
         supersedes: None,
     };
+    // Snapshot the whole per-state sidecar before/after the put so undo can
+    // restore the before-image and redo the after-image (PR #529 P1).
+    let prior = repo.get_state_visibility_bytes_for_state(&state)?;
     let record_id = repo.put_state_visibility(record)?;
+    let new = repo.get_state_visibility_bytes_for_state(&state)?;
     let scope = repo.op_scope();
-    repo.oplog()
-        .record_state_visibility_set(&state, &record_id, &tier, Some(&scope))?;
+    repo.oplog().record_state_visibility_set(
+        &state,
+        &record_id,
+        &tier,
+        VisibilitySidecarSnapshots { prior, new },
+        Some(&scope),
+    )?;
 
     let output = VisibilityMutationOutput {
         output_kind: "visibility_set",
@@ -135,13 +144,16 @@ fn cmd_visibility_promote(
         signature: None,
         supersedes: Some(superseded),
     };
+    let prior = repo.get_state_visibility_bytes_for_state(&state)?;
     let record_id = repo.put_state_visibility(record)?;
+    let new = repo.get_state_visibility_bytes_for_state(&state)?;
     let scope = repo.op_scope();
     repo.oplog().record_state_visibility_promote(
         &state,
         &superseded,
         &record_id,
         &tier,
+        VisibilitySidecarSnapshots { prior, new },
         Some(&scope),
     )?;
 

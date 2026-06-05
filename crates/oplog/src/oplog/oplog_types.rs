@@ -310,18 +310,33 @@ pub enum OpRecord {
     /// companion to the per-state `StateVisibility` sidecar record: the
     /// sidecar is the authoritative effective tier; this oplog entry records
     /// who bound it and when. Emitted both by `heddle visibility set` and by
-    /// the Invariant-A capture-time binding (spike #266 §5.4). Forensic only —
-    /// undo/redo treat it as a no-op (the sidecar is not transactional with
-    /// the oplog), mirroring `RemoteThreadUpdate`.
+    /// the Invariant-A capture-time binding (spike #266 §5.4).
+    ///
+    /// Reversible: `prior_sidecar`/`new_sidecar` carry the FULL per-state
+    /// visibility sidecar bytes (or `None` for public-by-absence) immediately
+    /// before and after the put. Undo restores `prior_sidecar`, redo restores
+    /// `new_sidecar` — both absolute write-or-remove, mirroring the redaction
+    /// sidecar capture-restore. Without the before-image the undo path could
+    /// only no-op, leaving the oplog and the sidecar divergent (PR #529 P1).
     StateVisibilitySet {
         state: ChangeId,
         /// Content id of the persisted `StateVisibility` record.
         record_id: ContentHash,
         /// The tier declared.
         tier: VisibilityTier,
+        /// Full sidecar bytes before the put (`None` = public-by-absence).
+        /// Undo target.
+        #[serde(default)]
+        prior_sidecar: Option<Vec<u8>>,
+        /// Full sidecar bytes after the put (`None` = public-by-absence).
+        /// Redo target.
+        #[serde(default)]
+        new_sidecar: Option<Vec<u8>>,
     },
     /// A state's visibility was promoted to a less-restrictive tier by
     /// appending a superseding `StateVisibility` record (heddle#317).
+    /// Reversible the same way as [`StateVisibilitySet`](Self::StateVisibilitySet):
+    /// `prior_sidecar`/`new_sidecar` snapshot the whole sidecar around the put.
     StateVisibilityPromote {
         state: ChangeId,
         /// The prior record this promotion supersedes.
@@ -330,6 +345,14 @@ pub enum OpRecord {
         record_id: ContentHash,
         /// The tier promoted to.
         tier: VisibilityTier,
+        /// Full sidecar bytes before the put (`None` = public-by-absence).
+        /// Undo target.
+        #[serde(default)]
+        prior_sidecar: Option<Vec<u8>>,
+        /// Full sidecar bytes after the put (`None` = public-by-absence).
+        /// Redo target.
+        #[serde(default)]
+        new_sidecar: Option<Vec<u8>>,
     },
 }
 
@@ -1091,12 +1114,16 @@ mod verb_catalog_tests {
                 state: cid(),
                 record_id: hash(),
                 tier: VisibilityTier::Internal,
+                prior_sidecar: None,
+                new_sidecar: Some(vec![1, 2, 3]),
             },
             OpRecord::StateVisibilityPromote {
                 state: cid(),
                 superseded: hash(),
                 record_id: hash(),
                 tier: VisibilityTier::Public,
+                prior_sidecar: Some(vec![4, 5]),
+                new_sidecar: None,
             },
         ]
     }

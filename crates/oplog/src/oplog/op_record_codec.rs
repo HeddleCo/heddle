@@ -269,12 +269,20 @@ enum StrictCurrentOpRecord {
         state: ChangeId,
         record_id: ContentHash,
         tier: VisibilityTier,
+        #[serde(default)]
+        prior_sidecar: Option<Vec<u8>>,
+        #[serde(default)]
+        new_sidecar: Option<Vec<u8>>,
     },
     StateVisibilityPromote {
         state: ChangeId,
         superseded: ContentHash,
         record_id: ContentHash,
         tier: VisibilityTier,
+        #[serde(default)]
+        prior_sidecar: Option<Vec<u8>>,
+        #[serde(default)]
+        new_sidecar: Option<Vec<u8>>,
     },
 }
 
@@ -446,21 +454,29 @@ impl StrictCurrentOpRecord {
                 state,
                 record_id,
                 tier,
+                prior_sidecar,
+                new_sidecar,
             } => OpRecord::StateVisibilitySet {
                 state,
                 record_id,
                 tier,
+                prior_sidecar,
+                new_sidecar,
             },
             Self::StateVisibilityPromote {
                 state,
                 superseded,
                 record_id,
                 tier,
+                prior_sidecar,
+                new_sidecar,
             } => OpRecord::StateVisibilityPromote {
                 state,
                 superseded,
                 record_id,
                 tier,
+                prior_sidecar,
+                new_sidecar,
             },
         }
     }
@@ -1337,12 +1353,16 @@ mod tests {
                 tier: VisibilityTier::Restricted {
                     scope_label: "embargo".into(),
                 },
+                prior_sidecar: None,
+                new_sidecar: Some(vec![1, 2, 3, 4]),
             },
             OpRecord::StateVisibilityPromote {
                 state: cid(32),
                 superseded: hash(33),
                 record_id: hash(34),
                 tier: VisibilityTier::Internal,
+                prior_sidecar: Some(vec![5, 6, 7]),
+                new_sidecar: Some(vec![8, 9, 10]),
             },
         ];
         for expected in records {

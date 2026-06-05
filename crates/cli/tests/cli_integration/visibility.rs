@@ -151,6 +151,128 @@ fn visibility_promote_supersedes_to_less_restrictive() {
 }
 
 #[test]
+fn undo_visibility_set_restores_prior_sidecar() {
+    // PR #529 P1: undoing a standalone `visibility set` must revert the
+    // sidecar, not just mark the oplog entry undone. A state that was
+    // public-by-absence before the set must read public again after undo, then
+    // re-tiered after redo.
+    let (temp, _) = init_and_capture("ordinary");
+    let state = capture_state(temp.path(), "ordinary capture");
+    assert_eq!(
+        show_json(temp.path(), &state)["effective_public"],
+        true,
+        "state starts public-by-absence"
+    );
+
+    heddle(
+        &["visibility", "set", &state, "--tier", "internal"],
+        Some(temp.path()),
+    )
+    .expect("visibility set");
+    assert_eq!(show_json(temp.path(), &state)["tier"], "internal");
+
+    heddle(&["undo"], Some(temp.path())).expect("undo visibility set");
+    let after_undo = show_json(temp.path(), &state);
+    assert_eq!(
+        after_undo["effective_public"], true,
+        "undo must restore public-by-absence (sidecar removed): {after_undo}"
+    );
+    assert_eq!(after_undo["tier"], "public");
+
+    heddle(&["redo"], Some(temp.path())).expect("redo visibility set");
+    let after_redo = show_json(temp.path(), &state);
+    assert_eq!(
+        after_redo["tier"], "internal",
+        "redo must reapply the set tier: {after_redo}"
+    );
+    assert_eq!(after_redo["effective_public"], false);
+}
+
+#[test]
+fn undo_visibility_set_restores_previous_nonpublic() {
+    // When a state already carries a non-public tier, undoing a later `set`
+    // must restore the PREVIOUS non-public tier, not drop to public-by-absence.
+    let (temp, _) = init_and_capture("ordinary");
+    let state = capture_state(temp.path(), "ordinary capture");
+
+    heddle(
+        &[
+            "visibility",
+            "set",
+            &state,
+            "--tier",
+            "team-scoped",
+            "--label",
+            "infra",
+        ],
+        Some(temp.path()),
+    )
+    .expect("set team-scoped");
+    assert_eq!(show_json(temp.path(), &state)["tier"], "team_scoped");
+
+    heddle(
+        &["visibility", "set", &state, "--tier", "internal"],
+        Some(temp.path()),
+    )
+    .expect("set internal");
+    assert_eq!(show_json(temp.path(), &state)["tier"], "internal");
+
+    heddle(&["undo"], Some(temp.path())).expect("undo second set");
+    let after = show_json(temp.path(), &state);
+    assert_eq!(
+        after["tier"], "team_scoped",
+        "undo must restore the previous non-public tier, not absence: {after}"
+    );
+    assert_eq!(after["effective_public"], false);
+    assert_eq!(after["label"], "infra");
+}
+
+#[test]
+fn undo_visibility_promote_reverts_tier() {
+    // A promote appends a superseding record; undo must drop back to the
+    // pre-promote effective tier.
+    let (temp, _) = init_and_capture("ordinary");
+    let state = capture_state(temp.path(), "ordinary capture");
+
+    heddle(
+        &[
+            "visibility",
+            "set",
+            &state,
+            "--tier",
+            "restricted",
+            "--label",
+            "embargo",
+        ],
+        Some(temp.path()),
+    )
+    .expect("set restricted");
+    assert_eq!(show_json(temp.path(), &state)["tier"], "restricted");
+
+    heddle(
+        &["visibility", "promote", &state, "--tier", "internal"],
+        Some(temp.path()),
+    )
+    .expect("promote to internal");
+    assert_eq!(show_json(temp.path(), &state)["tier"], "internal");
+
+    heddle(&["undo"], Some(temp.path())).expect("undo promote");
+    let after_undo = show_json(temp.path(), &state);
+    assert_eq!(
+        after_undo["tier"], "restricted",
+        "undo of promote must revert to the pre-promote tier: {after_undo}"
+    );
+    assert_eq!(after_undo["label"], "embargo");
+
+    heddle(&["redo"], Some(temp.path())).expect("redo promote");
+    assert_eq!(
+        show_json(temp.path(), &state)["tier"],
+        "internal",
+        "redo of promote must re-apply the promoted tier"
+    );
+}
+
+#[test]
 fn visibility_list_enumerates_tiered_states() {
     let (temp, _) = init_and_capture("ordinary");
     let state = capture_state(temp.path(), "ordinary capture");

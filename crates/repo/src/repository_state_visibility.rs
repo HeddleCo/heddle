@@ -33,7 +33,7 @@ use objects::{
     lock::RepositoryLockExt,
     object::{ChangeId, ContentHash, StateVisibility, StateVisibilityBlob, VisibilityTier},
 };
-use oplog::OpLogBackend;
+use oplog::{OpLogBackend, VisibilitySidecarSnapshots};
 
 use crate::namespace_policy::{VisibilityResolutionContext, resolve_default_visibility};
 use crate::repository::Repository;
@@ -285,12 +285,48 @@ impl Repository {
             signature: None,
             supersedes: None,
         };
+        // A fresh state has no prior record (guarded above), so the before-image
+        // is public-by-absence; capture the after-image for redo.
         let id = self.put_state_visibility(record)?;
+        let new = self.get_state_visibility_bytes_for_state(state)?;
+        let sidecar = VisibilitySidecarSnapshots { prior: None, new };
         let scope = self.op_scope();
         self.oplog()
-            .record_state_visibility_set(state, &id, &tier, Some(&scope))
+            .record_state_visibility_set(state, &id, &tier, sidecar, Some(&scope))
             .with_context(|| "record capture-time visibility oplog entry")?;
         Ok(Some(id))
+    }
+
+    /// Restore the per-state visibility sidecar to an absolute snapshot:
+    /// rewrite `snapshot`'s bytes, or remove the sidecar when `snapshot` is
+    /// `None` (public-by-absence). Absolute (write-or-delete), so re-running it
+    /// on a rollback path is idempotent. This is the undo/redo restore point —
+    /// undo passes the op's `prior_sidecar`, redo its `new_sidecar`. Mirrors
+    /// [`restore_redaction_sidecar`](Self::restore_redaction_sidecar).
+    pub fn restore_state_visibility_sidecar(
+        &self,
+        state: &ChangeId,
+        snapshot: Option<Vec<u8>>,
+    ) -> Result<()> {
+        let path = self.state_visibility_path_for_state(state);
+        match snapshot {
+            Some(bytes) => {
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("create '{}'", parent.display()))?;
+                }
+                write_file_atomic(&path, &bytes)
+                    .with_context(|| format!("write '{}'", path.display()))?;
+            }
+            None => {
+                if path.exists() {
+                    fs::remove_file(&path).with_context(|| {
+                        format!("remove state-visibility sidecar '{}'", path.display())
+                    })?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// `<heddle_dir>/visibility/` — root of the per-state visibility store.
