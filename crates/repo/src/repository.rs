@@ -1749,12 +1749,33 @@ impl Repository {
         prev_head: Option<ChangeId>,
         thread: Option<&ThreadName>,
     ) -> Result<()> {
+        self.commit_snapshot_atomic_with_records(new_state, prev_head, thread, Vec::new())
+    }
+
+    /// [`commit_snapshot_atomic`](Self::commit_snapshot_atomic) plus `extra`
+    /// records folded into the SAME batch as the `OpRecord::Snapshot`.
+    ///
+    /// Used by the snapshot creators that commit through this chokepoint rather
+    /// than the `SnapshotMutation` transaction (the in-progress merge branch and
+    /// the mount capture path) to fold the automatic capture-time
+    /// default-visibility binding's `OpRecord::StateVisibilitySet` into the
+    /// snapshot's batch, so one `heddle undo` reverts the snapshot and its
+    /// auto-applied default tier together (heddle#317 / PR #529 P1).
+    pub fn commit_snapshot_atomic_with_records(
+        &self,
+        new_state: &ChangeId,
+        prev_head: Option<ChangeId>,
+        thread: Option<&ThreadName>,
+        extra: Vec<OpRecord>,
+    ) -> Result<()> {
         let record = OpRecord::Snapshot {
             new_state: *new_state,
             prev_head,
             head: thread.is_none().then_some(*new_state),
             thread: thread.map(|name| name.to_string()),
         };
+        let mut records = vec![record];
+        records.extend(extra);
         let ref_update = match thread {
             Some(name) => RefUpdate::Thread {
                 name: name.clone(),
@@ -1766,7 +1787,7 @@ impl Repository {
                 new: Head::Detached { state: *new_state },
             },
         };
-        self.commit_and_publish(vec![record], &[ref_update])
+        self.commit_and_publish(records, &[ref_update])
     }
 
     pub fn repo_config(&self) -> &RepoConfig {

@@ -33,10 +33,24 @@ use objects::{
     lock::RepositoryLockExt,
     object::{ChangeId, ContentHash, StateVisibility, StateVisibilityBlob, VisibilityTier},
 };
-use oplog::{OpLogBackend, VisibilitySidecarSnapshots};
+use oplog::OpRecord;
 
 use crate::namespace_policy::{VisibilityResolutionContext, resolve_default_visibility};
 use crate::repository::Repository;
+
+/// The automatic capture-time default-visibility binding, staged for folding
+/// into a snapshot's own commit batch (heddle#317 / PR #529 P1). Produced by
+/// [`Repository::stage_default_visibility_binding`]; the sidecar has already
+/// been written when this is returned.
+pub struct DefaultVisibilityBinding {
+    /// The [`OpRecord::StateVisibilitySet`] audit record to append to the
+    /// snapshot's batch so undo/redo of that batch restores the sidecar.
+    pub record: OpRecord,
+    /// The per-state sidecar bytes BEFORE the binding (always `None` for a
+    /// freshly created state). The `SnapshotMutation` rewind restores the
+    /// sidecar to this image if the snapshot batch fails to commit.
+    pub prior_sidecar: Option<Vec<u8>>,
+}
 
 impl Repository {
     /// Record a visibility declaration for its state. Returns the record's
@@ -62,17 +76,31 @@ impl Repository {
     /// prior private record — no caller can leave a Public record that makes
     /// a public state read as non-public.
     pub fn put_state_visibility(&self, record: StateVisibility) -> Result<ContentHash> {
-        record
-            .validate()
-            .with_context(|| "validate state-visibility record before put")?;
-        let state = record.state;
-
         // Serialize the full read-modify-write behind the repo write lock so
         // concurrent appends on the same state can't clobber each other.
         let _lock = self
             .locker()
             .write()
             .with_context(|| "acquire repo write lock for state-visibility put")?;
+        self.put_state_visibility_locked(record)
+    }
+
+    /// Lock-free body of [`put_state_visibility`](Self::put_state_visibility).
+    ///
+    /// The caller **must already hold the repo write lock**. The repo lock is an
+    /// OS file lock (`flock`) that does NOT nest within one process — re-taking
+    /// it on a thread that already holds it deadlocks — so the snapshot
+    /// chokepoint, which writes the capture-time default-visibility binding
+    /// while still holding the snapshot write lock (heddle#317 / PR #529 P1),
+    /// calls this directly instead of the lock-taking wrapper.
+    pub(crate) fn put_state_visibility_locked(
+        &self,
+        record: StateVisibility,
+    ) -> Result<ContentHash> {
+        record
+            .validate()
+            .with_context(|| "validate state-visibility record before put")?;
+        let state = record.state;
 
         let id = state_visibility_content_hash(&record)?;
         let mut existing = self.get_state_visibility_for_state(&state)?;
@@ -265,12 +293,28 @@ impl Repository {
     /// Idempotent: a state that already carries a visibility record is left
     /// untouched, so a re-capture that mints the same `ChangeId` never
     /// double-binds, and a caller that explicitly set a tier before this runs is
-    /// respected. Returns the new record's id when one was written.
+    /// respected. Returns the binding to fold when one was written.
     ///
-    /// Must be called *outside* the snapshot write lock (the chokepoint releases
-    /// it before binding); this method takes the repo write lock itself via
-    /// [`Self::put_state_visibility`].
-    pub fn bind_default_visibility(&self, state: &ChangeId) -> Result<Option<ContentHash>> {
+    /// **Folds into the snapshot's own batch (PR #529 P1).** The returned
+    /// [`OpRecord::StateVisibilitySet`] is appended to the *same* oplog batch as
+    /// the snapshot that triggered the binding — never a separate trailing batch
+    /// — so a single `heddle undo` reverts the snapshot AND its auto-applied
+    /// default tier together. The old separate-batch binding made the first
+    /// `undo` after a capture restore only the sidecar, leaving the snapshot in
+    /// place (undo took two presses). Explicit user actions
+    /// (`heddle visibility set`/`promote`) stay their own undoable batch — only
+    /// this automatic, snapshot-time default binding folds in.
+    ///
+    /// `lock_held` declares whether the caller already holds the repo write lock.
+    /// The snapshot chokepoint's `SnapshotMutation::apply` runs under the snapshot
+    /// write lock and passes `true` (the sidecar write must not re-enter the
+    /// non-reentrant `flock` repo lock); the mount capture path holds no lock and
+    /// passes `false` (the sidecar write takes the lock itself).
+    pub fn stage_default_visibility_binding(
+        &self,
+        state: &ChangeId,
+        lock_held: bool,
+    ) -> Result<Option<DefaultVisibilityBinding>> {
         let tier = self.resolve_capture_default_visibility();
         if tier == VisibilityTier::Public {
             return Ok(None);
@@ -297,14 +341,23 @@ impl Repository {
         };
         // A fresh state has no prior record (guarded above), so the before-image
         // is public-by-absence; capture the after-image for redo.
-        let id = self.put_state_visibility(record)?;
-        let new = self.get_state_visibility_bytes_for_state(state)?;
-        let sidecar = VisibilitySidecarSnapshots { prior: None, new };
-        let scope = self.op_scope();
-        self.oplog()
-            .record_state_visibility_set(state, &id, &tier, sidecar, Some(&scope))
-            .with_context(|| "record capture-time visibility oplog entry")?;
-        Ok(Some(id))
+        let prior_sidecar = None;
+        let id = if lock_held {
+            self.put_state_visibility_locked(record)?
+        } else {
+            self.put_state_visibility(record)?
+        };
+        let new_sidecar = self.get_state_visibility_bytes_for_state(state)?;
+        Ok(Some(DefaultVisibilityBinding {
+            record: OpRecord::StateVisibilitySet {
+                state: *state,
+                record_id: id,
+                tier,
+                prior_sidecar: prior_sidecar.clone(),
+                new_sidecar,
+            },
+            prior_sidecar,
+        }))
     }
 
     /// Restore the per-state visibility sidecar to an absolute snapshot:

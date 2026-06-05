@@ -1105,6 +1105,7 @@ pub(crate) fn merge_thread_into_current(
         None,
         attribution.clone(),
         Some(merge_base_id),
+        false,
     )?;
 
     if let Some(entry) = &thread_entry {

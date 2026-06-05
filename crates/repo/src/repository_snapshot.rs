@@ -50,6 +50,12 @@ struct SnapshotMutation<'a> {
     prev_head: Option<ChangeId>,
     head: Head,
     transaction_id: String,
+    /// Set by `apply` when the automatic capture-time default-visibility binding
+    /// folds a `StateVisibilitySet` into this snapshot's batch (heddle#317 / PR
+    /// #529 P1): `(state, sidecar-before-the-binding)`. `rewind` restores the
+    /// sidecar to that before-image if the batch fails to commit, so a rewound
+    /// snapshot never leaves its auto-applied tier behind.
+    staged_visibility_rewind: Option<(ChangeId, Option<Vec<u8>>)>,
 }
 
 impl<'a> SnapshotMutation<'a> {
@@ -80,6 +86,7 @@ impl<'a> SnapshotMutation<'a> {
             prev_head,
             head,
             transaction_id,
+            staged_visibility_rewind: None,
         }
     }
 
@@ -121,17 +128,44 @@ impl AtomicMutation for SnapshotMutation<'_> {
         #[cfg(test)]
         maybe_snapshot_fault(SnapshotFault::AfterStageBeforeAtomicCommit);
 
-        let record = OpRecord::Snapshot {
+        let mut records = vec![OpRecord::Snapshot {
             new_state: execution.state.change_id,
             prev_head: self.prev_head,
             head: self.thread().is_none().then_some(execution.state.change_id),
             thread: self.thread(),
-        };
-        Ok(StagedCommit::new(execution, vec![record]))
+        }];
+
+        // heddle#317 / PR #529 P1: fold the automatic capture-time
+        // default-visibility binding into THIS snapshot's batch so one `heddle
+        // undo` reverts the snapshot AND its auto-applied default tier together
+        // (the old separate trailing batch made the first undo restore only the
+        // sidecar). `apply` runs under the snapshot write lock, so the sidecar
+        // write must not re-enter the non-reentrant repo lock (`lock_held =
+        // true`); `rewind` restores the sidecar if this batch fails to commit.
+        if let Some(binding) = self
+            .repo
+            .stage_default_visibility_binding(&execution.state.change_id, true)
+            .map_err(|e| HeddleError::Io(std::io::Error::other(format!("{e:#}"))))?
+        {
+            self.staged_visibility_rewind =
+                Some((execution.state.change_id, binding.prior_sidecar));
+            records.push(binding.record);
+        }
+
+        Ok(StagedCommit::new(execution, records))
     }
 
     fn rewind(&mut self, _ledger: &RewindLedger) -> Result<()> {
         self.repo.store.abort_snapshot_write_batch();
+        // Roll the folded default-visibility binding back to its before-image so
+        // a rewound snapshot leaves no orphaned auto-applied tier (heddle#317).
+        // Idempotent: `take` makes a second rewind a no-op, and
+        // `restore_state_visibility_sidecar` is an absolute write-or-delete.
+        if let Some((state, prior)) = self.staged_visibility_rewind.take() {
+            self.repo
+                .restore_state_visibility_sidecar(&state, prior)
+                .map_err(|e| HeddleError::Io(std::io::Error::other(format!("{e:#}"))))?;
+        }
         Ok(())
     }
 
@@ -510,22 +544,20 @@ impl Repository {
     /// Snapshot chokepoint (heddle#317, PR #529): EVERY worktree-snapshot
     /// creator — capture, cherry-pick, revert, retro — funnels through here, so
     /// the configured default visibility tier is bound to the freshly created
-    /// state at this single site via [`bind_default_visibility`](Self::bind_default_visibility).
-    /// Binding here rather than per call site means no creator can leak a state
-    /// public when the repo default is non-public by forgetting to re-bind.
-    /// The bind runs after the locked body returns (and drops the write lock it
-    /// held), because the binding takes that same lock itself.
+    /// state at this single site. The binding is folded into the snapshot's own
+    /// oplog batch inside [`SnapshotMutation::apply`] (via
+    /// [`stage_default_visibility_binding`](Self::stage_default_visibility_binding)),
+    /// so one `heddle undo` reverts the snapshot and its auto-applied default
+    /// together — never a separate trailing batch (PR #529 P1). The in-progress
+    /// merge branch commits through `commit_snapshot_atomic` and folds the
+    /// binding there for the same reason.
     pub fn snapshot_with_attribution_profiled(
         &self,
         intent: Option<String>,
         confidence: Option<f32>,
         attribution: Attribution,
     ) -> Result<SnapshotExecution> {
-        let execution =
-            self.snapshot_with_attribution_profiled_locked(intent, confidence, attribution)?;
-        self.bind_default_visibility(&execution.state.change_id)
-            .map_err(|e| HeddleError::Io(std::io::Error::other(format!("{e:#}"))))?;
-        Ok(execution)
+        self.snapshot_with_attribution_profiled_locked(intent, confidence, attribution)
     }
 
     #[instrument(skip(self, attribution), fields(intent = ?intent, confidence))]
@@ -565,6 +597,9 @@ impl Repository {
                 confidence,
                 attribution,
                 base,
+                // We hold the snapshot write lock here; fold the default-
+                // visibility binding into the merge's batch (heddle#317).
+                true,
             )?;
             self.merge_state_manager().finish()?;
             let tree = self
@@ -613,7 +648,9 @@ impl Repository {
     ///
     /// Routes through the same default-visibility chokepoint as
     /// [`snapshot_with_attribution_profiled`](Self::snapshot_with_attribution_profiled):
-    /// a Git-overlay capture must inherit the configured default tier too.
+    /// a Git-overlay capture must inherit the configured default tier too. The
+    /// binding is folded into the snapshot's batch inside
+    /// [`SnapshotMutation::apply`] (PR #529 P1).
     pub fn snapshot_tree_with_attribution_profiled(
         &self,
         tree: Tree,
@@ -621,11 +658,7 @@ impl Repository {
         confidence: Option<f32>,
         attribution: Attribution,
     ) -> Result<SnapshotExecution> {
-        let execution = self
-            .snapshot_tree_with_attribution_profiled_locked(tree, intent, confidence, attribution)?;
-        self.bind_default_visibility(&execution.state.change_id)
-            .map_err(|e| HeddleError::Io(std::io::Error::other(format!("{e:#}"))))?;
-        Ok(execution)
+        self.snapshot_tree_with_attribution_profiled_locked(tree, intent, confidence, attribution)
     }
 
     #[instrument(skip(self, tree, attribution), fields(intent = ?intent, confidence))]
@@ -683,6 +716,17 @@ impl Repository {
     }
 
     /// Create a merge state with two parents.
+    ///
+    /// `fold_default_visibility` binds the configured capture-time default
+    /// visibility tier to the new merge state and folds the resulting
+    /// `OpRecord::StateVisibilitySet` into the merge's own commit batch (so one
+    /// `heddle undo` reverts both — heddle#317 / PR #529 P1). It is `true` ONLY
+    /// for the in-progress-merge capture branch of
+    /// [`snapshot_with_attribution_profiled`](Self::snapshot_with_attribution_profiled),
+    /// which calls this while already holding the snapshot write lock — so the
+    /// sidecar write runs lock-held. The direct merge callers (the `merge` verb,
+    /// thread refresh, signing tests) pass `false`, preserving their prior
+    /// no-auto-binding behavior.
     pub fn snapshot_merge_with_attribution(
         &self,
         merge_parent: &ChangeId,
@@ -690,6 +734,7 @@ impl Repository {
         confidence: Option<f32>,
         attribution: Attribution,
         merge_base: Option<ChangeId>,
+        fold_default_visibility: bool,
     ) -> Result<State> {
         let tree = self.build_tree(&self.root)?;
         let tree_hash = self.store.put_tree(&tree)?;
@@ -750,8 +795,27 @@ impl Repository {
             Head::Detached { .. } => None,
         };
 
+        // Fold the automatic capture-time default-visibility binding into the
+        // merge's own batch (heddle#317 / PR #529 P1) when the in-progress-merge
+        // capture branch asked for it. That caller holds the snapshot write lock,
+        // so the sidecar write runs lock-held.
+        let extra = if fold_default_visibility {
+            self.stage_default_visibility_binding(&state.change_id, true)
+                .map_err(|e| HeddleError::Io(std::io::Error::other(format!("{e:#}"))))?
+                .map(|binding| binding.record)
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         // Record-first through the write chokepoint (heddle#354 r8).
-        self.commit_snapshot_atomic(&state.change_id, Some(first_parent), thread.as_ref())?;
+        self.commit_snapshot_atomic_with_records(
+            &state.change_id,
+            Some(first_parent),
+            thread.as_ref(),
+            extra,
+        )?;
 
         Ok(state)
     }

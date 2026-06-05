@@ -479,6 +479,7 @@ mod tests {
                     None,
                     attribution,
                     None,
+                    false,
                 )
                 .expect("merge");
 

@@ -24,6 +24,7 @@ mod repository_redaction;
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_signals;
 mod repository_state_visibility;
+pub use repository_state_visibility::DefaultVisibilityBinding;
 mod session_storage;
 pub mod snapshot_metadata;
 pub mod staleness;

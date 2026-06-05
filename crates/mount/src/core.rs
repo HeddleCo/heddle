@@ -3942,24 +3942,41 @@ impl ContentAddressedMount {
         let change_id = state.change_id;
         let prev_head_change_id = state_snapshot.change_id;
         let served_thread = objects::object::ThreadName::from(self.inner.thread.as_str());
-        self.inner
-            .repo
-            .commit_snapshot_atomic(&change_id, Some(prev_head_change_id), Some(&served_thread))
-            .map_err(MountError::Store)?;
 
         // Invariant A (heddle#317): a mount-captured state is a freshly created
         // state too, so it must inherit the configured default visibility tier
-        // through the same chokepoint binding the repo capture path uses. Runs
-        // after the atomic commit's write lock is released — the binding takes
-        // that lock itself. Public default is a no-op (absence ≡ public).
-        self.inner
+        // through the same chokepoint the repo capture path uses. Resolve + write
+        // the sidecar BEFORE the commit (no lock held here, so the sidecar write
+        // takes the repo lock itself) and FOLD the resulting
+        // `OpRecord::StateVisibilitySet` into the snapshot's own batch (PR #529
+        // P1), so one `heddle undo` reverts the snapshot and its auto-applied
+        // default together — never a separate trailing batch. Public default is a
+        // no-op (absence ≡ public ⇒ no record to fold).
+        let visibility_record = self
+            .inner
             .repo
-            .bind_default_visibility(&change_id)
+            .stage_default_visibility_binding(&change_id, false)
             .map_err(|e| {
                 MountError::Store(objects::error::HeddleError::Io(std::io::Error::other(
                     format!("{e:#}"),
                 )))
-            })?;
+            })?
+            .map(|binding| binding.record)
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        // Step 3 + 3a unified: advance the served thread and record the
+        // `OpRecord::Snapshot` **record-first** through the write chokepoint
+        // (heddle#354 r8).
+        self.inner
+            .repo
+            .commit_snapshot_atomic_with_records(
+                &change_id,
+                Some(prev_head_change_id),
+                Some(&served_thread),
+                visibility_record,
+            )
+            .map_err(MountError::Store)?;
 
         // Step 3b: refresh the active thread record's metadata
         // (changed paths, heavy-impact paths, freshness, etc).

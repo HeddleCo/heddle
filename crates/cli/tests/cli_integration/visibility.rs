@@ -171,6 +171,87 @@ fn revert_state_gets_default_visibility() {
 }
 
 #[test]
+fn undo_after_capture_with_nonpublic_default_reverts_snapshot_and_visibility_in_one_undo() {
+    // PR #529 P1 regression: the automatic capture-time default-visibility
+    // binding used to be its own trailing oplog batch, so the FIRST `undo` after
+    // a capture restored only the sidecar and left the snapshot in place — undo
+    // took two presses, and the automatic binding polluted undo history. Folding
+    // the binding into the snapshot's own batch makes ONE `undo` revert the
+    // snapshot AND its auto-applied default tier together.
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+
+    fs::write(temp.path().join("note.txt"), b"base").unwrap();
+    heddle(&["capture", "-m", "first"], Some(temp.path())).expect("capture first");
+    let first = latest_state(temp.path());
+
+    set_repo_default_visibility(temp.path(), "\"Internal\"");
+    fs::write(temp.path().join("note.txt"), b"secret").unwrap();
+    heddle(&["capture", "-m", "second"], Some(temp.path())).expect("capture second");
+    let second = latest_state(temp.path());
+    assert_ne!(first, second, "second capture is a distinct state");
+    assert_eq!(
+        show_json(temp.path(), &second)["tier"],
+        "internal",
+        "second capture inherits the non-public default"
+    );
+
+    // ONE undo must revert BOTH the snapshot (HEAD back to `first`) AND the
+    // auto-applied visibility (the captured state reads public-by-absence again).
+    heddle(&["undo"], Some(temp.path())).expect("undo capture");
+
+    assert_eq!(
+        latest_state(temp.path()),
+        first,
+        "one undo must revert the snapshot itself — HEAD back to the pre-capture state, \
+         not just the sidecar"
+    );
+    let after = show_json(temp.path(), &second);
+    assert_eq!(
+        after["effective_public"], true,
+        "the same single undo must also revert the auto-applied default visibility: {after}"
+    );
+    assert_eq!(after["tier"], "public");
+}
+
+#[test]
+fn explicit_visibility_set_remains_its_own_undoable_batch() {
+    // r2 preserved: an explicit `heddle visibility set` is a SEPARATE undoable
+    // batch from the capture — only the AUTOMATIC capture-time default binding
+    // folds into the snapshot batch. One undo of the set reverts the tier and
+    // leaves the captured snapshot in place as HEAD.
+    let (temp, _) = init_and_capture("ordinary"); // public default ⇒ capture has no auto binding
+    let state = capture_state(temp.path(), "ordinary capture");
+    assert_eq!(
+        show_json(temp.path(), &state)["effective_public"],
+        true,
+        "capture under the public default writes no visibility record"
+    );
+
+    heddle(
+        &["visibility", "set", &state, "--tier", "internal"],
+        Some(temp.path()),
+    )
+    .expect("visibility set");
+    assert_eq!(show_json(temp.path(), &state)["tier"], "internal");
+
+    // One undo reverts ONLY the explicit set; the snapshot stays HEAD (proving
+    // the set is its own batch, distinct from the capture).
+    heddle(&["undo"], Some(temp.path())).expect("undo set");
+    assert_eq!(
+        latest_state(temp.path()),
+        state,
+        "undo of the explicit set must NOT revert the capture — the set is its own batch"
+    );
+    let after = show_json(temp.path(), &state);
+    assert_eq!(
+        after["effective_public"], true,
+        "the explicit set is reverted by its own undo: {after}"
+    );
+    assert_eq!(after["tier"], "public");
+}
+
+#[test]
 fn public_default_capture_stays_record_free() {
     // The common case: with the default (public) tier, capture writes no
     // visibility record — absence ≡ public.
