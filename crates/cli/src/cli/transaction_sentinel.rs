@@ -147,7 +147,7 @@ pub fn append_op_to_active_for_thread(
                 continue;
             }
         };
-        if let Err(err) = std::fs::write(&path, serialized) {
+        if let Err(err) = objects::fs_atomic::write_file_atomic(&path, serialized.as_bytes()) {
             tracing::warn!(error = %err, txn = %txn.transaction_id,
                 "transaction-sentinel: failed to persist appended op");
             continue;
