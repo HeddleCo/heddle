@@ -206,6 +206,15 @@ impl Repository {
             &canonical_worktree_path(dest),
         )
         .map_err(HeddleError::Io)?;
+        // Remove any leftover courtesy stub a prior under-tier materialize of the
+        // same root wrote: `materialize_tree` only writes tracked leaves, so the
+        // stub would otherwise linger on disk. Cosmetic — capture ignores it —
+        // but an authorized re-materialize should leave a clean tree (heddle#316).
+        match fs::remove_file(dest.join(COURTESY_STUB_FILENAME)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(HeddleError::Io(e)),
+        }
         Ok(CheckoutMaterialization::Materialized { tree })
     }
 
@@ -1051,6 +1060,56 @@ mod tests {
         assert!(dest.join("secret.rs").exists());
         assert!(!dest.join(COURTESY_STUB_FILENAME).exists());
         assert!(manifest.files.contains_key("secret.rs"));
+    }
+
+    /// #316 / PR #528 r6: a worktree root first materialized under-tier (stub
+    /// written) and later re-materialized for an authorized audience must end up
+    /// with a clean tree — the real bytes present AND the stale courtesy stub
+    /// removed. `materialize_tree` only writes tracked leaves, so without an
+    /// explicit removal the stub would linger on disk after the visible path.
+    #[test]
+    fn authorized_rematerialize_removes_stale_embargo_stub() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("secret.rs"), b"fn exploit() {}\n").unwrap();
+        repo.snapshot(Some("embargoed fix".into()), None).unwrap();
+        embargo_state_with_tier(
+            &repo,
+            VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+        );
+
+        let dest_holder = TempDir::new().unwrap();
+        let dest = dest_holder.path().join("out");
+
+        // First: under-tier materialize of the root → only the stub lands.
+        repo.materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
+        assert!(
+            dest.join(COURTESY_STUB_FILENAME).exists(),
+            "under-tier materialize must write the stub"
+        );
+        assert!(!dest.join("secret.rs").exists());
+
+        // Then: re-materialize the SAME root for an authorized audience.
+        let manifest = repo
+            .materialize_thread(
+                "main",
+                &dest,
+                &AudienceTier::Restricted("sec-embargo".into()),
+            )
+            .unwrap();
+
+        assert!(
+            dest.join("secret.rs").exists(),
+            "authorized re-materialize must write the real tree"
+        );
+        assert!(manifest.files.contains_key("secret.rs"));
+        assert!(
+            !dest.join(COURTESY_STUB_FILENAME).exists(),
+            "the stale courtesy stub must be removed on the authorized re-materialize"
+        );
     }
 
     /// #316 / PR #528 r3 Finding 1: materializing an under-tier checkout writes
