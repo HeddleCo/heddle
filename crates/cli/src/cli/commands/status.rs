@@ -2457,7 +2457,7 @@ mod tests {
 
         let dest_holder = TempDir::new().unwrap();
         let dest = dest_holder.path().join("out");
-        repo.materialize_thread("main", &dest).unwrap();
+        repo.materialize_thread("main", &dest, &repo::AudienceTier::Internal).unwrap();
         (repo_dir, dest_holder, repo)
     }
 
@@ -2504,7 +2504,7 @@ mod tests {
 
         let dest_holder = TempDir::new().unwrap();
         let dest = dest_holder.path().join("out");
-        let mat = repo.materialize_thread("main", &dest).unwrap();
+        let mat = repo.materialize_thread("main", &dest, &repo::AudienceTier::Internal).unwrap();
 
         // Advance main from the main repo dir (not from dest).
         fs::write(repo_dir.path().join("hello.txt"), b"hello world\n").unwrap();

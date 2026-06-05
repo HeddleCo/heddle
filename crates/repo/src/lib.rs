@@ -80,7 +80,7 @@ pub use repository::{
 pub use repository_redaction::{PurgeOutcome, RemoveRedactionOutcome};
 pub use visibility::{
     AudienceParseError, AudienceTier, ScopeDropCounts, filter_for_audience,
-    filter_for_audience_with_drops,
+    filter_for_audience_with_drops, visible,
 };
 pub use session_storage::SessionManager;
 pub use snapshot_metadata::{

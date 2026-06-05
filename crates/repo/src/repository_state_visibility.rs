@@ -186,6 +186,29 @@ impl Repository {
             .is_some_and(|r| r.tier != VisibilityTier::Public))
     }
 
+    /// The effective visibility declaration for `state`: the latest
+    /// non-superseded record, or `None` when the state is public-by-absence.
+    /// Pure over the persisted records — never wall-clock (an `embargo_until`
+    /// is materialized into a superseding record before it can change the
+    /// effective tier, see the spike §5.4).
+    pub fn effective_state_visibility(
+        &self,
+        state: &ChangeId,
+    ) -> Result<Option<StateVisibility>> {
+        Ok(self.get_state_visibility_for_state(state)?.latest().cloned())
+    }
+
+    /// The effective tier of `state`: the latest declaration's tier, or
+    /// [`VisibilityTier::Public`] when the state is public-by-absence. This is
+    /// the single resolution the checkout courtesy stub and the bridge
+    /// frontier both key off, so they agree on who-sees-what.
+    pub fn effective_visibility_tier(&self, state: &ChangeId) -> Result<VisibilityTier> {
+        Ok(self
+            .effective_state_visibility(state)?
+            .map(|record| record.tier)
+            .unwrap_or(VisibilityTier::Public))
+    }
+
     /// Walk every visibility sidecar file in the repo. Returns
     /// `(state_id, blob)` pairs so callers can correlate. Used by listing
     /// surfaces and the GC's "never collect a visibility record" guard.

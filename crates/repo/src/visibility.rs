@@ -147,7 +147,7 @@ pub fn filter_for_audience_with_drops<'a>(
 /// out so the borrowing and dropping variants share the exact same
 /// rules — drift between them would be invisible at the call site and
 /// catastrophic for the bridge export footer.
-fn visible(visibility: &VisibilityTier, audience: &AudienceTier) -> bool {
+pub fn visible(visibility: &VisibilityTier, audience: &AudienceTier) -> bool {
     match (visibility, audience) {
         // Public is universally visible.
         (VisibilityTier::Public, _) => true,
