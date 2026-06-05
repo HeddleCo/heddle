@@ -68,14 +68,17 @@ fn cmd_visibility_set(cli: &Cli, repo: &Repository, args: VisibilitySetArgs) -> 
     let declarer = repo
         .get_principal()
         .with_context(|| "resolve current principal")?;
-    let declared_at = Utc::now();
 
     let record = StateVisibility {
         state,
         tier: tier.clone(),
         embargo_until: None,
         declarer: declarer.clone(),
-        declared_at,
+        // Placeholder: `commit_state_visibility` (re)stamps `declared_at` UNDER
+        // the write lock so the selection key orders with the commit, never a
+        // before-lock value. Read the authoritative timestamp back from the
+        // outcome below.
+        declared_at: Utc::now(),
         signature: None,
         supersedes: None,
     };
@@ -96,7 +99,7 @@ fn cmd_visibility_set(cli: &Cli, repo: &Repository, args: VisibilitySetArgs) -> 
         label: tier_label(&tier).map(str::to_string),
         record_id: outcome.put.id.short(),
         declarer: format!("{} <{}>", declarer.name, declarer.email),
-        declared_at: declared_at.to_rfc3339(),
+        declared_at: outcome.declared_at.to_rfc3339(),
         supersedes: None,
     };
     emit_mutation(cli, repo, &output, "set")
@@ -116,20 +119,21 @@ fn cmd_visibility_promote(
     let declarer = repo
         .get_principal()
         .with_context(|| "resolve current principal")?;
-    let declared_at = Utc::now();
     // `supersedes` is resolved INSIDE the combined primitive, under the same
     // repo write lock that writes the sidecar and appends the
     // `OpRecord::StateVisibilityPromote` audit entry (PR #529 P1 r6): the
-    // superseded record, the captured before-image, and the oplog append all
-    // come from one race-free, totally-ordered critical section. A promotion
-    // must supersede an existing declaration, so a public-by-absence state (no
-    // record) is an error.
+    // superseded record, the captured before-image, the `declared_at` stamp, and
+    // the oplog append all come from one race-free, totally-ordered critical
+    // section. A promotion must supersede an existing declaration, so a
+    // public-by-absence state (no record) is an error.
     let record = StateVisibility {
         state,
         tier: tier.clone(),
         embargo_until: None,
         declarer: declarer.clone(),
-        declared_at,
+        // Placeholder: re-stamped under the write lock by
+        // `commit_state_visibility`; read back from the outcome below.
+        declared_at: Utc::now(),
         signature: None,
         supersedes: None,
     };
@@ -152,7 +156,7 @@ fn cmd_visibility_promote(
         label: tier_label(&tier).map(str::to_string),
         record_id: outcome.put.id.short(),
         declarer: format!("{} <{}>", declarer.name, declarer.email),
-        declared_at: declared_at.to_rfc3339(),
+        declared_at: outcome.declared_at.to_rfc3339(),
         supersedes: Some(superseded.short()),
     };
     emit_mutation(cli, repo, &output, "promoted")

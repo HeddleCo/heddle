@@ -137,10 +137,27 @@ impl StateVisibilityBlob {
         !self.records.is_empty()
     }
 
-    /// The effective record: the most recent declaration by `declared_at`.
+    /// The effective record: the most recent declaration by `declared_at`,
+    /// breaking ties by **append order** (the record's position in `records`).
     /// Pure over the persisted records, never wall-clock.
+    ///
+    /// Records accrete in commit order — each locally-committed declaration is
+    /// pushed under the repo write lock, and its `declared_at` is stamped inside
+    /// that same critical section (heddle#317 / PR #529 P1) — so the append
+    /// index is a commit-consistent ordering key. When two records share an
+    /// identical `declared_at` (clock resolution can collide for ops serialized
+    /// in the same tick under the lock), the later-appended one wins, i.e. the
+    /// **last committed** declaration. This keeps the effective record aligned
+    /// with the serialized commit / oplog-append order rather than resolving
+    /// ambiguously. `declared_at` stays the primary key, so cross-host records
+    /// (which arrive carrying their originating host's timestamp) still order by
+    /// `declared_at` exactly as before — the index only decides exact ties.
     pub fn latest(&self) -> Option<&StateVisibility> {
-        self.records.iter().max_by_key(|r| r.declared_at)
+        self.records
+            .iter()
+            .enumerate()
+            .max_by(|(ia, a), (ib, b)| a.declared_at.cmp(&b.declared_at).then_with(|| ia.cmp(ib)))
+            .map(|(_, record)| record)
     }
 }
 
@@ -255,6 +272,32 @@ mod tests {
         };
         let blob = StateVisibilityBlob::new(vec![early, late.clone()]);
         assert_eq!(blob.latest().unwrap(), &late);
+    }
+
+    #[test]
+    fn equal_timestamp_visibility_records_resolve_deterministically() {
+        // Two records stamped in the SAME tick (identical declared_at) must
+        // resolve to the LATER-appended one — append order is commit order, so
+        // the last-committed declaration wins, never an ambiguous pick. Models
+        // two ops serialized under the lock whose clock didn't advance between
+        // them.
+        let same = Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap();
+        let first = StateVisibility {
+            declared_at: same,
+            ..record(VisibilityTier::Internal)
+        };
+        let second = StateVisibility {
+            declared_at: same,
+            ..record(VisibilityTier::TeamScoped {
+                team_id: "infra".into(),
+            })
+        };
+        let blob = StateVisibilityBlob::new(vec![first, second.clone()]);
+        assert_eq!(
+            blob.latest().unwrap(),
+            &second,
+            "an equal-timestamp tie must resolve to the last-appended (last-committed) record"
+        );
     }
 
     #[test]

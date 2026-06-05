@@ -78,6 +78,12 @@ pub enum VisibilityCommitKind {
 pub struct VisibilityCommitOutcome {
     pub put: PutVisibilityOutcome,
     pub superseded: Option<ContentHash>,
+    /// The `declared_at` the commit stamped on the record **under the write
+    /// lock** (heddle#317 / PR #529 P1 final). Authoritative — callers must read
+    /// the effective timestamp from here, never from the value they passed in
+    /// (which the commit overwrites), so the displayed timestamp matches the
+    /// one that orders the record.
+    pub declared_at: chrono::DateTime<Utc>,
 }
 
 /// Outcome of a conflict-rechecked undo/redo visibility-sidecar restore
@@ -146,7 +152,10 @@ impl Repository {
     /// set` landing between "is it absent?" and "write the default" cannot be
     /// clobbered — the guard sees the racer's record and skips (heddle#317 r5).
     /// Returns `Ok(None)` when a record already existed, else the put outcome.
-    /// This is the atomic primitive the capture-time default binding stands on.
+    /// Convenience wrapper that takes the repo write lock around
+    /// [`put_state_visibility_locked_if_absent`](Self::put_state_visibility_locked_if_absent);
+    /// the capture-time default binding instead holds the lock itself (to stamp
+    /// `declared_at` under it) and calls the locked body directly.
     pub fn put_state_visibility_if_absent(
         &self,
         record: StateVisibility,
@@ -298,6 +307,18 @@ impl Repository {
             .with_context(|| "acquire repo write lock for state-visibility commit")?;
 
         let mut record = record;
+        // Stamp `declared_at` UNDER the write lock (heddle#317 / PR #529 P1
+        // final). The selection key `StateVisibilityBlob::latest` orders on must
+        // be established inside the serializing critical section, so for two
+        // overlapping local ops the timestamp order equals the commit / oplog-
+        // append order: the LAST committed record is the effective one. A value
+        // captured before the lock could let an earlier-started-but-later-
+        // committed op win `latest()` while appending its record last, so `show`
+        // would disagree with the oplog. (Cross-host records keep their
+        // originating host's `declared_at`; they arrive via
+        // `accept_wire_state_visibility`, which never reaches this stamp.)
+        let declared_at = Utc::now();
+        record.declared_at = declared_at;
         let superseded = match kind {
             VisibilityCommitKind::Set => None,
             VisibilityCommitKind::Promote => {
@@ -355,7 +376,11 @@ impl Repository {
             return Err(append_err);
         }
 
-        Ok(Some(VisibilityCommitOutcome { put, superseded }))
+        Ok(Some(VisibilityCommitOutcome {
+            put,
+            superseded,
+            declared_at,
+        }))
     }
 
     /// Append the visibility audit `OpRecord` for a just-written sidecar put.
@@ -586,11 +611,29 @@ impl Repository {
         let declarer = self
             .get_principal()
             .with_context(|| "resolve principal for capture-time visibility binding")?;
+        // Take the repo write lock for the whole stamp + if-absent put when the
+        // caller doesn't already hold it. The snapshot chokepoint passes
+        // `lock_held = true` (it owns the non-reentrant `flock` already), so we
+        // must NOT re-acquire there — the caller's lock covers the stamp below.
+        let _own_lock = if lock_held {
+            None
+        } else {
+            Some(self.locker().write().with_context(|| {
+                "acquire repo write lock for capture-time default visibility binding"
+            })?)
+        };
         let record = StateVisibility {
             state: *state,
             tier: tier.clone(),
             embargo_until: None,
             declarer,
+            // Stamp `declared_at` UNDER the write lock (heddle#317 / PR #529 P1
+            // final) so the default binding's timestamp orders with its commit /
+            // oplog-append, never a before-lock value — the same invariant the
+            // explicit `set`/`promote` commit holds. A later `visibility set`
+            // accreting onto this binding then always carries a strictly later
+            // under-lock stamp, so `latest()` resolves to the last-committed
+            // record.
             declared_at: Utc::now(),
             signature: None,
             supersedes: None,
@@ -601,11 +644,9 @@ impl Repository {
         // by an unconditional default-bind; `if_absent` skips instead, and a skip
         // (Ok(None)) stages no oplog entry. The captured before-image is the one
         // the locked write actually overwrote — for a record-free state, None.
-        let outcome = if lock_held {
-            self.put_state_visibility_locked_if_absent(record)?
-        } else {
-            self.put_state_visibility_if_absent(record)?
-        };
+        // The locked body is always correct to call here: either the caller holds
+        // the lock (`lock_held`) or `_own_lock` does.
+        let outcome = self.put_state_visibility_locked_if_absent(record)?;
         let Some(outcome) = outcome else {
             return Ok(None);
         };
@@ -1376,6 +1417,82 @@ mod tests {
                 team_id: "infra".into()
             },
             "the record surviving undo-of-B must be A's team-scoped declaration"
+        );
+    }
+
+    #[test]
+    fn last_committed_visibility_set_wins_under_concurrency() {
+        // The final-round invariant: `latest()` must resolve to the LAST-COMMITTED
+        // record, matching the oplog append order — never an earlier-started op
+        // that happens to carry a later mint-time `declared_at`. Two overlapping
+        // `visibility set`s on the same state: A is "minted" first (its passed-in
+        // declared_at is EARLIER) but B commits FIRST and A commits LAST. Because
+        // `commit_state_visibility` re-stamps `declared_at` UNDER the write lock,
+        // A — the last committed — gets the later timestamp, so `latest()` returns
+        // A's tier and A's oplog entry is appended last. Pre-fix the mint-time
+        // declared_at decided the winner, so B (later mint time) would have won
+        // `latest()` while A's record was appended last — `show` disagreeing with
+        // the oplog.
+        let (_dir, repo) = fresh_repo();
+        let state = ChangeId::from_bytes([57u8; 16]);
+
+        // A is minted first with an EARLIER would-be declared_at...
+        let a = StateVisibility {
+            declared_at: Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap(),
+            ..sample_record(
+                state,
+                VisibilityTier::TeamScoped {
+                    team_id: "infra".into(),
+                },
+            )
+        };
+        // ...B is minted later with a LATER would-be declared_at.
+        let b = StateVisibility {
+            declared_at: Utc.with_ymd_and_hms(2026, 6, 1, 12, 5, 0).unwrap(),
+            ..sample_record(state, VisibilityTier::Internal)
+        };
+
+        // B COMMITS FIRST, A COMMITS LAST.
+        let b_out = repo
+            .commit_state_visibility(b, VisibilityCommitKind::Set)
+            .expect("commit B")
+            .expect("a set always commits");
+        let a_out = repo
+            .commit_state_visibility(a, VisibilityCommitKind::Set)
+            .expect("commit A")
+            .expect("a set always commits");
+
+        // The under-lock stamp orders A after B even though A's mint-time
+        // timestamp was earlier — last committed gets the later stamp.
+        assert!(
+            a_out.declared_at > b_out.declared_at,
+            "the last-committed op (A) must carry the later under-lock declared_at"
+        );
+
+        // `latest()` / `show` resolves to A's tier — the last-committed record —
+        // NOT B's, even though B's mint-time declared_at was later.
+        let stored = repo
+            .get_state_visibility_for_state(&state)
+            .expect("read back");
+        assert_eq!(stored.records.len(), 2, "both records accreted");
+        assert_eq!(
+            stored.latest().expect("a record").tier,
+            VisibilityTier::TeamScoped {
+                team_id: "infra".into()
+            },
+            "the effective tier must be A's (last committed), not B's later-mint-time tier"
+        );
+
+        // And it matches the oplog append order: A's audit entry is appended LAST.
+        let sets = recorded_visibility_sets(&repo);
+        assert_eq!(sets.len(), 2, "two visibility-set audit entries");
+        assert_eq!(
+            sets[0].record_id, b_out.put.id,
+            "B's audit entry is appended first (committed first)"
+        );
+        assert_eq!(
+            sets[1].record_id, a_out.put.id,
+            "A's audit entry is appended last (committed last) — matching latest()"
         );
     }
 
