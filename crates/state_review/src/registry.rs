@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Trait + dispatch registry for the five risk-signal modules.
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use objects::object::{RiskSignal, State};
 use semantic::parser::FunctionDef;
@@ -21,6 +24,12 @@ use crate::config::ReviewSignalsConfig;
 pub struct SemanticContext {
     pub prior_functions: BTreeMap<PathBuf, Vec<FunctionDef>>,
     pub new_functions: BTreeMap<PathBuf, Vec<FunctionDef>>,
+    /// Repo-relative paths that actually changed in this review pass. Modules
+    /// that should only report on the diff (e.g. novelty) scope their emitted
+    /// signals to this set while still comparing against the full
+    /// `new_functions` corpus. Empty means "no changed files known" — such a
+    /// module stays quiet rather than scanning the whole repo.
+    pub changed_paths: BTreeSet<PathBuf>,
 }
 
 impl SemanticContext {

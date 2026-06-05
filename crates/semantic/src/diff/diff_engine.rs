@@ -26,6 +26,14 @@ use crate::{
     parser::{Language, ParsedFile},
 };
 
+/// Outcome of loading changed-file content under the byte budget: the files
+/// loaded within budget, plus the unloaded `overflow` tail past the cutoff
+/// (path + kind only) that the caller degrades to file-level entries.
+struct LoadOutcome {
+    loaded: Vec<LoadedChange>,
+    overflow: FileChangeSet,
+}
+
 pub(crate) struct SemanticEngine<'a, F, G>
 where
     F: FnMut(&Path) -> Result<Option<String>, anyhow::Error>,
@@ -124,7 +132,7 @@ where
             return Ok(output);
         }
 
-        let loaded = self.load_changes(&mut output.fallback_reasons)?;
+        let LoadOutcome { loaded, overflow } = self.load_changes(&mut output.fallback_reasons)?;
         output.changes = build_file_level_changes(&loaded);
         output.file_renames = detect_renames(&loaded, self.options);
         apply_renames(&mut output.changes, &output.file_renames);
@@ -146,6 +154,15 @@ where
                 &output.file_renames,
             ));
             suppress_redundant_file_modified(&mut output.changes);
+        }
+
+        // The over-budget tail was intentionally not loaded (the perf win), but
+        // every changed file must still appear in `result.changes`. Degrade the
+        // unloaded tail to conservative file-level entries via the same path the
+        // changed-file-count budget uses — built from the raw change (path +
+        // kind), with no old/new content loaded.
+        if !overflow.is_empty() {
+            output.changes.extend(fallback_file_changes(&overflow));
         }
 
         output.aggregated = aggregate.then(|| aggregate_changes(output.changes.clone()));
@@ -196,10 +213,22 @@ where
     fn load_changes(
         &mut self,
         fallback_reasons: &mut Vec<SemanticFallbackReason>,
-    ) -> Result<Vec<LoadedChange>, anyhow::Error> {
-        let mut loaded = Vec::with_capacity(self.file_changes.len());
+    ) -> Result<LoadOutcome, anyhow::Error> {
+        let raw: Vec<&objects::object::FileChange> = self.file_changes.iter().collect();
+        let mut loaded = Vec::with_capacity(raw.len());
         let mut total_bytes = 0usize;
-        for change in &self.file_changes {
+        let mut cutoff = raw.len();
+        for (index, change) in raw.iter().enumerate() {
+            // Enforce the byte budget *before* loading the next file: once the
+            // cumulative total has crossed the cap we stop, leaving the rest of
+            // the corpus unloaded rather than paying the I/O + allocation for
+            // files we are about to discard. The file that tips the running
+            // total over the cap is the last one loaded; everything from here on
+            // is the overflow tail that degrades to file-level entries.
+            if total_bytes > self.options.budget.max_total_bytes {
+                cutoff = index;
+                break;
+            }
             let path = PathBuf::from(&change.path);
             let old_content = match change.kind {
                 DiffKind::Deleted | DiffKind::Modified => (self.load_old)(&path)?,
@@ -212,11 +241,19 @@ where
             total_bytes += old_content.as_ref().map_or(0, String::len)
                 + new_content.as_ref().map_or(0, String::len);
             loaded.push(LoadedChange::new(
-                change.clone(),
+                (*change).clone(),
                 path,
                 old_content,
                 new_content,
             ));
+        }
+
+        // Retain the unloaded tail so the caller can degrade it to conservative
+        // file-level entries instead of dropping those changed files. No content
+        // is read for these — only their path + kind survives.
+        let mut overflow = FileChangeSet::new();
+        for change in &raw[cutoff..] {
+            overflow.push((*change).clone());
         }
 
         if total_bytes > self.options.budget.max_total_bytes {
@@ -225,7 +262,7 @@ where
                 actual: total_bytes,
             });
         }
-        Ok(loaded)
+        Ok(LoadOutcome { loaded, overflow })
     }
 
     fn parse_files(
@@ -313,12 +350,162 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::path::Path;
 
     use objects::object::{DiffKind, FileChangeSet};
 
     use super::*;
     use crate::cache::SemanticParseCache;
+    use crate::diff::SemanticBudget;
+
+    #[test]
+    fn diff_budget_skips_load_past_cap() {
+        // Five modified files, each ~100 bytes per side (~200 total). A budget
+        // of 350 bytes is crossed while loading the second file, so only the
+        // first two files should ever be loaded — files 3..5 must NOT be
+        // touched. Before the fix the engine loaded every file and only
+        // checked the cap afterwards, so all five were loaded.
+        let body = "a".repeat(100);
+        let file_changes = FileChangeSet::from(vec![
+            ("f0.rs".to_string(), DiffKind::Modified),
+            ("f1.rs".to_string(), DiffKind::Modified),
+            ("f2.rs".to_string(), DiffKind::Modified),
+            ("f3.rs".to_string(), DiffKind::Modified),
+            ("f4.rs".to_string(), DiffKind::Modified),
+        ]);
+        let cache = SemanticParseCache::default();
+        let options = SemanticDiffOptions {
+            budget: SemanticBudget {
+                max_total_bytes: 350,
+                ..SemanticBudget::default()
+            },
+            ..SemanticDiffOptions::default()
+        };
+
+        let old_loads = Cell::new(0usize);
+        let new_loads = Cell::new(0usize);
+
+        let engine = SemanticEngine::new(
+            file_changes,
+            |_path| {
+                old_loads.set(old_loads.get() + 1);
+                Ok(Some(body.clone()))
+            },
+            |_path| {
+                new_loads.set(new_loads.get() + 1);
+                Ok(Some(body.clone()))
+            },
+            &options,
+            &cache,
+        );
+
+        let result = engine.full().expect("semantic diff should succeed");
+
+        // f0 (200) is under budget, f1 tips the running total to 400 > 350 and
+        // is the last load; f2..f4 are skipped entirely.
+        assert_eq!(old_loads.get(), 2, "only the under-budget prefix + tipping file load");
+        assert_eq!(new_loads.get(), 2, "only the under-budget prefix + tipping file load");
+        assert!(
+            result
+                .fallback_reasons
+                .iter()
+                .any(|r| matches!(r, SemanticFallbackReason::TotalByteBudgetExceeded { .. })),
+            "over-budget set should still report the byte-budget fallback: {:?}",
+            result.fallback_reasons
+        );
+    }
+
+    #[test]
+    fn over_budget_tail_degrades_to_file_level_not_dropped() {
+        // Five modified files, ~200 bytes each. The 350-byte budget is crossed
+        // while loading f1, so f2..f4 are the over-budget tail: they must NOT be
+        // loaded, but must STILL appear in `result.changes` as conservative
+        // file-level fallback entries (classification None) — not omitted.
+        let body = "a".repeat(100);
+        let file_changes = FileChangeSet::from(vec![
+            ("f0.rs".to_string(), DiffKind::Modified),
+            ("f1.rs".to_string(), DiffKind::Modified),
+            ("f2.rs".to_string(), DiffKind::Modified),
+            ("f3.rs".to_string(), DiffKind::Modified),
+            ("f4.rs".to_string(), DiffKind::Modified),
+        ]);
+        let cache = SemanticParseCache::default();
+        let options = SemanticDiffOptions {
+            budget: SemanticBudget {
+                max_total_bytes: 350,
+                ..SemanticBudget::default()
+            },
+            ..SemanticDiffOptions::default()
+        };
+
+        let old_loads = Cell::new(0usize);
+        let new_loads = Cell::new(0usize);
+
+        let engine = SemanticEngine::new(
+            file_changes,
+            |_path| {
+                old_loads.set(old_loads.get() + 1);
+                Ok(Some(body.clone()))
+            },
+            |_path| {
+                new_loads.set(new_loads.get() + 1);
+                Ok(Some(body.clone()))
+            },
+            &options,
+            &cache,
+        );
+
+        let result = engine.full().expect("semantic diff should succeed");
+
+        // Every changed file is represented, including the over-budget tail.
+        for name in ["f0.rs", "f1.rs", "f2.rs", "f3.rs", "f4.rs"] {
+            assert!(
+                result.changes.iter().any(|change| matches!(
+                    change,
+                    objects::object::SemanticChange::FileModified { path, .. }
+                        if path == Path::new(name)
+                )),
+                "changed file {name} must appear in result.changes (not dropped): {:?}",
+                result.changes
+            );
+        }
+
+        // The over-budget tail degrades to file-level fallback (classification
+        // None), while the loaded prefix carries semantic detail (Some).
+        let classification_of = |name: &str| {
+            result.changes.iter().find_map(|change| match change {
+                objects::object::SemanticChange::FileModified {
+                    path,
+                    classification,
+                    ..
+                } if path == Path::new(name) => Some(classification.is_some()),
+                _ => None,
+            })
+        };
+        assert_eq!(classification_of("f0.rs"), Some(true), "loaded prefix keeps detail");
+        assert_eq!(classification_of("f1.rs"), Some(true), "loaded prefix keeps detail");
+        for name in ["f2.rs", "f3.rs", "f4.rs"] {
+            assert_eq!(
+                classification_of(name),
+                Some(false),
+                "over-budget tail {name} must be conservative file-level fallback"
+            );
+        }
+
+        // The tail's content was never loaded — only the prefix + tipping file.
+        assert_eq!(old_loads.get(), 2, "tail files must not be loaded");
+        assert_eq!(new_loads.get(), 2, "tail files must not be loaded");
+
+        assert!(
+            result
+                .fallback_reasons
+                .iter()
+                .any(|r| matches!(r, SemanticFallbackReason::TotalByteBudgetExceeded { .. })),
+            "byte-budget fallback reason must still be recorded: {:?}",
+            result.fallback_reasons
+        );
+    }
 
     #[test]
     fn pure_function_body_diff_does_not_load_dependency_manifest() {
