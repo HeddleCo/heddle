@@ -701,9 +701,23 @@ impl StartThread {
         // plan-time bool. An adopted dir is cleared (not deleted), a self-created
         // dir is removed wholesale, and a refused/unestablished leaf (`None`) is
         // left untouched (cid 3335052857 / 3335586962).
+        let rewind_repo = tx.repo();
         tx.step_nonatomic(
             move || Ok(()),
-            move |()| rewind_checkout(&rewind_abs, claim_from_cell(&rewind_claim)),
+            move |()| {
+                let claim = claim_from_cell(&rewind_claim);
+                // Drop the per-root `.leaves` / withheld-marker sidecars the
+                // checkout chokepoint wrote (keyed by canonical root in the
+                // SHARED heddle dir, so `rewind_checkout` — which only touches
+                // the checkout DIRECTORY — never reaches them). Clear BEFORE the
+                // rewind removes the dir: the canonical key is derived by
+                // canonicalizing the still-present root. A rolled-back start must
+                // leave no orphaned sidecar (heddle#316 r11 P2).
+                if let Some(claim) = claim.as_ref() {
+                    rewind_repo.clear_materialized_root_records(&claim.handle().io_path())?;
+                }
+                rewind_checkout(&rewind_abs, claim)
+            },
             move || {
                 #[cfg(test)]
                 if materialize_fault_trips() {
@@ -1348,6 +1362,61 @@ mod tests {
         // The origin's dep dirs are untouched (we unlink, never follow).
         assert!(temp.path().join("dep_a").is_dir());
         assert!(temp.path().join("dep_b").is_dir());
+    }
+
+    /// Sorted file names directly under `dir` (empty when the dir is absent) —
+    /// used to detect whether a failed start orphaned a per-root sidecar.
+    fn sidecar_entries(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// #316 / PR #528 r11 P2: `checkout_state_gated` (reached by atomic
+    /// `start --path`) writes a per-root `.leaves` materialized-leaves record (and,
+    /// for a withheld base, a withheld marker) under the SHARED heddle dir, keyed
+    /// by the canonical worktree root. Those sidecars sit OUTSIDE the checkout
+    /// directory, so the checkout-dir rewind never reaches them. A later start
+    /// step that fails and rolls the transaction back must therefore drop them
+    /// explicitly, or they orphan. The `stage_checkout` inverse now clears the
+    /// per-root records before rewinding the dir.
+    #[test]
+    fn failed_atomic_start_rolls_back_leaves_sidecar() {
+        let (temp, repo, state) = repo_with_state(&["dep_a", "dep_b"]);
+        let checkout = temp.path().join("iso");
+
+        let roots_dir = repo.heddle_dir().join("materialized-roots");
+        let withheld_dir = repo.heddle_dir().join("withheld-checkouts");
+        let before_roots = sidecar_entries(&roots_dir);
+        let before_withheld = sidecar_entries(&withheld_dir);
+
+        // Fail the SECOND hydrate link — AFTER the checkout (and its per-root
+        // `.leaves` sidecar) is fully written — so the rollback must reach the
+        // root-keyed sidecars the checkout-dir rewind cannot.
+        let out = with_start_fault(StartFault::HydrateNth(1), || {
+            start_thread(&repo, solid_args("iso", &checkout, &state, true))
+        });
+        assert!(out.is_err(), "a partial hydrate must fail the start");
+        assert!(
+            std::fs::symlink_metadata(&checkout).is_err(),
+            "the checkout dir must be removed on rollback"
+        );
+
+        let after_roots = sidecar_entries(&roots_dir);
+        let after_withheld = sidecar_entries(&withheld_dir);
+        assert_eq!(
+            before_roots, after_roots,
+            "a rolled-back start must not orphan a per-root .leaves sidecar"
+        );
+        assert_eq!(
+            before_withheld, after_withheld,
+            "a rolled-back start must not orphan a withheld marker"
+        );
     }
 
     #[cfg(unix)]

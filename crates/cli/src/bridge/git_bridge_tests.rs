@@ -369,20 +369,38 @@ fn handle_http_backend_connection(
 
 impl GitDaemon {
     fn spawn(root: &std::path::Path) -> Self {
+        Self::spawn_with_push(root, false)
+    }
+
+    /// Spawn a daemon that also serves `receive-pack`, so the network PUSH path
+    /// (`push_network_remote_with_updates`) can be exercised against a real wire
+    /// remote — the only way to cover the URL/network destination reconciliation
+    /// (heddle#316 r11). `git daemon` denies anonymous push unless
+    /// `--enable=receive-pack` is passed.
+    fn spawn_push(root: &std::path::Path) -> Self {
+        Self::spawn_with_push(root, true)
+    }
+
+    fn spawn_with_push(root: &std::path::Path, allow_push: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
         let port = listener.local_addr().expect("listener addr").port();
         drop(listener);
 
+        let mut args: Vec<String> = vec![
+            "daemon".to_string(),
+            "--reuseaddr".to_string(),
+            "--export-all".to_string(),
+            format!("--base-path={}", root.display()),
+            "--listen=127.0.0.1".to_string(),
+            format!("--port={port}"),
+        ];
+        if allow_push {
+            args.push("--enable=receive-pack".to_string());
+        }
+        args.push(root.to_str().expect("root path").to_string());
+
         let child = Command::new("git")
-            .args([
-                "daemon",
-                "--reuseaddr",
-                "--export-all",
-                &format!("--base-path={}", root.display()),
-                "--listen=127.0.0.1",
-                &format!("--port={port}"),
-                root.to_str().expect("root path"),
-            ])
+            .args(&args)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
@@ -3794,5 +3812,237 @@ fn export_still_deletes_previously_exported_then_retracted_ref() {
             .find_reference("refs/heads/main")
             .is_err(),
         "a previously-exported, now-retracted branch must be DELETED at the destination"
+    );
+}
+
+/// #316 / PR #528 r11 Finding HcDQU: the retraction delete-set must propagate to
+/// URL/NETWORK remotes too, not only local-path destinations. A branch exported
+/// public over the `git://` push path and then retracted (whole line embargoed)
+/// must be DELETED on the wire remote — pre-r11 the URL push only sent additive
+/// updates, so a retracted ref lingered on the remote after vanishing locally.
+/// Uses the real network receive-pack path (`push_network_remote_with_updates`),
+/// NOT `copy_mirror_to_path_with_updates`.
+#[test]
+fn retraction_delete_propagates_to_url_remote() {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    std::fs::write(heddle_temp.path().join("a.txt"), b"only\n").unwrap();
+    repo.snapshot(Some("only".into()), None).unwrap();
+
+    // A real wire (git://) remote that also serves receive-pack.
+    let remote_root = TempDir::new().expect("remote root");
+    let _remote_repo = init_named_bare_git_repo(&remote_root, "remote.git");
+    // Point the bare remote's HEAD at a placeholder branch so receive-pack does
+    // not refuse to delete refs/heads/main later as "the current branch".
+    std::fs::write(
+        remote_root.path().join("remote.git").join("HEAD"),
+        b"ref: refs/heads/__heddle_placeholder\n",
+    )
+    .unwrap();
+    let daemon = GitDaemon::spawn_push(remote_root.path());
+    let url = daemon.url("remote.git");
+
+    // Export public over the NETWORK push path — main lands on the remote.
+    let mut bridge = GitBridge::new(&repo);
+    bridge.push(&url).expect("first network push");
+    {
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        assert!(
+            remote.find_reference("refs/heads/main").is_ok(),
+            "the remote must advertise main while the line is public"
+        );
+    }
+
+    // Embargo the WHOLE line so the served mirror stops serving refs/heads/main.
+    for state in repo.store().list_states().unwrap() {
+        repo.put_state_visibility(StateVisibility {
+            state,
+            tier: VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+            embargo_until: None,
+            declarer: Principal {
+                name: "Grace Hopper".into(),
+                email: "grace@example.com".into(),
+            },
+            declared_at: Utc::now(),
+            signature: None,
+            supersedes: None,
+        })
+        .unwrap();
+    }
+
+    // Re-push: main was heddle-exported AND is no longer served → DELETED on the
+    // wire remote, not just locally.
+    bridge.push(&url).expect("second network push");
+    let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
+    assert!(
+        remote.find_reference("refs/heads/main").is_err(),
+        "a previously-exported, now-retracted branch must be DELETED on the URL/network remote"
+    );
+}
+
+/// #316 / PR #528 r11 Finding HcDQO: a destination push must FORCE a deliberate
+/// embargo rewind. When a previously-exported tip B is embargoed but parent A
+/// stays served, the served frontier lags the branch back to A — a non-fast-
+/// forward rewind. Pre-r11 the local-path push ran a blanket FF guard that
+/// REJECTED it, so the destination kept advertising the embargoed B. The unified
+/// reconciliation distinguishes a backward rewind from a fork and forces the
+/// former through.
+#[test]
+fn embargo_rewind_forced_through_destination_push() {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    // Linear thread: public base A, then public tip B.
+    std::fs::write(heddle_temp.path().join("a.txt"), b"base\n").unwrap();
+    repo.snapshot(Some("base".into()), None).unwrap();
+    let state_a = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+    std::fs::write(heddle_temp.path().join("b.txt"), b"fix\n").unwrap();
+    repo.snapshot(Some("fix".into()), None).unwrap();
+    let state_b = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+
+    // First export to a real bare destination — main advertises the public tip B.
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    let mut bridge = GitBridge::new(&repo);
+    bridge.export_to_path(&dest_path).expect("first export");
+    let oid_a = bridge.mapping.get_git(&state_a).expect("A minted");
+    let oid_b = bridge.mapping.get_git(&state_b).expect("B minted");
+    {
+        let dest = gix::open(&dest_path).expect("open dest");
+        let tip = dest
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_id()
+            .unwrap()
+            .detach();
+        assert_eq!(tip, oid_b, "destination advertises the public tip B");
+    }
+
+    // Embargo only B; parent A stays served.
+    repo.put_state_visibility(StateVisibility {
+        state: state_b,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Grace Hopper".into(),
+            email: "grace@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+
+    // Re-export: the served frontier lags to A — a deliberate NON-fast-forward
+    // rewind the destination push must FORCE through, not reject with the FF
+    // guard. Pre-r11 this errored.
+    bridge
+        .export_to_path(&dest_path)
+        .expect("second export must force the embargo rewind through the destination");
+    let dest = gix::open(&dest_path).expect("reopen dest");
+    let tip = dest
+        .find_reference("refs/heads/main")
+        .unwrap()
+        .peel_to_id()
+        .unwrap()
+        .detach();
+    assert_eq!(
+        tip, oid_a,
+        "the destination branch must be rewound to the served ancestor A"
+    );
+    assert_ne!(
+        tip, oid_b,
+        "the destination must not keep advertising the embargoed tip B"
+    );
+}
+
+/// #316 / PR #528 r11: the r8 foreign-ref scoping must hold on the UNIFIED
+/// URL/network path. A branch INSIDE `refs/heads/*` that heddle never exported —
+/// planted directly on the wire remote by another user/tool — must survive a
+/// normal push: it is not in heddle's per-remote exported-refs record, so it can
+/// never join the delete-set.
+#[test]
+fn foreign_ref_on_url_remote_survives() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    std::fs::write(heddle_temp.path().join("a.txt"), b"only\n").unwrap();
+    repo.snapshot(Some("only".into()), None).unwrap();
+
+    let remote_root = TempDir::new().expect("remote root");
+    let _remote_repo = init_named_bare_git_repo(&remote_root, "remote.git");
+    let daemon = GitDaemon::spawn_push(remote_root.path());
+    let url = daemon.url("remote.git");
+
+    // First public push — records main as heddle-exported to THIS url remote.
+    let mut bridge = GitBridge::new(&repo);
+    bridge.push(&url).expect("first network push");
+
+    // Plant a branch heddle never exported, INSIDE the heddle-managed
+    // refs/heads/* namespace, directly on the remote.
+    {
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        let main_oid = remote
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_id()
+            .unwrap()
+            .detach();
+        set_reference(
+            &remote,
+            "refs/heads/other-user-branch",
+            main_oid,
+            PreviousValue::Any,
+            "test: foreign branch heddle never exported",
+        )
+        .expect("plant foreign managed ref");
+    }
+
+    // Re-push with nothing retracted — the foreign branch must survive (the r8
+    // delete-set scoping holds on the unified URL/network path).
+    bridge.push(&url).expect("second network push");
+
+    let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
+    assert!(
+        remote.find_reference("refs/heads/other-user-branch").is_ok(),
+        "a foreign branch heddle never exported must NOT be deleted on the URL/network remote"
+    );
+    assert!(
+        remote.find_reference("refs/heads/main").is_ok(),
+        "a still-served heddle branch must survive the reconciliation"
     );
 }

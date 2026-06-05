@@ -372,6 +372,26 @@ impl Repository {
         Ok(())
     }
 
+    /// Remove the per-worktree-root sidecars [`checkout_state_gated`] writes —
+    /// the clobber-proof materialized-leaves record and (if present) the withheld
+    /// marker — for the checkout at `worktree_root`. Both live under the SHARED
+    /// heddle dir keyed by the canonical worktree root, so the atomic `start`
+    /// rollback's checkout-directory rewind never reaches them; a failed-then-
+    /// rolled-back start would otherwise orphan them. Canonicalizes `worktree_root`
+    /// the same way the chokepoint did, so the key matches; the dir must still
+    /// exist at call time (the rollback clears these BEFORE rewinding the dir).
+    /// Idempotent: missing sidecars are a no-op (heddle#316 r11 P2).
+    ///
+    /// [`checkout_state_gated`]: Repository::checkout_state_gated
+    pub fn clear_materialized_root_records(&self, worktree_root: &Path) -> Result<()> {
+        let canonical = canonical_worktree_path(worktree_root);
+        crate::thread_manifest::clear_materialized_leaves(self.heddle_dir(), &canonical)
+            .map_err(HeddleError::Io)?;
+        crate::thread_manifest::clear_withheld_checkout(self.heddle_dir(), &canonical)
+            .map_err(HeddleError::Io)?;
+        Ok(())
+    }
+
     /// Write the [`ThreadManifest`] sidecar for a worktree that's
     /// already been materialised to `dest` against `state_id`. Used
     /// by the CLI's `start` path, which calls `materialize_tree`

@@ -604,6 +604,24 @@ pub fn read_materialized_leaves(
     Ok(Some(body.leaves.into_iter().collect()))
 }
 
+/// Remove the clobber-proof per-root materialized-leaves record for
+/// `canonical_worktree_root`. Idempotent: a missing record is a no-op success.
+/// Used by the atomic `start` rollback to drop a record a failed-then-rolled-back
+/// materialize would otherwise orphan in the shared heddle dir — the record is
+/// keyed by canonical root, so the checkout-directory rewind never reaches it
+/// (heddle#316 r11 P2).
+pub fn clear_materialized_leaves(
+    heddle_dir: &Path,
+    canonical_worktree_root: &Path,
+) -> io::Result<()> {
+    let path = materialized_leaves_path(heddle_dir, canonical_worktree_root);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(enrich_fs_error(&path, "removing", e)),
+    }
+}
+
 /// Atomically write `manifest` to disk for `thread`. Writes to a
 /// sibling temp file first then renames into place so a torn write
 /// can't leave a half-baked manifest visible to the next reader.

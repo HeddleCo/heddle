@@ -25,7 +25,7 @@ use gix_transport::{
 };
 use objects::{
     error::HeddleError,
-    object::{ChangeId, ChangeIdParseError, FileMode, Principal, ThreadName, Tree},
+    object::{ChangeId, ChangeIdParseError, ContentHash, FileMode, Principal, ThreadName, Tree},
     store::ObjectStore,
 };
 use refs::Head;
@@ -792,7 +792,13 @@ impl<'a> GitBridge<'a> {
                 let mirror_repo = self.open_git_repo()?;
                 let updates =
                     collect_ref_updates_for_push(&mirror_repo, scope, current_branch.as_deref())?;
-                push_network_remote_with_updates(&mirror_repo, &url, &updates, force)
+                push_network_remote_with_updates(
+                    &mirror_repo,
+                    self.heddle_repo.heddle_dir(),
+                    &url,
+                    &updates,
+                    force,
+                )
             }
         }
     }
@@ -876,19 +882,45 @@ impl<'a> GitBridge<'a> {
             &target_repo,
             updates.iter().map(|update| update.target),
         )?;
-        if !force {
-            validate_ref_updates_fast_forward(&target_repo, updates)?;
+
+        // The ONE served-frontier reconciliation, shared with the URL/network
+        // push path (heddle#316 r11). It writes survivors — FORCING a deliberate
+        // embargo rewind past the FF guard (a prior tip lagged down to its served
+        // ancestor) while still rejecting a true fork — AND deletes the refs
+        // heddle previously exported here that the served mirror no longer
+        // carries (retraction), leaving foreign refs heddle never exported
+        // untouched. `served_full_names` is the FULL mirror ref set so a scoped
+        // push never deletes a still-served out-of-scope sibling.
+        let served_full_names: HashSet<String> = collect_ref_updates(&mirror_repo)?
+            .iter()
+            .map(full_ref_name)
+            .collect();
+        let old_at_destination = read_destination_ref_map(&target_repo)?;
+        let previously_exported = read_exported_refs(&target_repo)?;
+        let plan = plan_destination_reconcile(
+            &mirror_repo,
+            updates,
+            &served_full_names,
+            &old_at_destination,
+            &previously_exported,
+            force,
+        )?;
+        for write in &plan.writes {
+            // The plan already decided force-vs-FF per ref (erroring on a fork
+            // unless `force`), so the destination write itself is unconditional —
+            // `PreviousValue::Any` mirrors the forced mirror-side branch rewind.
+            set_reference(
+                &target_repo,
+                &write.full_name,
+                write.new,
+                PreviousValue::Any,
+                log_message,
+            )?;
         }
-        apply_ref_updates(&target_repo, updates, log_message)?;
-        // Propagate retractions to the destination. `apply_ref_updates` only
-        // WRITES the surviving refs; it never DELETES one that disappeared from
-        // the served mirror. So a branch/tag/note exported while public and then
-        // retracted (whole line → Private, marker retargeted, line rebased away)
-        // would keep pointing at now-private commits at the destination. Deleting
-        // the refs heddle PREVIOUSLY exported here that the served mirror no
-        // longer carries closes that leak for every ref family — while leaving a
-        // foreign ref heddle never exported untouched (heddle#316 CLASS 2).
-        reconcile_destination_ref_deletions(&mirror_repo, &target_repo, updates)?;
+        for delete in &plan.deletes {
+            delete_reference_if_present(&target_repo, &delete.full_name)?;
+        }
+        write_exported_refs(&target_repo, &plan.new_manifest)?;
         Ok(())
     }
 
@@ -2531,23 +2563,6 @@ fn full_ref_name(update: &RefUpdate) -> String {
     }
 }
 
-fn validate_ref_updates_fast_forward(
-    repo: &gix::Repository,
-    updates: &[RefUpdate],
-) -> GitResult<()> {
-    for update in updates {
-        if !matches!(update.namespace, RefNamespace::Branch | RefNamespace::Note) {
-            continue;
-        }
-        let full_name = full_ref_name(update);
-        if let Ok(mut reference) = repo.find_reference(&full_name) {
-            let old = reference.peel_to_id().map_err(git_err)?.detach();
-            ensure_commit_update_fast_forward(repo, &full_name, old, update.target)?;
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn ensure_commit_update_fast_forward(
     repo: &gix::Repository,
     name: &str,
@@ -2599,19 +2614,39 @@ fn commit_is_descendant_of(
 /// wrote here — never the raw destination namespace (heddle#316 CLASS 2).
 const HEDDLE_EXPORTED_REFS_FILE: &str = "heddle-exported-refs";
 
+/// Directory, under heddle's OWN dir, holding the per-URL-remote exported-refs
+/// records. A network remote (`git://`, `ssh://`, `https://`) has no local git
+/// dir heddle can drop a sidecar into, so its record lives here instead — keyed
+/// by a hash of the remote URL. This is the network sibling of
+/// [`HEDDLE_EXPORTED_REFS_FILE`]: the SAME delete-set reconciliation, with the
+/// only difference being WHERE the record is stored (heddle#316 r11).
+const HEDDLE_NETWORK_EXPORTED_REFS_DIR: &str = "git-network-exported-refs";
+
 fn exported_refs_manifest_path(target_repo: &gix::Repository) -> PathBuf {
     target_repo.git_dir().join(HEDDLE_EXPORTED_REFS_FILE)
 }
 
-/// The set of full ref names heddle has previously exported to `target_repo`.
-/// `Ok(empty)` when no record exists yet — a first export, OR a destination
-/// heddle wrote to before this record existed. Returning empty (rather than
-/// assuming the destination's current heddle-namespace refs were heddle's) is
-/// the conservative choice: it can never delete a foreign ref on the first
-/// export after this code lands.
-pub(crate) fn read_exported_refs(target_repo: &gix::Repository) -> GitResult<HashSet<String>> {
-    let path = exported_refs_manifest_path(target_repo);
-    match fs::read_to_string(&path) {
+/// On-disk location of the exported-refs record for the network remote at `url`.
+/// Keyed by a hash of the URL string so an arbitrarily long / non-ASCII URL maps
+/// to a fixed-length, filesystem-safe filename. Stored under heddle's own dir
+/// (the remote is not local, so there is no destination git dir to host it).
+fn network_exported_refs_path(heddle_dir: &Path, url: &gix::Url) -> PathBuf {
+    let key =
+        ContentHash::compute_typed("git-network-exported-refs", url.to_string().as_bytes())
+            .to_hex();
+    heddle_dir
+        .join(HEDDLE_NETWORK_EXPORTED_REFS_DIR)
+        .join(format!("{key}.refs"))
+}
+
+/// The set of full ref names heddle has previously exported to the destination
+/// whose record lives at `path`. `Ok(empty)` when no record exists yet — a first
+/// export, OR a destination heddle wrote to before this record existed. Returning
+/// empty (rather than assuming the destination's current heddle-namespace refs
+/// were heddle's) is the conservative choice: it can never delete a foreign ref
+/// on the first export after this code lands.
+fn read_exported_refs_at(path: &Path) -> GitResult<HashSet<String>> {
+    match fs::read_to_string(path) {
         Ok(text) => Ok(text
             .lines()
             .map(str::trim)
@@ -2623,13 +2658,9 @@ pub(crate) fn read_exported_refs(target_repo: &gix::Repository) -> GitResult<Has
     }
 }
 
-/// Persist `refs` (full ref names) as heddle's record of what it has exported to
-/// `target_repo`. Atomic temp+rename so a torn write can't surface a half-record.
-pub(crate) fn write_exported_refs(
-    target_repo: &gix::Repository,
-    refs: &HashSet<String>,
-) -> GitResult<()> {
-    let path = exported_refs_manifest_path(target_repo);
+/// Persist `refs` (full ref names) as heddle's exported-refs record at `path`.
+/// Atomic temp+rename so a torn write can't surface a half-record.
+fn write_exported_refs_at(path: &Path, refs: &HashSet<String>) -> GitResult<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -2638,57 +2669,213 @@ pub(crate) fn write_exported_refs(
     let body = sorted.join("\n");
     let tmp = path.with_extension("tmp");
     fs::write(&tmp, body)?;
-    fs::rename(&tmp, &path)?;
+    fs::rename(&tmp, path)?;
     Ok(())
 }
 
-/// Propagate retractions to the destination by DELETING the refs heddle
-/// PREVIOUSLY exported there that the served mirror no longer carries — scoped
-/// strictly to refs heddle exported, NEVER the raw destination namespace. The
-/// retraction sibling of [`apply_ref_updates`] (which only writes survivors)
-/// (heddle#316 CLASS 2).
-///
-/// The delete-set is `previously-heddle-exported` − `currently-served`. A
-/// foreign branch/tag/note created at a shared local bare remote by another
-/// user or tool — which heddle never exported — is never in
-/// `previously-heddle-exported`, so a normal export/push never deletes it,
-/// even though it sits inside `refs/heads|tags|notes/*`. This replaces the r7
-/// logic that diffed the WHOLE destination namespace and so deleted such foreign
-/// refs (r8 HOLE 2). Applies uniformly across heads, tags, and notes.
-///
-/// The served set is the FULL mirror ref set (`collect_ref_updates(mirror)`),
-/// deliberately NOT the caller's possibly-scope-filtered `written`: a scoped
-/// push must delete only genuinely-retracted refs, never a still-served sibling
-/// that simply fell outside the push scope. `written` is the (possibly scoped)
-/// set this export just applied; it folds into the new record so a ref written
-/// this round is remembered as heddle-exported next time.
-fn reconcile_destination_ref_deletions(
-    mirror_repo: &gix::Repository,
-    target_repo: &gix::Repository,
-    written: &[RefUpdate],
-) -> GitResult<()> {
-    let served: HashSet<String> = collect_ref_updates(mirror_repo)?
-        .iter()
-        .map(full_ref_name)
-        .collect();
-    let previously_exported = read_exported_refs(target_repo)?;
+/// The set of full ref names heddle has previously exported to `target_repo`
+/// (the local-path destination record). See [`read_exported_refs_at`].
+pub(crate) fn read_exported_refs(target_repo: &gix::Repository) -> GitResult<HashSet<String>> {
+    read_exported_refs_at(&exported_refs_manifest_path(target_repo))
+}
 
-    for full in &previously_exported {
-        if !served.contains(full) {
-            delete_reference_if_present(target_repo, full)?;
+/// Persist the local-path destination's exported-refs record. See
+/// [`write_exported_refs_at`].
+pub(crate) fn write_exported_refs(
+    target_repo: &gix::Repository,
+    refs: &HashSet<String>,
+) -> GitResult<()> {
+    write_exported_refs_at(&exported_refs_manifest_path(target_repo), refs)
+}
+
+/// How a destination ref must move from its current `old` tip to the served
+/// `new` tip. The discriminator that lets EVERY push destination apply the SAME
+/// served-frontier reconciliation: a deliberate backward rewind (the embargo
+/// frontier lag) is FORCED past the fast-forward guard, while a true fork is
+/// still caught by it (heddle#316 r11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefMove {
+    /// `old == new` (or both absent) — nothing to do.
+    Unchanged,
+    /// No resolvable `old` at the destination — a fresh ref.
+    Create,
+    /// `new` descends from `old` — an ordinary fast-forward.
+    FastForward,
+    /// `old` descends from `new` — a deliberate backward rewind: the served
+    /// frontier was lagged down to an ancestor because the prior tip (or a
+    /// descendant of `new`) was embargoed/retracted. MUST be forced through at
+    /// every destination, exactly as the mirror-side branch rewind forces it.
+    Rewind,
+    /// `old` and `new` share no ancestor line (or `old` is unresolvable here) —
+    /// the divergence the fast-forward guard exists to catch.
+    Diverged,
+}
+
+/// Classify how a destination ref moves from `old` to `new`, resolving the
+/// topology in `repo` (the mirror, which holds every served object PLUS any
+/// previously-exported-now-embargoed object the purge dropped from the mapping
+/// but not from the object DB). The single place that distinguishes a deliberate
+/// embargo rewind from a fork, so both push destinations force the former and
+/// reject the latter identically.
+fn classify_ref_move(
+    repo: &gix::Repository,
+    old: Option<ObjectId>,
+    new: ObjectId,
+) -> GitResult<RefMove> {
+    let Some(old) = old else {
+        return Ok(RefMove::Create);
+    };
+    if old == repo.object_hash().null() {
+        return Ok(RefMove::Create);
+    }
+    if old == new {
+        return Ok(RefMove::Unchanged);
+    }
+    // `new` is the served frontier we just minted/copied, so walking from it is
+    // always safe. A fast-forward is `new` reaching `old`.
+    if commit_is_descendant_of(repo, new, old)? {
+        return Ok(RefMove::FastForward);
+    }
+    // A backward rewind is `old` reaching `new`. `old` is the destination's prior
+    // tip — a commit heddle previously published, so its objects survive in the
+    // mirror (the embargo purge drops the ChangeId→OID mapping, never the object).
+    // If `old` is NOT resolvable here, we cannot prove a rewind: treat it as the
+    // divergence the FF guard catches.
+    if repo.find_commit(old).is_ok() && commit_is_descendant_of(repo, old, new)? {
+        return Ok(RefMove::Rewind);
+    }
+    Ok(RefMove::Diverged)
+}
+
+/// A served ref a push destination must write: its full name, the destination's
+/// current `old` tip (for the receive-pack command; `None`/absent = a creation),
+/// and the served `new` tip.
+struct PlannedRefWrite {
+    full_name: String,
+    old: Option<ObjectId>,
+    new: ObjectId,
+}
+
+/// A previously-exported ref the served mirror no longer carries: it must be
+/// DELETED at the destination. Carries the destination's current `old` tip for
+/// the receive-pack delete command (`<old> <zero> <ref>`).
+struct PlannedRefDelete {
+    full_name: String,
+    old: ObjectId,
+}
+
+/// The ONE reconciliation plan EVERY push destination applies, so its published
+/// refs converge to the served frontier by construction.
+struct DestinationReconcilePlan {
+    /// Survivors to write — creations, fast-forwards, and FORCED embargo rewinds.
+    writes: Vec<PlannedRefWrite>,
+    /// Previously-exported refs the mirror no longer serves AND that still exist
+    /// at the destination — to delete. Scoped to heddle-owned refs (never foreign).
+    deletes: Vec<PlannedRefDelete>,
+    /// The exported-refs record to persist for this destination after the push.
+    new_manifest: HashSet<String>,
+}
+
+/// Build the served-frontier reconciliation plan shared by the local-path and
+/// URL/network push destinations (heddle#316 r11). The destination's published
+/// refs become the served frontier: retraction DELETES propagate, deliberate
+/// embargo REWINDS are forced past the FF guard, and foreign refs heddle never
+/// exported are left untouched.
+///
+/// * `mirror_repo` — resolves the rewind-vs-fork topology (see
+///   [`classify_ref_move`]).
+/// * `written` — the (possibly scope-filtered) served refs this push applies.
+/// * `served_full_names` — the FULL served mirror ref set (NOT scope-filtered):
+///   the delete-set is computed against this so a scoped push never deletes a
+///   still-served sibling that merely fell outside its scope.
+/// * `old_at_destination` — the destination's current ref tips (full name → oid).
+/// * `previously_exported` — heddle's record of what it exported to THIS
+///   destination; the delete-set and foreign-ref scoping derive from it.
+/// * `force` — the user's explicit `--force`: additionally forces a true fork.
+fn plan_destination_reconcile(
+    mirror_repo: &gix::Repository,
+    written: &[RefUpdate],
+    served_full_names: &HashSet<String>,
+    old_at_destination: &HashMap<String, ObjectId>,
+    previously_exported: &HashSet<String>,
+    force: bool,
+) -> GitResult<DestinationReconcilePlan> {
+    let mut writes = Vec::new();
+    for update in written {
+        let full = full_ref_name(update);
+        let old = old_at_destination.get(&full).copied();
+        let proceed = if matches!(update.namespace, RefNamespace::Branch | RefNamespace::Note) {
+            match classify_ref_move(mirror_repo, old, update.target)? {
+                RefMove::Unchanged => false,
+                RefMove::Create | RefMove::FastForward | RefMove::Rewind => true,
+                RefMove::Diverged => {
+                    if force {
+                        true
+                    } else {
+                        return Err(GitBridgeError::NonFastForwardRef {
+                            name: full.clone(),
+                            old: old.unwrap_or_else(|| mirror_repo.object_hash().null()),
+                            new: update.target,
+                        });
+                    }
+                }
+            }
+        } else {
+            // Tags are not FF-guarded (a tag move is not a linear advance); they
+            // overwrite like the local `PreviousValue::Any` / the wire's
+            // no-FF-check tag path always have. Skip only a true no-op.
+            old != Some(update.target)
+        };
+        if proceed {
+            writes.push(PlannedRefWrite {
+                full_name: full,
+                old,
+                new: update.target,
+            });
         }
     }
 
-    // New record = the refs heddle previously exported that are STILL served
-    // (a retracted one drops out — it was deleted above), plus the refs this
-    // export just wrote. Bounded to refs heddle owns at this destination, so a
-    // foreign ref can never enter the record and thus can never join a future
-    // delete-set.
-    let mut now_exported: HashSet<String> =
-        previously_exported.intersection(&served).cloned().collect();
-    now_exported.extend(written.iter().map(full_ref_name));
-    write_exported_refs(target_repo, &now_exported)?;
-    Ok(())
+    // Delete-set: refs heddle previously exported here that the served mirror no
+    // longer carries — scoped to refs heddle owns (never foreign), per r8. Emit a
+    // delete op only when the destination still has the ref; a ref already absent
+    // there needs no op but still drops out of the record below.
+    let mut deletes = Vec::new();
+    for full in previously_exported {
+        if !served_full_names.contains(full)
+            && let Some(old) = old_at_destination.get(full).copied()
+        {
+            deletes.push(PlannedRefDelete {
+                full_name: full.clone(),
+                old,
+            });
+        }
+    }
+
+    // New record = previously-exported refs STILL served (a retracted one drops
+    // out — it was deleted above), plus the refs this push just wrote. Bounded to
+    // refs heddle owns at this destination, so a foreign ref can never enter the
+    // record and thus can never join a future delete-set.
+    let mut new_manifest: HashSet<String> = previously_exported
+        .intersection(served_full_names)
+        .cloned()
+        .collect();
+    new_manifest.extend(written.iter().map(full_ref_name));
+
+    Ok(DestinationReconcilePlan {
+        writes,
+        deletes,
+        new_manifest,
+    })
+}
+
+/// The destination's current ref tips (full name → oid) across the namespaces
+/// heddle manages (heads, tags, notes) — the `old_at_destination` input to
+/// [`plan_destination_reconcile`] for a local-path destination.
+fn read_destination_ref_map(repo: &gix::Repository) -> GitResult<HashMap<String, ObjectId>> {
+    Ok(collect_ref_updates(repo)?
+        .iter()
+        .map(|update| (full_ref_name(update), update.target))
+        .collect())
 }
 
 pub(crate) fn apply_ref_updates(
@@ -3069,11 +3256,19 @@ fn fetch_network_remote(
 
 fn push_network_remote_with_updates(
     mirror_repo: &gix::Repository,
+    heddle_dir: &Path,
     url: &gix::Url,
     updates: &[RefUpdate],
     force: bool,
 ) -> GitResult<()> {
-    if updates.is_empty() {
+    // The network destination's exported-refs record lives in heddle's own dir,
+    // keyed by the remote URL (the remote has no local git dir to host the
+    // sidecar). Read it BEFORE the empty-updates fast-path: a retraction lands
+    // here with an EMPTY served set yet a non-empty record, so the delete-set —
+    // not the served set — is what must still propagate (heddle#316 r11).
+    let manifest_path = network_exported_refs_path(heddle_dir, url);
+    let previously_exported = read_exported_refs_at(&manifest_path)?;
+    if updates.is_empty() && previously_exported.is_empty() {
         return Ok(());
     }
 
@@ -3099,28 +3294,46 @@ fn push_network_remote_with_updates(
         }
         remote_refs_from_receive_pack_handshake(&mut handshake)?
     };
-    let mut commands = Vec::new();
-    for update in updates {
-        let full_name = full_ref_name(update);
-        let old = remote_refs
-            .get(&full_name)
-            .copied()
-            .unwrap_or_else(|| ObjectHashKind::Sha1.null());
-        if old == update.target {
-            continue;
-        }
-        if !force && matches!(update.namespace, RefNamespace::Branch | RefNamespace::Note) {
-            ensure_commit_update_fast_forward(mirror_repo, &full_name, old, update.target)?;
-        }
-        commands.push((full_name, old, update.target));
+
+    // The SAME served-frontier plan the local-path destination runs: writes
+    // (forcing embargo rewinds, rejecting forks), the retraction delete-set
+    // (scoped to heddle-owned refs — never foreign), and the new record to
+    // persist. `served_full_names` is the FULL mirror ref set so a scoped push
+    // never deletes a still-served out-of-scope sibling.
+    let served_full_names: HashSet<String> = collect_ref_updates(mirror_repo)?
+        .iter()
+        .map(full_ref_name)
+        .collect();
+    let plan = plan_destination_reconcile(
+        mirror_repo,
+        updates,
+        &served_full_names,
+        &remote_refs,
+        &previously_exported,
+        force,
+    )?;
+
+    let null_oid = mirror_repo.object_hash().null();
+    let mut commands: Vec<(String, ObjectId, ObjectId)> = Vec::new();
+    for write in &plan.writes {
+        let old = write.old.unwrap_or(null_oid);
+        commands.push((write.full_name.clone(), old, write.new));
+    }
+    for delete in &plan.deletes {
+        // A wire delete is `<old> <zero> <ref>` — the retraction sibling of a
+        // write, sent to URL/network remotes too (heddle#316 r11).
+        commands.push((delete.full_name.clone(), delete.old, null_oid));
     }
 
     if commands.is_empty() {
+        // Nothing to move on the wire, but the record may still need to drop a
+        // ref that was already absent at the remote.
+        write_exported_refs_at(&manifest_path, &plan.new_manifest)?;
         return Ok(());
     }
 
-    let pack =
-        pack_reachable_objects(mirror_repo, commands.iter().map(|(_, _, new_oid)| *new_oid))?;
+    // Pack only the SURVIVORS' new objects — a delete carries no new object.
+    let pack = pack_reachable_objects(mirror_repo, plan.writes.iter().map(|write| write.new))?;
     let mut request = transport
         .request(
             WriteMode::OneLfTerminatedLinePerWriteCall,
@@ -3143,7 +3356,11 @@ fn push_network_remote_with_updates(
     raw_writer.flush().map_err(git_err)?;
     drop(raw_writer);
 
-    read_receive_pack_status(&mut reader, &commands, url)
+    read_receive_pack_status(&mut reader, &commands, url)?;
+    // Only persist the record once the remote has acknowledged every command, so
+    // a failed push never leaves a ref recorded as exported that did not land.
+    write_exported_refs_at(&manifest_path, &plan.new_manifest)?;
+    Ok(())
 }
 
 fn remote_refs_from_receive_pack_handshake(
