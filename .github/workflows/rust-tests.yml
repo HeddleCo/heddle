@@ -188,6 +188,19 @@ jobs:
           target/debug/heddle --repo "$PWD" doctor schemas --output json
           target/debug/heddle --repo "$PWD" doctor docs --all --output json
 
+      # 3a-bis. Round-trip fidelity conformance gate (heddle#533). heddle's
+      #     foundational promise is lossless git overlay: adopt/import a
+      #     public repo and export it back must reproduce byte-identical git
+      #     object SHAs (commit/tree/blob/annotated-tag) and be `git fsck`
+      #     clean, across a spread of generated repos (linear / merge /
+      #     octopus / tags / notes / submodule-gitlink / binary / unicode /
+      #     exec-bit / nested trees). This is correctness, asserted per-PR —
+      #     NOT a weekly perf bench. Named separately from the broad
+      #     `cargo test --workspace` run so a fidelity regression is
+      #     unmistakable in the job log.
+      - name: Round-trip fidelity conformance gate
+        run: cargo test --locked -p heddle-cli --test roundtrip_fidelity -- --nocapture
+
       # 3b. Unit tests for `scripts/fuse-bench-compare.py`. The perf gate
       #     is only as honest as the compare script; these tests pin the
       #     "missing or corrupt estimates fail closed" contract (Codex r1
