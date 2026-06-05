@@ -27,6 +27,15 @@ pub enum VisibilityTier {
     Restricted {
         scope_label: String,
     },
+    /// The strictest tier: withheld from **every** audience — including the
+    /// otherwise all-seeing `Internal` audience — except the one holder of
+    /// the matching `Restricted(scope_label)`. Used for embargoed per-state
+    /// commit visibility, where even internal callers must not see the
+    /// content. The who-sees-what arm lives in `repo::visibility::visible`,
+    /// placed above the `(_, Internal) => true` arm so the embargo holds.
+    Private {
+        scope_label: String,
+    },
 }
 
 impl VisibilityTier {
@@ -40,6 +49,7 @@ impl VisibilityTier {
             Self::Internal => "internal",
             Self::TeamScoped { .. } => "team_scoped",
             Self::Restricted { .. } => "restricted",
+            Self::Private { .. } => "private",
         }
     }
 }

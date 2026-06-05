@@ -94,13 +94,14 @@ pub struct ScopeDropCounts {
     pub internal: u32,
     pub team: u32,
     pub restricted: u32,
+    pub private: u32,
 }
 
 impl ScopeDropCounts {
     /// Total annotations dropped across all scopes. Drives the
     /// `Heddle-Annotations-Omitted` footer line.
     pub fn total(&self) -> u32 {
-        self.internal + self.team + self.restricted
+        self.internal + self.team + self.restricted + self.private
     }
 }
 
@@ -135,6 +136,7 @@ pub fn filter_for_audience_with_drops<'a>(
                 VisibilityTier::Internal => drops.internal += 1,
                 VisibilityTier::TeamScoped { .. } => drops.team += 1,
                 VisibilityTier::Restricted { .. } => drops.restricted += 1,
+                VisibilityTier::Private { .. } => drops.private += 1,
             }
         }
     }
@@ -149,7 +151,18 @@ fn visible(visibility: &VisibilityTier, audience: &AudienceTier) -> bool {
     match (visibility, audience) {
         // Public is universally visible.
         (VisibilityTier::Public, _) => true,
-        // Internal sees everything (internal viewers are the trusted set).
+        // Private is the strictest tier: visible ONLY to the holder of the
+        // exact matching Restricted scope label, and withheld from everyone
+        // else — *including* the otherwise all-seeing Internal audience. These
+        // two arms MUST stay above `(_, AudienceTier::Internal) => true`:
+        // match arms evaluate top-to-bottom, so a Private arm below it would
+        // never be reached for an Internal audience and the embargo would
+        // silently leak to internal callers.
+        (VisibilityTier::Private { scope_label }, AudienceTier::Restricted(viewer)) => {
+            scope_label == viewer
+        }
+        (VisibilityTier::Private { .. }, _) => false,
+        // Internal sees everything else (internal viewers are the trusted set).
         (_, AudienceTier::Internal) => true,
         // Internal annotations to a public/restricted viewer are hidden.
         (VisibilityTier::Internal, AudienceTier::Public)
