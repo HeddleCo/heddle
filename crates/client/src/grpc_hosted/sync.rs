@@ -709,6 +709,11 @@ impl HostedGrpcClient {
                     // for signature + trust-list verification. The
                     // server emitted these only for blobs in our want
                     // set that carry an active redaction.
+                    proto::check_received_transfer_blob_size(
+                        transfer.redactions_blob.len(),
+                        proto::MAX_RECEIVED_REDACTIONS_BLOB_SIZE,
+                        "redactions",
+                    )?;
                     profile.bytes_received = profile
                         .bytes_received
                         .saturating_add(transfer.redactions_blob.len());
@@ -730,6 +735,11 @@ impl HostedGrpcClient {
                     profile.store_receive_object += decode_elapsed;
                 }
                 Some(pull_message::Body::StateVisibility(transfer)) => {
+                    proto::check_received_transfer_blob_size(
+                        transfer.state_visibility_blob.len(),
+                        proto::MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE,
+                        "state-visibility",
+                    )?;
                     profile.bytes_received = profile
                         .bytes_received
                         .saturating_add(transfer.state_visibility_blob.len());

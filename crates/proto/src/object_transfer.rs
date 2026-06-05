@@ -6,6 +6,47 @@ use objects::{
 
 use crate::{ObjectData, ObjectId, ObjectRequest, ObjectType, ProtocolError, Result};
 
+/// Maximum redaction sidecar blob accepted from the pull stream, per blob.
+///
+/// Redaction sidecars are signed range lists for a single blob — orders of
+/// magnitude smaller than the blob payload they describe. 64 MiB bounds the
+/// server-controlled receive buffer on the pull stream (the same
+/// unbounded-allocation OOM class #366 closed for the native pack/index
+/// buffers) while leaving generous headroom for any legitimate record.
+pub const MAX_RECEIVED_REDACTIONS_BLOB_SIZE: u64 = 64 * 1024 * 1024;
+
+/// Maximum state-visibility sidecar blob accepted from the pull stream, per
+/// state.
+///
+/// State-visibility sidecars are per-state tier records, not object payloads.
+/// 64 MiB bounds this second server-controlled pull-stream buffer with the
+/// same receive-side cap.
+pub const MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE: u64 = 64 * 1024 * 1024;
+
+/// Reject a received per-object transfer sidecar blob whose length exceeds
+/// `max_bytes`, before it is handed to the repository accept path.
+///
+/// Sidecar blobs (redaction, state-visibility) arrive as single
+/// server-controlled buffers on the pull stream. This is the single-shot
+/// analogue of [`crate::receive_pack_chunk`]'s running-total check: it bounds
+/// the in-memory allocation a hostile or buggy server can drive on the receive
+/// side. `kind` names the blob in the error (e.g. `"redactions"`).
+pub fn check_received_transfer_blob_size(
+    blob_len: usize,
+    max_bytes: u64,
+    kind: &str,
+) -> Result<()> {
+    let len = u64::try_from(blob_len).map_err(|_| {
+        ProtocolError::InvalidState(format!("{kind} blob length does not fit in u64"))
+    })?;
+    if len > max_bytes {
+        return Err(ProtocolError::InvalidState(format!(
+            "{kind} blob exceeds receive size limit: {len} bytes (max {max_bytes})"
+        )));
+    }
+    Ok(())
+}
+
 #[allow(dead_code)]
 pub fn chunk_count(object_size: usize, chunk_size: usize) -> usize {
     if object_size == 0 || chunk_size == 0 {
