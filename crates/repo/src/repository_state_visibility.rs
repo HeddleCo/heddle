@@ -529,7 +529,7 @@ impl Repository {
         &self,
         state: &ChangeId,
     ) -> Result<Option<StateVisibility>> {
-        Ok(self.get_state_visibility_for_state(state)?.latest().cloned())
+        Ok(self.get_state_visibility_for_state(state)?.latest()?.cloned())
     }
 
     /// The effective tier of `state`: the latest declaration's tier, or

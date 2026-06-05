@@ -34,7 +34,9 @@ pub fn cmd_visibility(cli: &Cli, command: VisibilityCommands) -> Result<()> {
 fn tier_label(tier: &VisibilityTier) -> Option<&str> {
     match tier {
         VisibilityTier::TeamScoped { team_id } => Some(team_id),
-        VisibilityTier::Restricted { scope_label } => Some(scope_label),
+        VisibilityTier::Restricted { scope_label } | VisibilityTier::Private { scope_label } => {
+            Some(scope_label)
+        }
         VisibilityTier::Public | VisibilityTier::Internal => None,
     }
 }
