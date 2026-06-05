@@ -387,12 +387,16 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                 });
             }
             None => {
-                // The whole line is embargoed to its root. If a prior export
-                // left a public branch serving a now-embargoed commit, retract
-                // it; otherwise emit absence.
-                if retracting {
-                    delete_reference_if_present(&repo, &branch_ref)?;
-                }
+                // The unifying invariant: a mirror branch exists iff its CURRENT
+                // target resolves to a served frontier. Here it does not — the
+                // thread's tip has no served ancestor-or-self — so any prior ref
+                // is stale and must be deleted unconditionally. Gating on the old
+                // tip being embargoed (r1) missed the sibling case where the
+                // thread was reset/rebased onto an unrelated (or Private) root:
+                // the old public tip is not embargoed, yet it is no longer the
+                // current target. `delete_reference_if_present` is a no-op when
+                // absent, so this also covers the genuine emit-absence case.
+                delete_reference_if_present(&repo, &branch_ref)?;
             }
         }
     }
@@ -413,16 +417,19 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                     });
                 }
                 None => {
-                    // The marker's state is no longer served (embargoed, or
-                    // withheld for a withheld ancestor). A tag is a
-                    // ref-publishing site just like a branch: retract one left
-                    // pointing at a now-embargoed commit from a prior export.
+                    // Same invariant as the branch: a mirror tag exists iff its
+                    // CURRENT target resolves to a served frontier. The marker's
+                    // current state is not served — embargoed, withheld for a
+                    // withheld ancestor, or retargeted to a Private state that
+                    // was never minted (absent from the served mapping) — so any
+                    // prior tag is stale and must be deleted unconditionally.
+                    // Gating on the old tag tip being embargoed (r1) missed the
+                    // sibling case where a marker is retargeted to a withheld
+                    // state: the old tip is not embargoed, yet it is no longer
+                    // the current target. `delete_reference_if_present` is a
+                    // no-op when absent.
                     let tag_ref = format!("refs/tags/{marker_name}");
-                    let stale =
-                        branch_tip_oid(&repo, &tag_ref).is_some_and(|oid| embargoed_oids.contains(&oid));
-                    if stale {
-                        delete_reference_if_present(&repo, &tag_ref)?;
-                    }
+                    delete_reference_if_present(&repo, &tag_ref)?;
                 }
             }
         }

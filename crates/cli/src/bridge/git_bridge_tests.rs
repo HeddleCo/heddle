@@ -3033,3 +3033,193 @@ fn export_deletes_branch_when_whole_line_is_later_embargoed() {
         "the stale public branch must be deleted, not left serving the embargoed commit"
     );
 }
+
+/// #316 / PR #528 r2 Finding 1 (sibling): a branch exported at a PUBLIC commit,
+/// then reset/rebased onto an unrelated `Private` root, must be deleted from the
+/// mirror. The old public tip is NOT embargoed — it is simply no longer
+/// reachable from the new tip — so r1's embargoed-tip retraction never fires.
+/// The unifying invariant catches it anyway: a mirror ref exists iff its CURRENT
+/// target resolves to a served frontier, and the new Private root resolves to
+/// none.
+#[test]
+fn export_deletes_branch_when_thread_reset_to_private_root() {
+    use chrono::Utc;
+    use objects::object::{
+        Attribution, Principal, State, StateVisibility, VisibilityTier,
+    };
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let put_state = |content: &[u8], parents: Vec<ChangeId>| -> State {
+        let store = repo.store();
+        let blob_hash = store
+            .put_blob(&Blob::from_slice(content))
+            .expect("put blob");
+        let tree_hash = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
+            .expect("put tree");
+        let state = State::new(
+            tree_hash,
+            parents,
+            Attribution::human(Principal::new("Alice", "alice@example.com")),
+        );
+        store.put_state(&state).expect("put state");
+        state
+    };
+
+    // Public root A on main.
+    let state_a = put_state(b"public base\n", Vec::new());
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &state_a.change_id)
+        .expect("set main to A");
+
+    let mut bridge = GitBridge::new(&repo);
+    let run1 = export_all(&mut bridge).expect("first export");
+    let oid_a = bridge
+        .mapping
+        .get_git(&state_a.change_id)
+        .expect("A minted while public");
+    assert!(
+        run1.branches
+            .iter()
+            .any(|b| b.name == "main" && b.tip == oid_a),
+        "run 1 advertises main at the public root A"
+    );
+
+    // Reset main onto an unrelated Private root B (no shared ancestry with A).
+    let state_b = put_state(b"private root\n", Vec::new());
+    repo.put_state_visibility(StateVisibility {
+        state: state_b.change_id,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Alice".into(),
+            email: "alice@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &state_b.change_id)
+        .expect("reset main to B");
+
+    // A stays public — NOT embargoed — so r1's embargoed-tip retraction cannot
+    // fire. B's line has no served frontier, so main must be deleted anyway.
+    let run2 = export_all(&mut bridge).expect("second export");
+    assert!(
+        run2.branches.iter().all(|b| b.name != "main"),
+        "main must not be advertised once reset onto a Private root"
+    );
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    assert!(
+        mirror.find_reference("refs/heads/main").is_err(),
+        "the stale public branch must be deleted after a reset to a Private root"
+    );
+    // Sanity: A is still served — proving the deletion is driven by the new
+    // target resolving to no served frontier, not by an embargo of the old tip.
+    assert!(
+        bridge.mapping.get_git(&state_a.change_id).is_some(),
+        "the old public tip A remains served; deletion is not driven by an embargo of A"
+    );
+}
+
+/// #316 / PR #528 r2 Finding 2 (sibling): a marker exported as a tag at a PUBLIC
+/// state A, then retargeted to a `Private` state B, must have its stale tag
+/// deleted. The old tag tip A is NOT embargoed (still served), so r1's
+/// embargoed-tip retraction never fires — but the marker's CURRENT target (B) is
+/// not served, so the unified invariant deletes the tag.
+#[test]
+fn export_deletes_tag_when_marker_retargeted_to_private() {
+    use chrono::Utc;
+    use objects::object::{
+        Attribution, Principal, State, StateVisibility, VisibilityTier,
+    };
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let put_state = |content: &[u8], parents: Vec<ChangeId>| -> State {
+        let store = repo.store();
+        let blob_hash = store
+            .put_blob(&Blob::from_slice(content))
+            .expect("put blob");
+        let tree_hash = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
+            .expect("put tree");
+        let state = State::new(
+            tree_hash,
+            parents,
+            Attribution::human(Principal::new("Alice", "alice@example.com")),
+        );
+        store.put_state(&state).expect("put state");
+        state
+    };
+
+    // Public state A on main, plus a marker v1.0 pinned to A.
+    let state_a = put_state(b"public release\n", Vec::new());
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &state_a.change_id)
+        .expect("set main to A");
+    repo.refs()
+        .create_marker(&MarkerName::new("v1.0"), &state_a.change_id)
+        .expect("create marker at A");
+
+    let mut bridge = GitBridge::new(&repo);
+    let run1 = export_all(&mut bridge).expect("first export");
+    let oid_a = bridge
+        .mapping
+        .get_git(&state_a.change_id)
+        .expect("A minted while public");
+    assert!(
+        run1.tags.iter().any(|t| t.name == "v1.0" && t.tip == oid_a),
+        "run 1 publishes tag v1.0 at the public state A"
+    );
+
+    // Retarget v1.0 onto a Private state B (never minted into the mirror).
+    let state_b = put_state(b"private release\n", Vec::new());
+    repo.put_state_visibility(StateVisibility {
+        state: state_b.change_id,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Alice".into(),
+            email: "alice@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+    repo.refs()
+        .delete_marker(&MarkerName::new("v1.0"))
+        .expect("clear old marker");
+    repo.refs()
+        .create_marker(&MarkerName::new("v1.0"), &state_b.change_id)
+        .expect("retarget marker to B");
+
+    // A is still served (not embargoed), so r1's stale-tag retraction cannot
+    // fire — but B is not served, so the tag must be deleted by the invariant.
+    let run2 = export_all(&mut bridge).expect("second export");
+    assert!(
+        run2.tags.iter().all(|t| t.name != "v1.0"),
+        "v1.0 must not be published once retargeted to a Private state"
+    );
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    assert!(
+        mirror.find_reference("refs/tags/v1.0").is_err(),
+        "the stale public tag must be deleted after retarget to a Private state"
+    );
+    assert!(
+        bridge.mapping.get_git(&state_a.change_id).is_some(),
+        "the old tag tip A remains served; deletion is not driven by an embargo of A"
+    );
+}
