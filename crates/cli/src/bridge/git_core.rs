@@ -884,11 +884,11 @@ impl<'a> GitBridge<'a> {
         // WRITES the surviving refs; it never DELETES one that disappeared from
         // the served mirror. So a branch/tag/note exported while public and then
         // retracted (whole line → Private, marker retargeted, line rebased away)
-        // would keep pointing at now-private commits at the destination. Diffing
-        // the destination's heddle-managed refs against the served mirror and
-        // deleting the difference closes that leak for every ref family
-        // (heddle#316 CLASS 2).
-        reconcile_destination_ref_deletions(&mirror_repo, &target_repo)?;
+        // would keep pointing at now-private commits at the destination. Deleting
+        // the refs heddle PREVIOUSLY exported here that the served mirror no
+        // longer carries closes that leak for every ref family — while leaving a
+        // foreign ref heddle never exported untouched (heddle#316 CLASS 2).
+        reconcile_destination_ref_deletions(&mirror_repo, &target_repo, updates)?;
         Ok(())
     }
 
@@ -2592,38 +2592,102 @@ fn commit_is_descendant_of(
     Ok(false)
 }
 
-/// Make the destination's heddle-managed refs equal the served mirror's refs by
-/// DELETING every destination ref that is absent from the served mirror set.
-/// The retraction sibling of [`apply_ref_updates`] (which only writes survivors)
-/// — together they enforce "destination heddle-managed refs == served mirror
-/// refs" on every export/push (heddle#316 CLASS 2).
+/// Filename, under a destination repo's git dir, of heddle's record of which
+/// full ref names it has exported to THAT destination. A heddle-owned sidecar
+/// (git ignores unknown files in the git dir), one full ref name per line. Lives
+/// WITH the destination so the delete-set can be scoped to refs heddle actually
+/// wrote here — never the raw destination namespace (heddle#316 CLASS 2).
+const HEDDLE_EXPORTED_REFS_FILE: &str = "heddle-exported-refs";
+
+fn exported_refs_manifest_path(target_repo: &gix::Repository) -> PathBuf {
+    target_repo.git_dir().join(HEDDLE_EXPORTED_REFS_FILE)
+}
+
+/// The set of full ref names heddle has previously exported to `target_repo`.
+/// `Ok(empty)` when no record exists yet — a first export, OR a destination
+/// heddle wrote to before this record existed. Returning empty (rather than
+/// assuming the destination's current heddle-namespace refs were heddle's) is
+/// the conservative choice: it can never delete a foreign ref on the first
+/// export after this code lands.
+pub(crate) fn read_exported_refs(target_repo: &gix::Repository) -> GitResult<HashSet<String>> {
+    let path = exported_refs_manifest_path(target_repo);
+    match fs::read_to_string(&path) {
+        Ok(text) => Ok(text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashSet::new()),
+        Err(e) => Err(GitBridgeError::Io(e)),
+    }
+}
+
+/// Persist `refs` (full ref names) as heddle's record of what it has exported to
+/// `target_repo`. Atomic temp+rename so a torn write can't surface a half-record.
+pub(crate) fn write_exported_refs(
+    target_repo: &gix::Repository,
+    refs: &HashSet<String>,
+) -> GitResult<()> {
+    let path = exported_refs_manifest_path(target_repo);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut sorted: Vec<&str> = refs.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    let body = sorted.join("\n");
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, body)?;
+    fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// Propagate retractions to the destination by DELETING the refs heddle
+/// PREVIOUSLY exported there that the served mirror no longer carries — scoped
+/// strictly to refs heddle exported, NEVER the raw destination namespace. The
+/// retraction sibling of [`apply_ref_updates`] (which only writes survivors)
+/// (heddle#316 CLASS 2).
 ///
-/// "Heddle-managed" is exactly the namespaces the mirror exports — branches
-/// (`refs/heads/*`), tags (`refs/tags/*`) and notes (`refs/notes/*`), the same
-/// set [`collect_ref_updates`] enumerates. Refs OUTSIDE those namespaces
-/// (`refs/remotes/*`, `refs/stash`, bespoke namespaces, ...) are never touched,
-/// so a ref heddle does not own at the destination is left alone. Covers all
-/// three families the mirror-side retraction covers so this is not a per-family
-/// drip.
+/// The delete-set is `previously-heddle-exported` − `currently-served`. A
+/// foreign branch/tag/note created at a shared local bare remote by another
+/// user or tool — which heddle never exported — is never in
+/// `previously-heddle-exported`, so a normal export/push never deletes it,
+/// even though it sits inside `refs/heads|tags|notes/*`. This replaces the r7
+/// logic that diffed the WHOLE destination namespace and so deleted such foreign
+/// refs (r8 HOLE 2). Applies uniformly across heads, tags, and notes.
 ///
 /// The served set is the FULL mirror ref set (`collect_ref_updates(mirror)`),
-/// deliberately NOT the caller's possibly-scope-filtered `updates`: a scoped
+/// deliberately NOT the caller's possibly-scope-filtered `written`: a scoped
 /// push must delete only genuinely-retracted refs, never a still-served sibling
-/// that simply fell outside the push scope.
+/// that simply fell outside the push scope. `written` is the (possibly scoped)
+/// set this export just applied; it folds into the new record so a ref written
+/// this round is remembered as heddle-exported next time.
 fn reconcile_destination_ref_deletions(
     mirror_repo: &gix::Repository,
     target_repo: &gix::Repository,
+    written: &[RefUpdate],
 ) -> GitResult<()> {
     let served: HashSet<String> = collect_ref_updates(mirror_repo)?
         .iter()
         .map(full_ref_name)
         .collect();
-    for dest_ref in collect_ref_updates(target_repo)? {
-        let full = full_ref_name(&dest_ref);
-        if !served.contains(&full) {
-            delete_reference_if_present(target_repo, &full)?;
+    let previously_exported = read_exported_refs(target_repo)?;
+
+    for full in &previously_exported {
+        if !served.contains(full) {
+            delete_reference_if_present(target_repo, full)?;
         }
     }
+
+    // New record = the refs heddle previously exported that are STILL served
+    // (a retracted one drops out — it was deleted above), plus the refs this
+    // export just wrote. Bounded to refs heddle owns at this destination, so a
+    // foreign ref can never enter the record and thus can never join a future
+    // delete-set.
+    let mut now_exported: HashSet<String> =
+        previously_exported.intersection(&served).cloned().collect();
+    now_exported.extend(written.iter().map(full_ref_name));
+    write_exported_refs(target_repo, &now_exported)?;
     Ok(())
 }
 

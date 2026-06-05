@@ -15,7 +15,7 @@
 //! every successful capture.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -496,6 +496,104 @@ pub fn clear_withheld_checkout(
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(enrich_fs_error(&path, "removing", e)),
     }
+}
+
+/// Serializable body of the per-worktree-root *materialized-leaves* record.
+/// A thin wrapper so `toml` round-trips the leaf-path set (TOML needs a
+/// top-level table, not a bare array). Storing the paths in a TOML string array
+/// — rather than a newline-joined blob — keeps the record correct even for a
+/// leaf path containing exotic bytes.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct MaterializedLeaves {
+    /// Worktree-relative, forward-slash-joined tracked leaf paths the *last*
+    /// materialize of this root left on disk. Empty after a withheld materialize
+    /// (only the untracked courtesy stub remains).
+    #[serde(default)]
+    leaves: Vec<String>,
+}
+
+/// On-disk location of the *materialized-leaves* record for the worktree root at
+/// `canonical_worktree_root`.
+///
+/// Keyed by the **canonical worktree root** (hashed), NOT the thread name —
+/// exactly like [`withheld_marker_path`], and for the same reason. The single
+/// per-thread `manifest.toml` is clobbered when a sibling worktree of the same
+/// thread is materialized, so it cannot reliably answer "what tracked leaves did
+/// a prior materialize leave at THIS root?". A record keyed on the root is
+/// untouchable by a sibling materialize (which writes a different root's record
+/// under a different hash), so the checkout reconcile can always source the
+/// exact prior-leaf set to remove — closing the withheld-reduction leak that
+/// otherwise reopened whenever the per-thread manifest was clobbered
+/// (heddle#316 CLASS 1).
+fn materialized_leaves_path(heddle_dir: &Path, canonical_worktree_root: &Path) -> PathBuf {
+    let key = ContentHash::compute_typed(
+        "materialized-leaves",
+        canonical_worktree_root.as_os_str().as_encoded_bytes(),
+    )
+    .to_hex();
+    heddle_dir
+        .join("materialized-roots")
+        .join(format!("{key}.leaves"))
+}
+
+/// Persist `leaves` — the worktree-relative tracked leaf paths a materialize
+/// just left at `canonical_worktree_root` — as the clobber-proof per-root
+/// record. Written on EVERY materialize through the checkout chokepoint (with an
+/// empty set on a withheld materialize, where only the untracked stub remains),
+/// so a later reconcile of the same root knows precisely which prior tracked
+/// leaves to remove even when a sibling worktree of the same thread has
+/// clobbered the per-thread `manifest.toml`. Atomic temp+rename so a torn write
+/// can't surface a half-record (heddle#316 CLASS 1).
+pub fn write_materialized_leaves(
+    heddle_dir: &Path,
+    canonical_worktree_root: &Path,
+    leaves: &BTreeSet<String>,
+) -> io::Result<()> {
+    let path = materialized_leaves_path(heddle_dir, canonical_worktree_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
+    }
+    let body = MaterializedLeaves {
+        leaves: leaves.iter().cloned().collect(),
+    };
+    let text = toml::to_string_pretty(&body).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("serialising materialized-leaves record: {e}"),
+        )
+    })?;
+    let tmp = path.with_extension("leaves.tmp");
+    fs::write(&tmp, text).map_err(|e| enrich_fs_error(&tmp, "writing", e))?;
+    fs::rename(&tmp, &path).map_err(|e| enrich_rename_error(&tmp, &path, e))
+}
+
+/// Read the clobber-proof per-root materialized-leaves record for
+/// `canonical_worktree_root`. `Ok(None)` only when **no record file exists**
+/// (a first-ever materialize of this root, or a root last materialized by a
+/// binary predating this record) — distinct from a present-but-empty record,
+/// which decodes to `Some(empty set)` (a withheld materialize left only the
+/// untracked stub). A malformed record errors so a corrupt sidecar surfaces
+/// rather than being silently treated as "nothing materialized here".
+pub fn read_materialized_leaves(
+    heddle_dir: &Path,
+    canonical_worktree_root: &Path,
+) -> io::Result<Option<BTreeSet<String>>> {
+    let path = materialized_leaves_path(heddle_dir, canonical_worktree_root);
+    let text = match fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(enrich_fs_error(&path, "reading", e)),
+    };
+    let body: MaterializedLeaves = toml::from_str(&text).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "malformed materialized-leaves record at {}: {e}",
+                path.display()
+            ),
+        )
+    })?;
+    Ok(Some(body.leaves.into_iter().collect()))
 }
 
 /// Atomically write `manifest` to disk for `thread`. Writes to a

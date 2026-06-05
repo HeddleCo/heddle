@@ -188,6 +188,18 @@ impl Repository {
                 collect_tree_leaf_paths(self, &tree, "", &mut withheld_leaves)?;
             }
             self.reconcile_materialized_root(dest, &canonical, &BTreeSet::new(), &withheld_leaves)?;
+            // Persist the clobber-proof per-root record: a withheld materialize
+            // leaves ONLY the untracked courtesy stub, so the tracked-leaf set is
+            // empty. Written here so the single chokepoint owns the record for
+            // every funnel path, and so a later reconcile of this root reads an
+            // authoritative empty set instead of falling to the backstop
+            // (heddle#316 CLASS 1).
+            crate::thread_manifest::write_materialized_leaves(
+                self.heddle_dir(),
+                &canonical,
+                &BTreeSet::new(),
+            )
+            .map_err(HeddleError::Io)?;
             let embargo_until = self
                 .effective_state_visibility(change_id)
                 .map_err(|e| {
@@ -219,6 +231,17 @@ impl Repository {
         let mut served_leaves = BTreeSet::new();
         collect_tree_leaf_paths(self, &tree, "", &mut served_leaves)?;
         self.reconcile_materialized_root(dest, &canonical, &served_leaves, &BTreeSet::new())?;
+        // Persist the clobber-proof per-root record of exactly the tracked leaves
+        // this visible materialize left on disk, so a later withheld
+        // re-materialize of this root removes precisely them even if a sibling
+        // worktree of the same thread clobbered the per-thread manifest in the
+        // interim (heddle#316 CLASS 1).
+        crate::thread_manifest::write_materialized_leaves(
+            self.heddle_dir(),
+            &canonical,
+            &served_leaves,
+        )
+        .map_err(HeddleError::Io)?;
         // This root now holds real served bytes: clear any stale withheld marker
         // a prior under-tier materialize of the same root may have left, so it
         // can't suppress this worktree's capture (heddle#316).
@@ -244,14 +267,23 @@ impl Repository {
     /// (heddle#316 CLASS 1).
     ///
     /// Removes every tracked leaf that (a) a prior materialization recorded for
-    /// this root in its [`ThreadManifest`] (keyed by canonical `worktree_path`,
-    /// thread-independent) UNION (b) the caller's `must_remove` set — MINUS the
-    /// `keep` set the target tier permits. Removal is guarded per file
+    /// this root in its clobber-proof per-root **materialized-leaves record**
+    /// (keyed by the canonical worktree root, so a sibling worktree of the same
+    /// thread can never erase it) UNION (b) the caller's `must_remove` set —
+    /// MINUS the `keep` set the target tier permits. Removal is guarded per file
     /// (`NotFound` ignored) and empty ancestor directories it leaves behind are
     /// pruned via `remove_dir` (which fails on non-empty dirs, so untracked
     /// siblings keep their directory alive).
     ///
-    /// Never blanket-`rm -rf`s: only paths sourced from the manifest /
+    /// Sourcing the prior leaves from the per-root record — NOT the single
+    /// per-thread `manifest.toml` — is what makes the withheld reduction
+    /// correct-by-construction: the manifest is clobbered the instant a sibling
+    /// worktree of the same thread materializes, which would drop a prior
+    /// *visible* leaf (e.g. an `old-secret.txt` removed before the withheld
+    /// target state) out of the removal set and leak it next to the stub. The
+    /// per-root record is immune to that race (heddle#316 CLASS 1).
+    ///
+    /// Never blanket-`rm -rf`s: only paths sourced from the per-root record /
     /// `must_remove` are touched, so user-untracked files and `.git`/heddle
     /// metadata are never removed.
     fn reconcile_materialized_root(
@@ -262,11 +294,35 @@ impl Repository {
         must_remove: &BTreeSet<String>,
     ) -> Result<()> {
         let mut to_remove: BTreeSet<String> = must_remove.clone();
-        if let Some(prior) =
-            crate::thread_manifest::manifest_for_worktree_root(self.heddle_dir(), canonical_root)
-                .map_err(HeddleError::Io)?
+        match crate::thread_manifest::read_materialized_leaves(self.heddle_dir(), canonical_root)
+            .map_err(HeddleError::Io)?
         {
-            to_remove.extend(prior.files.keys().cloned());
+            Some(prior_leaves) => {
+                // Clobber-proof per-root record of exactly the tracked leaves a
+                // prior materialize of THIS root left on disk. Authoritative —
+                // survives a sibling worktree's clobber of the per-thread
+                // manifest.
+                to_remove.extend(prior_leaves);
+            }
+            None => {
+                // Fail-closed backstop: no per-root record yet. Reached only on a
+                // first-ever materialize of this root (nothing prior to remove)
+                // or a root last materialized by a binary predating the per-root
+                // record. Fall back to the best-effort per-thread manifest so an
+                // upgrade-window reconcile still drops a recorded prior tree's
+                // leaves; `must_remove` (the target tier's own leaves) covers the
+                // rest. Strictly safer than trusting `must_remove` alone, and —
+                // like the primary path — touches only recorded leaves, never
+                // untracked/non-heddle files.
+                if let Some(prior) = crate::thread_manifest::manifest_for_worktree_root(
+                    self.heddle_dir(),
+                    canonical_root,
+                )
+                .map_err(HeddleError::Io)?
+                {
+                    to_remove.extend(prior.files.keys().cloned());
+                }
+            }
         }
 
         let mut prune_dirs: BTreeSet<PathBuf> = BTreeSet::new();
@@ -1425,6 +1481,95 @@ mod tests {
         // Capture of the still-withheld root is a no-op.
         let outcome = repo.capture_thread_from_disk("main", &dest).unwrap();
         assert_eq!(outcome, ThreadCaptureOutcome::NoOp);
+    }
+
+    /// #316 / PR #528 r8 HOLE 1: the withheld reduction must NOT depend on the
+    /// clobberable per-thread `manifest.toml`. A root first materialized VISIBLE
+    /// (holding `old-secret.txt`), THEN observed while a sibling worktree of the
+    /// SAME thread is materialized (the event that clobbers the per-thread
+    /// manifest, retargeting it at the sibling's root), THEN re-materialized
+    /// WITHHELD against a LATER state whose tree no longer contains
+    /// `old-secret.txt`, must still end up holding ONLY the courtesy stub. The
+    /// secret is in NEITHER the withheld state's own tree NOR (post-clobber) the
+    /// per-thread manifest — only the clobber-proof per-root record names it, so
+    /// the reduction can only succeed by sourcing that record.
+    #[test]
+    fn withheld_reduction_survives_sibling_manifest_clobber() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+
+        // State S1 (visible): contains the secret that must not linger later.
+        fs::write(repo_dir.path().join("old-secret.txt"), b"launch codes\n").unwrap();
+        repo.snapshot(Some("seed with secret".into()), None).unwrap();
+
+        // Root A materialized VISIBLE at S1 — the real bytes land on disk and the
+        // clobber-proof per-root record for A captures `old-secret.txt`.
+        let a_holder = TempDir::new().unwrap();
+        let root_a = a_holder.path().join("root-a");
+        repo.materialize_thread("main", &root_a, &AudienceTier::Internal)
+            .unwrap();
+        assert!(root_a.join("old-secret.txt").exists());
+
+        // Advance the thread to S2: the secret is REMOVED before this state, a
+        // new tracked file replaces it. So `old-secret.txt` is absent from S2's
+        // tree entirely.
+        fs::remove_file(repo_dir.path().join("old-secret.txt")).unwrap();
+        fs::write(repo_dir.path().join("kept.txt"), b"benign\n").unwrap();
+        repo.snapshot(Some("drop secret, advance".into()), None)
+            .unwrap();
+        embargo_state_with_tier(
+            &repo,
+            VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+        );
+
+        // A sibling worktree B of the SAME thread is materialized (authorized, at
+        // S2). `materialize_thread` rewrites `threads/main/manifest.toml` keyed by
+        // thread name, so this CLOBBERS A's record there — `manifest_for_worktree_root(A)`
+        // now resolves to B, the precise race that reopened the leak in r7.
+        let b_holder = TempDir::new().unwrap();
+        let root_b = b_holder.path().join("root-b");
+        repo.materialize_thread("main", &root_b, &AudienceTier::Restricted("sec-embargo".into()))
+            .unwrap();
+        assert!(root_b.join("kept.txt").exists());
+        // Confirm the clobber really happened: the per-thread manifest no longer
+        // records root A.
+        assert!(
+            crate::thread_manifest::manifest_for_worktree_root(
+                repo.heddle_dir(),
+                &canonical_worktree_path(&root_a),
+            )
+            .unwrap()
+            .is_none(),
+            "sibling materialize must have clobbered A's per-thread manifest record"
+        );
+
+        // Re-materialize root A WITHHELD (Internal can't see S2's Private tier).
+        // S2's tree does not contain `old-secret.txt`, and the per-thread
+        // manifest no longer names A — only the clobber-proof per-root record can
+        // drive its removal.
+        repo.materialize_thread("main", &root_a, &AudienceTier::Internal)
+            .unwrap();
+
+        assert!(
+            root_a.join(COURTESY_STUB_FILENAME).exists(),
+            "withheld checkout must hold the courtesy stub"
+        );
+        assert!(
+            !root_a.join("old-secret.txt").exists(),
+            "the prior visible tree's secret must be GONE even though the per-thread manifest was clobbered"
+        );
+        let remaining: Vec<_> = fs::read_dir(&root_a)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "withheld root must contain only the courtesy stub, got {remaining:?}"
+        );
+        assert_eq!(remaining[0].to_str().unwrap(), COURTESY_STUB_FILENAME);
     }
 
     /// #316 / PR #528 r3 Finding 1: materializing an under-tier checkout writes
