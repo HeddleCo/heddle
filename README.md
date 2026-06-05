@@ -44,13 +44,17 @@ Heddle's CLI follows five operating principles — verification, disposability, 
 - Explicit principal and agent attribution
 - Provenance-backed local blame with rewrite preservation across snapshot, collapse, and merge flows
 - Semantic diff and compare
+- Semantic merge: AST-item-level merge within a file (first-class Rust/Python/JS/TS; Go/C/C++/Java opt-in); does not auto-rewrite cross-file imports or call-sites
+- Automatic state signing: device-local ed25519 identity minted on first use signs every authored state — provenance with no manual key setup
 - Git adapter/bridge: adopt, import, export, sync
+- Byte-identical Git round-trip, CI-enforced: adopt→export reproduces identical commit/tree/blob/tag SHAs with a `git fsck`-clean result, gated per-PR by 10 deterministic fixtures
 - Multi-agent worktrees and agent registry
 
 ### Foundation in place
 
 - Hosted client (`heddle-cli`'s optional `client` feature enables `dep:heddle-client` for talking to a hosted backend; `weft-client-shim` is always present as a non-optional dep)
 - Verification and verification metadata across the wire protocol
+- Commit-level visibility tiers: per-state `StateVisibility` records and `heddle visibility set/promote` verbs (with oplog tier records) are shipped client-side; the bridge export/checkout gate that withholds non-served commits from a Git mirror is landing; hosted serve-side enforcement is in progress
 
 ### Planned
 
