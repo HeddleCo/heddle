@@ -96,6 +96,8 @@ mod thread_default_current;
 mod try_cmd;
 #[path = "cli_integration/unrelated_histories_recovery.rs"]
 mod unrelated_histories_recovery;
+#[path = "cli_integration/visibility.rs"]
+mod visibility;
 #[path = "cli_integration/watch.rs"]
 mod watch;
 #[path = "cli_integration/worktree_target_advice.rs"]
