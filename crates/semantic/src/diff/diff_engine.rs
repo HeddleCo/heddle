@@ -313,12 +313,71 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::path::Path;
 
     use objects::object::{DiffKind, FileChangeSet};
 
     use super::*;
     use crate::cache::SemanticParseCache;
+    use crate::diff::SemanticBudget;
+
+    #[test]
+    fn diff_budget_skips_load_past_cap() {
+        // Five modified files, each ~100 bytes per side (~200 total). A budget
+        // of 350 bytes is crossed while loading the second file, so only the
+        // first two files should ever be loaded — files 3..5 must NOT be
+        // touched. Before the fix the engine loaded every file and only
+        // checked the cap afterwards, so all five were loaded.
+        let body = "a".repeat(100);
+        let file_changes = FileChangeSet::from(vec![
+            ("f0.rs".to_string(), DiffKind::Modified),
+            ("f1.rs".to_string(), DiffKind::Modified),
+            ("f2.rs".to_string(), DiffKind::Modified),
+            ("f3.rs".to_string(), DiffKind::Modified),
+            ("f4.rs".to_string(), DiffKind::Modified),
+        ]);
+        let cache = SemanticParseCache::default();
+        let options = SemanticDiffOptions {
+            budget: SemanticBudget {
+                max_total_bytes: 350,
+                ..SemanticBudget::default()
+            },
+            ..SemanticDiffOptions::default()
+        };
+
+        let old_loads = Cell::new(0usize);
+        let new_loads = Cell::new(0usize);
+
+        let engine = SemanticEngine::new(
+            file_changes,
+            |_path| {
+                old_loads.set(old_loads.get() + 1);
+                Ok(Some(body.clone()))
+            },
+            |_path| {
+                new_loads.set(new_loads.get() + 1);
+                Ok(Some(body.clone()))
+            },
+            &options,
+            &cache,
+        );
+
+        let result = engine.full().expect("semantic diff should succeed");
+
+        // f0 (200) is under budget, f1 tips the running total to 400 > 350 and
+        // is the last load; f2..f4 are skipped entirely.
+        assert_eq!(old_loads.get(), 2, "only the under-budget prefix + tipping file load");
+        assert_eq!(new_loads.get(), 2, "only the under-budget prefix + tipping file load");
+        assert!(
+            result
+                .fallback_reasons
+                .iter()
+                .any(|r| matches!(r, SemanticFallbackReason::TotalByteBudgetExceeded { .. })),
+            "over-budget set should still report the byte-budget fallback: {:?}",
+            result.fallback_reasons
+        );
+    }
 
     #[test]
     fn pure_function_body_diff_does_not_load_dependency_manifest() {
