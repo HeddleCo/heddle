@@ -163,7 +163,9 @@ impl AtomicMutation for SnapshotMutation<'_> {
             | OpRecord::GitCheckpoint { .. }
             | OpRecord::RemoteThreadUpdate { .. }
             | OpRecord::RemoteThreadDelete { .. }
-            | OpRecord::UndoRecoveryUpdate { .. } => None,
+            | OpRecord::UndoRecoveryUpdate { .. }
+            | OpRecord::StateVisibilitySet { .. }
+            | OpRecord::StateVisibilityPromote { .. } => None,
         }) else {
             return Ok(this_run);
         };

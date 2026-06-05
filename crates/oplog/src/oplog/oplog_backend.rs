@@ -8,7 +8,7 @@ use std::future::Future;
 
 use objects::{
     error::Result,
-    object::{ChangeId, ContentHash, MarkerName, ThreadName},
+    object::{ChangeId, ContentHash, MarkerName, ThreadName, VisibilityTier},
 };
 
 use super::oplog_types::{
@@ -401,6 +401,51 @@ pub trait OpLogBackend: Send + Sync {
             vec![OpRecord::Purge {
                 redaction_id: *redaction_id,
                 blob: *blob,
+            }],
+            scope,
+        )?;
+        Ok(ids[0])
+    }
+
+    /// Record a state-visibility declaration (heddle#317). Forensic audit
+    /// companion to the per-state `StateVisibility` sidecar; emitted by
+    /// `heddle visibility set` and by the Invariant-A capture-time binding.
+    /// `scope` carries the repo's `op_scope()` for parity with the other
+    /// record helpers, even though the visibility class touches no refs.
+    fn record_state_visibility_set(
+        &self,
+        state: &ChangeId,
+        record_id: &ContentHash,
+        tier: &VisibilityTier,
+        scope: Option<&str>,
+    ) -> Result<u64> {
+        let ids = self.record_batch_scoped(
+            vec![OpRecord::StateVisibilitySet {
+                state: *state,
+                record_id: *record_id,
+                tier: tier.clone(),
+            }],
+            scope,
+        )?;
+        Ok(ids[0])
+    }
+
+    /// Record a state-visibility promotion (heddle#317): a superseding record
+    /// lifted the state to a less-restrictive `tier`.
+    fn record_state_visibility_promote(
+        &self,
+        state: &ChangeId,
+        superseded: &ContentHash,
+        record_id: &ContentHash,
+        tier: &VisibilityTier,
+        scope: Option<&str>,
+    ) -> Result<u64> {
+        let ids = self.record_batch_scoped(
+            vec![OpRecord::StateVisibilityPromote {
+                state: *state,
+                superseded: *superseded,
+                record_id: *record_id,
+                tier: tier.clone(),
             }],
             scope,
         )?;

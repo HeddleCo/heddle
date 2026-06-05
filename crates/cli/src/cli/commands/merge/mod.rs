@@ -1466,7 +1466,9 @@ fn merge_op_targets_state(op: &OpRecord, state: &ChangeId) -> bool {
         | OpRecord::GitCheckpoint { .. }
         | OpRecord::RemoteThreadUpdate { .. }
         | OpRecord::RemoteThreadDelete { .. }
-        | OpRecord::UndoRecoveryUpdate { .. } => false,
+        | OpRecord::UndoRecoveryUpdate { .. }
+        | OpRecord::StateVisibilitySet { .. }
+        | OpRecord::StateVisibilityPromote { .. } => false,
     }
 }
 

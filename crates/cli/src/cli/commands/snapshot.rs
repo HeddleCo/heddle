@@ -547,6 +547,14 @@ pub(crate) fn create_snapshot_profiled(
 
     let mut execution =
         repo.snapshot_with_attribution_profiled(intent.clone(), confidence, attribution)?;
+
+    // Invariant A (heddle#317, spike #266 §5.4): bind the inherited default
+    // visibility tier to the freshly captured state *now*, while resolving the
+    // config chain once. Must run after the snapshot call returns so the repo
+    // write lock it held is released — `bind_capture_visibility` takes that
+    // lock itself. A public resolution is a no-op (absence ≡ public).
+    repo.bind_capture_visibility(&execution.state.change_id)?;
+
     let thread_metadata_start = Instant::now();
     let (promotion_suggested, heavy_impact_paths) =
         update_active_thread_metadata(repo, &execution.state, &execution.tree)?;

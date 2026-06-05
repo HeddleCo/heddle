@@ -14,7 +14,8 @@ use crate::cli::{
     ActorCommands, AgentCommands, Cli, Commands, ContextCommands, DaemonCommands,
     DoctorCommands, HookCommands, IntegrationCommands, MaintenanceCommands, MarkerCommands,
     PurgeCommands, RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands,
-    ShellCommands, StackCommands, StashCommands, ThreadCommands, WorkspaceCommands,
+    ShellCommands, StackCommands, StashCommands, ThreadCommands, VisibilityCommands,
+    WorkspaceCommands,
     cli_args::{
         CommandCatalogArgs, ConflictCommands, DiscussCommands, ReviewCommands, TransactionCommands,
     },
@@ -2417,6 +2418,51 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ],
         ),
     ),
+    entry(&["visibility"], GROUP),
+    entry(
+        &["visibility", "set"],
+        json_discriminators(
+            opaque_schemas(DATA_MUTATION, &["visibility set"]),
+            &[json_discriminator(
+                Some("visibility set"),
+                "output_kind",
+                "visibility_set",
+            )],
+        ),
+    ),
+    entry(
+        &["visibility", "promote"],
+        json_discriminators(
+            opaque_schemas(DATA_MUTATION, &["visibility promote"]),
+            &[json_discriminator(
+                Some("visibility promote"),
+                "output_kind",
+                "visibility_promote",
+            )],
+        ),
+    ),
+    entry(
+        &["visibility", "show"],
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["visibility show"]),
+            &[json_discriminator(
+                Some("visibility show"),
+                "output_kind",
+                "visibility_show",
+            )],
+        ),
+    ),
+    entry(
+        &["visibility", "list"],
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["visibility list"]),
+            &[json_discriminator(
+                Some("visibility list"),
+                "output_kind",
+                "visibility_list",
+            )],
+        ),
+    ),
     entry(
         &["try"],
         documented_schemas(EXTERNAL_WORKTREE_MUTATION, &["try"]),
@@ -3851,6 +3897,12 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Purge { command } => match command {
             PurgeCommands::Apply(_) => vec!["purge", "apply"],
             PurgeCommands::List(_) => vec!["purge", "list"],
+        },
+        Commands::Visibility { command } => match command {
+            VisibilityCommands::Set(_) => vec!["visibility", "set"],
+            VisibilityCommands::Promote(_) => vec!["visibility", "promote"],
+            VisibilityCommands::Show(_) => vec!["visibility", "show"],
+            VisibilityCommands::List(_) => vec!["visibility", "list"],
         },
         Commands::Revert(_) => vec!["revert"],
         Commands::Undo(_) => vec!["undo"],

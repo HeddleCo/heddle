@@ -27,12 +27,15 @@
 use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use objects::{
     fs_atomic::write_file_atomic,
     lock::RepositoryLockExt,
     object::{ChangeId, ContentHash, StateVisibility, StateVisibilityBlob, VisibilityTier},
 };
+use oplog::OpLogBackend;
 
+use crate::namespace_policy::{VisibilityResolutionContext, resolve_default_visibility};
 use crate::repository::Repository;
 
 impl Repository {
@@ -215,6 +218,79 @@ impl Repository {
             out.push((state, blob));
         }
         Ok(out)
+    }
+
+    /// Canonical content id of a [`StateVisibility`] record — the same id
+    /// [`Self::put_state_visibility`] assigns. Exposed so callers (e.g. the
+    /// `visibility promote` verb) can name an existing record to supersede
+    /// without re-deriving the hashing scheme and drifting out of sync.
+    pub fn state_visibility_record_id(&self, record: &StateVisibility) -> Result<ContentHash> {
+        state_visibility_content_hash(record)
+    }
+
+    /// Resolve the default visibility tier a freshly captured state inherits.
+    ///
+    /// Runs the [`resolve_default_visibility`] chain with the repo-wide default
+    /// from `[review.discussion] default_visibility`. That field defaults to
+    /// [`VisibilityTier::Public`], so an unconfigured repo resolves public and
+    /// the common case stays record-free. Namespace policies are not yet loaded
+    /// from config, so the namespace tier of the chain is currently unused here.
+    pub fn resolve_capture_default_visibility(&self) -> VisibilityTier {
+        let ctx = VisibilityResolutionContext {
+            repo_default: Some(self.config().review.discussion.default_visibility.clone()),
+            namespace: None,
+        };
+        resolve_default_visibility(&ctx)
+    }
+
+    /// Invariant A — immutable-at-capture (spike #266 §5.4).
+    ///
+    /// Bind the inherited default tier to a brand-new state *at capture time*:
+    /// resolve the chain once, and persist any resolution more restrictive than
+    /// public as the state's initial [`StateVisibility`] record (plus an
+    /// `OpRecord::StateVisibilitySet` audit entry). A public resolution stays
+    /// record-free (absence ≡ public). Resolving here — not at first serve —
+    /// means a `[namespace]`/repo default that later drifts more-open cannot
+    /// retroactively expose an already-captured state.
+    ///
+    /// Idempotent: a state that already carries a visibility record is left
+    /// untouched, so a re-capture that mints the same `ChangeId` never
+    /// double-binds. Returns the new record's id when one was written.
+    ///
+    /// Must be called *outside* the snapshot write lock (the capture path holds
+    /// it across `snapshot_with_attribution_profiled`); this method takes the
+    /// repo write lock itself via [`Self::put_state_visibility`].
+    pub fn bind_capture_visibility(&self, state: &ChangeId) -> Result<Option<ContentHash>> {
+        let tier = self.resolve_capture_default_visibility();
+        if tier == VisibilityTier::Public {
+            return Ok(None);
+        }
+        if self
+            .get_state_visibility_for_state(state)
+            .with_context(|| "read existing visibility before capture-time binding")?
+            .has_record()
+        {
+            return Ok(None);
+        }
+
+        let declarer = self
+            .get_principal()
+            .with_context(|| "resolve principal for capture-time visibility binding")?;
+        let record = StateVisibility {
+            state: *state,
+            tier: tier.clone(),
+            embargo_until: None,
+            declarer,
+            declared_at: Utc::now(),
+            signature: None,
+            supersedes: None,
+        };
+        let id = self.put_state_visibility(record)?;
+        let scope = self.op_scope();
+        self.oplog()
+            .record_state_visibility_set(state, &id, &tier, Some(&scope))
+            .with_context(|| "record capture-time visibility oplog entry")?;
+        Ok(Some(id))
     }
 
     /// `<heddle_dir>/visibility/` — root of the per-state visibility store.

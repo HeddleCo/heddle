@@ -209,6 +209,8 @@ fn thread_for(op: &OpRecord) -> Option<String> {
         | OpRecord::ConflictResolved { .. }
         | OpRecord::Redact { .. }
         | OpRecord::UndoRecoveryUpdate { .. }
+        | OpRecord::StateVisibilitySet { .. }
+        | OpRecord::StateVisibilityPromote { .. }
         | OpRecord::Purge { .. } => None,
     }
 }
@@ -230,6 +232,8 @@ fn primary_change_id(op: &OpRecord) -> Option<ChangeId> {
         OpRecord::GitCheckpoint { state, .. } => Some(*state),
         OpRecord::EphemeralThreadCollapse { final_state, .. } => Some(*final_state),
         OpRecord::Redact { state, .. } => Some(*state),
+        OpRecord::StateVisibilitySet { state, .. }
+        | OpRecord::StateVisibilityPromote { state, .. } => Some(*state),
         OpRecord::RemoteThreadUpdate { state, .. }
         | OpRecord::RemoteThreadDelete { state, .. } => Some(*state),
         OpRecord::UndoRecoveryUpdate { state } => Some(*state),

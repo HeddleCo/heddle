@@ -17,6 +17,7 @@ mod commands_query;
 mod commands_redact;
 mod commands_remote;
 mod commands_review;
+mod commands_visibility;
 #[cfg(feature = "semantic")]
 mod commands_semantic;
 mod commands_shell;
@@ -71,6 +72,10 @@ pub use commands_redact::{
 pub use commands_remote::RemoteCommands;
 pub use commands_review::{
     ReviewCommands, ReviewHealthArgs, ReviewNextArgs, ReviewShowArgs, ReviewSignArgs, SignKindArg,
+};
+pub use commands_visibility::{
+    VisibilityCommands, VisibilityListArgs, VisibilityPromoteArgs, VisibilitySetArgs,
+    VisibilityShowArgs, VisibilityTierArg,
 };
 #[cfg(feature = "semantic")]
 pub use commands_semantic::{HotEventKindArg, HotSpotKeyArg, SemanticCommands};

@@ -757,6 +757,10 @@ async fn async_main() -> Result<()> {
 
         Commands::Purge { command } => cli::cli::commands::cmd_purge(&cli, command.clone()),
 
+        Commands::Visibility { command } => {
+            cli::cli::commands::cmd_visibility(&cli, command.clone())
+        }
+
         Commands::Maintenance { command } => cmd_maintenance(&cli, command.clone()),
 
         Commands::Blame {

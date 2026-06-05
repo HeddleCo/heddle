@@ -19,7 +19,7 @@
 
 use objects::{
     error::{HeddleError, Result},
-    object::{ChangeId, ContentHash},
+    object::{ChangeId, ContentHash, VisibilityTier},
 };
 use serde::{Deserialize, Serialize};
 
@@ -265,6 +265,17 @@ enum StrictCurrentOpRecord {
     UndoRecoveryUpdate {
         state: ChangeId,
     },
+    StateVisibilitySet {
+        state: ChangeId,
+        record_id: ContentHash,
+        tier: VisibilityTier,
+    },
+    StateVisibilityPromote {
+        state: ChangeId,
+        superseded: ContentHash,
+        record_id: ContentHash,
+        tier: VisibilityTier,
+    },
 }
 
 impl StrictCurrentOpRecord {
@@ -431,6 +442,26 @@ impl StrictCurrentOpRecord {
                 state,
             },
             Self::UndoRecoveryUpdate { state } => OpRecord::UndoRecoveryUpdate { state },
+            Self::StateVisibilitySet {
+                state,
+                record_id,
+                tier,
+            } => OpRecord::StateVisibilitySet {
+                state,
+                record_id,
+                tier,
+            },
+            Self::StateVisibilityPromote {
+                state,
+                superseded,
+                record_id,
+                tier,
+            } => OpRecord::StateVisibilityPromote {
+                state,
+                superseded,
+                record_id,
+                tier,
+            },
         }
     }
 }
@@ -1295,6 +1326,35 @@ mod tests {
     }
 
     #[test]
+    fn current_schema_round_trips_visibility_variants() {
+        // heddle#317 tail variants only exist in the current schema; prove
+        // they survive an encode → current-decode round-trip so the audit
+        // entries are readable back.
+        let records = [
+            OpRecord::StateVisibilitySet {
+                state: cid(30),
+                record_id: hash(31),
+                tier: VisibilityTier::Restricted {
+                    scope_label: "embargo".into(),
+                },
+            },
+            OpRecord::StateVisibilityPromote {
+                state: cid(32),
+                superseded: hash(33),
+                record_id: hash(34),
+                tier: VisibilityTier::Internal,
+            },
+        ];
+        for expected in records {
+            let bytes = encode_latest_record(&expected).unwrap();
+            let decoded = CurrentOpRecordSchema::decode(&bytes).unwrap();
+            assert_same_record(&decoded, &expected);
+            let decoded = decode_versioned_record(&bytes, OpRecordSchemaVersion::Current).unwrap();
+            assert_same_record(&decoded, &expected);
+        }
+    }
+
+    #[test]
     fn current_schema_round_trips_through_versioned_decoder() {
         for expected in atomic_no_head_records() {
             let bytes = encode_latest_record(&expected).unwrap();
@@ -1474,7 +1534,9 @@ pub(crate) mod tests_support {
                 },
                 OpRecord::RemoteThreadUpdate { .. }
                 | OpRecord::RemoteThreadDelete { .. }
-                | OpRecord::UndoRecoveryUpdate { .. } => {
+                | OpRecord::UndoRecoveryUpdate { .. }
+                | OpRecord::StateVisibilitySet { .. }
+                | OpRecord::StateVisibilityPromote { .. } => {
                     panic!("pre-atomic fixtures cannot encode post-atomic tail variants")
                 }
             }
@@ -1657,6 +1719,9 @@ pub(crate) mod tests_support {
                 },
                 OpRecord::UndoRecoveryUpdate { state } => {
                     Self::UndoRecoveryUpdate { state: *state }
+                }
+                OpRecord::StateVisibilitySet { .. } | OpRecord::StateVisibilityPromote { .. } => {
+                    panic!("atomic-no-head fixtures cannot encode heddle#317 visibility variants")
                 }
             }
         }

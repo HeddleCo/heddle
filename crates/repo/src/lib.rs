@@ -17,6 +17,7 @@ pub mod identity;
 pub mod lazy_hydrator;
 mod merge_state;
 pub mod migration;
+pub mod namespace_policy;
 pub mod operation_dedup;
 mod repository;
 mod repository_redaction;
