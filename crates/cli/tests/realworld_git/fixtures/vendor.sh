@@ -50,20 +50,32 @@ vendor_one() {
 
     git clone --bare \
         --depth="$depth" \
-        --no-tags \
         --single-branch \
         --branch="$branch" \
         "$url" "$shallow"
 
+    # Pull annotated + signed tags into the shallow clone. `--no-tags` on the
+    # clone (its prior default here) meant tags never arrived, so the
+    # round-trip fidelity gate (heddle#562) silently never exercised a signed
+    # annotated tag — the most error-prone fidelity case. Fetch tags
+    # explicitly; `--tag-of-filtered-object=drop` below still discards any tag
+    # whose target fell outside the shallow window.
+    git -C "$shallow" fetch --depth="$depth" origin 'refs/tags/*:refs/tags/*' \
+        || echo "    (no tags fetched for $name)"
+
     git init --bare "$fresh" >/dev/null
 
-    # `fast-export --signed-tags=strip --tag-of-filtered-object=drop`: drop
-    # tag signatures (we ship test fixtures, not release artifacts) and any
-    # tags pointing at objects we filtered out. `--all` would be a no-op in
-    # a single-branch shallow clone but keeps the script honest if we ever
-    # widen the clone.
+    # `fast-export --signed-tags=verbatim --tag-of-filtered-object=drop`:
+    # preserve the exact armored signature bytes on annotated tags so signed
+    # tags round-trip byte-identically (heddle#562 — `strip` discarded them,
+    # making the fidelity gate a no-op for tag signatures), while still
+    # dropping any tag whose target object we filtered out of the shallow
+    # window (a legitimate filter, not a fidelity loss). fast-export already
+    # preserves commit `gpgsig` headers verbatim by default. `--all` would be
+    # a no-op in a single-branch shallow clone but keeps the script honest if
+    # we ever widen the clone.
     git -C "$shallow" fast-export --all \
-        --signed-tags=strip \
+        --signed-tags=verbatim \
         --tag-of-filtered-object=drop \
         > "$dump"
     # Gitlink (mode 160000) entries used to be stripped here because

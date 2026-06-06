@@ -251,6 +251,79 @@ fn roundtrip_annotated_and_lightweight_tags() {
     assert_roundtrip_fidelity("tags", dir);
 }
 
+/// Materialize the checked-in signed-object bundle into a fresh working repo
+/// under `dir` and return the path to it. The bundle (see
+/// `tests/roundtrip_fidelity_fixtures/gen-signed-objects.sh`) was generated
+/// once with an ephemeral GPG key, so its signed-object SHAs are stable now
+/// that it is committed — but the caller never hardcodes them; the fidelity
+/// assertion recomputes every SHA from this live repo.
+///
+/// We `init` on a throwaway branch then `fetch` the bundle's heads + tags so
+/// the ref layout is clean (`refs/heads/*` + `refs/tags/*`, no `refs/remotes/*`
+/// that a `git clone` from a bundle would introduce), matching the in-process
+/// fixtures above.
+fn extract_signed_bundle(dir: &Path) -> std::path::PathBuf {
+    let bundle = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("roundtrip_fidelity_fixtures")
+        .join("signed-objects.bundle");
+    assert!(
+        bundle.exists(),
+        "signed-object fixture missing: {} (regenerate with \
+         tests/roundtrip_fidelity_fixtures/gen-signed-objects.sh)",
+        bundle.display()
+    );
+    let repo = dir.join("signed");
+    std::fs::create_dir_all(&repo).expect("create signed repo dir");
+    git(&repo, &["init", "-q", "--initial-branch=__bootstrap"]);
+    git(
+        &repo,
+        &[
+            "fetch",
+            "-q",
+            bundle.to_str().expect("bundle path utf8"),
+            "refs/heads/*:refs/heads/*",
+            "refs/tags/*:refs/tags/*",
+        ],
+    );
+    git(&repo, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    repo
+}
+
+/// Signed commits (folded `gpgsig` header) and signed annotated tags
+/// (signature appended unfolded in the tag body) are the most error-prone
+/// fidelity cases — and the vendored real-world fixtures never exercised them,
+/// because `vendor.sh` used to pass `--no-tags` + `--signed-tags=strip`, so
+/// the round-trip gate silently never saw a signature (heddle#562). This feeds
+/// a deterministic, self-contained signed-object fixture through the same
+/// adopt → export round-trip and asserts the signature bytes survive verbatim
+/// (identical commit + tag-object SHAs). A failure here is a real fidelity bug:
+/// export is not preserving the `gpgsig` / tag-body signature bytes.
+#[test]
+fn roundtrip_signed_commit_and_tag() {
+    let tmp = TempDir::new().unwrap();
+    let source = extract_signed_bundle(tmp.path());
+
+    // Guard against a silent no-op: the fixture must actually carry a signed
+    // commit (folded gpgsig header) and a signed annotated tag (inline PGP
+    // signature in the tag body). If a future bundle refresh drops either,
+    // this fails loudly rather than passing without testing signatures.
+    let main_oid = git(&source, &["rev-parse", "refs/heads/main"]);
+    let commit_obj = git(&source, &["cat-file", "commit", main_oid.trim()]);
+    assert!(
+        commit_obj.lines().any(|l| l.starts_with("gpgsig ")),
+        "signed-object fixture lost its signed commit (no gpgsig header):\n{commit_obj}"
+    );
+    let tag_oid = git(&source, &["rev-parse", "refs/tags/v1.0"]);
+    let tag_obj = git(&source, &["cat-file", "tag", tag_oid.trim()]);
+    assert!(
+        tag_obj.contains("-----BEGIN PGP SIGNATURE-----"),
+        "signed-object fixture lost its signed annotated tag (no inline signature):\n{tag_obj}"
+    );
+
+    assert_roundtrip_fidelity("signed-commit-and-tag", &source);
+}
+
 #[test]
 fn roundtrip_notes() {
     let tmp = TempDir::new().unwrap();
