@@ -13,7 +13,6 @@ use super::{
     fs_paths::{actions_dir, blobs_dir, packs_dir, states_dir, trees_dir},
 };
 use crate::{
-    fs_atomic::sync_directory,
     object::{Blob, ChangeId, ContentHash, State, Tree},
     store::{
         CompressionConfig, Result,
@@ -208,7 +207,9 @@ impl FsStore {
         self.loose_object_write_mode = mode;
     }
 
+    #[cfg(not(target_os = "linux"))]
     fn flush_pending_directory_syncs(&self) -> Result<usize> {
+        use crate::fs_atomic::sync_directory;
         let pending_dirs = {
             let mut guard = self.pending_directory_syncs.lock().map_err(|_| {
                 crate::store::HeddleError::Config(
@@ -369,9 +370,45 @@ impl FsStore {
         };
 
         if should_flush {
-            let _ = self.flush_pending_directory_syncs()?;
+            // On Linux, one `syncfs()` makes every object written during
+            // the batch durable in a single filesystem-wide barrier (git's
+            // `core.fsyncMethod=batch`), replacing the per-file `sync_data`
+            // skipped in `write_atomic`. It also flushes the directory
+            // metadata, so the deferred per-directory fsync queue is then
+            // redundant and just cleared. Other platforms fall back to the
+            // per-directory fsyncs that pair with their per-file `sync_data`.
+            #[cfg(target_os = "linux")]
+            {
+                self.syncfs_root()?;
+                if let Ok(mut pending) = self.pending_directory_syncs.lock() {
+                    pending.clear();
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = self.flush_pending_directory_syncs()?;
+            }
         }
 
+        Ok(())
+    }
+
+    /// Single filesystem-wide durability barrier for a snapshot write
+    /// batch on Linux (git's `core.fsyncMethod=batch`). `syncfs` flushes
+    /// every dirty page on the filesystem backing the object store in one
+    /// barrier, making all objects written during the batch durable
+    /// without the per-file `sync_data` that dominated large-history
+    /// import (heddle#550).
+    #[cfg(target_os = "linux")]
+    fn syncfs_root(&self) -> Result<()> {
+        use std::os::fd::AsRawFd;
+        let dir = std::fs::File::open(&self.root).map_err(crate::store::HeddleError::Io)?;
+        // SAFETY: `dir` owns a valid open fd for the duration of the call;
+        // `syncfs` only reads it to locate the filesystem to flush.
+        let rc = unsafe { libc::syncfs(dir.as_raw_fd()) };
+        if rc != 0 {
+            return Err(crate::store::HeddleError::Io(std::io::Error::last_os_error()));
+        }
         Ok(())
     }
 

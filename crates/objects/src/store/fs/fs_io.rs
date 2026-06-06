@@ -118,7 +118,22 @@ pub(super) fn write_atomic(
             // flush could leave a file that "exists" in the directory
             // but whose data blocks weren't flushed — exactly the
             // ACID violation we want to avoid for state/tree writes.
+            //
+            // On Linux the per-file `sync_data` is deferred to a single
+            // `syncfs()` barrier in `flush_snapshot_write_batch` (git's
+            // `core.fsyncMethod=batch`): one filesystem-wide flush
+            // replaces the N per-object fsyncs that dominate large
+            // commit-history import (heddle#550 — measured ~65% of
+            // `heddle adopt` import time). Objects written mid-batch are
+            // unreferenced until the post-flush oplog/ref/mapping
+            // commit, so a crash before flush leaves only harmless,
+            // content-addressed orphans that the next run re-creates
+            // identically. Non-Linux platforms (no `syncfs`) keep the
+            // per-file fsync and the deferred per-directory sync below.
+            #[cfg(not(target_os = "linux"))]
             AtomicWriteMode::BatchDirectorySync => file.sync_data()?,
+            #[cfg(target_os = "linux")]
+            AtomicWriteMode::BatchDirectorySync => {}
             // Cache-mirror writes: no fsync. Caller guards reads
             // with a hash check, so torn-write corruption is
             // recoverable (re-promote from the authoritative copy).
