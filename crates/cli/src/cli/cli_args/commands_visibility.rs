@@ -34,7 +34,7 @@ pub enum VisibilityCommands {
 }
 
 /// CLI surface for the tier enum. `VisibilityTier` carries a label on its
-/// team-scoped / restricted variants, so it can't derive `ValueEnum`
+/// team-scoped / restricted / private variants, so it can't derive `ValueEnum`
 /// directly; this flat enum + `--label` reconstructs it. Kept in lockstep
 /// with `VisibilityTier` by [`VisibilityTierArg::into_tier`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -44,13 +44,15 @@ pub enum VisibilityTierArg {
     Internal,
     TeamScoped,
     Restricted,
+    Private,
 }
 
 impl VisibilityTierArg {
-    /// Build the [`VisibilityTier`] this arg denotes. `team-scoped` and
-    /// `restricted` require `--label` (the team id / scope label); the label
-    /// is ignored for `public` / `internal`. Returns the human-facing error
-    /// string when a required label is missing.
+    /// Build the [`VisibilityTier`] this arg denotes. `team-scoped`,
+    /// `restricted`, and `private` (the strictest/embargo tier, withheld from
+    /// every audience incl. `internal`) require `--label` (the team id / scope
+    /// label); the label is ignored for `public` / `internal`. Returns the
+    /// human-facing error string when a required label is missing.
     pub fn into_tier(self, label: Option<String>) -> Result<VisibilityTier, String> {
         match self {
             VisibilityTierArg::Public => Ok(VisibilityTier::Public),
@@ -67,6 +69,12 @@ impl VisibilityTierArg {
                 }
                 _ => Err("the restricted tier requires --label <scope-label>".to_string()),
             },
+            VisibilityTierArg::Private => match label {
+                Some(scope_label) if !scope_label.trim().is_empty() => {
+                    Ok(VisibilityTier::Private { scope_label })
+                }
+                _ => Err("the private tier requires --label <scope-label>".to_string()),
+            },
         }
     }
 }
@@ -79,8 +87,8 @@ pub struct VisibilitySetArgs {
     /// The audience tier to declare.
     #[arg(long, value_enum)]
     pub tier: VisibilityTierArg,
-    /// Label for the `team-scoped` (team id) or `restricted` (scope label)
-    /// tiers. Ignored for `public` / `internal`.
+    /// Label for the `team-scoped` (team id) or `restricted` / `private`
+    /// (scope label) tiers. Ignored for `public` / `internal`.
     #[arg(long)]
     pub label: Option<String>,
 }
@@ -93,7 +101,7 @@ pub struct VisibilityPromoteArgs {
     /// The less-restrictive tier to promote to.
     #[arg(long, value_enum)]
     pub tier: VisibilityTierArg,
-    /// Label for the `team-scoped` / `restricted` target tier.
+    /// Label for the `team-scoped` / `restricted` / `private` target tier.
     #[arg(long)]
     pub label: Option<String>,
 }
@@ -106,3 +114,64 @@ pub struct VisibilityShowArgs {
 
 #[derive(Clone, Debug, Args)]
 pub struct VisibilityListArgs {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restricted_requires_non_empty_label() {
+        assert_eq!(
+            VisibilityTierArg::Restricted.into_tier(Some("legal".to_string())),
+            Ok(VisibilityTier::Restricted {
+                scope_label: "legal".to_string()
+            })
+        );
+        assert!(VisibilityTierArg::Restricted.into_tier(None).is_err());
+        assert!(VisibilityTierArg::Restricted
+            .into_tier(Some("   ".to_string()))
+            .is_err());
+    }
+
+    #[test]
+    fn private_maps_to_private_tier_with_non_empty_label() {
+        assert_eq!(
+            VisibilityTierArg::Private.into_tier(Some("embargo-x".to_string())),
+            Ok(VisibilityTier::Private {
+                scope_label: "embargo-x".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn private_requires_a_label() {
+        assert_eq!(
+            VisibilityTierArg::Private.into_tier(None),
+            Err("the private tier requires --label <scope-label>".to_string())
+        );
+        assert_eq!(
+            VisibilityTierArg::Private.into_tier(Some("  ".to_string())),
+            Err("the private tier requires --label <scope-label>".to_string())
+        );
+    }
+
+    #[test]
+    fn private_flows_through_the_317_monotonicity_check_as_rank_4() {
+        // `promote` is the *opening* verb (#317): it appends a superseding,
+        // strictly-LESS-restrictive declaration. Private (rank 4) is the most
+        // restrictive tier, so it is the embargo tier you reach via `set`; a
+        // `promote` AWAY from private to any lower tier is the valid opening,
+        // and a `promote` TO private is correctly rejected as a narrowing.
+        // This just confirms the new arg's tier flows through that check with
+        // the right rank — the monotonicity logic itself is unchanged.
+        let private = VisibilityTier::Private {
+            scope_label: "embargo-x".to_string(),
+        };
+        assert_eq!(private.restrictiveness_rank(), 4);
+        // Opening away from private is allowed.
+        assert!(VisibilityTier::Internal.is_strictly_less_restrictive_than(&private));
+        assert!(VisibilityTier::Public.is_strictly_less_restrictive_than(&private));
+        // Promoting *to* private (a narrowing) is not an opening — use `set`.
+        assert!(!private.is_strictly_less_restrictive_than(&VisibilityTier::Internal));
+    }
+}
