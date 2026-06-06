@@ -2787,6 +2787,95 @@ fn import_isolates_per_ref_mirror_failures() {
         );
     }
 }
+
+/// #561 — the mirror copy writes reachable objects as a single packfile
+/// (pack + index), not as N loose objects. The packed mirror must still
+/// contain *exactly* the object set the loose path produced (same OIDs,
+/// byte-identical), so SHA-stable export and annotated-tag preservation
+/// are unaffected by the storage form.
+#[test]
+fn import_writes_mirror_as_pack_with_identical_object_set() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_src_temp, source_repo) = init_git_repo();
+
+    // A real (non-empty) tree so every reachable object is physically
+    // stored — the empty tree is a gix synthetic and would skew a
+    // store-vs-store object-set comparison.
+    let blob = source_repo.write_blob(b"hello\n").expect("blob").detach();
+    let mut editor = source_repo
+        .edit_tree(gix::hash::ObjectId::empty_tree(source_repo.object_hash()))
+        .expect("tree editor");
+    editor
+        .upsert("file.txt", gix::object::tree::EntryKind::Blob, blob)
+        .expect("upsert blob");
+    let tree = editor.write().expect("tree").detach();
+
+    let first = commit_with_tree(&source_repo, Some("refs/heads/main"), tree, "first", &[]);
+    let second = commit_with_tree(&source_repo, Some("refs/heads/main"), tree, "second", &[first]);
+    let tag_oid = create_annotated_tag(&source_repo, "v1.0", second, "release");
+
+    let mut bridge = GitBridge::new(&repo);
+    bridge
+        .import(Some(source_repo.workdir().expect("workdir")))
+        .expect("import");
+
+    let mirror = bridge.open_git_repo().expect("open mirror");
+
+    // (1) Objects are stored packed, not loose.
+    let pack_dir = mirror.git_dir().join("objects").join("pack");
+    let pack_count = std::fs::read_dir(&pack_dir)
+        .expect("read pack dir")
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "pack"))
+        .count();
+    assert!(
+        pack_count >= 1,
+        "mirror should store reachable objects in at least one packfile"
+    );
+
+    // No loose objects: `objects/` should hold only `pack`/`info`, never a
+    // 2-hex fanout dir (the loose-object layout the old path produced).
+    let loose: Vec<_> = std::fs::read_dir(mirror.git_dir().join("objects"))
+        .expect("read objects dir")
+        .filter_map(Result::ok)
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.len() == 2 && name.chars().all(|c| c.is_ascii_hexdigit())
+        })
+        .collect();
+    assert!(
+        loose.is_empty(),
+        "mirror must not contain loose object dirs, found {loose:?}"
+    );
+
+    // (2) The packed set equals the source's stored (== reachable) set.
+    let source_set: std::collections::HashSet<_> = source_repo
+        .objects
+        .iter()
+        .expect("source object iter")
+        .map(|r| r.expect("source oid"))
+        .collect();
+    let mirror_set: std::collections::HashSet<_> = mirror
+        .objects
+        .iter()
+        .expect("mirror object iter")
+        .map(|r| r.expect("mirror oid"))
+        .collect();
+    assert_eq!(
+        mirror_set, source_set,
+        "packed mirror object set must equal the source reachable set"
+    );
+
+    // The annotated tag object survives in the pack, byte-identical.
+    let src = source_repo.find_object(tag_oid).expect("source tag present");
+    let mir = mirror.find_object(tag_oid).expect("mirror tag present");
+    assert_eq!(src.kind, gix::objs::Kind::Tag);
+    assert_eq!(mir.kind, src.kind, "tag object kind must match");
+    assert_eq!(mir.data, src.data, "annotated tag bytes must be identical");
+}
+
 #[test]
 fn import_honors_legacy_heddle_change_id_trailer() {
     let heddle_temp = TempDir::new().expect("heddle temp");
