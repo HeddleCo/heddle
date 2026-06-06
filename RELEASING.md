@@ -144,6 +144,29 @@ The asset filenames and the `SHA256SUMS` layout are part of this
 contract. Changing them is a breaking change for downstream packaging
 channels and requires a coordinated update.
 
+### Linux glibc floor
+
+The two `-unknown-linux-gnu` legs target **glibc ≥ 2.35**. They are
+built on `ubuntu-22.04` / `ubuntu-22.04-arm` runners (glibc 2.35), so
+the binaries dynamically link against no symbol newer than `GLIBC_2.35`
+and run on Debian 12 (glibc 2.36), Ubuntu 22.04, and every newer glibc
+distro forward.
+
+This is a declared contract, not an accident of the runner image.
+Building these legs on a newer runner (e.g. `ubuntu-24.04`, glibc 2.39)
+raises the symbol floor and crashes the binary at first run on the
+supported targets with `GLIBC_2.3x not found` (#549) — it `apt
+install`s / extracts fine and only fails on exec, so it is not caught
+by packaging tests. The runner pins are asserted by
+`scripts/check-release-pipeline.sh`; a bump back to a newer runner
+fails that check. To verify a built binary's floor:
+
+```bash
+objdump -T heddle | grep -oE 'GLIBC_[0-9.]+' | sort -uV | tail -1   # must be <= GLIBC_2.35
+# end-to-end smoke on the oldest supported target:
+docker run --rm -v "$PWD:/h" debian:12 /h/heddle --version
+```
+
 ## Verifying a release
 
 ```bash
@@ -178,7 +201,7 @@ cross-compiling from a single host. Trade-off:
 - **Native matrix (chosen)**: five parallel runners (~5–10 min each
   with `Swatinem/rust-cache`). No `cross`, no sysroot juggling, no
   Apple-codesign-on-Linux contortions later if/when we add notarization.
-  ARM is free on GitHub-hosted runners (`ubuntu-24.04-arm`, `macos-14`).
+  ARM is free on GitHub-hosted runners (`ubuntu-22.04-arm`, `macos-14`).
 - **Cross-compilation**: one runner, more setup. Wins on cost only if
   we hit a parallelism cap, which we won't at our release cadence.
 

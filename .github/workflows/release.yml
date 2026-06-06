@@ -191,10 +191,14 @@ jobs:
             runner: macos-13
             archive: tar.gz
           - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
+            # glibc floor: ubuntu-22.04 ships glibc 2.35, so the -gnu
+            # binaries run on Debian 12 (2.36) and Ubuntu 22.04+ forward.
+            # Building on ubuntu-24.04 (glibc 2.39) crashed at runtime on
+            # those targets with GLIBC_2.3x-not-found (#549).
+            runner: ubuntu-22.04-arm
             archive: tar.gz
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-24.04
+            runner: ubuntu-22.04
             archive: tar.gz
           - target: x86_64-pc-windows-msvc
             runner: windows-2022
