@@ -13,7 +13,7 @@ use repo::{Repository as HeddleRepository, ThreadId};
 use tracing::warn;
 
 pub use super::git_import_tree::{GitTreeImporter, import_git_tree};
-use super::git_import_tree::fail_lossy_entry;
+use super::git_import_tree::{PackImportSink, fail_lossy_entry};
 use crate::bridge::{
     git_core::{
         GitBridge, GitBridgeError, GitResult, RefNamespace, RefUpdate, SyncMapping,
@@ -148,7 +148,6 @@ fn resolve_identity(
 /// Import a single Git commit as a Heddle state.
 pub fn import_commit(
     mapping: &mut SyncMapping,
-    heddle_repo: &HeddleRepository,
     repo: &gix::Repository,
     tree_importer: &mut GitTreeImporter<'_>,
     git_oid: gix::hash::ObjectId,
@@ -243,7 +242,7 @@ pub fn import_commit(
         state
     };
 
-    heddle_repo.store().put_state(&state)?;
+    tree_importer.write_state(&state)?;
 
     Ok(change_id)
 }
@@ -569,9 +568,24 @@ fn import_with_ref_filter(
 
     bridge.build_existing_mapping(Some(repo.path()))?;
 
-    let mut tree_importer =
-        GitTreeImporter::with_options(bridge.heddle_repo, &repo, options.clone());
-    bridge.heddle_repo.store().begin_snapshot_write_batch()?;
+    // heddle#555: route the bulk import through a single streaming pack (one
+    // atomic install) instead of N loose objects + per-object fsync. Stage
+    // under the Heddle store dir so the final install is a same-filesystem
+    // rename(2). Only the write sink changes — every bridge import semantic
+    // (identity recovery, annotated-tag mirror, lossy handling, divergence
+    // checks, ref/tag/marker sync) is preserved by reusing the same walk.
+    let staging_dir = bridge
+        .heddle_repo
+        .heddle_dir()
+        .join("bridge-import")
+        .join("staging");
+    let pack_sink = PackImportSink::new(&staging_dir)?;
+    let mut tree_importer = GitTreeImporter::with_options_packed(
+        bridge.heddle_repo,
+        &repo,
+        options.clone(),
+        pack_sink,
+    );
     let mut noop_progress = |_: usize| {};
     let progress_cb: &mut dyn FnMut(usize) = match progress {
         Some(callback) => callback,
@@ -584,12 +598,16 @@ fn import_with_ref_filter(
             stats
                 .lossy_entries
                 .extend(tree_importer.lossy_entries().iter().cloned());
+            // Crash-safe sequencing (risk #3): the pack must be durably
+            // installed BEFORE the change_id↔git_oid mapping is committed or
+            // any ref/tag/marker is synced below, so a crash can never leave
+            // a ref or mapping entry pointing into a pack that didn't land.
+            tree_importer.finalize_pack_install()?;
             bridge.write_mapping_tmp_to_disk()?;
-            bridge.heddle_repo.store().flush_snapshot_write_batch()?;
             bridge.commit_mapping_tmp_to_disk()?;
         }
         Err(error) => {
-            bridge.heddle_repo.store().abort_snapshot_write_batch();
+            tree_importer.abort_pack();
             return Err(error);
         }
     }
@@ -906,18 +924,21 @@ fn import_commit_ancestry(
                 // with identical bytes.
                 let existing_change_id = bridge.mapping.get_heddle(oid);
                 let needs_state = match existing_change_id {
-                    Some(cid) => bridge.heddle_repo.store().get_state(&cid)?.is_none(),
+                    // heddle#555 risk #2: a state buffered in the un-finalized
+                    // pack isn't readable via the store yet, so check the
+                    // in-memory staged set first; fall back to the store for
+                    // states a prior import already installed (keeps re-import
+                    // idempotent — states_created stays 0 on a no-op re-adopt).
+                    Some(cid) => {
+                        !tree_importer.state_staged_in_pack(&cid)
+                            && bridge.heddle_repo.store().get_state(&cid)?.is_none()
+                    }
                     None => true,
                 };
                 if needs_state {
                     let before_lossy = tree_importer.lossy_entries().len();
-                    let change_id = import_commit(
-                        &mut bridge.mapping,
-                        bridge.heddle_repo,
-                        repo,
-                        tree_importer,
-                        oid,
-                    )?;
+                    let change_id =
+                        import_commit(&mut bridge.mapping, repo, tree_importer, oid)?;
                     bridge.mapping.insert(change_id, oid);
                     let commit_lossy_entries =
                         tree_importer.lossy_entries()[before_lossy..].to_vec();
