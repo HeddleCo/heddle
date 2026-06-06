@@ -305,7 +305,8 @@ impl FsStore {
         let batch_active = self.snapshot_write_batch_depth.lock().map_err(|_| {
             crate::store::HeddleError::Config("Failed to acquire snapshot batch lock".to_string())
         })?;
-        let configured_mode = if *batch_active > 0 {
+        let in_snapshot_batch = *batch_active > 0;
+        let configured_mode = if in_snapshot_batch {
             LooseObjectWriteMode::BatchDirectorySync
         } else {
             self.loose_object_write_mode
@@ -316,11 +317,17 @@ impl FsStore {
             LooseObjectWriteMode::Durable => AtomicWriteMode::Durable,
             LooseObjectWriteMode::BatchDirectorySync => AtomicWriteMode::BatchDirectorySync,
         };
-        write_atomic(path, data, mode, Some(&self.pending_directory_syncs))
+        write_atomic(
+            path,
+            data,
+            mode,
+            Some(&self.pending_directory_syncs),
+            in_snapshot_batch,
+        )
     }
 
     pub(super) fn write_pack_atomic(&self, path: &Path, data: &[u8]) -> Result<()> {
-        write_atomic(path, data, AtomicWriteMode::Durable, None)
+        write_atomic(path, data, AtomicWriteMode::Durable, None, false)
     }
 
     /// Atomic write tuned for *cache-mirror* loose objects: no fsync
@@ -344,7 +351,7 @@ impl FsStore {
     /// / `put_state` — those are the authoritative copy and must
     /// survive a crash.
     pub(super) fn write_loose_object_cache(&self, path: &Path, data: &[u8]) -> Result<()> {
-        write_atomic(path, data, AtomicWriteMode::NoSync, None)
+        write_atomic(path, data, AtomicWriteMode::NoSync, None, false)
     }
 
     pub(super) fn begin_snapshot_write_batch_impl(&self) -> Result<()> {

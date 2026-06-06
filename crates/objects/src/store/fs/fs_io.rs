@@ -56,11 +56,36 @@ pub(super) enum AtomicWriteMode {
     NoSync,
 }
 
+/// Whether a `BatchDirectorySync` write must issue its own per-file
+/// `sync_data` for content durability, rather than deferring to the
+/// snapshot batch's single `syncfs()` barrier.
+///
+/// The deferral (skip the per-file fsync, let `flush_snapshot_write_batch`
+/// run one `syncfs`) is sound ONLY on Linux AND ONLY inside an active
+/// snapshot batch — that's the only state in which a `syncfs` is
+/// guaranteed to follow. `BatchDirectorySync` can also be configured
+/// standalone via the public `set_loose_object_write_mode` setter with
+/// no active batch (depth 0); in that case no `syncfs` is ever issued,
+/// so the write must sync itself. Non-Linux has no `syncfs` and always
+/// syncs per file.
+fn batch_directory_sync_needs_per_file_sync(in_snapshot_batch: bool) -> bool {
+    if cfg!(target_os = "linux") {
+        !in_snapshot_batch
+    } else {
+        true
+    }
+}
+
+/// `in_snapshot_batch` is true only when this write happens inside an
+/// active `begin_snapshot_write_batch` (depth > 0), which guarantees a
+/// later `flush_snapshot_write_batch` will run the `syncfs()` barrier —
+/// see [`batch_directory_sync_needs_per_file_sync`].
 pub(super) fn write_atomic(
     path: &Path,
     data: &[u8],
     mode: AtomicWriteMode,
     pending_directory_syncs: Option<&Mutex<BTreeSet<PathBuf>>>,
+    in_snapshot_batch: bool,
 ) -> Result<()> {
     let parent = path
         .parent()
@@ -128,12 +153,20 @@ pub(super) fn write_atomic(
             // unreferenced until the post-flush oplog/ref/mapping
             // commit, so a crash before flush leaves only harmless,
             // content-addressed orphans that the next run re-creates
-            // identically. Non-Linux platforms (no `syncfs`) keep the
-            // per-file fsync and the deferred per-directory sync below.
-            #[cfg(not(target_os = "linux"))]
-            AtomicWriteMode::BatchDirectorySync => file.sync_data()?,
-            #[cfg(target_os = "linux")]
-            AtomicWriteMode::BatchDirectorySync => {}
+            // identically.
+            //
+            // That deferral is sound ONLY when a `syncfs` is guaranteed
+            // to follow — i.e. inside an active snapshot batch on Linux.
+            // When `BatchDirectorySync` is configured standalone via the
+            // public `set_loose_object_write_mode` setter with no active
+            // batch, no `syncfs` is ever issued, so the write must sync
+            // itself. Non-Linux platforms (no `syncfs`) always keep the
+            // per-file fsync. See `batch_directory_sync_needs_per_file_sync`.
+            AtomicWriteMode::BatchDirectorySync => {
+                if batch_directory_sync_needs_per_file_sync(in_snapshot_batch) {
+                    file.sync_data()?;
+                }
+            }
             // Cache-mirror writes: no fsync. Caller guards reads
             // with a hash check, so torn-write corruption is
             // recoverable (re-promote from the authoritative copy).
@@ -285,4 +318,37 @@ pub(super) fn list_hashes_from_dir(
     }
     debug!(count = hashes.len(), "Listed hashes");
     Ok(hashes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::batch_directory_sync_needs_per_file_sync;
+
+    #[test]
+    fn batch_directory_sync_defers_per_file_fsync_only_in_active_batch() {
+        // Standalone (mode set via the public setter, no active batch):
+        // no `syncfs` barrier is coming, so the write must always sync
+        // itself — on every platform. This is the heddle#550 durability
+        // fix: the Linux skip must not apply outside a snapshot batch.
+        assert!(
+            batch_directory_sync_needs_per_file_sync(false),
+            "standalone BatchDirectorySync must issue its own per-file sync_data",
+        );
+
+        // Inside an active snapshot batch, Linux may defer to the single
+        // `syncfs()` in flush_snapshot_write_batch (the #550 perf win);
+        // other platforms still sync per file.
+        let needs_sync_in_batch = batch_directory_sync_needs_per_file_sync(true);
+        if cfg!(target_os = "linux") {
+            assert!(
+                !needs_sync_in_batch,
+                "Linux must defer the per-file sync to the batch syncfs barrier",
+            );
+        } else {
+            assert!(
+                needs_sync_in_batch,
+                "non-Linux has no syncfs and must always sync per file",
+            );
+        }
+    }
 }

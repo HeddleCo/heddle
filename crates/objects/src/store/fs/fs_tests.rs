@@ -68,6 +68,41 @@ fn test_durable_loose_object_write_mode_does_not_queue_directory_syncs() {
 }
 
 #[test]
+fn standalone_batch_directory_sync_mode_writes_durably_without_a_batch() {
+    // Durability guard for heddle#550: `BatchDirectorySync` can be
+    // configured standalone via the public `set_loose_object_write_mode`
+    // setter, with no `begin_snapshot_write_batch` ever called. In that
+    // state the deferred `syncfs()` barrier never runs, so on Linux the
+    // write must NOT skip its per-file `sync_data` (that skip is only
+    // sound inside an active batch). Here we exercise that path
+    // end-to-end: set the mode standalone, write a loose object with no
+    // batch active, and confirm it is committed + round-trips with no
+    // flush call. The per-file-sync decision itself is unit-tested in
+    // `fs_io::tests::batch_directory_sync_defers_per_file_fsync_only_in_active_batch`.
+    let temp_dir = TempDir::new().unwrap();
+    let heddle_dir = temp_dir.path().join(".heddle");
+    let mut store = FsStore::new(&heddle_dir);
+    store.set_loose_object_write_mode(LooseObjectWriteMode::BatchDirectorySync);
+    store.init().unwrap();
+
+    assert_eq!(
+        store.loose_object_write_mode(),
+        LooseObjectWriteMode::BatchDirectorySync
+    );
+
+    let blob = Blob::from("standalone batch-mode durable bytes");
+    let hash = store.put_blob(&blob).unwrap();
+
+    // The object is committed and readable without any
+    // begin/flush_snapshot_write_batch call — its durability came from
+    // the per-file sync, not a syncfs that never runs.
+    let path = hash_path(&blobs_dir(store.root()), &hash);
+    assert!(path.exists(), "standalone-mode write must be committed on disk");
+    let retrieved = store.get_blob(&hash).unwrap().unwrap();
+    assert_eq!(retrieved.content(), blob.content());
+}
+
+#[test]
 fn test_snapshot_write_batch_defers_directory_sync_until_flush() {
     let (_temp, store) = create_test_store();
 
