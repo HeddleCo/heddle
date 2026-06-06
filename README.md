@@ -143,6 +143,16 @@ heddle blame path/to/file.rs
 | **Principal** | Human identity accountable for a change |
 | **Agent** | Model identity associated with a change |
 
+### Identifiers in output
+
+History commands render up to three distinct identifiers. They are not interchangeable:
+
+- **`hd-…` change id** (e.g. `hd-wgqnj47xyh40`) — the **ChangeId**. This is the stable, canonical handle: it is assigned once and survives rewrites, amends, and rebases. Pass it to commands that take a change as an argument — `heddle show <id>`, `heddle blame` reports it per line, and `heddle log <id>` selects by it. Prefixes are accepted, so a short `hd-…` is enough as long as it is unambiguous.
+- **`(……)` content hash** (e.g. `(61408ef9)`, shown beside the change id by `heddle log --verbose` and `heddle show`) — the short form of the **ContentHash**, a BLAKE3 digest of the state's contents. It is *not* a Git commit sha. Because it is content-addressed, it changes whenever the state's content changes, so it pins an exact snapshot but is not a stable handle to "the change". Use it for integrity/equality checks, not as a command argument.
+- **Git checkpoint sha** (shown on the `Git checkpoint:` line under `heddle log --verbose` / `heddle show`) — the actual Git commit that binds the state into Git history. This is the handle for plain-Git tooling (`git show`, `git log`); heddle commands take the `hd-…` change id instead.
+
+Rule of thumb: hand `hd-…` change ids to heddle, and the checkpoint sha to Git.
+
 ## Agent-friendly output
 
 Heddle is designed for programmatic use by agents and automation. Most read-shaped commands take `--output json`; `--output auto` — the default — renders text on a TTY and JSON when stdout is piped:
@@ -188,6 +198,8 @@ export HEDDLE_PRINCIPAL_EMAIL="you@example.com"
 export RUST_LOG=heddle=debug
 export RUST_BACKTRACE=1
 ```
+
+Heddle records the agent model string verbatim and echoes it back in attribution output (for example the `Agent:` line of `heddle log --verbose`). If the coding agent reports a model id with a bracketed suffix — such as `claude-opus-4-8[1m]` — heddle preserves the suffix as-is; it does not add or interpret it. The suffix is supplied by the agent harness to distinguish a model variant (for Claude models the bracketed tag denotes the context-window variant), so set `HEDDLE_AGENT_MODEL` to whatever identifier you want recorded.
 
 ## Repository layout
 
