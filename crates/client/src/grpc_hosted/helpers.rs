@@ -174,6 +174,17 @@ pub(super) fn descriptor_id(descriptor: &ObjectDescriptor) -> (String, String) {
     (descriptor.id.clone(), descriptor.object_type.clone())
 }
 
+/// Compute the same `(id, object_type)` key as
+/// `descriptor_id(&to_proto_object_info(info))` without the throwaway full
+/// proto encode. Must stay byte-identical to the descriptor the server keys on.
+pub(super) fn descriptor_id_from_info(info: &ObjectInfo) -> (String, String) {
+    let id = match &info.id {
+        ObjectId::Hash(hash) => hash.to_hex(),
+        ObjectId::ChangeId(change_id) => change_id.to_string_full(),
+    };
+    (id, object_type_name(info.obj_type).to_string())
+}
+
 pub(super) fn status_to_protocol_error(status: Status) -> ProtocolError {
     match status.code() {
         tonic::Code::Unauthenticated | tonic::Code::PermissionDenied => {
