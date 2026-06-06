@@ -136,7 +136,7 @@ heddle blame path/to/file.rs
 | Concept | Description |
 |---------|-------------|
 | **State** | Immutable snapshot of a repository at a point in time |
-| **ChangeId** | Stable logical identifier that survives rewrites |
+| **ChangeId** | Per-state identifier. Each state carries a *logical* ChangeId (the same value is carried forward across rewrites) and a *physical* ChangeId minted fresh for that state. The `hd-…` shown in output is the **physical** id; the logical id is internal and not surfaced (see [Identifiers in output](#identifiers-in-output)) |
 | **ContentHash** | BLAKE3 hash of object contents for integrity and deduplication |
 | **Thread** | Mutable named reference to a state |
 | **Marker** | Immutable named reference to a state |
@@ -147,7 +147,7 @@ heddle blame path/to/file.rs
 
 History commands render up to three distinct identifiers. They are not interchangeable:
 
-- **`hd-…` change id** (e.g. `hd-wgqnj47xyh40`) — the **ChangeId**. This is the stable, canonical handle: it is assigned once and survives rewrites, amends, and rebases. Pass it to commands that take a change as an argument — `heddle show <id>`, `heddle blame` reports it per line, and `heddle log <id>` selects by it. Prefixes are accepted, so a short `hd-…` is enough as long as it is unambiguous.
+- **`hd-…` change id** (e.g. `hd-wgqnj47xyh40`) — the **physical ChangeId**, minted fresh for each state. It is the handle for *this specific state*: pass it to commands that take a change as an argument — `heddle show <id>`, `heddle blame` reports it per line, and `heddle log <id>` selects by it (resolution matches the physical id of a recorded state). Prefixes are accepted, so a short `hd-…` is enough as long as it is unambiguous. It is **not** a lineage handle that survives rewrites: amending or rebasing produces a *new* state with a *new* `hd-…`, so an `hd-…` captured before a rebase still resolves to the pre-rebase state, not the rewritten one. Heddle does track a separate stable *logical* ChangeId that is carried forward across a rewrite, but it is internal — it is not rendered in output and is not accepted as a command argument, so the displayed `hd-…` is the only id you can pass, and it identifies one state rather than a lineage.
 - **`(……)` content hash** (e.g. `(61408ef9)`, shown beside the change id by `heddle log --verbose` and `heddle show`) — the short form of the **ContentHash**, a BLAKE3 digest of the state's contents. It is *not* a Git commit sha. Because it is content-addressed, it changes whenever the state's content changes, so it pins an exact snapshot but is not a stable handle to "the change". Use it for integrity/equality checks, not as a command argument.
 - **Git checkpoint sha** (shown on the `Git checkpoint:` line under `heddle log --verbose` / `heddle show`) — the actual Git commit that binds the state into Git history. This is the handle for plain-Git tooling (`git show`, `git log`); heddle commands take the `hd-…` change id instead.
 
