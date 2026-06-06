@@ -312,7 +312,14 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         .collect();
     let purge_sorted =
         bridge.sort_states_topologically(&purge_reachable.iter().copied().collect::<Vec<_>>())?;
-    let embargoed_oids = purge_unserved_mappings(
+    // The purge MUTATES the mapping down to the served set. Its returned drop-set
+    // (the OIDs THIS run withheld) is deliberately NOT used to classify EXISTING
+    // mirror tips: a scoped run's purge omits a tip embargoed in a PRIOR run, or
+    // out of this run's purge reach, so classifying by it misreads such a tip as
+    // served and keeps serving it. Existing-tip served classification (heads + tags
+    // below) uses the whole-mirror served-OID set (`served_oids`) instead
+    // (heddle#316).
+    purge_unserved_mappings(
         bridge.heddle_repo,
         &mut bridge.mapping,
         &purge_sorted,
@@ -475,6 +482,31 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     // destination against it — one projection, one reconcile, all destinations.
     let desired = project_desired_refs(bridge.heddle_repo, &bridge.mapping, &threads, &markers)?;
 
+    // The downward-closure served set over the WHOLE-MIRROR frontier — the SAME
+    // closure the purge ran over (every thread tip + every marker state). A state is
+    // served iff visible to this audience AND every reachable ancestor is served.
+    // Drives BOTH the served-OID set just below AND (further down) the tag
+    // classifier's served-but-unminted axis.
+    let frontier_served = {
+        let reachable_set: HashSet<ChangeId> = frontier_reachable.iter().copied().collect();
+        let sorted = bridge.sort_states_topologically(&frontier_reachable)?;
+        served_change_ids(bridge.heddle_repo, &sorted, &reachable_set, &audience)?
+    };
+
+    // The whole-mirror SERVED-OID set: the git OID of every served frontier state.
+    // An EXISTING mirror tip (head or tag) is "served" iff it is one of these — an
+    // actually-served commit RIGHT NOW — independent of whether THIS run's purge
+    // happened to drop it. `frontier_served` is downward-closed at the ChangeId
+    // level (served ⟹ every reachable ancestor served) and every minted commit's
+    // parents are themselves mapped, so the mapped OIDs of `frontier_served` already
+    // form the downward-closed git-ancestry set — no separate git walk is needed
+    // (heddle#316). Replaces the prior `embargoed_oids` (this-run-only purge
+    // drop-set) classification that leaked a prior-run / out-of-scope embargo.
+    let served_oids: HashSet<gix::hash::ObjectId> = frontier_served
+        .iter()
+        .filter_map(|state| bridge.mapping.get_git(state))
+        .collect();
+
     // Reconcile the mirror's heads to the desired set. The mirror is heddle-owned
     // (no out-of-band tips), so the apply keeps the FF guard on an ordinary
     // advance, FORCES only a deliberate embargo retract (the prior tip is now
@@ -510,7 +542,13 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                     // scoped export retracts, it does not materialize.
                     continue;
                 }
-                let retracting = existing.is_some_and(|oid| embargoed_oids.contains(&oid));
+                // The existing head tip RETRACTS iff it is no longer an
+                // actually-served commit — classified against the whole-mirror
+                // served-OID set, NOT this run's purge drop-set (which omits a tip
+                // embargoed in a PRIOR run or out of this scoped run's reach)
+                // (heddle#316). A still-served tip fast-forwards; an unserved one is
+                // force-rewound down to the served frontier.
+                let retracting = existing.is_some_and(|oid| !served_oids.contains(&oid));
                 if retracting {
                     set_reference(
                         &repo,
@@ -536,18 +574,6 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
             }
         }
     }
-
-    // The downward-closure served set over the whole-mirror frontier — the SAME
-    // closure the purge ran over (every thread tip + every marker state). A marker
-    // target is served iff it is visible to this audience AND every reachable
-    // ancestor is served. The marker reconcile below uses this to classify a
-    // marker that `desired` dropped, since `desired` collapses two distinct causes
-    // to absent (heddle#316).
-    let frontier_served = {
-        let reachable_set: HashSet<ChangeId> = frontier_reachable.iter().copied().collect();
-        let sorted = bridge.sort_states_topologically(&frontier_reachable)?;
-        served_change_ids(bridge.heddle_repo, &sorted, &reachable_set, &audience)?
-    };
 
     // Reconcile the mirror's tags. The tag's fate is a pure function of THREE
     // axes — the NEW marker target {served+minted, served-but-unminted, unserved,
@@ -575,22 +601,51 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         NoTarget,
     }
 
+    // The OIDs heddle MANAGES in the mirror: every commit heddle has minted — the
+    // pre-purge mapping snapshot (everything heddle knew at the start of this run,
+    // INCLUDING commits this run later embargoed) UNION the commits minted this run.
+    // Ownership token for the tag reconcile (the mirror's analog of the destination
+    // exported-refs record, r13): a mirror tag pointing at one of these is heddle's;
+    // a tag pointing anywhere else is a FOREIGN Git tag (e.g. a user's own
+    // `refs/tags/v1` fetched into the mirror) heddle never created.
+    let heddle_managed_oids: HashSet<gix::hash::ObjectId> = pre_purge_targets
+        .iter()
+        .map(|(_, oid)| *oid)
+        .chain(newly_minted.iter().copied())
+        .collect();
+
     let mut tag_names: std::collections::BTreeSet<String> =
         markers.iter().map(|m| m.to_string()).collect();
     for tag in repo.references().map_err(git_err)?.tags().map_err(git_err)? {
-        let tag = tag.map_err(git_err)?;
-        tag_names.insert(tag.name().shorten().to_string());
+        let mut tag = tag.map_err(git_err)?;
+        let name = tag.name().shorten().to_string();
+        // Fold in an EXISTING mirror tag ONLY when heddle MANAGES it (its tip is a
+        // commit heddle minted). A tag pointing at a commit heddle never produced is
+        // FOREIGN — folding it into the reconcile union would let the NoTarget /
+        // Unserved DELETE arms below remove a ref heddle never created (heddle#316).
+        // A foreign tag NAME that collides with a live marker still enters via the
+        // markers side above and is reconciled under that marker.
+        let managed = tag
+            .peel_to_id()
+            .ok()
+            .map(|id| id.detach())
+            .is_some_and(|oid| heddle_managed_oids.contains(&oid));
+        if managed {
+            tag_names.insert(name);
+        }
     }
 
     for name in &tag_names {
         let tag_ref = format!("refs/tags/{name}");
         let existing_oid = branch_tip_oid(&repo, &tag_ref);
-        // The existing mirror tag is "served" iff its tip was NOT dropped by this
-        // run's purge. An existing tip in `embargoed_oids` is serving a commit the
-        // purge just withheld — preserving it would keep leaking it (the r19 root
-        // cause: the prior code never read this axis).
+        // The existing mirror tag is "served" iff its tip is an actually-served
+        // commit RIGHT NOW — membership in the whole-mirror served-OID set, NOT the
+        // absence-from-this-run's-purge-drop-set the prior code used (which misreads
+        // a tip embargoed in a prior run, or out of this scoped run's purge reach, as
+        // served and keeps serving it). Preserving requires the tip be served; an
+        // unserved tip is deleted (the r19 axis, now correct across runs/scope).
         let existing_served = existing_oid
-            .map(|oid| !embargoed_oids.contains(&oid))
+            .map(|oid| served_oids.contains(&oid))
             .unwrap_or(false);
         let in_scope_full = thread.is_none();
 

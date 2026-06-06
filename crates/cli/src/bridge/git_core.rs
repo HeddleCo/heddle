@@ -3032,7 +3032,16 @@ pub(crate) fn plan_destination_reconcile(
                     new: update.target,
                 });
             }
-            new_manifest.insert(full, update.target);
+            // CLAIM ownership in the record ONLY for a ref heddle actually writes
+            // this push, or one it already owned (had a record for). A pre-existing
+            // destination ref already AT the served target that heddle never recorded
+            // (verdict Skip, `recorded` None) is FOREIGN — recording it would let a
+            // later export DELETE/rewind a ref heddle never created (heddle#316
+            // destination foreign-ref over-claim). Spare it: leave it out of the
+            // manifest so it stays unowned.
+            if proceed || recorded.is_some() {
+                new_manifest.insert(full, update.target);
+            }
             continue;
         }
 

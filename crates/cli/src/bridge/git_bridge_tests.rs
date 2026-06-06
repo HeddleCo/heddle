@@ -4237,6 +4237,69 @@ fn tag_reconcile_conformance_matrix() {
                 (matrix_mirror_tag(&bridge, "ghost"), None)
             }),
         },
+        // ── P1 regression guard: PRIOR-RUN embargo (not this run's purge) ──
+        // The existing tag's target P was embargoed in a PRIOR run and is out of
+        // THIS scoped run's purge reach (P is unreachable from every current frontier
+        // root). Classifying the existing tip by THIS run's purge drop-set (the bug)
+        // reads P as served → cell-6 PRESERVE → keeps serving embargoed P.
+        // Classifying by the whole-mirror served-OID set reads P as UNSERVED → cell-7
+        // DELETE. The new target is served-but-unminted (the ONLY path that reads the
+        // existing tag's served axis).
+        Cell {
+            label: "prior_run_embargoed_existing_tag_deleted",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let p = matrix_put_state(&repo, b"P\n", Vec::new());
+                repo.refs().create_marker(&MarkerName::new("v"), &p.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                // Run 1 mints P (every store state is minted by export_all) and
+                // materializes the mirror tag v → P.
+                export_all(&mut bridge).unwrap();
+                // PRIOR-run embargo of P. Retarget v to a fresh public-but-unminted C
+                // and export ONLY `alpha` — P is now unreachable from the scoped
+                // frontier (no thread/marker reaches it), so it is NOT in this run's
+                // purge drop-set, yet v's existing tag still points at P's OID.
+                matrix_embargo(&repo, p.change_id);
+                let alpha = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("alpha"), &alpha.change_id).unwrap();
+                let c = matrix_put_state(&repo, b"C\n", Vec::new());
+                repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &c.change_id).unwrap();
+                export_current_thread(&mut bridge, "alpha").unwrap();
+                (matrix_mirror_tag(&bridge, "v"), None)
+            }),
+        },
+        // ── foreign Git tag preserved: a mirror tag heddle never exported ──
+        // A user's own `refs/tags/user-v1`, pointing at a commit heddle never minted,
+        // with NO marker. The reconcile's NoTarget arm would DELETE it unless the
+        // heddle-managed-ref filter spares it (a foreign tag is left untouched).
+        Cell {
+            label: "foreign_unmanaged_git_tag_preserved",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                // Plant a FOREIGN tag in the mirror: a commit heddle never minted,
+                // tagged under a name heddle never exported.
+                let mirror = bridge.open_git_repo().unwrap();
+                let foreign =
+                    commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "foreign", &[]);
+                set_reference(
+                    &mirror,
+                    "refs/tags/user-v1",
+                    foreign,
+                    PreviousValue::MustNotExist,
+                    "test: foreign tag",
+                )
+                .unwrap();
+                export_all(&mut bridge).unwrap();
+                (matrix_mirror_tag(&bridge, "user-v1"), Some(foreign))
+            }),
+        },
     ];
 
     for cell in &cells {
@@ -4328,6 +4391,39 @@ fn head_reconcile_conformance_matrix() {
                     observed: matrix_mirror_head(&bridge, "main"),
                     expected: None,
                     forbidden: Some(oid_a),
+                }
+            }),
+        },
+        // P1 regression guard (head dual): a SCOPED export whose existing head tip
+        // was embargoed in a PRIOR run — and is out of THIS run's purge reach
+        // (unreachable from the scoped frontier) — must RETRACT (force-rewind) to the
+        // served ancestor, not classify the embargoed tip as served. Classifying by
+        // this run's purge drop-set (the bug) reads B as served → FF-guarded sync →
+        // a NonFastForward error on the rewind; classifying by the whole-mirror
+        // served-OID set reads B as unserved → force-rewind to A.
+        Cell {
+            label: "prior_run_embargoed_existing_head_retracts",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                let b = matrix_put_state(&repo, b"B\n", vec![a.change_id]);
+                repo.refs().set_thread(&ThreadName::new("main"), &b.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
+                let oid_b = bridge.mapping.get_git(&b.change_id).expect("B minted");
+                // Embargo the published tip B, rewind main to its served ancestor A,
+                // and export ONLY main (scoped). B is now unreachable from the scoped
+                // frontier, so it is NOT in this run's purge drop-set — only the
+                // served-OID classification rewinds the head off B.
+                matrix_embargo(&repo, b.change_id);
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                export_current_thread(&mut bridge, "main").unwrap();
+                HeadOutcome {
+                    observed: matrix_mirror_head(&bridge, "main"),
+                    expected: Some(oid_a),
+                    forbidden: Some(oid_b),
                 }
             }),
         },
@@ -5562,6 +5658,52 @@ fn reconcile_ownership_conformance_matrix() {
             Outcome::NonFastForward => unreachable!("handled above"),
         }
     }
+}
+
+/// #316 / PR #528 — destination foreign-ref over-claim: a pre-existing destination
+/// ref already AT the served target that heddle never recorded (no exported-refs
+/// entry) must NOT be claimed into the manifest. The verdict is Skip (no write, no
+/// delete), but the prior code still recorded it — which would let a LATER export,
+/// once it no longer serves that ref, DELETE a ref heddle never created. The
+/// reconcile now leaves it out of the new manifest, so the foreign ref survives a
+/// later retraction.
+#[test]
+fn foreign_destination_ref_spared() {
+    use crate::bridge::git_core::{RefNamespace, RefUpdate, plan_destination_reconcile};
+    use std::collections::HashMap;
+
+    let (_mirror_temp, mirror) = init_git_repo();
+    let a = commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "A", &[]);
+    let full = "refs/tags/user-v1".to_string();
+
+    // The served frontier WANTS refs/tags/user-v1 at A, and the destination already
+    // happens to be at A — but heddle never recorded it (recorded None): FOREIGN.
+    let served = vec![RefUpdate {
+        name: "user-v1".to_string(),
+        target: a,
+        namespace: RefNamespace::Tag,
+    }];
+    let mut old_map: HashMap<String, gix::hash::ObjectId> = HashMap::new();
+    old_map.insert(full.clone(), a);
+    let recorded_map: HashMap<String, gix::hash::ObjectId> = HashMap::new();
+
+    let plan =
+        plan_destination_reconcile(&mirror, &served, None, &old_map, &recorded_map, false).unwrap();
+    assert!(plan.writes.is_empty(), "a coincidental match must not be written");
+    assert!(plan.deletes.is_empty(), "a coincidental match must not be deleted");
+    assert!(
+        !plan.new_manifest.contains_key(&full),
+        "heddle must NOT claim ownership of a foreign destination ref it never recorded"
+    );
+
+    // The consequence: a LATER export that no longer serves user-v1 must NOT delete
+    // it, because it was never claimed (the manifest carries no record for it).
+    let plan2 =
+        plan_destination_reconcile(&mirror, &[], None, &old_map, &plan.new_manifest, false).unwrap();
+    assert!(
+        plan2.deletes.is_empty(),
+        "the foreign ref must survive a later retraction — it was never heddle's to delete"
+    );
 }
 
 /// #316 / PR #528 r17 (the behavioral gap): an out-of-band destination TAG heddle
