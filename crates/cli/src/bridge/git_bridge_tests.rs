@@ -3308,6 +3308,190 @@ fn scoped_export_reconciles_cross_thread_embargo() {
     );
 }
 
+/// #316 / PR #528 r16 (close-the-class): the DESTINATION-side analog of
+/// [`scoped_export_reconciles_cross_thread_embargo`]. r14 made the MIRROR
+/// reconcile whole-mirror, so a scoped export of `alpha` rewinds an out-of-scope
+/// `beta` off an embargoed commit — but the DESTINATION push still derived its
+/// desired set from the SCOPE-FILTERED ref list, so the out-of-scope `beta` fell
+/// into a "still served, leave untouched" arm and the destination KEPT SERVING
+/// the embargoed tip. The destination reconcile now derives from the SAME
+/// whole-mirror served frontier as the mirror reconcile, so a scoped push of
+/// alpha rewinds the destination's `beta` BY CONSTRUCTION. An out-of-band
+/// destination tip on a third ref must still be spared — widening the desired set
+/// to whole-mirror must NOT weaken r13's ownership gate.
+#[test]
+fn scoped_push_propagates_cross_thread_embargo_to_destination() {
+    use chrono::Utc;
+    use objects::object::{Attribution, Principal, State, StateVisibility, VisibilityTier};
+    use refs::Head;
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let put_state = |content: &[u8], parents: Vec<ChangeId>| -> State {
+        let store = repo.store();
+        let blob_hash = store
+            .put_blob(&Blob::from_slice(content))
+            .expect("put blob");
+        let tree_hash = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
+            .expect("put tree");
+        let state = State::new(
+            tree_hash,
+            parents,
+            Attribution::human(Principal::new("Alice", "alice@example.com")),
+        );
+        store.put_state(&state).expect("put state");
+        state
+    };
+
+    // Three independent lines (no shared ancestry).
+    // alpha: A0 → A1 (public). beta: B0 → B1 → B2 (public; B1 embargoed below).
+    // gamma: G0 (public; later embargoed AND advanced out of band at the destination).
+    let state_a0 = put_state(b"a0\n", Vec::new());
+    let state_a1 = put_state(b"a1\n", vec![state_a0.change_id]);
+    repo.refs()
+        .set_thread(&ThreadName::new("alpha"), &state_a1.change_id)
+        .expect("set alpha to A1");
+    let state_b0 = put_state(b"b0\n", Vec::new());
+    let state_b1 = put_state(b"b1\n", vec![state_b0.change_id]);
+    let state_b2 = put_state(b"b2\n", vec![state_b1.change_id]);
+    repo.refs()
+        .set_thread(&ThreadName::new("beta"), &state_b2.change_id)
+        .expect("set beta to B2");
+    let state_g0 = put_state(b"g0\n", Vec::new());
+    repo.refs()
+        .set_thread(&ThreadName::new("gamma"), &state_g0.change_id)
+        .expect("set gamma to G0");
+
+    // Run 1 — everything public, full export+push to a local destination. All three
+    // branches are published AND recorded as heddle-exported there.
+    let mut bridge = GitBridge::new(&repo);
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    bridge
+        .export_to_path(&dest_path)
+        .expect("first full export+push publishes alpha, beta, gamma");
+    let oid_a1 = bridge.mapping.get_git(&state_a1.change_id).expect("A1 minted");
+    let oid_b0 = bridge.mapping.get_git(&state_b0.change_id).expect("B0 minted");
+    let oid_b2 = bridge.mapping.get_git(&state_b2.change_id).expect("B2 minted");
+    let oid_g0 = bridge.mapping.get_git(&state_g0.change_id).expect("G0 minted");
+    {
+        let dest = gix::open(&dest_path).expect("open dest");
+        assert_eq!(
+            dest.find_reference("refs/heads/beta")
+                .unwrap()
+                .peel_to_id()
+                .unwrap()
+                .detach(),
+            oid_b2,
+            "run 1 publishes beta at its public tip B2 to the destination"
+        );
+    }
+
+    // Out-of-band advance: move the DESTINATION's gamma to a NEW commit G_oob that
+    // heddle never published (a descendant of the published G0). Heddle's record
+    // still says gamma == G0, so the ownership gate must spare G_oob.
+    let oid_g_oob = {
+        let dest = gix::open(&dest_path).expect("open dest");
+        commit_with_tree(
+            &dest,
+            Some("refs/heads/gamma"),
+            empty_tree_oid(&dest),
+            "out-of-band gamma",
+            &[oid_g0],
+        )
+    };
+
+    // Embargo B1 (reachable ONLY via beta) AND the whole gamma line (G0). Downward
+    // closure withholds B1/B2 (B0 stays served) and the whole gamma line (no served
+    // frontier ⇒ gamma is retracted from the mirror).
+    let embargo = |state: ChangeId| {
+        repo.put_state_visibility(StateVisibility {
+            state,
+            tier: VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+            embargo_until: None,
+            declarer: Principal {
+                name: "Alice".into(),
+                email: "alice@example.com".into(),
+            },
+            declared_at: Utc::now(),
+            signature: None,
+            supersedes: None,
+        })
+        .unwrap();
+    };
+    embargo(state_b1.change_id);
+    embargo(state_g0.change_id);
+
+    // Attach HEAD to alpha so a CurrentThread push scopes its EXPORT to alpha —
+    // alpha reaches neither beta nor gamma.
+    repo.refs()
+        .write_head(&Head::Attached {
+            thread: ThreadName::new("alpha"),
+        })
+        .expect("attach HEAD to alpha");
+
+    // Run 2 — SCOPED push of alpha to the SAME destination. The destination reconcile
+    // is driven by the whole-mirror served frontier, so it must rewind the
+    // destination's out-of-scope beta off the embargoed commit even though alpha
+    // does not reach beta.
+    bridge
+        .push_with_scope(
+            dest_path.to_str().expect("dest path"),
+            GitPushScope::CurrentThread,
+        )
+        .expect("scoped push of alpha");
+
+    let dest = gix::open(&dest_path).expect("reopen dest");
+
+    // beta REWOUND at the destination to its served frontier B0 — the embargoed
+    // B1/B2 are no longer served from the destination. This is the leak r16 closes.
+    let beta_tip = dest
+        .find_reference("refs/heads/beta")
+        .expect("beta still present at its served frontier")
+        .peel_to_id()
+        .expect("peel beta")
+        .detach();
+    assert_eq!(
+        beta_tip, oid_b0,
+        "scoped push of alpha must rewind the destination's beta off the embargoed commit to B0"
+    );
+    assert_ne!(
+        beta_tip, oid_b2,
+        "the destination must not keep serving the now-embargoed tip B2"
+    );
+
+    // alpha's own destination ref is at A1 and unaffected by the scoped push.
+    let alpha_tip = dest
+        .find_reference("refs/heads/alpha")
+        .expect("alpha present")
+        .peel_to_id()
+        .expect("peel alpha")
+        .detach();
+    assert_eq!(
+        alpha_tip, oid_a1,
+        "scoped push must leave alpha at A1 at the destination"
+    );
+
+    // The out-of-band gamma tip is SPARED: heddle's record (G0) does not match the
+    // destination's current tip (G_oob), so the ownership gate skips the retraction
+    // delete — widening the desired set to whole-mirror did NOT weaken r13.
+    let gamma_tip = dest
+        .find_reference("refs/heads/gamma")
+        .expect("gamma survives — heddle must not delete a tip it never published")
+        .peel_to_id()
+        .expect("peel gamma")
+        .detach();
+    assert_eq!(
+        gamma_tip, oid_g_oob,
+        "the out-of-band gamma tip must survive the scoped push (r13 ownership gate holds)"
+    );
+}
+
 /// #316 / PR #528 Finding 1 (root case): when the WHOLE line is embargoed to
 /// its root after a prior public export, the stale public branch must be
 /// deleted, not left pointing at the now-embargoed commit.

@@ -774,29 +774,31 @@ impl<'a> GitBridge<'a> {
         }
         self.write_current_checkout_from_existing_mirror()?;
 
+        // The export step above (scoped or all-thread) has already reconciled the
+        // mirror to the served frontier, so a scoped export materialized only the
+        // requested thread yet still RECONCILED every out-of-scope sibling (rewound
+        // an embargoed one). Both destination paths therefore reconcile against the
+        // WHOLE-MIRROR served frontier — `collect_ref_updates(mirror)`, computed
+        // inside each path — never a scope-filtered subset; the scope lives in the
+        // mirror state, not in a second destination filter (heddle#316 r16).
         let log_message = format!("heddle: push from {}", self.heddle_repo.root().display());
         match self.resolve_remote(remote_name, gix::remote::Direction::Push)? {
-            ResolvedRemote::Local(target_path) => {
-                let mirror_repo = self.open_git_repo()?;
-                let updates =
-                    collect_ref_updates_for_push(&mirror_repo, scope, current_branch.as_deref())?;
-                self.copy_mirror_to_path_with_updates(
-                    &target_path,
-                    &log_message,
-                    /* init_if_missing */ false,
-                    &updates,
-                    force,
-                )
-            }
+            ResolvedRemote::Local(target_path) => self.copy_mirror_to_path(
+                &target_path,
+                &log_message,
+                /* init_if_missing */ false,
+                scope,
+                current_branch.as_deref(),
+                force,
+            ),
             ResolvedRemote::Url(url) => {
                 let mirror_repo = self.open_git_repo()?;
-                let updates =
-                    collect_ref_updates_for_push(&mirror_repo, scope, current_branch.as_deref())?;
-                push_network_remote_with_updates(
+                push_network_remote(
                     &mirror_repo,
                     self.heddle_repo.heddle_dir(),
                     &url,
-                    &updates,
+                    scope,
+                    current_branch.as_deref(),
                     force,
                 )
             }
@@ -830,37 +832,26 @@ impl<'a> GitBridge<'a> {
             target_path,
             &format!("heddle: export from {}", self.heddle_repo.root().display()),
             /* init_if_missing */ true,
+            GitPushScope::AllThreads,
+            /* current_branch */ None,
+            /* force */ false,
         )?;
         Ok(stats)
     }
 
     /// Shared helper: copy every reachable object from the internal mirror to
-    /// `target_path`, then mirror branch/tag refs onto it. When
-    /// `init_if_missing` is true, the destination is created as a bare repo
-    /// when it does not exist.
+    /// `target_path`, then reconcile its branch/tag/note refs to the WHOLE-MIRROR
+    /// served frontier. When `init_if_missing` is true, the destination is created
+    /// as a bare repo when it does not exist. `scope`/`current_branch` gate only
+    /// MATERIALIZATION (a scoped push never publishes a brand-new sibling); `force`
+    /// authorizes retracting an out-of-band destination tip and forcing a true fork.
     fn copy_mirror_to_path(
         &mut self,
         target_path: &Path,
         log_message: &str,
         init_if_missing: bool,
-    ) -> GitResult<()> {
-        let mirror_repo = self.open_git_repo()?;
-        let updates = collect_ref_updates(&mirror_repo)?;
-        self.copy_mirror_to_path_with_updates(
-            target_path,
-            log_message,
-            init_if_missing,
-            &updates,
-            false,
-        )
-    }
-
-    fn copy_mirror_to_path_with_updates(
-        &mut self,
-        target_path: &Path,
-        log_message: &str,
-        init_if_missing: bool,
-        updates: &[RefUpdate],
+        scope: GitPushScope,
+        current_branch: Option<&str>,
         force: bool,
     ) -> GitResult<()> {
         let mirror_repo = self.open_git_repo()?;
@@ -877,10 +868,18 @@ impl<'a> GitBridge<'a> {
             )));
         };
 
+        // The WHOLE-MIRROR served frontier — the SAME projection the mirror
+        // reconcile materialized (heddle#316 r14/r16). It drives BOTH the object
+        // transfer AND the destination ref reconcile, so a scoped push reconciles
+        // the destination against the whole served frontier rather than a
+        // scope-filtered subset: an out-of-scope ref the mirror rewound for
+        // embargo propagates to the destination by construction, never kept at its
+        // old (embargoed) tip.
+        let served_frontier = collect_ref_updates(&mirror_repo)?;
         copy_reachable_objects(
             &mirror_repo,
             &target_repo,
-            updates.iter().map(|update| update.target),
+            served_frontier.iter().map(|update| update.target),
         )?;
 
         // The ONE served-frontier reconciliation, shared with the URL/network
@@ -889,18 +888,14 @@ impl<'a> GitBridge<'a> {
         // ancestor) while still rejecting a true fork — AND deletes the refs
         // heddle previously exported here that the served mirror no longer
         // carries (retraction), leaving foreign refs heddle never exported
-        // untouched. `served_full_names` is the FULL mirror ref set so a scoped
-        // push never deletes a still-served out-of-scope sibling.
-        let served_full_names: HashSet<String> = collect_ref_updates(&mirror_repo)?
-            .iter()
-            .map(full_ref_name)
-            .collect();
+        // untouched.
+        let creatable = creatable_ref_names(&served_frontier, scope, current_branch);
         let old_at_destination = read_destination_ref_map(&target_repo)?;
         let previously_exported = read_exported_refs(&target_repo)?;
         let plan = plan_destination_reconcile(
             &mirror_repo,
-            updates,
-            &served_full_names,
+            &served_frontier,
+            creatable.as_ref(),
             &old_at_destination,
             &previously_exported,
             force,
@@ -2518,29 +2513,6 @@ pub(crate) fn count_exported_commits(
     Ok(counts)
 }
 
-fn collect_ref_updates_for_push(
-    repo: &gix::Repository,
-    scope: GitPushScope,
-    current_branch: Option<&str>,
-) -> GitResult<Vec<RefUpdate>> {
-    let updates = collect_ref_updates(repo)?;
-    match scope {
-        GitPushScope::AllThreads => Ok(updates),
-        GitPushScope::CurrentThread => {
-            let branch = current_branch.ok_or_else(|| {
-                GitBridgeError::Git("missing current branch for scoped push".to_string())
-            })?;
-            Ok(updates
-                .into_iter()
-                .filter(|update| {
-                    (matches!(update.namespace, RefNamespace::Branch) && update.name == branch)
-                        || matches!(update.namespace, RefNamespace::Note)
-                })
-                .collect())
-        }
-    }
-}
-
 fn collect_ref_updates_for_fetch(
     repo: &gix::Repository,
     scope: GitFetchScope,
@@ -2834,8 +2806,40 @@ struct DestinationReconcilePlan {
     new_manifest: HashMap<String, ObjectId>,
 }
 
+/// The full ref names a push may MATERIALIZE (create fresh) at a destination — the
+/// `creatable_names` gate for [`plan_destination_reconcile`]. `None` for an
+/// all-thread push (every served ref is creatable, so the gate never fires);
+/// `Some(set)` for a current-thread push (only the attached branch + the notes
+/// refs). This is the destination analog of the mirror reconcile's materialization
+/// gate (`git_export::export`'s `existing.is_none() && !in_scope` skip): a scoped
+/// push reconciles EXISTING out-of-scope refs (the embargo rewind) but never
+/// publishes a brand-new sibling the caller did not ask to export (heddle#316 r16).
+fn creatable_ref_names(
+    served_frontier: &[RefUpdate],
+    scope: GitPushScope,
+    current_branch: Option<&str>,
+) -> Option<HashSet<String>> {
+    match scope {
+        GitPushScope::AllThreads => None,
+        GitPushScope::CurrentThread => {
+            let branch = current_branch.unwrap_or_default();
+            Some(
+                served_frontier
+                    .iter()
+                    .filter(|update| {
+                        (matches!(update.namespace, RefNamespace::Branch)
+                            && update.name == branch)
+                            || matches!(update.namespace, RefNamespace::Note)
+                    })
+                    .map(full_ref_name)
+                    .collect(),
+            )
+        }
+    }
+}
+
 /// Build the served-frontier reconciliation plan shared by the local-path and
-/// URL/network push destinations (heddle#316 r11/r13). The destination's
+/// URL/network push destinations (heddle#316 r11/r13/r16). The destination's
 /// published refs are a PURE PROJECTION of the served frontier, restricted to
 /// heddle-owned refs: every op — create, fast-forward, forced embargo rewind,
 /// retraction delete, or skip — is DERIVED from ONE pass over the desired-vs-
@@ -2844,14 +2848,37 @@ struct DestinationReconcilePlan {
 /// branch to forget: a destination tip heddle never published is neither
 /// force-rewound NOR deleted (it survives) unless the user passes `--force`.
 ///
+/// INVARIANT (heddle#316 r16): `served_frontier` is the WHOLE-MIRROR served
+/// frontier — every heddle-managed mirror ref at its CURRENT served target — the
+/// SAME projection the mirror reconcile (`git_export::export`) materialized into
+/// the mirror. The destination reconcile and the mirror reconcile are therefore
+/// driven by ONE source of truth, so destination and mirror cannot diverge for
+/// ANY embargo transition, in-scope OR out-of-scope: an out-of-scope ref the
+/// mirror rewound for embargo is present here at its NEW (rewound) target, and
+/// [`classify_ref_move`] emits the rewind to the destination by construction.
+/// There is NO "served but out of this push's scope, leave it untouched" arm — a
+/// scoped push reconciles the destination against the whole served frontier, not
+/// a scope-filtered subset that could keep serving a ref the mirror already
+/// rewound (the cross-thread-embargo destination leak this round closes).
+///
+/// The ONE thing scope still gates is MATERIALIZATION — exactly as the mirror
+/// reconcile does (`git_export::export`'s `existing.is_none() && !in_scope`
+/// skip): a scoped push REWINDS/RETRACTS an EXISTING out-of-scope ref (the embargo
+/// fix) but must not publish a brand-new sibling the caller did not ask to export.
+/// `creatable_names` carries that gate: a ref ABSENT from the destination whose
+/// name is NOT creatable is skipped (never created); one that already EXISTS is
+/// always reconciled, so no target change is ever masked.
+///
 /// * `mirror_repo` — resolves the rewind-vs-fork topology (see
 ///   [`classify_ref_move`]).
-/// * `written` — the (possibly scope-filtered) served refs this push applies —
-///   the DESIRED set: each entry is a heddle-owned ref that should exist at the
-///   destination at its served target.
-/// * `served_full_names` — the FULL served mirror ref set (NOT scope-filtered):
-///   a previously-exported ref still in this set is merely out of THIS push's
-///   scope, so it is left untouched rather than retracted.
+/// * `served_frontier` — the WHOLE-MIRROR served frontier: every heddle-owned
+///   ref that should exist at the destination, at its served target. A
+///   previously-exported ref ABSENT from this set is one the mirror no longer
+///   serves AT ALL (a retraction), never merely out of a push's scope.
+/// * `creatable_names` — the full ref names this push may MATERIALIZE fresh:
+///   `None` for an all-thread push (every served ref is creatable); `Some(set)`
+///   for a current-thread push (only the attached branch + notes). Gates ONLY
+///   first-time creation of an absent ref; an existing ref is always reconciled.
 /// * `old_at_destination` — the destination's current ref tips (full name → oid).
 /// * `previously_exported` — heddle's record of what it exported to THIS
 ///   destination (full ref name → last-published tip OID): the foreign-ref
@@ -2860,17 +2887,19 @@ struct DestinationReconcilePlan {
 ///   AND authorizes retracting an out-of-band destination tip.
 fn plan_destination_reconcile(
     mirror_repo: &gix::Repository,
-    written: &[RefUpdate],
-    served_full_names: &HashSet<String>,
+    served_frontier: &[RefUpdate],
+    creatable_names: Option<&HashSet<String>>,
     old_at_destination: &HashMap<String, ObjectId>,
     previously_exported: &HashMap<String, ObjectId>,
     force: bool,
 ) -> GitResult<DestinationReconcilePlan> {
-    // The DESIRED ref-set this push lands, indexed by full name → its `RefUpdate`
-    // (the served target + namespace). A name is in `desired` iff the served
-    // frontier wants it published at this destination now.
+    // The DESIRED ref-set indexed by full name → its `RefUpdate` (served target +
+    // namespace). A name is in `desired` iff the WHOLE-MIRROR served frontier
+    // wants it published now — there is no scope-filtered subset (heddle#316 r16),
+    // so an out-of-scope ref the mirror rewound for embargo is here at its NEW
+    // target rather than silently kept at its old (embargoed) tip.
     let desired: HashMap<String, &RefUpdate> =
-        written.iter().map(|u| (full_ref_name(u), u)).collect();
+        served_frontier.iter().map(|u| (full_ref_name(u), u)).collect();
 
     // ONE pass over the union of (desired ∪ previously-exported) names — the
     // complete desired-vs-actual diff. For each ref the op is derived from the
@@ -2890,6 +2919,20 @@ fn plan_destination_reconcile(
         let recorded = previously_exported.get(&full).copied();
 
         if let Some(update) = desired.get(&full).copied() {
+            // MATERIALIZATION gate (the mirror reconcile's `existing.is_none() &&
+            // !in_scope` skip, applied to the destination): an out-of-scope ref
+            // ABSENT from the destination must not be CREATED by a scoped push —
+            // that would publish a brand-new sibling the caller did not ask to
+            // export. An EXISTING out-of-scope ref falls through and is reconciled
+            // (rewind/retract), so the embargo fix is untouched; only first-time
+            // creation is suppressed. Preserve any ownership token so a later
+            // all-thread push can still materialize it (heddle#316 r14/r16).
+            if old.is_none() && creatable_names.is_some_and(|names| !names.contains(&full)) {
+                if let Some(recorded) = recorded {
+                    new_manifest.insert(full, recorded);
+                }
+                continue;
+            }
             // In the desired set: land it at the served target. A ref this push
             // publishes is heddle-owned at its new target — record it.
             let proceed = if matches!(update.namespace, RefNamespace::Branch | RefNamespace::Note) {
@@ -2925,19 +2968,10 @@ fn plan_destination_reconcile(
             continue;
         }
 
-        // Not in the desired set for this push.
-        if served_full_names.contains(&full) {
-            // Still served, merely outside this push's scope — leave the
-            // destination ref untouched and keep its recorded ownership token so a
-            // future scoped push never mistakes it for foreign or retracted.
-            if let Some(recorded) = recorded {
-                new_manifest.insert(full, recorded);
-            }
-            continue;
-        }
-
-        // Retracted: the served mirror no longer carries this previously-exported
-        // ref. Delete it — but ONLY through the SAME ownership gate the forced
+        // Absent from the WHOLE-MIRROR served frontier ⇒ genuinely retracted: the
+        // served mirror no longer carries this previously-exported ref at all (NOT
+        // merely out of a push's scope — there is no scope subset here). Delete it,
+        // but ONLY through the SAME ownership gate the forced
         // rewind uses: heddle owns the destination's current tip (`recorded ==
         // old`), or the user forces. An out-of-band advance heddle never published
         // is spared (it survives) and KEEPS its ownership token, so a later
@@ -3356,21 +3390,28 @@ fn fetch_network_remote(
     Ok(())
 }
 
-fn push_network_remote_with_updates(
+fn push_network_remote(
     mirror_repo: &gix::Repository,
     heddle_dir: &Path,
     url: &gix::Url,
-    updates: &[RefUpdate],
+    scope: GitPushScope,
+    current_branch: Option<&str>,
     force: bool,
 ) -> GitResult<()> {
     // The network destination's exported-refs record lives in heddle's own dir,
     // keyed by the remote URL (the remote has no local git dir to host the
-    // sidecar). Read it BEFORE the empty-updates fast-path: a retraction lands
+    // sidecar). Read it BEFORE the empty-frontier fast-path: a retraction lands
     // here with an EMPTY served set yet a non-empty record, so the delete-set —
     // not the served set — is what must still propagate (heddle#316 r11).
     let manifest_path = network_exported_refs_path(heddle_dir, url);
     let previously_exported = read_exported_refs_at(&manifest_path)?;
-    if updates.is_empty() && previously_exported.is_empty() {
+    // The WHOLE-MIRROR served frontier — the SAME projection the local-path
+    // destination reconciles against and the mirror reconcile materialized
+    // (heddle#316 r16). A scoped push reconciles the destination against this
+    // whole frontier, so an out-of-scope ref the mirror rewound for embargo
+    // propagates to the wire by construction, never a scope-filtered subset.
+    let served_frontier = collect_ref_updates(mirror_repo)?;
+    if served_frontier.is_empty() && previously_exported.is_empty() {
         return Ok(());
     }
 
@@ -3400,16 +3441,12 @@ fn push_network_remote_with_updates(
     // The SAME served-frontier plan the local-path destination runs: writes
     // (forcing embargo rewinds, rejecting forks), the retraction delete-set
     // (scoped to heddle-owned refs — never foreign), and the new record to
-    // persist. `served_full_names` is the FULL mirror ref set so a scoped push
-    // never deletes a still-served out-of-scope sibling.
-    let served_full_names: HashSet<String> = collect_ref_updates(mirror_repo)?
-        .iter()
-        .map(full_ref_name)
-        .collect();
+    // persist — all derived from the whole-mirror `served_frontier` above.
+    let creatable = creatable_ref_names(&served_frontier, scope, current_branch);
     let plan = plan_destination_reconcile(
         mirror_repo,
-        updates,
-        &served_full_names,
+        &served_frontier,
+        creatable.as_ref(),
         &remote_refs,
         &previously_exported,
         force,
