@@ -3,8 +3,11 @@
 # for the round-trip fidelity gate (heddle#562).
 #
 # The bundle carries a small repo with the two most error-prone fidelity cases
-# that the vendored real-world fixtures never exercised (vendor.sh used to pass
-# `--no-tags` + `--signed-tags=strip`, so signed objects never reached the gate):
+# that the vendored real-world fixtures can't exercise: those are shallow clones
+# re-rooted via `fast-export | fast-import`, which rewrites commit OIDs and so
+# invalidates any tag signature, so vendor.sh honestly `--signed-tags=strip`s
+# them. Genuine signed coverage has to come from a fixture built directly, like
+# this one:
 #
 #   * a SIGNED COMMIT — the PGP signature lives in a folded `gpgsig` header
 #     after the `committer` line;
@@ -86,6 +89,17 @@ git -C "$REPO" cat-file commit "$C8" | grep -q '^gpgsig ' \
     || { echo "FATAL: signed commit lacks a gpgsig header" >&2; exit 1; }
 git -C "$REPO" cat-file tag v1.0 | grep -q 'BEGIN PGP SIGNATURE' \
     || { echo "FATAL: signed tag lacks an inline PGP signature" >&2; exit 1; }
+
+# Cryptographic proof the signatures are GENUINELY VALID, not merely present.
+# This is the property a fast-export|fast-import re-root would silently destroy
+# (rewriting the referenced commit OID invalidates the tag signature) — the
+# whole reason this fixture is generated directly rather than vendored through
+# fast-export. The ephemeral key is still in the keyring here, so verification
+# can run; the checked-in bundle is therefore one that DID verify at gen time.
+git -C "$REPO" verify-commit "$C8" \
+    || { echo "FATAL: signed commit does not verify" >&2; exit 1; }
+git -C "$REPO" verify-tag v1.0 \
+    || { echo "FATAL: signed tag does not verify" >&2; exit 1; }
 git -C "$REPO" fsck --full --strict
 
 git -C "$REPO" bundle create "$OUT" --all

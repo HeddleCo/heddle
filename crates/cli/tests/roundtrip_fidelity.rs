@@ -292,13 +292,18 @@ fn extract_signed_bundle(dir: &Path) -> std::path::PathBuf {
 
 /// Signed commits (folded `gpgsig` header) and signed annotated tags
 /// (signature appended unfolded in the tag body) are the most error-prone
-/// fidelity cases — and the vendored real-world fixtures never exercised them,
-/// because `vendor.sh` used to pass `--no-tags` + `--signed-tags=strip`, so
-/// the round-trip gate silently never saw a signature (heddle#562). This feeds
-/// a deterministic, self-contained signed-object fixture through the same
-/// adopt → export round-trip and asserts the signature bytes survive verbatim
-/// (identical commit + tag-object SHAs). A failure here is a real fidelity bug:
-/// export is not preserving the `gpgsig` / tag-body signature bytes.
+/// fidelity cases. The vendored real-world fixtures deliberately can't cover
+/// them: they are shallow clones re-rooted through `fast-export | fast-import`,
+/// which rewrites commit OIDs and so invalidates any tag signature it carries —
+/// `vendor.sh` therefore `--signed-tags=strip`s them rather than shipping a
+/// fixture that looks signed but fails `git verify-tag` (heddle#562). This
+/// directly-generated fixture (never passed through fast-export, so its
+/// signatures stay valid — and `gen-signed-objects.sh` `git verify-commit`/
+/// `verify-tag`s the bundle at generation time) is the authoritative signed
+/// coverage. It feeds the signed objects through the same adopt → export
+/// round-trip and asserts the signature bytes survive verbatim (identical
+/// commit + tag-object SHAs). A failure here is a real fidelity bug: export is
+/// not preserving the `gpgsig` / tag-body signature bytes.
 #[test]
 fn roundtrip_signed_commit_and_tag() {
     let tmp = TempDir::new().unwrap();
