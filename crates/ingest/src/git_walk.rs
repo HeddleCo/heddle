@@ -85,6 +85,11 @@ pub struct CommitEntry {
     pub message: String,
     pub authored_at: DateTime<Utc>,
     pub committed_at: DateTime<Utc>,
+    /// The commit's `gpgsig` header, verbatim, when signed (#564 step 1).
+    pub gpgsig: Option<String>,
+    /// Remaining commit headers (beyond tree/parents/author/committer/gpgsig)
+    /// in original order. ORDER IS LOAD-BEARING for #566 byte-exactness.
+    pub extra_headers: Vec<(String, String)>,
 }
 
 /// Author/committer identity + timestamp.
@@ -93,6 +98,9 @@ pub struct GitSignature {
     pub name: String,
     pub email: String,
     pub time: DateTime<Utc>,
+    /// Timezone offset in seconds east of UTC (git's `+HHMM`). Heddle used
+    /// to discard this; #564 step 1 preserves it for byte-reconstruction.
+    pub tz_offset: i32,
 }
 
 /// One tree entry (direct child of a git tree).
@@ -427,6 +435,8 @@ impl GitSource {
             .map_err(|e| IngestError::Git(format!("message {sha}: {e}")))?
             .to_string();
 
+        let (gpgsig, extra_headers) = split_commit_extra_headers(&commit)?;
+
         Ok(CommitEntry {
             sha: oid.to_string(),
             tree_sha,
@@ -436,6 +446,8 @@ impl GitSource {
             message,
             authored_at,
             committed_at,
+            gpgsig,
+            extra_headers,
         })
     }
 
@@ -689,14 +701,15 @@ fn collect_one_reflog(
         // have to special-case creation / deletion markers downstream.
         let prev = bstr_hex_or_none(line.previous_oid);
         let new = bstr_hex_or_none(line.new_oid);
-        let seconds = line.signature.time().unwrap_or_default().seconds;
+        let time = line.signature.time().unwrap_or_default();
         let signature = GitSignature {
             name: line.signature.name.to_string(),
             email: line.signature.email.to_string(),
             time: Utc
-                .timestamp_opt(seconds, 0)
+                .timestamp_opt(time.seconds, 0)
                 .single()
                 .unwrap_or_else(Utc::now),
+            tz_offset: time.offset,
         };
         out.push(ReflogEntry {
             ref_name: ref_name.to_string(),
@@ -738,15 +751,42 @@ fn parse_oid(sha: &str) -> crate::Result<gix::hash::ObjectId> {
 }
 
 fn signature_from(sig: gix::actor::SignatureRef<'_>) -> GitSignature {
-    let seconds = sig.time().unwrap_or_default().seconds;
+    let time = sig.time().unwrap_or_default();
     GitSignature {
         name: sig.name.to_string(),
         email: sig.email.to_string(),
         time: Utc
-            .timestamp_opt(seconds, 0)
+            .timestamp_opt(time.seconds, 0)
             .single()
             .unwrap_or_else(Utc::now),
+        tz_offset: time.offset,
     }
+}
+
+/// `(gpgsig, ordered remaining headers)` — the result of splitting a
+/// commit's extra headers (see [`split_commit_extra_headers`]).
+type SplitHeaders = (Option<String>, Vec<(String, String)>);
+
+/// Pull the `gpgsig` header out of a commit's extra headers, returning it
+/// separately from the remaining headers (preserved in original order).
+/// #564 de-lossy step 1: gpgsig and header order are load-bearing for
+/// #566 byte-reconstruction.
+fn split_commit_extra_headers(commit: &gix::Commit<'_>) -> crate::Result<SplitHeaders> {
+    let decoded = commit
+        .decode()
+        .map_err(|e| IngestError::Git(format!("decode commit: {e}")))?;
+    let mut gpgsig = None;
+    let mut extra = Vec::new();
+    for (key, value) in decoded.extra_headers {
+        let key = key.to_string();
+        let value = value.to_string();
+        if key == "gpgsig" {
+            gpgsig = Some(value);
+        } else {
+            extra.push((key, value));
+        }
+    }
+    Ok((gpgsig, extra))
 }
 
 #[cfg(test)]
@@ -1301,15 +1341,19 @@ mod tests {
                 name: "x".into(),
                 email: "x".into(),
                 time: Utc::now(),
+                tz_offset: 0,
             },
             committer: GitSignature {
                 name: "x".into(),
                 email: "x".into(),
                 time: Utc::now(),
+                tz_offset: 0,
             },
             message: "".into(),
             authored_at: Utc::now(),
             committed_at: Utc::now(),
+            gpgsig: None,
+            extra_headers: Vec::new(),
         };
         let commits = vec![
             make("A", &[]),

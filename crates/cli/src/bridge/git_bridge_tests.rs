@@ -6131,3 +6131,145 @@ fn heddle_owned_tag_overwrite_still_lands() {
         "expected NonFastForwardRef, got {err:?}"
     );
 }
+
+/// Write a raw root commit with explicit, distinct author and committer
+/// signatures and arbitrary extra headers. Unlike `commit_with_tree`, which
+/// reuses one zero-offset signature for both roles, this surfaces committer,
+/// timezone, gpgsig, and extra-header fidelity (#564 step 1).
+fn commit_with_signatures(
+    repo: &gix::Repository,
+    reference: Option<&str>,
+    tree_oid: gix::hash::ObjectId,
+    message: &str,
+    author: gix::actor::Signature,
+    committer: gix::actor::Signature,
+    extra_headers: Vec<(gix::bstr::BString, gix::bstr::BString)>,
+) -> gix::hash::ObjectId {
+    let commit = gix::objs::Commit {
+        tree: tree_oid,
+        parents: Default::default(),
+        author,
+        committer,
+        encoding: None,
+        message: message.into(),
+        extra_headers,
+    };
+    let id = repo.write_object(&commit).expect("write commit").detach();
+    if let Some(reference) = reference {
+        set_reference(repo, reference, id, PreviousValue::Any, "test: update ref")
+            .expect("update ref");
+    }
+    id
+}
+
+/// #564 step 1: a commit imported through the bridge must round-trip every
+/// git-fidelity field — distinct committer identity, both timezone offsets,
+/// the verbatim message, the gpgsig (pulled out of the extra headers), and
+/// the remaining extra headers in order.
+#[test]
+fn import_preserves_commit_git_fidelity_fields() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_git_temp, git_repo) = init_git_repo();
+
+    let tree_oid = empty_tree_oid(&git_repo);
+    let author = gix::actor::Signature {
+        name: "Author".into(),
+        email: "author@example.com".into(),
+        time: gix::date::Time {
+            seconds: 1_000_000,
+            offset: -7 * 3600,
+        },
+    };
+    let committer = gix::actor::Signature {
+        name: "Committer".into(),
+        email: "committer@example.com".into(),
+        time: gix::date::Time {
+            seconds: 2_000_000,
+            offset: 2 * 3600,
+        },
+    };
+    let gpgsig = "-----BEGIN PGP SIGNATURE-----\nABCD\n-----END PGP SIGNATURE-----";
+    let extra_headers = vec![
+        ("gpgsig".into(), gpgsig.into()),
+        ("mergetag".into(), "object deadbeef".into()),
+    ];
+    let commit_oid = commit_with_signatures(
+        &git_repo,
+        Some("refs/heads/main"),
+        tree_oid,
+        "feat: thing\n\nBody.\n",
+        author,
+        committer,
+        extra_headers,
+    );
+
+    let mut bridge = GitBridge::new(&repo);
+    import_all(&mut bridge, Some(git_repo.workdir().expect("workdir"))).expect("import");
+
+    let change_id = bridge.mapping.get_heddle(commit_oid).expect("commit mapped");
+    let state = repo
+        .store()
+        .get_state(&change_id)
+        .expect("load state")
+        .expect("state written");
+
+    let stored_committer = state.committer.expect("committer preserved");
+    assert_eq!(stored_committer.name, "Committer");
+    assert_eq!(stored_committer.email, "committer@example.com");
+    assert_eq!(state.authored_tz_offset, -7 * 3600);
+    assert_eq!(state.committer_tz_offset, 2 * 3600);
+    assert_eq!(state.raw_message.as_deref(), Some("feat: thing\n\nBody.\n"));
+    // gix folds multi-line extra-header values and round-trips them with a
+    // trailing newline; byte-exact State round-tripping is covered by the
+    // ingest unit test. Here we verify the gpgsig is *extracted* into its own
+    // field (not left in extra_headers) and the rest stay ordered.
+    let gpgsig_stored = state.git_gpgsig.as_deref().expect("gpgsig extracted");
+    assert_eq!(gpgsig_stored.trim_end(), gpgsig, "gpgsig preserved");
+    assert_eq!(state.extra_headers.len(), 1, "only the non-gpgsig header remains");
+    assert_eq!(state.extra_headers[0].0, "mergetag");
+    assert_eq!(state.extra_headers[0].1.trim_end(), "object deadbeef");
+}
+
+/// #564 step 1: importing an annotated tag must persist its tag object
+/// (tagger / message / name / target) in the marker's annotated-tag
+/// sidecar, while the marker itself still resolves to the peeled commit.
+#[test]
+fn import_stores_annotated_tag_object() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_git_temp, git_repo) = init_git_repo();
+
+    let tree_oid = empty_tree_oid(&git_repo);
+    let commit_oid = commit_with_tree(&git_repo, Some("refs/heads/main"), tree_oid, "base", &[]);
+    create_annotated_tag(&git_repo, "v1.0", commit_oid, "release notes\n");
+
+    let mut bridge = GitBridge::new(&repo);
+    import_all(&mut bridge, Some(git_repo.workdir().expect("workdir"))).expect("import");
+
+    let change_id = bridge.mapping.get_heddle(commit_oid).expect("commit mapped");
+
+    // Lightweight behavior preserved: the marker resolves to the peeled commit.
+    assert_eq!(
+        repo.refs().get_marker(&MarkerName::new("v1.0")).unwrap(),
+        Some(change_id)
+    );
+
+    // ...and the annotated-tag sidecar captures the tag object itself.
+    let bytes = repo
+        .store()
+        .get_annotated_tag_bytes_for_marker("v1.0")
+        .expect("query sidecar")
+        .expect("annotated tag stored");
+    let tag = objects::object::AnnotatedTag::from_bytes(&bytes).expect("decode tag");
+    assert_eq!(tag.object, change_id);
+    assert_eq!(tag.target_kind, "commit");
+    assert_eq!(tag.tag_name, "v1.0");
+    assert!(
+        tag.message.as_deref().unwrap_or_default().contains("release notes"),
+        "tag message preserved: {:?}",
+        tag.message
+    );
+    let tagger = tag.tagger.expect("tagger preserved");
+    assert_eq!(tagger.name, "Heddle Test");
+}

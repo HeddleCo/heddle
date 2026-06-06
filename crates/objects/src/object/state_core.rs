@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{Attribution, ChangeId, ContentHash};
+use super::{Attribution, ChangeId, ContentHash, Principal};
 
 // ── Status ──────────────────────────────────────────────────────────
 
@@ -257,6 +257,52 @@ pub struct State {
     /// when this state captures an unresolved merge conflict as data.
     #[serde(default)]
     pub structured_conflicts: Option<ContentHash>,
+    // --- git-fidelity fields (#564 de-lossy step 1, #565) ---
+    //
+    // These preserve the parts of an imported git commit that Heddle's
+    // model used to drop, so a commit can be byte-reconstructed later
+    // (#566/#567) and the git mirror can be eliminated (#568). UNLIKE the
+    // W1 tail fields above, these ARE part of the content hash (see
+    // `update_hash`): two git-distinct commits that differ only in
+    // committer, timezone, verbatim message, gpgsig, or extra headers must
+    // hash differently so they can't dedup-collide in the content-addressed
+    // store. They are still tail-append + `#[serde(default)]` so legacy
+    // on-disk states keep deserializing.
+    /// The git committer identity, when distinct from the author
+    /// ([`Attribution::principal`]). Git records both an author (who wrote
+    /// the change) and a committer (who created this commit object); for
+    /// rebased / cherry-picked / amended commits the two differ. `None`
+    /// for native heddle commits and for legacy imports from before #565.
+    #[serde(default)]
+    pub committer: Option<Principal>,
+    /// Timezone offset (seconds east of UTC) of the *author* timestamp
+    /// ([`State::authored_at`] / `created_at` fallback). Git stores the
+    /// author's local offset (e.g. `+0000`, `-0700`); Heddle used to
+    /// discard it. `0` for native commits and legacy imports.
+    #[serde(default)]
+    pub authored_tz_offset: i32,
+    /// Timezone offset (seconds east of UTC) of the *committer* timestamp
+    /// (`created_at`). `0` for native commits and legacy imports.
+    #[serde(default)]
+    pub committer_tz_offset: i32,
+    /// The verbatim git commit message body (everything after the header
+    /// block), preserved exactly so reconstruction is byte-stable. Distinct
+    /// from `intent`, which is the trimmed first line surfaced in the UI.
+    /// `None` for native commits and legacy imports.
+    #[serde(default)]
+    pub raw_message: Option<String>,
+    /// The commit's `gpgsig` header value, verbatim, when the commit is
+    /// signed. Pulled out of [`State::extra_headers`] into its own field
+    /// because its byte-exact placement is load-bearing for #566's
+    /// signature reconstruction. `None` for unsigned commits.
+    #[serde(default)]
+    pub git_gpgsig: Option<String>,
+    /// Any remaining git commit headers beyond the ones Heddle models
+    /// natively (tree/parents/author/committer/gpgsig), in their original
+    /// order. ORDER IS LOAD-BEARING for #566 byte-exactness — this is a
+    /// `Vec`, never a map. Empty for native commits and legacy imports.
+    #[serde(default)]
+    pub extra_headers: Vec<(String, String)>,
 }
 
 impl State {
@@ -327,6 +373,12 @@ impl State {
             review_signatures: None,
             discussions: None,
             structured_conflicts: None,
+            committer: None,
+            authored_tz_offset: 0,
+            committer_tz_offset: 0,
+            raw_message: None,
+            git_gpgsig: None,
+            extra_headers: Vec::new(),
             status: Status::Draft,
         }
     }
@@ -429,6 +481,49 @@ impl State {
         self.authored_at = Some(timestamp);
         // Intentionally no `content_hash = None` here — authored_at is
         // not in the hash by design.
+        self
+    }
+
+    /// Record the git committer identity (distinct from the author).
+    ///
+    /// **Part of the state hash** — see the `committer` field docs and
+    /// `update_hash`. #564 de-lossy step 1.
+    pub fn with_committer(mut self, committer: Principal) -> Self {
+        self.committer = Some(committer);
+        self.content_hash = None;
+        self
+    }
+
+    /// Record the author/committer timezone offsets (seconds east of UTC).
+    /// **Part of the state hash.** #564 de-lossy step 1.
+    pub fn with_tz_offsets(mut self, authored: i32, committer: i32) -> Self {
+        self.authored_tz_offset = authored;
+        self.committer_tz_offset = committer;
+        self.content_hash = None;
+        self
+    }
+
+    /// Record the verbatim git commit message body.
+    /// **Part of the state hash.** #564 de-lossy step 1.
+    pub fn with_raw_message(mut self, raw_message: impl Into<String>) -> Self {
+        self.raw_message = Some(raw_message.into());
+        self.content_hash = None;
+        self
+    }
+
+    /// Record the commit's `gpgsig` header verbatim.
+    /// **Part of the state hash.** #564 de-lossy step 1.
+    pub fn with_git_gpgsig(mut self, gpgsig: impl Into<String>) -> Self {
+        self.git_gpgsig = Some(gpgsig.into());
+        self.content_hash = None;
+        self
+    }
+
+    /// Record the ordered remaining git commit headers. ORDER IS
+    /// LOAD-BEARING (#566). **Part of the state hash.** #564 de-lossy step 1.
+    pub fn with_extra_headers(mut self, extra_headers: Vec<(String, String)>) -> Self {
+        self.extra_headers = extra_headers;
+        self.content_hash = None;
         self
     }
 
@@ -555,6 +650,32 @@ impl State {
 
         len += 1;
 
+        // git-fidelity fields (#564 step 1). Must mirror `update_hash`
+        // byte-for-byte. committer: 1 tag byte + (name+NUL, email+NUL).
+        len += 1;
+        if let Some(committer) = &self.committer {
+            len += committer.name.len() as u64 + 1;
+            len += committer.email.len() as u64 + 1;
+        }
+        // both tz offsets: i32 LE, always present.
+        len += 4;
+        len += 4;
+        // raw_message + git_gpgsig: optional-string framing (1 + maybe len+1).
+        len += 1;
+        if let Some(raw_message) = &self.raw_message {
+            len += raw_message.len() as u64 + 1;
+        }
+        len += 1;
+        if let Some(gpgsig) = &self.git_gpgsig {
+            len += gpgsig.len() as u64 + 1;
+        }
+        // extra_headers: u32 count, then per pair u32 key_len+key, u32 val_len+val.
+        len += 4;
+        for (key, value) in &self.extra_headers {
+            len += 4 + key.len() as u64;
+            len += 4 + value.len() as u64;
+        }
+
         len
     }
 
@@ -625,6 +746,38 @@ impl State {
         }
 
         hasher.update(&[self.status.to_byte()]);
+
+        // git-fidelity fields (#564 de-lossy step 1, #565). These are
+        // DELIBERATELY part of the content hash — the opposite of the W1
+        // tail fields above. Two git commits that differ only in committer,
+        // timezone, verbatim message, gpgsig, or extra headers are distinct
+        // git objects; folding these into identity prevents them from
+        // dedup-colliding to one State in the content-addressed store. This
+        // re-hashes every pre-#565 state (a real format bump; acceptable
+        // pre-0.3). Keep this in sync with `hash_len`.
+        if let Some(committer) = &self.committer {
+            hasher.update(&[1]);
+            hasher.update(committer.name.as_bytes());
+            hasher.update(&[0]);
+            hasher.update(committer.email.as_bytes());
+            hasher.update(&[0]);
+        } else {
+            hasher.update(&[0]);
+        }
+
+        hasher.update(&self.authored_tz_offset.to_le_bytes());
+        hasher.update(&self.committer_tz_offset.to_le_bytes());
+
+        write_optional_string(hasher, &self.raw_message);
+        write_optional_string(hasher, &self.git_gpgsig);
+
+        hasher.update(&(self.extra_headers.len() as u32).to_le_bytes());
+        for (key, value) in &self.extra_headers {
+            hasher.update(&(key.len() as u32).to_le_bytes());
+            hasher.update(key.as_bytes());
+            hasher.update(&(value.len() as u32).to_le_bytes());
+            hasher.update(value.as_bytes());
+        }
     }
 }
 
@@ -802,5 +955,85 @@ mod tests {
             bare_hash,
             "W1 tail fields must not affect the state hash"
         );
+    }
+
+    /// The inverse of `w1_tail_fields_are_not_part_of_state_hash`: the
+    /// git-fidelity fields (#564 step 1) MUST be part of the hash so two
+    /// git-distinct commits can't dedup-collide. Each field, set in
+    /// isolation, must move the hash.
+    #[test]
+    fn fidelity_fields_are_part_of_state_hash() {
+        let base = sample_state();
+        let base_hash = base.compute_hash();
+
+        let with_committer = sample_state()
+            .with_change_id(base.change_id)
+            .with_logical_change_id(base.logical_change_id());
+        let mut with_committer = with_committer
+            .with_committer(Principal::new("Carol", "carol@example.com"));
+        with_committer.created_at = base.created_at;
+        assert_ne!(
+            with_committer.hash(),
+            base_hash,
+            "committer must affect the state hash"
+        );
+
+        for mutate in [
+            |s: State| s.with_tz_offsets(3600, -7200),
+            |s: State| s.with_raw_message("verbatim body\n"),
+            |s: State| s.with_git_gpgsig("-----BEGIN PGP SIGNATURE-----\n"),
+            |s: State| s.with_extra_headers(vec![("mergetag".into(), "x".into())]),
+        ] {
+            let seeded = sample_state()
+                .with_change_id(base.change_id)
+                .with_logical_change_id(base.logical_change_id());
+            let mut decorated = mutate(seeded);
+            decorated.created_at = base.created_at;
+            assert_ne!(
+                decorated.hash(),
+                base_hash,
+                "fidelity field must affect the state hash"
+            );
+        }
+    }
+
+    /// extra_headers order is load-bearing (#566): the same pairs in a
+    /// different order must hash differently.
+    #[test]
+    fn extra_headers_order_affects_hash() {
+        let base = sample_state();
+        let one = sample_state()
+            .with_change_id(base.change_id)
+            .with_logical_change_id(base.logical_change_id());
+        let mut one = one.with_extra_headers(vec![
+            ("a".into(), "1".into()),
+            ("b".into(), "2".into()),
+        ]);
+        one.created_at = base.created_at;
+
+        let two = sample_state()
+            .with_change_id(base.change_id)
+            .with_logical_change_id(base.logical_change_id());
+        let mut two = two.with_extra_headers(vec![
+            ("b".into(), "2".into()),
+            ("a".into(), "1".into()),
+        ]);
+        two.created_at = base.created_at;
+
+        assert_ne!(one.hash(), two.hash());
+    }
+
+    /// The fidelity fields set together produce a stable, recomputable
+    /// hash (guards against a `hash_len`/`update_hash` divergence making
+    /// the cached hash differ from a fresh `compute_hash`).
+    #[test]
+    fn fidelity_fields_hash_is_stable() {
+        let mut state = sample_state()
+            .with_committer(Principal::new("Dave", "dave@example.com"))
+            .with_tz_offsets(3600, 0)
+            .with_raw_message("body\n")
+            .with_git_gpgsig("sig")
+            .with_extra_headers(vec![("k".into(), "v".into())]);
+        assert_eq!(state.hash(), state.compute_hash());
     }
 }

@@ -118,10 +118,24 @@ pub(crate) fn state_from_commit(
     // merge-without-rebase workflows) the two are identical and the
     // distinction is invisible; for rebased / cherry-picked /
     // amended commits it preserves the original authoring time.
-    State::new(tree, parents, attribution)
+    // #564 step 1: preserve the committer identity, both timezone offsets,
+    // the verbatim message, the gpgsig, and any extra headers (in order) so
+    // the commit is byte-reconstructable later (#566) without the mirror.
+    let mut state = State::new(tree, parents, attribution)
         .with_timestamp(committed_timestamp(&commit.committed_at))
         .with_authored_at(committed_timestamp(&commit.authored_at))
         .with_intent(first_line_of(&commit.message))
+        .with_committer(Principal::new(
+            commit.committer.name.clone(),
+            commit.committer.email.clone(),
+        ))
+        .with_tz_offsets(commit.author.tz_offset, commit.committer.tz_offset)
+        .with_raw_message(commit.message.clone())
+        .with_extra_headers(commit.extra_headers.clone());
+    if let Some(gpgsig) = &commit.gpgsig {
+        state = state.with_git_gpgsig(gpgsig.clone());
+    }
+    state
 }
 
 /// Best-effort attribution parse. The principal is always the git author;
@@ -229,6 +243,7 @@ mod tests {
             name: name.into(),
             email: email.into(),
             time: Utc.with_ymd_and_hms(2026, 4, 1, 12, 0, 0).unwrap(),
+            tz_offset: 0,
         }
     }
 
@@ -242,6 +257,8 @@ mod tests {
             message: message.into(),
             authored_at: Utc.with_ymd_and_hms(2026, 4, 1, 12, 0, 0).unwrap(),
             committed_at: Utc.with_ymd_and_hms(2026, 4, 1, 12, 0, 0).unwrap(),
+            gpgsig: None,
+            extra_headers: Vec::new(),
         }
     }
 
@@ -385,5 +402,61 @@ mod tests {
 
         let blobs_after = store.list_blobs().unwrap().len();
         assert_eq!(blobs_before, blobs_after);
+    }
+
+    /// #564 step 1: a re-imported commit must round-trip every git-fidelity
+    /// field — distinct committer identity, both timezone offsets, the
+    /// verbatim message, the gpgsig, and the extra headers in order — so the
+    /// commit is byte-reconstructable later (#566) without the git mirror.
+    #[test]
+    fn write_commit_preserves_git_fidelity_fields() {
+        let store = InMemoryStore::new();
+        let mut map = ShaMap::new();
+        let tree = empty_tree_hash(&store);
+
+        let mut commit = make_commit("ff".repeat(20).as_str(), vec![], "feat: thing\n\nBody.\n");
+        commit.author = GitSignature {
+            name: "Author".into(),
+            email: "author@example.com".into(),
+            time: Utc.with_ymd_and_hms(2026, 4, 1, 12, 0, 0).unwrap(),
+            tz_offset: -7 * 3600,
+        };
+        commit.committer = GitSignature {
+            name: "Committer".into(),
+            email: "committer@example.com".into(),
+            time: Utc.with_ymd_and_hms(2026, 4, 2, 9, 0, 0).unwrap(),
+            tz_offset: 2 * 3600,
+        };
+        commit.gpgsig =
+            Some("-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----".into());
+        commit.extra_headers = vec![
+            ("mergetag".into(), "object deadbeef".into()),
+            ("encoding".into(), "ISO-8859-1".into()),
+        ];
+
+        let cid = StateWriter::new(&store, &mut map)
+            .write_commit(&commit, tree)
+            .unwrap();
+        let state = store.get_state(&cid).unwrap().expect("state written");
+
+        let committer = state.committer.expect("committer preserved");
+        assert_eq!(committer.name, "Committer");
+        assert_eq!(committer.email, "committer@example.com");
+        assert_eq!(state.authored_tz_offset, -7 * 3600);
+        assert_eq!(state.committer_tz_offset, 2 * 3600);
+        assert_eq!(state.raw_message.as_deref(), Some("feat: thing\n\nBody.\n"));
+        assert_eq!(
+            state.git_gpgsig.as_deref(),
+            Some("-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----")
+        );
+        assert_eq!(
+            state.extra_headers,
+            vec![
+                ("mergetag".to_string(), "object deadbeef".to_string()),
+                ("encoding".to_string(), "ISO-8859-1".to_string()),
+            ]
+        );
+        // `intent` stays the trimmed first line, distinct from `raw_message`.
+        assert_eq!(state.intent.as_deref(), Some("feat: thing"));
     }
 }

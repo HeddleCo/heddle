@@ -338,6 +338,7 @@ mod tests {
             name: "Test".into(),
             email: "t@example.com".into(),
             time: Utc::now(),
+            tz_offset: 0,
         }
     }
 

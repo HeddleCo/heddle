@@ -463,15 +463,19 @@ mod tests {
                 name: author.0.into(),
                 email: author.1.into(),
                 time: when,
+                tz_offset: 0,
             },
             committer: GitSignature {
                 name: author.0.into(),
                 email: author.1.into(),
                 time: when,
+                tz_offset: 0,
             },
             message: msg.into(),
             authored_at: when,
             committed_at: when,
+            gpgsig: None,
+            extra_headers: Vec::new(),
         }
     }
 

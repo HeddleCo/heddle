@@ -7,6 +7,7 @@ mod versioned_blob;
 mod action_id;
 mod action_operation;
 mod action_struct;
+mod annotated_tag;
 mod blob;
 mod diff;
 mod discussion;
@@ -31,6 +32,7 @@ mod visibility_tier;
 pub use action_id::ActionId;
 pub use action_operation::Operation;
 pub use action_struct::Action;
+pub use annotated_tag::AnnotatedTag;
 pub use blob::Blob;
 pub use diff::{DiffKind, FileChange, FileChangeSet};
 pub use discussion::{

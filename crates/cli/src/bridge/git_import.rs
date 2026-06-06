@@ -6,7 +6,7 @@ use std::{collections::HashSet, path::Path};
 
 use chrono::{TimeZone, Utc};
 use objects::object::{
-    Agent, Attribution, ChangeId, MarkerName, Principal, State, Status, ThreadName,
+    Agent, AnnotatedTag, Attribution, ChangeId, MarkerName, Principal, State, Status, ThreadName,
 };
 use refs::{Head, RefExpectation};
 use repo::{Repository as HeddleRepository, ThreadId};
@@ -145,6 +145,32 @@ fn resolve_identity(
     Ok((ChangeId::from_bytes(change_id_bytes), None))
 }
 
+/// `(gpgsig, ordered remaining headers)` — the result of splitting a
+/// commit's extra headers (see [`split_extra_headers`]).
+type SplitHeaders = (Option<String>, Vec<(String, String)>);
+
+/// Pull the `gpgsig` header out of a commit's extra headers, returning it
+/// separately from the remaining headers (preserved in original order).
+///
+/// gpgsig gets its own [`State`] field because its byte-exact placement is
+/// load-bearing for #566's signature reconstruction; the rest ride in
+/// `extra_headers`, where order is also load-bearing. #564 de-lossy step 1.
+fn split_extra_headers(commit: &gix::Commit<'_>) -> GitResult<SplitHeaders> {
+    let decoded = commit.decode().map_err(git_err)?;
+    let mut gpgsig = None;
+    let mut extra = Vec::new();
+    for (key, value) in decoded.extra_headers {
+        let key = key.to_string();
+        let value = value.to_string();
+        if key == "gpgsig" {
+            gpgsig = Some(value);
+        } else {
+            extra.push((key, value));
+        }
+    }
+    Ok((gpgsig, extra))
+}
+
 /// Import a single Git commit as a Heddle state.
 pub fn import_commit(
     mapping: &mut SyncMapping,
@@ -157,7 +183,21 @@ pub fn import_commit(
     let author = commit.author().map_err(git_err)?;
     let author_name = author.name.to_string();
     let author_email = author.email.to_string();
-    let timestamp = author.time().map_err(git_err)?.seconds;
+    let author_time = author.time().map_err(git_err)?;
+    let authored_seconds = author_time.seconds;
+    let authored_tz_offset = author_time.offset;
+    // #565: also capture the committer identity + time. Git records both an
+    // author (who wrote the change) and a committer (who created this commit
+    // object); the two differ for rebased / cherry-picked / amended commits.
+    let committer = commit.committer().map_err(git_err)?;
+    let committer_name = committer.name.to_string();
+    let committer_email = committer.email.to_string();
+    let committer_time = committer.time().map_err(git_err)?;
+    let committed_seconds = committer_time.seconds;
+    let committer_tz_offset = committer_time.offset;
+    // #565: capture gpgsig + any remaining headers (ordered) so the commit
+    // is byte-reconstructable later (#566) without the git mirror (#568).
+    let (git_gpgsig, extra_headers) = split_extra_headers(&commit)?;
     let tree_id = commit.tree_id().map_err(git_err)?.detach();
     let parent_git_oids: Vec<gix::hash::ObjectId> =
         commit.parent_ids().map(|id| id.detach()).collect();
@@ -226,15 +266,32 @@ pub fn import_commit(
         })
         .unwrap_or(Status::Draft);
 
-    let created_at = Utc.timestamp_opt(timestamp, 0).single().ok_or_else(|| {
-        GitBridgeError::InvalidMapping(format!("invalid Git timestamp: {}", timestamp))
+    // #565: `created_at` is the *committer* time (the commit object's
+    // birth) and `authored_at` is the *author* time, matching the
+    // `bridge git ingest` importer. Previously this path stored the author
+    // time as `created_at` and dropped the committer entirely, so the
+    // committer time wasn't recoverable; fidelity requires both.
+    let created_at = Utc.timestamp_opt(committed_seconds, 0).single().ok_or_else(|| {
+        GitBridgeError::InvalidMapping(format!("invalid Git timestamp: {}", committed_seconds))
+    })?;
+    let authored_at = Utc.timestamp_opt(authored_seconds, 0).single().ok_or_else(|| {
+        GitBridgeError::InvalidMapping(format!("invalid Git timestamp: {}", authored_seconds))
     })?;
 
-    let state = State::new(tree_hash, parent_oids, attribution)
+    let mut state = State::new(tree_hash, parent_oids, attribution)
         .with_change_id(change_id)
         .with_intent(intent.unwrap_or_else(|| "Imported from Git".to_string()))
         .with_timestamp(created_at)
+        .with_authored_at(authored_at)
+        .with_committer(Principal::new(committer_name, committer_email))
+        .with_tz_offsets(authored_tz_offset, committer_tz_offset)
+        .with_raw_message(message)
+        .with_extra_headers(extra_headers)
         .with_status(status);
+
+    if let Some(gpgsig) = git_gpgsig {
+        state = state.with_git_gpgsig(gpgsig);
+    }
 
     let state = if let Some(c) = confidence {
         state.with_confidence(c)
@@ -685,6 +742,10 @@ fn import_with_ref_filter(
         if wanted_refs.is_some_and(|wanted| !wanted.contains(&name)) {
             continue;
         }
+        // The ref's *immediate* target: a tag object for annotated tags, a
+        // commit for lightweight tags. We capture it before peeling so we
+        // can tell the two apart and store the annotated tag's object.
+        let immediate = tag.target().try_id().map(|id| id.to_owned());
         // Skip non-commit-pointing tags here too; the tips loop already
         // recorded them in `skipped_non_commit_refs`.
         let oid = match peel_to_commit_oid(&repo, &mut tag)? {
@@ -693,6 +754,27 @@ fn import_with_ref_filter(
         };
         if let Some(change_id) = bridge.mapping.get_heddle(oid) {
             sync_marker_from_git_tag(bridge, &name, &change_id)?;
+            // #565: for an annotated tag, also persist its tag object
+            // (tagger / message / gpgsig / type / name) in the marker's
+            // annotated-tag sidecar so the tag can be byte-reconstructed
+            // after the mirror is dropped (#568). Lightweight tags whose
+            // immediate target is the commit itself get no sidecar.
+            if let Some(immediate) = immediate
+                && immediate != oid
+                && repo.find_object(immediate).map_err(git_err)?.kind == gix::objs::Kind::Tag
+            {
+                let annotated = build_annotated_tag(&repo, immediate, &change_id)?;
+                let bytes = annotated.to_bytes().map_err(|e| {
+                    GitBridgeError::InvalidMapping(format!(
+                        "serialize annotated tag '{}': {}",
+                        name, e
+                    ))
+                })?;
+                bridge
+                    .heddle_repo
+                    .store()
+                    .put_annotated_tag_bytes_for_marker(&name, &bytes)?;
+            }
             stats.tags_synced += 1;
         }
     }
@@ -705,6 +787,41 @@ fn shallow_import_retry_command(wanted_refs: Option<&HashSet<String>>) -> String
         Some(_) => "heddle bridge git import --path <full-git-repo> --ref <ref>".to_string(),
         None => "heddle bridge git import --path <full-git-repo>".to_string(),
     }
+}
+
+/// Read an annotated git tag object and capture its fidelity metadata as an
+/// [`AnnotatedTag`]. `change_id` is the Heddle id of the peeled commit the
+/// tag resolves to (stored as the tag's `object`). #564 de-lossy step 1.
+fn build_annotated_tag(
+    repo: &gix::Repository,
+    tag_oid: gix::hash::ObjectId,
+    change_id: &ChangeId,
+) -> GitResult<AnnotatedTag> {
+    let tag = repo.find_tag(tag_oid).map_err(git_err)?;
+    let decoded = tag.decode().map_err(git_err)?;
+    let target_kind = match decoded.target_kind {
+        gix::objs::Kind::Commit => "commit",
+        gix::objs::Kind::Tree => "tree",
+        gix::objs::Kind::Blob => "blob",
+        gix::objs::Kind::Tag => "tag",
+    };
+    let mut annotated = AnnotatedTag::new(*change_id, target_kind, decoded.name.to_string())
+        .with_message(decoded.message.to_string());
+    if let Some(tagger) = decoded.tagger().map_err(git_err)? {
+        let time = tagger.time().map_err(git_err)?;
+        let at = Utc.timestamp_opt(time.seconds, 0).single().ok_or_else(|| {
+            GitBridgeError::InvalidMapping(format!("invalid tagger timestamp: {}", time.seconds))
+        })?;
+        annotated = annotated.with_tagger(
+            Principal::new(tagger.name.to_string(), tagger.email.to_string()),
+            at,
+            time.offset,
+        );
+    }
+    if let Some(sig) = decoded.pgp_signature {
+        annotated = annotated.with_git_gpgsig(sig.to_string());
+    }
+    Ok(annotated)
 }
 
 fn sync_marker_from_git_tag(
