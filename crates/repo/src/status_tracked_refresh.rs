@@ -126,21 +126,9 @@ fn refresh_tracked_file(
         return Ok(false);
     }
 
-    let hash = if ctx.index.is_fresh(key, &metadata) {
+    let hash = if let Some(cached_hash) = ctx.index.fresh_entry(key, &metadata).map(|c| c.hash) {
         ctx.stats.cache_hits += 1;
-        ctx.index.get(key).map(|cached| cached.hash).map_or_else(
-            || {
-                compute_and_cache_file(
-                    &path,
-                    key,
-                    &metadata,
-                    tree_entry.is_executable(),
-                    ctx.index,
-                    ctx.stats,
-                )
-            },
-            Ok,
-        )?
+        cached_hash
     } else {
         compute_and_cache_file(
             &path,
@@ -185,12 +173,9 @@ fn refresh_tracked_symlink(
         return Ok(false);
     }
 
-    let hash = if ctx.index.is_fresh(key, &metadata) {
+    let hash = if let Some(cached_hash) = ctx.index.fresh_entry(key, &metadata).map(|c| c.hash) {
         ctx.stats.cache_hits += 1;
-        ctx.index.get(key).map(|cached| cached.hash).map_or_else(
-            || compute_and_cache_symlink(&path, key, &metadata, ctx.index),
-            Ok,
-        )?
+        cached_hash
     } else {
         compute_and_cache_symlink(&path, key, &metadata, ctx.index)?
     };

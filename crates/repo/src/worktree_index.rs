@@ -383,27 +383,20 @@ impl WorktreeIndex {
 
     /// Check if a cached entry is still fresh compared to filesystem metadata.
     pub fn is_fresh(&self, path: &str, metadata: &fs::Metadata) -> bool {
-        let entry = match self.entries.get(path) {
-            Some(e) => e,
-            None => return false,
-        };
+        self.fresh_entry(path, metadata).is_some()
+    }
 
-        let modified = match metadata.modified() {
-            Ok(m) => m,
-            Err(_) => return false,
-        };
+    /// Return the cached entry for `path` iff it is still fresh compared to
+    /// filesystem metadata. Combines the lookup and freshness check into a
+    /// single map traversal — the tracked-refresh hot path calls this once
+    /// per file, so the second redundant `get` it replaces was pure overhead.
+    pub fn fresh_entry(&self, path: &str, metadata: &fs::Metadata) -> Option<&IndexEntry> {
+        let entry = self.entries.get(path)?;
 
-        let duration = match modified.duration_since(std::time::UNIX_EPOCH) {
-            Ok(d) => d,
-            Err(_) => return false,
-        };
-
-        let modified_sec = match i64::try_from(duration.as_secs()) {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
+        let modified = metadata.modified().ok()?;
+        let duration = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+        let modified_sec = i64::try_from(duration.as_secs()).ok()?;
         let modified_nsec = duration.subsec_nanos();
-
         let size = metadata.len();
 
         let kind = if metadata.is_symlink() {
@@ -427,11 +420,13 @@ impl WorktreeIndex {
             IndexEntryKind::Symlink => !entry.executable,
         };
 
-        entry.size == size
+        let fresh = entry.size == size
             && entry.modified_sec == modified_sec
             && entry.modified_nsec == modified_nsec
             && executable_matches
-            && entry.kind == kind
+            && entry.kind == kind;
+
+        fresh.then_some(entry)
     }
 
     /// Get a directory entry by path.
