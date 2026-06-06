@@ -897,6 +897,7 @@ fn worktree_entry_changed(root: &Path, path: &str, entry: &IndexEntryIntent) -> 
         path,
         entry.id,
         entry.mode.bits(),
+        None,
     )
     .with_context(|| format!("failed to inspect worktree path before commit: {path}"))?;
     Ok(state != GitWorktreeEntryState::Clean)

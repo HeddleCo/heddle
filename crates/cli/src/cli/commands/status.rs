@@ -32,8 +32,9 @@ use super::{
     command_catalog::ActionFields,
     git_compat::{GitIndexPlan, git_index_plan_for_repo, git_index_plan_for_root},
     git_overlay_health::{
-        GitOverlayHealth, RepositoryVerificationState, build_git_overlay_health,
-        build_plain_git_verification_probe, override_trust_recommended_action,
+        GitOverlayHealth, RepositoryVerificationState,
+        build_git_overlay_health_with_worktree_status, build_plain_git_verification_probe,
+        override_trust_recommended_action,
         remote_tracking_with_verification_action, repository_setup_guidance,
         serialize_empty_action_as_null,
     },
@@ -463,12 +464,18 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         repo.git_overlay_import_hint().unwrap_or(None)
     };
     let import_hint_ms = import_hint_start.elapsed().as_millis();
-    let git_overlay_health = build_git_overlay_health(&repo);
+    // Compute the git-overlay worktree status ONCE and thread it through both
+    // consumers (the health build below + the changes computation here). It
+    // re-reads + SHA-1s every tracked file (~950ms on a 10k-file worktree);
+    // previously `status` paid that twice.
+    let git_worktree_status_result = repo.git_overlay_worktree_status();
+    let git_overlay_health =
+        build_git_overlay_health_with_worktree_status(&repo, &git_worktree_status_result);
     let trust = RepositoryVerificationState::from_health(&repo, git_overlay_health.clone());
     let remote_tracking =
         remote_tracking.map(|remote| remote_tracking_with_verification_action(remote, &trust));
     let status_options = worktree_status_options(Some(repo.config()));
-    let git_worktree_status = repo.git_overlay_worktree_status().unwrap_or(None);
+    let git_worktree_status = git_worktree_status_result.unwrap_or(None);
     let git_index = git_index_plan_for_repo(&repo)?;
     let identity_notice = first_capture_identity_notice(&repo, current_state.as_ref())?;
     let git_clean_mapping_blocker = matches!(

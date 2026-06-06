@@ -1318,9 +1318,10 @@ impl Repository {
         }) {
             head_entries.insert(path, entry);
         }
+        let index_timestamp_secs = index.timestamp().unix_seconds();
         let mut index_entries = BTreeMap::new();
         for (_, (path, entry)) in index.entries_with_paths_by_filter_map(|path, entry| {
-            Some((git_path(path), (entry.id, entry.mode.bits())))
+            Some((git_path(path), (entry.id, entry.mode.bits(), entry.stat)))
         }) {
             index_entries.insert(path, entry);
         }
@@ -1329,7 +1330,7 @@ impl Repository {
         let mut modified = BTreeSet::new();
         let mut deleted = BTreeSet::new();
 
-        for (path, entry) in &index_entries {
+        for (path, (oid, mode, _stat)) in &index_entries {
             if ignored_git_overlay_status_path(path) {
                 continue;
             }
@@ -1337,7 +1338,7 @@ impl Repository {
                 None => {
                     added.insert(PathBuf::from(path));
                 }
-                Some(head_entry) if head_entry != entry => {
+                Some((head_oid, head_mode)) if (head_oid, head_mode) != (oid, mode) => {
                     modified.insert(PathBuf::from(path));
                 }
                 Some(_) => {}
@@ -1349,15 +1350,20 @@ impl Repository {
             }
         }
 
-        for (path, (oid, mode)) in &index_entries {
+        for (path, (oid, mode, stat)) in &index_entries {
             if ignored_git_overlay_status_path(path) {
                 continue;
             }
+            let probe = crate::git_worktree_status::IndexStatProbe {
+                stat: *stat,
+                index_timestamp_secs,
+            };
             match crate::git_worktree_status::git_worktree_entry_state(
                 &self.root,
                 path,
                 *oid,
                 *mode,
+                Some(probe),
             )? {
                 GitWorktreeEntryState::Clean => {}
                 GitWorktreeEntryState::Deleted => {
