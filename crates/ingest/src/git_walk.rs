@@ -81,15 +81,22 @@ pub struct CommitEntry {
     pub parents: Vec<String>,
     pub author: GitSignature,
     pub committer: GitSignature,
-    /// Full commit message (subject + body + trailers), as stored in git.
-    pub message: String,
+    /// Full commit message (subject + body + trailers), verbatim git bytes.
+    ///
+    /// Raw bytes, NOT a `String`: a commit with a non-UTF8 `encoding`
+    /// (latin-1, shift-jis, …) carries message bytes that aren't valid UTF-8,
+    /// and they must reach [`State::raw_message`](objects::object::State) byte-
+    /// identically for #566 reconstruction. Consumers that need a string view
+    /// (attribution / intent parsing) derive a lossy one at the edge.
+    pub message: Vec<u8>,
     pub authored_at: DateTime<Utc>,
     pub committed_at: DateTime<Utc>,
-    /// The commit's `gpgsig` header, verbatim, when signed (#564 step 1).
-    pub gpgsig: Option<String>,
+    /// The commit's `gpgsig` header, verbatim bytes, when signed (#564 step 1).
+    pub gpgsig: Option<Vec<u8>>,
     /// Remaining commit headers (beyond tree/parents/author/committer/gpgsig)
-    /// in original order. ORDER IS LOAD-BEARING for #566 byte-exactness.
-    pub extra_headers: Vec<(String, String)>,
+    /// in original order, as raw bytes so non-UTF8 values survive. ORDER IS
+    /// LOAD-BEARING for #566 byte-exactness.
+    pub extra_headers: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 /// Author/committer identity + timestamp.
@@ -433,7 +440,7 @@ impl GitSource {
         let message = commit
             .message_raw()
             .map_err(|e| IngestError::Git(format!("message {sha}: {e}")))?
-            .to_string();
+            .to_vec();
 
         let (gpgsig, extra_headers) = split_commit_extra_headers(&commit)?;
 
@@ -764,13 +771,14 @@ fn signature_from(sig: gix::actor::SignatureRef<'_>) -> GitSignature {
 }
 
 /// `(gpgsig, ordered remaining headers)` — the result of splitting a
-/// commit's extra headers (see [`split_commit_extra_headers`]).
-type SplitHeaders = (Option<String>, Vec<(String, String)>);
+/// commit's extra headers (see [`split_commit_extra_headers`]). Byte-typed:
+/// an extra-header value can be non-UTF8, so we never lossily `to_string()`.
+type SplitHeaders = (Option<Vec<u8>>, Vec<(Vec<u8>, Vec<u8>)>);
 
 /// Pull the `gpgsig` header out of a commit's extra headers, returning it
 /// separately from the remaining headers (preserved in original order).
 /// #564 de-lossy step 1: gpgsig and header order are load-bearing for
-/// #566 byte-reconstruction.
+/// #566 byte-reconstruction; names and values are raw bytes.
 fn split_commit_extra_headers(commit: &gix::Commit<'_>) -> crate::Result<SplitHeaders> {
     let decoded = commit
         .decode()
@@ -782,15 +790,13 @@ fn split_commit_extra_headers(commit: &gix::Commit<'_>) -> crate::Result<SplitHe
     // extension headers, per spike §1/§4) so the charset label isn't dropped.
     // Mirrors the bridge import path's `split_extra_headers`.
     if let Some(encoding) = decoded.encoding {
-        extra.push(("encoding".to_string(), encoding.to_string()));
+        extra.push((b"encoding".to_vec(), encoding.to_vec()));
     }
     for (key, value) in decoded.extra_headers {
-        let key = key.to_string();
-        let value = value.to_string();
         if key == "gpgsig" {
-            gpgsig = Some(value);
+            gpgsig = Some(value.to_vec());
         } else {
-            extra.push((key, value));
+            extra.push((key.to_vec(), value.to_vec()));
         }
     }
     Ok((gpgsig, extra))
@@ -953,7 +959,7 @@ mod tests {
         assert_eq!(commit.parents.len(), 1, "second commit has one parent");
         assert_eq!(commit.author.name, "Test");
         assert_eq!(commit.author.email, "test@example.com");
-        assert!(commit.message.contains("second commit"));
+        assert!(String::from_utf8_lossy(&commit.message).contains("second commit"));
     }
 
     #[test]
@@ -1356,7 +1362,7 @@ mod tests {
                 time: Utc::now(),
                 tz_offset: 0,
             },
-            message: "".into(),
+            message: Vec::new(),
             authored_at: Utc::now(),
             committed_at: Utc::now(),
             gpgsig: None,

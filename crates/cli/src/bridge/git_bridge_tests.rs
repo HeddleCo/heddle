@@ -6228,10 +6228,17 @@ fn import_preserves_commit_git_fidelity_fields() {
     // ingest unit test. Here we verify the gpgsig is *extracted* into its own
     // field (not left in extra_headers) and the rest stay ordered.
     let gpgsig_stored = state.git_gpgsig.as_deref().expect("gpgsig extracted");
-    assert_eq!(gpgsig_stored.trim_end(), gpgsig, "gpgsig preserved");
+    assert_eq!(
+        String::from_utf8_lossy(gpgsig_stored).trim_end(),
+        gpgsig,
+        "gpgsig preserved"
+    );
     assert_eq!(state.extra_headers.len(), 1, "only the non-gpgsig header remains");
-    assert_eq!(state.extra_headers[0].0, "mergetag");
-    assert_eq!(state.extra_headers[0].1.trim_end(), "object deadbeef");
+    assert_eq!(state.extra_headers[0].0, b"mergetag".to_vec());
+    assert_eq!(
+        String::from_utf8_lossy(&state.extra_headers[0].1).trim_end(),
+        "object deadbeef"
+    );
 }
 
 /// #564 step 1: importing an annotated tag must persist its tag object
@@ -6272,7 +6279,8 @@ fn import_stores_annotated_tag_object() {
     assert_eq!(tag.target_kind, "commit");
     assert_eq!(tag.tag_name, "v1.0");
     assert!(
-        tag.message.as_deref().unwrap_or_default().contains("release notes"),
+        String::from_utf8_lossy(tag.message.as_deref().unwrap_or_default())
+            .contains("release notes"),
         "tag message preserved: {:?}",
         tag.message
     );
@@ -6326,4 +6334,184 @@ fn reimport_annotated_to_lightweight_clears_stale_sidecar() {
             .expect("query sidecar"),
         "lightweight re-import must delete the stale annotated-tag sidecar"
     );
+}
+
+/// #564 de-lossy step 1, close-the-class proof (#565 r3). Every
+/// fidelity-bearing git byte-string must survive byte-identically through
+/// BOTH import paths — the bridge (`import_all`) and the ingest engine
+/// (`ingest::import_git_into`). A single fixture exercises non-UTF8 bytes in
+/// ALL of: the commit message, a `gpgsig` header, a custom extra-header
+/// value, a `mergetag` payload, and an annotated-tag message. `0xe9` (latin-1
+/// `é`) is invalid standalone UTF-8, so any lingering `String`/`to_string()`
+/// hop on any of these would replace it with U+FFFD and fail an assertion
+/// below. This one test fails if ANY sibling of the byte-vs-String class
+/// regresses.
+#[test]
+fn non_utf8_git_fidelity_is_byte_identical_across_bridge_and_ingest() {
+    use ingest::import_git_into;
+
+    let (_git_temp, git_repo) = init_git_repo();
+    let tree_oid = empty_tree_oid(&git_repo);
+
+    // The message keeps its own internal blank line (`\n\n`) to prove the
+    // header/body split isn't fooled by a `\n\n` inside the body.
+    let commit_message = b"caf\xe9 subject\n\nbody with a \xe9 byte\n".to_vec();
+    let gpgsig_value =
+        b"-----BEGIN PGP SIGNATURE-----\n\xe9 not-real-armor\n-----END PGP SIGNATURE-----".to_vec();
+    let custom_value = b"x-note caf\xe9 value".to_vec();
+    // A mergetag value is a whole tag object — multi-line, with its own blank
+    // line and a non-UTF8 byte in the tag name and message lines.
+    let mergetag_value = {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"object 0123456789012345678901234567890123456789\n");
+        v.extend_from_slice(b"type commit\n");
+        v.extend_from_slice(b"tag merged-\xe9\n");
+        v.extend_from_slice(b"tagger Heddle Test <heddle@test> 0 +0000\n");
+        v.extend_from_slice(b"\n");
+        v.extend_from_slice(b"merge note caf\xe9\n");
+        v
+    };
+
+    let commit = gix::objs::Commit {
+        tree: tree_oid,
+        parents: Default::default(),
+        author: test_signature(),
+        committer: test_signature(),
+        encoding: None,
+        message: commit_message.clone().into(),
+        extra_headers: vec![
+            ("gpgsig".into(), gpgsig_value.clone().into()),
+            ("x-custom".into(), custom_value.clone().into()),
+            ("mergetag".into(), mergetag_value.clone().into()),
+        ],
+    };
+    let commit_oid = git_repo.write_object(&commit).expect("write commit").detach();
+    set_reference(
+        &git_repo,
+        "refs/heads/main",
+        commit_oid,
+        PreviousValue::Any,
+        "test: main",
+    )
+    .expect("set main");
+
+    let tag_message = b"annotated \xe9 release note\n".to_vec();
+    let tag = gix::objs::Tag {
+        target: commit_oid,
+        target_kind: gix::objs::Kind::Commit,
+        name: "v9.9".into(),
+        tagger: Some(test_signature()),
+        message: tag_message.clone().into(),
+        pgp_signature: None,
+    };
+    let tag_oid = git_repo.write_object(&tag).expect("write tag").detach();
+    set_reference(
+        &git_repo,
+        "refs/tags/v9.9",
+        tag_oid,
+        PreviousValue::MustNotExist,
+        "test: tag",
+    )
+    .expect("set tag");
+
+    let git_workdir = git_repo.workdir().expect("workdir");
+
+    // ── path 1: bridge import ──
+    let bridge_heddle = TempDir::new().expect("bridge heddle temp");
+    let bridge_repo = Repository::init(bridge_heddle.path()).expect("init bridge heddle");
+    let mut bridge = GitBridge::new(&bridge_repo);
+    import_all(&mut bridge, Some(git_workdir)).expect("bridge import");
+    let bridge_cid = bridge
+        .mapping
+        .get_heddle(commit_oid)
+        .expect("bridge mapped commit");
+    let bridge_state = bridge_repo
+        .store()
+        .get_state(&bridge_cid)
+        .expect("load bridge state")
+        .expect("bridge state written");
+
+    // ── path 2: ingest import ──
+    let ingest_heddle = TempDir::new().expect("ingest heddle temp");
+    let (_stats, ingest_map) =
+        import_git_into(git_workdir, ingest_heddle.path()).expect("ingest import");
+    let ingest_cid = ingest_map
+        .get_commit(&commit_oid.to_string())
+        .expect("ingest mapped commit");
+    let ingest_repo = Repository::open(ingest_heddle.path()).expect("open ingest heddle");
+    let ingest_state = ingest_repo
+        .store()
+        .get_state(&ingest_cid)
+        .expect("load ingest state")
+        .expect("ingest state written");
+
+    // The fixture really is non-UTF8 — otherwise the test proves nothing.
+    assert!(String::from_utf8(commit_message.clone()).is_err());
+    assert!(String::from_utf8(tag_message.clone()).is_err());
+
+    // (1) commit message: byte-exact to the original, AND byte-identical
+    // across paths — this pins `message_raw_sloppy` (bridge) and
+    // `message_raw` (ingest) to the same bytes.
+    assert_eq!(
+        bridge_state.raw_message.as_deref(),
+        Some(commit_message.as_slice()),
+        "bridge must preserve the raw commit message verbatim"
+    );
+    assert_eq!(
+        ingest_state.raw_message, bridge_state.raw_message,
+        "raw_message must be byte-identical across bridge and ingest"
+    );
+
+    // (2) gpgsig: identical across paths, non-UTF8 survived.
+    let bridge_gpgsig = bridge_state.git_gpgsig.as_deref().expect("bridge gpgsig");
+    assert_eq!(
+        ingest_state.git_gpgsig.as_deref(),
+        Some(bridge_gpgsig),
+        "git_gpgsig must be byte-identical across paths"
+    );
+    assert!(
+        bridge_gpgsig.contains(&0xe9u8),
+        "gpgsig non-UTF8 byte must survive"
+    );
+    assert!(String::from_utf8(bridge_gpgsig.to_vec()).is_err());
+
+    // (3) extra headers (custom + mergetag): identical across paths, ordered,
+    // non-UTF8 survived.
+    assert_eq!(
+        bridge_state.extra_headers, ingest_state.extra_headers,
+        "extra_headers must be byte-identical (and same order) across paths"
+    );
+    let keys: Vec<&[u8]> = bridge_state
+        .extra_headers
+        .iter()
+        .map(|(k, _)| k.as_slice())
+        .collect();
+    assert_eq!(
+        keys,
+        vec![b"x-custom".as_slice(), b"mergetag".as_slice()],
+        "gpgsig is split into its own field; custom + mergetag remain in order"
+    );
+    for (key, value) in &bridge_state.extra_headers {
+        assert!(
+            value.contains(&0xe9u8),
+            "extra-header {:?} must preserve its non-UTF8 byte",
+            String::from_utf8_lossy(key)
+        );
+        assert!(String::from_utf8(value.clone()).is_err());
+    }
+
+    // (4) annotated-tag message (bridge sidecar; the ingest engine does not
+    // model annotated-tag objects): byte-exact + non-UTF8 survived.
+    let tag_bytes = bridge_repo
+        .store()
+        .get_annotated_tag_bytes_for_marker("v9.9")
+        .expect("query sidecar")
+        .expect("annotated tag stored");
+    let stored_tag = objects::object::AnnotatedTag::from_bytes(&tag_bytes).expect("decode tag");
+    assert_eq!(
+        stored_tag.message.as_deref(),
+        Some(tag_message.as_slice()),
+        "annotated-tag message must be byte-identical to the original"
+    );
+    assert!(stored_tag.message.as_deref().unwrap().contains(&0xe9u8));
 }

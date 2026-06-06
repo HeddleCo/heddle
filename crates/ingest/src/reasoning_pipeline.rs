@@ -278,6 +278,10 @@ impl<'a> ReasoningPipeline<'a> {
             }
             self.stats.commits_with_matches += 1;
 
+            // A lossy string view of the (byte-typed) commit message, for the
+            // preview text below. Computed once per commit, not per point.
+            let commit_message = String::from_utf8_lossy(&commit.message);
+
             // Precompute the canonical repo root once per commit — we'll
             // normalize each point's target.file against it. Canonical
             // form handles macOS's /var → /private/var symlink so an
@@ -335,7 +339,7 @@ impl<'a> ReasoningPipeline<'a> {
                         &mut preview,
                         self.params.preview_limit,
                         &commit.sha,
-                        &commit.message,
+                        &commit_message,
                         t,
                         &p,
                         quality.preview_decision(),

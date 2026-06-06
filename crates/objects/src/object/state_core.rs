@@ -306,14 +306,28 @@ pub struct State {
     /// signed. Pulled out of [`State::extra_headers`] into its own field
     /// because its byte-exact placement is load-bearing for #566's
     /// signature reconstruction. `None` for unsigned commits.
+    ///
+    /// Stored as raw bytes, NOT a `String`: the signature is split from the
+    /// same (lossy-prone) header iteration as [`State::extra_headers`], and
+    /// the byte-typed invariant is uniform — every fidelity-bearing git
+    /// byte-string is bytes so no UTF-8-lossy conversion can sneak in. (PGP
+    /// armor is ASCII in practice, but typing it as bytes keeps the whole
+    /// header set byte-exact and prevents a future sibling regression.)
     #[serde(default)]
-    pub git_gpgsig: Option<String>,
+    pub git_gpgsig: Option<Vec<u8>>,
     /// Any remaining git commit headers beyond the ones Heddle models
     /// natively (tree/parents/author/committer/gpgsig), in their original
     /// order. ORDER IS LOAD-BEARING for #566 byte-exactness — this is a
     /// `Vec`, never a map. Empty for native commits and legacy imports.
+    ///
+    /// Both the header name and value are raw bytes (`Vec<u8>`), NOT
+    /// `String`s: extra-header VALUES (a `mergetag` payload is a full tag
+    /// object; custom headers; gpgsig variants) can be non-UTF8, so a
+    /// `String` would force a lossy `to_string()` that destroys those bytes.
+    /// Names are ASCII by git's spec but are bytes too so the whole tuple is
+    /// byte-exact and no conversion sneaks in.
     #[serde(default)]
-    pub extra_headers: Vec<(String, String)>,
+    pub extra_headers: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl State {
@@ -520,17 +534,19 @@ impl State {
         self
     }
 
-    /// Record the commit's `gpgsig` header verbatim.
+    /// Record the commit's `gpgsig` header verbatim, as raw bytes (so it
+    /// round-trips byte-identically; see the `git_gpgsig` field docs).
     /// **Part of the state hash.** #564 de-lossy step 1.
-    pub fn with_git_gpgsig(mut self, gpgsig: impl Into<String>) -> Self {
-        self.git_gpgsig = Some(gpgsig.into());
+    pub fn with_git_gpgsig(mut self, gpgsig: impl AsRef<[u8]>) -> Self {
+        self.git_gpgsig = Some(gpgsig.as_ref().to_vec());
         self.content_hash = None;
         self
     }
 
-    /// Record the ordered remaining git commit headers. ORDER IS
-    /// LOAD-BEARING (#566). **Part of the state hash.** #564 de-lossy step 1.
-    pub fn with_extra_headers(mut self, extra_headers: Vec<(String, String)>) -> Self {
+    /// Record the ordered remaining git commit headers as raw bytes. ORDER
+    /// IS LOAD-BEARING (#566). **Part of the state hash.** #564 de-lossy
+    /// step 1.
+    pub fn with_extra_headers(mut self, extra_headers: Vec<(Vec<u8>, Vec<u8>)>) -> Self {
         self.extra_headers = extra_headers;
         self.content_hash = None;
         self
@@ -674,16 +690,16 @@ impl State {
         if self.authored_at.is_some() {
             len += 8;
         }
-        // raw_message: optional-bytes framing (1 tag + u32 len + bytes) — a
-        // length prefix, not NUL-termination, since a raw message can contain
-        // NUL bytes. git_gpgsig: optional-string framing (1 + maybe len+1).
+        // raw_message and git_gpgsig: optional-bytes framing (1 tag + u32 len
+        // + bytes) — a length prefix, not NUL-termination, since either can
+        // contain NUL bytes (both are now byte-typed for non-UTF8 fidelity).
         len += 1;
         if let Some(raw_message) = &self.raw_message {
             len += 4 + raw_message.len() as u64;
         }
         len += 1;
         if let Some(gpgsig) = &self.git_gpgsig {
-            len += gpgsig.len() as u64 + 1;
+            len += 4 + gpgsig.len() as u64;
         }
         // extra_headers: u32 count, then per pair u32 key_len+key, u32 val_len+val.
         len += 4;
@@ -794,14 +810,14 @@ impl State {
         }
 
         write_optional_bytes(hasher, &self.raw_message);
-        write_optional_string(hasher, &self.git_gpgsig);
+        write_optional_bytes(hasher, &self.git_gpgsig);
 
         hasher.update(&(self.extra_headers.len() as u32).to_le_bytes());
         for (key, value) in &self.extra_headers {
             hasher.update(&(key.len() as u32).to_le_bytes());
-            hasher.update(key.as_bytes());
+            hasher.update(key);
             hasher.update(&(value.len() as u32).to_le_bytes());
-            hasher.update(value.as_bytes());
+            hasher.update(value);
         }
     }
 }
@@ -1026,7 +1042,7 @@ mod tests {
             |s: State| s.with_authored_at(Utc::now() + chrono::Duration::seconds(1)),
             |s: State| s.with_raw_message("verbatim body\n"),
             |s: State| s.with_git_gpgsig("-----BEGIN PGP SIGNATURE-----\n"),
-            |s: State| s.with_extra_headers(vec![("mergetag".into(), "x".into())]),
+            |s: State| s.with_extra_headers(vec![(b"mergetag".to_vec(), b"x".to_vec())]),
         ] {
             let seeded = sample_state()
                 .with_change_id(base.change_id)
@@ -1050,8 +1066,8 @@ mod tests {
             .with_change_id(base.change_id)
             .with_logical_change_id(base.logical_change_id());
         let mut one = one.with_extra_headers(vec![
-            ("a".into(), "1".into()),
-            ("b".into(), "2".into()),
+            (b"a".to_vec(), b"1".to_vec()),
+            (b"b".to_vec(), b"2".to_vec()),
         ]);
         one.created_at = base.created_at;
 
@@ -1059,8 +1075,8 @@ mod tests {
             .with_change_id(base.change_id)
             .with_logical_change_id(base.logical_change_id());
         let mut two = two.with_extra_headers(vec![
-            ("b".into(), "2".into()),
-            ("a".into(), "1".into()),
+            (b"b".to_vec(), b"2".to_vec()),
+            (b"a".to_vec(), b"1".to_vec()),
         ]);
         two.created_at = base.created_at;
 
@@ -1078,7 +1094,7 @@ mod tests {
             .with_authored_at(Utc::now())
             .with_raw_message("body\n")
             .with_git_gpgsig("sig")
-            .with_extra_headers(vec![("k".into(), "v".into())]);
+            .with_extra_headers(vec![(b"k".to_vec(), b"v".to_vec())]);
         assert_eq!(state.hash(), state.compute_hash());
     }
 

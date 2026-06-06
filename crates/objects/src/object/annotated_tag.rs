@@ -50,17 +50,23 @@ pub struct AnnotatedTag {
     /// Timezone offset (seconds east of UTC) of the tagger timestamp.
     #[serde(default)]
     pub tagger_tz_offset: i32,
-    /// The tag message body, verbatim.
+    /// The tag message body, verbatim — raw bytes, NOT a `String`. A tag
+    /// message can carry non-UTF8 bytes (a non-ASCII signed release note, a
+    /// latin-1 body); a `String` would force a lossy conversion that breaks
+    /// byte-exact reconstruction (#566). The post-blank-line body, including
+    /// any appended signature, is stored verbatim (spike §7).
     #[serde(default)]
-    pub message: Option<String>,
+    pub message: Option<Vec<u8>>,
     /// The tag's `gpgsig`-equivalent (the embedded PGP signature block),
-    /// verbatim, when the tag is signed.
+    /// verbatim, when the tag is signed. Raw bytes for the same byte-exact
+    /// reason as [`AnnotatedTag::message`].
     #[serde(default)]
-    pub git_gpgsig: Option<String>,
+    pub git_gpgsig: Option<Vec<u8>>,
     /// Any remaining tag headers in original order. ORDER IS LOAD-BEARING
-    /// (#566). Empty for ordinary annotated tags.
+    /// (#566). Name and value are raw bytes so non-UTF8 header values
+    /// survive. Empty for ordinary annotated tags.
     #[serde(default)]
-    pub extra_headers: Vec<(String, String)>,
+    pub extra_headers: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl AnnotatedTag {
@@ -92,17 +98,17 @@ impl AnnotatedTag {
         self
     }
 
-    pub fn with_message(mut self, message: impl Into<String>) -> Self {
-        self.message = Some(message.into());
+    pub fn with_message(mut self, message: impl AsRef<[u8]>) -> Self {
+        self.message = Some(message.as_ref().to_vec());
         self
     }
 
-    pub fn with_git_gpgsig(mut self, gpgsig: impl Into<String>) -> Self {
-        self.git_gpgsig = Some(gpgsig.into());
+    pub fn with_git_gpgsig(mut self, gpgsig: impl AsRef<[u8]>) -> Self {
+        self.git_gpgsig = Some(gpgsig.as_ref().to_vec());
         self
     }
 
-    pub fn with_extra_headers(mut self, extra_headers: Vec<(String, String)>) -> Self {
+    pub fn with_extra_headers(mut self, extra_headers: Vec<(Vec<u8>, Vec<u8>)>) -> Self {
         self.extra_headers = extra_headers;
         self
     }
@@ -135,7 +141,7 @@ mod tests {
             )
             .with_message("release\n")
             .with_git_gpgsig("-----BEGIN PGP SIGNATURE-----\n")
-            .with_extra_headers(vec![("custom".into(), "x".into())])
+            .with_extra_headers(vec![(b"custom".to_vec(), b"x".to_vec())])
     }
 
     #[test]

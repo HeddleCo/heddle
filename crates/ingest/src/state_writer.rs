@@ -104,7 +104,12 @@ pub(crate) fn state_from_commit(
     tree: ContentHash,
     parents: Vec<ChangeId>,
 ) -> State {
-    let attribution = parse_attribution(&commit.author, &commit.message);
+    // A lossy string view, derived once for the parsers that need text
+    // (attribution trailers, the one-line intent). The verbatim bytes still
+    // reach `with_raw_message` below, so a non-UTF8 message is preserved even
+    // though these ASCII-footer parsers read a lossy view.
+    let message = String::from_utf8_lossy(&commit.message);
+    let attribution = parse_attribution(&commit.author, &message);
 
     // Heddle's hash includes the committer timestamp, so we use
     // committed_at (not authored_at) for `created_at` — keeps re-
@@ -124,7 +129,7 @@ pub(crate) fn state_from_commit(
     let mut state = State::new(tree, parents, attribution)
         .with_timestamp(committed_timestamp(&commit.committed_at))
         .with_authored_at(committed_timestamp(&commit.authored_at))
-        .with_intent(first_line_of(&commit.message))
+        .with_intent(first_line_of(&message))
         .with_committer(Principal::new(
             commit.committer.name.clone(),
             commit.committer.email.clone(),
@@ -254,7 +259,7 @@ mod tests {
             parents,
             author: sig("Alice", "alice@example.com"),
             committer: sig("Alice", "alice@example.com"),
-            message: message.into(),
+            message: message.as_bytes().to_vec(),
             authored_at: Utc.with_ymd_and_hms(2026, 4, 1, 12, 0, 0).unwrap(),
             committed_at: Utc.with_ymd_and_hms(2026, 4, 1, 12, 0, 0).unwrap(),
             gpgsig: None,
@@ -427,11 +432,14 @@ mod tests {
             time: Utc.with_ymd_and_hms(2026, 4, 2, 9, 0, 0).unwrap(),
             tz_offset: 2 * 3600,
         };
-        commit.gpgsig =
-            Some("-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----".into());
+        commit.gpgsig = Some(
+            "-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----"
+                .as_bytes()
+                .to_vec(),
+        );
         commit.extra_headers = vec![
-            ("mergetag".into(), "object deadbeef".into()),
-            ("encoding".into(), "ISO-8859-1".into()),
+            (b"mergetag".to_vec(), b"object deadbeef".to_vec()),
+            (b"encoding".to_vec(), b"ISO-8859-1".to_vec()),
         ];
 
         let cid = StateWriter::new(&store, &mut map)
@@ -450,13 +458,13 @@ mod tests {
         );
         assert_eq!(
             state.git_gpgsig.as_deref(),
-            Some("-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----")
+            Some("-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----".as_bytes())
         );
         assert_eq!(
             state.extra_headers,
             vec![
-                ("mergetag".to_string(), "object deadbeef".to_string()),
-                ("encoding".to_string(), "ISO-8859-1".to_string()),
+                (b"mergetag".to_vec(), b"object deadbeef".to_vec()),
+                (b"encoding".to_vec(), b"ISO-8859-1".to_vec()),
             ]
         );
         // `intent` stays the trimmed first line, distinct from `raw_message`.

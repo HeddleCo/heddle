@@ -146,15 +146,18 @@ fn resolve_identity(
 }
 
 /// `(gpgsig, ordered remaining headers)` — the result of splitting a
-/// commit's extra headers (see [`split_extra_headers`]).
-type SplitHeaders = (Option<String>, Vec<(String, String)>);
+/// commit's extra headers (see [`split_extra_headers`]). Byte-typed: an
+/// extra-header value (a `mergetag` payload, a custom header, gpgsig) can be
+/// non-UTF8, so we carry raw bytes and never a lossy `to_string()`.
+type SplitHeaders = (Option<Vec<u8>>, Vec<(Vec<u8>, Vec<u8>)>);
 
 /// Pull the `gpgsig` header out of a commit's extra headers, returning it
 /// separately from the remaining headers (preserved in original order).
 ///
 /// gpgsig gets its own [`State`] field because its byte-exact placement is
 /// load-bearing for #566's signature reconstruction; the rest ride in
-/// `extra_headers`, where order is also load-bearing. #564 de-lossy step 1.
+/// `extra_headers`, where order is also load-bearing. Names and values are
+/// raw bytes so non-UTF8 header values survive. #564 de-lossy step 1.
 fn split_extra_headers(commit: &gix::Commit<'_>) -> GitResult<SplitHeaders> {
     let decoded = commit.decode().map_err(git_err)?;
     let mut gpgsig = None;
@@ -166,15 +169,13 @@ fn split_extra_headers(commit: &gix::Commit<'_>) -> GitResult<SplitHeaders> {
     // `encoding` immediately after `committer`, ahead of the other extension
     // headers (spike §1/§4), so it leads the ordered vec.
     if let Some(encoding) = decoded.encoding {
-        extra.push(("encoding".to_string(), encoding.to_string()));
+        extra.push((b"encoding".to_vec(), encoding.to_vec()));
     }
     for (key, value) in decoded.extra_headers {
-        let key = key.to_string();
-        let value = value.to_string();
         if key == "gpgsig" {
-            gpgsig = Some(value);
+            gpgsig = Some(value.to_vec());
         } else {
-            extra.push((key, value));
+            extra.push((key.to_vec(), value.to_vec()));
         }
     }
     Ok((gpgsig, extra))
@@ -837,7 +838,7 @@ fn build_annotated_tag(
     };
     let mut annotated =
         AnnotatedTag::new(target_oid.to_string(), target_kind, decoded.name.to_string())
-            .with_message(decoded.message.to_string());
+            .with_message(decoded.message);
     if let Some(tagger) = decoded.tagger().map_err(git_err)? {
         let time = tagger.time().map_err(git_err)?;
         let at = Utc.timestamp_opt(time.seconds, 0).single().ok_or_else(|| {
@@ -850,7 +851,7 @@ fn build_annotated_tag(
         );
     }
     if let Some(sig) = decoded.pgp_signature {
-        annotated = annotated.with_git_gpgsig(sig.to_string());
+        annotated = annotated.with_git_gpgsig(sig);
     }
     Ok(annotated)
 }

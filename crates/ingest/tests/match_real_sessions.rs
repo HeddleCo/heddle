@@ -119,8 +119,7 @@ fn matches_real_sessions_against_recent_heddle_commits() {
         let matches = matcher.score_commit(&commit, &files);
         commits_scored += 1;
 
-        let subject = commit
-            .message
+        let subject = String::from_utf8_lossy(&commit.message)
             .lines()
             .next()
             .unwrap_or("")

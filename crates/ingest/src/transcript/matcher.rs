@@ -431,7 +431,7 @@ fn score_time_fit(t: &Transcript, commit_time: DateTime<Utc>, grace: Duration) -
 /// If the commit's Co-Authored-By trailer names a provider, return it.
 /// Re-uses the attribution parser the state writer already applies.
 fn provider_hint_from_commit(commit: &CommitEntry) -> Option<Provider> {
-    let attrib = parse_attribution(&commit.author, &commit.message);
+    let attrib = parse_attribution(&commit.author, &String::from_utf8_lossy(&commit.message));
     let agent = attrib.agent?;
     match agent.provider.to_lowercase().as_str() {
         "anthropic" | "claude" => Some(Provider::Claude),
@@ -471,7 +471,7 @@ mod tests {
                 time: when,
                 tz_offset: 0,
             },
-            message: msg.into(),
+            message: msg.as_bytes().to_vec(),
             authored_at: when,
             committed_at: when,
             gpgsig: None,
