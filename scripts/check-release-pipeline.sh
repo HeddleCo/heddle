@@ -101,6 +101,23 @@ for t in "${targets[@]}"; do
   fi
 done
 
+# Linux glibc floor (#549). The two -unknown-linux-gnu legs MUST build on
+# ubuntu-22.04 runners (glibc 2.35) so the binaries run on Debian 12 /
+# Ubuntu 22.04 forward. Building on a newer runner (ubuntu-24.04, glibc
+# 2.39) raises the symbol floor and crashes at runtime on those targets.
+# We assert the runner pin per-leg via the parsed-YAML pass below; this
+# grep is the cheap smoke screen that flags a wholesale bump.
+if grep -E "runner:\s*ubuntu-24\.04(-arm)?\b" "$WF" >/dev/null; then
+  err "a job pins runner: ubuntu-24.04 — the linux-gnu legs must stay on ubuntu-22.04 for the glibc 2.35 floor (#549)"
+else
+  ok "no ubuntu-24.04 runner pin (glibc floor preserved)"
+fi
+if grep -F "glibc floor" RELEASING.md >/dev/null; then
+  ok "RELEASING.md documents the Linux glibc floor"
+else
+  err "RELEASING.md must document the Linux glibc floor (see #549)"
+fi
+
 # Packaging: tarball for unix, zip for windows.
 grep -E "\.tar\.gz" "$WF" >/dev/null && ok "tar.gz packaging" || err "no tar.gz packaging in $WF"
 grep -E "\.zip"    "$WF" >/dev/null && ok "zip packaging"    || err "no zip packaging in $WF"
@@ -261,6 +278,28 @@ for name in downstream:
             )
         else:
             oks.append(f"{name} job pins checkout to validated tag_sha")
+
+# Linux glibc floor (#549): the two -unknown-linux-gnu build legs must
+# pin an ubuntu-22.04 runner (glibc 2.35). Read the runner per matrix
+# entry rather than grepping, so a per-leg regression (one leg bumped)
+# is caught even if the other stays correct.
+build_job = jobs.get("build")
+if isinstance(build_job, dict):
+    matrix = ((build_job.get("strategy") or {}).get("matrix") or {})
+    include = matrix.get("include", []) or []
+    gnu_legs = [e for e in include if isinstance(e, dict)
+                and str(e.get("target", "")).endswith("-unknown-linux-gnu")]
+    if not gnu_legs:
+        errors.append("build matrix has no *-unknown-linux-gnu legs to floor")
+    for e in gnu_legs:
+        runner = str(e.get("runner", ""))
+        target = e.get("target")
+        if runner.startswith("ubuntu-22.04"):
+            oks.append(f"{target} pinned to {runner} (glibc 2.35 floor)")
+        else:
+            errors.append(
+                f"{target} builds on '{runner}', not ubuntu-22.04 — raises the glibc floor above 2.35 (#549)"
+            )
 
 print("OKS:")
 for o in oks:
