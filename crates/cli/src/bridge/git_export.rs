@@ -17,7 +17,7 @@ use crate::bridge::{
         GitBridge, GitBridgeError, GitResult, LocalGitIdentity, SyncMapping,
         count_exported_commits, delete_reference_if_present,
         git_config_identity_with_global_fallback, git_err, principal_is_default_unknown,
-        set_reference,
+        read_or_seed_mirror_managed_refs, set_reference, write_mirror_managed_refs,
     },
     git_notes,
     git_sync::{sync_marker_to_tag, sync_track_to_branch},
@@ -507,21 +507,25 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         .filter_map(|state| bridge.mapping.get_git(state))
         .collect();
 
-    // Reconcile the mirror's heads to the desired set. The mirror is heddle-owned
-    // (no out-of-band tips), so the apply keeps the FF guard on an ordinary
-    // advance, FORCES only a deliberate embargo retract (the prior tip is now
-    // embargoed), and DELETES a head the projection dropped (its line has no
-    // served frontier — embargoed-to-root, or reset/rebased onto a Private root).
-    //
-    // A scoped export reconciles every CURRENT thread (heddle#316) so it RETRACTS
-    // an out-of-scope thread's branch whose commit became embargoed — but it only
-    // MATERIALIZES (creates) the branch it was scoped to. An out-of-scope thread
-    // with no existing mirror branch is left absent: a scoped export must not
-    // publish a brand-new branch for a thread the caller did not ask to export
-    // (that would also strand a stale ref if the thread is later dropped — the
-    // #289 dropped-thread contract). A branch can only "keep serving" an embargoed
-    // commit if it already EXISTS, and existing branches are still rewound/deleted
-    // below, so this skips nothing that could leak.
+    // The mirror's NAME-KEYED ownership record (heddle#316): a mirror ref is
+    // MANAGED iff heddle recorded WRITING it under that full name — NEVER by OID
+    // membership (the r20c bug that classified a foreign ref at a heddle OID as
+    // heddle's). The mirror analog of the destination's `heddle-exported-refs`
+    // record. Read BEFORE the head/tag loops mutate any ref so a genuine first run
+    // (absent record) seeds from the prior-run ref set rather than misreading every
+    // pre-existing ref as foreign — which would silently stop embargo retraction.
+    let mut managed_record = read_or_seed_mirror_managed_refs(&repo)?;
+
+    // Reconcile the mirror's HEADS via the shared `reconcile_ref` decision. Iterate
+    // the CURRENT threads: a dropped thread's stale branch is intentionally NOT
+    // pruned (the #289 dropped-thread contract) — it is never iterated, survives in
+    // the mirror, and stays in the managed record so the push still copies it. The
+    // desired head target is the maximal served ancestor-or-self of the thread tip
+    // (`frontier_git_oid`, via `project_desired_refs`). The existing tip is
+    // classified against the whole-mirror served-OID set, so a still-served tip
+    // fast-forwards, an embargoed tip force-rewinds to its served ancestor, and a
+    // whole-line-embargoed head is deleted. A scoped export reconciles every current
+    // thread but MATERIALIZES (creates) only the one it was scoped to.
     for track_name in &threads {
         if bridge
             .heddle_repo
@@ -534,171 +538,123 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         }
         let branch_ref = format!("refs/heads/{track_name}");
         let in_scope = thread.is_none() || thread == Some(track_name.as_str());
-        match desired.get(&branch_ref).copied() {
-            Some(git_oid) => {
-                let existing = branch_tip_oid(&repo, &branch_ref);
-                if existing.is_none() && !in_scope {
-                    // Out-of-scope served thread with no mirror branch yet: a
-                    // scoped export retracts, it does not materialize.
-                    continue;
-                }
-                // The existing head tip RETRACTS iff it is no longer an
-                // actually-served commit — classified against the whole-mirror
-                // served-OID set, NOT this run's purge drop-set (which omits a tip
-                // embargoed in a PRIOR run or out of this scoped run's reach)
-                // (heddle#316). A still-served tip fast-forwards; an unserved one is
-                // force-rewound down to the served frontier.
-                let retracting = existing.is_some_and(|oid| !served_oids.contains(&oid));
-                if retracting {
-                    set_reference(
-                        &repo,
-                        &branch_ref,
-                        git_oid,
-                        PreviousValue::Any,
-                        "heddle: retract embargoed thread frontier",
-                    )?;
-                } else {
-                    sync_track_to_branch(&repo, track_name, git_oid)?;
-                }
+        let desired_oid = desired.get(&branch_ref).copied();
+        let existing_oid = branch_tip_oid(&repo, &branch_ref);
+        match reconcile_ref(
+            ReconcileNs::Head,
+            desired_oid,
+            existing_oid,
+            in_scope,
+            /* marker_served_unminted */ false,
+            &served_oids,
+        ) {
+            ReconcileOp::Write => {
+                let git_oid = desired_oid.expect("Write implies a desired target");
+                sync_track_to_branch(&repo, track_name, git_oid)?;
+                managed_record.insert(branch_ref.clone(), git_oid);
                 stats.threads_synced += 1;
                 stats.branches.push(ExportedRef {
                     name: track_name.clone(),
                     tip: git_oid,
                 });
             }
-            None => {
-                // Absent from the projection ⇒ no served ancestor-or-self ⇒ any
-                // prior mirror branch is stale. `delete_reference_if_present` is a
-                // no-op when absent, so this also covers genuine emit-absence.
-                delete_reference_if_present(&repo, &branch_ref)?;
+            ReconcileOp::ForceRewind => {
+                let git_oid = desired_oid.expect("ForceRewind implies a desired target");
+                set_reference(
+                    &repo,
+                    &branch_ref,
+                    git_oid,
+                    PreviousValue::Any,
+                    "heddle: retract embargoed thread frontier",
+                )?;
+                managed_record.insert(branch_ref.clone(), git_oid);
+                stats.threads_synced += 1;
+                stats.branches.push(ExportedRef {
+                    name: track_name.clone(),
+                    tip: git_oid,
+                });
             }
+            ReconcileOp::Delete => {
+                delete_reference_if_present(&repo, &branch_ref)?;
+                managed_record.remove(&branch_ref);
+            }
+            // A head has no preserve path — `frontier_git_oid` recomputes the
+            // target every run, so a head is always rewound/deleted, never kept at
+            // a stale tip (Preserve is unreachable for `ReconcileNs::Head`).
+            ReconcileOp::Skip | ReconcileOp::Preserve => {}
         }
     }
 
-    // Reconcile the mirror's tags. The tag's fate is a pure function of THREE
-    // axes — the NEW marker target {served+minted, served-but-unminted, unserved,
-    // no-target(deleted)} × the EXISTING mirror tag's target {served, embargoed,
-    // absent} × scope {scoped, full} — never the existing tag's mere PRESENCE.
-    // Inspecting the existing tag's TARGET (the axis the prior code never read) is
-    // what distinguishes a served-but-unminted tag worth preserving (r18) from one
-    // pointing at an embargoed commit that must be deleted (r19).
-    //
-    // Iterate the UNION of current markers AND existing mirror tag names: a DELETED
-    // marker drops out of `markers`, so its stale mirror tag is only reachable via
-    // the existing-tags side (heddle#316 S3 — a deleted marker must delete its tag).
-    enum TagTarget {
-        /// Marker target is served AND minted into the mirror this run (its OID).
-        ServedMinted(gix::hash::ObjectId),
-        /// Marker target is served (visible + every reachable ancestor served) but
-        /// NOT minted into the mapping this run — a scoped export that didn't reach
-        /// it. A later all-thread export re-mints + advances the tag.
-        ServedUnminted,
-        /// Marker target is unserved (embargoed, withheld for a withheld ancestor,
-        /// or retargeted to a never-minted Private state).
-        Unserved,
-        /// No marker by this name exists any more (deleted) — only a stale mirror
-        /// tag may remain.
-        NoTarget,
-    }
-
-    // The OIDs heddle MANAGES in the mirror: every commit heddle has minted — the
-    // pre-purge mapping snapshot (everything heddle knew at the start of this run,
-    // INCLUDING commits this run later embargoed) UNION the commits minted this run.
-    // Ownership token for the tag reconcile (the mirror's analog of the destination
-    // exported-refs record, r13): a mirror tag pointing at one of these is heddle's;
-    // a tag pointing anywhere else is a FOREIGN Git tag (e.g. a user's own
-    // `refs/tags/v1` fetched into the mirror) heddle never created.
-    let heddle_managed_oids: HashSet<gix::hash::ObjectId> = pre_purge_targets
-        .iter()
-        .map(|(_, oid)| *oid)
-        .chain(newly_minted.iter().copied())
-        .collect();
-
+    // Reconcile the mirror's TAGS via the SAME `reconcile_ref` decision as heads.
+    // Iterate the UNION of current markers AND the managed-record tag names: a
+    // DELETED marker drops out of `markers`, so its stale managed mirror tag is
+    // reachable only via the managed-record side (heddle#316 S3 — a deleted marker
+    // must delete its tag). A FOREIGN tag heddle never wrote is in NEITHER set, so
+    // it is never visited: it survives untouched and stays out of the push frontier
+    // (`collect_managed_ref_updates`). The desired tag target comes from the
+    // projection (a marker minted this run); the served-but-unminted vs embargoed
+    // split (r18 PRESERVE vs r19 DELETE) is the existing tag's served-ness combined
+    // with `marker_served_unminted`.
     let mut tag_names: std::collections::BTreeSet<String> =
         markers.iter().map(|m| m.to_string()).collect();
-    for tag in repo.references().map_err(git_err)?.tags().map_err(git_err)? {
-        let mut tag = tag.map_err(git_err)?;
-        let name = tag.name().shorten().to_string();
-        // Fold in an EXISTING mirror tag ONLY when heddle MANAGES it (its tip is a
-        // commit heddle minted). A tag pointing at a commit heddle never produced is
-        // FOREIGN — folding it into the reconcile union would let the NoTarget /
-        // Unserved DELETE arms below remove a ref heddle never created (heddle#316).
-        // A foreign tag NAME that collides with a live marker still enters via the
-        // markers side above and is reconciled under that marker.
-        let managed = tag
-            .peel_to_id()
-            .ok()
-            .map(|id| id.detach())
-            .is_some_and(|oid| heddle_managed_oids.contains(&oid));
-        if managed {
-            tag_names.insert(name);
+    for full_name in managed_record.keys() {
+        if let Some(tag) = full_name.strip_prefix("refs/tags/") {
+            tag_names.insert(tag.to_string());
         }
     }
 
     for name in &tag_names {
         let tag_ref = format!("refs/tags/{name}");
         let existing_oid = branch_tip_oid(&repo, &tag_ref);
-        // The existing mirror tag is "served" iff its tip is an actually-served
-        // commit RIGHT NOW — membership in the whole-mirror served-OID set, NOT the
-        // absence-from-this-run's-purge-drop-set the prior code used (which misreads
-        // a tip embargoed in a prior run, or out of this scoped run's purge reach, as
-        // served and keeps serving it). Preserving requires the tip be served; an
-        // unserved tip is deleted (the r19 axis, now correct across runs/scope).
-        let existing_served = existing_oid
-            .map(|oid| served_oids.contains(&oid))
-            .unwrap_or(false);
-        let in_scope_full = thread.is_none();
-
-        let new_status = match bridge.heddle_repo.refs().get_marker(&MarkerName::new(name.as_str()))? {
-            None => TagTarget::NoTarget,
-            Some(state) => match bridge.mapping.get_git(&state) {
-                Some(oid) => TagTarget::ServedMinted(oid),
-                None if frontier_served.contains(&state) => TagTarget::ServedUnminted,
-                None => TagTarget::Unserved,
-            },
+        let desired_oid = desired.get(&tag_ref).copied();
+        let in_scope = thread.is_none();
+        // A live marker whose served target was NOT minted into the mapping this
+        // run (a scoped export that didn't reach it). The desired projection omits
+        // such a tag (it only publishes minted markers), so the reconcile sees
+        // `desired_oid == None`; this flag plus the existing tag's served-ness is
+        // the sole axis splitting r18-PRESERVE from r19-DELETE.
+        let marker_served_unminted = match bridge
+            .heddle_repo
+            .refs()
+            .get_marker(&MarkerName::new(name.as_str()))?
+        {
+            Some(state) => {
+                bridge.mapping.get_git(&state).is_none() && frontier_served.contains(&state)
+            }
+            None => false,
         };
-
-        match (new_status, existing_oid, existing_served) {
-            // Cell 5 — scoped export, served+minted target, no mirror tag yet:
-            // retract-only, never materialize a brand-new tag the caller did not
-            // ask to export (symmetric with the head reconcile's materialize gate).
-            (TagTarget::ServedMinted(_), None, _) if !in_scope_full => {}
-            // Cells 1-4 — served+minted target: FORCE-retarget the mirror tag to it.
-            // `sync_marker_to_tag` force-sets an existing tag (heddle#316 S1) and
-            // creates an absent one; tags are free-move by design.
-            (TagTarget::ServedMinted(oid), _, _) => {
-                sync_marker_to_tag(&repo, name, oid)?;
+        match reconcile_ref(
+            ReconcileNs::Tag,
+            desired_oid,
+            existing_oid,
+            in_scope,
+            marker_served_unminted,
+            &served_oids,
+        ) {
+            ReconcileOp::Write => {
+                let git_oid = desired_oid.expect("Write implies a desired target");
+                sync_marker_to_tag(&repo, name, git_oid)?;
+                managed_record.insert(tag_ref.clone(), git_oid);
                 stats.markers_synced += 1;
                 stats.tags.push(ExportedRef {
                     name: name.clone(),
-                    tip: oid,
+                    tip: git_oid,
                 });
             }
-            // Cell 6 (r18) — served-but-unminted target whose EXISTING tag is itself
-            // served: PRESERVE. A scoped export merely didn't mint it; a later
-            // all-thread export re-mints the target and advances the tag.
-            (TagTarget::ServedUnminted, Some(_), true) => {}
-            // Cell 7 (r19 FIX) — served-but-unminted target but the EXISTING tag
-            // points at an embargoed commit: preserving would keep serving it.
-            // DELETE. PRESERVE requires `existing_served`.
-            (TagTarget::ServedUnminted, Some(_), false) => {
+            ReconcileOp::Delete => {
                 delete_reference_if_present(&repo, &tag_ref)?;
+                managed_record.remove(&tag_ref);
             }
-            // Cell 8 — served-but-unminted target, no existing tag: nothing to do
-            // (a scoped export does not materialize an unminted target).
-            (TagTarget::ServedUnminted, None, _) => {}
-            // Cells 9-11 — target genuinely unserved (embargoed / withheld ancestor
-            // / Private): the tag is stale. DELETE (a no-op when the ref is absent).
-            (TagTarget::Unserved, _, _) => {
-                delete_reference_if_present(&repo, &tag_ref)?;
-            }
-            // Cells 12-13 (S3 FIX) — the marker was deleted: its stale mirror tag
-            // must go (DELETE is a no-op when the ref is already absent).
-            (TagTarget::NoTarget, _, _) => {
-                delete_reference_if_present(&repo, &tag_ref)?;
-            }
+            // PRESERVE keeps the existing served tag (still managed → stays in the
+            // record); SKIP is a no-op. A tag is free-move and never force-rewinds
+            // (ForceRewind is unreachable for `ReconcileNs::Tag`).
+            ReconcileOp::Preserve | ReconcileOp::Skip | ReconcileOp::ForceRewind => {}
         }
     }
+
+    // Persist the updated ownership record so the next reconcile — and the push
+    // frontier (`collect_managed_ref_updates`) — read heddle's managed set by name.
+    write_mirror_managed_refs(&repo, &managed_record)?;
 
     // Every count in the summary is a partition of the SINGLE copied ref
     // set: `total` is unique commits reachable from the mirror's branch/tag
@@ -717,6 +673,93 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     bridge.save_mapping_to_disk()?;
 
     Ok(stats)
+}
+
+/// Which namespace a reconciled mirror ref lives in. The reconcile DECISION is
+/// one shape for both; the only namespace-specific axis is how "write the desired
+/// target" lands — a head is fast-forward-guarded (and force-rewound for an
+/// embargo retract), a tag is free-move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReconcileNs {
+    Head,
+    Tag,
+}
+
+/// The op the mirror reconcile applies to a single ref. The SINGLE decision the
+/// head and tag reconciles share (heddle#316): a foreign ref never reaches here
+/// (the iteration set is current threads/markers ∪ heddle-managed names), so every
+/// arm acts on a ref heddle owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReconcileOp {
+    /// Nothing to do — a scoped export declining to materialize an out-of-scope
+    /// ref, or a genuine no-op (no desired target and nothing to retract).
+    Skip,
+    /// Write the desired target through the namespace's guarded path: a head
+    /// fast-forwards (or creates); a tag force-retargets (or creates).
+    Write,
+    /// Force-set a head to the desired target past the fast-forward guard — the
+    /// embargo retract that rewinds an embargoed tip to its served ancestor.
+    ForceRewind,
+    /// Keep an existing served tag whose marker target is served-but-unminted this
+    /// run (r18). A later all-thread export re-mints and advances it.
+    Preserve,
+    /// Delete the ref — its line/marker has no served frontier (whole-line embargo,
+    /// r19 embargoed-existing tag, or a deleted marker's stale tag).
+    Delete,
+}
+
+/// The mirror reconcile decision — IDENTICAL in shape for heads and tags
+/// (heddle#316). `desired_oid` is the served target the projection wants published
+/// (`None` ⇒ nothing served for this ref this run); `existing_oid` is the mirror
+/// ref's CURRENT tip, already PEELED to a commit by [`branch_tip_oid`] (so an
+/// annotated foreign tag colliding with a marker name is tested by its commit, not
+/// its tag-object OID — heddle#316 risk #2). `in_scope` gates only
+/// MATERIALIZATION: a scoped export reconciles existing refs but never CREATES a
+/// brand-new one the caller did not ask for. `marker_served_unminted` is set only
+/// for a tag whose live marker target is served but was not minted this run — the
+/// sole axis that, combined with `existing_served`, splits r18-PRESERVE from
+/// r19-DELETE. `served_oids` is the whole-mirror served-OID set classifying the
+/// existing tip (NOT this run's purge drop-set, which omits a prior-run /
+/// out-of-scope embargo).
+fn reconcile_ref(
+    ns: ReconcileNs,
+    desired_oid: Option<gix::hash::ObjectId>,
+    existing_oid: Option<gix::hash::ObjectId>,
+    in_scope: bool,
+    marker_served_unminted: bool,
+    served_oids: &HashSet<gix::hash::ObjectId>,
+) -> ReconcileOp {
+    // `existing_oid` is already the peeled commit OID (`branch_tip_oid`), so this
+    // membership test compares commit-against-commit (risk #2).
+    let existing_served = existing_oid
+        .map(|oid| served_oids.contains(&oid))
+        .unwrap_or(false);
+    match (desired_oid, existing_oid) {
+        // Scoped export, would-create: never materialize a ref the caller did not
+        // ask to export.
+        (Some(_), None) if !in_scope => ReconcileOp::Skip,
+        // Create a fresh ref at the served target.
+        (Some(_), None) => ReconcileOp::Write,
+        // Head with an existing tip: a still-served tip fast-forwards (r17 FF guard
+        // applies); an embargoed tip is force-rewound to its served ancestor.
+        (Some(_), Some(_)) if ns == ReconcileNs::Head => {
+            if existing_served {
+                ReconcileOp::Write
+            } else {
+                ReconcileOp::ForceRewind
+            }
+        }
+        // Tag with an existing tip: free-move force-retarget to the served target.
+        (Some(_), Some(_)) => ReconcileOp::Write,
+        // Nothing served, nothing present.
+        (None, None) => ReconcileOp::Skip,
+        // Nothing served, but a tag exists whose marker target is served-but-
+        // unminted AND the existing tag is itself served: PRESERVE (r18).
+        (None, Some(_)) if marker_served_unminted && existing_served => ReconcileOp::Preserve,
+        // Nothing served, an existing ref remains: DELETE (whole-line embargo, r19
+        // embargoed existing tag, or a deleted marker's stale tag).
+        (None, Some(_)) => ReconcileOp::Delete,
+    }
 }
 
 fn git_remote_names(heddle_repo: &HeddleRepository) -> HashSet<String> {

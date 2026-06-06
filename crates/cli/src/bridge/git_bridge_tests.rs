@@ -25,8 +25,9 @@ use tempfile::TempDir;
 use crate::bridge::{
     GitBridge,
     git_core::{
-        GitPushScope, copy_local_repo_to_bare, delete_reference_if_present, read_exported_refs,
-        set_reference, write_exported_refs,
+        GitPushScope, RefNamespace, collect_managed_ref_updates, copy_local_repo_to_bare,
+        delete_reference_if_present, read_exported_refs, read_mirror_managed_refs, set_reference,
+        write_exported_refs, write_mirror_managed_refs,
     },
     git_export::{export_all, export_current_thread, export_tree},
     git_import::{import_all, import_all_with_options, import_git_tree},
@@ -3964,6 +3965,58 @@ fn matrix_mirror_head(bridge: &GitBridge, name: &str) -> Option<gix::hash::Objec
         .and_then(|mut r| r.peel_to_id().ok().map(|id| id.detach()))
 }
 
+/// #316 / PR #528 — plant a FOREIGN tag in the mirror: a `refs/tags/<name>` heddle
+/// never WROTE (no marker, never reconciled under that name). Pass a heddle-MINTED
+/// `target` to exercise the r20c bug — OID-based ownership would mis-claim it as
+/// heddle's; the name-keyed managed record must still spare it.
+fn matrix_plant_foreign_tag(bridge: &GitBridge, name: &str, target: gix::hash::ObjectId) {
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    set_reference(
+        &mirror,
+        &format!("refs/tags/{name}"),
+        target,
+        PreviousValue::Any,
+        "test: foreign tag",
+    )
+    .expect("plant foreign tag");
+}
+
+/// #316 / PR #528 — plant a FOREIGN branch in the mirror: a `refs/heads/<name>`
+/// heddle never wrote, at a heddle-minted `target` (the head dual of the foreign
+/// tag at a heddle OID). It is not a heddle thread, so the head reconcile never
+/// iterates it; the name-keyed record must spare it.
+fn matrix_plant_foreign_branch(bridge: &GitBridge, name: &str, target: gix::hash::ObjectId) {
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    set_reference(
+        &mirror,
+        &format!("refs/heads/{name}"),
+        target,
+        PreviousValue::Any,
+        "test: foreign branch",
+    )
+    .expect("plant foreign branch");
+}
+
+/// #316 / PR #528 — the mirror's name-keyed managed-refs record (full ref name →
+/// last-published tip), the ownership boundary the reconcile and the push frontier
+/// both read.
+fn matrix_managed_record(bridge: &GitBridge) -> std::collections::HashMap<String, gix::hash::ObjectId> {
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    read_mirror_managed_refs(&mirror).expect("read mirror managed record")
+}
+
+/// #316 / PR #528 — whether `collect_managed_ref_updates` (the managed-filtered
+/// push frontier) carries a ref of `name`+`namespace`. A foreign ref must be
+/// ABSENT here even though it survives in the mirror.
+fn matrix_in_managed_frontier(bridge: &GitBridge, name: &str, namespace: RefNamespace) -> bool {
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    let record = read_mirror_managed_refs(&mirror).expect("read record");
+    collect_managed_ref_updates(&mirror, &record)
+        .expect("collect managed frontier")
+        .iter()
+        .any(|u| u.namespace == namespace && u.name == name)
+}
+
 /// #316 / PR #528 r19 + S3 — the conformance matrix that turns the per-cell tag
 /// fixes into a REDESIGN. The mirror tag's fate is a PURE FUNCTION of THREE axes:
 /// the NEW marker target {served+minted, served-but-unminted, unserved,
@@ -4208,7 +4261,7 @@ fn tag_reconcile_conformance_matrix() {
         // Cell 12: existing tag present, marker deleted — reached via the
         // existing-tags side of the union (markers no longer carries it).
         Cell {
-            label: "notarget_existing_served_deletes_stale_tag",
+            label: "deleted_marker_stale_tag_deleted",
             run: Box::new(|| {
                 let temp = TempDir::new().unwrap();
                 let repo = Repository::init(temp.path()).unwrap();
@@ -4246,7 +4299,7 @@ fn tag_reconcile_conformance_matrix() {
         // DELETE. The new target is served-but-unminted (the ONLY path that reads the
         // existing tag's served axis).
         Cell {
-            label: "prior_run_embargoed_existing_tag_deleted",
+            label: "prior_run_embargo_existing_tag_deletes",
             run: Box::new(|| {
                 let temp = TempDir::new().unwrap();
                 let repo = Repository::init(temp.path()).unwrap();
@@ -4298,6 +4351,33 @@ fn tag_reconcile_conformance_matrix() {
                 .unwrap();
                 export_all(&mut bridge).unwrap();
                 (matrix_mirror_tag(&bridge, "user-v1"), Some(foreign))
+            }),
+        },
+        // ── foreign tag AT A HEDDLE OID (the r20c bug) — spared AND excluded ──
+        // A foreign `refs/tags/user-v1` pointing at a commit heddle MINTED. The
+        // OBSOLETE OID-based ownership classified this as heddle's (its tip is a
+        // minted commit) → folded into the reconcile → deleted. The NAME-keyed
+        // record spares it (the name was never recorded as written), AND the
+        // managed-filtered push frontier excludes it.
+        Cell {
+            label: "foreign_tag_at_heddle_oid_spared_and_excluded",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
+                // Plant the foreign tag at the heddle-minted OID, AFTER the first
+                // export so the managed record already exists (the name is not in it).
+                matrix_plant_foreign_tag(&bridge, "user-v1", oid_a);
+                export_all(&mut bridge).unwrap();
+                assert!(
+                    !matrix_in_managed_frontier(&bridge, "user-v1", RefNamespace::Tag),
+                    "a foreign tag at a heddle OID must be EXCLUDED from the managed push frontier"
+                );
+                (matrix_mirror_tag(&bridge, "user-v1"), Some(oid_a))
             }),
         },
     ];
@@ -4427,6 +4507,34 @@ fn head_reconcile_conformance_matrix() {
                 }
             }),
         },
+        // ── foreign BRANCH at a heddle OID — spared (the head dual of the tag) ──
+        // A `refs/heads/user-feature` heddle never wrote, at a heddle-minted OID.
+        // It is not a heddle thread, so the head reconcile (iterating current
+        // threads) never visits it; the name-keyed record spares it, and the
+        // managed-filtered push frontier excludes it.
+        Cell {
+            label: "foreign_branch_at_heddle_oid_spared",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
+                matrix_plant_foreign_branch(&bridge, "user-feature", oid_a);
+                export_all(&mut bridge).unwrap();
+                assert!(
+                    !matrix_in_managed_frontier(&bridge, "user-feature", RefNamespace::Branch),
+                    "a foreign branch at a heddle OID must be EXCLUDED from the managed push frontier"
+                );
+                HeadOutcome {
+                    observed: matrix_mirror_head(&bridge, "user-feature"),
+                    expected: Some(oid_a),
+                    forbidden: None,
+                }
+            }),
+        },
     ];
 
     for cell in &cells {
@@ -4441,6 +4549,111 @@ fn head_reconcile_conformance_matrix() {
             );
         }
     }
+}
+
+/// #316 / PR #528 — the mirror's name-keyed managed-refs record is the ownership
+/// boundary: every ref the reconcile WRITES is CLAIMED, every ref it DELETES is
+/// DROPPED, and a foreign ref heddle never wrote NEVER enters — even one pointing
+/// at a heddle-minted OID (the r20c bug the OID-based record produced).
+#[test]
+fn mirror_managed_record_claims_written_drops_deleted_excludes_foreign() {
+    let temp = TempDir::new().unwrap();
+    let repo = Repository::init(temp.path()).unwrap();
+    let a = matrix_put_state(&repo, b"A\n", Vec::new());
+    repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+    repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+    let mut bridge = GitBridge::new(&repo);
+    export_all(&mut bridge).unwrap();
+
+    // CLAIM: the written head and tag are recorded.
+    let record = matrix_managed_record(&bridge);
+    assert!(record.contains_key("refs/heads/main"), "written head claimed: {record:?}");
+    assert!(record.contains_key("refs/tags/v"), "written tag claimed: {record:?}");
+
+    // EXCLUDE FOREIGN: a foreign tag at a heddle OID never enters the record.
+    let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
+    matrix_plant_foreign_tag(&bridge, "user-v1", oid_a);
+    export_all(&mut bridge).unwrap();
+    let record = matrix_managed_record(&bridge);
+    assert!(
+        !record.contains_key("refs/tags/user-v1"),
+        "a foreign tag (even at a heddle OID) must never enter the record: {record:?}"
+    );
+    assert!(record.contains_key("refs/heads/main"), "{record:?}");
+
+    // DROP: deleting the marker drops its tag from the record.
+    repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
+    export_all(&mut bridge).unwrap();
+    let record = matrix_managed_record(&bridge);
+    assert!(
+        !record.contains_key("refs/tags/v"),
+        "a deleted marker's tag must drop from the record: {record:?}"
+    );
+}
+
+/// #316 / PR #528 — the managed-refs record round-trips through its atomic
+/// temp+rename write and the shared exported-refs parse contract.
+#[test]
+fn mirror_managed_record_survives_round_trip() {
+    let temp = TempDir::new().unwrap();
+    let mirror = gix::init_bare(temp.path()).unwrap();
+    let main_tip = commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "main", &[]);
+    let tag_tip = commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "tag", &[]);
+
+    let mut record = std::collections::HashMap::new();
+    record.insert("refs/heads/main".to_string(), main_tip);
+    record.insert("refs/tags/v1.0".to_string(), tag_tip);
+    write_mirror_managed_refs(&mirror, &record).expect("write record");
+
+    let read_back = read_mirror_managed_refs(&mirror).expect("read record");
+    assert_eq!(read_back, record, "managed record must round-trip byte-for-byte");
+}
+
+/// #316 / PR #528 — the #1 first-run risk: the FIRST export after this code lands
+/// finds NO managed record. If an absent record made every pre-existing ref look
+/// foreign, embargo retraction would silently stop. Seeding the record from the
+/// current mirror ref set keeps pre-existing heddle refs managed, so a stale tag
+/// whose marker was already deleted IS still retracted on that first run. Without
+/// seeding, the tag (not a current marker, not in an empty record) would never be
+/// iterated and would survive — the leak this guards.
+#[test]
+fn first_export_after_upgrade_seeds_record_and_still_retracts() {
+    let temp = TempDir::new().unwrap();
+    let repo = Repository::init(temp.path()).unwrap();
+    let a = matrix_put_state(&repo, b"A\n", Vec::new());
+    let p = matrix_put_state(&repo, b"P\n", Vec::new());
+    repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+    repo.refs().create_marker(&MarkerName::new("v"), &p.change_id).unwrap();
+    let mut bridge = GitBridge::new(&repo);
+    export_all(&mut bridge).unwrap();
+    assert!(
+        matrix_mirror_tag(&bridge, "v").is_some(),
+        "run 1 must publish the tag"
+    );
+
+    // Simulate the PRE-record state: delete the on-disk record so the next export
+    // sees an absent record (as it would on the first run after this lands).
+    let record_path = {
+        let mirror = bridge.open_git_repo().unwrap();
+        mirror.git_dir().join("heddle-mirror-managed-refs")
+    };
+    assert!(record_path.exists(), "run 1 must have written the record");
+    std::fs::remove_file(&record_path).unwrap();
+
+    // Delete the marker so `v` is no longer a current marker. Only the SEED (from
+    // the current mirror ref set) makes `refs/tags/v` reachable by the reconcile.
+    repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
+    export_all(&mut bridge).unwrap();
+
+    assert_eq!(
+        matrix_mirror_tag(&bridge, "v"),
+        None,
+        "the first post-upgrade export must retract the stale tag via record seeding"
+    );
+    assert!(
+        record_path.exists(),
+        "the export must (re)write the managed record"
+    );
 }
 
 /// #316 / PR #528 r7 CLASS 2 (the leak): a branch exported to a real

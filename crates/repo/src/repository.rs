@@ -1878,15 +1878,21 @@ impl Repository {
 
     pub fn ignore_patterns(&self) -> Result<Vec<String>> {
         let mut patterns = self.config.worktree.ignore.clone();
-        // Reserve the operator-local courtesy-stub filename repo-wide. It is a
-        // Heddle artifact written for under-tier checkouts, never tracked
-        // content. Excluding it here is the single tree-build chokepoint every
-        // capture path consults (`build_tree`, `build_tree_with_stat_cache`,
-        // and the stat-cache no-op predicate), so the stub can never be pulled
-        // into a captured thread by any of them — including a plain
-        // `snapshot`/`capture` taken from inside a withheld worktree, which
-        // does not go through the withheld-manifest guard (heddle#316).
-        patterns.push(repository_thread_materialize::COURTESY_STUB_FILENAME.to_string());
+        // Reserve the operator-local courtesy-stub filename. It is a Heddle
+        // artifact written for under-tier checkouts, never tracked content.
+        // Excluding it here is the single tree-build chokepoint every capture path
+        // consults (`build_tree`, `build_tree_with_stat_cache`, and the stat-cache
+        // no-op predicate), so the stub can never be pulled into a captured thread
+        // by any of them — including a plain `snapshot`/`capture` taken from inside
+        // a withheld worktree, which does not go through the withheld-manifest guard
+        // (heddle#316). ROOT-ANCHORED (`/HEDDLE-EMBARGO.txt`): the stub is only ever
+        // written at the worktree root, so the bare filename — which gitignore
+        // matches at ANY depth — would silently drop a user's own
+        // `sub/HEDDLE-EMBARGO.txt` from capture (heddle#316 #9).
+        patterns.push(format!(
+            "/{}",
+            repository_thread_materialize::COURTESY_STUB_FILENAME
+        ));
         if self.capability() == RepositoryCapability::GitOverlay {
             patterns.push(".git".to_string());
             append_ignore_file_patterns(&mut patterns, &self.root.join(".gitignore"))?;

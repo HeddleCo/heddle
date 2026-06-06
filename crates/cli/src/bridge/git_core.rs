@@ -875,7 +875,14 @@ impl<'a> GitBridge<'a> {
         // scope-filtered subset: an out-of-scope ref the mirror rewound for
         // embargo propagates to the destination by construction, never kept at its
         // old (embargoed) tip.
-        let served_frontier = collect_ref_updates(&mirror_repo)?;
+        //
+        // Sourced from the MANAGED-filtered ref set (heddle#316): a foreign
+        // branch/tag heddle never wrote — even one at a heddle-minted commit —
+        // must NOT enter the served frontier nor the destination's desired set.
+        // Ownership is name-keyed via the mirror's managed-refs record, the
+        // mirror-side analog of the destination's exported-refs record.
+        let managed_record = read_mirror_managed_refs(&mirror_repo)?;
+        let served_frontier = collect_managed_ref_updates(&mirror_repo, &managed_record)?;
         copy_reachable_objects(
             &mirror_repo,
             &target_repo,
@@ -1176,6 +1183,18 @@ impl<'a> GitBridge<'a> {
             &tag_updates,
             "heddle: mirror checkout tags before push",
         )?;
+        // Claim the raw checkout tags as heddle-managed in the mirror record so
+        // the managed-filtered push frontier includes them — an all-threads push
+        // publishes the user's checkout tags on their behalf. This runs AFTER the
+        // export reconcile (which has no marker for a raw checkout tag and would
+        // drop it), so each push re-applies + re-claims them; the net effect
+        // matches the pre-record behavior where the push copied every mirror ref
+        // (heddle#316).
+        let mut record = read_mirror_managed_refs(&mirror_repo)?;
+        for update in &tag_updates {
+            record.insert(full_ref_name(update), update.target);
+        }
+        write_mirror_managed_refs(&mirror_repo, &record)?;
         Ok(())
     }
 
@@ -2693,6 +2712,98 @@ pub(crate) fn write_exported_refs(
     write_exported_refs_at(&exported_refs_manifest_path(target_repo), refs)
 }
 
+/// Filename, under the internal MIRROR's git dir, of heddle's record of which
+/// full ref names it MANAGES in the mirror, each mapped to the tip it last
+/// published for that ref. The mirror-side analog of [`HEDDLE_EXPORTED_REFS_FILE`]
+/// (the destination's `heddle-exported-refs`): the mirror reconcile had no
+/// persisted ownership record, so it reconstructed ownership ad-hoc from OID
+/// membership — the bug that drove heddle#316 through 7 review rounds. A mirror
+/// ref is MANAGED iff its full name is a key here, NEVER by OID membership: a
+/// foreign branch/tag that happens to point at a heddle-minted commit is still
+/// foreign because heddle never recorded WRITING it under that name. The format,
+/// atomic-write, and parse contract are shared verbatim with the destination
+/// record (`read_exported_refs_at`/`write_exported_refs_at`).
+const HEDDLE_MIRROR_MANAGED_REFS_FILE: &str = "heddle-mirror-managed-refs";
+
+/// On-disk path of the mirror's managed-refs record.
+fn mirror_managed_refs_path(mirror_repo: &gix::Repository) -> PathBuf {
+    mirror_repo.git_dir().join(HEDDLE_MIRROR_MANAGED_REFS_FILE)
+}
+
+/// Whether the mirror's managed-refs record exists on disk. Used to distinguish
+/// a genuine FIRST export after this code lands (absent → seed from the current
+/// mirror ref set so pre-existing heddle refs aren't all misread as foreign)
+/// from a record that exists but is empty (everything was legitimately dropped —
+/// do NOT re-seed).
+pub(crate) fn mirror_managed_refs_recorded(mirror_repo: &gix::Repository) -> bool {
+    mirror_managed_refs_path(mirror_repo).exists()
+}
+
+/// The full ref names heddle MANAGES in the mirror (full ref name → last-published
+/// tip OID). `Ok(empty)` when the record is absent — callers seed a first run from
+/// the current mirror ref set; see [`mirror_managed_refs_recorded`].
+pub(crate) fn read_mirror_managed_refs(
+    mirror_repo: &gix::Repository,
+) -> GitResult<HashMap<String, ObjectId>> {
+    read_exported_refs_at(&mirror_managed_refs_path(mirror_repo))
+}
+
+/// Persist the mirror's managed-refs record. Atomic temp+rename via
+/// [`write_exported_refs_at`].
+pub(crate) fn write_mirror_managed_refs(
+    mirror_repo: &gix::Repository,
+    refs: &HashMap<String, ObjectId>,
+) -> GitResult<()> {
+    write_exported_refs_at(&mirror_managed_refs_path(mirror_repo), refs)
+}
+
+/// Read the mirror's managed-refs record, SEEDING a genuine first run (no record
+/// on disk) from the current mirror ref set so the reconcile does not misread
+/// every pre-existing heddle ref as foreign.
+///
+/// This is the #1 first-run risk (heddle#316): an absent record on the first
+/// export after this code lands must NOT make existing refs look foreign — that
+/// would silently stop embargo retraction (a now-embargoed thread tip would never
+/// be rewound/deleted because its branch would be treated as a foreign ref to
+/// spare). Every ref currently in the mirror was put there by heddle (the mint
+/// reconcile, `import`, or `fetch`), so claiming them all as managed on the first
+/// run is correct. A record that EXISTS but is empty (everything was legitimately
+/// dropped) is NOT re-seeded — only a truly-absent record triggers the seed.
+pub(crate) fn read_or_seed_mirror_managed_refs(
+    mirror_repo: &gix::Repository,
+) -> GitResult<HashMap<String, ObjectId>> {
+    if mirror_managed_refs_recorded(mirror_repo) {
+        read_mirror_managed_refs(mirror_repo)
+    } else {
+        Ok(collect_ref_updates(mirror_repo)?
+            .into_iter()
+            .map(|update| (full_ref_name(&update), update.target))
+            .collect())
+    }
+}
+
+/// The mirror refs heddle MANAGES, as [`RefUpdate`]s — [`collect_ref_updates`]
+/// filtered to the names in the managed-refs `record`, PLUS every `refs/notes/*`
+/// ref (heddle's metadata namespace, always heddle-managed and content-rebuilt
+/// rather than target-claimed through the reconcile). The export/push frontier
+/// MUST source from this rather than the raw [`collect_ref_updates`] so a foreign
+/// branch/tag heddle never wrote — even one pointing at a heddle-minted commit —
+/// never enters the served frontier nor the destination's desired set (heddle#316).
+/// The FETCH path keeps using [`collect_ref_updates`]/[`collect_ref_updates_for_fetch`]
+/// (it must see every ref); only the export/push frontier is managed-filtered.
+pub(crate) fn collect_managed_ref_updates(
+    repo: &gix::Repository,
+    record: &HashMap<String, ObjectId>,
+) -> GitResult<Vec<RefUpdate>> {
+    Ok(collect_ref_updates(repo)?
+        .into_iter()
+        .filter(|update| {
+            matches!(update.namespace, RefNamespace::Note)
+                || record.contains_key(&full_ref_name(update))
+        })
+        .collect())
+}
+
 /// How a destination ref must move from its current `old` tip to the served
 /// `new` tip. The discriminator that lets EVERY push destination apply the SAME
 /// served-frontier reconciliation: a deliberate backward rewind (the embargo
@@ -3487,7 +3598,12 @@ fn push_network_remote(
     // (heddle#316 r16). A scoped push reconciles the destination against this
     // whole frontier, so an out-of-scope ref the mirror rewound for embargo
     // propagates to the wire by construction, never a scope-filtered subset.
-    let served_frontier = collect_ref_updates(mirror_repo)?;
+    //
+    // Managed-filtered (heddle#316): the same foreign-ref exclusion the
+    // local-path push applies — a foreign branch/tag heddle never wrote is kept
+    // off the wire, sourced from the mirror's name-keyed managed-refs record.
+    let managed_record = read_mirror_managed_refs(mirror_repo)?;
+    let served_frontier = collect_managed_ref_updates(mirror_repo, &managed_record)?;
     if served_frontier.is_empty() && previously_exported.is_empty() {
         return Ok(());
     }
