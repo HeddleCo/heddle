@@ -15,6 +15,7 @@ use super::{
         action_path, actions_dir, blobs_dir, hash_path, redaction_path, redactions_dir, state_path,
         state_visibility_dir, state_visibility_path, states_dir, trees_dir,
     },
+    fs_store::LooseObjectKind,
 };
 use crate::{
     object::{Action, ActionId, Blob, ChangeId, ContentHash, State, Tree},
@@ -428,7 +429,7 @@ impl ObjectStore for FsStore {
             let content = blob.content();
             let data = compress(content, &self.compression)?.unwrap_or_else(|| content.to_vec());
             trace!(compressed_size = data.len(), "Writing blob");
-            self.write_loose_object_atomic(&path, &data)?;
+            self.write_loose_object_atomic(&path, &data, LooseObjectKind::ContentAddressed)?;
         } else {
             trace!("Blob already exists, skipping write");
         }
@@ -457,7 +458,7 @@ impl ObjectStore for FsStore {
                 compressed_size = data.len(),
                 "Writing blob with precomputed hash"
             );
-            self.write_loose_object_atomic(&path, &data)?;
+            self.write_loose_object_atomic(&path, &data, LooseObjectKind::ContentAddressed)?;
         }
         if let Ok(mut cache) = self.recent_blobs.write() {
             cache.insert(hash, blob.clone());
@@ -476,7 +477,7 @@ impl ObjectStore for FsStore {
                 size = data.len(),
                 "Writing raw blob bytes with precomputed hash"
             );
-            self.write_loose_object_atomic(&path, data)?;
+            self.write_loose_object_atomic(&path, data, LooseObjectKind::ContentAddressed)?;
         }
         if let Ok(mut cache) = self.recent_blobs.write() {
             cache.insert(hash, Blob::from_slice(data));
@@ -651,7 +652,7 @@ impl ObjectStore for FsStore {
             let serialized = rmp_serde::to_vec(tree)?;
             let data = compress(&serialized, &self.compression)?.unwrap_or(serialized);
             trace!(compressed_size = data.len(), "Writing tree");
-            self.write_loose_object_atomic(&path, &data)?;
+            self.write_loose_object_atomic(&path, &data, LooseObjectKind::ContentAddressed)?;
         } else {
             trace!("Tree already exists, skipping write");
         }
@@ -669,7 +670,7 @@ impl ObjectStore for FsStore {
         let path = hash_path(&trees_dir(&self.root), &hash);
         if !path.exists() {
             trace!(size = data.len(), "Writing raw serialized tree");
-            self.write_loose_object_atomic(&path, data)?;
+            self.write_loose_object_atomic(&path, data, LooseObjectKind::ContentAddressed)?;
         }
         if let Ok(mut cache) = self.recent_trees.write() {
             cache.insert(hash, tree);
@@ -709,7 +710,7 @@ impl ObjectStore for FsStore {
         let serialized = rmp_serde::to_vec(state)?;
         let data = compress(&serialized, &self.compression)?.unwrap_or(serialized);
         trace!(compressed_size = data.len(), "Writing state");
-        self.write_loose_object_atomic(&path, &data)?;
+        self.write_loose_object_atomic(&path, &data, LooseObjectKind::Mutable)?;
         if let Ok(mut cache) = self.recent_states.write() {
             cache.insert(state.change_id, state.clone());
         }
@@ -721,7 +722,7 @@ impl ObjectStore for FsStore {
         let state = validate_state_serialized(data, id)?;
         let path = state_path(&self.root, &id);
         trace!(size = data.len(), "Writing raw serialized state");
-        self.write_loose_object_atomic(&path, data)?;
+        self.write_loose_object_atomic(&path, data, LooseObjectKind::Mutable)?;
         if let Ok(mut cache) = self.recent_states.write() {
             cache.insert(id, state);
         }
@@ -809,7 +810,7 @@ impl ObjectStore for FsStore {
             let serialized = rmp_serde::to_vec(action)?;
             let data = compress(&serialized, &self.compression)?.unwrap_or(serialized);
             trace!(id = %id, compressed_size = data.len(), "Writing action");
-            self.write_loose_object_atomic(&path, &data)?;
+            self.write_loose_object_atomic(&path, &data, LooseObjectKind::ContentAddressed)?;
         }
 
         Ok(id)

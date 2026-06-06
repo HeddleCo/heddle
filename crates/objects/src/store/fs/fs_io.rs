@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! IO helpers for FsStore.
 
-use std::{
-    fs::File,
-    io::Read,
-    path::{Path, PathBuf},
-};
+use std::{fs::File, io::Read, path::Path};
 
 use bytes::Bytes;
 
@@ -67,27 +63,30 @@ fn batch_staged_object_needs_per_file_sync() -> bool {
     !cfg!(target_os = "linux")
 }
 
-/// Write `data` to a temp file beside `path` but DON'T rename it into
-/// place. Used to *stage* a snapshot-batch object (heddle#550
-/// quarantine-then-promote): the canonical content-addressed path never
-/// holds bytes until [`promote_staged_object`] renames the temp in
-/// AFTER the durability barrier, so a crash before flush can only leave
-/// an orphan temp (ignored by reads) — never a present-but-torn object
-/// that the exists-skip would refuse to rewrite.
+/// Write `data` to the pre-computed staging temp `temp_path` (beside the
+/// canonical `path`) but DON'T rename it into place. Used to *stage* a
+/// snapshot-batch object (heddle#550 quarantine-then-promote): the
+/// canonical path never holds bytes until [`promote_staged_object`]
+/// renames the temp in AFTER the durability barrier, so a crash before
+/// flush can only leave an orphan temp (reclaimed by the staging sweep)
+/// — never a present-but-torn object that the exists-skip would refuse
+/// to rewrite.
 ///
-/// On Linux the temp is left un-synced (the batch's `syncfs()` flushes
-/// it); elsewhere it is `sync_data`'d so the bytes are durable before
-/// the promote rename. Returns the temp path to record for promotion.
-pub(super) fn stage_loose_object(path: &Path, data: &[u8]) -> Result<PathBuf> {
+/// The caller computes `temp_path` (via `stage_temp_path`) and records
+/// it for promotion BEFORE this call, so a concurrent staging sweep can
+/// never observe the temp on disk without also seeing it tracked. On
+/// Linux the temp is left un-synced (the batch's `syncfs()` flushes it);
+/// elsewhere it is `sync_data`'d so the bytes are durable before the
+/// promote rename.
+pub(super) fn stage_loose_object(path: &Path, temp_path: &Path, data: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| std::io::Error::other("invalid atomic write path"))?;
     std::fs::create_dir_all(parent)
         .map_err(|e| HeddleError::Io(enrich_fs_error(parent, "creating", e)))?;
 
-    let temp_path = temp_path(path);
     let write_result: std::io::Result<()> = (|| {
-        let mut file = open_temp_0o644(&temp_path)?;
+        let mut file = open_temp_0o644(temp_path)?;
         use std::io::Write as _;
         file.write_all(data)?;
         if batch_staged_object_needs_per_file_sync() {
@@ -97,10 +96,10 @@ pub(super) fn stage_loose_object(path: &Path, data: &[u8]) -> Result<PathBuf> {
     })();
 
     if let Err(err) = write_result {
-        let _ = std::fs::remove_file(&temp_path);
+        let _ = std::fs::remove_file(temp_path);
         return Err(HeddleError::Io(enrich_fs_error(path, "writing", err)));
     }
-    Ok(temp_path)
+    Ok(())
 }
 
 /// Promote a temp staged by [`stage_loose_object`] into its canonical

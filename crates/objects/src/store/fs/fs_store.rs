@@ -2,7 +2,7 @@
 //! Core FsStore structure.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     hash::Hash,
     path::{Path, PathBuf},
     sync::{Mutex, RwLock},
@@ -14,12 +14,31 @@ use super::{
     fs_paths::{actions_dir, blobs_dir, packs_dir, states_dir, trees_dir},
 };
 use crate::{
+    fs_atomic::{is_staged_temp_name, stage_temp_path},
     object::{Blob, ChangeId, ContentHash, State, Tree},
     store::{
         CompressionConfig, Result,
         pack::{PackManager, PackObjectId},
     },
 };
+
+/// Whether a loose-object write is content-addressed (its path is a
+/// content hash, so a re-stage at the same path is byte-identical and
+/// dedups safely) or mutable (keyed by an external id, so the same path
+/// can be legitimately re-staged with DIFFERENT bytes within one batch
+/// and the LATEST must win — heddle#550 Finding 1).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LooseObjectKind {
+    /// Blobs, trees, actions: path derived from the object's content
+    /// hash. A repeated stage of the same path carries identical bytes,
+    /// so it is safe to dedup-skip.
+    ContentAddressed,
+    /// State objects keyed by `ChangeId`. `put_state` intentionally
+    /// overwrites the same path as a change mutates, so a later staged
+    /// write at the same path must SUPERSEDE the earlier one rather than
+    /// dedup-skip it; otherwise the promoted state would be stale.
+    Mutable,
+}
 
 const RECENT_BLOB_CACHE_CAPACITY: usize = 2_048;
 const RECENT_TREE_CACHE_CAPACITY: usize = 1_024;
@@ -306,7 +325,12 @@ impl FsStore {
         manager.list_all_ids()
     }
 
-    pub(super) fn write_loose_object_atomic(&self, path: &Path, data: &[u8]) -> Result<()> {
+    pub(super) fn write_loose_object_atomic(
+        &self,
+        path: &Path,
+        data: &[u8],
+        kind: LooseObjectKind,
+    ) -> Result<()> {
         // Is THIS thread inside an active snapshot batch? Only the
         // batch-opening thread's writes are staged for deferred-flush
         // promotion (heddle#550 Finding 3); a concurrent write from any
@@ -318,59 +342,83 @@ impl FsStore {
             batches.get(&tid).is_some_and(|batch| batch.depth > 0)
         };
 
-        if in_batch_this_thread {
-            // Quarantine-then-promote (heddle#550 Finding 2): stage the
-            // bytes in a temp file beside the canonical path but DON'T
-            // rename into place yet. The canonical content-addressed
-            // path therefore never holds bytes that aren't durably
-            // flushed, so a crash before flush can only leave an orphan
-            // temp (ignored by reads) — never a present-but-torn object
-            // that `put_blob`/`put_tree`/`put_state`'s exists-skip would
-            // refuse to rewrite. Promotion (the rename) happens in
-            // `flush_snapshot_write_batch`, after the `syncfs` barrier.
-            //
-            // Dedup: a repeated put of the same content-addressed object
-            // within the batch is identical bytes, so skip re-staging.
-            // Safe to check unlocked-then-locked because the batch is
-            // single-threaded (only its owning thread, this one, mutates
-            // the `staged` map).
-            {
-                let batches = self.lock_snapshot_batches()?;
-                if batches
-                    .get(&tid)
-                    .is_some_and(|batch| batch.staged.contains_key(path))
-                {
-                    return Ok(());
-                }
-            }
-            let temp = stage_loose_object(path, data)?;
-            let mut batches = self.lock_snapshot_batches()?;
-            match batches.get_mut(&tid) {
-                Some(batch) if batch.depth > 0 => {
-                    if let Some(prev) = batch.staged.insert(path.to_path_buf(), temp) {
-                        // Lost a dedup race with ourselves (unreachable in
-                        // the single-threaded-per-batch model); drop the
-                        // superseded temp so it doesn't leak.
-                        let _ = std::fs::remove_file(prev);
-                    }
-                    Ok(())
-                }
-                // The batch closed out from under us between the staging
-                // write and re-acquiring the lock. Can't happen on the
-                // owning thread, but if it did the bytes would be lost —
-                // promote immediately so the write still lands durably.
-                _ => {
-                    promote_staged_object(&temp, path)?;
-                    crate::fs_atomic::sync_directory(path.parent().unwrap_or(Path::new(".")))?;
-                    Ok(())
-                }
-            }
-        } else {
+        if !in_batch_this_thread {
             // No active batch on this thread. `BatchDirectorySync` set
             // standalone via the public setter still means "fully
             // durable" — no `syncfs` is ever coming to back a deferral.
-            write_atomic(path, data, AtomicWriteMode::Durable)
+            return write_atomic(path, data, AtomicWriteMode::Durable);
         }
+
+        // Quarantine-then-promote (heddle#550): stage the bytes in a temp
+        // file beside the canonical path but DON'T rename into place yet.
+        // The canonical path therefore never holds bytes that aren't
+        // durably flushed, so a crash before flush can only leave an
+        // orphan staging temp (ignored by reads, reclaimed by the
+        // abandoned-staging sweep) — never a present-but-torn object that
+        // an exists-skip would refuse to rewrite. Promotion (the rename)
+        // happens in `flush_snapshot_write_batch`, after the `syncfs`
+        // barrier.
+        //
+        // Reserve the staging slot in `staged` UNDER THE LOCK before the
+        // temp file is written, so a concurrent staging sweep (another
+        // thread opening a batch on the same store) can never see this
+        // temp on disk without also seeing it tracked as in-flight.
+        let temp = stage_temp_path(path);
+        let superseded = {
+            let mut batches = self.lock_snapshot_batches()?;
+            match batches.get_mut(&tid) {
+                Some(batch) if batch.depth > 0 => {
+                    // Dedup applies ONLY to content-addressed objects: a
+                    // re-stage at the same path is byte-identical, so skip
+                    // it. Mutable (`ChangeId`-keyed) state writes are
+                    // exempt and fall through to stage + supersede so the
+                    // LATEST version wins (heddle#550 Finding 1).
+                    if kind == LooseObjectKind::ContentAddressed
+                        && batch.staged.contains_key(path)
+                    {
+                        return Ok(());
+                    }
+                    batch.staged.insert(path.to_path_buf(), temp.clone())
+                }
+                // The batch closed out from under us between the depth
+                // probe and re-acquiring the lock. Can't happen on the
+                // owning thread, but if it did the bytes would be lost —
+                // write durably so the object still lands.
+                _ => return write_atomic(path, data, AtomicWriteMode::Durable),
+            }
+        };
+
+        // Write the reserved temp with the lock released (keep file I/O
+        // off the snapshot-batch mutex).
+        if let Err(err) = stage_loose_object(path, &temp, data) {
+            // The staged write failed (`stage_loose_object` already
+            // removed its own partial temp). Roll the reservation back so
+            // a later flush never tries to promote a temp that does not
+            // exist: restore the version we superseded, or drop the slot
+            // if there was none.
+            let mut batches = self.lock_snapshot_batches()?;
+            if let Some(batch) = batches.get_mut(&tid)
+                && batch.staged.get(path) == Some(&temp)
+            {
+                match superseded {
+                    Some(prev) => {
+                        batch.staged.insert(path.to_path_buf(), prev);
+                    }
+                    None => {
+                        batch.staged.remove(path);
+                    }
+                }
+            }
+            return Err(err);
+        }
+
+        // The new bytes are durably staged; the superseded temp (a
+        // mutable re-stage, or an unreachable content-addressed dedup
+        // race) is now garbage.
+        if let Some(prev) = superseded {
+            let _ = std::fs::remove_file(prev);
+        }
+        Ok(())
     }
 
     fn lock_snapshot_batches(
@@ -411,14 +459,29 @@ impl FsStore {
 
     pub(super) fn begin_snapshot_write_batch_impl(&self) -> Result<()> {
         let tid = std::thread::current().id();
-        let mut batches = self.lock_snapshot_batches()?;
-        batches.entry(tid).or_default().depth += 1;
+        let opened_fresh = {
+            let mut batches = self.lock_snapshot_batches()?;
+            let batch = batches.entry(tid).or_default();
+            batch.depth += 1;
+            batch.depth == 1
+        };
+        // When this opens a fresh (not nested) batch, reclaim any staging
+        // temps abandoned by a previously crashed import (heddle#550
+        // Finding 3). Runs with the lock released — the sweep takes the
+        // lock itself to read the live-batch tracked set it must skip.
+        if opened_fresh {
+            self.sweep_abandoned_staged_temps();
+        }
         Ok(())
     }
 
     pub(super) fn flush_snapshot_write_batch_impl(&self) -> Result<()> {
         let tid = std::thread::current().id();
-        // Pop the staged set iff this flush closes the (nested) batch.
+        // Snapshot the staged set iff this flush closes the (nested)
+        // batch. The batch entry is LEFT in the map (at depth 0) while we
+        // promote, so a concurrent staging sweep still sees these temps as
+        // in-flight and won't reclaim them mid-promotion. It is removed
+        // once promotion finishes.
         let staged = {
             let mut batches = self.lock_snapshot_batches()?;
             let Some(batch) = batches.get_mut(&tid) else {
@@ -431,12 +494,23 @@ impl FsStore {
             if batch.depth > 0 {
                 return Ok(());
             }
-            let staged = std::mem::take(&mut batch.staged);
-            batches.remove(&tid);
-            staged
+            batch.staged.clone()
         };
 
-        self.promote_staged_batch(staged)
+        let result = self.promote_staged_batch(&staged);
+
+        // Promotion done (or failed): drop the now-quiescent batch entry.
+        // A failed promote leaves un-promoted temps behind, but they are
+        // no longer tracked once the entry is gone — the next import's
+        // begin-time sweep reclaims them.
+        {
+            let mut batches = self.lock_snapshot_batches()?;
+            if batches.get(&tid).is_some_and(|batch| batch.depth == 0) {
+                batches.remove(&tid);
+            }
+        }
+
+        result
     }
 
     /// Make every object staged during a snapshot batch durable, then
@@ -450,7 +524,7 @@ impl FsStore {
     /// already on disk (post-barrier) — never a present-but-torn object.
     /// A second barrier makes the new directory entries themselves
     /// durable before the caller writes any referencing artifact.
-    fn promote_staged_batch(&self, staged: HashMap<PathBuf, PathBuf>) -> Result<()> {
+    fn promote_staged_batch(&self, staged: &HashMap<PathBuf, PathBuf>) -> Result<()> {
         if staged.is_empty() {
             return Ok(());
         }
@@ -466,7 +540,7 @@ impl FsStore {
 
         // Step 2: promote each temp into its canonical path. The bytes are
         // already durable, so a renamed-into-place object is never torn.
-        for (canonical, temp) in &staged {
+        for (canonical, temp) in staged {
             promote_staged_object(temp, canonical)?;
         }
 
@@ -530,6 +604,53 @@ impl FsStore {
                 let _ = std::fs::remove_file(temp);
             }
         }
+        // Invalidate the in-memory object caches (heddle#550 Finding 2).
+        // `put_blob`/`put_tree`/`put_state` populate `recent_blobs` /
+        // `recent_trees` / `recent_states` eagerly, BEFORE the staged temp
+        // is promoted. On abort the temp is discarded and the canonical
+        // path is never written, so those cache entries now describe
+        // objects that do not exist on disk. The existence-gated read
+        // paths already refuse to serve them, but the cache-first
+        // `blob_size` fast path would report a never-written object as
+        // present — so purge the caches to force post-abort reads to
+        // re-resolve from disk.
+        self.clear_recent_object_caches();
+    }
+
+    /// Reclaim staging temp files abandoned by a crashed or killed import
+    /// (heddle#550 Finding 3). A crash before `flush_snapshot_write_batch`
+    /// leaves a `.stage-` temp beside every staged object; with no sweep
+    /// they accumulate across repeated crashes.
+    ///
+    /// Safety: only files whose names carry [`STAGED_TEMP_MARKER`] are
+    /// touched, so this never removes a canonical object or a concurrent
+    /// `write_atomic`'s short-lived `.tmp-` temp. Temps still tracked by a
+    /// live batch (in this store's `snapshot_batches`, including one
+    /// mid-promotion in `flush`) are skipped, so a concurrent import's
+    /// in-flight staging is never reclaimed out from under it.
+    ///
+    /// Cost: one `read_dir` pass over the loose-object directories,
+    /// metadata-only, run once per fresh batch (i.e. once per import) —
+    /// negligible beside the import it precedes.
+    fn sweep_abandoned_staged_temps(&self) {
+        let in_flight: HashSet<PathBuf> = match self.snapshot_batches.lock() {
+            Ok(batches) => batches
+                .values()
+                .flat_map(|batch| batch.staged.values().cloned())
+                .collect(),
+            // Poisoned lock: skip the opportunistic sweep rather than risk
+            // reclaiming a temp we can't prove is abandoned.
+            Err(_) => return,
+        };
+
+        for dir in [
+            blobs_dir(&self.root),
+            trees_dir(&self.root),
+            states_dir(&self.root),
+            actions_dir(&self.root),
+        ] {
+            sweep_staged_temps_under(&dir, &in_flight);
+        }
     }
 
     /// Number of objects currently staged (written but not yet promoted)
@@ -541,5 +662,33 @@ impl FsStore {
             .lock()
             .map(|batches| batches.get(&tid).map(|b| b.staged.len()).unwrap_or(0))
             .unwrap_or(0)
+    }
+}
+
+/// Remove abandoned `.stage-` temps under `dir`, recursing into the
+/// sharded sub-directories blobs/trees use. A temp in `in_flight` (still
+/// tracked by a live batch) is left alone; every other staged temp is
+/// crash garbage and is reclaimed. Best-effort: any I/O error (missing
+/// dir on a fresh store, permission) simply leaves the temp for a later
+/// sweep rather than failing the batch.
+fn sweep_staged_temps_under(dir: &Path, in_flight: &HashSet<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            sweep_staged_temps_under(&path, in_flight);
+        } else if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(is_staged_temp_name)
+            && !in_flight.contains(&path)
+        {
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }

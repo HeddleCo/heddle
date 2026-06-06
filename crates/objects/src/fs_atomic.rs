@@ -181,7 +181,17 @@ pub fn is_cross_device_link(err: &io::Error) -> bool {
     err.raw_os_error() == Some(EXDEV)
 }
 
-pub fn temp_path(path: &Path) -> PathBuf {
+/// Filename infix that marks a snapshot-batch *staging* temp, kept
+/// distinct from the `.tmp-` infix [`temp_path`] uses for ordinary
+/// `write_atomic` temps. The abandoned-staging sweep (heddle#550
+/// Finding 3) keys off this marker so it only ever removes un-promoted
+/// batch garbage — never a concurrent durable write's short-lived
+/// `.tmp-` temp, and never a canonical object (canonical names are
+/// hex hashes or `<id>.state`/`<id>.action`, none of which start with
+/// `.` or contain this marker).
+pub(crate) const STAGED_TEMP_MARKER: &str = ".stage-";
+
+fn temp_path_with_infix(path: &Path, infix: &str) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = path
         .file_name()
@@ -194,7 +204,26 @@ pub fn temp_path(path: &Path) -> PathBuf {
         .unwrap_or(0);
     let counter = TEMP_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
-    parent.join(format!(".{file_name}.tmp-{pid}-{unique}-{counter}"))
+    parent.join(format!(".{file_name}{infix}{pid}-{unique}-{counter}"))
+}
+
+pub fn temp_path(path: &Path) -> PathBuf {
+    temp_path_with_infix(path, ".tmp-")
+}
+
+/// Temp path for a snapshot-batch staged object. Uses
+/// [`STAGED_TEMP_MARKER`] so the abandoned-staging sweep can recognise
+/// and reclaim it without touching ordinary `.tmp-` temps.
+pub(crate) fn stage_temp_path(path: &Path) -> PathBuf {
+    temp_path_with_infix(path, STAGED_TEMP_MARKER)
+}
+
+/// True for the filename of a snapshot-batch staging temp produced by
+/// [`stage_temp_path`]. Canonical object files never start with `.`,
+/// so the leading-dot + marker test cannot false-positive on a real
+/// object.
+pub(crate) fn is_staged_temp_name(file_name: &str) -> bool {
+    file_name.starts_with('.') && file_name.contains(STAGED_TEMP_MARKER)
 }
 
 /// fsync the directory inode so a preceding `rename` is durable across

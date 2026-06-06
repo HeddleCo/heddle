@@ -4,9 +4,10 @@ use tempfile::TempDir;
 
 use super::{
     FsStore, LooseObjectWriteMode,
-    fs_paths::{blobs_dir, hash_path, packs_dir},
+    fs_paths::{blobs_dir, hash_path, packs_dir, state_path, states_dir},
 };
 use crate::{
+    fs_atomic::{is_staged_temp_name, stage_temp_path},
     object::{
         Action, Attribution, Blob, ChangeId, ContentHash, Operation, Principal, State, Tree,
         TreeEntry,
@@ -18,6 +19,29 @@ use crate::{
         pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId},
     },
 };
+
+/// Count `.stage-` staging temps anywhere under `dir` (recursing into
+/// the sharded sub-dirs blobs/trees use). Used by the Finding 3 sweep
+/// tests to assert what was reclaimed vs. preserved.
+fn count_staged_temps(dir: &std::path::Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut count = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            count += count_staged_temps(&path);
+        } else if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(is_staged_temp_name)
+        {
+            count += 1;
+        }
+    }
+    count
+}
 
 fn create_test_store() -> (TempDir, FsStore) {
     let temp_dir = TempDir::new().unwrap();
@@ -829,5 +853,222 @@ fn loose_blob_path_rejects_torn_cache_mirror() {
     assert!(
         probed.is_none(),
         "corrupted loose blob must not be served as canonical bytes"
+    );
+}
+
+#[test]
+fn batch_restage_of_same_state_promotes_latest_version() {
+    // heddle#550 Finding 1: the staging dedup keys by canonical path, but
+    // `put_state` is keyed by `ChangeId` and *intentionally overwrites*
+    // the same path as a change mutates. A later staged write to the same
+    // state path must SUPERSEDE the earlier one (the latest is
+    // authoritative) — content-addressed blobs/trees still dedup-skip,
+    // but a mutable state that drops its newest version would promote a
+    // stale snapshot.
+    let (_temp, store) = create_test_store();
+
+    let tree_v1 = ContentHash::compute(b"tree-v1");
+    let tree_v2 = ContentHash::compute(b"tree-v2");
+    let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
+    let state_v1 = State::new(tree_v1, vec![], attribution.clone()).with_intent("first");
+    let change_id = state_v1.change_id;
+    // Same ChangeId, different content (newer intent + tree).
+    let state_v2 = State::new(tree_v2, vec![], attribution)
+        .with_change_id(change_id)
+        .with_intent("second");
+
+    store.begin_snapshot_write_batch().unwrap();
+    store.put_state(&state_v1).unwrap();
+    store.put_state(&state_v2).unwrap();
+
+    // Both writes target the one ChangeId-keyed path, so the batch holds
+    // exactly one staged object — the supersede replaced the temp rather
+    // than stacking a second one.
+    assert_eq!(
+        store.staged_object_count(),
+        1,
+        "re-staging the same state path must supersede, not accumulate",
+    );
+
+    store.flush_snapshot_write_batch().unwrap();
+    store.clear_recent_object_caches();
+
+    let promoted = store.get_state(&change_id).unwrap().unwrap();
+    assert_eq!(
+        promoted.intent,
+        Some("second".to_string()),
+        "the LATEST staged state must be the one promoted",
+    );
+    assert_eq!(promoted.tree, tree_v2);
+}
+
+#[test]
+fn batch_restage_of_same_blob_still_dedups() {
+    // Counterpart to the Finding 1 supersede: a content-addressed object
+    // re-put within a batch carries identical bytes, so it must still
+    // dedup-skip (one staged temp), not stage a redundant second copy.
+    let (_temp, store) = create_test_store();
+
+    store.begin_snapshot_write_batch().unwrap();
+    let blob = Blob::from("identical content addressed bytes");
+    let h1 = store.put_blob(&blob).unwrap();
+    let h2 = store.put_blob(&blob).unwrap();
+    assert_eq!(h1, h2);
+    assert_eq!(
+        store.staged_object_count(),
+        1,
+        "an identical content-addressed re-put must dedup, not double-stage",
+    );
+    store.flush_snapshot_write_batch().unwrap();
+    assert_eq!(store.get_blob(&h1).unwrap().unwrap().content(), blob.content());
+}
+
+#[test]
+fn batch_abort_purges_in_memory_caches_so_reads_miss() {
+    // heddle#550 Finding 2: `put_blob` populates `recent_blobs` eagerly,
+    // BEFORE its staged temp is promoted. On abort the temp is discarded
+    // and the canonical path is never written, so that cache entry now
+    // points at an object that does not exist. The existence-gated
+    // `get_blob` already refuses to serve it, but the cache-first
+    // `blob_size` fast path would report the never-written object as
+    // present unless the abort purges the cache.
+    let (_temp, store) = create_test_store();
+
+    store.begin_snapshot_write_batch().unwrap();
+    let blob = Blob::from("aborted-and-must-not-leak-via-cache");
+    let hash = store.put_blob(&blob).unwrap();
+    // Cache-first size path sees the staged-but-unpromoted blob mid-batch.
+    assert_eq!(store.blob_size(&hash).unwrap(), Some(blob.content().len() as u64));
+
+    store.abort_snapshot_write_batch();
+
+    // After abort the object exists nowhere on disk. Every read path —
+    // including the cache-first size path — must re-resolve from disk and
+    // miss; none may serve a stale cache hit.
+    let canonical = hash_path(&blobs_dir(store.root()), &hash);
+    assert!(!canonical.exists(), "aborted blob must not occupy its canonical path");
+    assert!(
+        store.get_blob(&hash).unwrap().is_none(),
+        "get_blob must miss after abort",
+    );
+    assert!(
+        store.blob_size(&hash).unwrap().is_none(),
+        "blob_size must not serve a stale cache hit for an aborted (never-written) blob",
+    );
+    assert!(!store.has_blob(&hash).unwrap(), "has_blob must miss after abort");
+}
+
+#[test]
+fn begin_batch_sweeps_abandoned_staging_temps_but_spares_other_files() {
+    // heddle#550 Finding 3: a crash before flush leaves `.stage-` temps
+    // beside every staged object. The next import's fresh batch-begin must
+    // reclaim them — but ONLY them: ordinary `.tmp-` temps (from a
+    // concurrent durable `write_atomic`) and canonical objects must be
+    // left untouched.
+    let (_temp, store) = create_test_store();
+
+    // A real committed blob: canonical decoy that must survive the sweep.
+    let kept_blob = Blob::from("canonical object that must survive the sweep");
+    let kept_hash = store.put_blob(&kept_blob).unwrap();
+    let kept_canonical = hash_path(&blobs_dir(store.root()), &kept_hash);
+    assert!(kept_canonical.exists());
+
+    // Abandoned staging temps left by a "crashed" prior batch: one in a
+    // blobs shard, one in the flat states dir.
+    let orphan_blob_hash = Blob::from("orphaned staged blob").hash();
+    let orphan_blob_canonical = hash_path(&blobs_dir(store.root()), &orphan_blob_hash);
+    std::fs::create_dir_all(orphan_blob_canonical.parent().unwrap()).unwrap();
+    let orphan_blob_temp = stage_temp_path(&orphan_blob_canonical);
+    std::fs::write(&orphan_blob_temp, b"abandoned staged blob bytes").unwrap();
+
+    let orphan_state_canonical = state_path(store.root(), &ChangeId::generate());
+    std::fs::create_dir_all(orphan_state_canonical.parent().unwrap()).unwrap();
+    let orphan_state_temp = stage_temp_path(&orphan_state_canonical);
+    std::fs::write(&orphan_state_temp, b"abandoned staged state bytes").unwrap();
+
+    // A non-staging `.tmp-` temp (the shape `write_atomic` leaves): the
+    // sweep keys off the `.stage-` marker, so this must be spared.
+    let tmp_decoy = temp_path(&hash_path(&blobs_dir(store.root()), &Blob::from("decoy").hash()));
+    std::fs::create_dir_all(tmp_decoy.parent().unwrap()).unwrap();
+    std::fs::write(&tmp_decoy, b"ordinary write_atomic temp").unwrap();
+
+    assert_eq!(count_staged_temps(&blobs_dir(store.root())), 1);
+    assert_eq!(count_staged_temps(&states_dir(store.root())), 1);
+
+    // A fresh batch-begin runs the sweep.
+    store.begin_snapshot_write_batch().unwrap();
+
+    assert!(!orphan_blob_temp.exists(), "abandoned blob staging temp must be swept");
+    assert!(!orphan_state_temp.exists(), "abandoned state staging temp must be swept");
+    assert_eq!(count_staged_temps(&blobs_dir(store.root())), 0);
+    assert_eq!(count_staged_temps(&states_dir(store.root())), 0);
+
+    // Untouched: the `.tmp-` temp and the canonical blob.
+    assert!(tmp_decoy.exists(), "ordinary .tmp- temp must NOT be swept");
+    assert!(kept_canonical.exists(), "canonical object must NOT be swept");
+    assert_eq!(
+        store.get_blob(&kept_hash).unwrap().unwrap().content(),
+        kept_blob.content(),
+    );
+
+    store.abort_snapshot_write_batch();
+}
+
+#[test]
+fn staging_sweep_spares_a_concurrent_batchs_in_flight_temps() {
+    use std::sync::{Arc, mpsc};
+
+    // heddle#550 Finding 3: the sweep must reclaim ONLY abandoned temps.
+    // A concurrent batch on another thread has live, tracked staging temps
+    // mid-import; a fresh batch-begin on this thread must not delete them
+    // out from under it.
+    let (_temp, store) = create_test_store();
+    let store = Arc::new(store);
+
+    let (staged_tx, staged_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+
+    let store_a = Arc::clone(&store);
+    let batch_owner = std::thread::spawn(move || {
+        store_a.begin_snapshot_write_batch().unwrap();
+        let hash = store_a
+            .put_blob(&Blob::from("live in-flight staged blob"))
+            .unwrap();
+        staged_tx.send(hash).unwrap();
+        release_rx.recv().unwrap();
+        store_a.flush_snapshot_write_batch().unwrap();
+    });
+
+    let owner_hash = staged_rx.recv().unwrap();
+    let owner_canonical = hash_path(&blobs_dir(store.root()), &owner_hash);
+    assert!(!owner_canonical.exists(), "owner's blob is staged, not yet promoted");
+    // The owner's live staging temp is on disk and tracked.
+    assert_eq!(count_staged_temps(&blobs_dir(store.root())), 1);
+
+    // Plant an abandoned staging temp the sweep SHOULD reclaim.
+    let orphan_hash = Blob::from("orphan vs live").hash();
+    let orphan_canonical = hash_path(&blobs_dir(store.root()), &orphan_hash);
+    std::fs::create_dir_all(orphan_canonical.parent().unwrap()).unwrap();
+    let orphan_temp = stage_temp_path(&orphan_canonical);
+    std::fs::write(&orphan_temp, b"abandoned").unwrap();
+
+    // A fresh batch-begin on THIS thread sweeps. The owner's temp is
+    // tracked (in-flight) and must survive; the orphan must be reclaimed.
+    store.begin_snapshot_write_batch().unwrap();
+    assert!(!orphan_temp.exists(), "abandoned temp must be reclaimed by the sweep");
+    assert_eq!(
+        count_staged_temps(&blobs_dir(store.root())),
+        1,
+        "the concurrent batch's live staging temp must be spared",
+    );
+    store.abort_snapshot_write_batch();
+
+    // The owner can still flush: its temp survived to be promoted.
+    release_tx.send(()).unwrap();
+    batch_owner.join().unwrap();
+    assert!(owner_canonical.exists(), "owner's staged blob must promote after a concurrent sweep");
+    assert_eq!(
+        store.get_blob(&owner_hash).unwrap().unwrap().content(),
+        b"live in-flight staged blob",
     );
 }
