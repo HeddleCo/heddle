@@ -250,7 +250,7 @@ pub fn import_commit(
 
 /// Import Git commits into Heddle states.
 pub fn import_all(bridge: &mut GitBridge, git_path: Option<&Path>) -> GitResult<ImportStats> {
-    import_with_ref_filter(bridge, git_path, None, GitImportOptions::default())
+    import_with_ref_filter(bridge, git_path, None, GitImportOptions::default(), None)
 }
 
 pub fn import_all_with_options(
@@ -258,7 +258,17 @@ pub fn import_all_with_options(
     git_path: Option<&Path>,
     options: GitImportOptions,
 ) -> GitResult<ImportStats> {
-    import_with_ref_filter(bridge, git_path, None, options)
+    import_with_ref_filter(bridge, git_path, None, options, None)
+}
+
+/// Like [`import_all`], reporting the running commit count to `progress`
+/// after each commit is walked (drives the adopt progress indicator).
+pub fn import_all_with_progress(
+    bridge: &mut GitBridge,
+    git_path: Option<&Path>,
+    progress: Option<&mut dyn FnMut(usize)>,
+) -> GitResult<ImportStats> {
+    import_with_ref_filter(bridge, git_path, None, GitImportOptions::default(), progress)
 }
 
 pub fn import_selected_refs(
@@ -267,7 +277,13 @@ pub fn import_selected_refs(
     refs: &[String],
 ) -> GitResult<ImportStats> {
     let wanted = refs.iter().cloned().collect::<HashSet<_>>();
-    import_with_ref_filter(bridge, git_path, Some(&wanted), GitImportOptions::default())
+    import_with_ref_filter(
+        bridge,
+        git_path,
+        Some(&wanted),
+        GitImportOptions::default(),
+        None,
+    )
 }
 
 pub fn import_selected_refs_with_options(
@@ -277,7 +293,25 @@ pub fn import_selected_refs_with_options(
     options: GitImportOptions,
 ) -> GitResult<ImportStats> {
     let wanted = refs.iter().cloned().collect::<HashSet<_>>();
-    import_with_ref_filter(bridge, git_path, Some(&wanted), options)
+    import_with_ref_filter(bridge, git_path, Some(&wanted), options, None)
+}
+
+/// Like [`import_selected_refs`], reporting the running commit count to
+/// `progress` after each commit is walked.
+pub fn import_selected_refs_with_progress(
+    bridge: &mut GitBridge,
+    git_path: Option<&Path>,
+    refs: &[String],
+    progress: Option<&mut dyn FnMut(usize)>,
+) -> GitResult<ImportStats> {
+    let wanted = refs.iter().cloned().collect::<HashSet<_>>();
+    import_with_ref_filter(
+        bridge,
+        git_path,
+        Some(&wanted),
+        GitImportOptions::default(),
+        progress,
+    )
 }
 
 fn import_with_ref_filter(
@@ -285,6 +319,7 @@ fn import_with_ref_filter(
     git_path: Option<&Path>,
     wanted_refs: Option<&HashSet<String>>,
     options: GitImportOptions,
+    progress: Option<&mut dyn FnMut(usize)>,
 ) -> GitResult<ImportStats> {
     let repo = if let Some(path) = git_path {
         open_repo(path)?
@@ -537,23 +572,13 @@ fn import_with_ref_filter(
     let mut tree_importer =
         GitTreeImporter::with_options(bridge.heddle_repo, &repo, options.clone());
     bridge.heddle_repo.store().begin_snapshot_write_batch()?;
-    let import_result = (|| -> GitResult<()> {
-        let mut visiting = HashSet::new();
-        let mut imported = HashSet::new();
-        for plan in &plans {
-            let tip = plan.peeled_commit_oid;
-            import_commit_ancestry(
-                bridge,
-                &repo,
-                &mut tree_importer,
-                tip,
-                &mut visiting,
-                &mut imported,
-                &mut stats,
-            )?;
-        }
-        Ok(())
-    })();
+    let mut noop_progress = |_: usize| {};
+    let progress_cb: &mut dyn FnMut(usize) = match progress {
+        Some(callback) => callback,
+        None => &mut noop_progress,
+    };
+    let import_result =
+        walk_plans_into_states(bridge, &repo, &mut tree_importer, &plans, &mut stats, progress_cb);
     match import_result {
         Ok(()) => {
             stats
@@ -795,6 +820,37 @@ enum WalkPhase {
 /// children, already-imported nodes are skipped, and re-entering a node
 /// that's still in flight (a merge with two paths to the same ancestor)
 /// is a no-op.
+/// Walk each ref plan's ancestry into Heddle states, threading the optional
+/// per-commit progress callback through. Extracted from the import flow so the
+/// `progress` borrow is scoped to this call (an inline closure would force the
+/// borrow to outlive the surrounding function).
+#[allow(clippy::too_many_arguments)]
+fn walk_plans_into_states(
+    bridge: &mut GitBridge<'_>,
+    repo: &gix::Repository,
+    tree_importer: &mut GitTreeImporter<'_>,
+    plans: &[RefPlan],
+    stats: &mut ImportStats,
+    progress: &mut dyn FnMut(usize),
+) -> GitResult<()> {
+    let mut visiting = HashSet::new();
+    let mut imported = HashSet::new();
+    for plan in plans {
+        import_commit_ancestry(
+            bridge,
+            repo,
+            tree_importer,
+            plan.peeled_commit_oid,
+            &mut visiting,
+            &mut imported,
+            stats,
+            &mut *progress,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn import_commit_ancestry(
     bridge: &mut GitBridge<'_>,
     repo: &gix::Repository,
@@ -803,6 +859,7 @@ fn import_commit_ancestry(
     visiting: &mut HashSet<gix::hash::ObjectId>,
     imported: &mut HashSet<gix::hash::ObjectId>,
     stats: &mut ImportStats,
+    progress: &mut dyn FnMut(usize),
 ) -> GitResult<()> {
     let mut stack: Vec<WalkPhase> = vec![WalkPhase::Enter(git_oid)];
 
@@ -883,6 +940,7 @@ fn import_commit_ancestry(
                 // failure next to `ingest`. `states_created` retains
                 // the "new heddle states written" meaning.
                 stats.commits_imported += 1;
+                progress(stats.commits_imported);
                 visiting.remove(&oid);
                 imported.insert(oid);
             }

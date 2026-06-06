@@ -18,7 +18,7 @@ use super::{
 use crate::{
     bridge::{
         GitBridge,
-        git_import::{import_all, import_selected_refs},
+        git_import::{import_all_with_progress, import_selected_refs_with_progress},
     },
     cli::{AdoptArgs, Cli, should_output_json, style},
 };
@@ -78,23 +78,39 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
     progress.advance("importing commits");
     let mut bridge = GitBridge::new(&repo);
     let _ = bridge.hydrate_checkout_heddle_notes_from_configured_remotes();
-    let stats = if args.refs.is_empty() {
-        import_all(&mut bridge, Some(repo.root()))?
-    } else {
-        import_selected_refs(&mut bridge, Some(repo.root()), &args.refs)?
+    let stats = {
+        let mut on_commit = |count: usize| progress.commit_tick(count);
+        if args.refs.is_empty() {
+            import_all_with_progress(&mut bridge, Some(repo.root()), Some(&mut on_commit))?
+        } else {
+            import_selected_refs_with_progress(
+                &mut bridge,
+                Some(repo.root()),
+                &args.refs,
+                Some(&mut on_commit),
+            )?
+        }
     };
     progress.advance("writing refs");
     progress.finish();
     let trust = build_repository_verification_state(&repo);
     let already_in_sync = stats.states_created == 0 && stats.commits_imported > 0;
     let recommended_action = action_value(&trust);
+    // The .heddle data dir lives inside the repo; render it relative to the
+    // repo root so adopt output stays repo-relative and doesn't leak the
+    // user's absolute home path (#551).
+    let heddle_dir = repo.heddle_dir();
+    let heddle_data_path = heddle_dir
+        .strip_prefix(repo.root())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| heddle_dir.to_path_buf());
     let output = AdoptOutput {
         output_kind: "adopt",
         status: "completed",
         action: "adopt",
         adopted: true,
         initialized,
-        path: repo.heddle_dir().to_path_buf(),
+        path: heddle_data_path,
         refs: args.refs,
         commits_imported: stats.commits_imported,
         states_created: stats.states_created,
