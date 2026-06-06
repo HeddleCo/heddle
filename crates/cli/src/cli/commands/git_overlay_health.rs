@@ -1938,9 +1938,10 @@ fn plain_git_worktree_status(
     }) {
         head_entries.insert(path, entry);
     }
+    let index_timestamp_secs = index.timestamp().unix_seconds();
     let mut index_entries = BTreeMap::new();
     for (_, (path, entry)) in index.entries_with_paths_by_filter_map(|path, entry| {
-        Some((plain_git_path(path), (entry.id, entry.mode.bits())))
+        Some((plain_git_path(path), (entry.id, entry.mode.bits(), entry.stat)))
     }) {
         index_entries.insert(path, entry);
     }
@@ -1949,12 +1950,12 @@ fn plain_git_worktree_status(
     let mut modified = BTreeSet::new();
     let mut deleted = BTreeSet::new();
 
-    for (path, entry) in &index_entries {
+    for (path, (oid, mode, _stat)) in &index_entries {
         match head_entries.get(path) {
             None => {
                 added.insert(PathBuf::from(path));
             }
-            Some(head_entry) if head_entry != entry => {
+            Some((head_oid, head_mode)) if (head_oid, head_mode) != (oid, mode) => {
                 modified.insert(PathBuf::from(path));
             }
             Some(_) => {}
@@ -1966,8 +1967,18 @@ fn plain_git_worktree_status(
         }
     }
 
-    for (path, (oid, mode)) in &index_entries {
-        match repo::git_worktree_status::git_worktree_entry_state(root, path, *oid, *mode)? {
+    for (path, (oid, mode, stat)) in &index_entries {
+        let probe = repo::git_worktree_status::IndexStatProbe {
+            stat: *stat,
+            index_timestamp_secs,
+        };
+        match repo::git_worktree_status::git_worktree_entry_state(
+            root,
+            path,
+            *oid,
+            *mode,
+            Some(probe),
+        )? {
             GitWorktreeEntryState::Clean => {}
             GitWorktreeEntryState::Deleted => {
                 deleted.insert(PathBuf::from(path));
@@ -2535,6 +2546,26 @@ fn git_default_remote_name_from_repo(repo: &gix::Repository) -> Option<String> {
 }
 
 pub(crate) fn build_git_overlay_health(repo: &Repository) -> GitOverlayHealth {
+    build_git_overlay_health_inner(repo, None)
+}
+
+/// `status` hot-path variant: reuse the caller's already-computed git-overlay
+/// worktree status instead of recomputing it. `git_overlay_worktree_status`
+/// re-reads + SHA-1s every tracked file (~950ms on a 10k-file worktree); the
+/// `status` command otherwise pays it twice (here and in `build_status_output`).
+/// `worktree_status` is the exact `Result` from `git_overlay_worktree_status()`,
+/// so the clean/dirty/degraded classification stays byte-identical.
+pub(crate) fn build_git_overlay_health_with_worktree_status(
+    repo: &Repository,
+    worktree_status: &repo::Result<Option<WorktreeStatus>>,
+) -> GitOverlayHealth {
+    build_git_overlay_health_inner(repo, Some(worktree_status))
+}
+
+fn build_git_overlay_health_inner(
+    repo: &Repository,
+    precomputed_worktree_status: Option<&repo::Result<Option<WorktreeStatus>>>,
+) -> GitOverlayHealth {
     if repo.capability() != repo::RepositoryCapability::GitOverlay {
         return build_native_heddle_health(repo);
     }
@@ -2721,7 +2752,17 @@ pub(crate) fn build_git_overlay_health(repo: &Repository) -> GitOverlayHealth {
         }),
     }
 
-    match repo.git_overlay_worktree_status() {
+    // Reuse the caller's computation on the `status` path; fall back to a fresh
+    // probe (only reached here, after the early returns above) otherwise.
+    let computed_worktree_status;
+    let worktree_status = match precomputed_worktree_status {
+        Some(status) => status,
+        None => {
+            computed_worktree_status = repo.git_overlay_worktree_status();
+            &computed_worktree_status
+        }
+    };
+    match worktree_status {
         Ok(Some(status)) if !status.is_clean() => {
             let changed = status.modified.len() + status.added.len() + status.deleted.len();
             if heddle_worktree_is_clean(repo) {
@@ -2731,7 +2772,7 @@ pub(crate) fn build_git_overlay_health(repo: &Repository) -> GitOverlayHealth {
                     summary: format!(
                         "{changed} Git worktree path(s) are captured in Heddle but not checkpointed to Git"
                     ),
-                    details: dirty_details(&status),
+                    details: dirty_details(status),
                 });
                 return GitOverlayHealth {
                     status: "needs_checkpoint".to_string(),
@@ -2747,7 +2788,7 @@ pub(crate) fn build_git_overlay_health(repo: &Repository) -> GitOverlayHealth {
                 name: "worktree".to_string(),
                 status: "dirty_worktree".to_string(),
                 summary: format!("{changed} Git worktree path(s) have uncommitted changes"),
-                details: dirty_details(&status),
+                details: dirty_details(status),
             });
             return GitOverlayHealth {
                 status: "dirty_worktree".to_string(),
