@@ -4811,3 +4811,367 @@ fn out_of_band_advance_after_embargo_not_deleted() {
         );
     }
 }
+
+/// #316 / PR #528 r17 — the conformance matrix that turns the per-cell fix into a
+/// REDESIGN. It drives [`plan_destination_reconcile`] directly across every
+/// {namespace} × {operation} × {ownership} × {force} cell and asserts the
+/// reconcile outcome. The structural guarantee it locks: ownership (`recorded ==
+/// old`, a safe forward move, or `--force`) gates EVERY namespace's overwrite AND
+/// delete; move-classification (fast-forward for branch/note, free for tag) is
+/// the ONLY per-namespace axis. A future namespace that wires an overwrite
+/// without funnelling through the uniform ownership gate — the exact asymmetry
+/// that let an out-of-band tag be clobbered before r17 — would fail a row here.
+/// The annotated-tag-object sub-cases additionally prove a tag never resolves
+/// `find_commit` (which would error on a tag object).
+#[test]
+fn reconcile_ownership_conformance_matrix() {
+    use crate::bridge::git_core::{GitBridgeError, RefNamespace, RefUpdate, plan_destination_reconcile};
+    use std::collections::HashMap;
+
+    let (_mirror_temp, mirror) = init_git_repo();
+    // Linear topology a <- b so classify_ref_move resolves fast-forward (a->b),
+    // rewind (b->a, owned), and divergence for the branch/note rows.
+    let a = commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "A", &[]);
+    let b = commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "B", &[a]);
+    // An annotated-tag OBJECT (kind == Tag, NOT a commit): used as a tag tip to
+    // prove classify_tag_move never calls find_commit on it.
+    let tag_obj = create_annotated_tag(&mirror, "annot", b, "annotated tag object");
+
+    // Expected reconcile outcome for a single-ref call.
+    enum Outcome {
+        /// In `writes` with this `old`/`new`, and `deletes` empty.
+        Write(Option<gix::hash::ObjectId>, gix::hash::ObjectId),
+        /// In `deletes` with this `old`, and `writes` empty.
+        Delete(gix::hash::ObjectId),
+        /// Neither written nor deleted (no-op skip, or out-of-band spared).
+        Absent,
+        /// `Err(NonFastForwardRef)` — an unowned overwrite without `--force`.
+        NonFastForward,
+    }
+
+    struct Cell {
+        label: &'static str,
+        ns: RefNamespace,
+        old: Option<gix::hash::ObjectId>,
+        target: gix::hash::ObjectId,
+        recorded: Option<gix::hash::ObjectId>,
+        /// In the served frontier (an overwrite/create) vs. only previously
+        /// exported (a retraction).
+        desired: bool,
+        force: bool,
+        expect: Outcome,
+    }
+
+    let cells = vec![
+        // ---- branch: fast-forward move-classification + uniform ownership ----
+        Cell { label: "branch/create", ns: RefNamespace::Branch, old: None, target: b, recorded: None, desired: true, force: false, expect: Outcome::Write(None, b) },
+        Cell { label: "branch/no-op", ns: RefNamespace::Branch, old: Some(b), target: b, recorded: Some(b), desired: true, force: false, expect: Outcome::Absent },
+        Cell { label: "branch/fast-forward/owned", ns: RefNamespace::Branch, old: Some(a), target: b, recorded: Some(a), desired: true, force: false, expect: Outcome::Write(Some(a), b) },
+        Cell { label: "branch/fast-forward/out-of-band", ns: RefNamespace::Branch, old: Some(a), target: b, recorded: None, desired: true, force: false, expect: Outcome::Write(Some(a), b) },
+        Cell { label: "branch/rewind/owned", ns: RefNamespace::Branch, old: Some(b), target: a, recorded: Some(b), desired: true, force: false, expect: Outcome::Write(Some(b), a) },
+        Cell { label: "branch/rewind/out-of-band/force-off", ns: RefNamespace::Branch, old: Some(b), target: a, recorded: None, desired: true, force: false, expect: Outcome::NonFastForward },
+        Cell { label: "branch/rewind/out-of-band/force-on", ns: RefNamespace::Branch, old: Some(b), target: a, recorded: None, desired: true, force: true, expect: Outcome::Write(Some(b), a) },
+        Cell { label: "branch/retract/owned", ns: RefNamespace::Branch, old: Some(b), target: b, recorded: Some(b), desired: false, force: false, expect: Outcome::Delete(b) },
+        // Out-of-band retract: heddle published `a`, the destination drifted to `b`
+        // (recorded != old) — spared unless forced.
+        Cell { label: "branch/retract/out-of-band/force-off", ns: RefNamespace::Branch, old: Some(b), target: b, recorded: Some(a), desired: false, force: false, expect: Outcome::Absent },
+        Cell { label: "branch/retract/out-of-band/force-on", ns: RefNamespace::Branch, old: Some(b), target: b, recorded: Some(a), desired: false, force: true, expect: Outcome::Delete(b) },
+        // ---- tag: free move-classification + the SAME uniform ownership gate ----
+        Cell { label: "tag/create", ns: RefNamespace::Tag, old: None, target: b, recorded: None, desired: true, force: false, expect: Outcome::Write(None, b) },
+        Cell { label: "tag/no-op", ns: RefNamespace::Tag, old: Some(b), target: b, recorded: Some(b), desired: true, force: false, expect: Outcome::Absent },
+        Cell { label: "tag/owned-overwrite", ns: RefNamespace::Tag, old: Some(a), target: b, recorded: Some(a), desired: true, force: false, expect: Outcome::Write(Some(a), b) },
+        // THE r17 fix: an out-of-band tag (recorded != old) is no longer clobbered.
+        Cell { label: "tag/out-of-band-overwrite/unrecorded/force-off", ns: RefNamespace::Tag, old: Some(a), target: b, recorded: None, desired: true, force: false, expect: Outcome::NonFastForward },
+        Cell { label: "tag/out-of-band-overwrite/mismatched-record/force-off", ns: RefNamespace::Tag, old: Some(a), target: b, recorded: Some(b), desired: true, force: false, expect: Outcome::NonFastForward },
+        Cell { label: "tag/out-of-band-overwrite/force-on", ns: RefNamespace::Tag, old: Some(a), target: b, recorded: None, desired: true, force: true, expect: Outcome::Write(Some(a), b) },
+        // annotated-tag-object as the NEW target: proves no find_commit on a tag obj.
+        Cell { label: "tag/owned-overwrite/annotated-object-target", ns: RefNamespace::Tag, old: Some(a), target: tag_obj, recorded: Some(a), desired: true, force: false, expect: Outcome::Write(Some(a), tag_obj) },
+        // annotated-tag-object as the OLD tip: still gated by OID compare only.
+        Cell { label: "tag/out-of-band-overwrite/annotated-object-old/force-off", ns: RefNamespace::Tag, old: Some(tag_obj), target: b, recorded: None, desired: true, force: false, expect: Outcome::NonFastForward },
+        Cell { label: "tag/retract/owned", ns: RefNamespace::Tag, old: Some(b), target: b, recorded: Some(b), desired: false, force: false, expect: Outcome::Delete(b) },
+        Cell { label: "tag/retract/out-of-band/force-off", ns: RefNamespace::Tag, old: Some(b), target: b, recorded: Some(a), desired: false, force: false, expect: Outcome::Absent },
+        Cell { label: "tag/retract/out-of-band/force-on", ns: RefNamespace::Tag, old: Some(b), target: b, recorded: Some(a), desired: false, force: true, expect: Outcome::Delete(b) },
+        // ---- note: classified exactly like a branch (uniform ownership) ----
+        Cell { label: "note/create", ns: RefNamespace::Note, old: None, target: b, recorded: None, desired: true, force: false, expect: Outcome::Write(None, b) },
+        Cell { label: "note/no-op", ns: RefNamespace::Note, old: Some(b), target: b, recorded: Some(b), desired: true, force: false, expect: Outcome::Absent },
+        Cell { label: "note/fast-forward/owned", ns: RefNamespace::Note, old: Some(a), target: b, recorded: Some(a), desired: true, force: false, expect: Outcome::Write(Some(a), b) },
+        Cell { label: "note/rewind/owned", ns: RefNamespace::Note, old: Some(b), target: a, recorded: Some(b), desired: true, force: false, expect: Outcome::Write(Some(b), a) },
+        Cell { label: "note/rewind/out-of-band/force-off", ns: RefNamespace::Note, old: Some(b), target: a, recorded: None, desired: true, force: false, expect: Outcome::NonFastForward },
+        Cell { label: "note/rewind/out-of-band/force-on", ns: RefNamespace::Note, old: Some(b), target: a, recorded: None, desired: true, force: true, expect: Outcome::Write(Some(b), a) },
+        Cell { label: "note/retract/owned", ns: RefNamespace::Note, old: Some(b), target: b, recorded: Some(b), desired: false, force: false, expect: Outcome::Delete(b) },
+    ];
+
+    for cell in &cells {
+        let short = "v1";
+        let full = match cell.ns {
+            RefNamespace::Branch => format!("refs/heads/{short}"),
+            RefNamespace::Tag => format!("refs/tags/{short}"),
+            RefNamespace::Note => format!("refs/notes/{short}"),
+        };
+        let served: Vec<RefUpdate> = if cell.desired {
+            vec![RefUpdate { name: short.to_string(), target: cell.target, namespace: cell.ns }]
+        } else {
+            Vec::new()
+        };
+        let mut old_map: HashMap<String, gix::hash::ObjectId> = HashMap::new();
+        if let Some(o) = cell.old {
+            old_map.insert(full.clone(), o);
+        }
+        let mut recorded_map: HashMap<String, gix::hash::ObjectId> = HashMap::new();
+        if let Some(r) = cell.recorded {
+            recorded_map.insert(full.clone(), r);
+        }
+
+        let result =
+            plan_destination_reconcile(&mirror, &served, None, &old_map, &recorded_map, cell.force);
+
+        if let Outcome::NonFastForward = cell.expect {
+            let err = result
+                .expect_err(&format!("cell `{}`: expected Err(NonFastForwardRef)", cell.label));
+            assert!(
+                matches!(err, GitBridgeError::NonFastForwardRef { .. }),
+                "cell `{}`: expected NonFastForwardRef, got {err:?}",
+                cell.label
+            );
+            continue;
+        }
+
+        let plan = result
+            .unwrap_or_else(|e| panic!("cell `{}`: expected Ok, got {e:?}", cell.label));
+        match cell.expect {
+            Outcome::Write(exp_old, exp_new) => {
+                assert!(plan.deletes.is_empty(), "cell `{}`: expected no deletes", cell.label);
+                assert_eq!(plan.writes.len(), 1, "cell `{}`: expected exactly one write", cell.label);
+                let w = &plan.writes[0];
+                assert_eq!(w.full_name, full, "cell `{}`: write name", cell.label);
+                assert_eq!(w.old, exp_old, "cell `{}`: write old", cell.label);
+                assert_eq!(w.new, exp_new, "cell `{}`: write new", cell.label);
+            }
+            Outcome::Delete(exp_old) => {
+                assert!(plan.writes.is_empty(), "cell `{}`: expected no writes", cell.label);
+                assert_eq!(plan.deletes.len(), 1, "cell `{}`: expected exactly one delete", cell.label);
+                let d = &plan.deletes[0];
+                assert_eq!(d.full_name, full, "cell `{}`: delete name", cell.label);
+                assert_eq!(d.old, exp_old, "cell `{}`: delete old", cell.label);
+            }
+            Outcome::Absent => {
+                assert!(plan.writes.is_empty(), "cell `{}`: expected no writes", cell.label);
+                assert!(plan.deletes.is_empty(), "cell `{}`: expected no deletes", cell.label);
+            }
+            Outcome::NonFastForward => unreachable!("handled above"),
+        }
+    }
+}
+
+/// #316 / PR #528 r17 (the behavioral gap): an out-of-band destination TAG heddle
+/// never recorded must NOT be clobbered by a plain export/push — the precise
+/// asymmetry r1-r16 left open (tag DELETES were ownership-gated, tag WRITES were
+/// not). A destination `refs/tags/v1.0` advanced out of band past heddle's
+/// recorded published tip is FF-rejected (`NonFastForwardRef`) and survives; only
+/// `--force` overwrites it back to the served target. Covers BOTH call sites —
+/// local-path AND URL/network.
+#[test]
+fn out_of_band_destination_tag_not_overwritten() {
+    use crate::bridge::git_core::GitBridgeError;
+    use objects::object::{Attribution, Principal, State};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    // A public main that stays put, plus a SEPARATE state R pinned by marker v1.0
+    // — so heddle serves refs/tags/v1.0 throughout (it never rewinds/retracts).
+    std::fs::write(heddle_temp.path().join("main.txt"), b"trunk\n").unwrap();
+    repo.snapshot(Some("trunk".into()), None).unwrap();
+    let r = {
+        let store = repo.store();
+        let blob = store.put_blob(&Blob::from_slice(b"release\n")).expect("blob");
+        let tree = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("release.txt".to_string(), blob, false).expect("entry"),
+            ]))
+            .expect("tree");
+        let state = State::new(
+            tree,
+            Vec::new(),
+            Attribution::human(Principal::new("Grace Hopper", "grace@example.com")),
+        );
+        store.put_state(&state).expect("put R");
+        state
+    };
+    repo.refs()
+        .create_marker(&MarkerName::new("v1.0"), &r.change_id)
+        .expect("create marker at R");
+
+    let mut bridge = GitBridge::new(&repo);
+
+    // ---- local-path destination ----
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    bridge
+        .export_to_path(&dest_path)
+        .expect("first export publishes the tag (local)");
+
+    // The served tag tip heddle recorded for this destination.
+    let served_tag = {
+        let dest = gix::open(&dest_path).expect("open dest");
+        read_exported_refs(&dest).expect("read record")["refs/tags/v1.0"]
+    };
+
+    // Out-of-band advance: move the destination tag to a fresh commit X heddle
+    // never published (and never recorded).
+    let oid_x = {
+        let dest = gix::open(&dest_path).expect("open dest");
+        let x = commit_with_tree(&dest, None, empty_tree_oid(&dest), "out-of-band-tag", &[]);
+        set_reference(&dest, "refs/tags/v1.0", x, PreviousValue::Any, "test: out-of-band tag")
+            .expect("move tag out of band");
+        x
+    };
+    assert_ne!(oid_x, served_tag, "the out-of-band tag tip must differ from the served tip");
+
+    // A plain export must NOT clobber X: heddle does not own that tip.
+    let err = bridge
+        .export_to_path(&dest_path)
+        .expect_err("out-of-band tag must be FF-rejected at the local destination, not overwritten");
+    assert!(
+        matches!(err, GitBridgeError::NonFastForwardRef { .. }),
+        "expected a non-fast-forward rejection, got: {err:?}"
+    );
+    {
+        let dest = gix::open(&dest_path).expect("reopen dest");
+        let tip = dest
+            .find_reference("refs/tags/v1.0")
+            .unwrap()
+            .try_id()
+            .map(|id| id.detach())
+            .expect("tag id");
+        assert_eq!(tip, oid_x, "the out-of-band tag must survive — heddle must not overwrite it");
+    }
+
+    // `--force` is the explicit escape hatch: it DOES overwrite back to the tip.
+    bridge
+        .push_with_scope_force(dest_path.to_str().expect("dest path"), GitPushScope::AllThreads, true)
+        .expect("--force overrides the tag ownership gate at the local destination");
+    {
+        let dest = gix::open(&dest_path).expect("reopen dest");
+        let tip = dest
+            .find_reference("refs/tags/v1.0")
+            .unwrap()
+            .try_id()
+            .map(|id| id.detach())
+            .expect("tag id");
+        assert_eq!(tip, served_tag, "--force rewinds the local destination tag to the served tip");
+    }
+
+    // ---- URL/network destination ----
+    let remote_root = TempDir::new().expect("remote root");
+    let _remote_repo = init_named_bare_git_repo(&remote_root, "remote.git");
+    std::fs::write(
+        remote_root.path().join("remote.git").join("HEAD"),
+        b"ref: refs/heads/__heddle_placeholder\n",
+    )
+    .unwrap();
+    let daemon = GitDaemon::spawn_push(remote_root.path());
+    let url = daemon.url("remote.git");
+
+    bridge.push(&url).expect("first network push publishes the tag");
+    let remote_served_tag = {
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        remote
+            .find_reference("refs/tags/v1.0")
+            .unwrap()
+            .try_id()
+            .map(|id| id.detach())
+            .expect("tag id")
+    };
+
+    let remote_oid_x = {
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        let x = commit_with_tree(&remote, None, empty_tree_oid(&remote), "out-of-band-tag", &[]);
+        set_reference(&remote, "refs/tags/v1.0", x, PreviousValue::Any, "test: out-of-band tag")
+            .expect("move remote tag out of band");
+        x
+    };
+    assert_ne!(remote_oid_x, remote_served_tag, "the out-of-band remote tag tip must differ");
+
+    let err = bridge
+        .push(&url)
+        .expect_err("out-of-band tag must be FF-rejected on the URL/network remote too");
+    assert!(
+        matches!(err, GitBridgeError::NonFastForwardRef { .. }),
+        "expected a non-fast-forward rejection on the wire, got: {err:?}"
+    );
+    {
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
+        let tip = remote
+            .find_reference("refs/tags/v1.0")
+            .unwrap()
+            .try_id()
+            .map(|id| id.detach())
+            .expect("tag id");
+        assert_eq!(tip, remote_oid_x, "the out-of-band tag must survive on the URL/network remote");
+    }
+
+    bridge
+        .push_with_scope_force(&url, GitPushScope::AllThreads, true)
+        .expect("--force overrides the tag ownership gate on the URL/network remote");
+    {
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
+        let tip = remote
+            .find_reference("refs/tags/v1.0")
+            .unwrap()
+            .try_id()
+            .map(|id| id.detach())
+            .expect("tag id");
+        assert_eq!(tip, remote_served_tag, "--force rewinds the remote tag to the served tip");
+    }
+}
+
+/// #316 / PR #528 r17: the ownership gate must NOT over-block a LEGITIMATE tag
+/// move. A destination tag whose tip heddle still OWNS (`recorded == old`) is
+/// overwritten to the served target on a plain reconcile — `classify_tag_move`'s
+/// gate spares ONLY out-of-band tips heddle never recorded, never heddle's own
+/// published moves. Driven directly against [`plan_destination_reconcile`] (a
+/// marker re-point is a mirror-level `Conflict` by design — markers are immutable
+/// release pins — so the source-move path cannot stage this end-to-end), pinning
+/// the owned-vs-unowned boundary in one focused regression: identical inputs land
+/// a write when owned, and demand `--force` when not.
+#[test]
+fn heddle_owned_tag_overwrite_still_lands() {
+    use crate::bridge::git_core::{GitBridgeError, RefNamespace, RefUpdate, plan_destination_reconcile};
+    use std::collections::HashMap;
+
+    let (_mirror_temp, mirror) = init_git_repo();
+    let a = commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "A", &[]);
+    let b = commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "B", &[a]);
+
+    let full = "refs/tags/v1.0".to_string();
+    let served = vec![RefUpdate { name: "v1.0".to_string(), target: b, namespace: RefNamespace::Tag }];
+    let old_at_destination: HashMap<String, gix::hash::ObjectId> =
+        [(full.clone(), a)].into_iter().collect();
+
+    // Owned: heddle recorded the destination tip `a` it is overwriting → the move
+    // to `b` lands as a plain write, no `--force` needed.
+    let owned: HashMap<String, gix::hash::ObjectId> = [(full.clone(), a)].into_iter().collect();
+    let plan = plan_destination_reconcile(&mirror, &served, None, &old_at_destination, &owned, false)
+        .expect("a heddle-owned tag move must reconcile without --force");
+    assert_eq!(plan.writes.len(), 1, "owned tag move must produce exactly one write");
+    assert_eq!(plan.writes[0].full_name, full);
+    assert_eq!(plan.writes[0].old, Some(a), "write carries the owned old tip");
+    assert_eq!(plan.writes[0].new, b, "write lands the served target");
+    assert!(plan.deletes.is_empty(), "an owned overwrite is a write, not a delete");
+
+    // Contrast: the SAME move with no ownership record (out-of-band tip) is the r17
+    // gate — FF-rejected unless `--force`.
+    let unrecorded: HashMap<String, gix::hash::ObjectId> = HashMap::new();
+    let err = plan_destination_reconcile(&mirror, &served, None, &old_at_destination, &unrecorded, false)
+        .expect_err("an unowned tag overwrite must be FF-rejected without --force");
+    assert!(
+        matches!(err, GitBridgeError::NonFastForwardRef { .. }),
+        "expected NonFastForwardRef, got {err:?}"
+    );
+}

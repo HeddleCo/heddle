@@ -2773,37 +2773,100 @@ fn classify_ref_move(
     Ok(RefMove::Diverged)
 }
 
+/// Whether a destination ref in the served set may be overwritten, and on what
+/// terms. The verdict EVERY namespace's overwrite funnels through, so ownership
+/// is decided in exactly one place.
+///
+/// The reconcile invariant (heddle#316 r17): ownership — heddle owns the tip it
+/// overwrites (`recorded == old`, or the move is a safe forward), OR the user
+/// passes `--force` — gates EVERY namespace's overwrite AND every delete. The
+/// ONLY per-namespace axis is move-classification: branch/note resolve
+/// fast-forward-vs-fork topology via [`classify_ref_move`]; a tag's target may be
+/// an annotated-tag-object OID (not a commit) so it cannot be FF-classified and
+/// uses the free-move [`classify_tag_move`], which bakes the SAME ownership gate
+/// in. A new namespace that wires an overwrite without consulting a verdict here
+/// would skip the gate — the conformance matrix exists to fail that row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteVerdict {
+    /// No-op — the served target already matches the destination tip.
+    Skip,
+    /// Safe to land unconditionally: a create, a fast-forward, or a heddle-owned
+    /// overwrite/rewind (the ownership token already proved `recorded == old`).
+    Write,
+    /// An out-of-band overwrite heddle does NOT own — error unless `--force`.
+    RequireForce,
+}
+
+/// Map a branch/note [`RefMove`] onto a [`WriteVerdict`]. `Rewind` is already
+/// ownership-proven by [`classify_ref_move`] (`recorded == old`), so it is a
+/// `Write`; only `Diverged` (a fork, or an out-of-band advance heddle never
+/// published) demands `--force`.
+fn verdict_from_move(m: RefMove) -> WriteVerdict {
+    match m {
+        RefMove::Unchanged => WriteVerdict::Skip,
+        RefMove::Create | RefMove::FastForward | RefMove::Rewind => WriteVerdict::Write,
+        RefMove::Diverged => WriteVerdict::RequireForce,
+    }
+}
+
+/// Classify a TAG overwrite. Tags are free-move (never fast-forward-guarded): a
+/// tag's `target` can be an annotated-tag-object OID rather than a commit, so it
+/// cannot be FF-classified — [`classify_ref_move`] would resolve `find_commit`
+/// on the tag object and error. The ownership gate is applied directly here
+/// instead: a create or a heddle-owned overwrite (`recorded == old`) lands; an
+/// out-of-band tag heddle never recorded is spared (`RequireForce`) exactly as an
+/// out-of-band branch advance is — never silently clobbered (heddle#316 r17).
+fn classify_tag_move(
+    old: Option<ObjectId>,
+    target: ObjectId,
+    recorded: Option<ObjectId>,
+) -> WriteVerdict {
+    match old {
+        // No tip at the destination — a fresh tag.
+        None => WriteVerdict::Write,
+        // Already at the served target — nothing to do.
+        Some(o) if o == target => WriteVerdict::Skip,
+        // heddle owns the tip it is overwriting — its published move lands.
+        Some(o) if recorded == Some(o) => WriteVerdict::Write,
+        // An out-of-band tag heddle never published — spare it unless `--force`.
+        Some(_) => WriteVerdict::RequireForce,
+    }
+}
+
 /// A served ref a push destination must write: its full name, the destination's
 /// current `old` tip (for the receive-pack command; `None`/absent = a creation),
 /// and the served `new` tip.
-struct PlannedRefWrite {
-    full_name: String,
-    old: Option<ObjectId>,
-    new: ObjectId,
+#[derive(Debug)]
+pub(crate) struct PlannedRefWrite {
+    pub(crate) full_name: String,
+    pub(crate) old: Option<ObjectId>,
+    pub(crate) new: ObjectId,
 }
 
 /// A previously-exported ref the served mirror no longer carries: it must be
 /// DELETED at the destination. Carries the destination's current `old` tip for
 /// the receive-pack delete command (`<old> <zero> <ref>`).
-struct PlannedRefDelete {
-    full_name: String,
-    old: ObjectId,
+#[derive(Debug)]
+pub(crate) struct PlannedRefDelete {
+    pub(crate) full_name: String,
+    pub(crate) old: ObjectId,
 }
 
 /// The ONE reconciliation plan EVERY push destination applies, so its published
 /// refs converge to the served frontier by construction.
-struct DestinationReconcilePlan {
+#[derive(Debug)]
+pub(crate) struct DestinationReconcilePlan {
     /// Survivors to write — creations, fast-forwards, and FORCED embargo rewinds.
-    writes: Vec<PlannedRefWrite>,
+    pub(crate) writes: Vec<PlannedRefWrite>,
     /// Previously-exported refs the mirror no longer serves AND that still exist
     /// at the destination — to delete. Scoped to heddle-owned refs (never foreign).
-    deletes: Vec<PlannedRefDelete>,
+    pub(crate) deletes: Vec<PlannedRefDelete>,
     /// The exported-refs record to persist for this destination after the push:
     /// full ref name → the tip heddle just published, plus the previously-recorded
     /// tip for any ref left in place — a still-served ref out of this push's scope
     /// OR an out-of-band tip whose retraction was skipped (so `--force` can still
     /// retract it later). A deleted ref drops out; a foreign ref never enters.
-    new_manifest: HashMap<String, ObjectId>,
+    pub(crate) new_manifest: HashMap<String, ObjectId>,
 }
 
 /// The full ref names a push may MATERIALIZE (create fresh) at a destination — the
@@ -2885,7 +2948,7 @@ fn creatable_ref_names(
 ///   scoping AND the single ownership token for both delete and force.
 /// * `force` — the user's explicit `--force`: additionally forces a true fork
 ///   AND authorizes retracting an out-of-band destination tip.
-fn plan_destination_reconcile(
+pub(crate) fn plan_destination_reconcile(
     mirror_repo: &gix::Repository,
     served_frontier: &[RefUpdate],
     creatable_names: Option<&HashSet<String>>,
@@ -2934,28 +2997,33 @@ fn plan_destination_reconcile(
                 continue;
             }
             // In the desired set: land it at the served target. A ref this push
-            // publishes is heddle-owned at its new target — record it.
-            let proceed = if matches!(update.namespace, RefNamespace::Branch | RefNamespace::Note) {
-                match classify_ref_move(mirror_repo, old, update.target, recorded)? {
-                    RefMove::Unchanged => false,
-                    RefMove::Create | RefMove::FastForward | RefMove::Rewind => true,
-                    RefMove::Diverged => {
-                        if force {
-                            true
-                        } else {
-                            return Err(GitBridgeError::NonFastForwardRef {
-                                name: full.clone(),
-                                old: old.unwrap_or_else(|| mirror_repo.object_hash().null()),
-                                new: update.target,
-                            });
-                        }
+            // publishes is heddle-owned at its new target — record it. The
+            // overwrite funnels through ONE ownership gate ([`WriteVerdict`]): the
+            // only per-namespace axis is move-classification — branch/note resolve
+            // fast-forward-vs-fork topology, a tag is free-move (its target may be
+            // an annotated-tag-object OID, not a commit) with the SAME ownership
+            // gate baked into [`classify_tag_move`]. An out-of-band destination tip
+            // heddle never recorded is spared at EVERY namespace unless `--force`.
+            let verdict = match update.namespace {
+                RefNamespace::Branch | RefNamespace::Note => {
+                    verdict_from_move(classify_ref_move(mirror_repo, old, update.target, recorded)?)
+                }
+                RefNamespace::Tag => classify_tag_move(old, update.target, recorded),
+            };
+            let proceed = match verdict {
+                WriteVerdict::Skip => false,
+                WriteVerdict::Write => true,
+                WriteVerdict::RequireForce => {
+                    if force {
+                        true
+                    } else {
+                        return Err(GitBridgeError::NonFastForwardRef {
+                            name: full.clone(),
+                            old: old.unwrap_or_else(|| mirror_repo.object_hash().null()),
+                            new: update.target,
+                        });
                     }
                 }
-            } else {
-                // Tags are not FF-guarded (a tag move is not a linear advance);
-                // they overwrite like the local `PreviousValue::Any` / the wire's
-                // no-FF-check tag path always have. Skip only a true no-op.
-                old != Some(update.target)
             };
             if proceed {
                 writes.push(PlannedRefWrite {
