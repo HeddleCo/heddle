@@ -263,17 +263,13 @@ impl FsStore {
     }
 
     fn try_get_tree_once(&self, hash: &ContentHash) -> Result<Option<Tree>> {
-        let path = hash_path(&trees_dir(&self.root), hash);
-        let loose_exists = path.exists();
-        let pack_has = if loose_exists {
-            false
-        } else if let Ok(manager) = self.pack_manager().read() {
-            manager.has_object(hash)
-        } else {
-            false
-        };
-        if (loose_exists || pack_has)
-            && let Ok(cache) = self.recent_trees.read()
+        // Cache first. The recent-object cache only ever holds trees we
+        // wrote or read this process, so a hit is authoritative for a
+        // read — no need to confirm on-disk existence first. Skipping
+        // that probe removes a `stat` (and a pack-index lookup) per
+        // call, which dominates `heddle status` on directory-heavy
+        // trees (the walker loads one subtree per directory).
+        if let Ok(cache) = self.recent_trees.read()
             && let Some(tree) = cache.get(hash)
         {
             trace!("Found tree in recent object cache");
@@ -295,6 +291,7 @@ impl FsStore {
             return Ok(Some(tree));
         }
 
+        let path = hash_path(&trees_dir(&self.root), hash);
         match read_file_bytes(&path)? {
             Some(data) => {
                 trace!(size = data.as_slice().len(), "Tree data read");
