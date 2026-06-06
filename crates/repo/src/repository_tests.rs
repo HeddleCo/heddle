@@ -127,6 +127,51 @@ fn test_snapshot_creates_state() {
 }
 
 #[test]
+fn courtesy_filename_scoped_root_only() {
+    // heddle#316 #9: the courtesy-stub filename is reserved ROOT-ANCHORED
+    // (`/HEDDLE-EMBARGO.txt`). The stub is only ever written at the worktree
+    // root, so a root-level file of that name (an operator-local under-tier
+    // stub) stays ignored, but a user's OWN `sub/HEDDLE-EMBARGO.txt` deeper in
+    // the tree must be CAPTURED — the bare filename would have gitignore-matched
+    // it at any depth and silently dropped it.
+    let (temp_dir, repo) = create_test_repo();
+    let root = temp_dir.path();
+
+    fs::write(root.join("HEDDLE-EMBARGO.txt"), "root stub").unwrap();
+    fs::create_dir_all(root.join("sub")).unwrap();
+    fs::write(root.join("sub").join("HEDDLE-EMBARGO.txt"), "user content").unwrap();
+
+    let state = repo.snapshot(Some("capture".to_string()), None).unwrap();
+    let tree = repo
+        .store()
+        .get_tree(&state.tree)
+        .unwrap()
+        .expect("snapshot tree");
+
+    assert!(
+        !tree.entries().iter().any(|e| e.name == "HEDDLE-EMBARGO.txt"),
+        "the root-level courtesy stub must stay ignored at the worktree root"
+    );
+    let sub = tree
+        .entries()
+        .iter()
+        .find(|e| e.name == "sub" && e.is_tree())
+        .expect("sub/ subtree must be captured");
+    let sub_tree = repo
+        .store()
+        .get_tree(&sub.hash)
+        .unwrap()
+        .expect("sub subtree");
+    assert!(
+        sub_tree
+            .entries()
+            .iter()
+            .any(|e| e.name == "HEDDLE-EMBARGO.txt"),
+        "a user's own sub/HEDDLE-EMBARGO.txt must be captured (root-anchored ignore)"
+    );
+}
+
+#[test]
 fn snapshot_packs_blobs_and_leaves_no_loose_blob_files() {
     // ACID + perf invariant: a successful snapshot must install
     // every new blob through the pack hot path, not as N loose

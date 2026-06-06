@@ -24,8 +24,12 @@ use tempfile::TempDir;
 
 use crate::bridge::{
     GitBridge,
-    git_core::{GitPushScope, copy_local_repo_to_bare, delete_reference_if_present, set_reference},
-    git_export::{export_all, export_tree},
+    git_core::{
+        GitPushScope, RefNamespace, collect_managed_ref_updates, copy_local_repo_to_bare,
+        delete_reference_if_present, read_exported_refs, read_mirror_managed_refs, set_reference,
+        write_exported_refs, write_mirror_managed_refs,
+    },
+    git_export::{export_all, export_current_thread, export_tree},
     git_import::{import_all, import_all_with_options, import_git_tree},
     git_import_tree::GitTreeImporter,
     git_sync::{sync_branches, sync_tags, sync_track_to_branch},
@@ -366,20 +370,38 @@ fn handle_http_backend_connection(
 
 impl GitDaemon {
     fn spawn(root: &std::path::Path) -> Self {
+        Self::spawn_with_push(root, false)
+    }
+
+    /// Spawn a daemon that also serves `receive-pack`, so the network PUSH path
+    /// (`push_network_remote_with_updates`) can be exercised against a real wire
+    /// remote — the only way to cover the URL/network destination reconciliation
+    /// (heddle#316 r11). `git daemon` denies anonymous push unless
+    /// `--enable=receive-pack` is passed.
+    fn spawn_push(root: &std::path::Path) -> Self {
+        Self::spawn_with_push(root, true)
+    }
+
+    fn spawn_with_push(root: &std::path::Path, allow_push: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
         let port = listener.local_addr().expect("listener addr").port();
         drop(listener);
 
+        let mut args: Vec<String> = vec![
+            "daemon".to_string(),
+            "--reuseaddr".to_string(),
+            "--export-all".to_string(),
+            format!("--base-path={}", root.display()),
+            "--listen=127.0.0.1".to_string(),
+            format!("--port={port}"),
+        ];
+        if allow_push {
+            args.push("--enable=receive-pack".to_string());
+        }
+        args.push(root.to_str().expect("root path").to_string());
+
         let child = Command::new("git")
-            .args([
-                "daemon",
-                "--reuseaddr",
-                "--export-all",
-                &format!("--base-path={}", root.display()),
-                "--listen=127.0.0.1",
-                &format!("--port={port}"),
-                root.to_str().expect("root path"),
-            ])
+            .args(&args)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
@@ -2802,5 +2824,3310 @@ fn import_honors_legacy_heddle_change_id_trailer() {
         recovered.to_string_full(),
         legacy_change_id,
         "Phase B: legacy trailer change_ids must round-trip"
+    );
+}
+
+#[test]
+fn export_lags_public_branch_to_frontier_emitting_absence_for_embargoed_tip() {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    // A real principal so snapshot states carry a non-Unknown attribution and
+    // the bridge can mint Git commits without an external identity fallback.
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    // Build a linear thread: public base A, then tip B.
+    std::fs::write(heddle_temp.path().join("a.txt"), b"base\n").unwrap();
+    repo.snapshot(Some("base".into()), None).unwrap();
+    let state_a = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+
+    std::fs::write(heddle_temp.path().join("b.txt"), b"embargoed fix\n").unwrap();
+    repo.snapshot(Some("fix".into()), None).unwrap();
+    let state_b = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+    assert_ne!(state_a, state_b);
+
+    // Embargo the tip B (strictest Private tier). Downward-closure leaves the
+    // public frontier at A.
+    repo.put_state_visibility(StateVisibility {
+        state: state_b,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Grace Hopper".into(),
+            email: "grace@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+
+    let mut bridge = GitBridge::new(&repo);
+    let stats = export_all(&mut bridge).expect("export");
+
+    // The embargoed tip is never minted into the public mirror (absence) ...
+    assert!(
+        bridge.mapping.get_git(&state_b).is_none(),
+        "embargoed tip must not be minted into the public mirror"
+    );
+    let oid_a = bridge
+        .mapping
+        .get_git(&state_a)
+        .expect("public base A must be minted");
+    // ... and refs/heads/main lags to A, never the raw embargoed tip B.
+    let main = stats
+        .branches
+        .iter()
+        .find(|b| b.name == "main")
+        .expect("main branch must be exported");
+    assert_eq!(
+        main.tip, oid_a,
+        "public branch must lag to the visibility frontier (A), not the embargoed tip"
+    );
+}
+
+/// #316 / PR #528 Finding 1: a commit exported while PUBLIC, then later marked
+/// `Private`, must NOT keep being served on the next export. The stale
+/// ChangeId→OID mapping is rebuilt from the notes/sidecar every run, so the
+/// export must re-validate current visibility and retract the public branch
+/// down to the served frontier (here, the still-public base A).
+#[test]
+fn export_retracts_branch_when_public_commit_is_later_embargoed() {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    // Linear thread: public base A, then public tip B.
+    std::fs::write(heddle_temp.path().join("a.txt"), b"base\n").unwrap();
+    repo.snapshot(Some("base".into()), None).unwrap();
+    let state_a = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+    std::fs::write(heddle_temp.path().join("b.txt"), b"fix\n").unwrap();
+    repo.snapshot(Some("fix".into()), None).unwrap();
+    let state_b = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+
+    // Export run 1 — both public. The branch advertises the tip B.
+    let mut bridge = GitBridge::new(&repo);
+    let run1 = export_all(&mut bridge).expect("first export");
+    let oid_a = bridge.mapping.get_git(&state_a).expect("A minted");
+    let oid_b = bridge.mapping.get_git(&state_b).expect("B minted");
+    let run1_main = run1
+        .branches
+        .iter()
+        .find(|b| b.name == "main")
+        .expect("main exported");
+    assert_eq!(run1_main.tip, oid_b, "run 1 branch advertises the public tip B");
+
+    // B is embargoed AFTER it was already exported public.
+    repo.put_state_visibility(StateVisibility {
+        state: state_b,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Grace Hopper".into(),
+            email: "grace@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+
+    // Export run 2 — the stale B→OID mapping is rebuilt from notes, but the
+    // re-validation purge drops it and the branch is retracted to A.
+    let run2 = export_all(&mut bridge).expect("second export");
+    let run2_main = run2
+        .branches
+        .iter()
+        .find(|b| b.name == "main")
+        .expect("main re-exported");
+    assert_eq!(
+        run2_main.tip, oid_a,
+        "run 2 must lag the public branch to A, retracting the now-embargoed B"
+    );
+    assert!(
+        bridge.mapping.get_git(&state_b).is_none(),
+        "the now-Private B must be purged from the served mapping"
+    );
+
+    // The mirror ref itself no longer serves B.
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    let mut main_ref = mirror
+        .find_reference("refs/heads/main")
+        .expect("main ref present");
+    let tip = main_ref.peel_to_id().unwrap().detach();
+    assert_eq!(tip, oid_a, "refs/heads/main must point at A after retraction");
+    assert_ne!(tip, oid_b, "refs/heads/main must not keep serving embargoed B");
+}
+
+/// #316 / PR #528 r3 Finding 2: when a public commit is later embargoed, the
+/// purge drops its ChangeId→OID mapping AND its `refs/notes/heddle` entry must
+/// be retracted too. `collect_ref_updates` copies `refs/notes/*` to the mirror
+/// alongside branches and tags, so a note left for a withheld commit keeps
+/// publishing that commit's metadata (change_id, agent, status) even after the
+/// branch was retracted — a metadata leak. The note for a still-served commit
+/// must survive.
+#[test]
+fn export_retracts_note_for_retracted_commit() {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    // Linear thread: public base A, then public tip B.
+    std::fs::write(heddle_temp.path().join("a.txt"), b"base\n").unwrap();
+    repo.snapshot(Some("base".into()), None).unwrap();
+    let state_a = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+    std::fs::write(heddle_temp.path().join("b.txt"), b"fix\n").unwrap();
+    repo.snapshot(Some("fix".into()), None).unwrap();
+    let state_b = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+
+    // Export run 1 — both public. Notes get written for A and B.
+    let mut bridge = GitBridge::new(&repo);
+    export_all(&mut bridge).expect("first export");
+    let oid_a = bridge.mapping.get_git(&state_a).expect("A minted");
+    let oid_b = bridge.mapping.get_git(&state_b).expect("B minted");
+    {
+        let mirror = bridge.open_git_repo().expect("open mirror");
+        assert!(
+            crate::bridge::git_notes::read_note(&mirror, oid_a)
+                .unwrap()
+                .is_some(),
+            "A must carry a note after run 1"
+        );
+        assert!(
+            crate::bridge::git_notes::read_note(&mirror, oid_b)
+                .unwrap()
+                .is_some(),
+            "B must carry a note after run 1"
+        );
+    }
+
+    // B is embargoed AFTER it was already exported public.
+    repo.put_state_visibility(StateVisibility {
+        state: state_b,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Grace Hopper".into(),
+            email: "grace@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+
+    // Export run 2 — B is purged and its note must be retracted; A's note,
+    // still served, must remain.
+    export_all(&mut bridge).expect("second export");
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    assert!(
+        crate::bridge::git_notes::read_note(&mirror, oid_b)
+            .unwrap()
+            .is_none(),
+        "run 2 must retract the note for the now-embargoed B (no metadata leak)"
+    );
+    assert!(
+        crate::bridge::git_notes::read_note(&mirror, oid_a)
+            .unwrap()
+            .is_some(),
+        "A is still served — its note must survive the retraction"
+    );
+}
+
+/// #316 / PR #528 r9 FINDING B: a thread-SCOPED export must retract the note
+/// for any mapped out-of-thread commit that is unserved under the SAME
+/// downward-closure rule the branch frontier uses — not just the scoped
+/// `embargoed_oids`. A commit whose DIRECT tier is public but whose ANCESTOR
+/// became Private is not served (its branch would be withheld), yet
+/// `purge_unserved_mappings` only walks the scoped thread's reachable states,
+/// so without the full-target servedness pass its `refs/notes/heddle` entry
+/// stays in the mirror and gets pushed — a notes leak in scoped exports.
+#[test]
+fn scoped_export_retracts_note_for_commit_with_embargoed_ancestor() {
+    use chrono::Utc;
+    use objects::object::{Attribution, Principal, State, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let put_state = |content: &[u8], parents: Vec<ChangeId>| -> State {
+        let store = repo.store();
+        let blob_hash = store
+            .put_blob(&Blob::from_slice(content))
+            .expect("put blob");
+        let tree_hash = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
+            .expect("put tree");
+        let state = State::new(
+            tree_hash,
+            parents,
+            Attribution::human(Principal::new("Alice", "alice@example.com")),
+        );
+        store.put_state(&state).expect("put state");
+        state
+    };
+
+    // main line: public root R → public tip X (X descends from R).
+    let state_r = put_state(b"root\n", Vec::new());
+    let state_x = put_state(b"tip\n", vec![state_r.change_id]);
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &state_x.change_id)
+        .expect("set main to X");
+    // A separate, independent line on thread `other`: public root O.
+    let state_o = put_state(b"other root\n", Vec::new());
+    repo.refs()
+        .set_thread(&ThreadName::new("other"), &state_o.change_id)
+        .expect("set other to O");
+
+    // Run 1 — everything public. Notes get written for R, X, and O.
+    let mut bridge = GitBridge::new(&repo);
+    export_all(&mut bridge).expect("first export");
+    let oid_x = bridge
+        .mapping
+        .get_git(&state_x.change_id)
+        .expect("X minted while public");
+    let oid_o = bridge
+        .mapping
+        .get_git(&state_o.change_id)
+        .expect("O minted while public");
+    {
+        let mirror = bridge.open_git_repo().expect("open mirror");
+        assert!(
+            crate::bridge::git_notes::read_note(&mirror, oid_x)
+                .unwrap()
+                .is_some(),
+            "X must carry a note after run 1"
+        );
+    }
+
+    // Embargo R (X's ANCESTOR) — X's own tier stays public, but downward
+    // closure now withholds X.
+    repo.put_state_visibility(StateVisibility {
+        state: state_r.change_id,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Alice".into(),
+            email: "alice@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+
+    // Run 2 — SCOPED to `other`, which does NOT reach R or X. The scoped purge
+    // never examines X, but the notes-ref retraction must still withhold X's
+    // note because its ancestor R is unserved.
+    export_current_thread(&mut bridge, "other").expect("scoped export");
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    assert!(
+        crate::bridge::git_notes::read_note(&mirror, oid_x)
+            .unwrap()
+            .is_none(),
+        "scoped export must retract X's note (ancestor embargoed) — no notes leak"
+    );
+    assert!(
+        crate::bridge::git_notes::read_note(&mirror, oid_o)
+            .unwrap()
+            .is_some(),
+        "O is served — its note must survive the scoped retraction"
+    );
+}
+
+/// #316 / PR #528 r14: a SCOPED export must reconcile cross-thread embargo. A
+/// prior all-thread export publishes threads `alpha` and `beta`; then a commit
+/// reachable ONLY via `beta` is marked Private. A scoped export of `alpha` (not
+/// `beta`) must STILL rewind `beta`'s `refs/heads/` off the now-embargoed commit:
+/// the mirror reconcile spans the WHOLE mirror's served frontier, not just the
+/// export's scoped thread. `alpha`'s own ref is left untouched.
+#[test]
+fn scoped_export_reconciles_cross_thread_embargo() {
+    use chrono::Utc;
+    use objects::object::{Attribution, Principal, State, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let put_state = |content: &[u8], parents: Vec<ChangeId>| -> State {
+        let store = repo.store();
+        let blob_hash = store
+            .put_blob(&Blob::from_slice(content))
+            .expect("put blob");
+        let tree_hash = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
+            .expect("put tree");
+        let state = State::new(
+            tree_hash,
+            parents,
+            Attribution::human(Principal::new("Alice", "alice@example.com")),
+        );
+        store.put_state(&state).expect("put state");
+        state
+    };
+
+    // Two independent lines (no shared ancestry).
+    // alpha: A0 → A1 (both public). beta: B0 → B1 → B2 (all public).
+    let state_a0 = put_state(b"a0\n", Vec::new());
+    let state_a1 = put_state(b"a1\n", vec![state_a0.change_id]);
+    repo.refs()
+        .set_thread(&ThreadName::new("alpha"), &state_a1.change_id)
+        .expect("set alpha to A1");
+    let state_b0 = put_state(b"b0\n", Vec::new());
+    let state_b1 = put_state(b"b1\n", vec![state_b0.change_id]);
+    let state_b2 = put_state(b"b2\n", vec![state_b1.change_id]);
+    repo.refs()
+        .set_thread(&ThreadName::new("beta"), &state_b2.change_id)
+        .expect("set beta to B2");
+
+    // Run 1 — everything public, all-thread export. Both branches published.
+    let mut bridge = GitBridge::new(&repo);
+    let run1 = export_all(&mut bridge).expect("first export");
+    let oid_a1 = bridge
+        .mapping
+        .get_git(&state_a1.change_id)
+        .expect("A1 minted while public");
+    let oid_b0 = bridge
+        .mapping
+        .get_git(&state_b0.change_id)
+        .expect("B0 minted while public");
+    let oid_b2 = bridge
+        .mapping
+        .get_git(&state_b2.change_id)
+        .expect("B2 minted while public");
+    assert!(
+        run1.branches
+            .iter()
+            .any(|b| b.name == "beta" && b.tip == oid_b2),
+        "run 1 advertises beta at its public tip B2"
+    );
+
+    // Embargo B1 — a commit reachable ONLY via beta. Downward closure withholds
+    // B1 and its descendant B2; B0 stays served.
+    repo.put_state_visibility(StateVisibility {
+        state: state_b1.change_id,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Alice".into(),
+            email: "alice@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+
+    // Run 2 — SCOPED to alpha, which does NOT reach beta. The mirror reconcile
+    // must STILL rewind beta off the embargoed commit; alpha is untouched.
+    export_current_thread(&mut bridge, "alpha").expect("scoped export");
+    let mirror = bridge.open_git_repo().expect("open mirror");
+
+    // beta rewound to its served frontier B0 — the embargoed B1/B2 are no longer
+    // reachable from any mirror ref.
+    let beta_tip = mirror
+        .find_reference("refs/heads/beta")
+        .expect("beta still present at its served frontier")
+        .peel_to_id()
+        .expect("peel beta")
+        .detach();
+    assert_eq!(
+        beta_tip, oid_b0,
+        "scoped alpha export must rewind beta off the embargoed commit to B0"
+    );
+    assert_ne!(
+        beta_tip, oid_b2,
+        "beta must not keep serving the now-embargoed tip B2"
+    );
+
+    // alpha's own ref is unaffected by the scoped export.
+    let alpha_tip = mirror
+        .find_reference("refs/heads/alpha")
+        .expect("alpha present")
+        .peel_to_id()
+        .expect("peel alpha")
+        .detach();
+    assert_eq!(
+        alpha_tip, oid_a1,
+        "scoped export must leave its own thread's ref at A1"
+    );
+}
+
+/// #316 / PR #528 r16 (close-the-class): the DESTINATION-side analog of
+/// [`scoped_export_reconciles_cross_thread_embargo`]. r14 made the MIRROR
+/// reconcile whole-mirror, so a scoped export of `alpha` rewinds an out-of-scope
+/// `beta` off an embargoed commit — but the DESTINATION push still derived its
+/// desired set from the SCOPE-FILTERED ref list, so the out-of-scope `beta` fell
+/// into a "still served, leave untouched" arm and the destination KEPT SERVING
+/// the embargoed tip. The destination reconcile now derives from the SAME
+/// whole-mirror served frontier as the mirror reconcile, so a scoped push of
+/// alpha rewinds the destination's `beta` BY CONSTRUCTION. An out-of-band
+/// destination tip on a third ref must still be spared — widening the desired set
+/// to whole-mirror must NOT weaken r13's ownership gate.
+#[test]
+fn scoped_push_propagates_cross_thread_embargo_to_destination() {
+    use chrono::Utc;
+    use objects::object::{Attribution, Principal, State, StateVisibility, VisibilityTier};
+    use refs::Head;
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let put_state = |content: &[u8], parents: Vec<ChangeId>| -> State {
+        let store = repo.store();
+        let blob_hash = store
+            .put_blob(&Blob::from_slice(content))
+            .expect("put blob");
+        let tree_hash = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
+            .expect("put tree");
+        let state = State::new(
+            tree_hash,
+            parents,
+            Attribution::human(Principal::new("Alice", "alice@example.com")),
+        );
+        store.put_state(&state).expect("put state");
+        state
+    };
+
+    // Three independent lines (no shared ancestry).
+    // alpha: A0 → A1 (public). beta: B0 → B1 → B2 (public; B1 embargoed below).
+    // gamma: G0 (public; later embargoed AND advanced out of band at the destination).
+    let state_a0 = put_state(b"a0\n", Vec::new());
+    let state_a1 = put_state(b"a1\n", vec![state_a0.change_id]);
+    repo.refs()
+        .set_thread(&ThreadName::new("alpha"), &state_a1.change_id)
+        .expect("set alpha to A1");
+    let state_b0 = put_state(b"b0\n", Vec::new());
+    let state_b1 = put_state(b"b1\n", vec![state_b0.change_id]);
+    let state_b2 = put_state(b"b2\n", vec![state_b1.change_id]);
+    repo.refs()
+        .set_thread(&ThreadName::new("beta"), &state_b2.change_id)
+        .expect("set beta to B2");
+    let state_g0 = put_state(b"g0\n", Vec::new());
+    repo.refs()
+        .set_thread(&ThreadName::new("gamma"), &state_g0.change_id)
+        .expect("set gamma to G0");
+
+    // Run 1 — everything public, full export+push to a local destination. All three
+    // branches are published AND recorded as heddle-exported there.
+    let mut bridge = GitBridge::new(&repo);
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    bridge
+        .export_to_path(&dest_path)
+        .expect("first full export+push publishes alpha, beta, gamma");
+    let oid_a1 = bridge.mapping.get_git(&state_a1.change_id).expect("A1 minted");
+    let oid_b0 = bridge.mapping.get_git(&state_b0.change_id).expect("B0 minted");
+    let oid_b2 = bridge.mapping.get_git(&state_b2.change_id).expect("B2 minted");
+    let oid_g0 = bridge.mapping.get_git(&state_g0.change_id).expect("G0 minted");
+    {
+        let dest = gix::open(&dest_path).expect("open dest");
+        assert_eq!(
+            dest.find_reference("refs/heads/beta")
+                .unwrap()
+                .peel_to_id()
+                .unwrap()
+                .detach(),
+            oid_b2,
+            "run 1 publishes beta at its public tip B2 to the destination"
+        );
+    }
+
+    // Out-of-band advance: move the DESTINATION's gamma to a NEW commit G_oob that
+    // heddle never published (a descendant of the published G0). Heddle's record
+    // still says gamma == G0, so the ownership gate must spare G_oob.
+    let oid_g_oob = {
+        let dest = gix::open(&dest_path).expect("open dest");
+        commit_with_tree(
+            &dest,
+            Some("refs/heads/gamma"),
+            empty_tree_oid(&dest),
+            "out-of-band gamma",
+            &[oid_g0],
+        )
+    };
+
+    // Embargo B1 (reachable ONLY via beta) AND the whole gamma line (G0). Downward
+    // closure withholds B1/B2 (B0 stays served) and the whole gamma line (no served
+    // frontier ⇒ gamma is retracted from the mirror).
+    let embargo = |state: ChangeId| {
+        repo.put_state_visibility(StateVisibility {
+            state,
+            tier: VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+            embargo_until: None,
+            declarer: Principal {
+                name: "Alice".into(),
+                email: "alice@example.com".into(),
+            },
+            declared_at: Utc::now(),
+            signature: None,
+            supersedes: None,
+        })
+        .unwrap();
+    };
+    embargo(state_b1.change_id);
+    embargo(state_g0.change_id);
+
+    // Attach HEAD to alpha so a CurrentThread push scopes its EXPORT to alpha —
+    // alpha reaches neither beta nor gamma.
+    repo.refs()
+        .write_head(&Head::Attached {
+            thread: ThreadName::new("alpha"),
+        })
+        .expect("attach HEAD to alpha");
+
+    // Run 2 — SCOPED push of alpha to the SAME destination. The destination reconcile
+    // is driven by the whole-mirror served frontier, so it must rewind the
+    // destination's out-of-scope beta off the embargoed commit even though alpha
+    // does not reach beta.
+    bridge
+        .push_with_scope(
+            dest_path.to_str().expect("dest path"),
+            GitPushScope::CurrentThread,
+        )
+        .expect("scoped push of alpha");
+
+    let dest = gix::open(&dest_path).expect("reopen dest");
+
+    // beta REWOUND at the destination to its served frontier B0 — the embargoed
+    // B1/B2 are no longer served from the destination. This is the leak r16 closes.
+    let beta_tip = dest
+        .find_reference("refs/heads/beta")
+        .expect("beta still present at its served frontier")
+        .peel_to_id()
+        .expect("peel beta")
+        .detach();
+    assert_eq!(
+        beta_tip, oid_b0,
+        "scoped push of alpha must rewind the destination's beta off the embargoed commit to B0"
+    );
+    assert_ne!(
+        beta_tip, oid_b2,
+        "the destination must not keep serving the now-embargoed tip B2"
+    );
+
+    // alpha's own destination ref is at A1 and unaffected by the scoped push.
+    let alpha_tip = dest
+        .find_reference("refs/heads/alpha")
+        .expect("alpha present")
+        .peel_to_id()
+        .expect("peel alpha")
+        .detach();
+    assert_eq!(
+        alpha_tip, oid_a1,
+        "scoped push must leave alpha at A1 at the destination"
+    );
+
+    // The out-of-band gamma tip is SPARED: heddle's record (G0) does not match the
+    // destination's current tip (G_oob), so the ownership gate skips the retraction
+    // delete — widening the desired set to whole-mirror did NOT weaken r13.
+    let gamma_tip = dest
+        .find_reference("refs/heads/gamma")
+        .expect("gamma survives — heddle must not delete a tip it never published")
+        .peel_to_id()
+        .expect("peel gamma")
+        .detach();
+    assert_eq!(
+        gamma_tip, oid_g_oob,
+        "the out-of-band gamma tip must survive the scoped push (r13 ownership gate holds)"
+    );
+}
+
+/// #316 / PR #528 Finding 1 (root case): when the WHOLE line is embargoed to
+/// its root after a prior public export, the stale public branch must be
+/// deleted, not left pointing at the now-embargoed commit.
+#[test]
+fn export_deletes_branch_when_whole_line_is_later_embargoed() {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    // A single public state on main.
+    std::fs::write(heddle_temp.path().join("a.txt"), b"only\n").unwrap();
+    repo.snapshot(Some("only".into()), None).unwrap();
+    let state_a = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+
+    let mut bridge = GitBridge::new(&repo);
+    export_all(&mut bridge).expect("first export");
+    assert!(
+        bridge.mapping.get_git(&state_a).is_some(),
+        "A minted while public"
+    );
+
+    // Embargo EVERY state on the line — including the seeded root — so the
+    // whole line is embargoed to its root and no served ancestor remains.
+    for state in repo.store().list_states().unwrap() {
+        repo.put_state_visibility(StateVisibility {
+            state,
+            tier: VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+            embargo_until: None,
+            declarer: Principal {
+                name: "Grace Hopper".into(),
+                email: "grace@example.com".into(),
+            },
+            declared_at: Utc::now(),
+            signature: None,
+            supersedes: None,
+        })
+        .unwrap();
+    }
+
+    let run2 = export_all(&mut bridge).expect("second export");
+    assert!(
+        run2.branches.iter().all(|b| b.name != "main"),
+        "main must not be advertised once the whole line is embargoed"
+    );
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    assert!(
+        mirror.find_reference("refs/heads/main").is_err(),
+        "the stale public branch must be deleted, not left serving the embargoed commit"
+    );
+}
+
+/// #316 / PR #528 r2 Finding 1 (sibling): a branch exported at a PUBLIC commit,
+/// then reset/rebased onto an unrelated `Private` root, must be deleted from the
+/// mirror. The old public tip is NOT embargoed — it is simply no longer
+/// reachable from the new tip — so r1's embargoed-tip retraction never fires.
+/// The unifying invariant catches it anyway: a mirror ref exists iff its CURRENT
+/// target resolves to a served frontier, and the new Private root resolves to
+/// none.
+#[test]
+fn export_deletes_branch_when_thread_reset_to_private_root() {
+    use chrono::Utc;
+    use objects::object::{
+        Attribution, Principal, State, StateVisibility, VisibilityTier,
+    };
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let put_state = |content: &[u8], parents: Vec<ChangeId>| -> State {
+        let store = repo.store();
+        let blob_hash = store
+            .put_blob(&Blob::from_slice(content))
+            .expect("put blob");
+        let tree_hash = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
+            .expect("put tree");
+        let state = State::new(
+            tree_hash,
+            parents,
+            Attribution::human(Principal::new("Alice", "alice@example.com")),
+        );
+        store.put_state(&state).expect("put state");
+        state
+    };
+
+    // Public root A on main.
+    let state_a = put_state(b"public base\n", Vec::new());
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &state_a.change_id)
+        .expect("set main to A");
+
+    let mut bridge = GitBridge::new(&repo);
+    let run1 = export_all(&mut bridge).expect("first export");
+    let oid_a = bridge
+        .mapping
+        .get_git(&state_a.change_id)
+        .expect("A minted while public");
+    assert!(
+        run1.branches
+            .iter()
+            .any(|b| b.name == "main" && b.tip == oid_a),
+        "run 1 advertises main at the public root A"
+    );
+
+    // Reset main onto an unrelated Private root B (no shared ancestry with A).
+    let state_b = put_state(b"private root\n", Vec::new());
+    repo.put_state_visibility(StateVisibility {
+        state: state_b.change_id,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Alice".into(),
+            email: "alice@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &state_b.change_id)
+        .expect("reset main to B");
+
+    // A stays public — NOT embargoed — so r1's embargoed-tip retraction cannot
+    // fire. B's line has no served frontier, so main must be deleted anyway.
+    let run2 = export_all(&mut bridge).expect("second export");
+    assert!(
+        run2.branches.iter().all(|b| b.name != "main"),
+        "main must not be advertised once reset onto a Private root"
+    );
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    assert!(
+        mirror.find_reference("refs/heads/main").is_err(),
+        "the stale public branch must be deleted after a reset to a Private root"
+    );
+    // Sanity: A is still served — proving the deletion is driven by the new
+    // target resolving to no served frontier, not by an embargo of the old tip.
+    assert!(
+        bridge.mapping.get_git(&state_a.change_id).is_some(),
+        "the old public tip A remains served; deletion is not driven by an embargo of A"
+    );
+}
+
+/// #316 / PR #528 r2 Finding 2 (sibling): a marker exported as a tag at a PUBLIC
+/// state A, then retargeted to a `Private` state B, must have its stale tag
+/// deleted. The old tag tip A is NOT embargoed (still served), so r1's
+/// embargoed-tip retraction never fires — but the marker's CURRENT target (B) is
+/// not served, so the unified invariant deletes the tag.
+#[test]
+fn export_deletes_tag_when_marker_retargeted_to_private() {
+    use chrono::Utc;
+    use objects::object::{
+        Attribution, Principal, State, StateVisibility, VisibilityTier,
+    };
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let put_state = |content: &[u8], parents: Vec<ChangeId>| -> State {
+        let store = repo.store();
+        let blob_hash = store
+            .put_blob(&Blob::from_slice(content))
+            .expect("put blob");
+        let tree_hash = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
+            .expect("put tree");
+        let state = State::new(
+            tree_hash,
+            parents,
+            Attribution::human(Principal::new("Alice", "alice@example.com")),
+        );
+        store.put_state(&state).expect("put state");
+        state
+    };
+
+    // Public state A on main, plus a marker v1.0 pinned to A.
+    let state_a = put_state(b"public release\n", Vec::new());
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &state_a.change_id)
+        .expect("set main to A");
+    repo.refs()
+        .create_marker(&MarkerName::new("v1.0"), &state_a.change_id)
+        .expect("create marker at A");
+
+    let mut bridge = GitBridge::new(&repo);
+    let run1 = export_all(&mut bridge).expect("first export");
+    let oid_a = bridge
+        .mapping
+        .get_git(&state_a.change_id)
+        .expect("A minted while public");
+    assert!(
+        run1.tags.iter().any(|t| t.name == "v1.0" && t.tip == oid_a),
+        "run 1 publishes tag v1.0 at the public state A"
+    );
+
+    // Retarget v1.0 onto a Private state B (never minted into the mirror).
+    let state_b = put_state(b"private release\n", Vec::new());
+    repo.put_state_visibility(StateVisibility {
+        state: state_b.change_id,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Alice".into(),
+            email: "alice@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+    repo.refs()
+        .delete_marker(&MarkerName::new("v1.0"))
+        .expect("clear old marker");
+    repo.refs()
+        .create_marker(&MarkerName::new("v1.0"), &state_b.change_id)
+        .expect("retarget marker to B");
+
+    // A is still served (not embargoed), so r1's stale-tag retraction cannot
+    // fire — but B is not served, so the tag must be deleted by the invariant.
+    let run2 = export_all(&mut bridge).expect("second export");
+    assert!(
+        run2.tags.iter().all(|t| t.name != "v1.0"),
+        "v1.0 must not be published once retargeted to a Private state"
+    );
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    assert!(
+        mirror.find_reference("refs/tags/v1.0").is_err(),
+        "the stale public tag must be deleted after retarget to a Private state"
+    );
+    assert!(
+        bridge.mapping.get_git(&state_a.change_id).is_some(),
+        "the old tag tip A remains served; deletion is not driven by an embargo of A"
+    );
+}
+
+/// #316 / PR #528 r18 (the dual of the embargo retraction): the marker reconcile
+/// must NOT conflate "unserved (embargoed)" with "served-but-not-minted
+/// (out-of-scope)". A marker absent from the projected desired set has two
+/// causes the desired set alone cannot tell apart — its target is genuinely
+/// unserved (delete the stale tag, correct), OR its target is a still-PUBLIC
+/// state that this scoped export simply did not mint into the mirror, so it has
+/// no git OID in the mapping yet (preserve the prior tag). Deleting in the second
+/// case spuriously RETRACTS a previously-exported public tag until an all-thread
+/// export re-mints the target. This is the tag-side analog of the head rule: a
+/// scoped export neither materializes a brand-new ref nor deletes a still-served
+/// one it merely didn't mint.
+///
+/// The trigger that drives a SERVED marker target out of the mapping (the only
+/// way the `None` arm is reached for a public target) is a RETARGET to a
+/// not-yet-minted out-of-scope public state: a stationary marker's target stays
+/// in the mapping via the notes/sidecar rebuild, so it goes through the `Some`
+/// arm. The symmetric `Private`-retarget case (genuinely unserved) is covered by
+/// [`export_deletes_tag_when_marker_retargeted_to_private`] — together they prove
+/// the reconcile distinguishes served-but-unminted (preserve) from unserved
+/// (delete).
+#[test]
+fn scoped_export_preserves_unminted_out_of_scope_public_tag() {
+    use refs::Head;
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let put_state = |content: &[u8], parents: Vec<ChangeId>| -> objects::object::State {
+        use objects::object::{Attribution, Principal, State};
+        let store = repo.store();
+        let blob_hash = store
+            .put_blob(&Blob::from_slice(content))
+            .expect("put blob");
+        let tree_hash = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
+            .expect("put tree");
+        let state = State::new(
+            tree_hash,
+            parents,
+            Attribution::human(Principal::new("Alice", "alice@example.com")),
+        );
+        store.put_state(&state).expect("put state");
+        state
+    };
+
+    // Two independent public lines. alpha: A (the scoped thread). beta: B (a
+    // B-only state pinned by marker v1.0). alpha never reaches beta.
+    let state_a = put_state(b"alpha\n", Vec::new());
+    repo.refs()
+        .set_thread(&ThreadName::new("alpha"), &state_a.change_id)
+        .expect("set alpha to A");
+    let state_b = put_state(b"beta release\n", Vec::new());
+    repo.refs()
+        .set_thread(&ThreadName::new("beta"), &state_b.change_id)
+        .expect("set beta to B");
+    repo.refs()
+        .create_marker(&MarkerName::new("v1.0"), &state_b.change_id)
+        .expect("create marker v1.0 at B");
+
+    // Run 1 — full export+push to a real destination. Both threads + the tag land,
+    // and B is minted into the mirror at oid_b.
+    let mut bridge = GitBridge::new(&repo);
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    bridge
+        .export_to_path(&dest_path)
+        .expect("first full export publishes alpha, beta, and tag v1.0");
+    let oid_b = bridge
+        .mapping
+        .get_git(&state_b.change_id)
+        .expect("B minted while public");
+    {
+        let dest = gix::open(&dest_path).expect("open dest");
+        assert_eq!(
+            dest.find_reference("refs/tags/v1.0")
+                .expect("run 1 publishes tag v1.0 to the destination")
+                .peel_to_id()
+                .expect("peel v1.0")
+                .detach(),
+            oid_b,
+            "run 1 publishes tag v1.0 at the public state B"
+        );
+    }
+
+    // Advance beta to a NEW public state C and RETARGET v1.0 onto it. C has never
+    // been exported, so it carries no note/sidecar mapping — the only way a still
+    // public marker target reaches the reconcile's `None` arm.
+    let state_c = put_state(b"beta rc\n", vec![state_b.change_id]);
+    repo.refs()
+        .set_thread(&ThreadName::new("beta"), &state_c.change_id)
+        .expect("advance beta to C");
+    repo.refs()
+        .delete_marker(&MarkerName::new("v1.0"))
+        .expect("clear old marker");
+    repo.refs()
+        .create_marker(&MarkerName::new("v1.0"), &state_c.change_id)
+        .expect("retarget marker v1.0 to C");
+
+    // Attach HEAD to alpha so a CurrentThread push scopes the EXPORT to alpha,
+    // which does NOT reach C and so does NOT mint it this run.
+    repo.refs()
+        .write_head(&Head::Attached {
+            thread: ThreadName::new("alpha"),
+        })
+        .expect("attach HEAD to alpha");
+
+    // Sanity: C is genuinely absent from the mapping going into the scoped push —
+    // this is the served-but-unminted condition the fix must handle.
+    assert!(
+        bridge.mapping.get_git(&state_c.change_id).is_none(),
+        "C must be unminted so the marker reconcile takes the `None` arm"
+    );
+
+    // Run 2 — SCOPED push of alpha. C stays PUBLIC and served; the scoped export
+    // just doesn't mint it. The marker reconcile must PRESERVE the existing tag
+    // (at its prior oid_b) rather than retract it as if C had become unserved — a
+    // later all-thread export will re-mint C and advance the tag.
+    bridge
+        .push_with_scope(
+            dest_path.to_str().expect("dest path"),
+            GitPushScope::CurrentThread,
+        )
+        .expect("scoped push of alpha");
+
+    // The mirror must KEEP refs/tags/v1.0 — a served-but-unminted marker target is
+    // not a stale tag.
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    assert_eq!(
+        mirror
+            .find_reference("refs/tags/v1.0")
+            .expect("mirror must keep the served-but-unminted public tag v1.0")
+            .peel_to_id()
+            .expect("peel mirror v1.0")
+            .detach(),
+        oid_b,
+        "the scoped export must not retract a tag whose target is still public"
+    );
+
+    // ...and the destination reconcile must NOT propagate a deletion.
+    let dest = gix::open(&dest_path).expect("reopen dest");
+    assert_eq!(
+        dest.find_reference("refs/tags/v1.0")
+            .expect("destination must keep the served-but-unminted public tag v1.0")
+            .peel_to_id()
+            .expect("peel dest v1.0")
+            .detach(),
+        oid_b,
+        "the scoped push must not delete a tag whose target is still public"
+    );
+}
+
+/// #316 / PR #528 — fixture helper for the reconcile conformance matrices: a
+/// PUBLIC state holding one file, attributed to a real principal so the export
+/// mints it without any git-identity config.
+fn matrix_put_state(
+    repo: &Repository,
+    content: &[u8],
+    parents: Vec<ChangeId>,
+) -> objects::object::State {
+    use objects::object::{Attribution, Principal, State};
+    let store = repo.store();
+    let blob_hash = store
+        .put_blob(&Blob::from_slice(content))
+        .expect("put blob");
+    let tree_hash = store
+        .put_tree(&Tree::from_entries(vec![
+            TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+        ]))
+        .expect("put tree");
+    let state = State::new(
+        tree_hash,
+        parents,
+        Attribution::human(Principal::new("Alice", "alice@example.com")),
+    );
+    store.put_state(&state).expect("put state");
+    state
+}
+
+/// Mark `state` Private so the export treats it as unserved (embargoed).
+fn matrix_embargo(repo: &Repository, state: ChangeId) {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+    repo.put_state_visibility(StateVisibility {
+        state,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Alice".into(),
+            email: "alice@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+}
+
+/// Read the mirror's `refs/tags/<name>` tip, or `None` when the tag is absent.
+fn matrix_mirror_tag(bridge: &GitBridge, name: &str) -> Option<gix::hash::ObjectId> {
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    mirror
+        .find_reference(&format!("refs/tags/{name}"))
+        .ok()
+        .and_then(|mut r| r.peel_to_id().ok().map(|id| id.detach()))
+}
+
+/// Read the mirror's `refs/heads/<name>` tip, or `None` when the branch is absent.
+fn matrix_mirror_head(bridge: &GitBridge, name: &str) -> Option<gix::hash::ObjectId> {
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    mirror
+        .find_reference(&format!("refs/heads/{name}"))
+        .ok()
+        .and_then(|mut r| r.peel_to_id().ok().map(|id| id.detach()))
+}
+
+/// #316 / PR #528 — plant a FOREIGN tag in the mirror: a `refs/tags/<name>` heddle
+/// never WROTE (no marker, never reconciled under that name). Pass a heddle-MINTED
+/// `target` to exercise the r20c bug — OID-based ownership would mis-claim it as
+/// heddle's; the name-keyed managed record must still spare it.
+fn matrix_plant_foreign_tag(bridge: &GitBridge, name: &str, target: gix::hash::ObjectId) {
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    set_reference(
+        &mirror,
+        &format!("refs/tags/{name}"),
+        target,
+        PreviousValue::Any,
+        "test: foreign tag",
+    )
+    .expect("plant foreign tag");
+}
+
+/// #316 / PR #528 — plant a FOREIGN branch in the mirror: a `refs/heads/<name>`
+/// heddle never wrote, at a heddle-minted `target` (the head dual of the foreign
+/// tag at a heddle OID). It is not a heddle thread, so the head reconcile never
+/// iterates it; the name-keyed record must spare it.
+fn matrix_plant_foreign_branch(bridge: &GitBridge, name: &str, target: gix::hash::ObjectId) {
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    set_reference(
+        &mirror,
+        &format!("refs/heads/{name}"),
+        target,
+        PreviousValue::Any,
+        "test: foreign branch",
+    )
+    .expect("plant foreign branch");
+}
+
+/// #316 / PR #528 — the mirror's name-keyed managed-refs record (full ref name →
+/// last-published tip), the ownership boundary the reconcile and the push frontier
+/// both read.
+fn matrix_managed_record(bridge: &GitBridge) -> std::collections::HashMap<String, gix::hash::ObjectId> {
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    read_mirror_managed_refs(&mirror).expect("read mirror managed record")
+}
+
+/// #316 / PR #528 — whether `collect_managed_ref_updates` (the managed-filtered
+/// push frontier) carries a ref of `name`+`namespace`. A foreign ref must be
+/// ABSENT here even though it survives in the mirror.
+fn matrix_in_managed_frontier(bridge: &GitBridge, name: &str, namespace: RefNamespace) -> bool {
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    let record = read_mirror_managed_refs(&mirror).expect("read record");
+    collect_managed_ref_updates(&mirror, &record)
+        .expect("collect managed frontier")
+        .iter()
+        .any(|u| u.namespace == namespace && u.name == name)
+}
+
+/// #316 / PR #528 r19 + S3 — the conformance matrix that turns the per-cell tag
+/// fixes into a REDESIGN. The mirror tag's fate is a PURE FUNCTION of THREE axes:
+/// the NEW marker target {served+minted, served-but-unminted, unserved,
+/// no-target(deleted)} × the EXISTING mirror tag's target {served, embargoed,
+/// absent} × scope {scoped, full}. Each row builds a fixture that reaches one
+/// cell, runs `export_all`/`export_current_thread`, and asserts the mirror
+/// `refs/tags/v` is at the expected OID or absent. The structural guarantees it
+/// locks:
+/// * PRESERVE requires the EXISTING tag itself be SERVED (cell 6) — a tag pointing
+///   at an embargoed commit is DELETED even when the new target is served-but-
+///   unminted (cell 7, the r19 fix `existing_embargoed_unminted_new_deletes_tag`);
+///   reading the existing tag's TARGET is the axis the prior code never inspected.
+/// * a served+minted target FORCE-retargets the tag (S1, cells 2/3).
+/// * a DELETED marker still deletes its stale tag because the loop iterates
+///   `markers ∪ existing-tags` — the deleted marker is reached via the tags side
+///   (S3, cell 12).
+///
+/// It SUBSUMES the locked-in tests
+/// [`export_deletes_tag_when_marker_retargeted_to_private`] (cell 9) and
+/// [`scoped_export_preserves_unminted_out_of_scope_public_tag`] (cell 6).
+#[test]
+fn tag_reconcile_conformance_matrix() {
+    struct Cell {
+        label: &'static str,
+        /// Returns (observed mirror `refs/tags/v` tip, expected tip).
+        run: Box<dyn Fn() -> (Option<gix::hash::ObjectId>, Option<gix::hash::ObjectId>)>,
+    }
+
+    let cells: Vec<Cell> = vec![
+        // ── Cells 1-4: NEW target served+minted → Write (force-retarget) ──
+        // Cell 1: existing absent, full scope → materialize a fresh tag.
+        Cell {
+            label: "served_minted_existing_absent_full_creates",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
+                (matrix_mirror_tag(&bridge, "v"), Some(oid_a))
+            }),
+        },
+        // Cell 2: existing SERVED, full scope, retarget served→served → force-move.
+        Cell {
+            label: "served_minted_existing_served_full_retargets",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                let b = matrix_put_state(&repo, b"B\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs().set_thread(&ThreadName::new("rel"), &b.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let oid_b = bridge.mapping.get_git(&b.change_id).expect("B minted");
+                repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &b.change_id).unwrap();
+                export_all(&mut bridge).unwrap();
+                (matrix_mirror_tag(&bridge, "v"), Some(oid_b))
+            }),
+        },
+        // Cell 3: existing EMBARGOED, full scope, retarget to a served+minted
+        // INDEPENDENT root → force-move off the embargoed OID onto the new target.
+        Cell {
+            label: "served_minted_existing_embargoed_full_retargets",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                let b = matrix_put_state(&repo, b"B\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs().set_thread(&ThreadName::new("rel"), &b.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let oid_b = bridge.mapping.get_git(&b.change_id).expect("B minted");
+                matrix_embargo(&repo, a.change_id);
+                repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &b.change_id).unwrap();
+                export_all(&mut bridge).unwrap();
+                (matrix_mirror_tag(&bridge, "v"), Some(oid_b))
+            }),
+        },
+        // Cell 4: existing == new target → idempotent Write (no-op move).
+        Cell {
+            label: "served_minted_existing_same_idempotent",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
+                export_all(&mut bridge).unwrap();
+                (matrix_mirror_tag(&bridge, "v"), Some(oid_a))
+            }),
+        },
+        // Cell 5: served+minted target, existing absent, SCOPED → skip-materialize
+        // (a scoped export does not publish a brand-new tag the caller didn't ask for).
+        Cell {
+            label: "served_minted_existing_absent_scoped_skips",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                let b = matrix_put_state(&repo, b"B\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("alpha"), &a.change_id).unwrap();
+                repo.refs().set_thread(&ThreadName::new("beta"), &b.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &b.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_current_thread(&mut bridge, "beta").unwrap();
+                (matrix_mirror_tag(&bridge, "v"), None)
+            }),
+        },
+        // ── Cell 6 (r18): served-but-unminted target, existing SERVED → PRESERVE ──
+        Cell {
+            label: "served_unminted_existing_served_scoped_preserves",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                let b = matrix_put_state(&repo, b"B\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("alpha"), &a.change_id).unwrap();
+                repo.refs().set_thread(&ThreadName::new("beta"), &b.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &b.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let oid_b = bridge.mapping.get_git(&b.change_id).expect("B minted");
+                // Advance beta to a NEW public state C and retarget v→C; C is never
+                // exported, so it stays unminted and the scoped run takes the
+                // served-but-unminted path.
+                let c = matrix_put_state(&repo, b"C\n", vec![b.change_id]);
+                repo.refs().set_thread(&ThreadName::new("beta"), &c.change_id).unwrap();
+                repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &c.change_id).unwrap();
+                export_current_thread(&mut bridge, "alpha").unwrap();
+                (matrix_mirror_tag(&bridge, "v"), Some(oid_b))
+            }),
+        },
+        // ── Cell 7 (r19 FIX): served-but-unminted target, existing EMBARGOED → DELETE ──
+        // The named row: the existing tag points at a commit this run embargoed, so
+        // PRESERVE would keep serving it. PRESERVE requires existing_served.
+        Cell {
+            label: "existing_embargoed_unminted_new_deletes_tag",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                let p = matrix_put_state(&repo, b"P\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("alpha"), &a.change_id).unwrap();
+                repo.refs().set_thread(&ThreadName::new("rel"), &p.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &p.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                // New, never-exported public state C → served-but-unminted in the
+                // scoped run. Embargo P (still reachable via `rel`) so the EXISTING
+                // tag's tip enters `embargoed_oids`. Retarget v→C.
+                let c = matrix_put_state(&repo, b"C\n", Vec::new());
+                matrix_embargo(&repo, p.change_id);
+                repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &c.change_id).unwrap();
+                export_current_thread(&mut bridge, "alpha").unwrap();
+                (matrix_mirror_tag(&bridge, "v"), None)
+            }),
+        },
+        // Cell 8: served-but-unminted target, existing absent, scoped → no-op.
+        Cell {
+            label: "served_unminted_existing_absent_scoped_noop",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                let c = matrix_put_state(&repo, b"C\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("alpha"), &a.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &c.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_current_thread(&mut bridge, "alpha").unwrap();
+                (matrix_mirror_tag(&bridge, "v"), None)
+            }),
+        },
+        // ── Cells 9-11: NEW target genuinely UNSERVED → DELETE ──
+        // Cell 9: existing SERVED, retargeted to a Private state (subsumes the
+        // locked-in `export_deletes_tag_when_marker_retargeted_to_private`).
+        Cell {
+            label: "unserved_existing_served_full_deletes",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let b = matrix_put_state(&repo, b"B\n", Vec::new());
+                matrix_embargo(&repo, b.change_id);
+                repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &b.change_id).unwrap();
+                export_all(&mut bridge).unwrap();
+                (matrix_mirror_tag(&bridge, "v"), None)
+            }),
+        },
+        // Cell 10: existing EMBARGOED, target itself embargoed (the original r1
+        // embargo retraction).
+        Cell {
+            label: "unserved_existing_embargoed_full_deletes",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                matrix_embargo(&repo, a.change_id);
+                export_all(&mut bridge).unwrap();
+                (matrix_mirror_tag(&bridge, "v"), None)
+            }),
+        },
+        // Cell 11: existing absent, target unserved → DELETE is a no-op.
+        Cell {
+            label: "unserved_existing_absent_noop_delete",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                let b = matrix_put_state(&repo, b"B\n", Vec::new());
+                matrix_embargo(&repo, b.change_id);
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &b.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                (matrix_mirror_tag(&bridge, "v"), None)
+            }),
+        },
+        // ── Cells 12-13 (S3): the marker was DELETED → its stale tag must go ──
+        // Cell 12: existing tag present, marker deleted — reached via the
+        // existing-tags side of the union (markers no longer carries it).
+        Cell {
+            label: "deleted_marker_stale_tag_deleted",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
+                export_all(&mut bridge).unwrap();
+                (matrix_mirror_tag(&bridge, "v"), None)
+            }),
+        },
+        // Cell 13: neither a marker nor an existing tag — structurally never visited
+        // by the `markers ∪ existing-tags` union (a no-op by construction).
+        Cell {
+            label: "notarget_existing_absent_unvisited",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                (matrix_mirror_tag(&bridge, "ghost"), None)
+            }),
+        },
+        // ── P1 regression guard: PRIOR-RUN embargo (not this run's purge) ──
+        // The existing tag's target P was embargoed in a PRIOR run and is out of
+        // THIS scoped run's purge reach (P is unreachable from every current frontier
+        // root). Classifying the existing tip by THIS run's purge drop-set (the bug)
+        // reads P as served → cell-6 PRESERVE → keeps serving embargoed P.
+        // Classifying by the whole-mirror served-OID set reads P as UNSERVED → cell-7
+        // DELETE. The new target is served-but-unminted (the ONLY path that reads the
+        // existing tag's served axis).
+        Cell {
+            label: "prior_run_embargo_existing_tag_deletes",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let p = matrix_put_state(&repo, b"P\n", Vec::new());
+                repo.refs().create_marker(&MarkerName::new("v"), &p.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                // Run 1 mints P (every store state is minted by export_all) and
+                // materializes the mirror tag v → P.
+                export_all(&mut bridge).unwrap();
+                // PRIOR-run embargo of P. Retarget v to a fresh public-but-unminted C
+                // and export ONLY `alpha` — P is now unreachable from the scoped
+                // frontier (no thread/marker reaches it), so it is NOT in this run's
+                // purge drop-set, yet v's existing tag still points at P's OID.
+                matrix_embargo(&repo, p.change_id);
+                let alpha = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("alpha"), &alpha.change_id).unwrap();
+                let c = matrix_put_state(&repo, b"C\n", Vec::new());
+                repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &c.change_id).unwrap();
+                export_current_thread(&mut bridge, "alpha").unwrap();
+                (matrix_mirror_tag(&bridge, "v"), None)
+            }),
+        },
+        // ── foreign Git tag preserved: a mirror tag heddle never exported ──
+        // A user's own `refs/tags/user-v1`, pointing at a commit heddle never minted,
+        // with NO marker. The reconcile's NoTarget arm would DELETE it unless the
+        // heddle-managed-ref filter spares it (a foreign tag is left untouched).
+        Cell {
+            label: "foreign_unmanaged_git_tag_preserved",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                // Plant a FOREIGN tag in the mirror: a commit heddle never minted,
+                // tagged under a name heddle never exported.
+                let mirror = bridge.open_git_repo().unwrap();
+                let foreign =
+                    commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "foreign", &[]);
+                set_reference(
+                    &mirror,
+                    "refs/tags/user-v1",
+                    foreign,
+                    PreviousValue::MustNotExist,
+                    "test: foreign tag",
+                )
+                .unwrap();
+                export_all(&mut bridge).unwrap();
+                (matrix_mirror_tag(&bridge, "user-v1"), Some(foreign))
+            }),
+        },
+        // ── foreign tag AT A HEDDLE OID (the r20c bug) — spared AND excluded ──
+        // A foreign `refs/tags/user-v1` pointing at a commit heddle MINTED. The
+        // OBSOLETE OID-based ownership classified this as heddle's (its tip is a
+        // minted commit) → folded into the reconcile → deleted. The NAME-keyed
+        // record spares it (the name was never recorded as written), AND the
+        // managed-filtered push frontier excludes it.
+        Cell {
+            label: "foreign_tag_at_heddle_oid_spared_and_excluded",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
+                // Plant the foreign tag at the heddle-minted OID, AFTER the first
+                // export so the managed record already exists (the name is not in it).
+                matrix_plant_foreign_tag(&bridge, "user-v1", oid_a);
+                export_all(&mut bridge).unwrap();
+                assert!(
+                    !matrix_in_managed_frontier(&bridge, "user-v1", RefNamespace::Tag),
+                    "a foreign tag at a heddle OID must be EXCLUDED from the managed push frontier"
+                );
+                (matrix_mirror_tag(&bridge, "user-v1"), Some(oid_a))
+            }),
+        },
+    ];
+
+    for cell in &cells {
+        let (observed, expected) = (cell.run)();
+        assert_eq!(observed, expected, "tag cell `{}`", cell.label);
+    }
+}
+
+/// #316 / PR #528 S2 — the head reconcile has NO existing-embargo PRESERVE path,
+/// the asymmetry vs the tag reconcile (where a served-but-unminted tag at a still
+/// SERVED tip IS preserved, cell 6). A head's published target is recomputed every
+/// run as `frontier_git_oid` — the maximal SERVED ancestor-or-self of the thread
+/// tip — so a head can never keep serving an embargoed tip: it is REWOUND to the
+/// served frontier, or DELETED when no served frontier remains. Each embargo row
+/// asserts the resulting `refs/heads/main` tip is the served frontier and NEVER the
+/// embargoed OID.
+#[test]
+fn head_reconcile_conformance_matrix() {
+    struct HeadOutcome {
+        observed: Option<gix::hash::ObjectId>,
+        expected: Option<gix::hash::ObjectId>,
+        /// The embargoed OID the head must NEVER be left at (`None` when no embargo).
+        forbidden: Option<gix::hash::ObjectId>,
+    }
+    struct Cell {
+        label: &'static str,
+        run: Box<dyn Fn() -> HeadOutcome>,
+    }
+
+    let cells: Vec<Cell> = vec![
+        // Control: a plain public advance fast-forwards the head.
+        Cell {
+            label: "public_advance_fast_forwards",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let b = matrix_put_state(&repo, b"B\n", vec![a.change_id]);
+                repo.refs().set_thread(&ThreadName::new("main"), &b.change_id).unwrap();
+                export_all(&mut bridge).unwrap();
+                let oid_b = bridge.mapping.get_git(&b.change_id).expect("B minted");
+                HeadOutcome {
+                    observed: matrix_mirror_head(&bridge, "main"),
+                    expected: Some(oid_b),
+                    forbidden: None,
+                }
+            }),
+        },
+        // KEY: an embargoed TIP rewinds the head to the served ancestor — the head
+        // is NEVER preserved at the embargoed tip (the tag-cell-7 bug has no head dual).
+        Cell {
+            label: "embargoed_tip_rewinds_to_served_ancestor",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                let b = matrix_put_state(&repo, b"B\n", vec![a.change_id]);
+                repo.refs().set_thread(&ThreadName::new("main"), &b.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
+                let oid_b = bridge.mapping.get_git(&b.change_id).expect("B minted");
+                matrix_embargo(&repo, b.change_id);
+                export_all(&mut bridge).unwrap();
+                HeadOutcome {
+                    observed: matrix_mirror_head(&bridge, "main"),
+                    expected: Some(oid_a),
+                    forbidden: Some(oid_b),
+                }
+            }),
+        },
+        // KEY: the WHOLE line embargoed DELETES the head — no preserve path at all.
+        Cell {
+            label: "embargoed_whole_line_deletes_head",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
+                matrix_embargo(&repo, a.change_id);
+                export_all(&mut bridge).unwrap();
+                HeadOutcome {
+                    observed: matrix_mirror_head(&bridge, "main"),
+                    expected: None,
+                    forbidden: Some(oid_a),
+                }
+            }),
+        },
+        // P1 regression guard (head dual): a SCOPED export whose existing head tip
+        // was embargoed in a PRIOR run — and is out of THIS run's purge reach
+        // (unreachable from the scoped frontier) — must RETRACT (force-rewind) to the
+        // served ancestor, not classify the embargoed tip as served. Classifying by
+        // this run's purge drop-set (the bug) reads B as served → FF-guarded sync →
+        // a NonFastForward error on the rewind; classifying by the whole-mirror
+        // served-OID set reads B as unserved → force-rewind to A.
+        Cell {
+            label: "prior_run_embargoed_existing_head_retracts",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                let b = matrix_put_state(&repo, b"B\n", vec![a.change_id]);
+                repo.refs().set_thread(&ThreadName::new("main"), &b.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
+                let oid_b = bridge.mapping.get_git(&b.change_id).expect("B minted");
+                // Embargo the published tip B, rewind main to its served ancestor A,
+                // and export ONLY main (scoped). B is now unreachable from the scoped
+                // frontier, so it is NOT in this run's purge drop-set — only the
+                // served-OID classification rewinds the head off B.
+                matrix_embargo(&repo, b.change_id);
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                export_current_thread(&mut bridge, "main").unwrap();
+                HeadOutcome {
+                    observed: matrix_mirror_head(&bridge, "main"),
+                    expected: Some(oid_a),
+                    forbidden: Some(oid_b),
+                }
+            }),
+        },
+        // ── foreign BRANCH at a heddle OID — spared (the head dual of the tag) ──
+        // A `refs/heads/user-feature` heddle never wrote, at a heddle-minted OID.
+        // It is not a heddle thread, so the head reconcile (iterating current
+        // threads) never visits it; the name-keyed record spares it, and the
+        // managed-filtered push frontier excludes it.
+        Cell {
+            label: "foreign_branch_at_heddle_oid_spared",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
+                matrix_plant_foreign_branch(&bridge, "user-feature", oid_a);
+                export_all(&mut bridge).unwrap();
+                assert!(
+                    !matrix_in_managed_frontier(&bridge, "user-feature", RefNamespace::Branch),
+                    "a foreign branch at a heddle OID must be EXCLUDED from the managed push frontier"
+                );
+                HeadOutcome {
+                    observed: matrix_mirror_head(&bridge, "user-feature"),
+                    expected: Some(oid_a),
+                    forbidden: None,
+                }
+            }),
+        },
+    ];
+
+    for cell in &cells {
+        let out = (cell.run)();
+        assert_eq!(out.observed, out.expected, "head cell `{}`", cell.label);
+        if let Some(forbidden) = out.forbidden {
+            assert_ne!(
+                out.observed,
+                Some(forbidden),
+                "head cell `{}`: the head must NOT be left at the embargoed tip",
+                cell.label
+            );
+        }
+    }
+}
+
+/// #316 / PR #528 — the mirror's name-keyed managed-refs record is the ownership
+/// boundary: every ref the reconcile WRITES is CLAIMED, every ref it DELETES is
+/// DROPPED, and a foreign ref heddle never wrote NEVER enters — even one pointing
+/// at a heddle-minted OID (the r20c bug the OID-based record produced).
+#[test]
+fn mirror_managed_record_claims_written_drops_deleted_excludes_foreign() {
+    let temp = TempDir::new().unwrap();
+    let repo = Repository::init(temp.path()).unwrap();
+    let a = matrix_put_state(&repo, b"A\n", Vec::new());
+    repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+    repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+    let mut bridge = GitBridge::new(&repo);
+    export_all(&mut bridge).unwrap();
+
+    // CLAIM: the written head and tag are recorded.
+    let record = matrix_managed_record(&bridge);
+    assert!(record.contains_key("refs/heads/main"), "written head claimed: {record:?}");
+    assert!(record.contains_key("refs/tags/v"), "written tag claimed: {record:?}");
+
+    // EXCLUDE FOREIGN: a foreign tag at a heddle OID never enters the record.
+    let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
+    matrix_plant_foreign_tag(&bridge, "user-v1", oid_a);
+    export_all(&mut bridge).unwrap();
+    let record = matrix_managed_record(&bridge);
+    assert!(
+        !record.contains_key("refs/tags/user-v1"),
+        "a foreign tag (even at a heddle OID) must never enter the record: {record:?}"
+    );
+    assert!(record.contains_key("refs/heads/main"), "{record:?}");
+
+    // DROP: deleting the marker drops its tag from the record.
+    repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
+    export_all(&mut bridge).unwrap();
+    let record = matrix_managed_record(&bridge);
+    assert!(
+        !record.contains_key("refs/tags/v"),
+        "a deleted marker's tag must drop from the record: {record:?}"
+    );
+}
+
+/// #316 / PR #528 — the managed-refs record round-trips through its atomic
+/// temp+rename write and the shared exported-refs parse contract.
+#[test]
+fn mirror_managed_record_survives_round_trip() {
+    let temp = TempDir::new().unwrap();
+    let mirror = gix::init_bare(temp.path()).unwrap();
+    let main_tip = commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "main", &[]);
+    let tag_tip = commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "tag", &[]);
+
+    let mut record = std::collections::HashMap::new();
+    record.insert("refs/heads/main".to_string(), main_tip);
+    record.insert("refs/tags/v1.0".to_string(), tag_tip);
+    write_mirror_managed_refs(&mirror, &record).expect("write record");
+
+    let read_back = read_mirror_managed_refs(&mirror).expect("read record");
+    assert_eq!(read_back, record, "managed record must round-trip byte-for-byte");
+}
+
+/// #316 / PR #528 — the #1 first-run risk: the FIRST export after this code lands
+/// finds NO managed record. If an absent record made every pre-existing ref look
+/// foreign, embargo retraction would silently stop. Seeding the record from the
+/// current mirror ref set keeps pre-existing heddle refs managed, so a stale tag
+/// whose marker was already deleted IS still retracted on that first run. Without
+/// seeding, the tag (not a current marker, not in an empty record) would never be
+/// iterated and would survive — the leak this guards.
+#[test]
+fn first_export_after_upgrade_seeds_record_and_still_retracts() {
+    let temp = TempDir::new().unwrap();
+    let repo = Repository::init(temp.path()).unwrap();
+    let a = matrix_put_state(&repo, b"A\n", Vec::new());
+    let p = matrix_put_state(&repo, b"P\n", Vec::new());
+    repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+    repo.refs().create_marker(&MarkerName::new("v"), &p.change_id).unwrap();
+    let mut bridge = GitBridge::new(&repo);
+    export_all(&mut bridge).unwrap();
+    assert!(
+        matrix_mirror_tag(&bridge, "v").is_some(),
+        "run 1 must publish the tag"
+    );
+
+    // Simulate the PRE-record state: delete the on-disk record so the next export
+    // sees an absent record (as it would on the first run after this lands).
+    let record_path = {
+        let mirror = bridge.open_git_repo().unwrap();
+        mirror.git_dir().join("heddle-mirror-managed-refs")
+    };
+    assert!(record_path.exists(), "run 1 must have written the record");
+    std::fs::remove_file(&record_path).unwrap();
+
+    // Delete the marker so `v` is no longer a current marker. Only the SEED (from
+    // the current mirror ref set) makes `refs/tags/v` reachable by the reconcile.
+    repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
+    export_all(&mut bridge).unwrap();
+
+    assert_eq!(
+        matrix_mirror_tag(&bridge, "v"),
+        None,
+        "the first post-upgrade export must retract the stale tag via record seeding"
+    );
+    assert!(
+        record_path.exists(),
+        "the export must (re)write the managed record"
+    );
+}
+
+/// #316 / PR #528 r7 CLASS 2 (the leak): a branch exported to a real
+/// DESTINATION while public, then retracted (whole line embargoed), must be
+/// DELETED at the destination — not left pointing at now-private commits. The
+/// mirror-side retraction already deletes the branch from the internal mirror;
+/// the destination-sync step only ever WROTE the surviving refs and never
+/// computed deletions, so the destination kept the stale branch. The
+/// delete-set reconciliation closes that leak.
+#[test]
+fn export_propagates_branch_deletion_to_destination() {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    std::fs::write(heddle_temp.path().join("a.txt"), b"only\n").unwrap();
+    repo.snapshot(Some("only".into()), None).unwrap();
+
+    // Export to a real destination while public — the destination gets main.
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    let mut bridge = GitBridge::new(&repo);
+    bridge.export_to_path(&dest_path).expect("first export");
+    assert!(
+        gix::open(&dest_path)
+            .expect("open dest")
+            .find_reference("refs/heads/main")
+            .is_ok(),
+        "destination must advertise main while the line is public"
+    );
+
+    // Embargo the WHOLE line — including the seeded root — so no served frontier
+    // remains and the mirror deletes refs/heads/main.
+    for state in repo.store().list_states().unwrap() {
+        repo.put_state_visibility(StateVisibility {
+            state,
+            tier: VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+            embargo_until: None,
+            declarer: Principal {
+                name: "Grace Hopper".into(),
+                email: "grace@example.com".into(),
+            },
+            declared_at: Utc::now(),
+            signature: None,
+            supersedes: None,
+        })
+        .unwrap();
+    }
+
+    // Re-export to the SAME destination: the stale branch must be DELETED there.
+    bridge.export_to_path(&dest_path).expect("second export");
+    assert!(
+        gix::open(&dest_path)
+            .expect("reopen dest")
+            .find_reference("refs/heads/main")
+            .is_err(),
+        "retracting the line must DELETE refs/heads/main at the destination, not leave it serving now-private commits"
+    );
+}
+
+/// #316 / PR #528 r7 CLASS 2: the delete-set covers TAGS and the NOTES
+/// namespace too, so it is not a heads-only fix. A marker tag retracted from
+/// the mirror must be deleted at the destination; a stale heddle-managed notes
+/// ref absent from the served mirror must be deleted; and the embargoed
+/// commit's note ENTRY must no longer be readable at the destination.
+#[test]
+fn export_propagates_tag_and_note_deletion() {
+    use chrono::Utc;
+    use objects::object::{Attribution, Principal, State, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    // A public state on main that stays public throughout — so main never
+    // rewinds (a rewind would trip the export's fast-forward guard, a separate
+    // concern from this test).
+    std::fs::write(heddle_temp.path().join("main.txt"), b"trunk\n").unwrap();
+    repo.snapshot(Some("trunk".into()), None).unwrap();
+
+    // A SEPARATE public state R, pinned by marker v1.0 and independent of main,
+    // so embargoing it later deletes the tag and retracts its note without
+    // touching main's tip.
+    let r = {
+        let store = repo.store();
+        let blob = store.put_blob(&Blob::from_slice(b"release\n")).expect("blob");
+        let tree = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("release.txt".to_string(), blob, false).expect("entry"),
+            ]))
+            .expect("tree");
+        let state = State::new(
+            tree,
+            Vec::new(),
+            Attribution::human(Principal::new("Grace Hopper", "grace@example.com")),
+        );
+        store.put_state(&state).expect("put R");
+        state
+    };
+    repo.refs()
+        .create_marker(&MarkerName::new("v1.0"), &r.change_id)
+        .expect("create marker at R");
+
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    let mut bridge = GitBridge::new(&repo);
+    bridge.export_to_path(&dest_path).expect("first export");
+    let oid_r = bridge.mapping.get_git(&r.change_id).expect("R minted");
+
+    {
+        let dest = gix::open(&dest_path).expect("open dest");
+        assert!(
+            dest.find_reference("refs/tags/v1.0").is_ok(),
+            "destination must have the tag while public"
+        );
+        assert!(
+            crate::bridge::git_notes::read_note(&dest, oid_r)
+                .unwrap()
+                .is_some(),
+            "destination must carry R's note while public"
+        );
+        // Plant a stale notes ref the served mirror will never have, to exercise
+        // the NOTES namespace of the delete-set directly. r8 HOLE 2: the
+        // delete-set is now scoped to refs heddle PREVIOUSLY EXPORTED here (not
+        // the raw destination namespace), so record this ref as exported —
+        // mirroring a real "heddle exported it, mirror later stopped serving it"
+        // retraction. Without the record it would (correctly) be treated as a
+        // foreign ref and survive.
+        set_reference(
+            &dest,
+            "refs/notes/legacy",
+            oid_r,
+            PreviousValue::Any,
+            "test: stale heddle-exported notes ref",
+        )
+        .expect("plant stale notes ref");
+        let mut exported = read_exported_refs(&dest).expect("read exported-refs record");
+        exported.insert("refs/notes/legacy".to_string(), oid_r);
+        write_exported_refs(&dest, &exported).expect("record legacy as heddle-exported");
+    }
+
+    // Embargo R → the mirror deletes the tag and retracts R's note entry. main
+    // is independent of R, so it is untouched (no rewind).
+    repo.put_state_visibility(StateVisibility {
+        state: r.change_id,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Grace Hopper".into(),
+            email: "grace@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+
+    bridge.export_to_path(&dest_path).expect("second export");
+
+    let dest = gix::open(&dest_path).expect("reopen dest");
+    assert!(
+        dest.find_reference("refs/tags/v1.0").is_err(),
+        "retracting the marker must DELETE refs/tags/v1.0 at the destination"
+    );
+    assert!(
+        dest.find_reference("refs/notes/legacy").is_err(),
+        "a stale heddle-managed notes ref absent from the served mirror must be DELETED at the destination"
+    );
+    assert!(
+        crate::bridge::git_notes::read_note(&dest, oid_r)
+            .unwrap()
+            .is_none(),
+        "the embargoed commit's note must no longer be readable at the destination"
+    );
+    assert!(
+        dest.find_reference("refs/heads/main").is_ok(),
+        "the still-public main branch must survive the reconciliation"
+    );
+}
+
+/// #316 / PR #528 r7 CLASS 2: the delete-set is scoped strictly to the
+/// heddle-managed namespaces (`refs/heads/*`, `refs/tags/*`, `refs/notes/*`).
+/// A ref the destination holds OUTSIDE those namespaces is foreign — heddle
+/// does not own it — and must be left untouched by the reconciliation. Refs
+/// that ARE still served must also survive.
+#[test]
+fn export_does_not_delete_foreign_refs() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    std::fs::write(heddle_temp.path().join("a.txt"), b"only\n").unwrap();
+    repo.snapshot(Some("only".into()), None).unwrap();
+    let state_a = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    let mut bridge = GitBridge::new(&repo);
+    bridge.export_to_path(&dest_path).expect("first export");
+    let oid_a = bridge.mapping.get_git(&state_a).expect("A minted");
+
+    // Plant a foreign ref in a namespace heddle does not manage.
+    {
+        let dest = gix::open(&dest_path).expect("open dest");
+        set_reference(
+            &dest,
+            "refs/keep/backup",
+            oid_a,
+            PreviousValue::Any,
+            "test: foreign ref heddle does not own",
+        )
+        .expect("plant foreign ref");
+    }
+
+    // Re-export with nothing retracted (main still public).
+    bridge.export_to_path(&dest_path).expect("second export");
+
+    let dest = gix::open(&dest_path).expect("reopen dest");
+    assert!(
+        dest.find_reference("refs/keep/backup").is_ok(),
+        "a foreign ref outside heddle-managed namespaces must be left untouched"
+    );
+    assert!(
+        dest.find_reference("refs/heads/main").is_ok(),
+        "a still-served heddle branch must survive the reconciliation"
+    );
+}
+
+/// #316 / PR #528 r8 HOLE 2 (the data-loss): a destination ref INSIDE the
+/// heddle-managed namespaces (`refs/heads/*`) that heddle NEVER exported — e.g.
+/// a branch another user or tool created on a shared local bare remote — must
+/// survive a normal export/push. r7 diffed the whole destination namespace and so
+/// DELETED such a foreign branch; scoping the delete-set to refs heddle actually
+/// exported (recorded per destination) leaves it intact. The r7 foreign-ref test
+/// only escaped this bug by planting OUTSIDE heads/tags/notes.
+#[test]
+fn export_does_not_delete_foreign_managed_ref() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    std::fs::write(heddle_temp.path().join("a.txt"), b"only\n").unwrap();
+    repo.snapshot(Some("only".into()), None).unwrap();
+    let state_a = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    let mut bridge = GitBridge::new(&repo);
+    bridge.export_to_path(&dest_path).expect("first export");
+    let oid_a = bridge.mapping.get_git(&state_a).expect("A minted");
+
+    // Plant a branch heddle never exported, INSIDE the heddle-managed
+    // `refs/heads/*` namespace — the namespace r7 over-deleted from.
+    {
+        let dest = gix::open(&dest_path).expect("open dest");
+        set_reference(
+            &dest,
+            "refs/heads/other-user-branch",
+            oid_a,
+            PreviousValue::Any,
+            "test: foreign branch heddle never exported",
+        )
+        .expect("plant foreign managed ref");
+    }
+
+    // Re-export with nothing retracted (main still public).
+    bridge.export_to_path(&dest_path).expect("second export");
+
+    let dest = gix::open(&dest_path).expect("reopen dest");
+    assert!(
+        dest.find_reference("refs/heads/other-user-branch").is_ok(),
+        "a foreign branch heddle never exported must NOT be deleted by a normal push"
+    );
+    assert!(
+        dest.find_reference("refs/heads/main").is_ok(),
+        "a still-served heddle branch must survive the reconciliation"
+    );
+}
+
+/// #316 / PR #528 r8 HOLE 2 (regression guard): scoping the delete-set to
+/// heddle-exported refs must NOT break the genuine retraction path. A branch
+/// heddle exported while public, then retracted (whole line embargoed so the
+/// served mirror drops it), must STILL be DELETED at the destination — it is in
+/// the per-destination exported-refs record and absent from the served mirror,
+/// so it lands in the delete-set. Preserves the r7 behavior the HOLE 2 fix must
+/// not regress.
+#[test]
+fn export_still_deletes_previously_exported_then_retracted_ref() {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    std::fs::write(heddle_temp.path().join("a.txt"), b"only\n").unwrap();
+    repo.snapshot(Some("only".into()), None).unwrap();
+
+    // Export to a real destination while public — heddle records main as exported.
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    let mut bridge = GitBridge::new(&repo);
+    bridge.export_to_path(&dest_path).expect("first export");
+    assert!(
+        gix::open(&dest_path)
+            .expect("open dest")
+            .find_reference("refs/heads/main")
+            .is_ok(),
+        "destination must advertise main while the line is public"
+    );
+
+    // Embargo the WHOLE line so the mirror stops serving refs/heads/main.
+    for state in repo.store().list_states().unwrap() {
+        repo.put_state_visibility(StateVisibility {
+            state,
+            tier: VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+            embargo_until: None,
+            declarer: Principal {
+                name: "Grace Hopper".into(),
+                email: "grace@example.com".into(),
+            },
+            declared_at: Utc::now(),
+            signature: None,
+            supersedes: None,
+        })
+        .unwrap();
+    }
+
+    // Re-export: main was heddle-exported AND is no longer served → DELETED.
+    bridge.export_to_path(&dest_path).expect("second export");
+    assert!(
+        gix::open(&dest_path)
+            .expect("reopen dest")
+            .find_reference("refs/heads/main")
+            .is_err(),
+        "a previously-exported, now-retracted branch must be DELETED at the destination"
+    );
+}
+
+/// #316 / PR #528 r11 Finding HcDQU: the retraction delete-set must propagate to
+/// URL/NETWORK remotes too, not only local-path destinations. A branch exported
+/// public over the `git://` push path and then retracted (whole line embargoed)
+/// must be DELETED on the wire remote — pre-r11 the URL push only sent additive
+/// updates, so a retracted ref lingered on the remote after vanishing locally.
+/// Uses the real network receive-pack path (`push_network_remote_with_updates`),
+/// NOT `copy_mirror_to_path_with_updates`.
+#[test]
+fn retraction_delete_propagates_to_url_remote() {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    std::fs::write(heddle_temp.path().join("a.txt"), b"only\n").unwrap();
+    repo.snapshot(Some("only".into()), None).unwrap();
+
+    // A real wire (git://) remote that also serves receive-pack.
+    let remote_root = TempDir::new().expect("remote root");
+    let _remote_repo = init_named_bare_git_repo(&remote_root, "remote.git");
+    // Point the bare remote's HEAD at a placeholder branch so receive-pack does
+    // not refuse to delete refs/heads/main later as "the current branch".
+    std::fs::write(
+        remote_root.path().join("remote.git").join("HEAD"),
+        b"ref: refs/heads/__heddle_placeholder\n",
+    )
+    .unwrap();
+    let daemon = GitDaemon::spawn_push(remote_root.path());
+    let url = daemon.url("remote.git");
+
+    // Export public over the NETWORK push path — main lands on the remote.
+    let mut bridge = GitBridge::new(&repo);
+    bridge.push(&url).expect("first network push");
+    {
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        assert!(
+            remote.find_reference("refs/heads/main").is_ok(),
+            "the remote must advertise main while the line is public"
+        );
+    }
+
+    // Embargo the WHOLE line so the served mirror stops serving refs/heads/main.
+    for state in repo.store().list_states().unwrap() {
+        repo.put_state_visibility(StateVisibility {
+            state,
+            tier: VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+            embargo_until: None,
+            declarer: Principal {
+                name: "Grace Hopper".into(),
+                email: "grace@example.com".into(),
+            },
+            declared_at: Utc::now(),
+            signature: None,
+            supersedes: None,
+        })
+        .unwrap();
+    }
+
+    // Re-push: main was heddle-exported AND is no longer served → DELETED on the
+    // wire remote, not just locally.
+    bridge.push(&url).expect("second network push");
+    let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
+    assert!(
+        remote.find_reference("refs/heads/main").is_err(),
+        "a previously-exported, now-retracted branch must be DELETED on the URL/network remote"
+    );
+}
+
+/// #316 / PR #528 r11 Finding HcDQO: a destination push must FORCE a deliberate
+/// embargo rewind. When a previously-exported tip B is embargoed but parent A
+/// stays served, the served frontier lags the branch back to A — a non-fast-
+/// forward rewind. Pre-r11 the local-path push ran a blanket FF guard that
+/// REJECTED it, so the destination kept advertising the embargoed B. The unified
+/// reconciliation distinguishes a backward rewind from a fork and forces the
+/// former through.
+#[test]
+fn embargo_rewind_forced_through_destination_push() {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    // Linear thread: public base A, then public tip B.
+    std::fs::write(heddle_temp.path().join("a.txt"), b"base\n").unwrap();
+    repo.snapshot(Some("base".into()), None).unwrap();
+    let state_a = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+    std::fs::write(heddle_temp.path().join("b.txt"), b"fix\n").unwrap();
+    repo.snapshot(Some("fix".into()), None).unwrap();
+    let state_b = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+
+    // First export to a real bare destination — main advertises the public tip B.
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    let mut bridge = GitBridge::new(&repo);
+    bridge.export_to_path(&dest_path).expect("first export");
+    let oid_a = bridge.mapping.get_git(&state_a).expect("A minted");
+    let oid_b = bridge.mapping.get_git(&state_b).expect("B minted");
+    {
+        let dest = gix::open(&dest_path).expect("open dest");
+        let tip = dest
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_id()
+            .unwrap()
+            .detach();
+        assert_eq!(tip, oid_b, "destination advertises the public tip B");
+    }
+
+    // Embargo only B; parent A stays served.
+    repo.put_state_visibility(StateVisibility {
+        state: state_b,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Grace Hopper".into(),
+            email: "grace@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+
+    // Re-export: the served frontier lags to A — a deliberate NON-fast-forward
+    // rewind the destination push must FORCE through, not reject with the FF
+    // guard. Pre-r11 this errored.
+    bridge
+        .export_to_path(&dest_path)
+        .expect("second export must force the embargo rewind through the destination");
+    let dest = gix::open(&dest_path).expect("reopen dest");
+    let tip = dest
+        .find_reference("refs/heads/main")
+        .unwrap()
+        .peel_to_id()
+        .unwrap()
+        .detach();
+    assert_eq!(
+        tip, oid_a,
+        "the destination branch must be rewound to the served ancestor A"
+    );
+    assert_ne!(
+        tip, oid_b,
+        "the destination must not keep advertising the embargoed tip B"
+    );
+}
+
+/// #316 / PR #528 r11: the r8 foreign-ref scoping must hold on the UNIFIED
+/// URL/network path. A branch INSIDE `refs/heads/*` that heddle never exported —
+/// planted directly on the wire remote by another user/tool — must survive a
+/// normal push: it is not in heddle's per-remote exported-refs record, so it can
+/// never join the delete-set.
+#[test]
+fn foreign_ref_on_url_remote_survives() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    std::fs::write(heddle_temp.path().join("a.txt"), b"only\n").unwrap();
+    repo.snapshot(Some("only".into()), None).unwrap();
+
+    let remote_root = TempDir::new().expect("remote root");
+    let _remote_repo = init_named_bare_git_repo(&remote_root, "remote.git");
+    let daemon = GitDaemon::spawn_push(remote_root.path());
+    let url = daemon.url("remote.git");
+
+    // First public push — records main as heddle-exported to THIS url remote.
+    let mut bridge = GitBridge::new(&repo);
+    bridge.push(&url).expect("first network push");
+
+    // Plant a branch heddle never exported, INSIDE the heddle-managed
+    // refs/heads/* namespace, directly on the remote.
+    {
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        let main_oid = remote
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_id()
+            .unwrap()
+            .detach();
+        set_reference(
+            &remote,
+            "refs/heads/other-user-branch",
+            main_oid,
+            PreviousValue::Any,
+            "test: foreign branch heddle never exported",
+        )
+        .expect("plant foreign managed ref");
+    }
+
+    // Re-push with nothing retracted — the foreign branch must survive (the r8
+    // delete-set scoping holds on the unified URL/network path).
+    bridge.push(&url).expect("second network push");
+
+    let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
+    assert!(
+        remote.find_reference("refs/heads/other-user-branch").is_ok(),
+        "a foreign branch heddle never exported must NOT be deleted on the URL/network remote"
+    );
+    assert!(
+        remote.find_reference("refs/heads/main").is_ok(),
+        "a still-served heddle branch must survive the reconciliation"
+    );
+}
+
+/// #316 / PR #528 r12: a destination tip advanced OUT OF BAND past heddle's
+/// last-published tip — a descendant of the served frontier that heddle never
+/// published, then fetched into the mirror — must NOT be force-overwritten. r11
+/// treated ANY `old`-descends-from-`new` topology as a heddle-owned embargo
+/// rewind and forced it, clobbering the remote's newer linear commit (data
+/// loss). The force is now gated on heddle-OWNERSHIP (the exported-refs record):
+/// an out-of-band descendant is `Diverged` — FF-rejected unless `--force` — so
+/// the destination's newer commit survives. Covers local-path AND URL/network.
+#[test]
+fn out_of_band_destination_descendant_not_force_overwritten() {
+    use crate::bridge::git_core::GitBridgeError;
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    // A single public tip B heddle publishes to its destinations.
+    std::fs::write(heddle_temp.path().join("a.txt"), b"base\n").unwrap();
+    repo.snapshot(Some("base".into()), None).unwrap();
+    std::fs::write(heddle_temp.path().join("b.txt"), b"fix\n").unwrap();
+    repo.snapshot(Some("fix".into()), None).unwrap();
+    let state_b = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+
+    let mut bridge = GitBridge::new(&repo);
+
+    // ---- local-path destination ----
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    bridge
+        .export_to_path(&dest_path)
+        .expect("first export publishes B (local)");
+    let oid_b = bridge.mapping.get_git(&state_b).expect("B minted");
+
+    // Out-of-band advance: a NEW commit C on top of B, written to BOTH the mirror
+    // (the user fetched it, so it is a resolvable descendant of the served
+    // frontier — the exact topology that fooled r11) AND the destination (its
+    // branch moves to C). Identical inputs ⇒ identical oid in both repos.
+    let oid_c = {
+        let mirror = bridge.open_git_repo().expect("open mirror");
+        let in_mirror =
+            commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "out-of-band", &[oid_b]);
+        let dest = gix::open(&dest_path).expect("open dest");
+        let in_dest = commit_with_tree(
+            &dest,
+            Some("refs/heads/main"),
+            empty_tree_oid(&dest),
+            "out-of-band",
+            &[oid_b],
+        );
+        assert_eq!(
+            in_mirror, in_dest,
+            "C must be the same commit in mirror and destination"
+        );
+        in_mirror
+    };
+
+    // A plain export must NOT clobber C: heddle never published it, so the move is
+    // Diverged (FF-rejected), not a heddle-owned rewind.
+    let err = bridge.export_to_path(&dest_path).expect_err(
+        "out-of-band descendant must be FF-rejected at the local destination, not force-overwritten",
+    );
+    assert!(
+        matches!(err, GitBridgeError::NonFastForwardRef { .. }),
+        "expected a non-fast-forward rejection, got: {err:?}"
+    );
+    {
+        let dest = gix::open(&dest_path).expect("reopen dest");
+        let tip = dest
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_id()
+            .unwrap()
+            .detach();
+        assert_eq!(
+            tip, oid_c,
+            "the out-of-band commit must survive — heddle must not force-overwrite it"
+        );
+    }
+
+    // `--force` is the explicit escape hatch: it DOES overwrite C back to B.
+    bridge
+        .push_with_scope_force(
+            dest_path.to_str().expect("dest path"),
+            GitPushScope::AllThreads,
+            true,
+        )
+        .expect("--force overrides the FF guard at the local destination");
+    {
+        let dest = gix::open(&dest_path).expect("reopen dest");
+        let tip = dest
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_id()
+            .unwrap()
+            .detach();
+        assert_eq!(
+            tip, oid_b,
+            "--force rewinds the local destination to the served frontier B"
+        );
+    }
+
+    // ---- URL/network destination ----
+    let remote_root = TempDir::new().expect("remote root");
+    let _remote_repo = init_named_bare_git_repo(&remote_root, "remote.git");
+    let daemon = GitDaemon::spawn_push(remote_root.path());
+    let url = daemon.url("remote.git");
+
+    bridge.push(&url).expect("first network push publishes B");
+    {
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        let tip = remote
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_id()
+            .unwrap()
+            .detach();
+        assert_eq!(tip, oid_b, "remote advertises the published tip B");
+    }
+
+    // Out-of-band advance on the wire remote to the SAME C (already in the mirror).
+    {
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        let in_remote = commit_with_tree(
+            &remote,
+            Some("refs/heads/main"),
+            empty_tree_oid(&remote),
+            "out-of-band",
+            &[oid_b],
+        );
+        assert_eq!(in_remote, oid_c, "C must be the same commit on the wire remote");
+    }
+
+    // Plain network push must likewise refuse to clobber C.
+    let err = bridge.push(&url).expect_err(
+        "out-of-band descendant must be FF-rejected on the URL/network remote too",
+    );
+    assert!(
+        matches!(err, GitBridgeError::NonFastForwardRef { .. }),
+        "expected a non-fast-forward rejection on the wire, got: {err:?}"
+    );
+    {
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
+        let tip = remote
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_id()
+            .unwrap()
+            .detach();
+        assert_eq!(
+            tip, oid_c,
+            "the out-of-band commit must survive on the URL/network remote"
+        );
+    }
+}
+
+/// #316 / PR #528 r12: the r11 behavior is PRESERVED — a tip heddle ITSELF
+/// published, then embargoed, IS force-rewound to the served frontier at every
+/// destination. The r12 ownership gate authorizes the force precisely because the
+/// destination tip equals heddle's recorded published tip; only out-of-band tips
+/// heddle never published are spared (see
+/// [`out_of_band_destination_descendant_not_force_overwritten`]). Covers
+/// local-path AND URL/network.
+#[test]
+fn heddle_published_tip_embargo_rewind_still_forced() {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    // Linear thread: public base A, then public tip B — both heddle-published.
+    std::fs::write(heddle_temp.path().join("a.txt"), b"base\n").unwrap();
+    repo.snapshot(Some("base".into()), None).unwrap();
+    let state_a = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+    std::fs::write(heddle_temp.path().join("b.txt"), b"fix\n").unwrap();
+    repo.snapshot(Some("fix".into()), None).unwrap();
+    let state_b = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+
+    let mut bridge = GitBridge::new(&repo);
+
+    // Publish B to BOTH a local-path destination and a URL/network remote.
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    bridge
+        .export_to_path(&dest_path)
+        .expect("first export publishes B (local)");
+
+    let remote_root = TempDir::new().expect("remote root");
+    let _remote_repo = init_named_bare_git_repo(&remote_root, "remote.git");
+    let daemon = GitDaemon::spawn_push(remote_root.path());
+    let url = daemon.url("remote.git");
+    bridge.push(&url).expect("first network push publishes B");
+
+    let oid_a = bridge.mapping.get_git(&state_a).expect("A minted");
+    let oid_b = bridge.mapping.get_git(&state_b).expect("B minted");
+    {
+        let dest = gix::open(&dest_path).expect("open dest");
+        assert_eq!(
+            dest.find_reference("refs/heads/main")
+                .unwrap()
+                .peel_to_id()
+                .unwrap()
+                .detach(),
+            oid_b,
+            "local destination advertises the published tip B"
+        );
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        assert_eq!(
+            remote
+                .find_reference("refs/heads/main")
+                .unwrap()
+                .peel_to_id()
+                .unwrap()
+                .detach(),
+            oid_b,
+            "remote advertises the published tip B"
+        );
+    }
+
+    // Embargo only B; parent A stays served. The served frontier lags to A — a
+    // deliberate heddle-OWNED rewind: the destination tip (B) equals heddle's
+    // recorded published tip, so the force is authorized at every destination.
+    repo.put_state_visibility(StateVisibility {
+        state: state_b,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Grace Hopper".into(),
+            email: "grace@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+
+    bridge
+        .export_to_path(&dest_path)
+        .expect("second export must FORCE the heddle-owned embargo rewind (local)");
+    bridge
+        .push(&url)
+        .expect("second network push must FORCE the heddle-owned embargo rewind (network)");
+
+    let dest = gix::open(&dest_path).expect("reopen dest");
+    let tip = dest
+        .find_reference("refs/heads/main")
+        .unwrap()
+        .peel_to_id()
+        .unwrap()
+        .detach();
+    assert_eq!(
+        tip, oid_a,
+        "local destination must be force-rewound to the served ancestor A"
+    );
+    assert_ne!(
+        tip, oid_b,
+        "local destination must not keep advertising the embargoed tip B"
+    );
+
+    let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
+    let rtip = remote
+        .find_reference("refs/heads/main")
+        .unwrap()
+        .peel_to_id()
+        .unwrap()
+        .detach();
+    assert_eq!(
+        rtip, oid_a,
+        "URL/network remote must be force-rewound to the served ancestor A"
+    );
+    assert_ne!(
+        rtip, oid_b,
+        "URL/network remote must not keep advertising the embargoed tip B"
+    );
+}
+
+/// #316 / PR #528 r13 (the r12-review delete finding): the retraction DELETE must
+/// honor the SAME heddle-ownership gate as the forced rewind. A destination tip
+/// advanced OUT OF BAND past heddle's last-published tip — and then the whole
+/// line embargoed so the branch has no served frontier — must NOT be deleted by a
+/// plain export/push. heddle never published that tip, so it is not heddle's to
+/// retract; deleting it would clobber the user's commit (data loss). r11/r12 gated
+/// FORCE on ownership but the delete-set still fired on ANY previously-exported-
+/// now-unserved ref — the sibling-class miss. The unified desired-vs-actual+
+/// ownership diff now derives delete from the same token (`recorded == old`): the
+/// out-of-band tip survives; `--force` is the explicit escape. Covers local-path
+/// AND URL/network.
+#[test]
+fn out_of_band_advance_after_embargo_not_deleted() {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    // A single public tip B heddle publishes to its destinations.
+    std::fs::write(heddle_temp.path().join("a.txt"), b"base\n").unwrap();
+    repo.snapshot(Some("base".into()), None).unwrap();
+    let state_b = repo
+        .refs()
+        .get_thread(&ThreadName::new("main"))
+        .unwrap()
+        .unwrap();
+
+    let mut bridge = GitBridge::new(&repo);
+
+    // Publish B to BOTH a local-path destination and a URL/network remote BEFORE
+    // the embargo — both must record main as heddle-exported at B.
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    bridge
+        .export_to_path(&dest_path)
+        .expect("first export publishes B (local)");
+    let oid_b = bridge.mapping.get_git(&state_b).expect("B minted");
+
+    let remote_root = TempDir::new().expect("remote root");
+    let _remote_repo = init_named_bare_git_repo(&remote_root, "remote.git");
+    // Park the bare remote's HEAD off main so receive-pack never treats main as
+    // the checked-out branch (matches the retraction-delete URL test).
+    std::fs::write(
+        remote_root.path().join("remote.git").join("HEAD"),
+        b"ref: refs/heads/__heddle_placeholder\n",
+    )
+    .unwrap();
+    let daemon = GitDaemon::spawn_push(remote_root.path());
+    let url = daemon.url("remote.git");
+    bridge.push(&url).expect("first network push publishes B");
+
+    // Out-of-band advance: a NEW commit C on top of B, written to the mirror (a
+    // resolvable descendant of the served frontier), the local destination, AND
+    // the wire remote. Identical inputs ⇒ identical oid in all three.
+    let oid_c = {
+        let mirror = bridge.open_git_repo().expect("open mirror");
+        let in_mirror =
+            commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "out-of-band", &[oid_b]);
+        let dest = gix::open(&dest_path).expect("open dest");
+        let in_dest = commit_with_tree(
+            &dest,
+            Some("refs/heads/main"),
+            empty_tree_oid(&dest),
+            "out-of-band",
+            &[oid_b],
+        );
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        let in_remote = commit_with_tree(
+            &remote,
+            Some("refs/heads/main"),
+            empty_tree_oid(&remote),
+            "out-of-band",
+            &[oid_b],
+        );
+        assert_eq!(in_mirror, in_dest, "C identical in mirror and local destination");
+        assert_eq!(in_mirror, in_remote, "C identical in mirror and wire remote");
+        in_mirror
+    };
+
+    // Embargo the WHOLE line so refs/heads/main has no served frontier — the exact
+    // retraction-delete trigger.
+    for state in repo.store().list_states().unwrap() {
+        repo.put_state_visibility(StateVisibility {
+            state,
+            tier: VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+            embargo_until: None,
+            declarer: Principal {
+                name: "Grace Hopper".into(),
+                email: "grace@example.com".into(),
+            },
+            declared_at: Utc::now(),
+            signature: None,
+            supersedes: None,
+        })
+        .unwrap();
+    }
+
+    // A plain export must NOT delete C at the local destination: the destination's
+    // current tip (C) is not heddle's recorded published tip (B), so the ownership
+    // gate spares it from retraction. Pre-r13 this DELETED C.
+    bridge
+        .export_to_path(&dest_path)
+        .expect("plain export must not error on the out-of-band retraction (local)");
+    {
+        let dest = gix::open(&dest_path).expect("reopen dest");
+        let tip = dest
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_id()
+            .unwrap()
+            .detach();
+        assert_eq!(
+            tip, oid_c,
+            "the out-of-band commit must survive — heddle must not delete a tip it never published (local)"
+        );
+    }
+
+    // Same on the URL/network remote: a plain push must not delete the out-of-band
+    // branch on the wire.
+    bridge
+        .push(&url)
+        .expect("plain network push must not error on the out-of-band retraction");
+    {
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
+        let tip = remote
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_id()
+            .unwrap()
+            .detach();
+        assert_eq!(
+            tip, oid_c,
+            "the out-of-band commit must survive on the URL/network remote too"
+        );
+    }
+
+    // `--force` is the explicit escape: it DOES retract the out-of-band branch.
+    bridge
+        .push_with_scope_force(
+            dest_path.to_str().expect("dest path"),
+            GitPushScope::AllThreads,
+            true,
+        )
+        .expect("--force retracts the out-of-band branch at the local destination");
+    {
+        let dest = gix::open(&dest_path).expect("reopen dest");
+        assert!(
+            dest.find_reference("refs/heads/main").is_err(),
+            "--force deletes the retracted branch even when the destination tip was advanced out of band"
+        );
+    }
+}
+
+/// #316 / PR #528 r17 — the conformance matrix that turns the per-cell fix into a
+/// REDESIGN. It drives [`plan_destination_reconcile`] directly across every
+/// {namespace} × {operation} × {ownership} × {force} cell and asserts the
+/// reconcile outcome. The structural guarantee it locks: ownership (`recorded ==
+/// old`, a safe forward move, or `--force`) gates EVERY namespace's overwrite AND
+/// delete; move-classification (fast-forward for branch/note, free for tag) is
+/// the ONLY per-namespace axis. A future namespace that wires an overwrite
+/// without funnelling through the uniform ownership gate — the exact asymmetry
+/// that let an out-of-band tag be clobbered before r17 — would fail a row here.
+/// The annotated-tag-object sub-cases additionally prove a tag never resolves
+/// `find_commit` (which would error on a tag object).
+#[test]
+fn reconcile_ownership_conformance_matrix() {
+    use crate::bridge::git_core::{GitBridgeError, RefNamespace, RefUpdate, plan_destination_reconcile};
+    use std::collections::HashMap;
+
+    let (_mirror_temp, mirror) = init_git_repo();
+    // Linear topology a <- b so classify_ref_move resolves fast-forward (a->b),
+    // rewind (b->a, owned), and divergence for the branch/note rows.
+    let a = commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "A", &[]);
+    let b = commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "B", &[a]);
+    // An annotated-tag OBJECT (kind == Tag, NOT a commit): used as a tag tip to
+    // prove classify_tag_move never calls find_commit on it.
+    let tag_obj = create_annotated_tag(&mirror, "annot", b, "annotated tag object");
+
+    // Expected reconcile outcome for a single-ref call.
+    enum Outcome {
+        /// In `writes` with this `old`/`new`, and `deletes` empty.
+        Write(Option<gix::hash::ObjectId>, gix::hash::ObjectId),
+        /// In `deletes` with this `old`, and `writes` empty.
+        Delete(gix::hash::ObjectId),
+        /// Neither written nor deleted (no-op skip, or out-of-band spared).
+        Absent,
+        /// `Err(NonFastForwardRef)` — an unowned overwrite without `--force`.
+        NonFastForward,
+    }
+
+    struct Cell {
+        label: &'static str,
+        ns: RefNamespace,
+        old: Option<gix::hash::ObjectId>,
+        target: gix::hash::ObjectId,
+        recorded: Option<gix::hash::ObjectId>,
+        /// In the served frontier (an overwrite/create) vs. only previously
+        /// exported (a retraction).
+        desired: bool,
+        force: bool,
+        expect: Outcome,
+    }
+
+    let cells = vec![
+        // ---- branch: fast-forward move-classification + uniform ownership ----
+        Cell { label: "branch/create", ns: RefNamespace::Branch, old: None, target: b, recorded: None, desired: true, force: false, expect: Outcome::Write(None, b) },
+        Cell { label: "branch/no-op", ns: RefNamespace::Branch, old: Some(b), target: b, recorded: Some(b), desired: true, force: false, expect: Outcome::Absent },
+        Cell { label: "branch/fast-forward/owned", ns: RefNamespace::Branch, old: Some(a), target: b, recorded: Some(a), desired: true, force: false, expect: Outcome::Write(Some(a), b) },
+        Cell { label: "branch/fast-forward/out-of-band", ns: RefNamespace::Branch, old: Some(a), target: b, recorded: None, desired: true, force: false, expect: Outcome::Write(Some(a), b) },
+        Cell { label: "branch/rewind/owned", ns: RefNamespace::Branch, old: Some(b), target: a, recorded: Some(b), desired: true, force: false, expect: Outcome::Write(Some(b), a) },
+        Cell { label: "branch/rewind/out-of-band/force-off", ns: RefNamespace::Branch, old: Some(b), target: a, recorded: None, desired: true, force: false, expect: Outcome::NonFastForward },
+        Cell { label: "branch/rewind/out-of-band/force-on", ns: RefNamespace::Branch, old: Some(b), target: a, recorded: None, desired: true, force: true, expect: Outcome::Write(Some(b), a) },
+        Cell { label: "branch/retract/owned", ns: RefNamespace::Branch, old: Some(b), target: b, recorded: Some(b), desired: false, force: false, expect: Outcome::Delete(b) },
+        // Out-of-band retract: heddle published `a`, the destination drifted to `b`
+        // (recorded != old) — spared unless forced.
+        Cell { label: "branch/retract/out-of-band/force-off", ns: RefNamespace::Branch, old: Some(b), target: b, recorded: Some(a), desired: false, force: false, expect: Outcome::Absent },
+        Cell { label: "branch/retract/out-of-band/force-on", ns: RefNamespace::Branch, old: Some(b), target: b, recorded: Some(a), desired: false, force: true, expect: Outcome::Delete(b) },
+        // ---- tag: free move-classification + the SAME uniform ownership gate ----
+        Cell { label: "tag/create", ns: RefNamespace::Tag, old: None, target: b, recorded: None, desired: true, force: false, expect: Outcome::Write(None, b) },
+        Cell { label: "tag/no-op", ns: RefNamespace::Tag, old: Some(b), target: b, recorded: Some(b), desired: true, force: false, expect: Outcome::Absent },
+        Cell { label: "tag/owned-overwrite", ns: RefNamespace::Tag, old: Some(a), target: b, recorded: Some(a), desired: true, force: false, expect: Outcome::Write(Some(a), b) },
+        // THE r17 fix: an out-of-band tag (recorded != old) is no longer clobbered.
+        Cell { label: "tag/out-of-band-overwrite/unrecorded/force-off", ns: RefNamespace::Tag, old: Some(a), target: b, recorded: None, desired: true, force: false, expect: Outcome::NonFastForward },
+        Cell { label: "tag/out-of-band-overwrite/mismatched-record/force-off", ns: RefNamespace::Tag, old: Some(a), target: b, recorded: Some(b), desired: true, force: false, expect: Outcome::NonFastForward },
+        Cell { label: "tag/out-of-band-overwrite/force-on", ns: RefNamespace::Tag, old: Some(a), target: b, recorded: None, desired: true, force: true, expect: Outcome::Write(Some(a), b) },
+        // annotated-tag-object as the NEW target: proves no find_commit on a tag obj.
+        Cell { label: "tag/owned-overwrite/annotated-object-target", ns: RefNamespace::Tag, old: Some(a), target: tag_obj, recorded: Some(a), desired: true, force: false, expect: Outcome::Write(Some(a), tag_obj) },
+        // annotated-tag-object as the OLD tip: still gated by OID compare only.
+        Cell { label: "tag/out-of-band-overwrite/annotated-object-old/force-off", ns: RefNamespace::Tag, old: Some(tag_obj), target: b, recorded: None, desired: true, force: false, expect: Outcome::NonFastForward },
+        Cell { label: "tag/retract/owned", ns: RefNamespace::Tag, old: Some(b), target: b, recorded: Some(b), desired: false, force: false, expect: Outcome::Delete(b) },
+        Cell { label: "tag/retract/out-of-band/force-off", ns: RefNamespace::Tag, old: Some(b), target: b, recorded: Some(a), desired: false, force: false, expect: Outcome::Absent },
+        Cell { label: "tag/retract/out-of-band/force-on", ns: RefNamespace::Tag, old: Some(b), target: b, recorded: Some(a), desired: false, force: true, expect: Outcome::Delete(b) },
+        // ---- note: classified exactly like a branch (uniform ownership) ----
+        Cell { label: "note/create", ns: RefNamespace::Note, old: None, target: b, recorded: None, desired: true, force: false, expect: Outcome::Write(None, b) },
+        Cell { label: "note/no-op", ns: RefNamespace::Note, old: Some(b), target: b, recorded: Some(b), desired: true, force: false, expect: Outcome::Absent },
+        Cell { label: "note/fast-forward/owned", ns: RefNamespace::Note, old: Some(a), target: b, recorded: Some(a), desired: true, force: false, expect: Outcome::Write(Some(a), b) },
+        Cell { label: "note/rewind/owned", ns: RefNamespace::Note, old: Some(b), target: a, recorded: Some(b), desired: true, force: false, expect: Outcome::Write(Some(b), a) },
+        Cell { label: "note/rewind/out-of-band/force-off", ns: RefNamespace::Note, old: Some(b), target: a, recorded: None, desired: true, force: false, expect: Outcome::NonFastForward },
+        Cell { label: "note/rewind/out-of-band/force-on", ns: RefNamespace::Note, old: Some(b), target: a, recorded: None, desired: true, force: true, expect: Outcome::Write(Some(b), a) },
+        Cell { label: "note/retract/owned", ns: RefNamespace::Note, old: Some(b), target: b, recorded: Some(b), desired: false, force: false, expect: Outcome::Delete(b) },
+    ];
+
+    for cell in &cells {
+        let short = "v1";
+        let full = match cell.ns {
+            RefNamespace::Branch => format!("refs/heads/{short}"),
+            RefNamespace::Tag => format!("refs/tags/{short}"),
+            RefNamespace::Note => format!("refs/notes/{short}"),
+        };
+        let served: Vec<RefUpdate> = if cell.desired {
+            vec![RefUpdate { name: short.to_string(), target: cell.target, namespace: cell.ns }]
+        } else {
+            Vec::new()
+        };
+        let mut old_map: HashMap<String, gix::hash::ObjectId> = HashMap::new();
+        if let Some(o) = cell.old {
+            old_map.insert(full.clone(), o);
+        }
+        let mut recorded_map: HashMap<String, gix::hash::ObjectId> = HashMap::new();
+        if let Some(r) = cell.recorded {
+            recorded_map.insert(full.clone(), r);
+        }
+
+        let result =
+            plan_destination_reconcile(&mirror, &served, None, &old_map, &recorded_map, cell.force);
+
+        if let Outcome::NonFastForward = cell.expect {
+            let err = result
+                .expect_err(&format!("cell `{}`: expected Err(NonFastForwardRef)", cell.label));
+            assert!(
+                matches!(err, GitBridgeError::NonFastForwardRef { .. }),
+                "cell `{}`: expected NonFastForwardRef, got {err:?}",
+                cell.label
+            );
+            continue;
+        }
+
+        let plan = result
+            .unwrap_or_else(|e| panic!("cell `{}`: expected Ok, got {e:?}", cell.label));
+        match cell.expect {
+            Outcome::Write(exp_old, exp_new) => {
+                assert!(plan.deletes.is_empty(), "cell `{}`: expected no deletes", cell.label);
+                assert_eq!(plan.writes.len(), 1, "cell `{}`: expected exactly one write", cell.label);
+                let w = &plan.writes[0];
+                assert_eq!(w.full_name, full, "cell `{}`: write name", cell.label);
+                assert_eq!(w.old, exp_old, "cell `{}`: write old", cell.label);
+                assert_eq!(w.new, exp_new, "cell `{}`: write new", cell.label);
+            }
+            Outcome::Delete(exp_old) => {
+                assert!(plan.writes.is_empty(), "cell `{}`: expected no writes", cell.label);
+                assert_eq!(plan.deletes.len(), 1, "cell `{}`: expected exactly one delete", cell.label);
+                let d = &plan.deletes[0];
+                assert_eq!(d.full_name, full, "cell `{}`: delete name", cell.label);
+                assert_eq!(d.old, exp_old, "cell `{}`: delete old", cell.label);
+            }
+            Outcome::Absent => {
+                assert!(plan.writes.is_empty(), "cell `{}`: expected no writes", cell.label);
+                assert!(plan.deletes.is_empty(), "cell `{}`: expected no deletes", cell.label);
+            }
+            Outcome::NonFastForward => unreachable!("handled above"),
+        }
+    }
+}
+
+/// #316 / PR #528 — destination foreign-ref over-claim: a pre-existing destination
+/// ref already AT the served target that heddle never recorded (no exported-refs
+/// entry) must NOT be claimed into the manifest. The verdict is Skip (no write, no
+/// delete), but the prior code still recorded it — which would let a LATER export,
+/// once it no longer serves that ref, DELETE a ref heddle never created. The
+/// reconcile now leaves it out of the new manifest, so the foreign ref survives a
+/// later retraction.
+#[test]
+fn foreign_destination_ref_spared() {
+    use crate::bridge::git_core::{RefNamespace, RefUpdate, plan_destination_reconcile};
+    use std::collections::HashMap;
+
+    let (_mirror_temp, mirror) = init_git_repo();
+    let a = commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "A", &[]);
+    let full = "refs/tags/user-v1".to_string();
+
+    // The served frontier WANTS refs/tags/user-v1 at A, and the destination already
+    // happens to be at A — but heddle never recorded it (recorded None): FOREIGN.
+    let served = vec![RefUpdate {
+        name: "user-v1".to_string(),
+        target: a,
+        namespace: RefNamespace::Tag,
+    }];
+    let mut old_map: HashMap<String, gix::hash::ObjectId> = HashMap::new();
+    old_map.insert(full.clone(), a);
+    let recorded_map: HashMap<String, gix::hash::ObjectId> = HashMap::new();
+
+    let plan =
+        plan_destination_reconcile(&mirror, &served, None, &old_map, &recorded_map, false).unwrap();
+    assert!(plan.writes.is_empty(), "a coincidental match must not be written");
+    assert!(plan.deletes.is_empty(), "a coincidental match must not be deleted");
+    assert!(
+        !plan.new_manifest.contains_key(&full),
+        "heddle must NOT claim ownership of a foreign destination ref it never recorded"
+    );
+
+    // The consequence: a LATER export that no longer serves user-v1 must NOT delete
+    // it, because it was never claimed (the manifest carries no record for it).
+    let plan2 =
+        plan_destination_reconcile(&mirror, &[], None, &old_map, &plan.new_manifest, false).unwrap();
+    assert!(
+        plan2.deletes.is_empty(),
+        "the foreign ref must survive a later retraction — it was never heddle's to delete"
+    );
+}
+
+/// #316 / PR #528 r17 (the behavioral gap): an out-of-band destination TAG heddle
+/// never recorded must NOT be clobbered by a plain export/push — the precise
+/// asymmetry r1-r16 left open (tag DELETES were ownership-gated, tag WRITES were
+/// not). A destination `refs/tags/v1.0` advanced out of band past heddle's
+/// recorded published tip is FF-rejected (`NonFastForwardRef`) and survives; only
+/// `--force` overwrites it back to the served target. Covers BOTH call sites —
+/// local-path AND URL/network.
+#[test]
+fn out_of_band_destination_tag_not_overwritten() {
+    use crate::bridge::git_core::GitBridgeError;
+    use objects::object::{Attribution, Principal, State};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    // A public main that stays put, plus a SEPARATE state R pinned by marker v1.0
+    // — so heddle serves refs/tags/v1.0 throughout (it never rewinds/retracts).
+    std::fs::write(heddle_temp.path().join("main.txt"), b"trunk\n").unwrap();
+    repo.snapshot(Some("trunk".into()), None).unwrap();
+    let r = {
+        let store = repo.store();
+        let blob = store.put_blob(&Blob::from_slice(b"release\n")).expect("blob");
+        let tree = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("release.txt".to_string(), blob, false).expect("entry"),
+            ]))
+            .expect("tree");
+        let state = State::new(
+            tree,
+            Vec::new(),
+            Attribution::human(Principal::new("Grace Hopper", "grace@example.com")),
+        );
+        store.put_state(&state).expect("put R");
+        state
+    };
+    repo.refs()
+        .create_marker(&MarkerName::new("v1.0"), &r.change_id)
+        .expect("create marker at R");
+
+    let mut bridge = GitBridge::new(&repo);
+
+    // ---- local-path destination ----
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    bridge
+        .export_to_path(&dest_path)
+        .expect("first export publishes the tag (local)");
+
+    // The served tag tip heddle recorded for this destination.
+    let served_tag = {
+        let dest = gix::open(&dest_path).expect("open dest");
+        read_exported_refs(&dest).expect("read record")["refs/tags/v1.0"]
+    };
+
+    // Out-of-band advance: move the destination tag to a fresh commit X heddle
+    // never published (and never recorded).
+    let oid_x = {
+        let dest = gix::open(&dest_path).expect("open dest");
+        let x = commit_with_tree(&dest, None, empty_tree_oid(&dest), "out-of-band-tag", &[]);
+        set_reference(&dest, "refs/tags/v1.0", x, PreviousValue::Any, "test: out-of-band tag")
+            .expect("move tag out of band");
+        x
+    };
+    assert_ne!(oid_x, served_tag, "the out-of-band tag tip must differ from the served tip");
+
+    // A plain export must NOT clobber X: heddle does not own that tip.
+    let err = bridge
+        .export_to_path(&dest_path)
+        .expect_err("out-of-band tag must be FF-rejected at the local destination, not overwritten");
+    assert!(
+        matches!(err, GitBridgeError::NonFastForwardRef { .. }),
+        "expected a non-fast-forward rejection, got: {err:?}"
+    );
+    {
+        let dest = gix::open(&dest_path).expect("reopen dest");
+        let tip = dest
+            .find_reference("refs/tags/v1.0")
+            .unwrap()
+            .try_id()
+            .map(|id| id.detach())
+            .expect("tag id");
+        assert_eq!(tip, oid_x, "the out-of-band tag must survive — heddle must not overwrite it");
+    }
+
+    // `--force` is the explicit escape hatch: it DOES overwrite back to the tip.
+    bridge
+        .push_with_scope_force(dest_path.to_str().expect("dest path"), GitPushScope::AllThreads, true)
+        .expect("--force overrides the tag ownership gate at the local destination");
+    {
+        let dest = gix::open(&dest_path).expect("reopen dest");
+        let tip = dest
+            .find_reference("refs/tags/v1.0")
+            .unwrap()
+            .try_id()
+            .map(|id| id.detach())
+            .expect("tag id");
+        assert_eq!(tip, served_tag, "--force rewinds the local destination tag to the served tip");
+    }
+
+    // ---- URL/network destination ----
+    let remote_root = TempDir::new().expect("remote root");
+    let _remote_repo = init_named_bare_git_repo(&remote_root, "remote.git");
+    std::fs::write(
+        remote_root.path().join("remote.git").join("HEAD"),
+        b"ref: refs/heads/__heddle_placeholder\n",
+    )
+    .unwrap();
+    let daemon = GitDaemon::spawn_push(remote_root.path());
+    let url = daemon.url("remote.git");
+
+    bridge.push(&url).expect("first network push publishes the tag");
+    let remote_served_tag = {
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        remote
+            .find_reference("refs/tags/v1.0")
+            .unwrap()
+            .try_id()
+            .map(|id| id.detach())
+            .expect("tag id")
+    };
+
+    let remote_oid_x = {
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        let x = commit_with_tree(&remote, None, empty_tree_oid(&remote), "out-of-band-tag", &[]);
+        set_reference(&remote, "refs/tags/v1.0", x, PreviousValue::Any, "test: out-of-band tag")
+            .expect("move remote tag out of band");
+        x
+    };
+    assert_ne!(remote_oid_x, remote_served_tag, "the out-of-band remote tag tip must differ");
+
+    let err = bridge
+        .push(&url)
+        .expect_err("out-of-band tag must be FF-rejected on the URL/network remote too");
+    assert!(
+        matches!(err, GitBridgeError::NonFastForwardRef { .. }),
+        "expected a non-fast-forward rejection on the wire, got: {err:?}"
+    );
+    {
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
+        let tip = remote
+            .find_reference("refs/tags/v1.0")
+            .unwrap()
+            .try_id()
+            .map(|id| id.detach())
+            .expect("tag id");
+        assert_eq!(tip, remote_oid_x, "the out-of-band tag must survive on the URL/network remote");
+    }
+
+    bridge
+        .push_with_scope_force(&url, GitPushScope::AllThreads, true)
+        .expect("--force overrides the tag ownership gate on the URL/network remote");
+    {
+        let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
+        let tip = remote
+            .find_reference("refs/tags/v1.0")
+            .unwrap()
+            .try_id()
+            .map(|id| id.detach())
+            .expect("tag id");
+        assert_eq!(tip, remote_served_tag, "--force rewinds the remote tag to the served tip");
+    }
+}
+
+/// #316 / PR #528 r17: the ownership gate must NOT over-block a LEGITIMATE tag
+/// move. A destination tag whose tip heddle still OWNS (`recorded == old`) is
+/// overwritten to the served target on a plain reconcile — `classify_tag_move`'s
+/// gate spares ONLY out-of-band tips heddle never recorded, never heddle's own
+/// published moves. Driven directly against [`plan_destination_reconcile`]
+/// (the mirror now FORCE-retargets a marker re-point, heddle#316 S1, so the
+/// source-move path cannot stage an out-of-band DESTINATION tip end-to-end),
+/// pinning the owned-vs-unowned boundary in one focused regression: identical
+/// inputs land a write when owned, and demand `--force` when not.
+#[test]
+fn heddle_owned_tag_overwrite_still_lands() {
+    use crate::bridge::git_core::{GitBridgeError, RefNamespace, RefUpdate, plan_destination_reconcile};
+    use std::collections::HashMap;
+
+    let (_mirror_temp, mirror) = init_git_repo();
+    let a = commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "A", &[]);
+    let b = commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "B", &[a]);
+
+    let full = "refs/tags/v1.0".to_string();
+    let served = vec![RefUpdate { name: "v1.0".to_string(), target: b, namespace: RefNamespace::Tag }];
+    let old_at_destination: HashMap<String, gix::hash::ObjectId> =
+        [(full.clone(), a)].into_iter().collect();
+
+    // Owned: heddle recorded the destination tip `a` it is overwriting → the move
+    // to `b` lands as a plain write, no `--force` needed.
+    let owned: HashMap<String, gix::hash::ObjectId> = [(full.clone(), a)].into_iter().collect();
+    let plan = plan_destination_reconcile(&mirror, &served, None, &old_at_destination, &owned, false)
+        .expect("a heddle-owned tag move must reconcile without --force");
+    assert_eq!(plan.writes.len(), 1, "owned tag move must produce exactly one write");
+    assert_eq!(plan.writes[0].full_name, full);
+    assert_eq!(plan.writes[0].old, Some(a), "write carries the owned old tip");
+    assert_eq!(plan.writes[0].new, b, "write lands the served target");
+    assert!(plan.deletes.is_empty(), "an owned overwrite is a write, not a delete");
+
+    // Contrast: the SAME move with no ownership record (out-of-band tip) is the r17
+    // gate — FF-rejected unless `--force`.
+    let unrecorded: HashMap<String, gix::hash::ObjectId> = HashMap::new();
+    let err = plan_destination_reconcile(&mirror, &served, None, &old_at_destination, &unrecorded, false)
+        .expect_err("an unowned tag overwrite must be FF-rejected without --force");
+    assert!(
+        matches!(err, GitBridgeError::NonFastForwardRef { .. }),
+        "expected NonFastForwardRef, got {err:?}"
     );
 }

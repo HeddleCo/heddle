@@ -15,7 +15,7 @@
 //! every successful capture.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -68,6 +68,23 @@ pub struct ThreadManifest {
     /// else (skip both). Canonicalized at write time so symlink /
     /// `./` traversal differences don't cause a false miss.
     pub worktree_path: PathBuf,
+    /// `true` when the *last* materialize of this thread was *withheld*: the
+    /// state's visibility tier was not visible to the materializing audience,
+    /// so only the operator-local courtesy stub was written and the tracked
+    /// bytes withheld (`files` is therefore empty while `tree_hash` still names
+    /// the real, unserved state's tree).
+    ///
+    /// **Diagnostic only.** This is a per-thread field on a single
+    /// `manifest.toml`, so it reflects only whichever worktree was materialized
+    /// last; a sibling worktree of the same thread clobbers it. The
+    /// authoritative, per-worktree-root non-capturable signal that
+    /// `capture_thread_from_disk` actually consults is the withheld *marker*
+    /// (see [`mark_withheld_checkout`] / [`is_withheld_checkout`]), keyed on the
+    /// worktree root so an under-tier checkout of one worktree never suppresses
+    /// an authorized sibling worktree's capture. `#[serde(default)]` keeps
+    /// pre-existing manifests readable as `false`. See heddle#316.
+    #[serde(default)]
+    pub withheld: bool,
     /// Per-file stat-cache. Key is the worktree-relative path with
     /// forward-slash separators (so a manifest moves between macOS
     /// and Linux without rewriting). Value is the snapshot of
@@ -95,6 +112,7 @@ impl ThreadManifest {
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
             worktree_path,
+            withheld: false,
             files: BTreeMap::new(),
         }
     }
@@ -293,6 +311,76 @@ pub fn read_manifest(heddle_dir: &Path, thread: &str) -> io::Result<Option<Threa
     Ok(Some(manifest))
 }
 
+/// Find the thread manifest whose recorded `worktree_path` equals
+/// `canonical_worktree_root`, regardless of which thread name it lives under.
+///
+/// Keyed by the **canonical worktree root**, not the thread name, because the
+/// checkout reconcile step needs to know which tracked leaves a *prior*
+/// materialization left at a root so a now-withheld re-materialize can remove
+/// exactly those — and that prior materialization may have been a different
+/// thread checked out at the same path. Returns `Ok(None)` when no manifest
+/// records this root (a first-ever materialize, or one whose manifest was
+/// since clobbered by a sibling worktree of the same thread). Malformed or
+/// schema-mismatched manifests are skipped rather than erroring — the reconcile
+/// caller treats "no recoverable record" as "nothing to remove".
+pub fn manifest_for_worktree_root(
+    heddle_dir: &Path,
+    canonical_worktree_root: &Path,
+) -> io::Result<Option<ThreadManifest>> {
+    let threads_dir = heddle_dir.join("threads");
+    let mut found = None;
+    find_manifest_for_root(&threads_dir, canonical_worktree_root, &mut found)?;
+    Ok(found)
+}
+
+/// Depth-first walk under `cur` looking for a `manifest.toml` whose
+/// `worktree_path` matches `root_match`. Stops at the first match. Mirrors
+/// [`walk_thread_manifests`]'s structure but parses the full manifest (not a
+/// summary) and short-circuits on the path predicate.
+fn find_manifest_for_root(
+    cur: &Path,
+    root_match: &Path,
+    out: &mut Option<ThreadManifest>,
+) -> io::Result<()> {
+    if out.is_some() {
+        return Ok(());
+    }
+    let entries = match fs::read_dir(cur) {
+        Ok(e) => e,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(enrich_fs_error(cur, "listing", e)),
+    };
+    let mut subdirs = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        let path = entry.path();
+        if ft.is_dir() {
+            subdirs.push(path);
+        } else if ft.is_file() && entry.file_name() == "manifest.toml" {
+            // Parse directly rather than reconstructing the thread name and
+            // routing through `read_manifest`: we match on `worktree_path`, so
+            // the thread name is irrelevant here. Skip anything unparseable or
+            // schema-stale — the reconcile caller is conservative by design.
+            if let Ok(text) = fs::read_to_string(&path)
+                && let Ok(manifest) = toml::from_str::<ThreadManifest>(&text)
+                && manifest.schema_version == SCHEMA_VERSION
+                && manifest.worktree_path == root_match
+            {
+                *out = Some(manifest);
+                return Ok(());
+            }
+        }
+    }
+    for sub in subdirs {
+        find_manifest_for_root(&sub, root_match, out)?;
+        if out.is_some() {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
 /// Delete the on-disk manifest directory for `thread`. Used by
 /// `heddle thread drop` to keep the materialized-thread inventory
 /// (`heddle status` / `heddle daemon status`) in sync with the live
@@ -342,6 +430,198 @@ pub fn remove_thread_manifest_dir(heddle_dir: &Path, thread: &str) -> io::Result
     Ok(removed)
 }
 
+/// On-disk location of the *withheld-checkout* marker for the worktree
+/// materialized at `canonical_worktree_root`.
+///
+/// Keyed by the **canonical worktree root**, NOT the thread name. A single
+/// thread can be materialized into more than one worktree at once (e.g. an
+/// authorized checkout at tier-A into one dir and an under-tier checkout into
+/// another). The per-thread `manifest.toml` is a single file that the second
+/// materialize clobbers, so a `withheld` flag stored there cannot distinguish
+/// "this worktree was withheld" from "some sibling worktree of the same thread
+/// was withheld". Keying the marker on the worktree root makes each
+/// materialization's withheld status independent — an under-tier checkout into
+/// worktree B never suppresses a capture of authorized worktree A of the same
+/// thread (heddle#316).
+///
+/// The root is hashed (not embedded) so an arbitrarily long / non-ASCII path
+/// maps to a fixed-length, filesystem-safe filename.
+fn withheld_marker_path(heddle_dir: &Path, canonical_worktree_root: &Path) -> PathBuf {
+    let key = ContentHash::compute_typed(
+        "withheld-checkout",
+        canonical_worktree_root.as_os_str().as_encoded_bytes(),
+    )
+    .to_hex();
+    heddle_dir
+        .join("withheld-checkouts")
+        .join(format!("{key}.marker"))
+}
+
+/// Record that the checkout materialized at `canonical_worktree_root` is
+/// *withheld*: the state's visibility tier was not visible to the materializing
+/// audience, so only the operator-local courtesy stub was written and the
+/// tracked bytes withheld. `capture_thread_from_disk` of this specific worktree
+/// must be a no-op. Keyed per worktree root (see [`withheld_marker_path`]), so a
+/// sibling worktree of the same thread is unaffected. The marker body is the
+/// human-readable root for diagnostics; presence is the signal.
+pub fn mark_withheld_checkout(
+    heddle_dir: &Path,
+    canonical_worktree_root: &Path,
+) -> io::Result<()> {
+    let path = withheld_marker_path(heddle_dir, canonical_worktree_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
+    }
+    fs::write(&path, canonical_worktree_root.to_string_lossy().as_bytes())
+        .map_err(|e| enrich_fs_error(&path, "writing", e))
+}
+
+/// `true` iff the worktree at `canonical_worktree_root` was recorded withheld
+/// by [`mark_withheld_checkout`] and not since cleared.
+pub fn is_withheld_checkout(heddle_dir: &Path, canonical_worktree_root: &Path) -> bool {
+    withheld_marker_path(heddle_dir, canonical_worktree_root).exists()
+}
+
+/// Clear any withheld marker for `canonical_worktree_root`. Called when the
+/// same root is (re)materialized with real, served content, so a stale marker
+/// left by a prior under-tier materialize of that root can't suppress a
+/// now-authorized capture. Idempotent: a missing marker is a no-op success.
+pub fn clear_withheld_checkout(
+    heddle_dir: &Path,
+    canonical_worktree_root: &Path,
+) -> io::Result<()> {
+    let path = withheld_marker_path(heddle_dir, canonical_worktree_root);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(enrich_fs_error(&path, "removing", e)),
+    }
+}
+
+/// Serializable body of the per-worktree-root *materialized-leaves* record.
+/// A thin wrapper so `toml` round-trips the leaf-path set (TOML needs a
+/// top-level table, not a bare array). Storing the paths in a TOML string array
+/// — rather than a newline-joined blob — keeps the record correct even for a
+/// leaf path containing exotic bytes.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct MaterializedLeaves {
+    /// Worktree-relative, forward-slash-joined tracked leaf paths the *last*
+    /// materialize of this root left on disk. Empty after a withheld materialize
+    /// (only the untracked courtesy stub remains).
+    #[serde(default)]
+    leaves: Vec<String>,
+}
+
+/// On-disk location of the *materialized-leaves* record for the worktree root at
+/// `canonical_worktree_root`.
+///
+/// Keyed by the **canonical worktree root** (hashed), NOT the thread name —
+/// exactly like [`withheld_marker_path`], and for the same reason. The single
+/// per-thread `manifest.toml` is clobbered when a sibling worktree of the same
+/// thread is materialized, so it cannot reliably answer "what tracked leaves did
+/// a prior materialize leave at THIS root?". A record keyed on the root is
+/// untouchable by a sibling materialize (which writes a different root's record
+/// under a different hash), so the checkout reconcile can always source the
+/// exact prior-leaf set to remove — closing the withheld-reduction leak that
+/// otherwise reopened whenever the per-thread manifest was clobbered
+/// (heddle#316 CLASS 1).
+fn materialized_leaves_path(heddle_dir: &Path, canonical_worktree_root: &Path) -> PathBuf {
+    let key = ContentHash::compute_typed(
+        "materialized-leaves",
+        canonical_worktree_root.as_os_str().as_encoded_bytes(),
+    )
+    .to_hex();
+    heddle_dir
+        .join("materialized-roots")
+        .join(format!("{key}.leaves"))
+}
+
+/// Persist `leaves` — the worktree-relative tracked leaf paths a materialize
+/// just left at `canonical_worktree_root` — as the clobber-proof per-root
+/// record. Two routes funnel through here, and ONLY these two, so the record
+/// always reflects the actual tracked content at the root:
+///   * the checkout chokepoint ([`Repository::checkout_state_gated`]) on every
+///     materialize — with an empty set on a withheld materialize, where only the
+///     untracked stub remains; and
+///   * [`write_manifest`], which derives the projection from `manifest.files` so
+///     every manifest writer (capture refresh, post-snapshot refresh, the CLI
+///     start `record`) keeps `.leaves` in lockstep with the manifest by
+///     construction.
+///
+/// A later reconcile of the same root therefore knows precisely which prior
+/// tracked leaves to remove even when a sibling worktree of the same thread has
+/// clobbered the per-thread `manifest.toml`. Atomic temp+rename so a torn write
+/// can't surface a half-record (heddle#316 CLASS 1).
+pub fn write_materialized_leaves(
+    heddle_dir: &Path,
+    canonical_worktree_root: &Path,
+    leaves: &BTreeSet<String>,
+) -> io::Result<()> {
+    let path = materialized_leaves_path(heddle_dir, canonical_worktree_root);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
+    }
+    let body = MaterializedLeaves {
+        leaves: leaves.iter().cloned().collect(),
+    };
+    let text = toml::to_string_pretty(&body).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("serialising materialized-leaves record: {e}"),
+        )
+    })?;
+    let tmp = path.with_extension("leaves.tmp");
+    fs::write(&tmp, text).map_err(|e| enrich_fs_error(&tmp, "writing", e))?;
+    fs::rename(&tmp, &path).map_err(|e| enrich_rename_error(&tmp, &path, e))
+}
+
+/// Read the clobber-proof per-root materialized-leaves record for
+/// `canonical_worktree_root`. `Ok(None)` only when **no record file exists**
+/// (a first-ever materialize of this root, or a root last materialized by a
+/// binary predating this record) — distinct from a present-but-empty record,
+/// which decodes to `Some(empty set)` (a withheld materialize left only the
+/// untracked stub). A malformed record errors so a corrupt sidecar surfaces
+/// rather than being silently treated as "nothing materialized here".
+pub fn read_materialized_leaves(
+    heddle_dir: &Path,
+    canonical_worktree_root: &Path,
+) -> io::Result<Option<BTreeSet<String>>> {
+    let path = materialized_leaves_path(heddle_dir, canonical_worktree_root);
+    let text = match fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(enrich_fs_error(&path, "reading", e)),
+    };
+    let body: MaterializedLeaves = toml::from_str(&text).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "malformed materialized-leaves record at {}: {e}",
+                path.display()
+            ),
+        )
+    })?;
+    Ok(Some(body.leaves.into_iter().collect()))
+}
+
+/// Remove the clobber-proof per-root materialized-leaves record for
+/// `canonical_worktree_root`. Idempotent: a missing record is a no-op success.
+/// Used by the atomic `start` rollback to drop a record a failed-then-rolled-back
+/// materialize would otherwise orphan in the shared heddle dir — the record is
+/// keyed by canonical root, so the checkout-directory rewind never reaches it
+/// (heddle#316 r11 P2).
+pub fn clear_materialized_leaves(
+    heddle_dir: &Path,
+    canonical_worktree_root: &Path,
+) -> io::Result<()> {
+    let path = materialized_leaves_path(heddle_dir, canonical_worktree_root);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(enrich_fs_error(&path, "removing", e)),
+    }
+}
+
 /// Atomically write `manifest` to disk for `thread`. Writes to a
 /// sibling temp file first then renames into place so a torn write
 /// can't leave a half-baked manifest visible to the next reader.
@@ -363,6 +643,24 @@ pub fn write_manifest(
     let tmp = path.with_extension("toml.tmp");
     fs::write(&tmp, text).map_err(|e| enrich_fs_error(&tmp, "writing", e))?;
     fs::rename(&tmp, &path).map_err(|e| enrich_rename_error(&tmp, &path, e))?;
+
+    // Keep the clobber-proof per-root materialized-leaves record in lockstep with
+    // the manifest, BY CONSTRUCTION. The manifest is the source of truth for the
+    // tracked set materialized at `worktree_path`; `.leaves` is its root-keyed
+    // projection that the withheld reduction
+    // ([`Repository::reconcile_materialized_root`]) reads to know which prior
+    // tracked leaves to remove. Deriving + writing it from the SAME call that
+    // writes the manifest is the single sync chokepoint: every manifest writer —
+    // post-capture refresh, post-snapshot refresh, the CLI start `record`, and the
+    // `materialize` paths — updates `.leaves` here, so the two records cannot
+    // drift. A withheld manifest carries empty `files`, so the projection is the
+    // empty set, exactly matching the withheld reduction's own write. The record
+    // is keyed by the canonical worktree root (== `manifest.worktree_path`), so a
+    // sibling worktree of the same thread can never erase it (heddle#316: the
+    // per-root `.leaves` staleness class — capture used to rewrite `manifest.toml`
+    // but never `.leaves`, leaking a captured-then-withheld leaf).
+    let leaves: BTreeSet<String> = manifest.files.keys().cloned().collect();
+    write_materialized_leaves(heddle_dir, &manifest.worktree_path, &leaves)?;
     Ok(())
 }
 

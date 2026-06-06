@@ -27,6 +27,15 @@ pub enum VisibilityTier {
     Restricted {
         scope_label: String,
     },
+    /// The strictest tier: withheld from **every** audience — including the
+    /// otherwise all-seeing `Internal` audience — except the one holder of
+    /// the matching `Restricted(scope_label)`. Used for embargoed per-state
+    /// commit visibility, where even internal callers must not see the
+    /// content. The who-sees-what arm lives in `repo::visibility::visible`,
+    /// placed above the `(_, Internal) => true` arm so the embargo holds.
+    Private {
+        scope_label: String,
+    },
 }
 
 impl VisibilityTier {
@@ -40,6 +49,7 @@ impl VisibilityTier {
             Self::Internal => "internal",
             Self::TeamScoped { .. } => "team_scoped",
             Self::Restricted { .. } => "restricted",
+            Self::Private { .. } => "private",
         }
     }
 
@@ -52,20 +62,23 @@ impl VisibilityTier {
     /// | `Public`     | 0    | every audience (least restrictive)          |
     /// | `Internal`   | 1    | the workspace-internal set (+ every team)   |
     /// | `TeamScoped` | 2    | one named team                              |
-    /// | `Restricted` | 3    | one named scope label (most restrictive)    |
+    /// | `Restricted` | 3    | one named scope label                        |
+    /// | `Private`    | 4    | only the matching scope holder (most restrictive, even `Internal` is excluded) |
     ///
     /// This is the *defined* total order for "less restrictive", consistent with
     /// spike #266 §5.2 (`Internal` content is one of the least-restrictive
-    /// values; `Restricted` the most). The labelled variants compare by rank
-    /// only — a lateral move between two teams / two scope labels is the **same**
-    /// rank, hence not *strictly* less restrictive, and must go through `set`
-    /// rather than `promote`.
+    /// values; `Private` the most — it is the embargo tier that withholds from
+    /// every audience including `Internal`). The labelled variants compare by
+    /// rank only — a lateral move between two teams / two scope labels is the
+    /// **same** rank, hence not *strictly* less restrictive, and must go through
+    /// `set` rather than `promote`.
     pub fn restrictiveness_rank(&self) -> u8 {
         match self {
             Self::Public => 0,
             Self::Internal => 1,
             Self::TeamScoped { .. } => 2,
             Self::Restricted { .. } => 3,
+            Self::Private { .. } => 4,
         }
     }
 

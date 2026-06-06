@@ -77,7 +77,7 @@ pub(crate) fn apply_merged_tree(repo: &Repository, tree: &Tree) -> Result<()> {
         }
     }
 
-    repo.materialize_tree(tree, repo.root())?;
+    repo.materialize_computed_tree(tree, repo.root())?;
 
     Ok(())
 }

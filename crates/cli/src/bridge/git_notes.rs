@@ -217,6 +217,82 @@ pub fn write_note(
     Ok(())
 }
 
+/// Retract the notes attached to `commit_oids` from `refs/notes/heddle`.
+///
+/// The notes ref copies to the public mirror alongside branches and tags
+/// (`collect_ref_updates` picks up `refs/notes/*`), so a note left behind for a
+/// commit that has since been embargoed/retracted is a metadata leak: the
+/// mirror keeps publishing a note whose payload (and tree entry) references the
+/// withheld commit. This is the notes-ref sibling of the branch/tag retraction
+/// the exporter already performs (heddle#316).
+///
+/// Writes a single new notes commit dropping every present entry, then advances
+/// `refs/notes/heddle` to it. A genuine fast-forward (the new commit descends
+/// from the prior notes head), so it survives the bridge's FF guard on push.
+/// No-op — no new commit, no ref churn — when the notes ref is absent or none
+/// of `commit_oids` actually has an entry.
+pub fn remove_notes(
+    repo: &gix::Repository,
+    commit_oids: &std::collections::HashSet<ObjectId>,
+) -> GitResult<()> {
+    if commit_oids.is_empty() {
+        return Ok(());
+    }
+    let (parent_commit, current_tree_oid) = read_notes_head(repo)?;
+    // No notes ref at all → nothing published, nothing to retract.
+    let Some(parent) = parent_commit else {
+        return Ok(());
+    };
+
+    // Only the requested OIDs that actually have an entry need removing.
+    // Checking first avoids churning the ref (a new empty-delta commit) when a
+    // retraction touches commits that never carried a note.
+    let target_names: std::collections::HashSet<String> = commit_oids
+        .iter()
+        .map(|oid| oid.to_hex_with_len(40).to_string())
+        .collect();
+    let tree = repo.find_tree(current_tree_oid).map_err(git_err)?;
+    let mut to_remove: Vec<String> = Vec::new();
+    for entry in tree.iter() {
+        let entry = entry.map_err(git_err)?;
+        let name = entry.filename().to_string();
+        if target_names.contains(&name) {
+            to_remove.push(name);
+        }
+    }
+    if to_remove.is_empty() {
+        return Ok(());
+    }
+
+    let mut editor = repo.edit_tree(current_tree_oid).map_err(git_err)?;
+    for name in &to_remove {
+        editor.remove(name.as_str()).map_err(git_err)?;
+    }
+    let new_tree_oid = editor.write().map_err(git_err)?.detach();
+
+    let signature = bridge_notes_signature();
+    let mut author_buf = gix::date::parse::TimeBuf::default();
+    let mut committer_buf = gix::date::parse::TimeBuf::default();
+    let new_commit = repo
+        .new_commit_as(
+            signature.to_ref(&mut committer_buf),
+            signature.to_ref(&mut author_buf),
+            "heddle: retract state metadata",
+            new_tree_oid,
+            vec![parent],
+        )
+        .map_err(git_err)?;
+
+    set_reference(
+        repo,
+        NOTES_REF,
+        new_commit.id,
+        PreviousValue::ExistingMustMatch(gix::refs::Target::Object(parent)),
+        "heddle: retract state note",
+    )?;
+    Ok(())
+}
+
 /// Look up the note attached to `commit_oid`, if any.
 pub fn read_note(repo: &gix::Repository, commit_oid: ObjectId) -> GitResult<Option<HeddleNote>> {
     let Ok(reference) = repo.find_reference(NOTES_REF) else {

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use objects::object::ChangeId;
-use repo::Repository;
+use repo::{AudienceTier, CheckoutMaterialization, Repository};
 
 use super::super::advice::RecoveryAdvice;
 
@@ -251,7 +251,7 @@ pub(crate) fn write_isolated_checkout(
     abs_path: &Path,
     base_state: &ChangeId,
     thread: Option<&str>,
-) -> Result<()> {
+) -> Result<CheckoutMaterialization> {
     let heddle_dir = abs_path.join(".heddle");
     if heddle_dir.exists() {
         return Err(anyhow::anyhow!(worktree_target_existing_heddle_advice(
@@ -293,12 +293,22 @@ pub(crate) fn write_isolated_checkout(
         .store()
         .get_state(base_state)?
         .ok_or_else(|| anyhow::anyhow!("State not found in object store"))?;
-    let tree = repo
-        .store()
-        .get_tree(&state.tree)?
-        .ok_or_else(|| anyhow::anyhow!("Tree not found in object store"))?;
-    repo.materialize_tree(&tree, abs_path)?;
-    Ok(())
+    // Route through the visibility-gated checkout chokepoint rather than calling
+    // the raw `materialize_tree`. `heddle start --path` reaches the materializer
+    // HERE, not through `materialize_thread`, so the gate must live at this
+    // chokepoint too or an embargoed state's bytes leak into the checkout
+    // (#316 / PR #528 Finding 2). Operator-local checkouts use the all-seeing
+    // `Internal` audience; a `Private` state is withheld even from `Internal`
+    // (fail closed) and the checkout receives the courtesy stub instead.
+    //
+    // PROPAGATE the gate outcome to the caller (do NOT discard it): when the base
+    // state is withheld, only the courtesy stub is on disk — the real tree was
+    // intentionally not materialized. The atomic start path uses this to record a
+    // WITHHELD-consistent manifest instead of stat-ing the unmaterialized real
+    // tree, so `heddle start` on a Private base yields a withheld checkout rather
+    // than erroring (#316 / PR #528 r9 Finding 3).
+    let outcome = repo.checkout_state_gated(base_state, &state, abs_path, &AudienceTier::Internal)?;
+    Ok(outcome)
 }
 
 fn worktree_target_existing_heddle_advice(path: &Path) -> RecoveryAdvice {
@@ -315,4 +325,98 @@ fn worktree_target_existing_heddle_advice(path: &Path) -> RecoveryAdvice {
         "heddle start <name> --path <empty-path>",
         vec!["heddle start <name> --path <empty-path>".to_string()],
     )
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, ThreadName, VisibilityTier};
+    use tempfile::TempDir;
+
+    // The operator-local courtesy placeholder filename written by the gated
+    // checkout chokepoint when a state is under-tier for the audience. Mirrored
+    // here (the const itself is repo-crate-private) to assert the leak is
+    // closed at this entry point too.
+    const COURTESY_STUB_FILENAME: &str = "HEDDLE-EMBARGO.txt";
+
+    fn embargo_head(repo: &Repository) -> ChangeId {
+        let state_id = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("head present");
+        repo.put_state_visibility(StateVisibility {
+            state: state_id,
+            tier: VisibilityTier::Private {
+                scope_label: "sec-embargo".into(),
+            },
+            embargo_until: None,
+            declarer: Principal {
+                name: "Grace Hopper".into(),
+                email: "grace@example.com".into(),
+            },
+            declared_at: Utc::now(),
+            signature: None,
+            supersedes: None,
+        })
+        .expect("put visibility");
+        state_id
+    }
+
+    /// #316 / PR #528 Finding 2: `heddle start --path` reaches the materializer
+    /// via `write_isolated_checkout`, not `materialize_thread`. The visibility
+    /// gate must cover this chokepoint too, or an embargoed state's bytes leak
+    /// into the checkout. An under-tier state gets the courtesy stub, never its
+    /// tracked content.
+    #[test]
+    fn write_isolated_checkout_withholds_embargoed_state() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        std::fs::write(repo_dir.path().join("secret.rs"), b"fn exploit() {}\n").unwrap();
+        repo.snapshot(Some("embargoed".into()), None).unwrap();
+        let state_id = embargo_head(&repo);
+
+        let holder = TempDir::new().unwrap();
+        let dest = holder.path().join("out");
+        write_isolated_checkout(&repo, &dest, &state_id, Some("main")).expect("checkout");
+
+        assert!(
+            dest.join(COURTESY_STUB_FILENAME).exists(),
+            "embargoed start --path must write the courtesy stub"
+        );
+        assert!(
+            !dest.join("secret.rs").exists(),
+            "embargoed bytes must NOT be materialized via write_isolated_checkout"
+        );
+    }
+
+    /// The same chokepoint still materializes the real bytes for a state that
+    /// IS visible to the operator-local audience — the gate fails closed only
+    /// for under-tier states.
+    #[test]
+    fn write_isolated_checkout_materializes_visible_state() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        std::fs::write(repo_dir.path().join("ok.rs"), b"fn ok() {}\n").unwrap();
+        repo.snapshot(Some("public".into()), None).unwrap();
+        let state_id = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("head present");
+
+        let holder = TempDir::new().unwrap();
+        let dest = holder.path().join("out");
+        write_isolated_checkout(&repo, &dest, &state_id, Some("main")).expect("checkout");
+
+        assert!(
+            dest.join("ok.rs").exists(),
+            "a visible state materializes its real bytes"
+        );
+        assert!(
+            !dest.join(COURTESY_STUB_FILENAME).exists(),
+            "no courtesy stub for a visible state"
+        );
+    }
 }

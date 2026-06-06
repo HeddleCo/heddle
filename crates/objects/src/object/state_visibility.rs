@@ -64,7 +64,8 @@ impl StateVisibility {
         buf.push(0);
         match &self.tier {
             VisibilityTier::TeamScoped { team_id } => buf.extend_from_slice(team_id.as_bytes()),
-            VisibilityTier::Restricted { scope_label } => {
+            VisibilityTier::Restricted { scope_label }
+            | VisibilityTier::Private { scope_label } => {
                 buf.extend_from_slice(scope_label.as_bytes())
             }
             VisibilityTier::Public | VisibilityTier::Internal => {}
@@ -96,6 +97,9 @@ impl StateVisibility {
             }
             VisibilityTier::Restricted { scope_label } if scope_label.trim().is_empty() => {
                 Err(StateVisibilityError::EmptyTierLabel("restricted"))
+            }
+            VisibilityTier::Private { scope_label } if scope_label.trim().is_empty() => {
+                Err(StateVisibilityError::EmptyTierLabel("private"))
             }
             _ => Ok(()),
         }

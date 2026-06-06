@@ -183,7 +183,7 @@ fn apply_tree_to_worktree(repo: &Repository, tree: &objects::object::Tree) -> Re
     }
 
     // Write all entries recursively.
-    repo.materialize_tree(tree, repo.root())?;
+    repo.materialize_computed_tree(tree, repo.root())?;
 
     Ok(())
 }
