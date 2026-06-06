@@ -2,14 +2,15 @@
 //! Core FsStore structure.
 
 use std::{
-    collections::{BTreeSet, HashMap, VecDeque},
+    collections::{HashMap, VecDeque},
     hash::Hash,
     path::{Path, PathBuf},
     sync::{Mutex, RwLock},
+    thread::ThreadId,
 };
 
 use super::{
-    fs_io::{AtomicWriteMode, write_atomic},
+    fs_io::{AtomicWriteMode, promote_staged_object, stage_loose_object, write_atomic},
     fs_paths::{actions_dir, blobs_dir, packs_dir, states_dir, trees_dir},
 };
 use crate::{
@@ -33,7 +34,39 @@ const VERIFIED_LOOSE_BLOB_CACHE_CAPACITY: usize = 65_536;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LooseObjectWriteMode {
     Durable,
+    /// Legacy alias for [`LooseObjectWriteMode::Durable`]. Snapshot-batch
+    /// deferral is no longer driven by this store-wide mode field — it is
+    /// scoped per-batch via `begin_snapshot_write_batch` (heddle#550
+    /// Finding 3). Configured standalone via `set_loose_object_write_mode`
+    /// with no active batch, a write must still be fully durable on its
+    /// own (no `syncfs` is ever coming), so this is treated exactly like
+    /// `Durable`. Retained so the public setter keeps its r1 durability
+    /// guarantee without a behavioural surprise.
     BatchDirectorySync,
+}
+
+/// Per-thread snapshot write-batch state.
+///
+/// Scoping the batch to the thread that opened it (heddle#550 Finding 3)
+/// is what keeps a concurrent unrelated write on the same `FsStore` —
+/// e.g. a daemon servicing a second operation — out of this batch's
+/// deferred `syncfs` barrier. Only writes issued by the batch-opening
+/// thread are staged; every other caller gets normal per-write
+/// durability even while this batch is open.
+///
+/// Each batch is single-threaded by construction (the import/snapshot
+/// operation that opens it issues all its object writes from the opening
+/// thread), so this entry is only ever touched by its owning thread.
+#[derive(Debug, Default)]
+struct SnapshotBatch {
+    /// begin/flush nesting depth; the `syncfs` barrier + promotion run
+    /// when a flush brings this back to 0.
+    depth: usize,
+    /// Objects staged during this batch: canonical destination -> the
+    /// temp file holding the not-yet-promoted bytes. Keyed by canonical
+    /// path so a repeated put of the same content-addressed object
+    /// dedups instead of staging the bytes twice.
+    staged: HashMap<PathBuf, PathBuf>,
 }
 
 #[derive(Debug)]
@@ -102,8 +135,11 @@ pub struct FsStore {
     pub(super) recent_trees: RwLock<RecentObjectCache<ContentHash, Tree>>,
     pub(super) recent_states: RwLock<RecentObjectCache<ChangeId, State>>,
     loose_object_write_mode: LooseObjectWriteMode,
-    snapshot_write_batch_depth: Mutex<usize>,
-    pending_directory_syncs: Mutex<BTreeSet<PathBuf>>,
+    /// Active snapshot write batches, keyed by the thread that opened
+    /// each. See [`SnapshotBatch`] — per-thread scoping is the
+    /// heddle#550 Finding 3 fix (a process-wide depth counter swept
+    /// every concurrent caller's writes into one operation's batch).
+    snapshot_batches: Mutex<HashMap<ThreadId, SnapshotBatch>>,
     /// In-process trust cache for loose-blob cache mirrors. A hash
     /// enters this LRU when this process either (a) wrote the blob
     /// itself via `promote_to_loose_uncompressed` or (b) successfully
@@ -144,8 +180,7 @@ impl FsStore {
                 RECENT_TREE_CACHE_CAPACITY,
             )),
             loose_object_write_mode: LooseObjectWriteMode::Durable,
-            snapshot_write_batch_depth: Mutex::new(0),
-            pending_directory_syncs: Mutex::new(BTreeSet::new()),
+            snapshot_batches: Mutex::new(HashMap::new()),
             verified_loose_blobs: RwLock::new(RecentObjectCache::with_capacity(
                 VERIFIED_LOOSE_BLOB_CACHE_CAPACITY,
             )),
@@ -166,8 +201,7 @@ impl FsStore {
                 RECENT_TREE_CACHE_CAPACITY,
             )),
             loose_object_write_mode: LooseObjectWriteMode::Durable,
-            snapshot_write_batch_depth: Mutex::new(0),
-            pending_directory_syncs: Mutex::new(BTreeSet::new()),
+            snapshot_batches: Mutex::new(HashMap::new()),
             verified_loose_blobs: RwLock::new(RecentObjectCache::with_capacity(
                 VERIFIED_LOOSE_BLOB_CACHE_CAPACITY,
             )),
@@ -205,35 +239,6 @@ impl FsStore {
 
     pub fn set_loose_object_write_mode(&mut self, mode: LooseObjectWriteMode) {
         self.loose_object_write_mode = mode;
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn flush_pending_directory_syncs(&self) -> Result<usize> {
-        use crate::fs_atomic::sync_directory;
-        let pending_dirs = {
-            let mut guard = self.pending_directory_syncs.lock().map_err(|_| {
-                crate::store::HeddleError::Config(
-                    "Failed to acquire pending directory sync lock".to_string(),
-                )
-            })?;
-            if guard.is_empty() {
-                return Ok(0);
-            }
-            let dirs = guard.iter().cloned().collect::<Vec<_>>();
-            guard.clear();
-            dirs
-        };
-
-        for (index, dir) in pending_dirs.iter().enumerate() {
-            if let Err(error) = sync_directory(dir) {
-                if let Ok(mut guard) = self.pending_directory_syncs.lock() {
-                    guard.extend(pending_dirs[index..].iter().cloned());
-                }
-                return Err(error.into());
-            }
-        }
-
-        Ok(pending_dirs.len())
     }
 
     /// Reload pack files from disk.
@@ -302,32 +307,82 @@ impl FsStore {
     }
 
     pub(super) fn write_loose_object_atomic(&self, path: &Path, data: &[u8]) -> Result<()> {
-        let batch_active = self.snapshot_write_batch_depth.lock().map_err(|_| {
-            crate::store::HeddleError::Config("Failed to acquire snapshot batch lock".to_string())
-        })?;
-        let in_snapshot_batch = *batch_active > 0;
-        let configured_mode = if in_snapshot_batch {
-            LooseObjectWriteMode::BatchDirectorySync
-        } else {
-            self.loose_object_write_mode
+        // Is THIS thread inside an active snapshot batch? Only the
+        // batch-opening thread's writes are staged for deferred-flush
+        // promotion (heddle#550 Finding 3); a concurrent write from any
+        // other thread — or any non-batch caller — falls through to a
+        // normal fully-durable write below.
+        let tid = std::thread::current().id();
+        let in_batch_this_thread = {
+            let batches = self.lock_snapshot_batches()?;
+            batches.get(&tid).is_some_and(|batch| batch.depth > 0)
         };
-        drop(batch_active);
 
-        let mode = match configured_mode {
-            LooseObjectWriteMode::Durable => AtomicWriteMode::Durable,
-            LooseObjectWriteMode::BatchDirectorySync => AtomicWriteMode::BatchDirectorySync,
-        };
-        write_atomic(
-            path,
-            data,
-            mode,
-            Some(&self.pending_directory_syncs),
-            in_snapshot_batch,
-        )
+        if in_batch_this_thread {
+            // Quarantine-then-promote (heddle#550 Finding 2): stage the
+            // bytes in a temp file beside the canonical path but DON'T
+            // rename into place yet. The canonical content-addressed
+            // path therefore never holds bytes that aren't durably
+            // flushed, so a crash before flush can only leave an orphan
+            // temp (ignored by reads) — never a present-but-torn object
+            // that `put_blob`/`put_tree`/`put_state`'s exists-skip would
+            // refuse to rewrite. Promotion (the rename) happens in
+            // `flush_snapshot_write_batch`, after the `syncfs` barrier.
+            //
+            // Dedup: a repeated put of the same content-addressed object
+            // within the batch is identical bytes, so skip re-staging.
+            // Safe to check unlocked-then-locked because the batch is
+            // single-threaded (only its owning thread, this one, mutates
+            // the `staged` map).
+            {
+                let batches = self.lock_snapshot_batches()?;
+                if batches
+                    .get(&tid)
+                    .is_some_and(|batch| batch.staged.contains_key(path))
+                {
+                    return Ok(());
+                }
+            }
+            let temp = stage_loose_object(path, data)?;
+            let mut batches = self.lock_snapshot_batches()?;
+            match batches.get_mut(&tid) {
+                Some(batch) if batch.depth > 0 => {
+                    if let Some(prev) = batch.staged.insert(path.to_path_buf(), temp) {
+                        // Lost a dedup race with ourselves (unreachable in
+                        // the single-threaded-per-batch model); drop the
+                        // superseded temp so it doesn't leak.
+                        let _ = std::fs::remove_file(prev);
+                    }
+                    Ok(())
+                }
+                // The batch closed out from under us between the staging
+                // write and re-acquiring the lock. Can't happen on the
+                // owning thread, but if it did the bytes would be lost —
+                // promote immediately so the write still lands durably.
+                _ => {
+                    promote_staged_object(&temp, path)?;
+                    crate::fs_atomic::sync_directory(path.parent().unwrap_or(Path::new(".")))?;
+                    Ok(())
+                }
+            }
+        } else {
+            // No active batch on this thread. `BatchDirectorySync` set
+            // standalone via the public setter still means "fully
+            // durable" — no `syncfs` is ever coming to back a deferral.
+            write_atomic(path, data, AtomicWriteMode::Durable)
+        }
+    }
+
+    fn lock_snapshot_batches(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, HashMap<ThreadId, SnapshotBatch>>> {
+        self.snapshot_batches.lock().map_err(|_| {
+            crate::store::HeddleError::Config("Failed to acquire snapshot batch lock".to_string())
+        })
     }
 
     pub(super) fn write_pack_atomic(&self, path: &Path, data: &[u8]) -> Result<()> {
-        write_atomic(path, data, AtomicWriteMode::Durable, None, false)
+        write_atomic(path, data, AtomicWriteMode::Durable)
     }
 
     /// Atomic write tuned for *cache-mirror* loose objects: no fsync
@@ -351,49 +406,89 @@ impl FsStore {
     /// / `put_state` — those are the authoritative copy and must
     /// survive a crash.
     pub(super) fn write_loose_object_cache(&self, path: &Path, data: &[u8]) -> Result<()> {
-        write_atomic(path, data, AtomicWriteMode::NoSync, None, false)
+        write_atomic(path, data, AtomicWriteMode::NoSync)
     }
 
     pub(super) fn begin_snapshot_write_batch_impl(&self) -> Result<()> {
-        let mut depth = self.snapshot_write_batch_depth.lock().map_err(|_| {
-            crate::store::HeddleError::Config("Failed to acquire snapshot batch lock".to_string())
-        })?;
-        *depth += 1;
+        let tid = std::thread::current().id();
+        let mut batches = self.lock_snapshot_batches()?;
+        batches.entry(tid).or_default().depth += 1;
         Ok(())
     }
 
     pub(super) fn flush_snapshot_write_batch_impl(&self) -> Result<()> {
-        let should_flush = {
-            let mut depth = self.snapshot_write_batch_depth.lock().map_err(|_| {
-                crate::store::HeddleError::Config(
-                    "Failed to acquire snapshot batch lock".to_string(),
-                )
-            })?;
-            if *depth == 0 {
+        let tid = std::thread::current().id();
+        // Pop the staged set iff this flush closes the (nested) batch.
+        let staged = {
+            let mut batches = self.lock_snapshot_batches()?;
+            let Some(batch) = batches.get_mut(&tid) else {
+                return Ok(());
+            };
+            if batch.depth == 0 {
                 return Ok(());
             }
-            *depth -= 1;
-            *depth == 0
+            batch.depth -= 1;
+            if batch.depth > 0 {
+                return Ok(());
+            }
+            let staged = std::mem::take(&mut batch.staged);
+            batches.remove(&tid);
+            staged
         };
 
-        if should_flush {
-            // On Linux, one `syncfs()` makes every object written during
-            // the batch durable in a single filesystem-wide barrier (git's
-            // `core.fsyncMethod=batch`), replacing the per-file `sync_data`
-            // skipped in `write_atomic`. It also flushes the directory
-            // metadata, so the deferred per-directory fsync queue is then
-            // redundant and just cleared. Other platforms fall back to the
-            // per-directory fsyncs that pair with their per-file `sync_data`.
-            #[cfg(target_os = "linux")]
-            {
-                self.syncfs_root()?;
-                if let Ok(mut pending) = self.pending_directory_syncs.lock() {
-                    pending.clear();
+        self.promote_staged_batch(staged)
+    }
+
+    /// Make every object staged during a snapshot batch durable, then
+    /// promote (rename) it into its canonical content-addressed path.
+    ///
+    /// The ordering is what holds the heddle#550 durability invariant:
+    /// the data barrier runs while the objects are still in their temp
+    /// staging files, so after the promote a canonical path can only
+    /// ever reference *durable* bytes. A crash at any point leaves either
+    /// orphan temps (pre-barrier) or canonical objects whose data is
+    /// already on disk (post-barrier) — never a present-but-torn object.
+    /// A second barrier makes the new directory entries themselves
+    /// durable before the caller writes any referencing artifact.
+    fn promote_staged_batch(&self, staged: HashMap<PathBuf, PathBuf>) -> Result<()> {
+        if staged.is_empty() {
+            return Ok(());
+        }
+
+        // Step 1: durability barrier for the staged temp *data*. On Linux
+        // one `syncfs()` flushes every staged temp in a single
+        // filesystem-wide barrier (git's `core.fsyncMethod=batch`) —
+        // replacing the N per-object fsyncs that dominate large-history
+        // import (heddle#550). Elsewhere each temp was already
+        // `sync_data`'d in `stage_loose_object`.
+        #[cfg(target_os = "linux")]
+        self.syncfs_root()?;
+
+        // Step 2: promote each temp into its canonical path. The bytes are
+        // already durable, so a renamed-into-place object is never torn.
+        for (canonical, temp) in &staged {
+            promote_staged_object(temp, canonical)?;
+        }
+
+        // Step 3: make the new directory entries durable before any
+        // referencing artifact (mapping/oplog/refs) is written. On Linux
+        // a second `syncfs()` covers every touched directory; elsewhere
+        // fsync each distinct canonical parent directory.
+        #[cfg(target_os = "linux")]
+        self.syncfs_root()?;
+        #[cfg(not(target_os = "linux"))]
+        {
+            use std::collections::BTreeSet;
+
+            use crate::fs_atomic::sync_directory;
+            let mut dirs: BTreeSet<&Path> = BTreeSet::new();
+            for canonical in staged.keys() {
+                if let Some(parent) = canonical.parent() {
+                    dirs.insert(parent);
                 }
             }
-            #[cfg(not(target_os = "linux"))]
-            {
-                let _ = self.flush_pending_directory_syncs()?;
+            for dir in dirs {
+                sync_directory(dir)?;
             }
         }
 
@@ -420,19 +515,31 @@ impl FsStore {
     }
 
     pub(super) fn abort_snapshot_write_batch_impl(&self) {
-        if let Ok(mut depth) = self.snapshot_write_batch_depth.lock() {
-            *depth = 0;
-        }
-        if let Ok(mut pending) = self.pending_directory_syncs.lock() {
-            pending.clear();
+        let tid = std::thread::current().id();
+        let staged = {
+            let Ok(mut batches) = self.snapshot_batches.lock() else {
+                return;
+            };
+            batches.remove(&tid).map(|batch| batch.staged)
+        };
+        // Discard the staged temps. They were never promoted to a
+        // canonical path, so there are no torn objects to clean up —
+        // just orphan temp files the next run would ignore anyway.
+        if let Some(staged) = staged {
+            for temp in staged.into_values() {
+                let _ = std::fs::remove_file(temp);
+            }
         }
     }
 
+    /// Number of objects currently staged (written but not yet promoted)
+    /// in the calling thread's active snapshot batch.
     #[cfg(test)]
-    pub(super) fn pending_directory_sync_count(&self) -> usize {
-        self.pending_directory_syncs
+    pub(super) fn staged_object_count(&self) -> usize {
+        let tid = std::thread::current().id();
+        self.snapshot_batches
             .lock()
-            .map(|pending| pending.len())
+            .map(|batches| batches.get(&tid).map(|b| b.staged.len()).unwrap_or(0))
             .unwrap_or(0)
     }
 }

@@ -584,8 +584,17 @@ fn import_with_ref_filter(
             stats
                 .lossy_entries
                 .extend(tree_importer.lossy_entries().iter().cloned());
-            bridge.write_mapping_tmp_to_disk()?;
+            // Durability ordering (heddle#550): the syncfs barrier that
+            // makes the imported objects durable MUST run before the
+            // recoverable mapping that references them is written. The
+            // mapping tmp is recoverable on the next load (a leftover
+            // `.tmp` is renamed into place), so writing it first would
+            // let a crash leave a recoverable mapping pointing at objects
+            // whose data was never flushed. Flush (syncfs + promote)
+            // first, then persist the referencing artifact.
             bridge.heddle_repo.store().flush_snapshot_write_batch()?;
+            objects::fault_inject::maybe_panic_at("import_after_flush_before_mapping");
+            bridge.write_mapping_tmp_to_disk()?;
             bridge.commit_mapping_tmp_to_disk()?;
         }
         Err(error) => {

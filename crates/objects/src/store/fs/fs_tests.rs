@@ -48,13 +48,16 @@ fn test_default_loose_object_write_mode_is_durable_outside_snapshot_batch() {
     );
 
     let blob = Blob::from("durable default");
-    store.put_blob(&blob).unwrap();
+    let hash = store.put_blob(&blob).unwrap();
 
-    assert_eq!(store.pending_directory_sync_count(), 0);
+    // No batch open: the write lands at its canonical path immediately
+    // (fully durable), nothing is left staged.
+    assert_eq!(store.staged_object_count(), 0);
+    assert!(hash_path(&blobs_dir(store.root()), &hash).exists());
 }
 
 #[test]
-fn test_durable_loose_object_write_mode_does_not_queue_directory_syncs() {
+fn test_durable_loose_object_write_mode_does_not_stage_objects() {
     let temp_dir = TempDir::new().unwrap();
     let heddle_dir = temp_dir.path().join(".heddle");
     let mut store = FsStore::new(&heddle_dir);
@@ -64,7 +67,7 @@ fn test_durable_loose_object_write_mode_does_not_queue_directory_syncs() {
     let blob = Blob::from("durable sync");
     store.put_blob(&blob).unwrap();
 
-    assert_eq!(store.pending_directory_sync_count(), 0);
+    assert_eq!(store.staged_object_count(), 0);
 }
 
 #[test]
@@ -103,31 +106,180 @@ fn standalone_batch_directory_sync_mode_writes_durably_without_a_batch() {
 }
 
 #[test]
-fn test_snapshot_write_batch_defers_directory_sync_until_flush() {
+fn test_snapshot_write_batch_stages_until_flush_then_promotes() {
     let (_temp, store) = create_test_store();
 
     store.begin_snapshot_write_batch().unwrap();
 
     let blob = Blob::from("batched sync");
     let hash = store.put_blob(&blob).unwrap();
+    let canonical = hash_path(&blobs_dir(store.root()), &hash);
 
-    assert_eq!(store.pending_directory_sync_count(), 1);
-    assert!(store.get_blob(&hash).unwrap().is_some());
+    // Quarantine (heddle#550 Finding 2): mid-batch the object is staged
+    // in a temp beside its canonical path, NOT renamed into place — so
+    // the canonical content-addressed path never holds bytes that aren't
+    // yet durably flushed. A crash here can only leave an orphan temp.
+    assert_eq!(store.staged_object_count(), 1);
+    assert!(
+        !canonical.exists(),
+        "staged object must not occupy its canonical path before flush",
+    );
 
     store.flush_snapshot_write_batch().unwrap();
-    assert_eq!(store.pending_directory_sync_count(), 0);
+
+    // After the flush barrier + promote, the object is at its canonical
+    // path and reads back correctly.
+    assert_eq!(store.staged_object_count(), 0);
+    assert!(canonical.exists(), "flush must promote the staged object");
+    assert_eq!(
+        store.get_blob(&hash).unwrap().unwrap().content(),
+        blob.content(),
+    );
 }
 
 #[test]
-fn test_abort_snapshot_write_batch_clears_pending_directory_syncs() {
+fn test_abort_snapshot_write_batch_discards_staged_objects() {
     let (_temp, store) = create_test_store();
 
     store.begin_snapshot_write_batch().unwrap();
-    store.put_blob(&Blob::from("aborted batch")).unwrap();
-    assert_eq!(store.pending_directory_sync_count(), 1);
+    let hash = store.put_blob(&Blob::from("aborted batch")).unwrap();
+    let canonical = hash_path(&blobs_dir(store.root()), &hash);
+    assert_eq!(store.staged_object_count(), 1);
+    assert!(!canonical.exists());
 
     store.abort_snapshot_write_batch();
-    assert_eq!(store.pending_directory_sync_count(), 0);
+
+    // Abort drops the staged temps and never promotes them: the canonical
+    // path stays empty (no torn object the next run could exists-skip).
+    assert_eq!(store.staged_object_count(), 0);
+    assert!(
+        !canonical.exists(),
+        "aborted batch must not leave a canonical object behind",
+    );
+}
+
+#[test]
+fn incomplete_batch_leaves_no_canonical_object_so_rerun_rewrites() {
+    // heddle#550 Finding 2: a batch that writes objects but never flushes
+    // (process crashed mid-import, before the mapping/oplog commit) must
+    // not leave a present-but-torn object at a canonical content-addressed
+    // path. If it did, the next run's content-addressed exists-skip would
+    // refuse to rewrite it and the torn bytes would survive forever.
+    //
+    // Quarantine-then-promote guarantees the opposite: in-batch writes are
+    // staged in temp files and only renamed into canonical AFTER the
+    // durability barrier, so an unflushed batch leaves canonical empty and
+    // the re-run rewrites cleanly + byte-identically.
+    let temp_dir = TempDir::new().unwrap();
+    let heddle_dir = temp_dir.path().join(".heddle");
+    let blob = Blob::from("content recreated identically after a torn batch");
+
+    let hash = {
+        let store = FsStore::new(&heddle_dir);
+        store.init().unwrap();
+        store.begin_snapshot_write_batch().unwrap();
+        let hash = store.put_blob(&blob).unwrap();
+        let canonical = hash_path(&blobs_dir(store.root()), &hash);
+
+        // Incomplete batch: no flush, no abort. The object is staged but
+        // never promoted, so its canonical path is empty and it is
+        // invisible to reads.
+        assert_eq!(store.staged_object_count(), 1);
+        assert!(
+            !canonical.exists(),
+            "an unflushed batch must not occupy the canonical path",
+        );
+        assert!(store.get_blob(&hash).unwrap().is_none());
+
+        hash
+        // `store` dropped here with the batch still open == crash. No Drop
+        // promotes the staged temps; the canonical path stays empty.
+    };
+
+    // Fresh store over the same root re-imports the same content. Because
+    // the canonical path is empty (no torn object to exists-skip), the put
+    // actually rewrites; after flush the object is durable + byte-identical.
+    let store = FsStore::new(&heddle_dir);
+    let canonical = hash_path(&blobs_dir(store.root()), &hash);
+    assert!(
+        !canonical.exists(),
+        "the crashed batch must have left no canonical object behind",
+    );
+    store.begin_snapshot_write_batch().unwrap();
+    let rehash = store.put_blob(&blob).unwrap();
+    assert_eq!(rehash, hash, "content-addressed hash must be stable");
+    store.flush_snapshot_write_batch().unwrap();
+
+    assert!(
+        canonical.exists(),
+        "the re-run must rewrite + promote the object (not exists-skip a torn one)",
+    );
+    assert_eq!(
+        store.get_blob(&hash).unwrap().unwrap().content(),
+        blob.content(),
+    );
+}
+
+#[test]
+fn concurrent_non_batch_write_is_durable_while_another_thread_holds_a_batch() {
+    use std::sync::{Arc, mpsc};
+
+    // heddle#550 Finding 3: the snapshot batch is scoped to the thread
+    // that opened it. A concurrent unrelated write on a *different* thread
+    // (e.g. a daemon servicing a second operation on the same store) must
+    // get normal per-write durability — it must NOT be swept into the
+    // batch-owner's deferred `syncfs` barrier.
+    let (_temp, store) = create_test_store();
+    let store = Arc::new(store);
+
+    let (staged_tx, staged_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+
+    let store_a = Arc::clone(&store);
+    let batch_owner = std::thread::spawn(move || {
+        store_a.begin_snapshot_write_batch().unwrap();
+        let hash = store_a
+            .put_blob(&Blob::from("batch-owner staged object"))
+            .unwrap();
+        staged_tx.send(hash).unwrap();
+        // Hold the batch open until the main thread has done its write.
+        release_rx.recv().unwrap();
+        store_a.flush_snapshot_write_batch().unwrap();
+    });
+
+    let owner_hash = staged_rx.recv().unwrap();
+    let owner_canonical = hash_path(&blobs_dir(store.root()), &owner_hash);
+    assert!(
+        !owner_canonical.exists(),
+        "the batch owner's object is staged, not yet promoted",
+    );
+
+    // This (main) thread holds no batch. Its write must land durably at
+    // its canonical path immediately, independent of the other thread's
+    // open batch.
+    let unrelated = Blob::from("main-thread unrelated durable write");
+    let unrelated_hash = store.put_blob(&unrelated).unwrap();
+    let unrelated_canonical = hash_path(&blobs_dir(store.root()), &unrelated_hash);
+    assert!(
+        unrelated_canonical.exists(),
+        "a concurrent non-batch write must be durable immediately, not deferred \
+         to the other thread's batch",
+    );
+    assert_eq!(
+        store.staged_object_count(),
+        0,
+        "the main thread opened no batch, so it stages nothing",
+    );
+    assert_eq!(
+        store.get_blob(&unrelated_hash).unwrap().unwrap().content(),
+        unrelated.content(),
+    );
+
+    release_tx.send(()).unwrap();
+    batch_owner.join().unwrap();
+
+    // The owner's flush promotes only its own object.
+    assert!(owner_canonical.exists());
 }
 
 #[test]

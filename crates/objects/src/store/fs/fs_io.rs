@@ -2,11 +2,9 @@
 //! IO helpers for FsStore.
 
 use std::{
-    collections::BTreeSet,
     fs::File,
     io::Read,
     path::{Path, PathBuf},
-    sync::Mutex,
 };
 
 use bytes::Bytes;
@@ -43,7 +41,6 @@ impl FileBytes {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum AtomicWriteMode {
     Durable,
-    BatchDirectorySync,
     /// No fsync at all. Caller asserts the file is a recoverable
     /// cache mirror — the authoritative copy lives elsewhere
     /// (typically a pack) and re-derivation on read is correct.
@@ -56,37 +53,98 @@ pub(super) enum AtomicWriteMode {
     NoSync,
 }
 
-/// Whether a `BatchDirectorySync` write must issue its own per-file
+/// Whether a snapshot-batch staged object must issue its own per-file
 /// `sync_data` for content durability, rather than deferring to the
-/// snapshot batch's single `syncfs()` barrier.
+/// batch's single `syncfs()` barrier at flush.
 ///
-/// The deferral (skip the per-file fsync, let `flush_snapshot_write_batch`
-/// run one `syncfs`) is sound ONLY on Linux AND ONLY inside an active
-/// snapshot batch — that's the only state in which a `syncfs` is
-/// guaranteed to follow. `BatchDirectorySync` can also be configured
-/// standalone via the public `set_loose_object_write_mode` setter with
-/// no active batch (depth 0); in that case no `syncfs` is ever issued,
-/// so the write must sync itself. Non-Linux has no `syncfs` and always
-/// syncs per file.
-fn batch_directory_sync_needs_per_file_sync(in_snapshot_batch: bool) -> bool {
-    if cfg!(target_os = "linux") {
-        !in_snapshot_batch
-    } else {
-        true
-    }
+/// On Linux the staged temp's data sync is deferred to one `syncfs()`
+/// in `flush_snapshot_write_batch` (git's `core.fsyncMethod=batch`):
+/// one filesystem-wide flush replaces the N per-object fsyncs that
+/// dominate large commit-history import (heddle#550). Non-Linux has no
+/// `syncfs`, so each staged temp must sync its own data before the
+/// flush promotes (renames) it into place.
+fn batch_staged_object_needs_per_file_sync() -> bool {
+    !cfg!(target_os = "linux")
 }
 
-/// `in_snapshot_batch` is true only when this write happens inside an
-/// active `begin_snapshot_write_batch` (depth > 0), which guarantees a
-/// later `flush_snapshot_write_batch` will run the `syncfs()` barrier —
-/// see [`batch_directory_sync_needs_per_file_sync`].
-pub(super) fn write_atomic(
-    path: &Path,
-    data: &[u8],
-    mode: AtomicWriteMode,
-    pending_directory_syncs: Option<&Mutex<BTreeSet<PathBuf>>>,
-    in_snapshot_batch: bool,
-) -> Result<()> {
+/// Write `data` to a temp file beside `path` but DON'T rename it into
+/// place. Used to *stage* a snapshot-batch object (heddle#550
+/// quarantine-then-promote): the canonical content-addressed path never
+/// holds bytes until [`promote_staged_object`] renames the temp in
+/// AFTER the durability barrier, so a crash before flush can only leave
+/// an orphan temp (ignored by reads) — never a present-but-torn object
+/// that the exists-skip would refuse to rewrite.
+///
+/// On Linux the temp is left un-synced (the batch's `syncfs()` flushes
+/// it); elsewhere it is `sync_data`'d so the bytes are durable before
+/// the promote rename. Returns the temp path to record for promotion.
+pub(super) fn stage_loose_object(path: &Path, data: &[u8]) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("invalid atomic write path"))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| HeddleError::Io(enrich_fs_error(parent, "creating", e)))?;
+
+    let temp_path = temp_path(path);
+    let write_result: std::io::Result<()> = (|| {
+        let mut file = open_temp_0o644(&temp_path)?;
+        use std::io::Write as _;
+        file.write_all(data)?;
+        if batch_staged_object_needs_per_file_sync() {
+            file.sync_data()?;
+        }
+        Ok(())
+    })();
+
+    if let Err(err) = write_result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(HeddleError::Io(enrich_fs_error(path, "writing", err)));
+    }
+    Ok(temp_path)
+}
+
+/// Promote a temp staged by [`stage_loose_object`] into its canonical
+/// path. The caller MUST have run the batch durability barrier (Linux
+/// `syncfs`, else the per-file `sync_data` in `stage_loose_object`)
+/// BEFORE calling this, so the renamed bytes are already durable; the
+/// only remaining durability step is making the new directory entry
+/// itself durable, which the caller does once for the whole batch
+/// (a second `syncfs` on Linux, per-directory fsyncs elsewhere).
+///
+/// A `rename` over an existing canonical file atomically replaces it
+/// (a sibling writer may have installed the same content-addressed
+/// object meanwhile — identical bytes, so the replace is a no-op in
+/// effect). The temp is cleaned up on failure.
+pub(super) fn promote_staged_object(temp_path: &Path, path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| HeddleError::Io(enrich_fs_error(parent, "creating", e)))?;
+    }
+    if let Err(err) = std::fs::rename(temp_path, path) {
+        let _ = std::fs::remove_file(temp_path);
+        return Err(HeddleError::Io(enrich_rename_error(temp_path, path, err)));
+    }
+    Ok(())
+}
+
+fn open_temp_0o644(temp_path: &Path) -> std::io::Result<File> {
+    // Open with explicit mode 0o644 instead of relying on the process
+    // umask. This makes loose objects byte-and-mode deterministic:
+    // clonefile on macOS preserves source mode, so a worktree
+    // materialised from a loose blob inherits 0o644 *without* an extra
+    // chmod. `repository_materialization` skips `set_file_mode` on
+    // non-executable files because of this contract.
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o644);
+    }
+    opts.open(temp_path)
+}
+
+pub(super) fn write_atomic(path: &Path, data: &[u8], mode: AtomicWriteMode) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| std::io::Error::other("invalid atomic write path"))?;
@@ -95,12 +153,8 @@ pub(super) fn write_atomic(
 
     let temp_path = temp_path(path);
     // Tag each fallible op with the verb that should appear in the
-    // user-facing message if it trips. We compute the wrapped error at
-    // the boundary so an EXDEV from `rename` gets the src+dst-aware
-    // message via `enrich_rename_error`, while a write into the temp
-    // file gets the "writing" verb against the destination path. The
-    // deferred-directory-sync lock-poison case is non-IO and gets a
-    // synthetic `io::Error::other`.
+    // user-facing message if it trips, so an EXDEV from `rename` gets
+    // the src+dst-aware message via `enrich_rename_error`.
     enum Op {
         Write,
         Rename,
@@ -108,22 +162,7 @@ pub(super) fn write_atomic(
     }
     let mut failing_op = Op::Write;
     let write_result: std::io::Result<()> = (|| {
-        // Open with explicit mode 0o644 instead of relying on the
-        // process umask. This makes loose objects byte-and-mode
-        // deterministic: clonefile on macOS preserves source mode,
-        // so a worktree materialised from a loose blob inherits
-        // 0o644 *without* an extra chmod. `repository_materialization`
-        // skips `set_file_mode` on non-executable files because of
-        // this contract — see `materialize_blob`'s comment near the
-        // `set_file_mode(dest, true)` call.
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o644);
-        }
-        let mut file = opts.open(&temp_path)?;
+        let mut file = open_temp_0o644(&temp_path)?;
         use std::io::Write as _;
         file.write_all(data)?;
         match mode {
@@ -132,41 +171,6 @@ pub(super) fn write_atomic(
             // is fully on disk and discoverable through the parent
             // directory before this returns.
             AtomicWriteMode::Durable => file.sync_all()?,
-            // `BatchDirectorySync` keeps per-file content durability
-            // (so a crash mid-batch can't leave a renamed-but-empty
-            // file behind) but defers parent-directory fsyncs to
-            // `flush_snapshot_write_batch`. The trees + state file
-            // written during a snapshot rely on this mode for
-            // durability of their *contents*; the deferred dir fsync
-            // is what makes the rename observable to a fresh process.
-            // Without `sync_data` here, a crash after rename + before
-            // flush could leave a file that "exists" in the directory
-            // but whose data blocks weren't flushed — exactly the
-            // ACID violation we want to avoid for state/tree writes.
-            //
-            // On Linux the per-file `sync_data` is deferred to a single
-            // `syncfs()` barrier in `flush_snapshot_write_batch` (git's
-            // `core.fsyncMethod=batch`): one filesystem-wide flush
-            // replaces the N per-object fsyncs that dominate large
-            // commit-history import (heddle#550 — measured ~65% of
-            // `heddle adopt` import time). Objects written mid-batch are
-            // unreferenced until the post-flush oplog/ref/mapping
-            // commit, so a crash before flush leaves only harmless,
-            // content-addressed orphans that the next run re-creates
-            // identically.
-            //
-            // That deferral is sound ONLY when a `syncfs` is guaranteed
-            // to follow — i.e. inside an active snapshot batch on Linux.
-            // When `BatchDirectorySync` is configured standalone via the
-            // public `set_loose_object_write_mode` setter with no active
-            // batch, no `syncfs` is ever issued, so the write must sync
-            // itself. Non-Linux platforms (no `syncfs`) always keep the
-            // per-file fsync. See `batch_directory_sync_needs_per_file_sync`.
-            AtomicWriteMode::BatchDirectorySync => {
-                if batch_directory_sync_needs_per_file_sync(in_snapshot_batch) {
-                    file.sync_data()?;
-                }
-            }
             // Cache-mirror writes: no fsync. Caller guards reads
             // with a hash check, so torn-write corruption is
             // recoverable (re-promote from the authoritative copy).
@@ -177,14 +181,6 @@ pub(super) fn write_atomic(
         failing_op = Op::SyncDir;
         match mode {
             AtomicWriteMode::Durable => sync_directory(parent)?,
-            AtomicWriteMode::BatchDirectorySync => {
-                if let Some(pending) = pending_directory_syncs {
-                    let mut dirs = pending.lock().map_err(|_| {
-                        std::io::Error::other("failed to acquire pending directory sync lock")
-                    })?;
-                    dirs.insert(parent.to_path_buf());
-                }
-            }
             AtomicWriteMode::NoSync => {}
         }
         Ok(())
@@ -322,32 +318,25 @@ pub(super) fn list_hashes_from_dir(
 
 #[cfg(test)]
 mod tests {
-    use super::batch_directory_sync_needs_per_file_sync;
+    use super::batch_staged_object_needs_per_file_sync;
 
     #[test]
-    fn batch_directory_sync_defers_per_file_fsync_only_in_active_batch() {
-        // Standalone (mode set via the public setter, no active batch):
-        // no `syncfs` barrier is coming, so the write must always sync
-        // itself — on every platform. This is the heddle#550 durability
-        // fix: the Linux skip must not apply outside a snapshot batch.
-        assert!(
-            batch_directory_sync_needs_per_file_sync(false),
-            "standalone BatchDirectorySync must issue its own per-file sync_data",
-        );
-
-        // Inside an active snapshot batch, Linux may defer to the single
-        // `syncfs()` in flush_snapshot_write_batch (the #550 perf win);
-        // other platforms still sync per file.
-        let needs_sync_in_batch = batch_directory_sync_needs_per_file_sync(true);
+    fn staged_object_defers_per_file_fsync_to_syncfs_only_on_linux() {
+        // A snapshot-batch staged object defers its data sync to the
+        // batch's single `syncfs()` barrier ONLY on Linux (the #550
+        // perf win — N per-object fsyncs collapse to one syncfs). Every
+        // other platform has no `syncfs`, so each staged temp must
+        // `sync_data` itself before the flush promotes it into place.
+        let needs_sync = batch_staged_object_needs_per_file_sync();
         if cfg!(target_os = "linux") {
             assert!(
-                !needs_sync_in_batch,
-                "Linux must defer the per-file sync to the batch syncfs barrier",
+                !needs_sync,
+                "Linux must defer the staged-object data sync to the batch syncfs barrier",
             );
         } else {
             assert!(
-                needs_sync_in_batch,
-                "non-Linux has no syncfs and must always sync per file",
+                needs_sync,
+                "non-Linux has no syncfs and must sync each staged object per file",
             );
         }
     }
