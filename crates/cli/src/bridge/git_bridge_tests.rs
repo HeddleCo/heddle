@@ -3898,6 +3898,455 @@ fn scoped_export_preserves_unminted_out_of_scope_public_tag() {
     );
 }
 
+/// #316 / PR #528 — fixture helper for the reconcile conformance matrices: a
+/// PUBLIC state holding one file, attributed to a real principal so the export
+/// mints it without any git-identity config.
+fn matrix_put_state(
+    repo: &Repository,
+    content: &[u8],
+    parents: Vec<ChangeId>,
+) -> objects::object::State {
+    use objects::object::{Attribution, Principal, State};
+    let store = repo.store();
+    let blob_hash = store
+        .put_blob(&Blob::from_slice(content))
+        .expect("put blob");
+    let tree_hash = store
+        .put_tree(&Tree::from_entries(vec![
+            TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+        ]))
+        .expect("put tree");
+    let state = State::new(
+        tree_hash,
+        parents,
+        Attribution::human(Principal::new("Alice", "alice@example.com")),
+    );
+    store.put_state(&state).expect("put state");
+    state
+}
+
+/// Mark `state` Private so the export treats it as unserved (embargoed).
+fn matrix_embargo(repo: &Repository, state: ChangeId) {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+    repo.put_state_visibility(StateVisibility {
+        state,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Alice".into(),
+            email: "alice@example.com".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+}
+
+/// Read the mirror's `refs/tags/<name>` tip, or `None` when the tag is absent.
+fn matrix_mirror_tag(bridge: &GitBridge, name: &str) -> Option<gix::hash::ObjectId> {
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    mirror
+        .find_reference(&format!("refs/tags/{name}"))
+        .ok()
+        .and_then(|mut r| r.peel_to_id().ok().map(|id| id.detach()))
+}
+
+/// Read the mirror's `refs/heads/<name>` tip, or `None` when the branch is absent.
+fn matrix_mirror_head(bridge: &GitBridge, name: &str) -> Option<gix::hash::ObjectId> {
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    mirror
+        .find_reference(&format!("refs/heads/{name}"))
+        .ok()
+        .and_then(|mut r| r.peel_to_id().ok().map(|id| id.detach()))
+}
+
+/// #316 / PR #528 r19 + S3 — the conformance matrix that turns the per-cell tag
+/// fixes into a REDESIGN. The mirror tag's fate is a PURE FUNCTION of THREE axes:
+/// the NEW marker target {served+minted, served-but-unminted, unserved,
+/// no-target(deleted)} × the EXISTING mirror tag's target {served, embargoed,
+/// absent} × scope {scoped, full}. Each row builds a fixture that reaches one
+/// cell, runs `export_all`/`export_current_thread`, and asserts the mirror
+/// `refs/tags/v` is at the expected OID or absent. The structural guarantees it
+/// locks:
+/// * PRESERVE requires the EXISTING tag itself be SERVED (cell 6) — a tag pointing
+///   at an embargoed commit is DELETED even when the new target is served-but-
+///   unminted (cell 7, the r19 fix `existing_embargoed_unminted_new_deletes_tag`);
+///   reading the existing tag's TARGET is the axis the prior code never inspected.
+/// * a served+minted target FORCE-retargets the tag (S1, cells 2/3).
+/// * a DELETED marker still deletes its stale tag because the loop iterates
+///   `markers ∪ existing-tags` — the deleted marker is reached via the tags side
+///   (S3, cell 12).
+///
+/// It SUBSUMES the locked-in tests
+/// [`export_deletes_tag_when_marker_retargeted_to_private`] (cell 9) and
+/// [`scoped_export_preserves_unminted_out_of_scope_public_tag`] (cell 6).
+#[test]
+fn tag_reconcile_conformance_matrix() {
+    struct Cell {
+        label: &'static str,
+        /// Returns (observed mirror `refs/tags/v` tip, expected tip).
+        run: Box<dyn Fn() -> (Option<gix::hash::ObjectId>, Option<gix::hash::ObjectId>)>,
+    }
+
+    let cells: Vec<Cell> = vec![
+        // ── Cells 1-4: NEW target served+minted → Write (force-retarget) ──
+        // Cell 1: existing absent, full scope → materialize a fresh tag.
+        Cell {
+            label: "served_minted_existing_absent_full_creates",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
+                (matrix_mirror_tag(&bridge, "v"), Some(oid_a))
+            }),
+        },
+        // Cell 2: existing SERVED, full scope, retarget served→served → force-move.
+        Cell {
+            label: "served_minted_existing_served_full_retargets",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                let b = matrix_put_state(&repo, b"B\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs().set_thread(&ThreadName::new("rel"), &b.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let oid_b = bridge.mapping.get_git(&b.change_id).expect("B minted");
+                repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &b.change_id).unwrap();
+                export_all(&mut bridge).unwrap();
+                (matrix_mirror_tag(&bridge, "v"), Some(oid_b))
+            }),
+        },
+        // Cell 3: existing EMBARGOED, full scope, retarget to a served+minted
+        // INDEPENDENT root → force-move off the embargoed OID onto the new target.
+        Cell {
+            label: "served_minted_existing_embargoed_full_retargets",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                let b = matrix_put_state(&repo, b"B\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs().set_thread(&ThreadName::new("rel"), &b.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let oid_b = bridge.mapping.get_git(&b.change_id).expect("B minted");
+                matrix_embargo(&repo, a.change_id);
+                repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &b.change_id).unwrap();
+                export_all(&mut bridge).unwrap();
+                (matrix_mirror_tag(&bridge, "v"), Some(oid_b))
+            }),
+        },
+        // Cell 4: existing == new target → idempotent Write (no-op move).
+        Cell {
+            label: "served_minted_existing_same_idempotent",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
+                export_all(&mut bridge).unwrap();
+                (matrix_mirror_tag(&bridge, "v"), Some(oid_a))
+            }),
+        },
+        // Cell 5: served+minted target, existing absent, SCOPED → skip-materialize
+        // (a scoped export does not publish a brand-new tag the caller didn't ask for).
+        Cell {
+            label: "served_minted_existing_absent_scoped_skips",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                let b = matrix_put_state(&repo, b"B\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("alpha"), &a.change_id).unwrap();
+                repo.refs().set_thread(&ThreadName::new("beta"), &b.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &b.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_current_thread(&mut bridge, "beta").unwrap();
+                (matrix_mirror_tag(&bridge, "v"), None)
+            }),
+        },
+        // ── Cell 6 (r18): served-but-unminted target, existing SERVED → PRESERVE ──
+        Cell {
+            label: "served_unminted_existing_served_scoped_preserves",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                let b = matrix_put_state(&repo, b"B\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("alpha"), &a.change_id).unwrap();
+                repo.refs().set_thread(&ThreadName::new("beta"), &b.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &b.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let oid_b = bridge.mapping.get_git(&b.change_id).expect("B minted");
+                // Advance beta to a NEW public state C and retarget v→C; C is never
+                // exported, so it stays unminted and the scoped run takes the
+                // served-but-unminted path.
+                let c = matrix_put_state(&repo, b"C\n", vec![b.change_id]);
+                repo.refs().set_thread(&ThreadName::new("beta"), &c.change_id).unwrap();
+                repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &c.change_id).unwrap();
+                export_current_thread(&mut bridge, "alpha").unwrap();
+                (matrix_mirror_tag(&bridge, "v"), Some(oid_b))
+            }),
+        },
+        // ── Cell 7 (r19 FIX): served-but-unminted target, existing EMBARGOED → DELETE ──
+        // The named row: the existing tag points at a commit this run embargoed, so
+        // PRESERVE would keep serving it. PRESERVE requires existing_served.
+        Cell {
+            label: "existing_embargoed_unminted_new_deletes_tag",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                let p = matrix_put_state(&repo, b"P\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("alpha"), &a.change_id).unwrap();
+                repo.refs().set_thread(&ThreadName::new("rel"), &p.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &p.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                // New, never-exported public state C → served-but-unminted in the
+                // scoped run. Embargo P (still reachable via `rel`) so the EXISTING
+                // tag's tip enters `embargoed_oids`. Retarget v→C.
+                let c = matrix_put_state(&repo, b"C\n", Vec::new());
+                matrix_embargo(&repo, p.change_id);
+                repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &c.change_id).unwrap();
+                export_current_thread(&mut bridge, "alpha").unwrap();
+                (matrix_mirror_tag(&bridge, "v"), None)
+            }),
+        },
+        // Cell 8: served-but-unminted target, existing absent, scoped → no-op.
+        Cell {
+            label: "served_unminted_existing_absent_scoped_noop",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                let c = matrix_put_state(&repo, b"C\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("alpha"), &a.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &c.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_current_thread(&mut bridge, "alpha").unwrap();
+                (matrix_mirror_tag(&bridge, "v"), None)
+            }),
+        },
+        // ── Cells 9-11: NEW target genuinely UNSERVED → DELETE ──
+        // Cell 9: existing SERVED, retargeted to a Private state (subsumes the
+        // locked-in `export_deletes_tag_when_marker_retargeted_to_private`).
+        Cell {
+            label: "unserved_existing_served_full_deletes",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let b = matrix_put_state(&repo, b"B\n", Vec::new());
+                matrix_embargo(&repo, b.change_id);
+                repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &b.change_id).unwrap();
+                export_all(&mut bridge).unwrap();
+                (matrix_mirror_tag(&bridge, "v"), None)
+            }),
+        },
+        // Cell 10: existing EMBARGOED, target itself embargoed (the original r1
+        // embargo retraction).
+        Cell {
+            label: "unserved_existing_embargoed_full_deletes",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                matrix_embargo(&repo, a.change_id);
+                export_all(&mut bridge).unwrap();
+                (matrix_mirror_tag(&bridge, "v"), None)
+            }),
+        },
+        // Cell 11: existing absent, target unserved → DELETE is a no-op.
+        Cell {
+            label: "unserved_existing_absent_noop_delete",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                let b = matrix_put_state(&repo, b"B\n", Vec::new());
+                matrix_embargo(&repo, b.change_id);
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &b.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                (matrix_mirror_tag(&bridge, "v"), None)
+            }),
+        },
+        // ── Cells 12-13 (S3): the marker was DELETED → its stale tag must go ──
+        // Cell 12: existing tag present, marker deleted — reached via the
+        // existing-tags side of the union (markers no longer carries it).
+        Cell {
+            label: "notarget_existing_served_deletes_stale_tag",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
+                export_all(&mut bridge).unwrap();
+                (matrix_mirror_tag(&bridge, "v"), None)
+            }),
+        },
+        // Cell 13: neither a marker nor an existing tag — structurally never visited
+        // by the `markers ∪ existing-tags` union (a no-op by construction).
+        Cell {
+            label: "notarget_existing_absent_unvisited",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                (matrix_mirror_tag(&bridge, "ghost"), None)
+            }),
+        },
+    ];
+
+    for cell in &cells {
+        let (observed, expected) = (cell.run)();
+        assert_eq!(observed, expected, "tag cell `{}`", cell.label);
+    }
+}
+
+/// #316 / PR #528 S2 — the head reconcile has NO existing-embargo PRESERVE path,
+/// the asymmetry vs the tag reconcile (where a served-but-unminted tag at a still
+/// SERVED tip IS preserved, cell 6). A head's published target is recomputed every
+/// run as `frontier_git_oid` — the maximal SERVED ancestor-or-self of the thread
+/// tip — so a head can never keep serving an embargoed tip: it is REWOUND to the
+/// served frontier, or DELETED when no served frontier remains. Each embargo row
+/// asserts the resulting `refs/heads/main` tip is the served frontier and NEVER the
+/// embargoed OID.
+#[test]
+fn head_reconcile_conformance_matrix() {
+    struct HeadOutcome {
+        observed: Option<gix::hash::ObjectId>,
+        expected: Option<gix::hash::ObjectId>,
+        /// The embargoed OID the head must NEVER be left at (`None` when no embargo).
+        forbidden: Option<gix::hash::ObjectId>,
+    }
+    struct Cell {
+        label: &'static str,
+        run: Box<dyn Fn() -> HeadOutcome>,
+    }
+
+    let cells: Vec<Cell> = vec![
+        // Control: a plain public advance fast-forwards the head.
+        Cell {
+            label: "public_advance_fast_forwards",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let b = matrix_put_state(&repo, b"B\n", vec![a.change_id]);
+                repo.refs().set_thread(&ThreadName::new("main"), &b.change_id).unwrap();
+                export_all(&mut bridge).unwrap();
+                let oid_b = bridge.mapping.get_git(&b.change_id).expect("B minted");
+                HeadOutcome {
+                    observed: matrix_mirror_head(&bridge, "main"),
+                    expected: Some(oid_b),
+                    forbidden: None,
+                }
+            }),
+        },
+        // KEY: an embargoed TIP rewinds the head to the served ancestor — the head
+        // is NEVER preserved at the embargoed tip (the tag-cell-7 bug has no head dual).
+        Cell {
+            label: "embargoed_tip_rewinds_to_served_ancestor",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                let b = matrix_put_state(&repo, b"B\n", vec![a.change_id]);
+                repo.refs().set_thread(&ThreadName::new("main"), &b.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
+                let oid_b = bridge.mapping.get_git(&b.change_id).expect("B minted");
+                matrix_embargo(&repo, b.change_id);
+                export_all(&mut bridge).unwrap();
+                HeadOutcome {
+                    observed: matrix_mirror_head(&bridge, "main"),
+                    expected: Some(oid_a),
+                    forbidden: Some(oid_b),
+                }
+            }),
+        },
+        // KEY: the WHOLE line embargoed DELETES the head — no preserve path at all.
+        Cell {
+            label: "embargoed_whole_line_deletes_head",
+            run: Box::new(|| {
+                let temp = TempDir::new().unwrap();
+                let repo = Repository::init(temp.path()).unwrap();
+                let a = matrix_put_state(&repo, b"A\n", Vec::new());
+                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                let mut bridge = GitBridge::new(&repo);
+                export_all(&mut bridge).unwrap();
+                let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
+                matrix_embargo(&repo, a.change_id);
+                export_all(&mut bridge).unwrap();
+                HeadOutcome {
+                    observed: matrix_mirror_head(&bridge, "main"),
+                    expected: None,
+                    forbidden: Some(oid_a),
+                }
+            }),
+        },
+    ];
+
+    for cell in &cells {
+        let out = (cell.run)();
+        assert_eq!(out.observed, out.expected, "head cell `{}`", cell.label);
+        if let Some(forbidden) = out.forbidden {
+            assert_ne!(
+                out.observed,
+                Some(forbidden),
+                "head cell `{}`: the head must NOT be left at the embargoed tip",
+                cell.label
+            );
+        }
+    }
+}
+
 /// #316 / PR #528 r7 CLASS 2 (the leak): a branch exported to a real
 /// DESTINATION while public, then retracted (whole line embargoed), must be
 /// DELETED at the destination — not left pointing at now-private commits. The
@@ -5287,11 +5736,11 @@ fn out_of_band_destination_tag_not_overwritten() {
 /// move. A destination tag whose tip heddle still OWNS (`recorded == old`) is
 /// overwritten to the served target on a plain reconcile — `classify_tag_move`'s
 /// gate spares ONLY out-of-band tips heddle never recorded, never heddle's own
-/// published moves. Driven directly against [`plan_destination_reconcile`] (a
-/// marker re-point is a mirror-level `Conflict` by design — markers are immutable
-/// release pins — so the source-move path cannot stage this end-to-end), pinning
-/// the owned-vs-unowned boundary in one focused regression: identical inputs land
-/// a write when owned, and demand `--force` when not.
+/// published moves. Driven directly against [`plan_destination_reconcile`]
+/// (the mirror now FORCE-retargets a marker re-point, heddle#316 S1, so the
+/// source-move path cannot stage an out-of-band DESTINATION tip end-to-end),
+/// pinning the owned-vs-unowned boundary in one focused regression: identical
+/// inputs land a write when owned, and demand `--force` when not.
 #[test]
 fn heddle_owned_tag_overwrite_still_lands() {
     use crate::bridge::git_core::{GitBridgeError, RefNamespace, RefUpdate, plan_destination_reconcile};

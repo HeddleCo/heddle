@@ -549,44 +549,97 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         served_change_ids(bridge.heddle_repo, &sorted, &reachable_set, &audience)?
     };
 
-    // Reconcile the mirror's tags to the desired set. `markers` spans the whole
-    // mirror (heddle#316), so a scoped export also retracts an EXISTING tag whose
-    // marker's state became unserved — but, symmetric with heads above, it does
-    // not materialize a brand-new tag (markers ride on an all-thread export).
-    for marker_name in &markers {
-        let Some(target_state) = bridge.heddle_repo.refs().get_marker(marker_name)? else {
-            continue;
+    // Reconcile the mirror's tags. The tag's fate is a pure function of THREE
+    // axes — the NEW marker target {served+minted, served-but-unminted, unserved,
+    // no-target(deleted)} × the EXISTING mirror tag's target {served, embargoed,
+    // absent} × scope {scoped, full} — never the existing tag's mere PRESENCE.
+    // Inspecting the existing tag's TARGET (the axis the prior code never read) is
+    // what distinguishes a served-but-unminted tag worth preserving (r18) from one
+    // pointing at an embargoed commit that must be deleted (r19).
+    //
+    // Iterate the UNION of current markers AND existing mirror tag names: a DELETED
+    // marker drops out of `markers`, so its stale mirror tag is only reachable via
+    // the existing-tags side (heddle#316 S3 — a deleted marker must delete its tag).
+    enum TagTarget {
+        /// Marker target is served AND minted into the mirror this run (its OID).
+        ServedMinted(gix::hash::ObjectId),
+        /// Marker target is served (visible + every reachable ancestor served) but
+        /// NOT minted into the mapping this run — a scoped export that didn't reach
+        /// it. A later all-thread export re-mints + advances the tag.
+        ServedUnminted,
+        /// Marker target is unserved (embargoed, withheld for a withheld ancestor,
+        /// or retargeted to a never-minted Private state).
+        Unserved,
+        /// No marker by this name exists any more (deleted) — only a stale mirror
+        /// tag may remain.
+        NoTarget,
+    }
+
+    let mut tag_names: std::collections::BTreeSet<String> =
+        markers.iter().map(|m| m.to_string()).collect();
+    for tag in repo.references().map_err(git_err)?.tags().map_err(git_err)? {
+        let tag = tag.map_err(git_err)?;
+        tag_names.insert(tag.name().shorten().to_string());
+    }
+
+    for name in &tag_names {
+        let tag_ref = format!("refs/tags/{name}");
+        let existing_oid = branch_tip_oid(&repo, &tag_ref);
+        // The existing mirror tag is "served" iff its tip was NOT dropped by this
+        // run's purge. An existing tip in `embargoed_oids` is serving a commit the
+        // purge just withheld — preserving it would keep leaking it (the r19 root
+        // cause: the prior code never read this axis).
+        let existing_served = existing_oid
+            .map(|oid| !embargoed_oids.contains(&oid))
+            .unwrap_or(false);
+        let in_scope_full = thread.is_none();
+
+        let new_status = match bridge.heddle_repo.refs().get_marker(&MarkerName::new(name.as_str()))? {
+            None => TagTarget::NoTarget,
+            Some(state) => match bridge.mapping.get_git(&state) {
+                Some(oid) => TagTarget::ServedMinted(oid),
+                None if frontier_served.contains(&state) => TagTarget::ServedUnminted,
+                None => TagTarget::Unserved,
+            },
         };
-        let tag_ref = format!("refs/tags/{marker_name}");
-        match desired.get(&tag_ref).copied() {
-            Some(git_oid) => {
-                if thread.is_some() && repo.find_reference(&tag_ref).is_err() {
-                    // Scoped export, served marker with no mirror tag yet: retract
-                    // only, do not materialize.
-                    continue;
-                }
-                sync_marker_to_tag(&repo, marker_name, git_oid)?;
+
+        match (new_status, existing_oid, existing_served) {
+            // Cell 5 — scoped export, served+minted target, no mirror tag yet:
+            // retract-only, never materialize a brand-new tag the caller did not
+            // ask to export (symmetric with the head reconcile's materialize gate).
+            (TagTarget::ServedMinted(_), None, _) if !in_scope_full => {}
+            // Cells 1-4 — served+minted target: FORCE-retarget the mirror tag to it.
+            // `sync_marker_to_tag` force-sets an existing tag (heddle#316 S1) and
+            // creates an absent one; tags are free-move by design.
+            (TagTarget::ServedMinted(oid), _, _) => {
+                sync_marker_to_tag(&repo, name, oid)?;
                 stats.markers_synced += 1;
                 stats.tags.push(ExportedRef {
-                    name: marker_name.to_string(),
-                    tip: git_oid,
+                    name: name.clone(),
+                    tip: oid,
                 });
             }
-            None => {
-                // `desired` drops a marker to absent for TWO causes it cannot tell
-                // apart: the target is genuinely UNSERVED (embargoed, withheld for
-                // a withheld ancestor, or Private) — its prior tag is stale and
-                // must be deleted — OR the target is a still-PUBLIC state this
-                // (scoped) export did not mint, so it has no git OID in the mapping
-                // yet. Classify on the SERVED predicate, independent of
-                // minted-ness: a served-but-unminted target's tag is PRESERVED
-                // (symmetric with the head reconcile, which neither materializes
-                // nor deletes an out-of-scope served ref it merely didn't mint — an
-                // all-thread export re-mints the target and advances the tag);
-                // only a genuinely-unserved target's tag is deleted (heddle#316).
-                if frontier_served.contains(&target_state) {
-                    continue;
-                }
+            // Cell 6 (r18) — served-but-unminted target whose EXISTING tag is itself
+            // served: PRESERVE. A scoped export merely didn't mint it; a later
+            // all-thread export re-mints the target and advances the tag.
+            (TagTarget::ServedUnminted, Some(_), true) => {}
+            // Cell 7 (r19 FIX) — served-but-unminted target but the EXISTING tag
+            // points at an embargoed commit: preserving would keep serving it.
+            // DELETE. PRESERVE requires `existing_served`.
+            (TagTarget::ServedUnminted, Some(_), false) => {
+                delete_reference_if_present(&repo, &tag_ref)?;
+            }
+            // Cell 8 — served-but-unminted target, no existing tag: nothing to do
+            // (a scoped export does not materialize an unminted target).
+            (TagTarget::ServedUnminted, None, _) => {}
+            // Cells 9-11 — target genuinely unserved (embargoed / withheld ancestor
+            // / Private): the tag is stale. DELETE (a no-op when the ref is absent).
+            (TagTarget::Unserved, _, _) => {
+                delete_reference_if_present(&repo, &tag_ref)?;
+            }
+            // Cells 12-13 (S3 FIX) — the marker was deleted: its stale mirror tag
+            // must go (DELETE is a no-op when the ref is already absent).
+            (TagTarget::NoTarget, _, _) => {
                 delete_reference_if_present(&repo, &tag_ref)?;
             }
         }

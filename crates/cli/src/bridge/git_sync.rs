@@ -163,10 +163,19 @@ pub fn sync_marker_to_tag(
     if let Ok(mut reference) = repo.find_reference(&tag_ref) {
         let existing = reference.peel_to_id().map_err(git_err)?.detach();
         if existing != git_oid {
-            return Err(GitBridgeError::Conflict(format!(
-                "tag {} at {} differs from marker {} at {}",
-                marker_name, existing, marker_name, git_oid
-            )));
+            // A marker is a free-move ref (`classify_tag_move`): a legitimate
+            // RETARGET to a new served+minted OID must FORCE-set the mirror tag,
+            // not abort the whole export with a conflict (heddle#316 S1). The
+            // mirror is heddle-owned, so there is no out-of-band tip to spare
+            // here; the destination-side ownership gate (`classify_tag_move`,
+            // `recorded == old`) still spares an out-of-band DESTINATION tag.
+            set_reference(
+                repo,
+                &tag_ref,
+                git_oid,
+                PreviousValue::Any,
+                "heddle: sync marker",
+            )?;
         }
         return Ok(());
     }
