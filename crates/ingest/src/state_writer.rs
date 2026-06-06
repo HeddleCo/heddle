@@ -444,7 +444,10 @@ mod tests {
         assert_eq!(committer.email, "committer@example.com");
         assert_eq!(state.authored_tz_offset, -7 * 3600);
         assert_eq!(state.committer_tz_offset, 2 * 3600);
-        assert_eq!(state.raw_message.as_deref(), Some("feat: thing\n\nBody.\n"));
+        assert_eq!(
+            state.raw_message.as_deref(),
+            Some("feat: thing\n\nBody.\n".as_bytes())
+        );
         assert_eq!(
             state.git_gpgsig.as_deref(),
             Some("-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----")

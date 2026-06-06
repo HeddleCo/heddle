@@ -777,6 +777,13 @@ fn split_commit_extra_headers(commit: &gix::Commit<'_>) -> crate::Result<SplitHe
         .map_err(|e| IngestError::Git(format!("decode commit: {e}")))?;
     let mut gpgsig = None;
     let mut extra = Vec::new();
+    // gix exposes git's standard `encoding` header as the typed `.encoding`
+    // field, not in `extra_headers`; capture it explicitly (ahead of the other
+    // extension headers, per spike §1/§4) so the charset label isn't dropped.
+    // Mirrors the bridge import path's `split_extra_headers`.
+    if let Some(encoding) = decoded.encoding {
+        extra.push(("encoding".to_string(), encoding.to_string()));
+    }
     for (key, value) in decoded.extra_headers {
         let key = key.to_string();
         let value = value.to_string();

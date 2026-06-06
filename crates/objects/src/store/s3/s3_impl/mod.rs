@@ -582,4 +582,165 @@ impl ObjectStore for S3Store {
         }
         Ok(ids)
     }
+
+    // ── Annotated tag sidecar ──────────────────────────────────────────────
+    //
+    // Per-marker sidecar holding an annotated git tag object's metadata (#564
+    // step 1, #565), keyed by hex(marker name) under `marker-tags/` to match
+    // the fs backend. The bridge import writes this UNCONDITIONALLY for every
+    // annotated tag, so without these overrides an S3-backed repo would hit the
+    // trait's "unsupported" default and fail every annotated-tag import.
+
+    fn has_annotated_tag_for_marker(&self, marker: &str) -> Result<bool> {
+        let key = self.marker_tag_key(marker);
+        let client = Arc::clone(&self.client);
+        let bucket = self.bucket.clone();
+        self.block(async move {
+            retry_with(
+                RetryPolicy::S3_DEFAULT,
+                should_retry_store_error,
+                || async {
+                    match client.head_object().bucket(&bucket).key(&key).send().await {
+                        Ok(_) => Ok(true),
+                        Err(e) => {
+                            if e.as_service_error()
+                                .map(|e| e.is_not_found())
+                                .unwrap_or(false)
+                            {
+                                Ok(false)
+                            } else {
+                                Err(StoreError::Io(std::io::Error::other(format!(
+                                    "S3 head_object failed: {}",
+                                    e
+                                ))))
+                            }
+                        }
+                    }
+                },
+            )
+            .await
+        })
+    }
+
+    fn get_annotated_tag_bytes_for_marker(&self, marker: &str) -> Result<Option<Vec<u8>>> {
+        let key = self.marker_tag_key(marker);
+        let client = Arc::clone(&self.client);
+        let bucket = self.bucket.clone();
+        self.block(async move {
+            retry_with(
+                RetryPolicy::S3_DEFAULT,
+                should_retry_store_error,
+                || async {
+                    match client.get_object().bucket(&bucket).key(&key).send().await {
+                        Ok(response) => {
+                            let data = response.body.collect().await.map_err(|e| {
+                                StoreError::Io(std::io::Error::other(format!(
+                                    "Failed to read S3 object body: {}",
+                                    e
+                                )))
+                            })?;
+                            Ok(Some(data.into_bytes().to_vec()))
+                        }
+                        Err(e) => {
+                            if e.as_service_error()
+                                .map(|e| e.is_no_such_key())
+                                .unwrap_or(false)
+                            {
+                                Ok(None)
+                            } else {
+                                Err(StoreError::Io(std::io::Error::other(format!(
+                                    "S3 get_object failed: {}",
+                                    e
+                                ))))
+                            }
+                        }
+                    }
+                },
+            )
+            .await
+        })
+    }
+
+    fn put_annotated_tag_bytes_for_marker(&self, marker: &str, bytes: &[u8]) -> Result<()> {
+        let key = self.marker_tag_key(marker);
+        let body = bytes.to_vec();
+        let client = Arc::clone(&self.client);
+        let bucket = self.bucket.clone();
+        self.block(async move {
+            retry_with(
+                RetryPolicy::S3_DEFAULT,
+                should_retry_store_error,
+                || async {
+                    client
+                        .put_object()
+                        .bucket(&bucket)
+                        .key(&key)
+                        .body(ByteStream::from(body.clone()))
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            StoreError::Io(std::io::Error::other(format!(
+                                "S3 put_object failed: {}",
+                                e
+                            )))
+                        })?;
+                    Ok(())
+                },
+            )
+            .await
+        })
+    }
+
+    fn delete_annotated_tag_for_marker(&self, marker: &str) -> Result<()> {
+        // S3 delete is idempotent — removing a missing key returns success, so
+        // this is a no-op for lightweight tags, matching the fs backend.
+        let key = self.marker_tag_key(marker);
+        let client = Arc::clone(&self.client);
+        let bucket = self.bucket.clone();
+        self.block(async move {
+            retry_with(
+                RetryPolicy::S3_DEFAULT,
+                should_retry_store_error,
+                || async {
+                    client
+                        .delete_object()
+                        .bucket(&bucket)
+                        .key(&key)
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            StoreError::Io(std::io::Error::other(format!(
+                                "S3 delete_object failed: {}",
+                                e
+                            )))
+                        })?;
+                    Ok(())
+                },
+            )
+            .await
+        })
+    }
+
+    fn list_markers_with_annotated_tag(&self) -> Result<Vec<String>> {
+        let store = self.clone();
+        let keys = self.block(async move {
+            retry_with(RetryPolicy::S3_DEFAULT, should_retry_store_error, || {
+                store.list_with_prefix("marker-tags/")
+            })
+            .await
+        })?;
+        let mut names = Vec::new();
+        for key in keys {
+            // Filenames are hex(marker_name_utf8); recover the name.
+            if let Some(stem) = key
+                .strip_prefix("marker-tags/")
+                .and_then(|k| k.strip_suffix(".bin"))
+                && let Ok(bytes) = hex::decode(stem)
+                && let Ok(name) = String::from_utf8(bytes)
+            {
+                names.push(name);
+            }
+        }
+        Ok(names)
+    }
 }

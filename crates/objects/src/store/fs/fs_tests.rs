@@ -405,6 +405,56 @@ fn test_state_roundtrip() {
     assert_eq!(retrieved.intent, Some("Test state".to_string()));
 }
 
+/// #564 step 1: a non-UTF8 git commit message (latin-1 `café` = `caf\xe9`)
+/// must survive a real store→load round-trip byte-identically. This is why
+/// `raw_message` is `Vec<u8>` and not `String`.
+#[test]
+fn test_state_roundtrip_preserves_non_utf8_raw_message() {
+    let (_temp, store) = create_test_store();
+
+    let raw = b"caf\xe9\n".to_vec();
+    assert!(String::from_utf8(raw.clone()).is_err(), "fixture must be non-UTF8");
+
+    let tree_hash = ContentHash::compute(b"tree");
+    let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
+    let state = State::new(tree_hash, vec![], attribution).with_raw_message(&raw);
+
+    store.put_state(&state).unwrap();
+
+    let retrieved = store.get_state(&state.change_id).unwrap().unwrap();
+    assert_eq!(
+        retrieved.raw_message.as_deref(),
+        Some(raw.as_slice()),
+        "raw message bytes must round-trip verbatim through the store"
+    );
+}
+
+/// The annotated-tag sidecar round-trips through the fs store, and deleting it
+/// (the annotated→lightweight re-import path, #565) clears it idempotently.
+#[test]
+fn test_annotated_tag_sidecar_roundtrip_and_delete() {
+    let (_temp, store) = create_test_store();
+
+    assert!(!store.has_annotated_tag_for_marker("v1.0").unwrap());
+    store
+        .put_annotated_tag_bytes_for_marker("v1.0", b"tag-bytes")
+        .unwrap();
+    assert!(store.has_annotated_tag_for_marker("v1.0").unwrap());
+    assert_eq!(
+        store.get_annotated_tag_bytes_for_marker("v1.0").unwrap(),
+        Some(b"tag-bytes".to_vec())
+    );
+    assert_eq!(
+        store.list_markers_with_annotated_tag().unwrap(),
+        vec!["v1.0".to_string()]
+    );
+
+    store.delete_annotated_tag_for_marker("v1.0").unwrap();
+    assert!(!store.has_annotated_tag_for_marker("v1.0").unwrap());
+    // Deleting a missing sidecar is a no-op (idempotent).
+    store.delete_annotated_tag_for_marker("v1.0").unwrap();
+}
+
 #[test]
 fn test_list_states() {
     let (_temp, store) = create_test_store();

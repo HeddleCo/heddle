@@ -16,7 +16,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{ChangeId, Principal};
+use super::Principal;
 
 /// The metadata of an annotated git tag object, captured on import so the
 /// tag can be byte-reconstructed after the git mirror is dropped.
@@ -26,12 +26,17 @@ use super::{ChangeId, Principal};
 /// order is load-bearing for byte-exactness, never a map.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnnotatedTag {
-    /// The Heddle [`ChangeId`] of the object the tag points at. For the
-    /// common case (`target_kind == "commit"`) this is the state the
-    /// marker also resolves to.
-    pub object: ChangeId,
-    /// The git type of the tagged object, verbatim (`"commit"`, and in
-    /// rare tag-of-tag / tag-of-blob cases `"tag"` / `"blob"` / `"tree"`).
+    /// The git object id (hex) the tag points at **directly** — the value of
+    /// the tag object's `object` header (spike §7), NOT the fully-peeled
+    /// commit. For the common case (`target_kind == "commit"`) the direct
+    /// target IS the commit; for a tag-of-tag (`target_kind == "tag"`) it is
+    /// the inner tag object. `object` and [`target_kind`](Self::target_kind)
+    /// always describe the same (direct) object. The marker that owns this
+    /// sidecar separately resolves to the peeled-commit `ChangeId`, so the
+    /// Heddle-side linkage is not lost by storing a raw git OID here.
+    pub object: String,
+    /// The git type of the tag's **direct** target, verbatim (`"commit"`, and
+    /// in rare tag-of-tag / tag-of-blob cases `"tag"` / `"blob"` / `"tree"`).
     pub target_kind: String,
     /// The tag's own name, verbatim (the `tag <name>` header).
     pub tag_name: String,
@@ -59,15 +64,16 @@ pub struct AnnotatedTag {
 }
 
 impl AnnotatedTag {
-    /// Create an annotated tag pointing at `object` of git type
-    /// `target_kind` (usually `"commit"`), with the given name.
+    /// Create an annotated tag pointing **directly** at git object id
+    /// `object` (hex) of git type `target_kind` (usually `"commit"`), with the
+    /// given name.
     pub fn new(
-        object: ChangeId,
+        object: impl Into<String>,
         target_kind: impl Into<String>,
         tag_name: impl Into<String>,
     ) -> Self {
         Self {
-            object,
+            object: object.into(),
             target_kind: target_kind.into(),
             tag_name: tag_name.into(),
             tagger: None,
@@ -117,8 +123,12 @@ mod tests {
     use super::*;
 
     fn sample() -> AnnotatedTag {
-        AnnotatedTag::new(ChangeId::from_bytes([5; 16]), "commit", "v1.0")
-            .with_tagger(
+        AnnotatedTag::new(
+            "1234567890abcdef1234567890abcdef12345678",
+            "commit",
+            "v1.0",
+        )
+        .with_tagger(
                 Principal::new("Tagger", "tagger@example.com"),
                 Utc::now(),
                 -7200,
@@ -138,7 +148,11 @@ mod tests {
 
     #[test]
     fn lightweight_constructor_has_no_metadata() {
-        let tag = AnnotatedTag::new(ChangeId::from_bytes([1; 16]), "commit", "v0.1");
+        let tag = AnnotatedTag::new(
+            "1234567890abcdef1234567890abcdef12345678",
+            "commit",
+            "v0.1",
+        );
         assert!(tag.tagger.is_none());
         assert!(tag.message.is_none());
         assert!(tag.git_gpgsig.is_none());

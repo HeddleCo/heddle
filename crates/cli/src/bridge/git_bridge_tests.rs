@@ -6219,7 +6219,10 @@ fn import_preserves_commit_git_fidelity_fields() {
     assert_eq!(stored_committer.email, "committer@example.com");
     assert_eq!(state.authored_tz_offset, -7 * 3600);
     assert_eq!(state.committer_tz_offset, 2 * 3600);
-    assert_eq!(state.raw_message.as_deref(), Some("feat: thing\n\nBody.\n"));
+    assert_eq!(
+        state.raw_message.as_deref(),
+        Some("feat: thing\n\nBody.\n".as_bytes())
+    );
     // gix folds multi-line extra-header values and round-trips them with a
     // trailing newline; byte-exact State round-tripping is covered by the
     // ingest unit test. Here we verify the gpgsig is *extracted* into its own
@@ -6262,7 +6265,10 @@ fn import_stores_annotated_tag_object() {
         .expect("query sidecar")
         .expect("annotated tag stored");
     let tag = objects::object::AnnotatedTag::from_bytes(&bytes).expect("decode tag");
-    assert_eq!(tag.object, change_id);
+    // `object` is the tag's DIRECT git target OID; for a commit-target tag
+    // that is the commit OID itself (the marker, asserted above, carries the
+    // peeled-commit ChangeId).
+    assert_eq!(tag.object, commit_oid.to_string());
     assert_eq!(tag.target_kind, "commit");
     assert_eq!(tag.tag_name, "v1.0");
     assert!(
@@ -6272,4 +6278,52 @@ fn import_stores_annotated_tag_object() {
     );
     let tagger = tag.tagger.expect("tagger preserved");
     assert_eq!(tagger.name, "Heddle Test");
+}
+
+/// #565: re-importing a tag that changed from annotated to lightweight (same
+/// name, now pointing directly at the commit) must DELETE the stale
+/// annotated-tag sidecar, or a dropped tag object would linger and
+/// reconstruct the wrong tag.
+#[test]
+fn reimport_annotated_to_lightweight_clears_stale_sidecar() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_git_temp, git_repo) = init_git_repo();
+
+    let tree_oid = empty_tree_oid(&git_repo);
+    let commit_oid = commit_with_tree(&git_repo, Some("refs/heads/main"), tree_oid, "base", &[]);
+    create_annotated_tag(&git_repo, "v1.0", commit_oid, "release notes\n");
+
+    // First import: the annotated-tag sidecar is written.
+    let mut bridge = GitBridge::new(&repo);
+    import_all(&mut bridge, Some(git_repo.workdir().expect("workdir"))).expect("first import");
+    assert!(
+        repo.store()
+            .has_annotated_tag_for_marker("v1.0")
+            .expect("query sidecar"),
+        "annotated import must write the sidecar"
+    );
+
+    // Demote v1.0 to a lightweight tag: drop the annotated ref and re-create it
+    // pointing directly at the commit.
+    delete_reference_if_present(&git_repo, "refs/tags/v1.0").expect("drop annotated tag");
+    set_reference(
+        &git_repo,
+        "refs/tags/v1.0",
+        commit_oid,
+        PreviousValue::Any,
+        "test: lightweight tag",
+    )
+    .expect("create lightweight tag");
+
+    // Re-import: the now-lightweight tag must clear the stale sidecar.
+    let mut bridge = GitBridge::new(&repo);
+    import_all(&mut bridge, Some(git_repo.workdir().expect("workdir"))).expect("re-import");
+    assert!(
+        !repo
+            .store()
+            .has_annotated_tag_for_marker("v1.0")
+            .expect("query sidecar"),
+        "lightweight re-import must delete the stale annotated-tag sidecar"
+    );
 }

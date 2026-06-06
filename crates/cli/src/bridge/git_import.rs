@@ -159,6 +159,15 @@ fn split_extra_headers(commit: &gix::Commit<'_>) -> GitResult<SplitHeaders> {
     let decoded = commit.decode().map_err(git_err)?;
     let mut gpgsig = None;
     let mut extra = Vec::new();
+    // gix surfaces git's standard `encoding` header as the typed `.encoding`
+    // field, NOT inside `extra_headers`. If we only iterate `extra_headers` the
+    // charset label is silently dropped — and then a non-UTF8 message can't be
+    // interpreted on reconstruction. Capture it explicitly. git emits
+    // `encoding` immediately after `committer`, ahead of the other extension
+    // headers (spike §1/§4), so it leads the ordered vec.
+    if let Some(encoding) = decoded.encoding {
+        extra.push(("encoding".to_string(), encoding.to_string()));
+    }
     for (key, value) in decoded.extra_headers {
         let key = key.to_string();
         let value = value.to_string();
@@ -179,7 +188,12 @@ pub fn import_commit(
     git_oid: gix::hash::ObjectId,
 ) -> GitResult<ChangeId> {
     let commit = repo.find_commit(git_oid).map_err(git_err)?;
-    let message = commit.message_raw_sloppy().to_string();
+    // Capture the raw message bytes verbatim for byte-exact reconstruction
+    // (#566): a non-UTF8 message (latin-1, shift-jis, …) must survive intact,
+    // so store bytes, not a String. A lossy String view is derived only for
+    // trailer / intent parsing, which inspect the (ASCII) footer lines.
+    let message_bytes = commit.message_raw_sloppy().to_vec();
+    let message = String::from_utf8_lossy(&message_bytes).into_owned();
     let author = commit.author().map_err(git_err)?;
     let author_name = author.name.to_string();
     let author_email = author.email.to_string();
@@ -285,7 +299,7 @@ pub fn import_commit(
         .with_authored_at(authored_at)
         .with_committer(Principal::new(committer_name, committer_email))
         .with_tz_offsets(authored_tz_offset, committer_tz_offset)
-        .with_raw_message(message)
+        .with_raw_message(message_bytes)
         .with_extra_headers(extra_headers)
         .with_status(status);
 
@@ -759,11 +773,15 @@ fn import_with_ref_filter(
             // annotated-tag sidecar so the tag can be byte-reconstructed
             // after the mirror is dropped (#568). Lightweight tags whose
             // immediate target is the commit itself get no sidecar.
-            if let Some(immediate) = immediate
-                && immediate != oid
-                && repo.find_object(immediate).map_err(git_err)?.kind == gix::objs::Kind::Tag
-            {
-                let annotated = build_annotated_tag(&repo, immediate, &change_id)?;
+            let is_annotated = match immediate {
+                Some(immediate) if immediate != oid => {
+                    repo.find_object(immediate).map_err(git_err)?.kind == gix::objs::Kind::Tag
+                }
+                _ => false,
+            };
+            if is_annotated {
+                let immediate = immediate.expect("annotated tag has an immediate tag object");
+                let annotated = build_annotated_tag(&repo, immediate)?;
                 let bytes = annotated.to_bytes().map_err(|e| {
                     GitBridgeError::InvalidMapping(format!(
                         "serialize annotated tag '{}': {}",
@@ -774,6 +792,15 @@ fn import_with_ref_filter(
                     .heddle_repo
                     .store()
                     .put_annotated_tag_bytes_for_marker(&name, &bytes)?;
+            } else {
+                // #565: this tag is lightweight (or was demoted from annotated
+                // on re-import). Remove any annotated-tag sidecar left over
+                // from a prior annotated import of the same name, so a stale
+                // tag object can't linger and reconstruct the wrong tag.
+                bridge
+                    .heddle_repo
+                    .store()
+                    .delete_annotated_tag_for_marker(&name)?;
             }
             stats.tags_synced += 1;
         }
@@ -790,14 +817,17 @@ fn shallow_import_retry_command(wanted_refs: Option<&HashSet<String>>) -> String
 }
 
 /// Read an annotated git tag object and capture its fidelity metadata as an
-/// [`AnnotatedTag`]. `change_id` is the Heddle id of the peeled commit the
-/// tag resolves to (stored as the tag's `object`). #564 de-lossy step 1.
+/// [`AnnotatedTag`]. The stored `object` is the tag's **direct** target git
+/// OID (spike §7) paired with its `target_kind` — for a tag-of-tag this is the
+/// inner tag object, NOT the fully-peeled commit. The marker that owns the
+/// sidecar separately resolves to the peeled commit, so the Heddle linkage is
+/// kept there. #564 de-lossy step 1.
 fn build_annotated_tag(
     repo: &gix::Repository,
     tag_oid: gix::hash::ObjectId,
-    change_id: &ChangeId,
 ) -> GitResult<AnnotatedTag> {
     let tag = repo.find_tag(tag_oid).map_err(git_err)?;
+    let target_oid = tag.target_id().map_err(git_err)?.detach();
     let decoded = tag.decode().map_err(git_err)?;
     let target_kind = match decoded.target_kind {
         gix::objs::Kind::Commit => "commit",
@@ -805,8 +835,9 @@ fn build_annotated_tag(
         gix::objs::Kind::Blob => "blob",
         gix::objs::Kind::Tag => "tag",
     };
-    let mut annotated = AnnotatedTag::new(*change_id, target_kind, decoded.name.to_string())
-        .with_message(decoded.message.to_string());
+    let mut annotated =
+        AnnotatedTag::new(target_oid.to_string(), target_kind, decoded.name.to_string())
+            .with_message(decoded.message.to_string());
     if let Some(tagger) = decoded.tagger().map_err(git_err)? {
         let time = tagger.time().map_err(git_err)?;
         let at = Utc.timestamp_opt(time.seconds, 0).single().ok_or_else(|| {

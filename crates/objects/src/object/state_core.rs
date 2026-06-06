@@ -224,15 +224,19 @@ pub struct State {
     /// `created_at`.
     ///
     /// `created_at` is the *committer* time — when the state object
-    /// came into being in its current form. We hash that into the
-    /// state id so re-imports of the same git history produce
-    /// deterministic Heddle hashes. But for blame display we usually
-    /// want the *author* time — when someone actually wrote the
-    /// change — which survives `git rebase`, cherry-pick, squash-
-    /// merge, and `git commit --amend`. The `bridge git ingest`
-    /// importer fills this from `git_commit.authored_at`; native
-    /// heddle commits leave it `None` and blame falls back to
-    /// `created_at`.
+    /// came into being in its current form. `authored_at` is the
+    /// *author* time — when someone actually wrote the change — which
+    /// survives `git rebase`, cherry-pick, squash-merge, and `git
+    /// commit --amend`. The `bridge git ingest`/`import` importers fill
+    /// this from the git author time; native heddle commits leave it
+    /// `None` and blame falls back to `created_at`.
+    ///
+    /// **Part of the state hash (#564 de-lossy step 1).** Author time
+    /// is part of a git commit's identity: two commits that differ
+    /// *only* by author timestamp are distinct git objects, so folding
+    /// it into the hash keeps them from dedup-colliding to one State in
+    /// the content-addressed store. `None` hashes as a single absence
+    /// byte, so native commits are unaffected beyond the format bump.
     #[serde(default)]
     pub authored_at: Option<DateTime<Utc>>,
     /// Content hash of the state's [`RiskSignalBlob`](crate::object::RiskSignalBlob),
@@ -289,8 +293,15 @@ pub struct State {
     /// block), preserved exactly so reconstruction is byte-stable. Distinct
     /// from `intent`, which is the trimmed first line surfaced in the UI.
     /// `None` for native commits and legacy imports.
+    ///
+    /// Stored as raw bytes, NOT a `String`: a commit with a non-UTF8
+    /// `encoding` (latin-1, shift-jis, …) carries message bytes that are not
+    /// valid UTF-8 (e.g. `0xe9` for latin-1 `é`); a `String` could not
+    /// round-trip them byte-identically. (non-UTF8 author/committer identity
+    /// *names* are not yet byte-preserved — `Principal` is still `String`; see
+    /// #564.)
     #[serde(default)]
-    pub raw_message: Option<String>,
+    pub raw_message: Option<Vec<u8>>,
     /// The commit's `gpgsig` header value, verbatim, when the commit is
     /// signed. Pulled out of [`State::extra_headers`] into its own field
     /// because its byte-exact placement is load-bearing for #566's
@@ -473,14 +484,11 @@ impl State {
     /// Native heddle commits leave this `None`; blame display then
     /// falls back to `created_at`.
     ///
-    /// **Not part of the state hash.** `created_at` is what hashes;
-    /// this field is purely metadata for display. A re-imported repo
-    /// that picks up updated authored timestamps will produce the
-    /// same Heddle State hashes as before.
+    /// **Part of the state hash (#564 de-lossy step 1)** — see the
+    /// `authored_at` field docs and `update_hash`.
     pub fn with_authored_at(mut self, timestamp: DateTime<Utc>) -> Self {
         self.authored_at = Some(timestamp);
-        // Intentionally no `content_hash = None` here — authored_at is
-        // not in the hash by design.
+        self.content_hash = None;
         self
     }
 
@@ -503,10 +511,11 @@ impl State {
         self
     }
 
-    /// Record the verbatim git commit message body.
-    /// **Part of the state hash.** #564 de-lossy step 1.
-    pub fn with_raw_message(mut self, raw_message: impl Into<String>) -> Self {
-        self.raw_message = Some(raw_message.into());
+    /// Record the verbatim git commit message body, as raw bytes (so a
+    /// non-UTF8 message round-trips byte-identically; see the `raw_message`
+    /// field docs). **Part of the state hash.** #564 de-lossy step 1.
+    pub fn with_raw_message(mut self, raw_message: impl AsRef<[u8]>) -> Self {
+        self.raw_message = Some(raw_message.as_ref().to_vec());
         self.content_hash = None;
         self
     }
@@ -660,10 +669,17 @@ impl State {
         // both tz offsets: i32 LE, always present.
         len += 4;
         len += 4;
-        // raw_message + git_gpgsig: optional-string framing (1 + maybe len+1).
+        // authored_at (author time): 1 tag byte + (i64 LE when Some).
+        len += 1;
+        if self.authored_at.is_some() {
+            len += 8;
+        }
+        // raw_message: optional-bytes framing (1 tag + u32 len + bytes) — a
+        // length prefix, not NUL-termination, since a raw message can contain
+        // NUL bytes. git_gpgsig: optional-string framing (1 + maybe len+1).
         len += 1;
         if let Some(raw_message) = &self.raw_message {
-            len += raw_message.len() as u64 + 1;
+            len += 4 + raw_message.len() as u64;
         }
         len += 1;
         if let Some(gpgsig) = &self.git_gpgsig {
@@ -750,11 +766,11 @@ impl State {
         // git-fidelity fields (#564 de-lossy step 1, #565). These are
         // DELIBERATELY part of the content hash — the opposite of the W1
         // tail fields above. Two git commits that differ only in committer,
-        // timezone, verbatim message, gpgsig, or extra headers are distinct
-        // git objects; folding these into identity prevents them from
-        // dedup-colliding to one State in the content-addressed store. This
-        // re-hashes every pre-#565 state (a real format bump; acceptable
-        // pre-0.3). Keep this in sync with `hash_len`.
+        // author/committer time, timezone, verbatim message, gpgsig, or extra
+        // headers are distinct git objects; folding these into identity
+        // prevents them from dedup-colliding to one State in the
+        // content-addressed store. This re-hashes every pre-#565 state (a real
+        // format bump; acceptable pre-0.3). Keep this in sync with `hash_len`.
         if let Some(committer) = &self.committer {
             hasher.update(&[1]);
             hasher.update(committer.name.as_bytes());
@@ -768,7 +784,16 @@ impl State {
         hasher.update(&self.authored_tz_offset.to_le_bytes());
         hasher.update(&self.committer_tz_offset.to_le_bytes());
 
-        write_optional_string(hasher, &self.raw_message);
+        // Author time (#564): committer time is hashed above as created_at;
+        // author time is the other half of a git commit's temporal identity.
+        if let Some(authored_at) = self.authored_at {
+            hasher.update(&[1]);
+            hasher.update(&authored_at.timestamp().to_le_bytes());
+        } else {
+            hasher.update(&[0]);
+        }
+
+        write_optional_bytes(hasher, &self.raw_message);
         write_optional_string(hasher, &self.git_gpgsig);
 
         hasher.update(&(self.extra_headers.len() as u32).to_le_bytes());
@@ -777,6 +802,24 @@ impl State {
             hasher.update(key.as_bytes());
             hasher.update(&(value.len() as u32).to_le_bytes());
             hasher.update(value.as_bytes());
+        }
+    }
+}
+
+/// Length-prefixed optional-bytes framing for the hash: `[1] + u32-LE len +
+/// bytes` when `Some`, a single `[0]` when `None`. Unlike
+/// [`write_optional_string`]'s NUL-terminated framing this is binary-safe —
+/// `raw_message` can contain NUL bytes, so a length prefix (not a terminator)
+/// is required to keep the hash unambiguous.
+fn write_optional_bytes(hasher: &mut blake3::Hasher, value: &Option<Vec<u8>>) {
+    match value {
+        Some(bytes) => {
+            hasher.update(&[1]);
+            hasher.update(&(bytes.len() as u32).to_le_bytes());
+            hasher.update(bytes);
+        }
+        None => {
+            hasher.update(&[0]);
         }
     }
 }
@@ -980,6 +1023,7 @@ mod tests {
 
         for mutate in [
             |s: State| s.with_tz_offsets(3600, -7200),
+            |s: State| s.with_authored_at(Utc::now() + chrono::Duration::seconds(1)),
             |s: State| s.with_raw_message("verbatim body\n"),
             |s: State| s.with_git_gpgsig("-----BEGIN PGP SIGNATURE-----\n"),
             |s: State| s.with_extra_headers(vec![("mergetag".into(), "x".into())]),
@@ -1031,9 +1075,58 @@ mod tests {
         let mut state = sample_state()
             .with_committer(Principal::new("Dave", "dave@example.com"))
             .with_tz_offsets(3600, 0)
+            .with_authored_at(Utc::now())
             .with_raw_message("body\n")
             .with_git_gpgsig("sig")
             .with_extra_headers(vec![("k".into(), "v".into())]);
         assert_eq!(state.hash(), state.compute_hash());
+    }
+
+    /// A non-UTF8 git message body (latin-1 `café` = `caf\xe9`) must be
+    /// stored byte-identically. `raw_message` is `Vec<u8>`, not `String`,
+    /// precisely so these bytes survive; the hash stays stable/recomputable
+    /// over the raw bytes (length-prefixed framing, NUL-safe). #564 step 1.
+    #[test]
+    fn non_utf8_raw_message_is_byte_preserved() {
+        let raw = b"caf\xe9\n".to_vec();
+        assert!(
+            String::from_utf8(raw.clone()).is_err(),
+            "test fixture must be invalid UTF-8 to be meaningful"
+        );
+        let mut state = sample_state().with_raw_message(&raw);
+        assert_eq!(
+            state.raw_message.as_deref(),
+            Some(raw.as_slice()),
+            "raw bytes preserved verbatim"
+        );
+        // rmp serialize → deserialize (the store's on-disk codec) keeps the
+        // bytes intact, and the hash recomputes identically afterwards.
+        let bytes = rmp_serde::to_vec(&state).expect("serialize state");
+        let back: State = rmp_serde::from_slice(&bytes).expect("deserialize state");
+        assert_eq!(back.raw_message.as_deref(), Some(raw.as_slice()));
+        let mut back = back;
+        assert_eq!(state.hash(), back.hash());
+        assert_eq!(back.hash(), back.compute_hash());
+    }
+
+    /// A NUL byte inside the message must not be swallowed/truncated by the
+    /// hash framing — length-prefixed `raw_message` is what makes this safe,
+    /// where the old NUL-terminated string framing would have been ambiguous.
+    #[test]
+    fn raw_message_with_nul_byte_changes_hash() {
+        let base = sample_state();
+        let with_nul = sample_state()
+            .with_change_id(base.change_id)
+            .with_logical_change_id(base.logical_change_id());
+        let mut a = with_nul.with_raw_message(b"a\x00b");
+        a.created_at = base.created_at;
+
+        let other = sample_state()
+            .with_change_id(base.change_id)
+            .with_logical_change_id(base.logical_change_id());
+        let mut b = other.with_raw_message(b"a\x00c");
+        b.created_at = base.created_at;
+
+        assert_ne!(a.hash(), b.hash());
     }
 }
