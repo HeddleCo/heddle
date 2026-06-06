@@ -3746,6 +3746,158 @@ fn export_deletes_tag_when_marker_retargeted_to_private() {
     );
 }
 
+/// #316 / PR #528 r18 (the dual of the embargo retraction): the marker reconcile
+/// must NOT conflate "unserved (embargoed)" with "served-but-not-minted
+/// (out-of-scope)". A marker absent from the projected desired set has two
+/// causes the desired set alone cannot tell apart — its target is genuinely
+/// unserved (delete the stale tag, correct), OR its target is a still-PUBLIC
+/// state that this scoped export simply did not mint into the mirror, so it has
+/// no git OID in the mapping yet (preserve the prior tag). Deleting in the second
+/// case spuriously RETRACTS a previously-exported public tag until an all-thread
+/// export re-mints the target. This is the tag-side analog of the head rule: a
+/// scoped export neither materializes a brand-new ref nor deletes a still-served
+/// one it merely didn't mint.
+///
+/// The trigger that drives a SERVED marker target out of the mapping (the only
+/// way the `None` arm is reached for a public target) is a RETARGET to a
+/// not-yet-minted out-of-scope public state: a stationary marker's target stays
+/// in the mapping via the notes/sidecar rebuild, so it goes through the `Some`
+/// arm. The symmetric `Private`-retarget case (genuinely unserved) is covered by
+/// [`export_deletes_tag_when_marker_retargeted_to_private`] — together they prove
+/// the reconcile distinguishes served-but-unminted (preserve) from unserved
+/// (delete).
+#[test]
+fn scoped_export_preserves_unminted_out_of_scope_public_tag() {
+    use refs::Head;
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let put_state = |content: &[u8], parents: Vec<ChangeId>| -> objects::object::State {
+        use objects::object::{Attribution, Principal, State};
+        let store = repo.store();
+        let blob_hash = store
+            .put_blob(&Blob::from_slice(content))
+            .expect("put blob");
+        let tree_hash = store
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
+            .expect("put tree");
+        let state = State::new(
+            tree_hash,
+            parents,
+            Attribution::human(Principal::new("Alice", "alice@example.com")),
+        );
+        store.put_state(&state).expect("put state");
+        state
+    };
+
+    // Two independent public lines. alpha: A (the scoped thread). beta: B (a
+    // B-only state pinned by marker v1.0). alpha never reaches beta.
+    let state_a = put_state(b"alpha\n", Vec::new());
+    repo.refs()
+        .set_thread(&ThreadName::new("alpha"), &state_a.change_id)
+        .expect("set alpha to A");
+    let state_b = put_state(b"beta release\n", Vec::new());
+    repo.refs()
+        .set_thread(&ThreadName::new("beta"), &state_b.change_id)
+        .expect("set beta to B");
+    repo.refs()
+        .create_marker(&MarkerName::new("v1.0"), &state_b.change_id)
+        .expect("create marker v1.0 at B");
+
+    // Run 1 — full export+push to a real destination. Both threads + the tag land,
+    // and B is minted into the mirror at oid_b.
+    let mut bridge = GitBridge::new(&repo);
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export-target");
+    bridge
+        .export_to_path(&dest_path)
+        .expect("first full export publishes alpha, beta, and tag v1.0");
+    let oid_b = bridge
+        .mapping
+        .get_git(&state_b.change_id)
+        .expect("B minted while public");
+    {
+        let dest = gix::open(&dest_path).expect("open dest");
+        assert_eq!(
+            dest.find_reference("refs/tags/v1.0")
+                .expect("run 1 publishes tag v1.0 to the destination")
+                .peel_to_id()
+                .expect("peel v1.0")
+                .detach(),
+            oid_b,
+            "run 1 publishes tag v1.0 at the public state B"
+        );
+    }
+
+    // Advance beta to a NEW public state C and RETARGET v1.0 onto it. C has never
+    // been exported, so it carries no note/sidecar mapping — the only way a still
+    // public marker target reaches the reconcile's `None` arm.
+    let state_c = put_state(b"beta rc\n", vec![state_b.change_id]);
+    repo.refs()
+        .set_thread(&ThreadName::new("beta"), &state_c.change_id)
+        .expect("advance beta to C");
+    repo.refs()
+        .delete_marker(&MarkerName::new("v1.0"))
+        .expect("clear old marker");
+    repo.refs()
+        .create_marker(&MarkerName::new("v1.0"), &state_c.change_id)
+        .expect("retarget marker v1.0 to C");
+
+    // Attach HEAD to alpha so a CurrentThread push scopes the EXPORT to alpha,
+    // which does NOT reach C and so does NOT mint it this run.
+    repo.refs()
+        .write_head(&Head::Attached {
+            thread: ThreadName::new("alpha"),
+        })
+        .expect("attach HEAD to alpha");
+
+    // Sanity: C is genuinely absent from the mapping going into the scoped push —
+    // this is the served-but-unminted condition the fix must handle.
+    assert!(
+        bridge.mapping.get_git(&state_c.change_id).is_none(),
+        "C must be unminted so the marker reconcile takes the `None` arm"
+    );
+
+    // Run 2 — SCOPED push of alpha. C stays PUBLIC and served; the scoped export
+    // just doesn't mint it. The marker reconcile must PRESERVE the existing tag
+    // (at its prior oid_b) rather than retract it as if C had become unserved — a
+    // later all-thread export will re-mint C and advance the tag.
+    bridge
+        .push_with_scope(
+            dest_path.to_str().expect("dest path"),
+            GitPushScope::CurrentThread,
+        )
+        .expect("scoped push of alpha");
+
+    // The mirror must KEEP refs/tags/v1.0 — a served-but-unminted marker target is
+    // not a stale tag.
+    let mirror = bridge.open_git_repo().expect("open mirror");
+    assert_eq!(
+        mirror
+            .find_reference("refs/tags/v1.0")
+            .expect("mirror must keep the served-but-unminted public tag v1.0")
+            .peel_to_id()
+            .expect("peel mirror v1.0")
+            .detach(),
+        oid_b,
+        "the scoped export must not retract a tag whose target is still public"
+    );
+
+    // ...and the destination reconcile must NOT propagate a deletion.
+    let dest = gix::open(&dest_path).expect("reopen dest");
+    assert_eq!(
+        dest.find_reference("refs/tags/v1.0")
+            .expect("destination must keep the served-but-unminted public tag v1.0")
+            .peel_to_id()
+            .expect("peel dest v1.0")
+            .detach(),
+        oid_b,
+        "the scoped push must not delete a tag whose target is still public"
+    );
+}
+
 /// #316 / PR #528 r7 CLASS 2 (the leak): a branch exported to a real
 /// DESTINATION while public, then retracted (whole line embargoed), must be
 /// DELETED at the destination — not left pointing at now-private commits. The

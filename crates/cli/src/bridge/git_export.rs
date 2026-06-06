@@ -537,14 +537,26 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         }
     }
 
+    // The downward-closure served set over the whole-mirror frontier — the SAME
+    // closure the purge ran over (every thread tip + every marker state). A marker
+    // target is served iff it is visible to this audience AND every reachable
+    // ancestor is served. The marker reconcile below uses this to classify a
+    // marker that `desired` dropped, since `desired` collapses two distinct causes
+    // to absent (heddle#316).
+    let frontier_served = {
+        let reachable_set: HashSet<ChangeId> = frontier_reachable.iter().copied().collect();
+        let sorted = bridge.sort_states_topologically(&frontier_reachable)?;
+        served_change_ids(bridge.heddle_repo, &sorted, &reachable_set, &audience)?
+    };
+
     // Reconcile the mirror's tags to the desired set. `markers` spans the whole
     // mirror (heddle#316), so a scoped export also retracts an EXISTING tag whose
     // marker's state became unserved — but, symmetric with heads above, it does
     // not materialize a brand-new tag (markers ride on an all-thread export).
     for marker_name in &markers {
-        if bridge.heddle_repo.refs().get_marker(marker_name)?.is_none() {
+        let Some(target_state) = bridge.heddle_repo.refs().get_marker(marker_name)? else {
             continue;
-        }
+        };
         let tag_ref = format!("refs/tags/{marker_name}");
         match desired.get(&tag_ref).copied() {
             Some(git_oid) => {
@@ -561,9 +573,20 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                 });
             }
             None => {
-                // Absent from the projection ⇒ the marker's state is not served
-                // (embargoed, withheld for a withheld ancestor, or retargeted to a
-                // Private/unminted state) ⇒ any prior mirror tag is stale.
+                // `desired` drops a marker to absent for TWO causes it cannot tell
+                // apart: the target is genuinely UNSERVED (embargoed, withheld for
+                // a withheld ancestor, or Private) — its prior tag is stale and
+                // must be deleted — OR the target is a still-PUBLIC state this
+                // (scoped) export did not mint, so it has no git OID in the mapping
+                // yet. Classify on the SERVED predicate, independent of
+                // minted-ness: a served-but-unminted target's tag is PRESERVED
+                // (symmetric with the head reconcile, which neither materializes
+                // nor deletes an out-of-scope served ref it merely didn't mint — an
+                // all-thread export re-mints the target and advances the tag);
+                // only a genuinely-unserved target's tag is deleted (heddle#316).
+                if frontier_served.contains(&target_state) {
+                    continue;
+                }
                 delete_reference_if_present(&repo, &tag_ref)?;
             }
         }
