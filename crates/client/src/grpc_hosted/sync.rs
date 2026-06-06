@@ -24,8 +24,9 @@ use tonic::Request;
 use super::{
     HostedGrpcClient, PullMaterialization,
     helpers::{
-        descriptor_id, object_descriptor_with_status, parse_descriptor_to_info,
-        status_to_protocol_error, to_proto_object_info, transport_mode_name,
+        descriptor_id, descriptor_id_from_info, object_descriptor_with_status,
+        parse_descriptor_to_info, status_to_protocol_error, to_proto_object_info,
+        transport_mode_name,
     },
 };
 
@@ -229,7 +230,7 @@ impl HostedGrpcClient {
 
         let object_index = objects
             .into_iter()
-            .map(|info| (descriptor_id(&to_proto_object_info(&info)), info))
+            .map(|info| (descriptor_id_from_info(&info), info))
             .collect::<HashMap<_, _>>();
 
         let ready_transport_mode = ready
@@ -1511,6 +1512,22 @@ mod tests {
 
     fn sample_blob() -> ContentHash {
         ContentHash::from_bytes([7u8; 32])
+    }
+
+    #[test]
+    fn descriptor_id_from_info_matches_proto_encode_path() {
+        let infos = [
+            redaction_info(sample_blob()),
+            state_info(ChangeId::from_bytes([3u8; 16])),
+            state_visibility_info(ChangeId::from_bytes([9u8; 16])),
+        ];
+        for info in infos {
+            assert_eq!(
+                descriptor_id_from_info(&info),
+                descriptor_id(&to_proto_object_info(&info)),
+                "keying path must stay byte-identical to the throwaway-encode path",
+            );
+        }
     }
 
     fn loose_tree_path(repo: &Repository, hash: &ContentHash) -> std::path::PathBuf {
