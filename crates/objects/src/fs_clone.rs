@@ -21,27 +21,61 @@
 //! - **Anywhere else** (or when reflink isn't supported by the
 //!   underlying filesystem): caller falls back to a real copy.
 //!
-//! The functions here return `Ok(true)` on a successful clone,
-//! `Ok(false)` when the kernel reported the operation isn't supported
-//! on this filesystem (so the caller should fall back to a real copy
-//! and remember to skip future reflink attempts in this batch), and an
-//! `Err` for genuine I/O errors that the caller should surface.
+//! The core [`try_reflink`] returns a [`ReflinkOutcome`] so the caller
+//! can tell three genuinely-different situations apart: a successful
+//! clone, a "this filesystem can't reflink" verdict (batch-wide signal
+//! to stop trying), and a "the source vanished from under us" race
+//! (a per-blob fallback that must NOT poison the batch). Overloading the
+//! last two — as a bare `Ok(false)` did — makes one concurrently-pruned
+//! loose mirror needlessly disable reflinks for every remaining blob.
 
 use std::{fs, io, path::Path};
+
+/// The three outcomes of a reflink attempt, kept distinct so callers
+/// don't conflate "filesystem can't reflink" (a batch-wide property)
+/// with "this one source vanished mid-flight" (a per-blob race).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReflinkOutcome {
+    /// CoW clone succeeded; `dest` now exists, sharing physical blocks
+    /// with `source` until either side is written.
+    Cloned,
+    /// The kernel reported reflinks aren't supported for this
+    /// filesystem / src+dst pair (`EXDEV`/`EOPNOTSUPP`/`ENOTSUP`/
+    /// `ENOSYS`/`EINVAL`). This is a property of the destination
+    /// filesystem, so a caller materializing a batch MAY disable
+    /// reflinks for the rest of it and fall straight to copy/write.
+    Unsupported,
+    /// The `source` was gone by the time we looked (concurrent prune /
+    /// torn NoSync promote). Reflink is only an optimization, so the
+    /// caller should degrade to a real copy / bytes-write for THIS blob
+    /// only — and crucially keep reflinks enabled for the rest of the
+    /// batch, since the filesystem itself is perfectly capable. A blob
+    /// that is genuinely absent (not just unreflinkable) still surfaces
+    /// downstream when the copy/write fallback can't find its bytes.
+    SourceVanished,
+}
 
 /// Try a filesystem-level reflink (copy-on-write clone) from `source`
 /// to `dest`. On success the destination has its own inode and shares
 /// physical blocks with the source until either side is modified.
 ///
-/// On a successful reflink: returns `Ok(true)`. The destination file
-/// has been created with the kernel's choice of permissions (typically
-/// the source's). Callers should `set_permissions` afterwards if they
-/// need a specific mode.
+/// On a successful reflink: returns `Ok(ReflinkOutcome::Cloned)`. The
+/// destination file has been created with the kernel's choice of
+/// permissions (typically the source's). Callers should
+/// `set_permissions` afterwards if they need a specific mode.
 ///
 /// On a "filesystem doesn't support reflinks" verdict (`EXDEV`,
 /// `EOPNOTSUPP`, `ENOTSUP`, `ENOSYS`, `EINVAL` from the ioctl form):
-/// returns `Ok(false)`. The caller should fall back to `fs::copy` and
-/// remember to skip future reflink attempts on this filesystem.
+/// returns `Ok(ReflinkOutcome::Unsupported)`. The caller should fall
+/// back to `fs::copy` and may skip future reflink attempts on this
+/// filesystem.
+///
+/// When the `source` is gone (missing at the pre-check, or `ENOENT`
+/// from the syscall in the TOCTOU window after it): returns
+/// `Ok(ReflinkOutcome::SourceVanished)`. The caller should fall back
+/// to a copy/bytes-write for this blob only and keep reflinks enabled
+/// for the rest of the batch — a vanished mirror says nothing about
+/// the filesystem's reflink capability.
 ///
 /// On any other I/O error: returns `Err`.
 ///
@@ -49,7 +83,22 @@ use std::{fs, io, path::Path};
 /// nonexistent destination). On Linux `FICLONE` requires the dest fd
 /// be opened for writing on a regular file, which we create with
 /// `O_CREAT | O_WRONLY | O_TRUNC`.
-pub fn try_reflink(source: &Path, dest: &Path) -> io::Result<bool> {
+pub fn try_reflink(source: &Path, dest: &Path) -> io::Result<ReflinkOutcome> {
+    // Never hand `clonefile`/`FICLONE` a source that isn't there: a missing
+    // source is reported as ENOENT, which `reflink_unsupported` deliberately
+    // does NOT swallow (ENOENT is a genuinely-missing file, not "reflink
+    // unsupported"), so it would hard-error. Reflink is only an optimization —
+    // a vanished loose mirror (concurrent prune / torn promote) must degrade to
+    // the caller's copy/bytes-write fallback, not crash. This is reported as
+    // `SourceVanished` (NOT `Unsupported`) so a single pruned blob doesn't
+    // disable reflinks for the whole batch. This guard is what stopped `heddle
+    // start` from failing on macOS/APFS with `conflict: No such file or
+    // directory` (heddle#571). A genuinely-missing blob still errors loudly
+    // downstream — `get_blob` returns `NotFound` with the hash when the copy
+    // fallback also can't find the bytes.
+    if !source.exists() {
+        return Ok(ReflinkOutcome::SourceVanished);
+    }
     #[cfg(target_os = "macos")]
     {
         try_clonefile_macos(source, dest)
@@ -61,7 +110,7 @@ pub fn try_reflink(source: &Path, dest: &Path) -> io::Result<bool> {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (source, dest);
-        Ok(false)
+        Ok(ReflinkOutcome::Unsupported)
     }
 }
 
@@ -78,7 +127,7 @@ pub fn clonefile_or_copy(source: &Path, dest: &Path) -> io::Result<bool> {
     // `clonefile`/FICLONE require dest not to exist; remove any stale
     // entry first. Ignored if dest doesn't exist.
     let _ = fs::remove_file(dest);
-    if try_reflink(source, dest)? {
+    if matches!(try_reflink(source, dest)?, ReflinkOutcome::Cloned) {
         return Ok(true);
     }
     fs::copy(source, dest)?;
@@ -86,7 +135,7 @@ pub fn clonefile_or_copy(source: &Path, dest: &Path) -> io::Result<bool> {
 }
 
 #[cfg(target_os = "macos")]
-fn try_clonefile_macos(source: &Path, dest: &Path) -> io::Result<bool> {
+fn try_clonefile_macos(source: &Path, dest: &Path) -> io::Result<ReflinkOutcome> {
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
 
     // SAFETY: linking the system `clonefile(2)` symbol. Signature
@@ -115,19 +164,15 @@ fn try_clonefile_macos(source: &Path, dest: &Path) -> io::Result<bool> {
     // (clone metadata + data, follow no symlinks on the source).
     let rc = unsafe { clonefile(src_c.as_ptr(), dst_c.as_ptr(), 0) };
     if rc == 0 {
-        return Ok(true);
+        return Ok(ReflinkOutcome::Cloned);
     }
 
     let err = io::Error::last_os_error();
-    if reflink_unsupported(&err) {
-        Ok(false)
-    } else {
-        Err(err)
-    }
+    classify_clone_err(source, err)
 }
 
 #[cfg(target_os = "linux")]
-fn try_ficlone_linux(source: &Path, dest: &Path) -> io::Result<bool> {
+fn try_ficlone_linux(source: &Path, dest: &Path) -> io::Result<ReflinkOutcome> {
     use std::{fs::OpenOptions, os::unix::io::AsRawFd};
 
     // FICLONE = _IOW(0x94, 9, int) on Linux. The kernel header
@@ -136,7 +181,14 @@ fn try_ficlone_linux(source: &Path, dest: &Path) -> io::Result<bool> {
     // i.e. _IOC_WRITE | sizeof(int) | type=0x94 | nr=9.
     const FICLONE: libc::c_ulong = 0x4004_9409;
 
-    let src = OpenOptions::new().read(true).open(source)?;
+    // Opening the source can race a concurrent prune: the pre-check in
+    // `try_reflink` saw it, but it can vanish before this open. Map that
+    // to `SourceVanished` so the caller degrades per-blob rather than
+    // disabling reflinks for the batch (or hard-erroring).
+    let src = match OpenOptions::new().read(true).open(source) {
+        Ok(f) => f,
+        Err(err) => return classify_clone_err(source, err),
+    };
     let dst = OpenOptions::new()
         .write(true)
         .create(true)
@@ -147,7 +199,7 @@ fn try_ficlone_linux(source: &Path, dest: &Path) -> io::Result<bool> {
     // as the third arg.
     let rc = unsafe { libc::ioctl(dst.as_raw_fd(), FICLONE, src.as_raw_fd()) };
     if rc == 0 {
-        return Ok(true);
+        return Ok(ReflinkOutcome::Cloned);
     }
 
     let err = io::Error::last_os_error();
@@ -155,8 +207,27 @@ fn try_ficlone_linux(source: &Path, dest: &Path) -> io::Result<bool> {
     // `fs::copy` fallback starts from a known state.
     drop(dst);
     let _ = fs::remove_file(dest);
+    classify_clone_err(source, err)
+}
+
+/// Classify a clonefile/FICLONE (or source-open) failure into the
+/// caller-meaningful [`ReflinkOutcome`] or a genuine error.
+///
+/// * `Unsupported` — the filesystem (or src/dst pair) can't reflink
+///   (`reflink_unsupported`). A batch-wide property.
+/// * `SourceVanished` — the failure is `ENOENT` and the source is in
+///   fact gone now (concurrent prune / torn promote in the TOCTOU
+///   window after the pre-check). A per-blob race; reflinks stay viable
+///   for the rest of the batch. An `ENOENT` whose source still exists
+///   (e.g. a missing dest parent) is NOT swallowed here — it surfaces
+///   as an `Err` for the caller to attribute correctly.
+/// * `Err` — anything else; the caller should surface it.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn classify_clone_err(source: &Path, err: io::Error) -> io::Result<ReflinkOutcome> {
     if reflink_unsupported(&err) {
-        Ok(false)
+        Ok(ReflinkOutcome::Unsupported)
+    } else if err.kind() == io::ErrorKind::NotFound && !source.exists() {
+        Ok(ReflinkOutcome::SourceVanished)
     } else {
         Err(err)
     }
@@ -212,7 +283,7 @@ pub fn filesystem_supports_reflink(parent_dir: &Path) -> bool {
     }
     drop(f);
 
-    let supported = matches!(try_reflink(&src, &dst), Ok(true));
+    let supported = matches!(try_reflink(&src, &dst), Ok(ReflinkOutcome::Cloned));
     let _ = fs::remove_file(&src);
     let _ = fs::remove_file(&dst);
     supported
@@ -223,6 +294,33 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// heddle#571 (Bug 2): reflink must be gated on the source existing. A
+    /// vanished loose mirror (concurrent prune / torn promote) must degrade to
+    /// the caller's copy/bytes-write fallback, NOT hard-error with the ENOENT
+    /// that `clonefile` raises on macOS (and that `reflink_unsupported`
+    /// correctly refuses to swallow). It must report `SourceVanished` —
+    /// distinct from `Unsupported` — so one pruned blob doesn't disable
+    /// reflinks for the whole batch (heddle#571 r3). Verifiable on Linux: no
+    /// syscall is issued.
+    #[test]
+    fn try_reflink_missing_source_reports_vanished_not_unsupported() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("does-not-exist.txt");
+        let dst = temp.path().join("dst.txt");
+        assert!(!src.exists());
+
+        let result = try_reflink(&src, &dst);
+        assert!(
+            matches!(result, Ok(ReflinkOutcome::SourceVanished)),
+            "a missing reflink source must report SourceVanished (per-blob fallback, \
+             NOT the batch-wide Unsupported), got {result:?}"
+        );
+        assert!(
+            !dst.exists(),
+            "no destination should be created when the source is missing"
+        );
+    }
 
     #[test]
     fn clonefile_or_copy_creates_destination_with_source_bytes() {
@@ -288,8 +386,12 @@ mod tests {
         let dst = temp.path().join("dst.txt");
         fs::write(&src, b"reflink inode test").unwrap();
 
-        let did_reflink = try_reflink(&src, &dst).unwrap();
-        assert!(did_reflink, "filesystem advertised reflink support");
+        let outcome = try_reflink(&src, &dst).unwrap();
+        assert_eq!(
+            outcome,
+            ReflinkOutcome::Cloned,
+            "filesystem advertised reflink support"
+        );
 
         let src_inode = fs::metadata(&src).unwrap().ino();
         let dst_inode = fs::metadata(&dst).unwrap().ino();

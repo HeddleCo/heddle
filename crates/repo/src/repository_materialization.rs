@@ -688,13 +688,22 @@ impl Repository {
         Ok(())
     }
 
-    /// One clone attempt: returns `Ok(true)` on a successful reflink
-    /// or fallback `fs::copy`, `Ok(false)` only when the
-    /// filesystem-level helper reports the operation isn't supported
-    /// (`EXDEV`/`EOPNOTSUPP`/`ENOSYS`/`EINVAL`). On the unsupported
-    /// verdict the context is flipped so the rest of the batch skips
-    /// straight to the in-memory `fs::write` path without paying the
-    /// failed-syscall tax. Genuine I/O errors bubble up.
+    /// One clone attempt: returns `Ok(true)` on a successful reflink,
+    /// `Ok(false)` when the caller should fall back to the in-memory
+    /// `fs::write` path. The two `Ok(false)` causes are deliberately
+    /// handled differently:
+    ///
+    /// * `ReflinkOutcome::Unsupported` (`EXDEV`/`EOPNOTSUPP`/`ENOSYS`/
+    ///   `EINVAL`) — a filesystem-capability verdict, so the context is
+    ///   flipped (`disable_reflinks`) and the rest of the batch skips
+    ///   straight to `fs::write` without paying the failed-syscall tax.
+    /// * `ReflinkOutcome::SourceVanished` — the loose mirror was pruned
+    ///   mid-flight. A per-blob race, so we fall back for this blob only
+    ///   and leave reflinks ENABLED for the rest of the batch
+    ///   (heddle#571 r3).
+    ///
+    /// Genuine I/O errors bubble up (attributed to the offending side by
+    /// `classify_clone_failure`).
     fn try_clone(
         &self,
         source: &Path,
@@ -706,13 +715,35 @@ impl Repository {
         // make sure we're starting from a clean slate. A previous
         // `goto` could have left a regular file or a stale link here.
         let _ = fs::remove_file(dest);
+        // Reflink is a pure optimization; correctness must never depend on the
+        // loose source still being present at the syscall. `loose_blob_path`
+        // verified it existed, but a concurrent prune or a torn NoSync promote
+        // can remove it before we get here. On macOS, handing `clonefile(2)` a
+        // missing source surfaces as ENOENT — which `reflink_unsupported`
+        // deliberately does NOT swallow (ENOENT means a genuinely missing file,
+        // not "reflink unsupported") — so without this guard the whole
+        // `heddle start` hard-fails (heddle#571). Fall back to the bytes-write
+        // path for THIS blob only by returning `Ok(false)`; do NOT
+        // `disable_reflinks`, so sibling blobs whose mirrors are intact still
+        // clone. The caller (`materialize_blob`) then writes the blob from its
+        // decompressed bytes via `get_blob` — the same path Linux's
+        // ext4-EOPNOTSUPP short-circuit already takes.
+        if !source.exists() {
+            debug!(
+                source = %source.display(),
+                dest = %dest.display(),
+                "loose reflink source missing before clone; falling back to bytes-write for this blob"
+            );
+            return Ok(false);
+        }
+        use objects::fs_clone::ReflinkOutcome;
         match objects::fs_clone::try_reflink(source, dest) {
-            Ok(true) => {
+            Ok(ReflinkOutcome::Cloned) => {
                 set_file_mode(dest, executable)?;
                 context.record_reflink();
                 Ok(true)
             }
-            Ok(false) => {
+            Ok(ReflinkOutcome::Unsupported) => {
                 // Filesystem doesn't support reflinks. Disable for
                 // the rest of the batch and let the caller fall
                 // through to `fs::write` (which decompresses from
@@ -725,6 +756,22 @@ impl Repository {
                 context.disable_reflinks();
                 Ok(false)
             }
+            Ok(ReflinkOutcome::SourceVanished) => {
+                // [heddle#571 r3] The loose mirror was pruned out from under
+                // us between the pre-check and the clone. That's a per-blob
+                // race, NOT a filesystem-capability verdict — so degrade to
+                // the bytes-write fallback for THIS blob only and DO NOT
+                // `disable_reflinks`. Sibling blobs whose mirrors are intact
+                // still get the CoW win. A blob genuinely absent from the
+                // store still errors loudly when the bytes-write fallback's
+                // `get_blob` can't find it.
+                debug!(
+                    source = %source.display(),
+                    dest = %dest.display(),
+                    "loose reflink source vanished before clone; falling back to bytes-write for this blob (reflinks stay enabled batch-wide)"
+                );
+                Ok(false)
+            }
             Err(err) => {
                 debug!(
                     ?err,
@@ -732,9 +779,57 @@ impl Repository {
                     dest = %dest.display(),
                     "reflink failed with I/O error"
                 );
-                Err(err.into())
+                match classify_clone_failure(source, dest, &err) {
+                    // [heddle#571 r2, finding 2] Source vanished mid-flight
+                    // (TOCTOU): degrade to the bytes-write fallback for this
+                    // blob rather than hard-erroring. See `classify_clone_failure`.
+                    None => {
+                        debug!(
+                            source = %source.display(),
+                            dest = %dest.display(),
+                            "loose reflink source vanished between pre-check and clone syscall; falling back to bytes-write for this blob"
+                        );
+                        Ok(false)
+                    }
+                    // [heddle#571 r2, finding 3] Attribute to the offending side.
+                    Some((offender, action)) => {
+                        Err(HeddleError::Io(enrich_fs_error(offender, action, err)))
+                    }
+                }
             }
         }
+    }
+}
+
+/// Classify a clone-syscall (`clonefile`/`FICLONE`) I/O failure into either a
+/// bytes-write fallback or an enriched, correctly-attributed error.
+///
+/// * `None` — the loose source vanished between the `!source.exists()`
+///   pre-check and the syscall (concurrent prune / torn NoSync promote), so the
+///   syscall raised `ENOENT`. The caller should degrade to the bytes-write
+///   fallback (`Ok(false)`), which re-reads the authoritative bytes from the
+///   store; a blob genuinely absent from the store still errors there with its
+///   hash. This closes the TOCTOU race rather than blindly masking `ENOENT`
+///   (heddle#571 r2, finding 2).
+/// * `Some((path, action))` — a real failure to surface, attributed to the side
+///   that actually failed. The source survived (the vanished case returned
+///   `None`), so a create/permission/read-only/no-space failure is the
+///   DESTINATION's (read-only checkout dir, unwritable target). We blame the
+///   source only when it is the unreadable party (probed directly). Reporting a
+///   dest-side failure against the blob path would point the user at the wrong
+///   file (heddle#571 r2, finding 3).
+fn classify_clone_failure<'a>(
+    source: &'a Path,
+    dest: &'a Path,
+    err: &std::io::Error,
+) -> Option<(&'a Path, &'static str)> {
+    if err.kind() == std::io::ErrorKind::NotFound && !source.exists() {
+        return None;
+    }
+    if fs::File::open(source).is_ok() {
+        Some((dest, "reflinking into"))
+    } else {
+        Some((source, "reflinking"))
     }
 }
 
@@ -844,8 +939,93 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        Repository, WorktreeWriteOp, materialization_worker_count, remove_materialized_leaf,
+        MaterializationContext, Repository, WorktreeWriteOp, classify_clone_failure,
+        materialization_worker_count, remove_materialized_leaf,
     };
+
+    /// heddle#571 (round 2, finding 2): a clone syscall that raises ENOENT
+    /// because the loose source vanished AFTER the pre-check (TOCTOU) must
+    /// degrade to the bytes-write fallback (`None`), not hard-error.
+    #[test]
+    fn classify_clone_failure_vanished_source_falls_back() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("gone.blob");
+        let dest = temp.path().join("checkout/file");
+        assert!(!source.exists());
+
+        let enoent = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert!(
+            classify_clone_failure(&source, &dest, &enoent).is_none(),
+            "a vanished-source ENOENT must signal the bytes-write fallback"
+        );
+    }
+
+    /// heddle#571 (round 2, finding 3): when the source is still present and
+    /// readable, the clone failed on the DESTINATION side — attribute the error
+    /// to the dest (checkout) path, not the blob.
+    #[test]
+    fn classify_clone_failure_present_source_blames_dest() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("present.blob");
+        std::fs::write(&source, b"bytes").unwrap();
+        let dest = temp.path().join("readonly-checkout/file");
+
+        // A dest-side failure shape (e.g. read-only checkout dir).
+        let erofs = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let attributed = classify_clone_failure(&source, &dest, &erofs);
+        assert_eq!(
+            attributed,
+            Some((dest.as_path(), "reflinking into")),
+            "a failure with the source still readable must be attributed to dest"
+        );
+    }
+
+    /// heddle#571 (round 2, finding 3): a non-ENOENT failure whose source is no
+    /// longer openable is attributed to the SOURCE path (it is the unreadable
+    /// party), not the destination.
+    #[test]
+    fn classify_clone_failure_unreadable_source_blames_source() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("missing.blob"); // not created → unopenable
+        let dest = temp.path().join("file");
+
+        // Not ENOENT (so the vanished-source fast path doesn't fire), but the
+        // source can't be opened → blame the source.
+        let other = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            classify_clone_failure(&source, &dest, &other),
+            Some((source.as_path(), "reflinking")),
+            "an unreadable source must be attributed to the source path"
+        );
+    }
+
+    /// heddle#571 (round 3): a vanished loose source is a per-blob race, not a
+    /// filesystem-capability verdict — `try_clone` must degrade to the
+    /// bytes-write fallback for that blob WITHOUT flipping the batch-wide
+    /// `reflink_supported` flag. Previously the helper's pre-check returned a
+    /// bare `Ok(false)`, indistinguishable from "filesystem can't reflink", so
+    /// one concurrently-pruned mirror needlessly disabled reflinks (forcing
+    /// copy-writes) for every remaining blob in the batch.
+    #[test]
+    fn try_clone_vanished_source_keeps_batch_reflinks_enabled() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let context = MaterializationContext::new();
+        assert!(context.reflinks_enabled(), "context starts optimistic");
+
+        let missing = temp.path().join("pruned.blob");
+        let dest = temp.path().join("wt/out.txt");
+        assert!(!missing.exists());
+
+        let cloned = repo
+            .try_clone(&missing, &dest, false, &context)
+            .expect("a vanished source must fall back, not error");
+        assert!(!cloned, "a vanished source cannot have been reflinked");
+        assert!(
+            context.reflinks_enabled(),
+            "a vanished source must NOT disable reflinks for the rest of the batch"
+        );
+    }
 
     /// Regression: `remove_materialized_leaf` must tolerate `ENOTEMPTY` on
     /// the directory branch, mirroring `remove_existing_path` in the
