@@ -203,6 +203,7 @@ mount = [
 
 [dev-dependencies]
 criterion = "0.8"
+gix.workspace = true
 gix-transport.workspace = true
 hyper-util.workspace = true
 review = { path = "../review", package = "heddle-review" }

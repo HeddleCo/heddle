@@ -304,6 +304,75 @@ fn assert_all_commits_reconstruct(case: &str, source: &Path) {
     }
 }
 
+/// #567 export-from-state gate: every commit reachable in `source` must be
+/// REGENERATED from Heddle state into a FRESH repo that has never held the
+/// verbatim imported bytes, landing at its ORIGINAL git SHA with byte-identical
+/// content. Where [`assert_all_commits_reconstruct`] checks the serializer in
+/// isolation (#566), this drives the export's actual reconstruct-and-WRITE step
+/// ([`GitBridge::reconstruct_and_write_commit_for_git_sha`]) and proves the
+/// minted object no longer depends on the git mirror's verbatim copy — the
+/// dependency #568 removes. The fresh repo is asserted empty of each commit
+/// BEFORE reconstruction, so a regenerated object appearing there can only have
+/// come from Heddle state.
+fn assert_all_commits_export_from_state(case: &str, source: &Path) {
+    git(source, &["fsck", "--full", "--strict"]);
+    let shas = all_commit_shas(source);
+    assert!(!shas.is_empty(), "[{case}] no commits to reconstruct");
+
+    let heddle_home = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_home.path()).expect("init heddle repo");
+    let mut bridge = GitBridge::new(&repo);
+    import_all_with_options(&mut bridge, Some(source), GitImportOptions { lossy: false })
+        .unwrap_or_else(|e| panic!("[{case}] import from git failed: {e}"));
+
+    // A FRESH bare repo, separate from the bridge mirror: it has never held any
+    // commit object, so a regenerated commit landing here is provably rebuilt
+    // from state rather than copied from the mirror's verbatim import.
+    let fresh_home = TempDir::new().expect("fresh temp");
+    let fresh = gix::init_bare(fresh_home.path().join("fresh.git"))
+        .unwrap_or_else(|e| panic!("[{case}] init fresh bare repo failed: {e}"));
+
+    for sha in &shas {
+        let oid = gix::ObjectId::from_hex(sha.as_bytes())
+            .unwrap_or_else(|e| panic!("[{case}] bad sha {sha}: {e}"));
+        assert!(
+            !fresh.has_object(oid),
+            "[{case}] fresh repo unexpectedly already holds commit {sha} before \
+             reconstruction — the from-state independence guarantee is void"
+        );
+
+        let written = bridge
+            .reconstruct_and_write_commit_for_git_sha(&fresh, sha)
+            .unwrap_or_else(|e| panic!("[{case}] reconstruct+write {sha} failed: {e}"))
+            .unwrap_or_else(|| panic!("[{case}] no Heddle state maps to commit {sha}"));
+
+        // (1) the regenerated object lands at the ORIGINAL git SHA ...
+        assert_eq!(
+            written.to_string(),
+            *sha,
+            "[{case}] commit {sha} regenerated to a DIFFERENT object {written}"
+        );
+        // (2) ... and now physically exists in the fresh repo (written from
+        // state, not copied) ...
+        assert!(
+            fresh.has_object(written),
+            "[{case}] commit {sha} absent from fresh repo after reconstruct+write"
+        );
+        // (3) ... byte-identical to git's own view of the original object.
+        let golden = cat_commit(source, sha);
+        let object = fresh
+            .find_object(written)
+            .unwrap_or_else(|e| panic!("[{case}] find regenerated {sha} failed: {e}"));
+        assert_eq!(
+            object.data, golden,
+            "[{case}] commit {sha} regenerated to DIFFERENT bytes\n  \
+             reconstructed: {:?}\n  golden:        {:?}",
+            String::from_utf8_lossy(&object.data),
+            String::from_utf8_lossy(&golden),
+        );
+    }
+}
+
 #[test]
 fn commit_conformance_plain_corpus() {
     let tmp = TempDir::new().unwrap();
@@ -379,4 +448,26 @@ fn commit_conformance_signed_and_mergetag() {
     );
 
     assert_all_commits_reconstruct("signed-and-mergetag", &source);
+}
+
+/// #567: the plain §9 corpus (C1..C7) must export-FROM-STATE — every commit
+/// regenerated into a fresh repo at its original SHA, byte-identical — covering
+/// empty message, no-trailing-newline, CRLF, weird/negative tz, non-UTF8
+/// encoding, and an octopus merge.
+#[test]
+fn export_from_state_plain_corpus() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    build_plain_corpus(dir);
+    assert_all_commits_export_from_state("plain-corpus", dir);
+}
+
+/// #567: the signed commit (folded `gpgsig`) and signed merge (`mergetag` +
+/// `gpgsig`) — the most error-prone fidelity cases — must likewise export
+/// byte-identically from state, with no mirror verbatim copy involved.
+#[test]
+fn export_from_state_signed_and_mergetag() {
+    let tmp = TempDir::new().unwrap();
+    let source = extract_commit_bundle(tmp.path());
+    assert_all_commits_export_from_state("signed-and-mergetag", &source);
 }

@@ -78,6 +78,23 @@ pub fn reconstruct_commit_bytes(
     Ok(build_commit_content(state, &tree_oid, &parent_oids))
 }
 
+/// Frame + write a reconstructed commit object's `content` bytes into `repo`'s
+/// object database, returning its git OID — the SHA-1 of the framed object (§0),
+/// equal to the original commit's id exactly when `content` is byte-identical to
+/// the original.
+///
+/// This is the write side of export-from-state (#567): export regenerates each
+/// commit object from Heddle state and writes it here, rather than relying on the
+/// git mirror still holding the verbatim imported bytes — the dependency #568
+/// removes. Idempotent: `gix`'s `write_buf` hashes first and no-ops when the
+/// object already exists, so re-writing a commit the mirror already carries (the
+/// common case today) costs nothing.
+pub fn write_commit_object(repo: &gix::Repository, content: &[u8]) -> GitResult<ObjectId> {
+    use gix::objs::Write;
+    repo.write_buf(gix::objs::Kind::Commit, content)
+        .map_err(git_err)
+}
+
 /// Assemble the commit content bytes from already-resolved OIDs. Pure (no repo,
 /// no mapping) so the byte layout — header order, actor lines, header folding,
 /// verbatim message — is unit-testable in isolation (§1/§2/§5/§6).
@@ -214,6 +231,20 @@ impl GitBridge<'_> {
         reconstruct_commit_bytes(self.heddle_repo, repo, &self.mapping, state)
     }
 
+    /// Reconstruct `state`'s commit object from Heddle state and WRITE it into
+    /// `repo`'s object database, returning its git OID (see [`write_commit_object`]).
+    /// The export's commit-minting step (#567): the object is regenerated from
+    /// state, so it lands at the original SHA without the mirror needing to hold
+    /// the verbatim bytes.
+    pub fn reconstruct_and_write_commit(
+        &self,
+        repo: &gix::Repository,
+        state: &State,
+    ) -> GitResult<ObjectId> {
+        let content = self.reconstruct_commit_bytes(repo, state)?;
+        write_commit_object(repo, &content)
+    }
+
     /// Reconstruct the commit currently mapped to the git object `sha` (40-hex),
     /// or `None` if no Heddle state maps to it. Convenience for callers keyed by
     /// the original git OID — e.g. the #566 conformance gate, which compares the
@@ -236,6 +267,28 @@ impl GitBridge<'_> {
             &self.mapping,
             &state,
         )?))
+    }
+
+    /// Reconstruct the commit mapped to git object `sha` and WRITE it into `repo`,
+    /// returning the written OID (or `None` if no Heddle state maps to `sha`).
+    /// Combines [`Self::reconstruct_commit_for_git_sha`] with the odb write so the
+    /// #567 export-from-state path is exercisable against an arbitrary repo —
+    /// notably a FRESH one that never received the verbatim imported bytes, which
+    /// is how the export gate proves the object is regenerated from state, not
+    /// copied from the mirror.
+    pub fn reconstruct_and_write_commit_for_git_sha(
+        &self,
+        repo: &gix::Repository,
+        sha: &str,
+    ) -> GitResult<Option<ObjectId>> {
+        let oid = ObjectId::from_hex(sha.as_bytes()).map_err(git_err)?;
+        let Some(change_id) = self.mapping.get_heddle(oid) else {
+            return Ok(None);
+        };
+        let Some(state) = self.heddle_repo.store().get_state(&change_id)? else {
+            return Ok(None);
+        };
+        Ok(Some(self.reconstruct_and_write_commit(repo, &state)?))
     }
 }
 

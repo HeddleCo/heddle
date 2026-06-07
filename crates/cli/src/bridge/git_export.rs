@@ -20,11 +20,27 @@ use crate::bridge::{
         read_or_seed_mirror_managed_refs, set_reference, write_mirror_managed_refs,
     },
     git_notes,
+    git_reconstruct::{reconstruct_commit_bytes, write_commit_object},
     git_sync::{sync_marker_to_tag, sync_track_to_branch},
     git_util::{ExportStats, ExportedRef},
 };
 
 const SUBMODULE_PREFIX: &str = "heddle-submodule:";
+
+/// Whether `state` carries a captured original git commit to reconstruct
+/// byte-exactly (the #565 de-lossy fidelity fields). When true, export
+/// regenerates the commit object from state via [`reconstruct_commit_bytes`]
+/// with NO W2 footer and NO `"No intent specified"` placeholder — any injected
+/// byte would push the minted object off the original SHA (#567). When false
+/// (a native heddle commit, no original to preserve), export mints with the
+/// footer/placeholder as before.
+///
+/// `raw_message` is the load-bearing signal: the git importer always records it
+/// (even as an empty body for an empty-message commit) for an imported commit,
+/// and never for a native one.
+fn has_git_fidelity(state: &objects::object::State) -> bool {
+    state.raw_message.is_some()
+}
 
 /// Export a single state to Git for `audience`.
 ///
@@ -58,6 +74,20 @@ pub(crate) fn export_state(
         return Ok(None);
     }
 
+    // Fidelity mode (#567): the state carries a captured original git commit
+    // (#565 fields). Regenerate that object byte-exactly from state and write
+    // it — NO footer, NO placeholder, NO message override — so the minted bytes
+    // reproduce the ORIGINAL commit SHA rather than a footer-mutated one. This
+    // is the path that lets the git mirror be dropped (#568): a correct export
+    // no longer depends on the mirror holding the verbatim imported bytes.
+    if has_git_fidelity(&state) {
+        let content = reconstruct_commit_bytes(heddle_repo, repo, mapping, &state)?;
+        return Ok(Some(write_commit_object(repo, &content)?));
+    }
+
+    // Native heddle commit: no original to preserve. Mint via `new_commit_as`
+    // and inject the durable W2 footer (and the "No intent specified"
+    // placeholder for an empty intent) — these ride ONLY native commits.
     let git_tree_oid = export_tree(heddle_repo, repo, &state.tree)?;
     // R6: emit the W2 footer on every exported commit. The footer is
     // durable across remotes; per-scope breakdowns ride on the opt-in
@@ -335,14 +365,39 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     let mut newly_minted: HashSet<gix::hash::ObjectId> = HashSet::new();
 
     for state_id in sorted_states {
-        // Skip states already mapped to a git object that exists in the
-        // mirror — that's the common case for git-imported states whose
-        // original commit bytes are already present (and whose SHAs we
-        // want to preserve verbatim, which means NOT recreating them).
+        // Already mapped to a git object — the common case for git-imported
+        // states (the import populated the ChangeId→OID mapping) and for
+        // native commits a prior export already minted. Not re-counted as
+        // "newly minted" (the total is decided below by ref-reachability).
         if bridge.mapping.has_heddle(&state_id) {
-            // Already mapped to an existing commit — nothing to mint.
-            // Whether it counts toward the total is decided below by
-            // ref-reachability, not by membership in the walked set.
+            // For an IMPORTED commit (#565 fidelity fields present),
+            // REGENERATE the object from state into the mirror rather than
+            // leaning on the verbatim imported bytes still being there (#567).
+            // Byte-identical, so the OID is unchanged and the write is
+            // idempotent today; what changes is that a correct export no
+            // longer DEPENDS on the mirror's verbatim copy — the step that
+            // lets the mirror be dropped (#568). Native already-mapped commits
+            // have no original to reconstruct (raw_message is None), so they
+            // are left to their prior mint; re-minting those is out of scope.
+            if let Some(state) = bridge.heddle_repo.store().get_state(&state_id)?
+                && has_git_fidelity(&state)
+            {
+                let content =
+                    reconstruct_commit_bytes(bridge.heddle_repo, &repo, &bridge.mapping, &state)?;
+                let oid = write_commit_object(&repo, &content)?;
+                // The regenerated object MUST hash to the mapped OID; a
+                // mismatch means state-reconstruction diverged from the
+                // imported bytes (a #565/#566 fidelity regression) and would
+                // silently corrupt the export, so fail loud here.
+                if let Some(mapped) = bridge.mapping.get_git(&state_id)
+                    && mapped != oid
+                {
+                    return Err(GitBridgeError::Git(format!(
+                        "reconstructed commit for {state_id} hashed to {oid}, \
+                         but the import mapped it to {mapped} (fidelity regression)"
+                    )));
+                }
+            }
             continue;
         }
 
