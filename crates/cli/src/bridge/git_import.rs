@@ -211,7 +211,14 @@ pub fn import_commit(
         })
         .collect::<GitResult<Vec<_>>>()?;
 
+    // Canonical lossy marker (#567): if importing this commit's tree dropped or
+    // converted any unrepresentable entry, the rebuilt tree no longer hashes to
+    // the original, so record it on the State. `import_tree` appends to the
+    // importer's running lossy-entry log (even for cached subtrees), so a growth
+    // across this call means this commit's content is lossy.
+    let lossy_before = tree_importer.lossy_entries().len();
     let tree_hash = tree_importer.import_tree(tree_id)?;
+    let git_lossy = tree_importer.lossy_entries().len() > lossy_before;
 
     let principal = Principal::new(author_name, author_email);
 
@@ -283,6 +290,7 @@ pub fn import_commit(
         .with_committer(Principal::new(committer_name, committer_email))
         .with_tz_offsets(authored_tz_offset, committer_tz_offset)
         .with_raw_message(message_bytes)
+        .with_git_lossy(git_lossy)
         .with_extra_headers(extra_headers)
         .with_status(status);
 

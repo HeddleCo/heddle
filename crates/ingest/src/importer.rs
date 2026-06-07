@@ -247,8 +247,16 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             let mut packed = PackedImport::new(self.git, self.map, builder, self.options.clone());
             let mut last_log = 0usize;
             for (idx, commit) in commits.iter().enumerate() {
+                // Canonical lossy marker (#567): translating this commit's tree
+                // appends to the running lossy-entry log when an unrepresentable
+                // entry is dropped/converted (even for cached subtrees). A growth
+                // across the call means this commit's content is not byte-faithful
+                // to the original, so record it on the State the same single way
+                // the bridge `--lossy` import does.
+                let lossy_before = packed.stats.lossy_entries.len();
                 let tree_hash = packed.translate_tree(&commit.tree_sha)?;
-                packed.write_commit(commit, tree_hash)?;
+                let git_lossy = packed.stats.lossy_entries.len() > lossy_before;
+                packed.write_commit(commit, tree_hash, git_lossy)?;
 
                 // Progress trace every ~500 commits keeps long imports from
                 // looking hung without spamming at default `info` verbosity.
@@ -507,7 +515,12 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
         Ok(hash)
     }
 
-    fn write_commit(&mut self, commit: &CommitEntry, tree: ContentHash) -> crate::Result<ChangeId> {
+    fn write_commit(
+        &mut self,
+        commit: &CommitEntry,
+        tree: ContentHash,
+        git_lossy: bool,
+    ) -> crate::Result<ChangeId> {
         if let Some(cid) = self.map.get_commit(&commit.sha) {
             return Ok(cid);
         }
@@ -526,7 +539,7 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
             }
         }
 
-        let state = state_from_commit(commit, tree, parents);
+        let state = state_from_commit(commit, tree, parents, git_lossy);
         // `to_vec_named` matches objects's convention; see the longer
         // explanation in `translate_tree`.
         let data = rmp_serde::to_vec_named(&state)

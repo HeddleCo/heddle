@@ -302,6 +302,24 @@ pub struct State {
     /// #564.)
     #[serde(default)]
     pub raw_message: Option<Vec<u8>>,
+    /// The SINGLE canonical "this state's content is NOT byte-faithful to the
+    /// original git object" marker (#567). Set to `true` by BOTH lossy
+    /// population paths — `bridge git import --lossy` and `bridge git ingest
+    /// --lossy` — whenever an unrepresentable tree entry was dropped or
+    /// converted during import, so the rebuilt tree (hence commit) no longer
+    /// hashes to the original SHA. The git-export fidelity guard reads this one
+    /// flag to decide whether reconstruct-from-state is safe; covering every
+    /// lossy entry point (and any future one) with a single signal instead of
+    /// enumerating import surfaces. `false` for native heddle commits and for
+    /// lossless imports.
+    ///
+    /// Provenance metadata, NOT part of the content hash: a lossy import always
+    /// drops/converts tree entries, so its tree — and therefore the rest of the
+    /// hashed identity — already differs from a lossless import of the same
+    /// source; folding the flag in would add nothing but break every existing
+    /// content hash.
+    #[serde(default)]
+    pub git_lossy: bool,
     /// Every git commit header beyond the ones Heddle models natively
     /// (tree/parents/author/committer), in their original order. ORDER IS
     /// LOAD-BEARING for #566 byte-exactness — this is a `Vec`, never a map.
@@ -396,6 +414,7 @@ impl State {
             authored_tz_offset: 0,
             committer_tz_offset: 0,
             raw_message: None,
+            git_lossy: false,
             extra_headers: Vec::new(),
             status: Status::Draft,
         }
@@ -523,6 +542,17 @@ impl State {
     /// field docs). **Part of the state hash.** #564 de-lossy step 1.
     pub fn with_raw_message(mut self, raw_message: impl AsRef<[u8]>) -> Self {
         self.raw_message = Some(raw_message.as_ref().to_vec());
+        self.content_hash = None;
+        self
+    }
+
+    /// Mark this state's content as NOT byte-faithful to the original git
+    /// object — set by the `--lossy` import/ingest paths when a tree entry was
+    /// dropped or converted. The git-export fidelity guard reads this single
+    /// signal to skip reconstruct-from-state (#567). Not part of the content
+    /// hash (see the `git_lossy` field docs).
+    pub fn with_git_lossy(mut self, git_lossy: bool) -> Self {
+        self.git_lossy = git_lossy;
         self.content_hash = None;
         self
     }
