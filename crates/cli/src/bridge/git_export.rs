@@ -115,22 +115,30 @@ pub(crate) fn export_state(
         return Ok(None);
     }
 
-    // Fidelity mode (#567): the state carries a captured original git commit
-    // (#565 fields). Regenerate that object byte-exactly from state and write
-    // it — NO footer, NO placeholder, NO message override — so the minted bytes
-    // reproduce the ORIGINAL commit SHA rather than a footer-mutated one. This
-    // is the path that lets the git mirror be dropped (#568): a correct export
-    // no longer depends on the mirror holding the verbatim imported bytes.
-    // Fidelity guard (#567): reconstruct from state ONLY when fully byte-faithful.
-    // A non-byte-faithful commit (non-UTF8 identity, or a `--lossy` import) would
-    // mint a WRONG SHA, so fall THROUGH to the native mint path rather than
-    // reconstruct it. This branch runs for an UNMAPPED fidelity state — which
-    // INCLUDES every `bridge git ingest` commit (ingest never populates the bridge
-    // mapping). Lossiness is read off the state's own canonical `git_lossy` flag,
-    // so an ingest-lossy commit is caught here just like an import-lossy one,
-    // rather than slipping through because the mirror's per-OID lossy log is
-    // unreachable for an unmapped state (#567 round 2).
-    if commit_is_byte_faithful(&state) {
+    // Fidelity mint (#567): the state carries a captured original git commit
+    // (#565 fields — `raw_message` is the load-bearing signal). MINT the commit
+    // object from that raw metadata via `reconstruct_commit_bytes` — NO footer,
+    // NO placeholder, NO message override — so the minted bytes preserve the
+    // original message/identities/headers rather than the native intent+footer.
+    // This is the path that lets the git mirror be dropped (#568): a correct
+    // export no longer depends on the mirror holding the verbatim imported bytes.
+    //
+    // Routing (#567 round 3): export keys off (is byte-faithful?) AND (does a
+    // bridge mapping exist?). The verbatim / mapped-OID fallback for a lossy
+    // commit applies ONLY when a bridge mapping holds a TRACKED original OID to
+    // preserve — and that branch lives in `export_scoped`'s already-mapped path.
+    // `export_state` is only ever reached for an UNMAPPED state (the caller's
+    // `has_heddle` guard), so there is NO original OID to match and NO verbatim
+    // mirror bytes to fall back to. Every unmapped fidelity state therefore MINTS
+    // from its own raw metadata — a `--lossy` one is NOT rejected into a
+    // nonexistent verbatim source (the r2 over-correction, #567 round 3):
+    //   * byte-faithful (a clean `bridge git ingest`, native heddle commit with
+    //     fidelity, ...) → the derived OID coincides with the original commit SHA;
+    //   * lossy / non-UTF8 (`bridge git ingest --lossy`) → a DERIVED OID that
+    //     still preserves raw_message/identities/headers. With no original to
+    //     match this is correct, not the wrong-SHA bug the r2 `git_lossy` guard
+    //     (rightly) blocks ONLY for a MAPPED commit.
+    if has_git_fidelity(&state) {
         let content = reconstruct_commit_bytes(heddle_repo, repo, mapping, &state)?;
         return Ok(Some(write_commit_object(repo, &content)?));
     }

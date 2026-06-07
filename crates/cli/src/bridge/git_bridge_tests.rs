@@ -953,6 +953,70 @@ fn ingest_lossy_state_carries_canonical_git_lossy_marker() {
     assert_only_state_is_lossy_with_fidelity(&repo, "bridge git ingest --lossy");
 }
 
+/// #567 round 3: a `bridge git ingest --lossy` state is UNMAPPED (ingest never
+/// populates the bridge mapping) yet carries git-fidelity (`raw_message`). Export
+/// must MINT it from its OWN raw metadata — there is no tracked original OID to
+/// match and no verbatim mirror bytes to fall back to, so the r2 `git_lossy` guard
+/// must NOT reject it into the (nonexistent) verbatim/mapped-OID path (the r2
+/// over-correction). The minted commit preserves the raw message verbatim; the
+/// native intent+footer mint would instead emit "No intent specified" + a
+/// `Heddle-State` footer. The minted OID is DERIVED (there is no original to
+/// match); the load-bearing assertion is that the raw metadata survives the mint.
+#[cfg(feature = "ingest")]
+#[test]
+fn export_mints_lossy_ingest_state_from_raw_metadata() {
+    use ingest::{ImportOptions, import_git_into_with_options};
+
+    let (_git_temp, git_repo) = init_gitlink_repo();
+    let git_path = git_repo.workdir().expect("workdir");
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let (stats, map) =
+        import_git_into_with_options(git_path, heddle_temp.path(), ImportOptions { lossy: true })
+            .expect("lossy ingest succeeds");
+    drop(map);
+    assert_eq!(stats.lossy_entries.len(), 1, "gitlink is the one lossy entry");
+
+    let repo = Repository::open(heddle_temp.path()).expect("open heddle repo");
+    let state = {
+        let ids = repo.store().list_states().expect("list states");
+        assert_eq!(ids.len(), 1, "single gitlink commit ingested");
+        repo.store()
+            .get_state(&ids[0])
+            .expect("get state")
+            .expect("state present")
+    };
+    let raw_message = state.raw_message.clone().expect("ingest records raw_message");
+
+    // The bridge mapping is empty after ingest (ingest populates no SyncMapping),
+    // so this is exactly the unmapped lossy case that export must MINT, not reject.
+    let mut bridge = GitBridge::new(&repo);
+
+    let dest_root = TempDir::new().expect("dest temp");
+    let dest_path = dest_root.path().join("export");
+    bridge
+        .export_to_path(&dest_path)
+        .expect("export must MINT the unmapped lossy state, not reject it");
+
+    let dest_repo = gix::open(&dest_path).expect("open dest");
+    let dest_main = dest_repo
+        .find_reference("refs/heads/main")
+        .expect("exported main ref")
+        .peel_to_id()
+        .expect("exported main target")
+        .detach();
+    let dest_commit = dest_repo.find_commit(dest_main).expect("dest main commit");
+
+    // Minted from raw metadata: the message is the verbatim raw_message, NOT the
+    // native "No intent specified" + Heddle-State footer the intent-mint emits.
+    assert_eq!(
+        dest_commit.message_raw_sloppy().to_vec(),
+        raw_message,
+        "exported commit must preserve the ingest state's raw message verbatim, \
+         not the native \"No intent specified\" + Heddle-State footer"
+    );
+}
+
 /// Regression: `copy_local_repo_to_bare` (the engine behind `heddle clone
 /// /path/to/bare /work` for git-overlay paths) used to walk every tree
 /// entry without distinguishing gitlinks from regular blobs/subtrees,
