@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { Heddle, HeddleError, type Executor, type ExecRequest, type ExecResult } from "../src/index.js";
-import type { StatusSchema } from "../generated/heddle-schemas.js";
+import { Heddle, HeddleError, HeddleStreamingVerbError, type Executor, type ExecRequest, type ExecResult } from "../src/index.js";
+import type { StatusSchema, WatchLineSchema } from "../generated/heddle-schemas.js";
 
 /** A deterministic in-memory executor — proves the parsing/error seam works
  *  without building or spawning the real binary. The real-binary smoke test
@@ -84,6 +84,65 @@ test("flags exit 75 (TempFail) as retryable", async () => {
     (err: unknown) => {
       assert.ok(err instanceof HeddleError);
       assert.equal(err.retryable, true);
+      return true;
+    },
+  );
+});
+
+test("run() refuses a streaming (JSONL) verb instead of mis-parsing it", async () => {
+  // `watch` emits JSONL — multiple objects, one per line. A single
+  // JSON.parse of this would throw or silently keep only the first object.
+  const jsonl = [
+    JSON.stringify({ id: 1, kind: "capture", ts: "t1" }),
+    JSON.stringify({ id: 2, kind: "commit", ts: "t2" }),
+  ].join("\n");
+  const fake = new FakeExecutor({ exitCode: 0, stdout: jsonl, stderr: "" });
+  const heddle = new Heddle({ executor: fake });
+  await assert.rejects(
+    // A typed caller is blocked at compile time; the cast exercises the
+    // runtime guard that protects untyped JS callers.
+    () => (heddle.run as (verb: string) => Promise<unknown>)("watch"),
+    (err: unknown) => {
+      assert.ok(err instanceof HeddleStreamingVerbError);
+      assert.equal(err.verb, "watch");
+      // The executor must not even be invoked for a streaming verb on run().
+      assert.equal(fake.lastRequest, undefined);
+      return true;
+    },
+  );
+});
+
+test("stream() parses a JSONL verb line by line", async () => {
+  const lines: WatchLineSchema[] = [
+    { id: 1, kind: "capture", ts: "t1" },
+    { id: 2, kind: "commit", ts: "t2" },
+  ];
+  const fake = new FakeExecutor({
+    exitCode: 0,
+    stdout: lines.map((l) => JSON.stringify(l)).join("\n") + "\n",
+    stderr: "",
+  });
+  const heddle = new Heddle({ executor: fake });
+  const collected: WatchLineSchema[] = [];
+  for await (const line of heddle.watch()) collected.push(line);
+  assert.deepEqual(collected, lines);
+  assert.equal(fake.lastRequest?.verb, "watch");
+});
+
+test("stream() maps a non-zero exit to a HeddleError", async () => {
+  const fake = new FakeExecutor({
+    exitCode: 74,
+    stdout: "",
+    stderr: JSON.stringify({ code: "io", error: "stream failed", exit_code: 74, hint: "", kind: "io" }),
+  });
+  const heddle = new Heddle({ executor: fake });
+  await assert.rejects(
+    async () => {
+      for await (const _ of heddle.watch()) void _;
+    },
+    (err: unknown) => {
+      assert.ok(err instanceof HeddleError);
+      assert.equal(err.exitCode, 74);
       return true;
     },
   );

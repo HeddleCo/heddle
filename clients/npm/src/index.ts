@@ -1,5 +1,10 @@
-export { Heddle } from "./heddle.js";
-export type { HeddleOptions, RunOptions } from "./heddle.js";
+export { Heddle, HEDDLE_STREAMING_VERBS } from "./heddle.js";
+export type {
+  HeddleOptions,
+  RunOptions,
+  HeddleStreamingVerb,
+  HeddleRunVerb,
+} from "./heddle.js";
 export {
   SpawnExecutor,
   type Executor,
@@ -9,6 +14,7 @@ export {
 } from "./executor.js";
 export {
   HeddleError,
+  HeddleStreamingVerbError,
   HeddleExitCode,
   RETRYABLE_EXIT_CODE,
   type HeddleExitCodeName,

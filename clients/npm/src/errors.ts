@@ -23,6 +23,26 @@ export type HeddleExitCodeName = keyof typeof HeddleExitCode;
 export const RETRYABLE_EXIT_CODE = HeddleExitCode.TempFail;
 
 /**
+ * Thrown when {@link Heddle.run} is called with a streaming (JSONL) verb.
+ * Such verbs emit one JSON object per line, which a single `JSON.parse`
+ * cannot consume; the caller should use {@link Heddle.stream} instead.
+ */
+export class HeddleStreamingVerbError extends Error {
+  /** The streaming verb that was (incorrectly) passed to `run()`. */
+  readonly verb: string;
+
+  constructor(verb: string) {
+    super(
+      `\`${verb}\` emits JSONL (one JSON object per line); run() parses a ` +
+        `single JSON payload and would mis-parse it. Use ` +
+        `heddle.stream(${JSON.stringify(verb)}) to iterate the lines.`,
+    );
+    this.name = "HeddleStreamingVerbError";
+    this.verb = verb;
+  }
+}
+
+/**
  * Thrown when a heddle invocation exits non-zero. Carries the parsed JSON
  * error envelope (when the CLI emitted one), the raw streams, and a
  * `retryable` flag derived from the sysexits contract (only exit 75).

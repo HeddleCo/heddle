@@ -8,7 +8,32 @@ import {
   type Executor,
   type ExecResult,
 } from "./executor.js";
-import { HeddleError } from "./errors.js";
+import { HeddleError, HeddleStreamingVerbError } from "./errors.js";
+
+/**
+ * Verbs that emit JSONL — one JSON object per line — instead of a single
+ * JSON payload. These carry `json_kind: "jsonl"` in the CLI command catalog
+ * (`heddle watch` streams live oplog activity; `harness-bridge` relays an
+ * event stream). A single `JSON.parse` of their stdout is always wrong, so
+ * {@link Heddle.run} refuses them — callers iterate {@link Heddle.stream}.
+ */
+export type HeddleStreamingVerb = Extract<
+  HeddleSchemaVerb,
+  "watch" | "harness-bridge"
+>;
+
+/** Runtime mirror of {@link HeddleStreamingVerb} for value-level checks. */
+export const HEDDLE_STREAMING_VERBS: readonly HeddleStreamingVerb[] = [
+  "watch",
+  "harness-bridge",
+];
+
+/** Any schema-backed verb that returns a single JSON payload via `run()`. */
+export type HeddleRunVerb = Exclude<HeddleSchemaVerb, HeddleStreamingVerb>;
+
+function isStreamingVerb(verb: string): verb is HeddleStreamingVerb {
+  return (HEDDLE_STREAMING_VERBS as readonly string[]).includes(verb);
+}
 
 export interface HeddleOptions {
   /** Path to the heddle binary. Defaults to "heddle" on PATH. Ignored if
@@ -67,15 +92,21 @@ export class Heddle {
   }
 
   /**
-   * Run any schema-backed verb and return its typed payload. Throws
-   * {@link HeddleError} on a non-zero exit, {@link HeddleError} on
-   * unparseable stdout.
+   * Run a single-payload schema-backed verb and return its typed payload.
+   * Throws {@link HeddleError} on a non-zero exit or unparseable stdout, and
+   * {@link HeddleStreamingVerbError} if given a JSONL/streaming verb (use
+   * {@link Heddle.stream} for those — the type already excludes them, but the
+   * runtime guard catches untyped JS callers).
    */
-  async run<V extends HeddleSchemaVerb>(
+  async run<V extends HeddleRunVerb>(
     verb: V,
     args: readonly string[] = [],
     options: RunOptions = {},
   ): Promise<HeddleVerbOutputs[V]> {
+    if (isStreamingVerb(verb)) {
+      throw new HeddleStreamingVerbError(verb);
+    }
+
     const result = await this.executor.exec({
       verb,
       args,
@@ -95,6 +126,55 @@ export class Heddle {
     }
 
     return parsePayload<V>(verb, result);
+  }
+
+  /**
+   * Drive a streaming (JSONL) verb and yield each line's typed payload. The
+   * default {@link SpawnExecutor} buffers the process output and resolves on
+   * exit, so this iterates the collected lines once the verb terminates (a
+   * snapshot `heddle watch`, `harness-bridge` relay, etc.); incremental
+   * line-by-line delivery awaits a streaming transport (#586). Throws
+   * {@link HeddleError} on a non-zero exit or an unparseable line.
+   */
+  async *stream<V extends HeddleStreamingVerb>(
+    verb: V,
+    args: readonly string[] = [],
+    options: RunOptions = {},
+  ): AsyncGenerator<HeddleVerbOutputs[V], void, unknown> {
+    const result = await this.executor.exec({
+      verb,
+      args,
+      opId: options.opId,
+      repoPath: options.repoPath ?? this.repoPath,
+      signal: options.signal,
+    });
+
+    if (result.exitCode !== 0) {
+      throw new HeddleError({
+        verb,
+        exitCode: result.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        envelope: parseErrorEnvelope(result),
+      });
+    }
+
+    for (const line of result.stdout.split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) continue;
+      let parsed: HeddleVerbOutputs[V];
+      try {
+        parsed = JSON.parse(trimmed) as HeddleVerbOutputs[V];
+      } catch {
+        throw new HeddleError({
+          verb,
+          exitCode: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr,
+        });
+      }
+      yield parsed;
+    }
   }
 
   // ---- Harness ops (documented schemas, #581) ----------------------------
@@ -147,6 +227,11 @@ export class Heddle {
   /** `heddle bridge git export` — export to a git repo. Mutating. */
   export(args: readonly string[] = [], options: RunOptions = {}) {
     return this.run("bridge git export", args, options);
+  }
+
+  /** `heddle watch` — stream live oplog activity (JSONL). Read-only. */
+  watch(args: readonly string[] = [], options: RunOptions = {}) {
+    return this.stream("watch", args, options);
   }
 }
 
