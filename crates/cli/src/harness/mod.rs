@@ -2154,13 +2154,14 @@ fn allocate_thread_name(repo: &Repository, base: &str) -> Result<String> {
 }
 
 fn default_private_thread_path(repo: &Repository, name: &str) -> PathBuf {
-    // Mirror `thread::default_threads_root`: managed checkouts live under
-    // the repo's reserved `.heddle/threads/` dir (excluded from the
-    // parent's overlay/status traversal, reachable from a repo sandbox).
-    repo.heddle_dir()
-        .join("threads")
-        .join(sanitize_name(name))
-        .join("root")
+    // Route through the ONE canonical `thread_manifest::thread_dir`
+    // derivation `heddle start` and the per-thread `manifest.toml` sidecar
+    // use — NOT a harness-local re-sanitisation. Harness subagent/root-actor
+    // names are commonly slash-namespaced (`parent/task`); a local
+    // `sanitize_name` flattened `parent/task` and `parent-task` onto the same
+    // `.heddle/threads/parent-task/root`, colliding two distinct threads and
+    // diverging from the manifest/checkout layout (heddle#572 r2).
+    repo::thread_manifest::thread_dir(repo.heddle_dir(), name).join("root")
 }
 
 fn sanitize_name(name: &str) -> String {
@@ -2807,6 +2808,27 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         (temp, repo)
+    }
+
+    /// Harness subagent/root-actor checkout paths must use the SAME canonical
+    /// `thread_manifest::thread_dir(...).join("root")` derivation `start` and
+    /// the per-thread manifest use — for the slash-namespaced names the
+    /// harness commonly mints (`parent/task`). Before this, a harness-local
+    /// `sanitize_name` flattened `parent/task` and `parent-task` onto the same
+    /// `.heddle/threads/parent-task/root`, colliding distinct threads
+    /// (heddle#572 r2).
+    #[test]
+    fn harness_default_path_matches_canonical_thread_dir() {
+        let (_temp, repo) = init_repo();
+        for id in ["foo", "parent/task", "feature/foo", "team@scope"] {
+            let harness_path = default_private_thread_path(&repo, id);
+            let canonical =
+                repo::thread_manifest::thread_dir(repo.heddle_dir(), id).join("root");
+            assert_eq!(
+                harness_path, canonical,
+                "harness default must match the canonical thread_dir for {id:?}"
+            );
+        }
     }
 
     #[test]

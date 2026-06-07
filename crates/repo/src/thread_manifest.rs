@@ -163,63 +163,94 @@ impl ManifestFile {
 }
 
 /// The single per-thread directory under `<heddle_dir>/threads/`, keyed
-/// off the raw thread name. Slashed ids nest (`feature/x` →
-/// `threads/feature/x/`), matching the manifest walk's name
-/// reconstruction. Thread ids are `validate_thread_id`-checked (no `..`,
-/// no leading `/`) before they ever reach here, so the join stays inside
-/// `threads/`. This is the ONE derivation both the manifest sidecar and
-/// the worktree checkout root key off, so the two never diverge or
-/// collide for a given thread.
+/// off the thread name through a **prefix-safe single-segment encoding**
+/// ([`encode_thread_segment`]). A slashed id never becomes a directory
+/// prefix of another: `feature/foo` maps to `threads/feature%2Ffoo`, NOT
+/// `threads/feature/foo`, so it can neither nest under nor swallow a
+/// `feature` (or `feature/f`) thread. Because the encoding is injective
+/// and yields exactly one path component, two distinct ids always land in
+/// disjoint sibling directories, and none can ever be an ancestor of
+/// another (closing the prefix-nesting + recursive-drop class, heddle#572
+/// r2).
+///
+/// This is the ONE derivation every thread-path consumer keys off — the
+/// `manifest.toml` sidecar, the worktree checkout root (`<dir>/root`) for
+/// all three workspace modes, the harness subagent/root-actor paths, and
+/// the promote default — so the manifest and the checkout can never
+/// diverge or collide for a given thread.
 pub fn thread_dir(heddle_dir: &Path, thread: &str) -> PathBuf {
-    heddle_dir.join("threads").join(thread)
+    heddle_dir
+        .join("threads")
+        .join(encode_thread_segment(thread))
+}
+
+/// Encode a thread id into a single, filesystem-safe, prefix-free path
+/// segment. Percent-encodes every byte that is unsafe as a lone path
+/// component — the separators `/` and `\`, the Windows-hostile `:`, the
+/// `%` escape itself, and anything outside the safe slug set — so the
+/// mapping is injective and reversible ([`decode_thread_segment`]) and
+/// each id occupies one disjoint leaf under `threads/`. The common safe
+/// slug characters (alphanumerics and `_ - . @ + =`) pass through for
+/// readability, so `v1.2`, `team@scope`, and `wip+1=2` stay legible while
+/// `feature/foo` becomes `feature%2Ffoo`.
+///
+/// The whole-segment `.` / `..` results are escaped specially: a thread
+/// id of exactly `.` (which [`crate::validate_thread_id`] permits) or `..`
+/// (which it rejects, but unchecked/deserialized ids could still carry)
+/// would otherwise be a current-/parent-dir component that escapes or
+/// aliases `threads/`.
+pub fn encode_thread_segment(thread: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(thread.len());
+    for &b in thread.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'@' | b'+' | b'=') {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+    }
+    match out.as_str() {
+        "." => "%2E".to_string(),
+        ".." => "%2E%2E".to_string(),
+        _ => out,
+    }
+}
+
+/// Inverse of [`encode_thread_segment`]: recover the thread id from its
+/// on-disk directory segment. Returns `None` for a malformed segment (a
+/// truncated/`%`-escape with non-hex digits, or bytes that don't form
+/// valid UTF-8) so the manifest walk skips foreign directories rather than
+/// inventing a bogus thread name.
+pub fn decode_thread_segment(segment: &str) -> Option<String> {
+    let bytes = segment.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return None;
+            }
+            let hi = (bytes[i + 1] as char).to_digit(16)?;
+            let lo = (bytes[i + 2] as char).to_digit(16)?;
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// Where this thread's manifest lives on disk, given the repo's
-/// `heddle_dir` and a thread name: `<heddle_dir>/threads/<thread>/manifest.toml`.
+/// `heddle_dir` and a thread name:
+/// `<heddle_dir>/threads/<encoded>/manifest.toml`, a sibling of the
+/// checkout root `<encoded>/root`. Derives from [`thread_dir`] so it
+/// shares the one prefix-safe encoding.
 pub fn manifest_path(heddle_dir: &Path, thread: &str) -> PathBuf {
     thread_dir(heddle_dir, thread).join("manifest.toml")
-}
-
-/// True if `candidate` would land *inside* an already-existing thread's
-/// reserved subtree under `threads_root` (`<heddle_dir>/threads`). A
-/// thread occupies `threads/<name>/`, marked by its `manifest.toml`
-/// sidecar; a new explicit `--path` checkout must not nest below one, or
-/// it would land inside another thread's `root/` worktree. A fresh
-/// `threads/<newname>` or `threads/<newname>/root` (no manifest-bearing
-/// ancestor) returns false.
-///
-/// The marker is the `manifest.toml` sidecar — NOT the presence of a
-/// `root/` subdir: callers that create the target directory *before*
-/// re-validating (e.g. `prepare_worktree_target`) would otherwise see the
-/// just-created `root/` and falsely reject a legitimate fresh checkout.
-/// The manifest is written by the materialize transaction, strictly after
-/// target preparation, so a thread being created right now has none yet.
-///
-/// `threads_root` must be the same `<heddle_dir>/threads` base the caller
-/// tested `candidate`'s containment against, so the prefix strips cleanly.
-pub fn is_inside_existing_thread_dir(threads_root: &Path, candidate: &Path) -> bool {
-    let Ok(rel) = candidate.strip_prefix(threads_root) else {
-        return false;
-    };
-    let comps: Vec<_> = rel
-        .components()
-        .filter_map(|c| match c {
-            std::path::Component::Normal(s) => Some(s.to_owned()),
-            _ => None,
-        })
-        .collect();
-    // Walk every PROPER ancestor directory of `candidate` under
-    // `threads_root` (i.e. drop the candidate leaf itself). If any such
-    // ancestor carries a `manifest.toml`, it is an existing thread root
-    // and `candidate` sits nested inside it.
-    let mut dir = threads_root.to_path_buf();
-    for seg in comps.iter().take(comps.len().saturating_sub(1)) {
-        dir.push(seg);
-        if dir.join("manifest.toml").is_file() {
-            return true;
-        }
-    }
-    false
 }
 
 /// Summary of a single materialized thread, gathered by walking
@@ -245,76 +276,36 @@ pub struct MaterializedThreadSummary {
 /// manifests are silently skipped — callers that care can re-read
 /// individual manifests via [`read_manifest`].
 ///
-/// Walks recursively. Thread names conventionally contain slashes
-/// (`feature/m-thread`, `bugfix/issue-123`) which `manifest_path`
-/// passes through to `Path::join`, so the on-disk layout mirrors
-/// the conceptual hierarchy. A single-level read_dir would miss
-/// every nested thread; recursing reconstructs the thread name from
-/// the relative path of each `manifest.toml`'s parent directory.
+/// A single-level scan: every thread occupies exactly one directory
+/// `threads/<encoded>/` (the prefix-safe [`thread_dir`] encoding), so the
+/// thread name is the *decoded* directory segment and there is nothing to
+/// recurse into. Directories whose segment doesn't decode (foreign / hand-
+/// placed) are skipped. This also keeps the scan out of each thread's
+/// `root/` worktree, which has no thread `manifest.toml` of its own.
 pub fn list_thread_manifests(heddle_dir: &Path) -> io::Result<Vec<MaterializedThreadSummary>> {
     let threads_dir = heddle_dir.join("threads");
-    let mut summaries = Vec::new();
-    walk_thread_manifests(&threads_dir, &threads_dir, &mut summaries)?;
-    summaries.sort_by(|a, b| a.thread.cmp(&b.thread));
-    Ok(summaries)
-}
-
-/// Depth-first walk under `threads_dir`. For every directory found
-/// to contain a `manifest.toml`, parse it and collect a summary; the
-/// thread name is the relative path of that directory from the root
-/// (`feature/m-thread` for a manifest at `threads/feature/m-thread/`).
-/// Subdirectories of a manifest-bearing directory are *not* recursed
-/// into — a thread directory shouldn't contain another thread.
-fn walk_thread_manifests(
-    threads_dir: &Path,
-    cur: &Path,
-    out: &mut Vec<MaterializedThreadSummary>,
-) -> io::Result<()> {
-    let entries = match fs::read_dir(cur) {
+    let entries = match fs::read_dir(&threads_dir) {
         Ok(e) => e,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(enrich_fs_error(cur, "listing", e)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(enrich_fs_error(&threads_dir, "listing", e)),
     };
-    // Two-pass: first look for `manifest.toml` (treat this dir as a
-    // thread root and stop), otherwise recurse into subdirectories.
-    // Collected so we can short-circuit cheaply without re-stating.
-    let mut subdirs = Vec::new();
-    let mut has_manifest = false;
+    let mut summaries = Vec::new();
     for entry in entries {
         let entry = entry?;
-        let ft = entry.file_type()?;
-        if ft.is_dir() {
-            subdirs.push(entry.path());
-        } else if ft.is_file() && entry.file_name() == "manifest.toml" {
-            has_manifest = true;
+        if !entry.file_type()?.is_dir() {
+            continue;
         }
-    }
-    if has_manifest {
-        // Reconstruct the thread name from the path relative to
-        // `threads_dir`. On Windows the separator is `\`; the on-
-        // disk schema is always `/`-joined per `manifest_path`'s use
-        // of `Path::join` plus the convention that thread names use
-        // forward slashes. Normalise here so the returned summary's
-        // `thread` field round-trips through `read_manifest` and
-        // `manifest_path` cleanly.
-        let rel = cur.strip_prefix(threads_dir).unwrap_or(cur);
-        let mut name_parts: Vec<String> = Vec::new();
-        for component in rel.components() {
-            if let std::path::Component::Normal(s) = component
-                && let Some(s) = s.to_str()
-            {
-                name_parts.push(s.to_string());
-            } else {
-                // Non-utf8 or weird path component → skip silently.
-                return Ok(());
-            }
-        }
-        if name_parts.is_empty() {
-            return Ok(());
-        }
-        let name = name_parts.join("/");
-        if let Ok(Some(m)) = read_manifest(threads_dir.parent().unwrap_or(threads_dir), &name) {
-            out.push(MaterializedThreadSummary {
+        let Some(segment) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(name) = decode_thread_segment(&segment) else {
+            continue;
+        };
+        // Read the manifest directly from this dir rather than re-deriving
+        // its path from `name` — robust to any segment whose decode→encode
+        // isn't byte-identical (e.g. a hand-placed lowercase escape).
+        if let Ok(Some(m)) = read_manifest_at(&entry.path().join("manifest.toml")) {
+            summaries.push(MaterializedThreadSummary {
                 thread: name,
                 state_id: m.state_id,
                 tree_hash: m.tree_hash,
@@ -322,12 +313,9 @@ fn walk_thread_manifests(
                 file_count: m.files.len(),
             });
         }
-        return Ok(());
     }
-    for sub in subdirs {
-        walk_thread_manifests(threads_dir, &sub, out)?;
-    }
-    Ok(())
+    summaries.sort_by(|a, b| a.thread.cmp(&b.thread));
+    Ok(summaries)
 }
 
 /// Read the on-disk manifest for `thread`. Returns `Ok(None)` when no
@@ -336,11 +324,18 @@ fn walk_thread_manifests(
 /// schema-version mismatch — callers should treat that as "rebuild
 /// the manifest from scratch", not as a corruption hazard.
 pub fn read_manifest(heddle_dir: &Path, thread: &str) -> io::Result<Option<ThreadManifest>> {
-    let path = manifest_path(heddle_dir, thread);
-    let text = match fs::read_to_string(&path) {
+    read_manifest_at(&manifest_path(heddle_dir, thread))
+}
+
+/// Read + validate a `manifest.toml` at an explicit `path`. Shared by the
+/// name-keyed [`read_manifest`] and the directory-scanning
+/// [`list_thread_manifests`] so both apply the same not-found / malformed /
+/// schema-mismatch handling.
+pub fn read_manifest_at(path: &Path) -> io::Result<Option<ThreadManifest>> {
+    let text = match fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(enrich_fs_error(&path, "reading", e)),
+        Err(e) => return Err(enrich_fs_error(path, "reading", e)),
     };
     let manifest: ThreadManifest = toml::from_str(&text).map_err(|e| {
         io::Error::new(
@@ -379,57 +374,31 @@ pub fn manifest_for_worktree_root(
     canonical_worktree_root: &Path,
 ) -> io::Result<Option<ThreadManifest>> {
     let threads_dir = heddle_dir.join("threads");
-    let mut found = None;
-    find_manifest_for_root(&threads_dir, canonical_worktree_root, &mut found)?;
-    Ok(found)
-}
-
-/// Depth-first walk under `cur` looking for a `manifest.toml` whose
-/// `worktree_path` matches `root_match`. Stops at the first match. Mirrors
-/// [`walk_thread_manifests`]'s structure but parses the full manifest (not a
-/// summary) and short-circuits on the path predicate.
-fn find_manifest_for_root(
-    cur: &Path,
-    root_match: &Path,
-    out: &mut Option<ThreadManifest>,
-) -> io::Result<()> {
-    if out.is_some() {
-        return Ok(());
-    }
-    let entries = match fs::read_dir(cur) {
+    let entries = match fs::read_dir(&threads_dir) {
         Ok(e) => e,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(enrich_fs_error(cur, "listing", e)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(enrich_fs_error(&threads_dir, "listing", e)),
     };
-    let mut subdirs = Vec::new();
+    // Single-level scan: every thread's `manifest.toml` lives exactly one
+    // level deep at `threads/<encoded>/manifest.toml` (flat [`thread_dir`]
+    // layout). Match on the recorded `worktree_path`, so the thread name is
+    // irrelevant; skip anything unparseable or schema-stale — the reconcile
+    // caller is conservative by design.
     for entry in entries {
         let entry = entry?;
-        let ft = entry.file_type()?;
-        let path = entry.path();
-        if ft.is_dir() {
-            subdirs.push(path);
-        } else if ft.is_file() && entry.file_name() == "manifest.toml" {
-            // Parse directly rather than reconstructing the thread name and
-            // routing through `read_manifest`: we match on `worktree_path`, so
-            // the thread name is irrelevant here. Skip anything unparseable or
-            // schema-stale — the reconcile caller is conservative by design.
-            if let Ok(text) = fs::read_to_string(&path)
-                && let Ok(manifest) = toml::from_str::<ThreadManifest>(&text)
-                && manifest.schema_version == SCHEMA_VERSION
-                && manifest.worktree_path == root_match
-            {
-                *out = Some(manifest);
-                return Ok(());
-            }
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path().join("manifest.toml");
+        if let Ok(text) = fs::read_to_string(&path)
+            && let Ok(manifest) = toml::from_str::<ThreadManifest>(&text)
+            && manifest.schema_version == SCHEMA_VERSION
+            && manifest.worktree_path == canonical_worktree_root
+        {
+            return Ok(Some(manifest));
         }
     }
-    for sub in subdirs {
-        find_manifest_for_root(&sub, root_match, out)?;
-        if out.is_some() {
-            return Ok(());
-        }
-    }
-    Ok(())
+    Ok(None)
 }
 
 /// Delete the on-disk manifest directory for `thread`. Used by
@@ -438,47 +407,23 @@ fn find_manifest_for_root(
 /// thread set. Idempotent: a missing directory is reported as
 /// "deleted = false" rather than an error.
 ///
-/// Removes the whole `<heddle_dir>/threads/<thread>/` directory —
+/// Removes the whole `<heddle_dir>/threads/<encoded>/` directory —
 /// not just `manifest.toml` — so future per-thread sidecars
 /// (verification artefacts, capture journals, etc.) clean up with
 /// the same call.
+///
+/// The flat [`thread_dir`] encoding gives every thread its own
+/// single-segment leaf with no shared parent namespace, so dropping one
+/// thread can never recursively delete a *different* slash-namespaced
+/// thread's checkout, and there are no empty intermediate parents left to
+/// reap (the heddle#572 r2 recursive-drop hazard).
 pub fn remove_thread_manifest_dir(heddle_dir: &Path, thread: &str) -> io::Result<bool> {
-    let threads_root = heddle_dir.join("threads");
-    let dir = threads_root.join(thread);
-    let removed = match fs::remove_dir_all(&dir) {
-        Ok(()) => true,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => false,
-        Err(e) => return Err(enrich_fs_error(&dir, "removing", e)),
-    };
-    // Sweep empty parent directories left over by slash-namespaced
-    // threads. Dropping `feature/m-thread` removes
-    // `threads/feature/m-thread/` but `threads/feature/` would
-    // otherwise linger — purely cosmetic, but after many dropped
-    // threads the on-disk tree grows visually messy and the user
-    // ends up with a `ls .heddle/threads/` full of empty husks.
-    // Walk upward stopping at the first non-empty parent (another
-    // thread might still live there) or at `threads/` itself
-    // (we don't reap the root, that's heddle-managed).
-    if removed && let Some(mut parent) = dir.parent() {
-        while parent != threads_root {
-            match fs::read_dir(parent).map(|mut it| it.next().is_some()) {
-                Ok(true) => break, // sibling thread present
-                Ok(false) => match fs::remove_dir(parent) {
-                    Ok(()) => {}
-                    // Race: another process refilled the dir
-                    // between the read_dir check and the remove —
-                    // treat as "stop, that's their problem now".
-                    Err(_) => break,
-                },
-                Err(_) => break,
-            }
-            match parent.parent() {
-                Some(next) => parent = next,
-                None => break,
-            }
-        }
+    let dir = thread_dir(heddle_dir, thread);
+    match fs::remove_dir_all(&dir) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(enrich_fs_error(&dir, "removing", e)),
     }
-    Ok(removed)
 }
 
 /// On-disk location of the *withheld-checkout* marker for the worktree
@@ -786,51 +731,73 @@ mod tests {
     fn thread_dir_and_manifest_share_one_derivation_for_slashed_ids() {
         let heddle = Path::new("/repo/.heddle");
         let dir = thread_dir(heddle, "feature/foo");
-        assert_eq!(dir, Path::new("/repo/.heddle/threads/feature/foo"));
+        // The slash is percent-encoded into ONE path segment, so the id can
+        // never nest under (or swallow) another thread's directory.
+        assert_eq!(dir, Path::new("/repo/.heddle/threads/feature%2Ffoo"));
         // The manifest is a child of the shared per-thread dir, so a checkout
         // root at `<dir>/root` is its sibling.
         assert_eq!(manifest_path(heddle, "feature/foo"), dir.join("manifest.toml"));
         assert!(manifest_path(heddle, "feature/foo").starts_with(heddle.join("threads")));
     }
 
+    /// The close-the-class proof for the prefix-nesting bug: a thread id that
+    /// is a path-component prefix of another (`feature/f` vs `feature/foo`, and
+    /// the bare `feature` vs `feature/foo`) must map to DISJOINT directories
+    /// where neither is an ancestor of the other. Before the flat encoding,
+    /// `feature` lived at `threads/feature/` and `feature/foo` nested inside it
+    /// at `threads/feature/foo/`, so `thread drop feature` recursively deleted
+    /// `feature/foo`'s checkout (heddle#572 r2).
     #[test]
-    fn nested_inside_existing_thread_detected_for_slashed_ids() {
-        let dir = TempDir::new().unwrap();
-        let threads_root = dir.path().join("threads");
+    fn prefix_thread_ids_get_disjoint_non_nested_dirs() {
+        let heddle = Path::new("/repo/.heddle");
+        let pairs = [
+            ("feature/f", "feature/foo"),
+            ("feature", "feature/foo"),
+            ("foo", "foo/root"),
+        ];
+        for (a, b) in pairs {
+            let da = thread_dir(heddle, a);
+            let db = thread_dir(heddle, b);
+            assert_ne!(da, db, "distinct ids {a:?}/{b:?} must map to distinct dirs");
+            assert!(
+                !da.starts_with(&db) && !db.starts_with(&da),
+                "neither {a:?}→{} nor {b:?}→{} may be a path prefix of the other",
+                da.display(),
+                db.display(),
+            );
+        }
+    }
 
-        // An existing slashed thread `feature/foo` carries its manifest.
-        let foo = threads_root.join("feature").join("foo");
-        std::fs::create_dir_all(foo.join("root")).unwrap();
-        std::fs::write(foo.join("manifest.toml"), b"# stub\n").unwrap();
-
-        // Nested inside the existing thread's checkout → true.
-        assert!(is_inside_existing_thread_dir(
-            &threads_root,
-            &foo.join("root").join("nested")
-        ));
-        // The checkout root itself sits below the manifest-bearing dir → true.
-        assert!(is_inside_existing_thread_dir(&threads_root, &foo.join("root")));
-
-        // A fresh thread under the SAME `feature/` namespace is fine — the
-        // intermediate `feature/` dir carries no manifest of its own.
-        assert!(!is_inside_existing_thread_dir(
-            &threads_root,
-            &threads_root.join("feature").join("bar")
-        ));
-        assert!(!is_inside_existing_thread_dir(
-            &threads_root,
-            &threads_root.join("feature").join("bar").join("root")
-        ));
-        // A brand-new top-level slot is fine.
-        assert!(!is_inside_existing_thread_dir(
-            &threads_root,
-            &threads_root.join("brandnew")
-        ));
-        // A path outside threads_root is never "inside a thread".
-        assert!(!is_inside_existing_thread_dir(
-            &threads_root,
-            Path::new("/elsewhere/foo")
-        ));
+    /// `encode`/`decode` round-trips every thread id `validate_thread_id`
+    /// accepts (plus the dangerous `.`/`..` whole-segment cases), and never
+    /// emits a `/` or a path-traversal component.
+    #[test]
+    fn encode_decode_round_trips_and_stays_single_segment() {
+        for id in [
+            "feature/foo",
+            "feature/f",
+            "feature",
+            "v1.2",
+            "team@scope",
+            "wip+1=2",
+            "a_b-c.d",
+            "main",
+            ".",
+            "..",
+            "weird name with spaces",
+            "team:scope",
+            "100%done",
+        ] {
+            let seg = encode_thread_segment(id);
+            assert!(!seg.contains('/'), "{id:?} → {seg:?} must be one segment");
+            assert_ne!(seg, ".", "{id:?} must not encode to a current-dir component");
+            assert_ne!(seg, "..", "{id:?} must not encode to a parent-dir component");
+            assert_eq!(
+                decode_thread_segment(&seg).as_deref(),
+                Some(id),
+                "{id:?} must round-trip through encode/decode"
+            );
+        }
     }
 
     #[test]
@@ -892,41 +859,35 @@ mod tests {
         assert!(!a.matches(&e), "size change must invalidate the cache");
     }
 
-    /// `remove_thread_manifest_dir` must reap empty parent directories
-    /// left behind by slash-namespaced thread names so the on-disk
-    /// inventory doesn't grow visually messy after many drops. Stop
-    /// reaping when a sibling thread is still around, and never reap
-    /// the `threads/` root itself.
+    /// Close-the-class proof for the recursive-drop hazard: dropping a
+    /// slash-namespaced thread must remove ONLY its own flat directory and
+    /// never touch a sibling that shares a conceptual namespace. Under the
+    /// old slash-nesting layout `feature/keeper` and `feature/dropme` shared a
+    /// `threads/feature/` parent, so dropping one could recursively delete the
+    /// other; the flat encoding gives each a disjoint leaf (heddle#572 r2).
     #[test]
-    fn remove_thread_manifest_dir_reaps_empty_parents() {
+    fn remove_thread_manifest_dir_isolates_slash_namespaced_siblings() {
         let dir = TempDir::new().unwrap();
-        // Two threads under the same `feature/` parent. Drop one;
-        // `feature/` must survive because the other is still there.
         let m = ThreadManifest::new(cid(), h(1), PathBuf::from("/tmp/test-worktree"));
         write_manifest(dir.path(), "feature/keeper", &m).unwrap();
         write_manifest(dir.path(), "feature/dropme", &m).unwrap();
 
         assert!(remove_thread_manifest_dir(dir.path(), "feature/dropme").unwrap());
         assert!(
-            dir.path().join("threads").join("feature").is_dir(),
-            "sibling thread must keep the `feature/` parent alive"
+            !thread_dir(dir.path(), "feature/dropme").exists(),
+            "the dropped thread's directory must be gone"
         );
         assert!(
-            dir.path()
-                .join("threads")
-                .join("feature")
-                .join("keeper")
-                .is_dir(),
-            "keeper's directory must be untouched"
+            thread_dir(dir.path(), "feature/keeper").exists(),
+            "a slash-namespaced sibling must be completely untouched by the drop"
+        );
+        assert!(
+            read_manifest(dir.path(), "feature/keeper").unwrap().is_some(),
+            "the sibling's manifest must survive"
         );
 
-        // Now drop the second one. `feature/` should be reaped, and
-        // `threads/` itself must stay (heddle-managed root).
+        // The `threads/` root is heddle-managed and must never be removed.
         assert!(remove_thread_manifest_dir(dir.path(), "feature/keeper").unwrap());
-        assert!(
-            !dir.path().join("threads").join("feature").exists(),
-            "empty `feature/` parent must be reaped"
-        );
         assert!(
             dir.path().join("threads").is_dir(),
             "the `threads/` root is heddle-managed and must never be reaped"

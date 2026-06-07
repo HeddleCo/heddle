@@ -108,12 +108,24 @@ fn validate_worktree_target(repo: &Repository, path: &Path) -> Result<()> {
     let threads_root = repo.heddle_dir().join("threads");
     let in_threads_root = path == threads_root || path.starts_with(&threads_root);
     if in_threads_root {
+        // The threads metadata root ITSELF is off-limits: checking out at
+        // `.heddle/threads` would write the worktree's `.heddle/` and the
+        // per-thread `manifest.toml` on top of the thread-metadata root,
+        // breaking the layout invariant (heddle#572 r2). A descendant
+        // per-thread slot is what's allowed, not the root.
+        if path == threads_root {
+            return Err(anyhow::anyhow!(worktree_target_nested_thread_advice(path)));
+        }
         // Under `.heddle/threads` is allowed for managed checkouts, but the
         // target must be a fresh per-thread slot — never nested inside an
-        // EXISTING thread's reserved subtree (its `root/` worktree). Allowing
-        // any descendant would land the new checkout inside thread `foo` when
-        // `--path .heddle/threads/foo/root/nested` is passed after `foo` exists.
-        if repo::thread_manifest::is_inside_existing_thread_dir(&threads_root, path) {
+        // EXISTING thread's reserved subtree (`.heddle/threads/<name>/`,
+        // which holds its `root/` worktree/mount). `is_inside_existing_thread`
+        // enumerates EVERY existing thread (solid, materialized, AND
+        // virtualized) via its record + the shared `thread_dir` derivation,
+        // not just manifest-bearing materialized roots — so an explicit
+        // `--path .heddle/threads/<existing>/root/nested` is rejected for any
+        // workspace mode (heddle#572 r2).
+        if is_inside_existing_thread(repo, &threads_root, path)? {
             return Err(anyhow::anyhow!(worktree_target_nested_thread_advice(path)));
         }
     } else if path == repo.heddle_dir() || path.starts_with(repo.heddle_dir()) {
@@ -135,6 +147,48 @@ fn validate_worktree_target(repo: &Repository, path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// True if `candidate` (already known to live under `threads_root`) falls
+/// inside an EXISTING thread's reserved per-thread directory
+/// `.heddle/threads/<encoded>/` — for ANY workspace mode.
+///
+/// Existing threads are enumerated from the durable thread RECORDS (not the
+/// filesystem), and each record's reserved directory is recomputed with the
+/// shared [`repo::thread_manifest::thread_dir`] derivation. This is the
+/// mode-agnostic source of truth:
+///   * a `manifest.toml` sidecar exists only for *materialized* threads —
+///     `solid` and `virtualized` starts write a record but no manifest, so a
+///     manifest-only check (the heddle#572 r1 guard) silently missed them;
+///   * the record is written strictly AFTER target validation for a *new*
+///     thread (the atomic `start` stages it inside `execute`; the harness
+///     `save`s it after `prepare_worktree_target`), so a brand-new thread is
+///     never in this set — its fresh `.heddle/threads/<new>/root` slot is
+///     correctly allowed without self-exclusion.
+///
+/// A thread's OWN canonical checkout root `.heddle/threads/<encoded>/root`
+/// is exempted, because `promote` re-materializes an EXISTING thread into
+/// exactly that slot (the record is already present at validation time). A
+/// reuse of a populated slot is still caught downstream by the
+/// emptiness/`.heddle`-already-present checks; only a target nested STRICTLY
+/// deeper than a thread's `root` (or anywhere else inside its reserved dir)
+/// is a nesting violation.
+fn is_inside_existing_thread(
+    repo: &Repository,
+    threads_root: &Path,
+    candidate: &Path,
+) -> Result<bool> {
+    // Cheap guard: only paths under `threads_root` can be inside a thread dir.
+    if !candidate.starts_with(threads_root) {
+        return Ok(false);
+    }
+    for thread in repo::ThreadManager::new(repo.heddle_dir()).list()? {
+        let dir = repo::thread_manifest::thread_dir(repo.heddle_dir(), &thread.thread);
+        if candidate.starts_with(&dir) && candidate != dir.join("root") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn worktree_target_symlink_advice(path: &Path) -> RecoveryAdvice {
@@ -429,29 +483,78 @@ mod gate_tests {
         );
     }
 
+    /// Register a thread record (any mode) the way a completed `start`
+    /// would, so the registry-based nesting guard can see it. Materialized
+    /// threads also write a `manifest.toml`; solid and virtualized threads do
+    /// NOT — the guard must recognise them all from the record alone.
+    fn register_thread(repo: &Repository, name: &str, mode: repo::ThreadMode) {
+        let now = Utc::now();
+        let thread = repo::Thread {
+            id: name.to_string(),
+            thread: name.to_string(),
+            target_thread: None,
+            parent_thread: None,
+            mode,
+            state: repo::ThreadState::Active,
+            base_state: "deadbeef".to_string(),
+            base_root: "deadbeef".to_string(),
+            current_state: None,
+            merged_state: None,
+            task: None,
+            execution_path: PathBuf::new(),
+            materialized_path: None,
+            changed_paths: Vec::new(),
+            impact_categories: Vec::new(),
+            heavy_impact_paths: Vec::new(),
+            promotion_suggested: false,
+            freshness: repo::ThreadFreshness::Unknown,
+            verification_summary: Default::default(),
+            confidence_summary: Default::default(),
+            integration_policy_result: Default::default(),
+            created_at: now,
+            updated_at: now,
+            ephemeral: None,
+            auto: false,
+            shared_target_dir: None,
+        };
+        repo::ThreadManager::new(repo.heddle_dir())
+            .save(&thread)
+            .expect("save thread record");
+    }
+
     /// An explicit `--path` may live under `.heddle/threads/<newname>` (the
     /// managed home for checkouts) but must NOT nest inside an EXISTING
     /// thread's reserved subtree — that would land the new checkout inside
-    /// another thread's `root/` worktree. A fresh slot is still accepted.
+    /// another thread's `root/` worktree or mount. The guard enumerates
+    /// threads from their records, so it covers EVERY workspace mode —
+    /// including `virtualized`, which writes no `manifest.toml` (heddle#572
+    /// r2). A fresh slot, and the threads-root itself, are also exercised.
     #[test]
     fn validate_rejects_path_nested_in_existing_thread_checkout() {
         let repo_dir = TempDir::new().unwrap();
         let repo = Repository::init_default(repo_dir.path()).unwrap();
         let threads_root = repo.heddle_dir().join("threads");
 
-        // Simulate an existing thread `foo`: its manifest sidecar marks the
-        // reserved subtree, and `root/` holds its worktree bytes.
-        let foo_dir = threads_root.join("foo");
-        std::fs::create_dir_all(foo_dir.join("root")).unwrap();
-        std::fs::write(foo_dir.join("manifest.toml"), b"# stub\n").unwrap();
+        // An existing MATERIALIZED thread `foo` and an existing VIRTUALIZED
+        // thread `virt`. Both occupy `.heddle/threads/<name>/` with a `root/`
+        // worktree/mount; only `foo` has a `manifest.toml`.
+        register_thread(&repo, "foo", repo::ThreadMode::Materialized);
+        register_thread(&repo, "virt", repo::ThreadMode::Virtualized);
+        for name in ["foo", "virt"] {
+            let nested = threads_root.join(name).join("root").join("nested");
+            let err = validate_worktree_target(&repo, &nested).unwrap_err();
+            assert!(
+                err.to_string().contains("nested inside an existing thread"),
+                "path nested in existing {name} thread must be rejected: {err}"
+            );
+        }
 
-        // Nested inside foo's checkout → rejected with a clear error.
-        let nested = foo_dir.join("root").join("nested");
-        let err = validate_worktree_target(&repo, &nested)
-            .expect_err("path nested in an existing thread must be rejected");
+        // The threads metadata root itself is rejected (never a checkout slot).
+        let err = validate_worktree_target(&repo, &threads_root)
+            .expect_err("the .heddle/threads metadata root must be rejected");
         assert!(
             err.to_string().contains("nested inside an existing thread"),
-            "unexpected error: {err}"
+            "unexpected error for threads-root target: {err}"
         );
 
         // A fresh per-thread slot (and its `root/` leaf) is still accepted.
@@ -459,6 +562,12 @@ mod gate_tests {
             .expect("a fresh .heddle/threads/<name> slot is allowed");
         validate_worktree_target(&repo, &threads_root.join("brandnew").join("root"))
             .expect("a fresh .heddle/threads/<name>/root checkout is allowed");
+
+        // An EXISTING thread's OWN canonical `root` slot is allowed — this is
+        // exactly what `promote` re-materializes (the record already exists at
+        // validation time). Empty here, so the emptiness check passes too.
+        validate_worktree_target(&repo, &threads_root.join("foo").join("root"))
+            .expect("re-materializing a thread's own canonical root slot is allowed");
     }
 
     /// The same chokepoint still materializes the real bytes for a state that

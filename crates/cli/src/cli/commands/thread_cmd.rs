@@ -1333,15 +1333,15 @@ fn print_thread_output(
 }
 
 fn default_materialized_thread_path(repo: &Repository, thread_id: &str) -> PathBuf {
-    // Promote to a solid checkout under the same Heddle-managed
-    // `.heddle/threads/<name>/root` layout the `start` defaults use, so a
-    // promoted thread stays reachable from a repo-scoped sandbox and out
-    // of the parent repo's status. The `root/` leaf keeps the per-thread
-    // `manifest.toml` sidecar a sibling of the checkout, not inside it.
-    // See `thread::default_threads_root`.
-    super::thread::default_threads_root(repo)
-        .join(thread_id.replace('/', "-"))
-        .join("root")
+    // Promote to a solid checkout under the SAME canonical
+    // `thread_manifest::thread_dir` derivation `start` and the per-thread
+    // `manifest.toml` sidecar use. A local `replace('/', "-")` flattened
+    // slashed ids differently from the manifest layout, so `foo/bar`'s
+    // checkout landed at `.heddle/threads/foo-bar/root` while its manifest
+    // keyed `foo/bar` — diverging, and able to collide with a real `foo-bar`
+    // thread (heddle#572 r2). The `root/` leaf keeps the sidecar a sibling
+    // of the checkout, not inside it.
+    repo::thread_manifest::thread_dir(repo.heddle_dir(), thread_id).join("root")
 }
 
 // --- thread cleanup -------------------------------------------------
@@ -1794,6 +1794,27 @@ fn apply_thread_drop(repo: &Repository, manager: &ThreadManager, thread: &Thread
 #[cfg(test)]
 mod cleanup_tests {
     use super::*;
+
+    /// `promote`'s default checkout path must be byte-identical to the
+    /// canonical `thread_manifest::thread_dir(...).join("root")` derivation
+    /// `start` and the per-thread manifest use — for slashed ids too. Before
+    /// this, promote flattened `foo/bar` with `replace('/', "-")`, diverging
+    /// from the manifest layout and able to collide with a real `foo-bar`
+    /// thread (heddle#572 r2).
+    #[test]
+    fn promote_default_path_matches_canonical_thread_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(dir.path()).unwrap();
+        for id in ["foo", "foo/bar", "team@scope", "feature/foo"] {
+            let promote = default_materialized_thread_path(&repo, id);
+            let canonical =
+                repo::thread_manifest::thread_dir(repo.heddle_dir(), id).join("root");
+            assert_eq!(
+                promote, canonical,
+                "promote default must match the canonical thread_dir for {id:?}"
+            );
+        }
+    }
 
     #[test]
     fn parse_duration_handles_supported_units() {
