@@ -6,8 +6,6 @@
 //! The mount itself lives in [`crates/mount`]; this module is the
 //! thin CLI-side adapter that:
 //!
-//! * builds the conventional mount-point path
-//!   (`.{repo_name}-heddle-mounts/{name}/`),
 //! * spawns a background mount session when the thread starts,
 //! * unmounts cleanly when the thread is dropped.
 //!
@@ -17,28 +15,9 @@
 //! [`virtualized_unsupported_error`] runtime check so the rest of
 //! the CLI keeps building everywhere.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::anyhow;
-
-/// Compute the conventional mount point for a virtualized thread.
-///
-/// Mirrors [`default_lightweight_thread_path`] / [`default_private_thread_path`]
-/// (which produce `.{repo_name}-heddle-threads/{name}/root/`) but
-/// uses a sibling parent directory so a single repo can host both
-/// lightweight checkouts and virtual mounts side-by-side without
-/// path collisions.
-///
-/// Resolved template: `<repo_parent>/.<repo_name>-heddle-mounts/<sanitized_name>/`
-pub(crate) fn default_virtualized_mount_path(
-    workspace_parent: &Path,
-    repo_name: &str,
-    sanitized_thread: &str,
-) -> PathBuf {
-    workspace_parent
-        .join(format!(".{repo_name}-heddle-mounts"))
-        .join(sanitized_thread)
-}
 
 /// Anchored error for any build that has no native mount adapter
 /// active. Surfaced when none of (linux+fuse, macos+fskit,

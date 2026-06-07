@@ -37,10 +37,10 @@ use super::{heddle, setup_repo};
 fn virtualized_thread_round_trip() {
     let main = setup_repo("greet.txt", "hello from heddle");
 
-    // Start a virtualized thread. The mount point lives outside
-    // the repo (sibling `.{name}-heddle-mounts/...` directory),
-    // and `heddle --output json` prints the resolved path under
-    // `thread.path`.
+    // Start a virtualized thread. The mount point lives under the
+    // repo's reserved `.heddle/threads/<name>` dir (excluded from the
+    // parent repo's overlay/status traversal), and `heddle --output
+    // json` prints the resolved path under `thread.path`.
     let raw = heddle(
         &[
             "--output", "json",
@@ -67,8 +67,8 @@ fn virtualized_thread_round_trip() {
         .expect("virtualized thread output should include the mount path under thread.path")
         .to_string();
     assert!(
-        mount_path.contains("-heddle-mounts/"),
-        "mount path should sit under the conventional .<repo>-heddle-mounts/ sibling \
+        mount_path.contains("/.heddle/threads/"),
+        "mount path should sit under the managed .heddle/threads/ root \
          (got {mount_path:?})"
     );
 

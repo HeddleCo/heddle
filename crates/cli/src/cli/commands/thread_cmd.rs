@@ -1136,8 +1136,34 @@ fn cmd_thread_promote(
             );
         }
     }
-    let path = path.unwrap_or_else(|| default_materialized_thread_path(repo, thread_id));
-    let abs_path = prepare_worktree_target(repo, &path)?.path;
+    let using_default = path.is_none();
+    let target = path.unwrap_or_else(|| default_materialized_thread_path(repo, thread_id));
+
+    // Conversion-in-place (heddle#572 r3 Finding #3): an already-materialized
+    // (or solid) thread is ALREADY checked out at its canonical
+    // `.heddle/threads/<name>/root` — which is exactly the promote default. A
+    // fresh solid materialize there would hit the non-empty / existing-`.heddle`
+    // refusal, so promote of a default-located thread would never succeed. Tear
+    // down THIS thread's own existing checkout first so the conversion can write
+    // fresh (un-shared) bytes into the same canonical slot. Guarded narrowly to
+    // the default target AND this thread's own recorded checkout, so we never
+    // remove another thread's (or a user-supplied) directory; the clean-worktree
+    // gate above already ran against it.
+    if using_default && matches!(thread.mode, ThreadMode::Materialized | ThreadMode::Solid) {
+        let existing = thread
+            .materialized_path
+            .clone()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| thread.execution_path.clone());
+        if !existing.as_os_str().is_empty()
+            && existing.join(".heddle").exists()
+            && same_existing_dir(&existing, &target)
+        {
+            remove_path_recursively(&existing)?;
+        }
+    }
+
+    let abs_path = prepare_worktree_target(repo, &target, Some(thread_id))?.path;
     write_isolated_checkout(repo, &abs_path, &state_id, Some(&thread.thread))?;
 
     thread.mode = ThreadMode::Solid;
@@ -1332,19 +1358,27 @@ fn print_thread_output(
     Ok(())
 }
 
+/// Whether two paths denote the same directory. Canonicalizes both when they
+/// exist on disk (so a recorded-canonical path and a freshly-derived default
+/// that resolve to the same inode compare equal), falling back to a structural
+/// comparison otherwise.
+fn same_existing_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
+}
+
 fn default_materialized_thread_path(repo: &Repository, thread_id: &str) -> PathBuf {
-    let repo_name = repo
-        .root()
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("heddle");
-    let parent = repo
-        .root()
-        .parent()
-        .map(|path| path.to_path_buf())
-        .unwrap_or_else(|| repo.root().to_path_buf());
-    parent.join(format!("{repo_name}-{}", thread_id.replace('/', "-")))
+    // Promote to a solid checkout under the SAME canonical
+    // `thread_manifest::thread_dir` derivation `start` and the per-thread
+    // `manifest.toml` sidecar use. A local `replace('/', "-")` flattened
+    // slashed ids differently from the manifest layout, so `foo/bar`'s
+    // checkout landed at `.heddle/threads/foo-bar/root` while its manifest
+    // keyed `foo/bar` — diverging, and able to collide with a real `foo-bar`
+    // thread (heddle#572 r2). The `root/` leaf keeps the sidecar a sibling
+    // of the checkout, not inside it.
+    repo::thread_manifest::thread_dir(repo.heddle_dir(), thread_id).join("root")
 }
 
 // --- thread cleanup -------------------------------------------------
@@ -1797,6 +1831,27 @@ fn apply_thread_drop(repo: &Repository, manager: &ThreadManager, thread: &Thread
 #[cfg(test)]
 mod cleanup_tests {
     use super::*;
+
+    /// `promote`'s default checkout path must be byte-identical to the
+    /// canonical `thread_manifest::thread_dir(...).join("root")` derivation
+    /// `start` and the per-thread manifest use — for slashed ids too. Before
+    /// this, promote flattened `foo/bar` with `replace('/', "-")`, diverging
+    /// from the manifest layout and able to collide with a real `foo-bar`
+    /// thread (heddle#572 r2).
+    #[test]
+    fn promote_default_path_matches_canonical_thread_dir() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(dir.path()).unwrap();
+        for id in ["foo", "foo/bar", "team@scope", "feature/foo"] {
+            let promote = default_materialized_thread_path(&repo, id);
+            let canonical =
+                repo::thread_manifest::thread_dir(repo.heddle_dir(), id).join("root");
+            assert_eq!(
+                promote, canonical,
+                "promote default must match the canonical thread_dir for {id:?}"
+            );
+        }
+    }
 
     #[test]
     fn parse_duration_handles_supported_units() {

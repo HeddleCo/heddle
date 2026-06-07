@@ -73,11 +73,11 @@ fn materialized_thread_full_lifecycle() {
     // Manifest sidecar must be written under the *main* repo's
     // heddle_dir (the worktree's `.heddle/objectstore` pointer keeps
     // everyone agreeing on a single store).
-    let manifest_dir = main
-        .path()
-        .join(".heddle")
-        .join("threads")
-        .join("feature/m-thread");
+    // Use the canonical prefix-safe `thread_dir` derivation: a slashed id
+    // lives at `.heddle/threads/<encoded>/` (e.g. `feature%2Fm-thread`), NOT
+    // a nested `feature/m-thread/` (heddle#572 r2).
+    let manifest_dir =
+        repo::thread_manifest::thread_dir(&main.path().join(".heddle"), "feature/m-thread");
     let manifest_path = manifest_dir.join("manifest.toml");
     assert!(
         manifest_path.is_file(),
@@ -216,12 +216,11 @@ fn short_status_surfaces_stale_materialized_thread_advisory() {
     // This is the same observable condition produced when the head
     // advances past a manifest without the manifest being refreshed
     // (the unit test in status.rs exercises that path directly).
-    let manifest_path = main
-        .path()
-        .join(".heddle")
-        .join("threads")
-        .join("feature/short-stale")
-        .join("manifest.toml");
+    // Canonical prefix-safe layout: `.heddle/threads/<encoded>/manifest.toml`
+    // (`feature%2Fshort-stale`), not a nested `feature/short-stale/`
+    // (heddle#572 r2).
+    let manifest_path =
+        repo::thread_manifest::manifest_path(&main.path().join(".heddle"), "feature/short-stale");
     assert!(
         manifest_path.is_file(),
         "manifest expected at {} after start --workspace materialized",

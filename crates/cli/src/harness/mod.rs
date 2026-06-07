@@ -1029,7 +1029,7 @@ impl HarnessBridgeRuntime {
             // wiring before they can become the default execution root.
             ThreadMode::Virtualized => default_private_thread_path(&self.repo, name),
         };
-        let abs_path = prepare_worktree_target(&self.repo, &path)?.path;
+        let abs_path = prepare_worktree_target(&self.repo, &path, Some(name))?.path;
         write_isolated_checkout(&self.repo, &abs_path, &base_state, Some(name))?;
 
         let base_state_obj = self
@@ -2154,24 +2154,14 @@ fn allocate_thread_name(repo: &Repository, base: &str) -> Result<String> {
 }
 
 fn default_private_thread_path(repo: &Repository, name: &str) -> PathBuf {
-    let workspace_root = shared_workspace_root(repo);
-    let repo_name = workspace_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("heddle");
-    let parent = workspace_root
-        .parent()
-        .map(|path| path.to_path_buf())
-        .unwrap_or_else(|| workspace_root.to_path_buf());
-    parent
-        .join(format!(".{repo_name}-heddle-threads"))
-        .join(sanitize_name(name))
-        .join("root")
-}
-
-fn shared_workspace_root(repo: &Repository) -> &Path {
-    repo.heddle_dir().parent().unwrap_or_else(|| repo.root())
+    // Route through the ONE canonical `thread_manifest::thread_dir`
+    // derivation `heddle start` and the per-thread `manifest.toml` sidecar
+    // use — NOT a harness-local re-sanitisation. Harness subagent/root-actor
+    // names are commonly slash-namespaced (`parent/task`); a local
+    // `sanitize_name` flattened `parent/task` and `parent-task` onto the same
+    // `.heddle/threads/parent-task/root`, colliding two distinct threads and
+    // diverging from the manifest/checkout layout (heddle#572 r2).
+    repo::thread_manifest::thread_dir(repo.heddle_dir(), name).join("root")
 }
 
 fn sanitize_name(name: &str) -> String {
@@ -2818,6 +2808,27 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         (temp, repo)
+    }
+
+    /// Harness subagent/root-actor checkout paths must use the SAME canonical
+    /// `thread_manifest::thread_dir(...).join("root")` derivation `start` and
+    /// the per-thread manifest use — for the slash-namespaced names the
+    /// harness commonly mints (`parent/task`). Before this, a harness-local
+    /// `sanitize_name` flattened `parent/task` and `parent-task` onto the same
+    /// `.heddle/threads/parent-task/root`, colliding distinct threads
+    /// (heddle#572 r2).
+    #[test]
+    fn harness_default_path_matches_canonical_thread_dir() {
+        let (_temp, repo) = init_repo();
+        for id in ["foo", "parent/task", "feature/foo", "team@scope"] {
+            let harness_path = default_private_thread_path(&repo, id);
+            let canonical =
+                repo::thread_manifest::thread_dir(repo.heddle_dir(), id).join("root");
+            assert_eq!(
+                harness_path, canonical,
+                "harness default must match the canonical thread_dir for {id:?}"
+            );
+        }
     }
 
     #[test]

@@ -576,8 +576,36 @@ impl GitIndexPlan {
     }
 }
 
+/// True when `root` is itself the top of a Git worktree, not merely
+/// nested inside one. A Heddle thread checkout now lives under the parent
+/// repo's `.heddle/threads/` (heddle#572); it's a *native* isolated
+/// checkout that shares the parent's object store but is NOT a Git
+/// worktree of its own. Bare `gix::discover` walks up the directory tree,
+/// so from inside such a checkout it would find the PARENT repo's `.git`
+/// and read its index/HEAD as though they belonged to the checkout.
+/// Requiring the discovered worktree to equal `root` keeps git-index
+/// inspection scoped to genuine git-overlay roots — and matches the
+/// pre-#572 behaviour where a sibling checkout had no git above it at all.
+fn git_worktree_rooted_at(root: &Path) -> bool {
+    match gix::discover(root) {
+        Ok(git) => git
+            .workdir()
+            .is_some_and(|workdir| paths_equal(workdir, root)),
+        Err(_) => false,
+    }
+}
+
+fn paths_equal(left: &Path, right: &Path) -> bool {
+    let left = left.canonicalize();
+    let right = right.canonicalize();
+    match (left, right) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 pub(crate) fn git_index_plan_for_root(root: &Path) -> Result<Option<GitIndexPlan>> {
-    if gix::discover(root).is_err() {
+    if !git_worktree_rooted_at(root) {
         return Ok(None);
     }
     Ok(Some(GitIndexPlan::from_intent(
@@ -587,7 +615,7 @@ pub(crate) fn git_index_plan_for_root(root: &Path) -> Result<Option<GitIndexPlan
 }
 
 pub(crate) fn git_index_plan_for_repo(repo: &Repository) -> Result<Option<GitIndexPlan>> {
-    if gix::discover(repo.root()).is_err() {
+    if !git_worktree_rooted_at(repo.root()) {
         return Ok(None);
     }
     Ok(Some(GitIndexPlan::from_intent(

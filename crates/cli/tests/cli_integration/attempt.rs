@@ -227,7 +227,7 @@ fn attempt_mixed_success_and_failure_ranks_success_first() {
 
     // Build a script that flips behaviour based on which thread's
     // checkout it's running in. Each attempt's checkout sits at
-    // `<...>-heddle-threads/<thread-name>/root`, so the parent
+    // `.heddle/threads/<thread-name>/root`, so the parent
     // directory's basename is the thread name (`mixed-1`, `mixed-2`,
     // …). We succeed on threads whose name ends in `-1` and fail on
     // the rest. With N=3 that yields exactly one success and two
@@ -410,16 +410,10 @@ fn attempt_shared_target_default_on_for_rust_workspace() {
     // The thread checkouts should each contain a `.cargo/config.toml`
     // that redirects to the shared target dir. The thread path layout
     // for `--workspace materialized` is
-    // `<repo_parent>/.<repo_name>-heddle-threads/<thread>/root/`; we
-    // assert the cargo config exists there.
+    // `<repo>/.heddle/threads/<thread>/root/`; we assert the cargo
+    // config exists there.
     let attempts = value["attempts"].as_array().unwrap();
-    let repo_parent = temp.path().parent().expect("temp dir has a parent");
-    let repo_basename = temp
-        .path()
-        .file_name()
-        .and_then(|n| n.to_str())
-        .expect("temp dir has a basename");
-    let threads_dir = repo_parent.join(format!(".{repo_basename}-heddle-threads"));
+    let threads_dir = temp.path().join(".heddle").join("threads");
     for attempt in attempts {
         let name = attempt["thread"].as_str().unwrap();
         let cargo_config = threads_dir
