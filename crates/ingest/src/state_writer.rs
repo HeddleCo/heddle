@@ -124,9 +124,10 @@ pub(crate) fn state_from_commit(
     // distinction is invisible; for rebased / cherry-picked /
     // amended commits it preserves the original authoring time.
     // #564 step 1: preserve the committer identity, both timezone offsets,
-    // the verbatim message, the gpgsig, and any extra headers (in order) so
-    // the commit is byte-reconstructable later (#566) without the mirror.
-    let mut state = State::new(tree, parents, attribution)
+    // the verbatim message, and any extra headers (in order, gpgsig inline at
+    // its captured position) so the commit is byte-reconstructable later
+    // (#566) without the mirror.
+    State::new(tree, parents, attribution)
         .with_timestamp(committed_timestamp(&commit.committed_at))
         .with_authored_at(committed_timestamp(&commit.authored_at))
         .with_intent(first_line_of(&message))
@@ -136,11 +137,7 @@ pub(crate) fn state_from_commit(
         ))
         .with_tz_offsets(commit.author.tz_offset, commit.committer.tz_offset)
         .with_raw_message(commit.message.clone())
-        .with_extra_headers(commit.extra_headers.clone());
-    if let Some(gpgsig) = &commit.gpgsig {
-        state = state.with_git_gpgsig(gpgsig.clone());
-    }
-    state
+        .with_extra_headers(commit.extra_headers.clone())
 }
 
 /// Best-effort attribution parse. The principal is always the git author;
@@ -262,7 +259,6 @@ mod tests {
             message: message.as_bytes().to_vec(),
             authored_at: Utc.with_ymd_and_hms(2026, 4, 1, 12, 0, 0).unwrap(),
             committed_at: Utc.with_ymd_and_hms(2026, 4, 1, 12, 0, 0).unwrap(),
-            gpgsig: None,
             extra_headers: Vec::new(),
         }
     }
@@ -411,8 +407,9 @@ mod tests {
 
     /// #564 step 1: a re-imported commit must round-trip every git-fidelity
     /// field — distinct committer identity, both timezone offsets, the
-    /// verbatim message, the gpgsig, and the extra headers in order — so the
-    /// commit is byte-reconstructable later (#566) without the git mirror.
+    /// verbatim message, and the extra headers in order (gpgsig kept inline at
+    /// its captured position) — so the commit is byte-reconstructable later
+    /// (#566) without the git mirror.
     #[test]
     fn write_commit_preserves_git_fidelity_fields() {
         let store = InMemoryStore::new();
@@ -432,13 +429,15 @@ mod tests {
             time: Utc.with_ymd_and_hms(2026, 4, 2, 9, 0, 0).unwrap(),
             tz_offset: 2 * 3600,
         };
-        commit.gpgsig = Some(
-            "-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----"
-                .as_bytes()
-                .to_vec(),
-        );
+        // gpgsig sits BETWEEN mergetag and encoding — a non-canonical order
+        // that proves the signature keeps its captured ordinal in
+        // `extra_headers` (no split-out field that would lose the position).
         commit.extra_headers = vec![
             (b"mergetag".to_vec(), b"object deadbeef".to_vec()),
+            (
+                b"gpgsig".to_vec(),
+                b"-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----".to_vec(),
+            ),
             (b"encoding".to_vec(), b"ISO-8859-1".to_vec()),
         ];
 
@@ -456,14 +455,16 @@ mod tests {
             state.raw_message.as_deref(),
             Some("feat: thing\n\nBody.\n".as_bytes())
         );
-        assert_eq!(
-            state.git_gpgsig.as_deref(),
-            Some("-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----".as_bytes())
-        );
+        // The extra headers (gpgsig included) round-trip in exactly the
+        // captured order.
         assert_eq!(
             state.extra_headers,
             vec![
                 (b"mergetag".to_vec(), b"object deadbeef".to_vec()),
+                (
+                    b"gpgsig".to_vec(),
+                    b"-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----".to_vec(),
+                ),
                 (b"encoding".to_vec(), b"ISO-8859-1".to_vec()),
             ]
         );

@@ -302,27 +302,21 @@ pub struct State {
     /// #564.)
     #[serde(default)]
     pub raw_message: Option<Vec<u8>>,
-    /// The commit's `gpgsig` header value, verbatim, when the commit is
-    /// signed. Pulled out of [`State::extra_headers`] into its own field
-    /// because its byte-exact placement is load-bearing for #566's
-    /// signature reconstruction. `None` for unsigned commits.
+    /// Every git commit header beyond the ones Heddle models natively
+    /// (tree/parents/author/committer), in their original order. ORDER IS
+    /// LOAD-BEARING for #566 byte-exactness — this is a `Vec`, never a map.
+    /// Empty for native commits and legacy imports.
     ///
-    /// Stored as raw bytes, NOT a `String`: the signature is split from the
-    /// same (lossy-prone) header iteration as [`State::extra_headers`], and
-    /// the byte-typed invariant is uniform — every fidelity-bearing git
-    /// byte-string is bytes so no UTF-8-lossy conversion can sneak in. (PGP
-    /// armor is ASCII in practice, but typing it as bytes keeps the whole
-    /// header set byte-exact and prevents a future sibling regression.)
-    #[serde(default)]
-    pub git_gpgsig: Option<Vec<u8>>,
-    /// Any remaining git commit headers beyond the ones Heddle models
-    /// natively (tree/parents/author/committer/gpgsig), in their original
-    /// order. ORDER IS LOAD-BEARING for #566 byte-exactness — this is a
-    /// `Vec`, never a map. Empty for native commits and legacy imports.
+    /// `gpgsig` is just one of these headers and is kept INLINE at its
+    /// captured ordinal (not split into a separate field): when a commit's
+    /// extension headers are in non-canonical order — e.g. `x-custom`, then
+    /// `gpgsig`, then `mergetag` — splitting gpgsig out would lose its
+    /// position and break byte-identical reconstruction. The serialization
+    /// source of truth for the signature is its position here (spike §3).
     ///
     /// Both the header name and value are raw bytes (`Vec<u8>`), NOT
     /// `String`s: extra-header VALUES (a `mergetag` payload is a full tag
-    /// object; custom headers; gpgsig variants) can be non-UTF8, so a
+    /// object; custom headers; gpgsig armor) can be non-UTF8, so a
     /// `String` would force a lossy `to_string()` that destroys those bytes.
     /// Names are ASCII by git's spec but are bytes too so the whole tuple is
     /// byte-exact and no conversion sneaks in.
@@ -402,7 +396,6 @@ impl State {
             authored_tz_offset: 0,
             committer_tz_offset: 0,
             raw_message: None,
-            git_gpgsig: None,
             extra_headers: Vec::new(),
             status: Status::Draft,
         }
@@ -530,15 +523,6 @@ impl State {
     /// field docs). **Part of the state hash.** #564 de-lossy step 1.
     pub fn with_raw_message(mut self, raw_message: impl AsRef<[u8]>) -> Self {
         self.raw_message = Some(raw_message.as_ref().to_vec());
-        self.content_hash = None;
-        self
-    }
-
-    /// Record the commit's `gpgsig` header verbatim, as raw bytes (so it
-    /// round-trips byte-identically; see the `git_gpgsig` field docs).
-    /// **Part of the state hash.** #564 de-lossy step 1.
-    pub fn with_git_gpgsig(mut self, gpgsig: impl AsRef<[u8]>) -> Self {
-        self.git_gpgsig = Some(gpgsig.as_ref().to_vec());
         self.content_hash = None;
         self
     }
@@ -690,18 +674,15 @@ impl State {
         if self.authored_at.is_some() {
             len += 8;
         }
-        // raw_message and git_gpgsig: optional-bytes framing (1 tag + u32 len
-        // + bytes) — a length prefix, not NUL-termination, since either can
-        // contain NUL bytes (both are now byte-typed for non-UTF8 fidelity).
+        // raw_message: optional-bytes framing (1 tag + u32 len + bytes) — a
+        // length prefix, not NUL-termination, since the message can contain
+        // NUL bytes (it's byte-typed for non-UTF8 fidelity).
         len += 1;
         if let Some(raw_message) = &self.raw_message {
             len += 4 + raw_message.len() as u64;
         }
-        len += 1;
-        if let Some(gpgsig) = &self.git_gpgsig {
-            len += 4 + gpgsig.len() as u64;
-        }
-        // extra_headers: u32 count, then per pair u32 key_len+key, u32 val_len+val.
+        // extra_headers (gpgsig rides inline here at its captured position):
+        // u32 count, then per pair u32 key_len+key, u32 val_len+val.
         len += 4;
         for (key, value) in &self.extra_headers {
             len += 4 + key.len() as u64;
@@ -782,8 +763,8 @@ impl State {
         // git-fidelity fields (#564 de-lossy step 1, #565). These are
         // DELIBERATELY part of the content hash — the opposite of the W1
         // tail fields above. Two git commits that differ only in committer,
-        // author/committer time, timezone, verbatim message, gpgsig, or extra
-        // headers are distinct git objects; folding these into identity
+        // author/committer time, timezone, verbatim message, or extra headers
+        // (gpgsig included) are distinct git objects; folding these into identity
         // prevents them from dedup-colliding to one State in the
         // content-addressed store. This re-hashes every pre-#565 state (a real
         // format bump; acceptable pre-0.3). Keep this in sync with `hash_len`.
@@ -810,8 +791,8 @@ impl State {
         }
 
         write_optional_bytes(hasher, &self.raw_message);
-        write_optional_bytes(hasher, &self.git_gpgsig);
 
+        // extra_headers (gpgsig is one of these, kept inline at its position).
         hasher.update(&(self.extra_headers.len() as u32).to_le_bytes());
         for (key, value) in &self.extra_headers {
             hasher.update(&(key.len() as u32).to_le_bytes());
@@ -1041,7 +1022,13 @@ mod tests {
             |s: State| s.with_tz_offsets(3600, -7200),
             |s: State| s.with_authored_at(Utc::now() + chrono::Duration::seconds(1)),
             |s: State| s.with_raw_message("verbatim body\n"),
-            |s: State| s.with_git_gpgsig("-----BEGIN PGP SIGNATURE-----\n"),
+            // gpgsig now rides inline in extra_headers at its captured position.
+            |s: State| {
+                s.with_extra_headers(vec![(
+                    b"gpgsig".to_vec(),
+                    b"-----BEGIN PGP SIGNATURE-----\n".to_vec(),
+                )])
+            },
             |s: State| s.with_extra_headers(vec![(b"mergetag".to_vec(), b"x".to_vec())]),
         ] {
             let seeded = sample_state()
@@ -1093,8 +1080,10 @@ mod tests {
             .with_tz_offsets(3600, 0)
             .with_authored_at(Utc::now())
             .with_raw_message("body\n")
-            .with_git_gpgsig("sig")
-            .with_extra_headers(vec![(b"k".to_vec(), b"v".to_vec())]);
+            .with_extra_headers(vec![
+                (b"gpgsig".to_vec(), b"sig".to_vec()),
+                (b"k".to_vec(), b"v".to_vec()),
+            ]);
         assert_eq!(state.hash(), state.compute_hash());
     }
 

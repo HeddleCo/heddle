@@ -62,18 +62,6 @@ impl S3Store {
         format!("{}actions/{}.bin", self.prefix, id)
     }
 
-    /// Get the S3 key for a marker's annotated-tag sidecar. The marker name is
-    /// hex-encoded so arbitrary tag names (incl. slashes) are key-safe and the
-    /// original name is recoverable for listing — the same scheme the fs
-    /// backend uses (`marker-tags/<hex>.bin`).
-    pub(super) fn marker_tag_key(&self, marker: &str) -> String {
-        format!(
-            "{}marker-tags/{}.bin",
-            self.prefix,
-            hex::encode(marker.as_bytes())
-        )
-    }
-
     /// Lazily-initialized accessor for the runtime bridge.
     ///
     /// The synchronous `ObjectStore` methods route every `.send().await`

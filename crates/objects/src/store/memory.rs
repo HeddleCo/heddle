@@ -36,7 +36,6 @@ pub struct InMemoryStore {
     actions: RwLock<HashMap<ActionId, Vec<u8>>>,
     redactions: RwLock<HashMap<ContentHash, Vec<u8>>>,
     state_visibility: RwLock<HashMap<ChangeId, Vec<u8>>>,
-    annotated_tags: RwLock<HashMap<String, Vec<u8>>>,
 }
 
 impl InMemoryStore {
@@ -198,31 +197,6 @@ impl ObjectStore for InMemoryStore {
 
     fn list_states_with_visibility(&self) -> Result<Vec<ChangeId>> {
         Ok(self.state_visibility.read().unwrap().keys().copied().collect())
-    }
-
-    fn has_annotated_tag_for_marker(&self, marker: &str) -> Result<bool> {
-        Ok(self.annotated_tags.read().unwrap().contains_key(marker))
-    }
-
-    fn get_annotated_tag_bytes_for_marker(&self, marker: &str) -> Result<Option<Vec<u8>>> {
-        Ok(self.annotated_tags.read().unwrap().get(marker).cloned())
-    }
-
-    fn put_annotated_tag_bytes_for_marker(&self, marker: &str, bytes: &[u8]) -> Result<()> {
-        self.annotated_tags
-            .write()
-            .unwrap()
-            .insert(marker.to_string(), bytes.to_vec());
-        Ok(())
-    }
-
-    fn delete_annotated_tag_for_marker(&self, marker: &str) -> Result<()> {
-        self.annotated_tags.write().unwrap().remove(marker);
-        Ok(())
-    }
-
-    fn list_markers_with_annotated_tag(&self) -> Result<Vec<String>> {
-        Ok(self.annotated_tags.read().unwrap().keys().cloned().collect())
     }
 }
 

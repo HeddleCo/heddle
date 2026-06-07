@@ -58,15 +58,3 @@ pub(super) fn state_visibility_dir(root: &Path) -> PathBuf {
 pub(super) fn state_visibility_path(root: &Path, state: &ChangeId) -> PathBuf {
     state_visibility_dir(root).join(format!("{}.bin", state.to_string_full()))
 }
-
-pub(super) fn marker_tags_dir(root: &Path) -> PathBuf {
-    root.join("marker-tags")
-}
-
-/// Sidecar path for the annotated-tag object of marker `name`. The marker
-/// name is hex-encoded into the filename so arbitrary tag names (including
-/// slashes) are path-safe and the original name is recoverable for listing
-/// (#564 step 1, #565).
-pub(super) fn marker_tag_path(root: &Path, name: &str) -> PathBuf {
-    marker_tags_dir(root).join(format!("{}.bin", hex::encode(name.as_bytes())))
-}

@@ -6,7 +6,7 @@ use std::{collections::HashSet, path::Path};
 
 use chrono::{TimeZone, Utc};
 use objects::object::{
-    Agent, AnnotatedTag, Attribution, ChangeId, MarkerName, Principal, State, Status, ThreadName,
+    Agent, Attribution, ChangeId, MarkerName, Principal, State, Status, ThreadName,
 };
 use refs::{Head, RefExpectation};
 use repo::{Repository as HeddleRepository, ThreadId};
@@ -145,22 +145,18 @@ fn resolve_identity(
     Ok((ChangeId::from_bytes(change_id_bytes), None))
 }
 
-/// `(gpgsig, ordered remaining headers)` — the result of splitting a
-/// commit's extra headers (see [`split_extra_headers`]). Byte-typed: an
-/// extra-header value (a `mergetag` payload, a custom header, gpgsig) can be
-/// non-UTF8, so we carry raw bytes and never a lossy `to_string()`.
-type SplitHeaders = (Option<Vec<u8>>, Vec<(Vec<u8>, Vec<u8>)>);
-
-/// Pull the `gpgsig` header out of a commit's extra headers, returning it
-/// separately from the remaining headers (preserved in original order).
+/// Collect a commit's extension headers in their original order, as raw
+/// bytes so non-UTF8 header values survive. ORDER IS LOAD-BEARING for #566
+/// byte-exactness.
 ///
-/// gpgsig gets its own [`State`] field because its byte-exact placement is
-/// load-bearing for #566's signature reconstruction; the rest ride in
-/// `extra_headers`, where order is also load-bearing. Names and values are
-/// raw bytes so non-UTF8 header values survive. #564 de-lossy step 1.
-fn split_extra_headers(commit: &gix::Commit<'_>) -> GitResult<SplitHeaders> {
+/// `gpgsig` is kept INLINE here at its captured ordinal rather than split
+/// into a separate field: when a commit's headers are in non-canonical order
+/// — e.g. `x-custom`, then `gpgsig`, then `mergetag` — splitting gpgsig out
+/// would lose its position and break byte-identical reconstruction. Its
+/// position in this vec is the serialization source of truth (spike §3).
+/// #564 de-lossy step 1.
+fn collect_extra_headers(commit: &gix::Commit<'_>) -> GitResult<Vec<(Vec<u8>, Vec<u8>)>> {
     let decoded = commit.decode().map_err(git_err)?;
-    let mut gpgsig = None;
     let mut extra = Vec::new();
     // gix surfaces git's standard `encoding` header as the typed `.encoding`
     // field, NOT inside `extra_headers`. If we only iterate `extra_headers` the
@@ -172,13 +168,9 @@ fn split_extra_headers(commit: &gix::Commit<'_>) -> GitResult<SplitHeaders> {
         extra.push((b"encoding".to_vec(), encoding.to_vec()));
     }
     for (key, value) in decoded.extra_headers {
-        if key == "gpgsig" {
-            gpgsig = Some(value.to_vec());
-        } else {
-            extra.push((key.to_vec(), value.to_vec()));
-        }
+        extra.push((key.to_vec(), value.to_vec()));
     }
-    Ok((gpgsig, extra))
+    Ok(extra)
 }
 
 /// Import a single Git commit as a Heddle state.
@@ -210,9 +202,10 @@ pub fn import_commit(
     let committer_time = committer.time().map_err(git_err)?;
     let committed_seconds = committer_time.seconds;
     let committer_tz_offset = committer_time.offset;
-    // #565: capture gpgsig + any remaining headers (ordered) so the commit
-    // is byte-reconstructable later (#566) without the git mirror (#568).
-    let (git_gpgsig, extra_headers) = split_extra_headers(&commit)?;
+    // #565: capture all extension headers in order (gpgsig inline at its
+    // position) so the commit is byte-reconstructable later (#566) without
+    // the git mirror (#568).
+    let extra_headers = collect_extra_headers(&commit)?;
     let tree_id = commit.tree_id().map_err(git_err)?.detach();
     let parent_git_oids: Vec<gix::hash::ObjectId> =
         commit.parent_ids().map(|id| id.detach()).collect();
@@ -293,7 +286,7 @@ pub fn import_commit(
         GitBridgeError::InvalidMapping(format!("invalid Git timestamp: {}", authored_seconds))
     })?;
 
-    let mut state = State::new(tree_hash, parent_oids, attribution)
+    let state = State::new(tree_hash, parent_oids, attribution)
         .with_change_id(change_id)
         .with_intent(intent.unwrap_or_else(|| "Imported from Git".to_string()))
         .with_timestamp(created_at)
@@ -303,10 +296,6 @@ pub fn import_commit(
         .with_raw_message(message_bytes)
         .with_extra_headers(extra_headers)
         .with_status(status);
-
-    if let Some(gpgsig) = git_gpgsig {
-        state = state.with_git_gpgsig(gpgsig);
-    }
 
     let state = if let Some(c) = confidence {
         state.with_confidence(c)
@@ -757,10 +746,6 @@ fn import_with_ref_filter(
         if wanted_refs.is_some_and(|wanted| !wanted.contains(&name)) {
             continue;
         }
-        // The ref's *immediate* target: a tag object for annotated tags, a
-        // commit for lightweight tags. We capture it before peeling so we
-        // can tell the two apart and store the annotated tag's object.
-        let immediate = tag.target().try_id().map(|id| id.to_owned());
         // Skip non-commit-pointing tags here too; the tips loop already
         // recorded them in `skipped_non_commit_refs`.
         let oid = match peel_to_commit_oid(&repo, &mut tag)? {
@@ -768,41 +753,10 @@ fn import_with_ref_filter(
             Err(_) => continue,
         };
         if let Some(change_id) = bridge.mapping.get_heddle(oid) {
+            // Markers become lightweight tags (just a ref → peeled commit);
+            // that round-trips through the mirror unchanged and needs no object.
             sync_marker_from_git_tag(bridge, &name, &change_id)?;
-            // #565: for an annotated tag, also persist its tag object
-            // (tagger / message / gpgsig / type / name) in the marker's
-            // annotated-tag sidecar so the tag can be byte-reconstructed
-            // after the mirror is dropped (#568). Lightweight tags whose
-            // immediate target is the commit itself get no sidecar.
-            let is_annotated = match immediate {
-                Some(immediate) if immediate != oid => {
-                    repo.find_object(immediate).map_err(git_err)?.kind == gix::objs::Kind::Tag
-                }
-                _ => false,
-            };
-            if is_annotated {
-                let immediate = immediate.expect("annotated tag has an immediate tag object");
-                let annotated = build_annotated_tag(&repo, immediate)?;
-                let bytes = annotated.to_bytes().map_err(|e| {
-                    GitBridgeError::InvalidMapping(format!(
-                        "serialize annotated tag '{}': {}",
-                        name, e
-                    ))
-                })?;
-                bridge
-                    .heddle_repo
-                    .store()
-                    .put_annotated_tag_bytes_for_marker(&name, &bytes)?;
-            } else {
-                // #565: this tag is lightweight (or was demoted from annotated
-                // on re-import). Remove any annotated-tag sidecar left over
-                // from a prior annotated import of the same name, so a stale
-                // tag object can't linger and reconstruct the wrong tag.
-                bridge
-                    .heddle_repo
-                    .store()
-                    .delete_annotated_tag_for_marker(&name)?;
-            }
+            // annotated-tag-object fidelity: see #575 (first-class content-addressed storage)
             stats.tags_synced += 1;
         }
     }
@@ -815,45 +769,6 @@ fn shallow_import_retry_command(wanted_refs: Option<&HashSet<String>>) -> String
         Some(_) => "heddle bridge git import --path <full-git-repo> --ref <ref>".to_string(),
         None => "heddle bridge git import --path <full-git-repo>".to_string(),
     }
-}
-
-/// Read an annotated git tag object and capture its fidelity metadata as an
-/// [`AnnotatedTag`]. The stored `object` is the tag's **direct** target git
-/// OID (spike §7) paired with its `target_kind` — for a tag-of-tag this is the
-/// inner tag object, NOT the fully-peeled commit. The marker that owns the
-/// sidecar separately resolves to the peeled commit, so the Heddle linkage is
-/// kept there. #564 de-lossy step 1.
-fn build_annotated_tag(
-    repo: &gix::Repository,
-    tag_oid: gix::hash::ObjectId,
-) -> GitResult<AnnotatedTag> {
-    let tag = repo.find_tag(tag_oid).map_err(git_err)?;
-    let target_oid = tag.target_id().map_err(git_err)?.detach();
-    let decoded = tag.decode().map_err(git_err)?;
-    let target_kind = match decoded.target_kind {
-        gix::objs::Kind::Commit => "commit",
-        gix::objs::Kind::Tree => "tree",
-        gix::objs::Kind::Blob => "blob",
-        gix::objs::Kind::Tag => "tag",
-    };
-    let mut annotated =
-        AnnotatedTag::new(target_oid.to_string(), target_kind, decoded.name.to_string())
-            .with_message(decoded.message);
-    if let Some(tagger) = decoded.tagger().map_err(git_err)? {
-        let time = tagger.time().map_err(git_err)?;
-        let at = Utc.timestamp_opt(time.seconds, 0).single().ok_or_else(|| {
-            GitBridgeError::InvalidMapping(format!("invalid tagger timestamp: {}", time.seconds))
-        })?;
-        annotated = annotated.with_tagger(
-            Principal::new(tagger.name.to_string(), tagger.email.to_string()),
-            at,
-            time.offset,
-        );
-    }
-    if let Some(sig) = decoded.pgp_signature {
-        annotated = annotated.with_git_gpgsig(sig);
-    }
-    Ok(annotated)
 }
 
 fn sync_marker_from_git_tag(

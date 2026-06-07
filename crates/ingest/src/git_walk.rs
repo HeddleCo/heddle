@@ -91,11 +91,11 @@ pub struct CommitEntry {
     pub message: Vec<u8>,
     pub authored_at: DateTime<Utc>,
     pub committed_at: DateTime<Utc>,
-    /// The commit's `gpgsig` header, verbatim bytes, when signed (#564 step 1).
-    pub gpgsig: Option<Vec<u8>>,
-    /// Remaining commit headers (beyond tree/parents/author/committer/gpgsig)
-    /// in original order, as raw bytes so non-UTF8 values survive. ORDER IS
-    /// LOAD-BEARING for #566 byte-exactness.
+    /// Every commit header beyond tree/parents/author/committer, in original
+    /// order, as raw bytes so non-UTF8 values survive. ORDER IS LOAD-BEARING
+    /// for #566 byte-exactness. `gpgsig` rides inline here at its captured
+    /// position (not split out) so a non-canonical header order reconstructs
+    /// byte-identically. #564 step 1.
     pub extra_headers: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
@@ -442,7 +442,7 @@ impl GitSource {
             .map_err(|e| IngestError::Git(format!("message {sha}: {e}")))?
             .to_vec();
 
-        let (gpgsig, extra_headers) = split_commit_extra_headers(&commit)?;
+        let extra_headers = collect_commit_extra_headers(&commit)?;
 
         Ok(CommitEntry {
             sha: oid.to_string(),
@@ -453,7 +453,6 @@ impl GitSource {
             message,
             authored_at,
             committed_at,
-            gpgsig,
             extra_headers,
         })
     }
@@ -770,36 +769,27 @@ fn signature_from(sig: gix::actor::SignatureRef<'_>) -> GitSignature {
     }
 }
 
-/// `(gpgsig, ordered remaining headers)` — the result of splitting a
-/// commit's extra headers (see [`split_commit_extra_headers`]). Byte-typed:
-/// an extra-header value can be non-UTF8, so we never lossily `to_string()`.
-type SplitHeaders = (Option<Vec<u8>>, Vec<(Vec<u8>, Vec<u8>)>);
-
-/// Pull the `gpgsig` header out of a commit's extra headers, returning it
-/// separately from the remaining headers (preserved in original order).
-/// #564 de-lossy step 1: gpgsig and header order are load-bearing for
-/// #566 byte-reconstruction; names and values are raw bytes.
-fn split_commit_extra_headers(commit: &gix::Commit<'_>) -> crate::Result<SplitHeaders> {
+/// Collect a commit's extension headers in their original order, as raw
+/// bytes so non-UTF8 values survive. ORDER IS LOAD-BEARING for #566
+/// byte-reconstruction. `gpgsig` is kept INLINE at its captured ordinal (not
+/// split out) so a non-canonical header order reconstructs byte-identically;
+/// its position is the serialization source of truth (spike §3). Mirrors the
+/// bridge import path's `collect_extra_headers`. #564 de-lossy step 1.
+fn collect_commit_extra_headers(commit: &gix::Commit<'_>) -> crate::Result<Vec<(Vec<u8>, Vec<u8>)>> {
     let decoded = commit
         .decode()
         .map_err(|e| IngestError::Git(format!("decode commit: {e}")))?;
-    let mut gpgsig = None;
     let mut extra = Vec::new();
     // gix exposes git's standard `encoding` header as the typed `.encoding`
     // field, not in `extra_headers`; capture it explicitly (ahead of the other
     // extension headers, per spike §1/§4) so the charset label isn't dropped.
-    // Mirrors the bridge import path's `split_extra_headers`.
     if let Some(encoding) = decoded.encoding {
         extra.push((b"encoding".to_vec(), encoding.to_vec()));
     }
     for (key, value) in decoded.extra_headers {
-        if key == "gpgsig" {
-            gpgsig = Some(value.to_vec());
-        } else {
-            extra.push((key.to_vec(), value.to_vec()));
-        }
+        extra.push((key.to_vec(), value.to_vec()));
     }
-    Ok((gpgsig, extra))
+    Ok(extra)
 }
 
 #[cfg(test)]
@@ -1365,7 +1355,6 @@ mod tests {
             message: Vec::new(),
             authored_at: Utc::now(),
             committed_at: Utc::now(),
-            gpgsig: None,
             extra_headers: Vec::new(),
         };
         let commits = vec![

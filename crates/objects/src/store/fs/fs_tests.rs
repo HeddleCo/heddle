@@ -429,32 +429,6 @@ fn test_state_roundtrip_preserves_non_utf8_raw_message() {
     );
 }
 
-/// The annotated-tag sidecar round-trips through the fs store, and deleting it
-/// (the annotated→lightweight re-import path, #565) clears it idempotently.
-#[test]
-fn test_annotated_tag_sidecar_roundtrip_and_delete() {
-    let (_temp, store) = create_test_store();
-
-    assert!(!store.has_annotated_tag_for_marker("v1.0").unwrap());
-    store
-        .put_annotated_tag_bytes_for_marker("v1.0", b"tag-bytes")
-        .unwrap();
-    assert!(store.has_annotated_tag_for_marker("v1.0").unwrap());
-    assert_eq!(
-        store.get_annotated_tag_bytes_for_marker("v1.0").unwrap(),
-        Some(b"tag-bytes".to_vec())
-    );
-    assert_eq!(
-        store.list_markers_with_annotated_tag().unwrap(),
-        vec!["v1.0".to_string()]
-    );
-
-    store.delete_annotated_tag_for_marker("v1.0").unwrap();
-    assert!(!store.has_annotated_tag_for_marker("v1.0").unwrap());
-    // Deleting a missing sidecar is a no-op (idempotent).
-    store.delete_annotated_tag_for_marker("v1.0").unwrap();
-}
-
 #[test]
 fn test_list_states() {
     let (_temp, store) = create_test_store();

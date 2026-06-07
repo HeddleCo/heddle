@@ -212,21 +212,6 @@ impl ObjectStore for AnyStore {
     fn list_states_with_visibility(&self) -> Result<Vec<ChangeId>> {
         any_store_dispatch!(self, list_states_with_visibility())
     }
-    fn has_annotated_tag_for_marker(&self, marker: &str) -> Result<bool> {
-        any_store_dispatch!(self, has_annotated_tag_for_marker(marker))
-    }
-    fn get_annotated_tag_bytes_for_marker(&self, marker: &str) -> Result<Option<Vec<u8>>> {
-        any_store_dispatch!(self, get_annotated_tag_bytes_for_marker(marker))
-    }
-    fn put_annotated_tag_bytes_for_marker(&self, marker: &str, bytes: &[u8]) -> Result<()> {
-        any_store_dispatch!(self, put_annotated_tag_bytes_for_marker(marker, bytes))
-    }
-    fn delete_annotated_tag_for_marker(&self, marker: &str) -> Result<()> {
-        any_store_dispatch!(self, delete_annotated_tag_for_marker(marker))
-    }
-    fn list_markers_with_annotated_tag(&self) -> Result<Vec<String>> {
-        any_store_dispatch!(self, list_markers_with_annotated_tag())
-    }
 }
 
 /// Trait for object storage backends.
@@ -626,55 +611,6 @@ pub trait ObjectStore: Send + Sync {
     ///
     /// Default impl returns `Ok(vec![])`.
     fn list_states_with_visibility(&self) -> Result<Vec<ChangeId>> {
-        Ok(Vec::new())
-    }
-
-    /// Whether the store holds an annotated-tag object for `marker`.
-    ///
-    /// Annotated-tag objects (#564 step 1, #565) are a per-marker sidecar
-    /// holding the metadata of an annotated git tag (tagger, message,
-    /// gpgsig, extra headers) that the marker's peeled-commit `ChangeId`
-    /// alone can't represent. Like redactions / state-visibility they live
-    /// outside the content-addressed object graph, keyed by marker name.
-    /// Lightweight tags have no record here.
-    ///
-    /// Default impl returns `Ok(false)` for stores that don't model it.
-    fn has_annotated_tag_for_marker(&self, _marker: &str) -> Result<bool> {
-        Ok(false)
-    }
-
-    /// Return the raw rmp-encoded [`AnnotatedTag`](crate::object::AnnotatedTag)
-    /// bytes for `marker`, or `Ok(None)` if the marker is a lightweight tag
-    /// (no annotated-tag object).
-    ///
-    /// Default impl returns `Ok(None)`.
-    fn get_annotated_tag_bytes_for_marker(&self, _marker: &str) -> Result<Option<Vec<u8>>> {
-        Ok(None)
-    }
-
-    /// Persist the rmp-encoded annotated-tag object bytes for `marker`.
-    ///
-    /// Default impl returns an "unsupported" error so stores that don't
-    /// model the sidecar refuse rather than silently dropping the record.
-    fn put_annotated_tag_bytes_for_marker(&self, _marker: &str, _bytes: &[u8]) -> Result<()> {
-        Err(HeddleError::InvalidObject(
-            "this object store does not support persisting annotated tags".to_string(),
-        ))
-    }
-
-    /// Remove the annotated-tag object for `marker`, if any. No-op when the
-    /// marker is a lightweight tag. Used when a marker is deleted or
-    /// demoted to lightweight.
-    ///
-    /// Default impl is a no-op.
-    fn delete_annotated_tag_for_marker(&self, _marker: &str) -> Result<()> {
-        Ok(())
-    }
-
-    /// List every marker that has an annotated-tag object.
-    ///
-    /// Default impl returns `Ok(vec![])`.
-    fn list_markers_with_annotated_tag(&self) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
 }

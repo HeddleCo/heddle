@@ -474,7 +474,6 @@ mod tests {
             message: msg.as_bytes().to_vec(),
             authored_at: when,
             committed_at: when,
-            gpgsig: None,
             extra_headers: Vec::new(),
         }
     }

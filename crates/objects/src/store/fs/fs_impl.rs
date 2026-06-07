@@ -12,9 +12,8 @@ use super::{
     FsStore,
     fs_io::{list_hashes_from_dir, read_file_bytes, read_file_header},
     fs_paths::{
-        action_path, actions_dir, blobs_dir, hash_path, marker_tag_path, marker_tags_dir,
-        redaction_path, redactions_dir, state_path, state_visibility_dir, state_visibility_path,
-        states_dir, trees_dir,
+        action_path, actions_dir, blobs_dir, hash_path, redaction_path, redactions_dir,
+        state_path, state_visibility_dir, state_visibility_path, states_dir, trees_dir,
     },
 };
 use crate::{
@@ -1066,60 +1065,4 @@ impl ObjectStore for FsStore {
         Ok(out)
     }
 
-    fn has_annotated_tag_for_marker(&self, marker: &str) -> Result<bool> {
-        Ok(marker_tag_path(&self.root, marker).exists())
-    }
-
-    fn get_annotated_tag_bytes_for_marker(&self, marker: &str) -> Result<Option<Vec<u8>>> {
-        let path = marker_tag_path(&self.root, marker);
-        match fs::read(&path) {
-            Ok(bytes) => Ok(Some(bytes)),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(err) => Err(HeddleError::Io(err)),
-        }
-    }
-
-    fn put_annotated_tag_bytes_for_marker(&self, marker: &str, bytes: &[u8]) -> Result<()> {
-        let dir = marker_tags_dir(&self.root);
-        if !dir.exists() {
-            fs::create_dir_all(&dir)?;
-        }
-        let path = marker_tag_path(&self.root, marker);
-        crate::fs_atomic::write_file_atomic(&path, bytes)?;
-        Ok(())
-    }
-
-    fn delete_annotated_tag_for_marker(&self, marker: &str) -> Result<()> {
-        let path = marker_tag_path(&self.root, marker);
-        match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(HeddleError::Io(err)),
-        }
-    }
-
-    fn list_markers_with_annotated_tag(&self) -> Result<Vec<String>> {
-        let dir = marker_tags_dir(&self.root);
-        if !dir.exists() {
-            return Ok(Vec::new());
-        }
-        let mut out = Vec::new();
-        for entry in fs::read_dir(&dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("bin") {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            // Filenames are hex(marker_name_utf8); recover the name.
-            if let Ok(bytes) = hex::decode(stem)
-                && let Ok(name) = String::from_utf8(bytes)
-            {
-                out.push(name);
-            }
-        }
-        Ok(out)
-    }
 }
