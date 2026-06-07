@@ -753,14 +753,57 @@ impl Repository {
                     dest = %dest.display(),
                     "reflink failed with I/O error"
                 );
-                // Surface the offending loose source path so a
-                // clonefile/FICLONE failure is diagnosable instead of a bare
-                // `No such file or directory (os error 2)` with no context
-                // (heddle#571). `enrich_fs_error` also classifies common
-                // failures (out-of-space, read-only, permission) by ErrorKind.
-                Err(HeddleError::Io(enrich_fs_error(source, "reflinking", err)))
+                match classify_clone_failure(source, dest, &err) {
+                    // [heddle#571 r2, finding 2] Source vanished mid-flight
+                    // (TOCTOU): degrade to the bytes-write fallback for this
+                    // blob rather than hard-erroring. See `classify_clone_failure`.
+                    None => {
+                        debug!(
+                            source = %source.display(),
+                            dest = %dest.display(),
+                            "loose reflink source vanished between pre-check and clone syscall; falling back to bytes-write for this blob"
+                        );
+                        Ok(false)
+                    }
+                    // [heddle#571 r2, finding 3] Attribute to the offending side.
+                    Some((offender, action)) => {
+                        Err(HeddleError::Io(enrich_fs_error(offender, action, err)))
+                    }
+                }
             }
         }
+    }
+}
+
+/// Classify a clone-syscall (`clonefile`/`FICLONE`) I/O failure into either a
+/// bytes-write fallback or an enriched, correctly-attributed error.
+///
+/// * `None` — the loose source vanished between the `!source.exists()`
+///   pre-check and the syscall (concurrent prune / torn NoSync promote), so the
+///   syscall raised `ENOENT`. The caller should degrade to the bytes-write
+///   fallback (`Ok(false)`), which re-reads the authoritative bytes from the
+///   store; a blob genuinely absent from the store still errors there with its
+///   hash. This closes the TOCTOU race rather than blindly masking `ENOENT`
+///   (heddle#571 r2, finding 2).
+/// * `Some((path, action))` — a real failure to surface, attributed to the side
+///   that actually failed. The source survived (the vanished case returned
+///   `None`), so a create/permission/read-only/no-space failure is the
+///   DESTINATION's (read-only checkout dir, unwritable target). We blame the
+///   source only when it is the unreadable party (probed directly). Reporting a
+///   dest-side failure against the blob path would point the user at the wrong
+///   file (heddle#571 r2, finding 3).
+fn classify_clone_failure<'a>(
+    source: &'a Path,
+    dest: &'a Path,
+    err: &std::io::Error,
+) -> Option<(&'a Path, &'static str)> {
+    if err.kind() == std::io::ErrorKind::NotFound && !source.exists() {
+        return None;
+    }
+    if fs::File::open(source).is_ok() {
+        Some((dest, "reflinking into"))
+    } else {
+        Some((source, "reflinking"))
     }
 }
 
@@ -870,8 +913,65 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        Repository, WorktreeWriteOp, materialization_worker_count, remove_materialized_leaf,
+        Repository, WorktreeWriteOp, classify_clone_failure, materialization_worker_count,
+        remove_materialized_leaf,
     };
+
+    /// heddle#571 (round 2, finding 2): a clone syscall that raises ENOENT
+    /// because the loose source vanished AFTER the pre-check (TOCTOU) must
+    /// degrade to the bytes-write fallback (`None`), not hard-error.
+    #[test]
+    fn classify_clone_failure_vanished_source_falls_back() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("gone.blob");
+        let dest = temp.path().join("checkout/file");
+        assert!(!source.exists());
+
+        let enoent = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert!(
+            classify_clone_failure(&source, &dest, &enoent).is_none(),
+            "a vanished-source ENOENT must signal the bytes-write fallback"
+        );
+    }
+
+    /// heddle#571 (round 2, finding 3): when the source is still present and
+    /// readable, the clone failed on the DESTINATION side — attribute the error
+    /// to the dest (checkout) path, not the blob.
+    #[test]
+    fn classify_clone_failure_present_source_blames_dest() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("present.blob");
+        std::fs::write(&source, b"bytes").unwrap();
+        let dest = temp.path().join("readonly-checkout/file");
+
+        // A dest-side failure shape (e.g. read-only checkout dir).
+        let erofs = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let attributed = classify_clone_failure(&source, &dest, &erofs);
+        assert_eq!(
+            attributed,
+            Some((dest.as_path(), "reflinking into")),
+            "a failure with the source still readable must be attributed to dest"
+        );
+    }
+
+    /// heddle#571 (round 2, finding 3): a non-ENOENT failure whose source is no
+    /// longer openable is attributed to the SOURCE path (it is the unreadable
+    /// party), not the destination.
+    #[test]
+    fn classify_clone_failure_unreadable_source_blames_source() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("missing.blob"); // not created → unopenable
+        let dest = temp.path().join("file");
+
+        // Not ENOENT (so the vanished-source fast path doesn't fire), but the
+        // source can't be opened → blame the source.
+        let other = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            classify_clone_failure(&source, &dest, &other),
+            Some((source.as_path(), "reflinking")),
+            "an unreadable source must be attributed to the source path"
+        );
+    }
 
     /// Regression: `remove_materialized_leaf` must tolerate `ENOTEMPTY` on
     /// the directory branch, mirroring `remove_existing_path` in the

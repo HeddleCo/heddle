@@ -73,15 +73,26 @@ use super::worktree_cmd::{
 ///     propagate through the helpers' `anyhow::Result` via `?`) keeps its
 ///     variant, so an `Io`/`NotFound`/etc. stays itself and only a genuine
 ///     merge/visibility `Conflict` stays a `Conflict`;
-///   * a bare `std::io::Error` surfaces as `HeddleError::Io` (preserving the
-///     path/os-error its source carries);
+///   * an error whose chain bottoms out in a `std::io::Error` surfaces as
+///     `HeddleError::Io`, preserving BOTH the original `ErrorKind` (so
+///     `exit::from_error`'s kind-keyed classification stays correct) AND the
+///     `anyhow` context (the exact path/action that helpers like
+///     `write_cargo_config` attach via `.with_context`) — we must not downcast
+///     the bare `io::Error` out of the chain, which would throw every context
+///     layer away and leave the user with a contextless `No such file or
+///     directory`;
 ///   * only a genuinely-unclassifiable error falls back to `Conflict`.
 fn apply_error(err: anyhow::Error) -> HeddleError {
     match err.downcast::<HeddleError>() {
         Ok(heddle) => heddle,
-        Err(err) => match err.downcast::<std::io::Error>() {
-            Ok(io) => HeddleError::Io(io),
-            Err(err) => HeddleError::Conflict(format!("{err:#}")),
+        // Not already a structured `HeddleError`. If an `io::Error` sits
+        // anywhere in the chain, keep the variant as `Io` with its kind, but
+        // carry the full context chain (`{err:#}`) as the message so the
+        // path/action survives. Extract the kind first so the `downcast_ref`
+        // borrow is dropped before we format `err`.
+        Err(err) => match err.downcast_ref::<std::io::Error>().map(std::io::Error::kind) {
+            Some(kind) => HeddleError::Io(std::io::Error::new(kind, format!("{err:#}"))),
+            None => HeddleError::Conflict(format!("{err:#}")),
         },
     }
 }
@@ -1133,6 +1144,38 @@ mod tests {
         assert!(
             matches!(apply_error(conflict), HeddleError::Conflict(_)),
             "a genuine conflict must remain a conflict"
+        );
+    }
+
+    /// heddle#571 (round 2, finding 1): reclassifying an io failure must NOT
+    /// drop the `anyhow` context. The real shape is `write_cargo_config` doing
+    /// `fs::write(..).with_context(|| "writing .cargo/config.toml to {path}")?` —
+    /// the chain's outer layer is the context string, its source the io::Error.
+    /// `apply_error` must surface it as `Io` (kind preserved) WHILE keeping the
+    /// path/action in the message, so `heddle start --shared-target` failing to
+    /// write the cargo config still tells the user which file/action failed.
+    #[test]
+    fn apply_error_preserves_context_when_reclassifying_io() {
+        use anyhow::Context as _;
+
+        let with_ctx = Err::<(), _>(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "os error 13",
+        ))
+        .context("writing .cargo/config.toml to /work/.cargo/config.toml")
+        .unwrap_err();
+
+        let mapped = apply_error(with_ctx);
+        // Kind preserved so `exit::from_error` still classifies it correctly.
+        assert!(
+            matches!(&mapped, HeddleError::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied),
+            "io kind must survive reclassification, got {mapped:?}"
+        );
+        // The path/action context must NOT be flattened away.
+        let msg = format!("{mapped}");
+        assert!(
+            msg.contains(".cargo/config.toml") && msg.contains("writing"),
+            "reclassified io error must retain the path/action context: {msg}"
         );
     }
 
