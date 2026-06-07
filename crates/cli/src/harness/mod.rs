@@ -1029,7 +1029,7 @@ impl HarnessBridgeRuntime {
             // wiring before they can become the default execution root.
             ThreadMode::Virtualized => default_private_thread_path(&self.repo, name),
         };
-        let abs_path = prepare_worktree_target(&self.repo, &path)?.path;
+        let abs_path = prepare_worktree_target(&self.repo, &path, Some(name))?.path;
         write_isolated_checkout(&self.repo, &abs_path, &base_state, Some(name))?;
 
         let base_state_obj = self

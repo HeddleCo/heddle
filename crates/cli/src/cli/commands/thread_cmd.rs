@@ -1136,8 +1136,34 @@ fn cmd_thread_promote(
             );
         }
     }
-    let path = path.unwrap_or_else(|| default_materialized_thread_path(repo, thread_id));
-    let abs_path = prepare_worktree_target(repo, &path)?.path;
+    let using_default = path.is_none();
+    let target = path.unwrap_or_else(|| default_materialized_thread_path(repo, thread_id));
+
+    // Conversion-in-place (heddle#572 r3 Finding #3): an already-materialized
+    // (or solid) thread is ALREADY checked out at its canonical
+    // `.heddle/threads/<name>/root` — which is exactly the promote default. A
+    // fresh solid materialize there would hit the non-empty / existing-`.heddle`
+    // refusal, so promote of a default-located thread would never succeed. Tear
+    // down THIS thread's own existing checkout first so the conversion can write
+    // fresh (un-shared) bytes into the same canonical slot. Guarded narrowly to
+    // the default target AND this thread's own recorded checkout, so we never
+    // remove another thread's (or a user-supplied) directory; the clean-worktree
+    // gate above already ran against it.
+    if using_default && matches!(thread.mode, ThreadMode::Materialized | ThreadMode::Solid) {
+        let existing = thread
+            .materialized_path
+            .clone()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| thread.execution_path.clone());
+        if !existing.as_os_str().is_empty()
+            && existing.join(".heddle").exists()
+            && same_existing_dir(&existing, &target)
+        {
+            remove_path_recursively(&existing)?;
+        }
+    }
+
+    let abs_path = prepare_worktree_target(repo, &target, Some(thread_id))?.path;
     write_isolated_checkout(repo, &abs_path, &state_id, Some(&thread.thread))?;
 
     thread.mode = ThreadMode::Solid;
@@ -1330,6 +1356,17 @@ fn print_thread_output(
         }
     }
     Ok(())
+}
+
+/// Whether two paths denote the same directory. Canonicalizes both when they
+/// exist on disk (so a recorded-canonical path and a freshly-derived default
+/// that resolve to the same inode compare equal), falling back to a structural
+/// comparison otherwise.
+fn same_existing_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
 }
 
 fn default_materialized_thread_path(repo: &Repository, thread_id: &str) -> PathBuf {

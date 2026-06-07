@@ -5695,12 +5695,15 @@ fn start_explicit_path_under_heddle_threads_is_accepted() {
     heddle(&["adopt"], Some(temp.path())).expect("adopt Git overlay repo");
 
     // The inverted guard allows an explicit `--path` under `.heddle/`
-    // (heddle's reserved dir) even though it's inside the repo directory.
+    // (heddle's reserved dir) even though it's inside the repo directory — as
+    // long as it is a per-thread checkout LEAF (`<slot>/root`), so the manifest
+    // sidecar stays OUTSIDE the checkout.
     let custom = temp
         .path()
         .join(".heddle")
         .join("threads")
-        .join("explicit-custom");
+        .join("explicit-custom")
+        .join("root");
     let custom_arg = custom.to_str().unwrap();
     let started = json_value(
         temp.path(),
@@ -5716,8 +5719,159 @@ fn start_explicit_path_under_heddle_threads_is_accepted() {
     assert_eq!(started["thread"]["name"], "explicit-under-heddle");
     assert!(
         custom.join(".heddle").exists(),
-        "explicit .heddle/threads path should be accepted and materialized: {started}"
+        "explicit .heddle/threads/<slot>/root path should be accepted and materialized: {started}"
     );
+}
+
+/// heddle#572 r3 Finding #4: a managed `--path` that is the bare per-thread
+/// directory `.heddle/threads/<slot>` (no `root` leaf) is refused — the
+/// per-thread `manifest.toml` sidecar lives there, so a checkout would swallow
+/// it. The sidecar must stay a SIBLING of the checkout, never a child.
+#[test]
+fn start_managed_path_without_leaf_is_refused() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_for_json_contract(temp.path(), "main");
+    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
+    git_commit_all_for_json_contract(temp.path(), "seed");
+    heddle(&["adopt"], Some(temp.path())).expect("adopt Git overlay repo");
+
+    let bare = temp.path().join(".heddle").join("threads").join("no-leaf");
+    let err = heddle(
+        &["start", "no-leaf-thread", "--path", bare.to_str().unwrap()],
+        Some(temp.path()),
+    )
+    .expect_err("a bare per-thread dir (no leaf) must be refused");
+    assert!(
+        err.contains("per-thread checkout leaf"),
+        "unexpected error for no-leaf managed target: {err}"
+    );
+}
+
+/// heddle#572 r3 Finding #2: a fresh `start` must NOT reuse another thread's
+/// reserved canonical root. Two threads sharing one execution path is a
+/// corruption hazard; only a same-thread promote may re-occupy it.
+#[test]
+fn start_cannot_reuse_another_threads_reserved_root() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_for_json_contract(temp.path(), "main");
+    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
+    git_commit_all_for_json_contract(temp.path(), "seed");
+    heddle(&["adopt"], Some(temp.path())).expect("adopt Git overlay repo");
+
+    json_value(
+        temp.path(),
+        &["--output", "json", "start", "owner", "--workspace", "solid"],
+    );
+    // `owner`'s reserved root is `.heddle/threads/owner/root`. A different
+    // thread aiming there must be refused.
+    let owner_root = temp.path().join(".heddle/threads/owner/root");
+    let err = heddle(
+        &["start", "intruder", "--path", owner_root.to_str().unwrap()],
+        Some(temp.path()),
+    )
+    .expect_err("reusing another thread's reserved root must be refused");
+    assert!(
+        err.contains("nested inside an existing thread"),
+        "unexpected error reusing another thread's root: {err}"
+    );
+}
+
+/// heddle#572 r3 Finding #3: a materialized thread is already checked out at
+/// its canonical `.heddle/threads/<name>/root` — the promote default. Promotion
+/// must succeed by converting that checkout in place to a solid one, not refuse
+/// because the slot is occupied.
+#[test]
+fn promote_materialized_thread_converts_in_place() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_for_json_contract(temp.path(), "main");
+    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
+    git_commit_all_for_json_contract(temp.path(), "seed");
+    heddle(&["adopt"], Some(temp.path())).expect("adopt Git overlay repo");
+
+    json_value(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "start",
+            "promo",
+            "--workspace",
+            "materialized",
+        ],
+    );
+    let checkout = temp.path().join(".heddle/threads/promo/root");
+    assert!(checkout.join(".heddle").exists(), "materialized checkout present");
+
+    let promoted = json_value(temp.path(), &["thread", "promote", "promo"]);
+    assert_eq!(promoted["thread"]["mode"], "solid", "{promoted}");
+    assert!(
+        checkout.join(".heddle").exists(),
+        "the in-place converted solid checkout must still exist at the canonical root: {promoted}"
+    );
+    // The sidecar stayed OUTSIDE the checkout (a sibling of `root`).
+    assert!(
+        temp.path()
+            .join(".heddle/threads/promo/manifest.toml")
+            .exists(),
+        "manifest sidecar must remain a sibling of the checkout, not inside it"
+    );
+}
+
+/// heddle#572 r3 Finding #5 (the isolation guard): a thread checkout under
+/// `.heddle/threads/<t>/root` is a boundary-delimited worktree. A command run
+/// INSIDE it must resolve the THREAD's own HEAD/branch — never climb to the
+/// git-overlay parent and adopt the parent branch. The checkout's own `.heddle`
+/// pointer is that boundary (git's analogue is the linked-worktree `.git`
+/// file); capability detection roots at the checkout, so the parent's
+/// `git-overlay` capability and `main` branch never leak in.
+#[test]
+fn inside_thread_checkout_resolves_thread_not_parent_branch() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_for_json_contract(temp.path(), "main");
+    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
+    git_commit_all_for_json_contract(temp.path(), "seed");
+    heddle(&["adopt"], Some(temp.path())).expect("adopt Git overlay repo");
+
+    for mode in ["solid", "materialized"] {
+        let name = format!("{mode}-iso");
+        json_value(
+            temp.path(),
+            &["--output", "json", "start", &name, "--workspace", mode],
+        );
+        let checkout = temp.path().join(format!(".heddle/threads/{name}/root"));
+        assert!(
+            checkout.join(".heddle").exists(),
+            "{mode} checkout should materialize at {}",
+            checkout.display()
+        );
+
+        let status = json_value(&checkout, &["status"]);
+        // Capability roots at the checkout boundary, not the git-overlay parent.
+        assert_eq!(
+            status["repository_capability"], "native-heddle",
+            "inside a {mode} checkout the capability must root at the checkout, not the parent: {status}"
+        );
+        // HEAD resolves to the THREAD, never the parent's `main` branch.
+        assert_eq!(
+            status["thread"], name.as_str(),
+            "inside a {mode} checkout HEAD must be the thread, not the parent: {status}"
+        );
+        assert_eq!(
+            status["verification"]["heddle_thread"], name.as_str(),
+            "the overlay verification must also see the thread, not the parent: {status}"
+        );
+        // The parent's git branch (`main`) must NOT leak in.
+        assert!(
+            status["verification"]["git_branch"].is_null(),
+            "inside a {mode} checkout the parent git branch must NOT leak in: {status}"
+        );
+        // The checkout still knows it lives under a git-overlay parent, but as
+        // an isolated checkout — not as the parent repo itself.
+        assert_eq!(
+            status["repository_context"]["kind"], "git-overlay-isolated-checkout",
+            "{status}"
+        );
+    }
 }
 
 #[test]

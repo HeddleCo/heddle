@@ -1797,7 +1797,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // creation is the transaction's first step, so a failure in the remaining
     // pre-transaction work below can't orphan a dir we made before `execute`
     // had a rewind ledger (heddle#356 cid 3333881552).
-    let prepared_target = plan_worktree_target(repo, &path)?;
+    let prepared_target = plan_worktree_target(repo, &path, Some(&args.name))?;
     let target_dir_created = prepared_target.target_dir_created;
     let abs_path = normalize_path_for_containment(&prepared_target.path)?;
 
