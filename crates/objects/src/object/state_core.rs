@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{Attribution, ChangeId, ContentHash};
+use super::{Attribution, ChangeId, ContentHash, Principal};
 
 // ── Status ──────────────────────────────────────────────────────────
 
@@ -224,15 +224,19 @@ pub struct State {
     /// `created_at`.
     ///
     /// `created_at` is the *committer* time — when the state object
-    /// came into being in its current form. We hash that into the
-    /// state id so re-imports of the same git history produce
-    /// deterministic Heddle hashes. But for blame display we usually
-    /// want the *author* time — when someone actually wrote the
-    /// change — which survives `git rebase`, cherry-pick, squash-
-    /// merge, and `git commit --amend`. The `bridge git ingest`
-    /// importer fills this from `git_commit.authored_at`; native
-    /// heddle commits leave it `None` and blame falls back to
-    /// `created_at`.
+    /// came into being in its current form. `authored_at` is the
+    /// *author* time — when someone actually wrote the change — which
+    /// survives `git rebase`, cherry-pick, squash-merge, and `git
+    /// commit --amend`. The `bridge git ingest`/`import` importers fill
+    /// this from the git author time; native heddle commits leave it
+    /// `None` and blame falls back to `created_at`.
+    ///
+    /// **Part of the state hash (#564 de-lossy step 1).** Author time
+    /// is part of a git commit's identity: two commits that differ
+    /// *only* by author timestamp are distinct git objects, so folding
+    /// it into the hash keeps them from dedup-colliding to one State in
+    /// the content-addressed store. `None` hashes as a single absence
+    /// byte, so native commits are unaffected beyond the format bump.
     #[serde(default)]
     pub authored_at: Option<DateTime<Utc>>,
     /// Content hash of the state's [`RiskSignalBlob`](crate::object::RiskSignalBlob),
@@ -257,6 +261,67 @@ pub struct State {
     /// when this state captures an unresolved merge conflict as data.
     #[serde(default)]
     pub structured_conflicts: Option<ContentHash>,
+    // --- git-fidelity fields (#564 de-lossy step 1, #565) ---
+    //
+    // These preserve the parts of an imported git commit that Heddle's
+    // model used to drop, so a commit can be byte-reconstructed later
+    // (#566/#567) and the git mirror can be eliminated (#568). UNLIKE the
+    // W1 tail fields above, these ARE part of the content hash (see
+    // `update_hash`): two git-distinct commits that differ only in
+    // committer, timezone, verbatim message, gpgsig, or extra headers must
+    // hash differently so they can't dedup-collide in the content-addressed
+    // store. They are still tail-append + `#[serde(default)]` so legacy
+    // on-disk states keep deserializing.
+    /// The git committer identity, when distinct from the author
+    /// ([`Attribution::principal`]). Git records both an author (who wrote
+    /// the change) and a committer (who created this commit object); for
+    /// rebased / cherry-picked / amended commits the two differ. `None`
+    /// for native heddle commits and for legacy imports from before #565.
+    #[serde(default)]
+    pub committer: Option<Principal>,
+    /// Timezone offset (seconds east of UTC) of the *author* timestamp
+    /// ([`State::authored_at`] / `created_at` fallback). Git stores the
+    /// author's local offset (e.g. `+0000`, `-0700`); Heddle used to
+    /// discard it. `0` for native commits and legacy imports.
+    #[serde(default)]
+    pub authored_tz_offset: i32,
+    /// Timezone offset (seconds east of UTC) of the *committer* timestamp
+    /// (`created_at`). `0` for native commits and legacy imports.
+    #[serde(default)]
+    pub committer_tz_offset: i32,
+    /// The verbatim git commit message body (everything after the header
+    /// block), preserved exactly so reconstruction is byte-stable. Distinct
+    /// from `intent`, which is the trimmed first line surfaced in the UI.
+    /// `None` for native commits and legacy imports.
+    ///
+    /// Stored as raw bytes, NOT a `String`: a commit with a non-UTF8
+    /// `encoding` (latin-1, shift-jis, …) carries message bytes that are not
+    /// valid UTF-8 (e.g. `0xe9` for latin-1 `é`); a `String` could not
+    /// round-trip them byte-identically. (non-UTF8 author/committer identity
+    /// *names* are not yet byte-preserved — `Principal` is still `String`; see
+    /// #564.)
+    #[serde(default)]
+    pub raw_message: Option<Vec<u8>>,
+    /// Every git commit header beyond the ones Heddle models natively
+    /// (tree/parents/author/committer), in their original order. ORDER IS
+    /// LOAD-BEARING for #566 byte-exactness — this is a `Vec`, never a map.
+    /// Empty for native commits and legacy imports.
+    ///
+    /// `gpgsig` is just one of these headers and is kept INLINE at its
+    /// captured ordinal (not split into a separate field): when a commit's
+    /// extension headers are in non-canonical order — e.g. `x-custom`, then
+    /// `gpgsig`, then `mergetag` — splitting gpgsig out would lose its
+    /// position and break byte-identical reconstruction. The serialization
+    /// source of truth for the signature is its position here (spike §3).
+    ///
+    /// Both the header name and value are raw bytes (`Vec<u8>`), NOT
+    /// `String`s: extra-header VALUES (a `mergetag` payload is a full tag
+    /// object; custom headers; gpgsig armor) can be non-UTF8, so a
+    /// `String` would force a lossy `to_string()` that destroys those bytes.
+    /// Names are ASCII by git's spec but are bytes too so the whole tuple is
+    /// byte-exact and no conversion sneaks in.
+    #[serde(default)]
+    pub extra_headers: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl State {
@@ -327,6 +392,11 @@ impl State {
             review_signatures: None,
             discussions: None,
             structured_conflicts: None,
+            committer: None,
+            authored_tz_offset: 0,
+            committer_tz_offset: 0,
+            raw_message: None,
+            extra_headers: Vec::new(),
             status: Status::Draft,
         }
     }
@@ -421,14 +491,48 @@ impl State {
     /// Native heddle commits leave this `None`; blame display then
     /// falls back to `created_at`.
     ///
-    /// **Not part of the state hash.** `created_at` is what hashes;
-    /// this field is purely metadata for display. A re-imported repo
-    /// that picks up updated authored timestamps will produce the
-    /// same Heddle State hashes as before.
+    /// **Part of the state hash (#564 de-lossy step 1)** — see the
+    /// `authored_at` field docs and `update_hash`.
     pub fn with_authored_at(mut self, timestamp: DateTime<Utc>) -> Self {
         self.authored_at = Some(timestamp);
-        // Intentionally no `content_hash = None` here — authored_at is
-        // not in the hash by design.
+        self.content_hash = None;
+        self
+    }
+
+    /// Record the git committer identity (distinct from the author).
+    ///
+    /// **Part of the state hash** — see the `committer` field docs and
+    /// `update_hash`. #564 de-lossy step 1.
+    pub fn with_committer(mut self, committer: Principal) -> Self {
+        self.committer = Some(committer);
+        self.content_hash = None;
+        self
+    }
+
+    /// Record the author/committer timezone offsets (seconds east of UTC).
+    /// **Part of the state hash.** #564 de-lossy step 1.
+    pub fn with_tz_offsets(mut self, authored: i32, committer: i32) -> Self {
+        self.authored_tz_offset = authored;
+        self.committer_tz_offset = committer;
+        self.content_hash = None;
+        self
+    }
+
+    /// Record the verbatim git commit message body, as raw bytes (so a
+    /// non-UTF8 message round-trips byte-identically; see the `raw_message`
+    /// field docs). **Part of the state hash.** #564 de-lossy step 1.
+    pub fn with_raw_message(mut self, raw_message: impl AsRef<[u8]>) -> Self {
+        self.raw_message = Some(raw_message.as_ref().to_vec());
+        self.content_hash = None;
+        self
+    }
+
+    /// Record the ordered remaining git commit headers as raw bytes. ORDER
+    /// IS LOAD-BEARING (#566). **Part of the state hash.** #564 de-lossy
+    /// step 1.
+    pub fn with_extra_headers(mut self, extra_headers: Vec<(Vec<u8>, Vec<u8>)>) -> Self {
+        self.extra_headers = extra_headers;
+        self.content_hash = None;
         self
     }
 
@@ -555,6 +659,36 @@ impl State {
 
         len += 1;
 
+        // git-fidelity fields (#564 step 1). Must mirror `update_hash`
+        // byte-for-byte. committer: 1 tag byte + (name+NUL, email+NUL).
+        len += 1;
+        if let Some(committer) = &self.committer {
+            len += committer.name.len() as u64 + 1;
+            len += committer.email.len() as u64 + 1;
+        }
+        // both tz offsets: i32 LE, always present.
+        len += 4;
+        len += 4;
+        // authored_at (author time): 1 tag byte + (i64 LE when Some).
+        len += 1;
+        if self.authored_at.is_some() {
+            len += 8;
+        }
+        // raw_message: optional-bytes framing (1 tag + u32 len + bytes) — a
+        // length prefix, not NUL-termination, since the message can contain
+        // NUL bytes (it's byte-typed for non-UTF8 fidelity).
+        len += 1;
+        if let Some(raw_message) = &self.raw_message {
+            len += 4 + raw_message.len() as u64;
+        }
+        // extra_headers (gpgsig rides inline here at its captured position):
+        // u32 count, then per pair u32 key_len+key, u32 val_len+val.
+        len += 4;
+        for (key, value) in &self.extra_headers {
+            len += 4 + key.len() as u64;
+            len += 4 + value.len() as u64;
+        }
+
         len
     }
 
@@ -625,6 +759,65 @@ impl State {
         }
 
         hasher.update(&[self.status.to_byte()]);
+
+        // git-fidelity fields (#564 de-lossy step 1, #565). These are
+        // DELIBERATELY part of the content hash — the opposite of the W1
+        // tail fields above. Two git commits that differ only in committer,
+        // author/committer time, timezone, verbatim message, or extra headers
+        // (gpgsig included) are distinct git objects; folding these into identity
+        // prevents them from dedup-colliding to one State in the
+        // content-addressed store. This re-hashes every pre-#565 state (a real
+        // format bump; acceptable pre-0.3). Keep this in sync with `hash_len`.
+        if let Some(committer) = &self.committer {
+            hasher.update(&[1]);
+            hasher.update(committer.name.as_bytes());
+            hasher.update(&[0]);
+            hasher.update(committer.email.as_bytes());
+            hasher.update(&[0]);
+        } else {
+            hasher.update(&[0]);
+        }
+
+        hasher.update(&self.authored_tz_offset.to_le_bytes());
+        hasher.update(&self.committer_tz_offset.to_le_bytes());
+
+        // Author time (#564): committer time is hashed above as created_at;
+        // author time is the other half of a git commit's temporal identity.
+        if let Some(authored_at) = self.authored_at {
+            hasher.update(&[1]);
+            hasher.update(&authored_at.timestamp().to_le_bytes());
+        } else {
+            hasher.update(&[0]);
+        }
+
+        write_optional_bytes(hasher, &self.raw_message);
+
+        // extra_headers (gpgsig is one of these, kept inline at its position).
+        hasher.update(&(self.extra_headers.len() as u32).to_le_bytes());
+        for (key, value) in &self.extra_headers {
+            hasher.update(&(key.len() as u32).to_le_bytes());
+            hasher.update(key);
+            hasher.update(&(value.len() as u32).to_le_bytes());
+            hasher.update(value);
+        }
+    }
+}
+
+/// Length-prefixed optional-bytes framing for the hash: `[1] + u32-LE len +
+/// bytes` when `Some`, a single `[0]` when `None`. Unlike
+/// [`write_optional_string`]'s NUL-terminated framing this is binary-safe —
+/// `raw_message` can contain NUL bytes, so a length prefix (not a terminator)
+/// is required to keep the hash unambiguous.
+fn write_optional_bytes(hasher: &mut blake3::Hasher, value: &Option<Vec<u8>>) {
+    match value {
+        Some(bytes) => {
+            hasher.update(&[1]);
+            hasher.update(&(bytes.len() as u32).to_le_bytes());
+            hasher.update(bytes);
+        }
+        None => {
+            hasher.update(&[0]);
+        }
     }
 }
 
@@ -639,6 +832,95 @@ fn write_optional_string(hasher: &mut blake3::Hasher, value: &Option<String>) {
             hasher.update(&[0]);
         }
     }
+}
+
+/// Parse the *extension* headers from a raw git commit object's content bytes
+/// (the bytes `git cat-file commit <sha>` prints — i.e. gix's `Commit::data`),
+/// in their exact on-the-wire order, ready to store in [`State::extra_headers`].
+///
+/// A commit's header block runs from the start of the content up to the first
+/// blank line (the header/body separator). Its leading headers are always, in
+/// fixed order, `tree`, zero-or-more `parent`, `author`, `committer`; Heddle
+/// models those natively. Every header **after** `committer` is an extension
+/// header (`encoding`, `gpgsig`, `mergetag`, or any unknown/future name) and is
+/// returned here as a `(name, value)` byte pair at its real position.
+///
+/// **This is the single source of truth for extension-header order and bytes.**
+/// Both git import paths (the CLI bridge and the ingest walker) build
+/// `extra_headers` from it. The alternative — stitching the vec back together
+/// from a decoder's *typed* accessors (gix surfaces `encoding`, and historically
+/// `gpgsig`, as fields *outside* its `extra_headers`) — silently reorders the
+/// headers git happens to model as typed fields, which breaks #566 byte-exact
+/// reconstruction. So we never consult those typed accessors for position; the
+/// raw header block is authoritative. (#564 de-lossy step 1 — close-the-class.)
+///
+/// Folded continuation lines (a value line beginning with a single space
+/// `0x20`, used by `gpgsig`/`mergetag`) are **unfolded**: each continuation
+/// contributes a `\n` plus the line with exactly one leading space stripped, so
+/// the stored value holds the value's real internal newlines with no trailing
+/// newline. The serializer (#566) re-folds by mapping every `\n` back to `\n `
+/// (spike §2). A "blank" line inside an armored value is ` \n` on the wire (one
+/// space), so it unfolds to an empty segment — never confused with the
+/// header/body separator, which is a truly empty line.
+pub fn parse_commit_extension_headers(commit_content: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    // The header block ends at the first *empty* line. Folded "blank" lines
+    // inside an armored value are ` \n` (a single space), never empty, so the
+    // first `\n\n` reliably marks the header/body boundary.
+    let header_block = match find_subslice(commit_content, b"\n\n") {
+        Some(idx) => &commit_content[..idx],
+        // No separator (malformed / header-only) — treat all of it as headers.
+        None => commit_content,
+    };
+
+    // Collect every logical header (name, unfolded value) in order; the
+    // extension headers are the ones after the `committer` line.
+    let mut headers: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for line in header_block.split(|&b| b == b'\n') {
+        if line.first() == Some(&b' ') {
+            // Continuation of the current header value: restore the newline
+            // that folding replaced and strip exactly one leading space.
+            if let Some((_, value)) = headers.last_mut() {
+                value.push(b'\n');
+                value.extend_from_slice(&line[1..]);
+            }
+            // A continuation with no preceding header is malformed git; skip it
+            // rather than panic.
+            continue;
+        }
+        // New header: `name<SP>value`. A header line with no space is degenerate
+        // (git never emits one in this region) — record it with an empty value
+        // so no bytes are silently dropped.
+        let (name, value) = match line.iter().position(|&b| b == b' ') {
+            Some(sp) => (line[..sp].to_vec(), line[sp + 1..].to_vec()),
+            None => (line.to_vec(), Vec::new()),
+        };
+        headers.push((name, value));
+    }
+
+    // Extension headers are everything strictly after `committer`. git always
+    // emits exactly one committer line ahead of the extension headers; if it is
+    // somehow absent, fall back to excluding the four core names so nothing is
+    // silently dropped or mis-captured.
+    match headers.iter().position(|(name, _)| name == b"committer") {
+        Some(idx) => headers.split_off(idx + 1),
+        None => headers
+            .into_iter()
+            .filter(|(name, _)| {
+                !matches!(
+                    name.as_slice(),
+                    b"tree" | b"parent" | b"author" | b"committer"
+                )
+            })
+            .collect(),
+    }
+}
+
+/// Index of the first occurrence of `needle` in `haystack`, or `None`.
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 #[cfg(test)]
@@ -802,5 +1084,217 @@ mod tests {
             bare_hash,
             "W1 tail fields must not affect the state hash"
         );
+    }
+
+    /// The inverse of `w1_tail_fields_are_not_part_of_state_hash`: the
+    /// git-fidelity fields (#564 step 1) MUST be part of the hash so two
+    /// git-distinct commits can't dedup-collide. Each field, set in
+    /// isolation, must move the hash.
+    #[test]
+    fn fidelity_fields_are_part_of_state_hash() {
+        let base = sample_state();
+        let base_hash = base.compute_hash();
+
+        let with_committer = sample_state()
+            .with_change_id(base.change_id)
+            .with_logical_change_id(base.logical_change_id());
+        let mut with_committer = with_committer
+            .with_committer(Principal::new("Carol", "carol@example.com"));
+        with_committer.created_at = base.created_at;
+        assert_ne!(
+            with_committer.hash(),
+            base_hash,
+            "committer must affect the state hash"
+        );
+
+        for mutate in [
+            |s: State| s.with_tz_offsets(3600, -7200),
+            |s: State| s.with_authored_at(Utc::now() + chrono::Duration::seconds(1)),
+            |s: State| s.with_raw_message("verbatim body\n"),
+            // gpgsig now rides inline in extra_headers at its captured position.
+            |s: State| {
+                s.with_extra_headers(vec![(
+                    b"gpgsig".to_vec(),
+                    b"-----BEGIN PGP SIGNATURE-----\n".to_vec(),
+                )])
+            },
+            |s: State| s.with_extra_headers(vec![(b"mergetag".to_vec(), b"x".to_vec())]),
+        ] {
+            let seeded = sample_state()
+                .with_change_id(base.change_id)
+                .with_logical_change_id(base.logical_change_id());
+            let mut decorated = mutate(seeded);
+            decorated.created_at = base.created_at;
+            assert_ne!(
+                decorated.hash(),
+                base_hash,
+                "fidelity field must affect the state hash"
+            );
+        }
+    }
+
+    /// extra_headers order is load-bearing (#566): the same pairs in a
+    /// different order must hash differently.
+    #[test]
+    fn extra_headers_order_affects_hash() {
+        let base = sample_state();
+        let one = sample_state()
+            .with_change_id(base.change_id)
+            .with_logical_change_id(base.logical_change_id());
+        let mut one = one.with_extra_headers(vec![
+            (b"a".to_vec(), b"1".to_vec()),
+            (b"b".to_vec(), b"2".to_vec()),
+        ]);
+        one.created_at = base.created_at;
+
+        let two = sample_state()
+            .with_change_id(base.change_id)
+            .with_logical_change_id(base.logical_change_id());
+        let mut two = two.with_extra_headers(vec![
+            (b"b".to_vec(), b"2".to_vec()),
+            (b"a".to_vec(), b"1".to_vec()),
+        ]);
+        two.created_at = base.created_at;
+
+        assert_ne!(one.hash(), two.hash());
+    }
+
+    /// The fidelity fields set together produce a stable, recomputable
+    /// hash (guards against a `hash_len`/`update_hash` divergence making
+    /// the cached hash differ from a fresh `compute_hash`).
+    #[test]
+    fn fidelity_fields_hash_is_stable() {
+        let mut state = sample_state()
+            .with_committer(Principal::new("Dave", "dave@example.com"))
+            .with_tz_offsets(3600, 0)
+            .with_authored_at(Utc::now())
+            .with_raw_message("body\n")
+            .with_extra_headers(vec![
+                (b"gpgsig".to_vec(), b"sig".to_vec()),
+                (b"k".to_vec(), b"v".to_vec()),
+            ]);
+        assert_eq!(state.hash(), state.compute_hash());
+    }
+
+    /// A non-UTF8 git message body (latin-1 `café` = `caf\xe9`) must be
+    /// stored byte-identically. `raw_message` is `Vec<u8>`, not `String`,
+    /// precisely so these bytes survive; the hash stays stable/recomputable
+    /// over the raw bytes (length-prefixed framing, NUL-safe). #564 step 1.
+    #[test]
+    fn non_utf8_raw_message_is_byte_preserved() {
+        let raw = b"caf\xe9\n".to_vec();
+        assert!(
+            String::from_utf8(raw.clone()).is_err(),
+            "test fixture must be invalid UTF-8 to be meaningful"
+        );
+        let mut state = sample_state().with_raw_message(&raw);
+        assert_eq!(
+            state.raw_message.as_deref(),
+            Some(raw.as_slice()),
+            "raw bytes preserved verbatim"
+        );
+        // rmp serialize → deserialize (the store's on-disk codec) keeps the
+        // bytes intact, and the hash recomputes identically afterwards.
+        let bytes = rmp_serde::to_vec(&state).expect("serialize state");
+        let back: State = rmp_serde::from_slice(&bytes).expect("deserialize state");
+        assert_eq!(back.raw_message.as_deref(), Some(raw.as_slice()));
+        let mut back = back;
+        assert_eq!(state.hash(), back.hash());
+        assert_eq!(back.hash(), back.compute_hash());
+    }
+
+    /// A NUL byte inside the message must not be swallowed/truncated by the
+    /// hash framing — length-prefixed `raw_message` is what makes this safe,
+    /// where the old NUL-terminated string framing would have been ambiguous.
+    #[test]
+    fn raw_message_with_nul_byte_changes_hash() {
+        let base = sample_state();
+        let with_nul = sample_state()
+            .with_change_id(base.change_id)
+            .with_logical_change_id(base.logical_change_id());
+        let mut a = with_nul.with_raw_message(b"a\x00b");
+        a.created_at = base.created_at;
+
+        let other = sample_state()
+            .with_change_id(base.change_id)
+            .with_logical_change_id(base.logical_change_id());
+        let mut b = other.with_raw_message(b"a\x00c");
+        b.created_at = base.created_at;
+
+        assert_ne!(a.hash(), b.hash());
+    }
+
+    /// Close-the-class conformance: extension headers are captured from the
+    /// raw commit header block in their EXACT on-the-wire order, regardless of
+    /// which ones a decoder would surface as typed fields. A commit whose
+    /// optional headers are in non-canonical order — `x-custom`, then a folded
+    /// `gpgsig`, then `encoding`, then a folded `mergetag` — must reproduce that
+    /// exact ordered `(name, value)` byte sequence. This fails if any header is
+    /// reordered, prepended, appended, or dropped. #564 de-lossy step 1.
+    #[test]
+    fn parse_extension_headers_preserves_noncanonical_wire_order() {
+        // A folded `mergetag` value carries a full tag object, which itself has
+        // an internal blank line between the tag headers and the tag message —
+        // on the wire that blank line is folded to a single space (` `), NEVER
+        // an empty line, so it must not be mistaken for the header/body split.
+        // Built line-by-line (NOT a `\`-continued literal, which would eat the
+        // load-bearing leading space on each folded continuation line).
+        let lines: &[&[u8]] = &[
+            b"tree 1111111111111111111111111111111111111111",
+            b"parent 2222222222222222222222222222222222222222",
+            b"author Alice <alice@example.com> 1700000000 +0000",
+            b"committer Bob <bob@example.com> 1700000100 +0000",
+            b"x-custom custom value",
+            b"gpgsig -----BEGIN PGP SIGNATURE-----",
+            b" sig-line-1",
+            b" -----END PGP SIGNATURE-----",
+            b"encoding ISO-8859-1",
+            b"mergetag object 3333333333333333333333333333333333333333",
+            b" type commit",
+            b" tag sidetag",
+            b" tagger Carol <carol@example.com> 1700000050 +0000",
+            b" ", // folded blank line inside the tag object (one space)
+            b" signed side tag",
+            b"", // the real header/body separator (empty line)
+            b"the commit message",
+            b"",
+        ];
+        let content = lines.join(&b'\n');
+
+        let headers = parse_commit_extension_headers(&content);
+
+        let expected: Vec<(Vec<u8>, Vec<u8>)> = vec![
+            (b"x-custom".to_vec(), b"custom value".to_vec()),
+            (
+                b"gpgsig".to_vec(),
+                // Unfolded: internal newlines restored, NO trailing newline (the
+                // serializer re-folds each `\n` to `\n `, spike §2).
+                b"-----BEGIN PGP SIGNATURE-----\nsig-line-1\n-----END PGP SIGNATURE-----"
+                    .to_vec(),
+            ),
+            (b"encoding".to_vec(), b"ISO-8859-1".to_vec()),
+            (
+                b"mergetag".to_vec(),
+                // The folded ` \n` blank line unfolds to an empty segment, so the
+                // tag object's header/message split survives as a real `\n\n`.
+                b"object 3333333333333333333333333333333333333333\ntype commit\ntag sidetag\ntagger Carol <carol@example.com> 1700000050 +0000\n\nsigned side tag".to_vec(),
+            ),
+        ];
+
+        assert_eq!(headers, expected);
+    }
+
+    /// A commit with no extension headers (the common case) yields an empty
+    /// vec — `tree`/`parent`/`author`/`committer` are modelled natively and
+    /// never leak into `extra_headers`.
+    #[test]
+    fn parse_extension_headers_empty_when_only_core_headers() {
+        let content: &[u8] = b"\
+tree 1111111111111111111111111111111111111111\n\
+author Alice <alice@example.com> 1700000000 +0000\n\
+committer Bob <bob@example.com> 1700000100 +0000\n\
+\n\
+just a message\n";
+        assert!(parse_commit_extension_headers(content).is_empty());
     }
 }

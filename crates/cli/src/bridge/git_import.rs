@@ -7,6 +7,7 @@ use std::{collections::HashSet, path::Path};
 use chrono::{TimeZone, Utc};
 use objects::object::{
     Agent, Attribution, ChangeId, MarkerName, Principal, State, Status, ThreadName,
+    parse_commit_extension_headers,
 };
 use refs::{Head, RefExpectation};
 use repo::{Repository as HeddleRepository, ThreadId};
@@ -145,6 +146,22 @@ fn resolve_identity(
     Ok((ChangeId::from_bytes(change_id_bytes), None))
 }
 
+/// Collect a commit's extension headers in their original on-the-wire order,
+/// as raw bytes so non-UTF8 header values survive. ORDER IS LOAD-BEARING for
+/// #566 byte-exactness.
+///
+/// Built straight from the raw commit object bytes (`commit.data`) via
+/// [`parse_commit_extension_headers`] so `encoding` / `gpgsig` / `mergetag` /
+/// any unknown header all land at their TRUE captured position through one code
+/// path. We deliberately do NOT stitch the vec from gix's typed accessors
+/// (`CommitRef::encoding`, …): gix surfaces some headers as typed fields outside
+/// `extra_headers`, and re-inserting them by hand reorders them — the close-the-
+/// class bug this replaces. The raw header block is the source of truth.
+/// #564 de-lossy step 1.
+fn collect_extra_headers(commit: &gix::Commit<'_>) -> GitResult<Vec<(Vec<u8>, Vec<u8>)>> {
+    Ok(parse_commit_extension_headers(&commit.data))
+}
+
 /// Import a single Git commit as a Heddle state.
 pub fn import_commit(
     mapping: &mut SyncMapping,
@@ -153,11 +170,31 @@ pub fn import_commit(
     git_oid: gix::hash::ObjectId,
 ) -> GitResult<ChangeId> {
     let commit = repo.find_commit(git_oid).map_err(git_err)?;
-    let message = commit.message_raw_sloppy().to_string();
+    // Capture the raw message bytes verbatim for byte-exact reconstruction
+    // (#566): a non-UTF8 message (latin-1, shift-jis, …) must survive intact,
+    // so store bytes, not a String. A lossy String view is derived only for
+    // trailer / intent parsing, which inspect the (ASCII) footer lines.
+    let message_bytes = commit.message_raw_sloppy().to_vec();
+    let message = String::from_utf8_lossy(&message_bytes).into_owned();
     let author = commit.author().map_err(git_err)?;
     let author_name = author.name.to_string();
     let author_email = author.email.to_string();
-    let timestamp = author.time().map_err(git_err)?.seconds;
+    let author_time = author.time().map_err(git_err)?;
+    let authored_seconds = author_time.seconds;
+    let authored_tz_offset = author_time.offset;
+    // #565: also capture the committer identity + time. Git records both an
+    // author (who wrote the change) and a committer (who created this commit
+    // object); the two differ for rebased / cherry-picked / amended commits.
+    let committer = commit.committer().map_err(git_err)?;
+    let committer_name = committer.name.to_string();
+    let committer_email = committer.email.to_string();
+    let committer_time = committer.time().map_err(git_err)?;
+    let committed_seconds = committer_time.seconds;
+    let committer_tz_offset = committer_time.offset;
+    // #565: capture all extension headers in true wire order (encoding /
+    // gpgsig / mergetag / unknown all at their captured position) so the commit
+    // is byte-reconstructable later (#566) without the git mirror (#568).
+    let extra_headers = collect_extra_headers(&commit)?;
     let tree_id = commit.tree_id().map_err(git_err)?.detach();
     let parent_git_oids: Vec<gix::hash::ObjectId> =
         commit.parent_ids().map(|id| id.detach()).collect();
@@ -226,14 +263,27 @@ pub fn import_commit(
         })
         .unwrap_or(Status::Draft);
 
-    let created_at = Utc.timestamp_opt(timestamp, 0).single().ok_or_else(|| {
-        GitBridgeError::InvalidMapping(format!("invalid Git timestamp: {}", timestamp))
+    // #565: `created_at` is the *committer* time (the commit object's
+    // birth) and `authored_at` is the *author* time, matching the
+    // `bridge git ingest` importer. Previously this path stored the author
+    // time as `created_at` and dropped the committer entirely, so the
+    // committer time wasn't recoverable; fidelity requires both.
+    let created_at = Utc.timestamp_opt(committed_seconds, 0).single().ok_or_else(|| {
+        GitBridgeError::InvalidMapping(format!("invalid Git timestamp: {}", committed_seconds))
+    })?;
+    let authored_at = Utc.timestamp_opt(authored_seconds, 0).single().ok_or_else(|| {
+        GitBridgeError::InvalidMapping(format!("invalid Git timestamp: {}", authored_seconds))
     })?;
 
     let state = State::new(tree_hash, parent_oids, attribution)
         .with_change_id(change_id)
         .with_intent(intent.unwrap_or_else(|| "Imported from Git".to_string()))
         .with_timestamp(created_at)
+        .with_authored_at(authored_at)
+        .with_committer(Principal::new(committer_name, committer_email))
+        .with_tz_offsets(authored_tz_offset, committer_tz_offset)
+        .with_raw_message(message_bytes)
+        .with_extra_headers(extra_headers)
         .with_status(status);
 
     let state = if let Some(c) = confidence {
@@ -692,7 +742,10 @@ fn import_with_ref_filter(
             Err(_) => continue,
         };
         if let Some(change_id) = bridge.mapping.get_heddle(oid) {
+            // Markers become lightweight tags (just a ref → peeled commit);
+            // that round-trips through the mirror unchanged and needs no object.
             sync_marker_from_git_tag(bridge, &name, &change_id)?;
+            // annotated-tag-object fidelity: see #575 (first-class content-addressed storage)
             stats.tags_synced += 1;
         }
     }

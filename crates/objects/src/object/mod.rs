@@ -55,7 +55,7 @@ pub use state_context::{
     ContextError, ContextTarget,
 };
 pub use state_core::{
-    SignatureStatus, State, StateSignature, Status, Verification,
+    SignatureStatus, State, StateSignature, Status, Verification, parse_commit_extension_headers,
 };
 pub use state_provenance::{FileProvenance, LineSpan, Origin, OriginSet, ProvenanceError};
 pub use state_review::{

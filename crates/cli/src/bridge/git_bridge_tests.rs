@@ -6131,3 +6131,252 @@ fn heddle_owned_tag_overwrite_still_lands() {
         "expected NonFastForwardRef, got {err:?}"
     );
 }
+
+/// Write a raw root commit with explicit, distinct author and committer
+/// signatures and arbitrary extra headers. Unlike `commit_with_tree`, which
+/// reuses one zero-offset signature for both roles, this surfaces committer,
+/// timezone, gpgsig, and extra-header fidelity (#564 step 1).
+fn commit_with_signatures(
+    repo: &gix::Repository,
+    reference: Option<&str>,
+    tree_oid: gix::hash::ObjectId,
+    message: &str,
+    author: gix::actor::Signature,
+    committer: gix::actor::Signature,
+    extra_headers: Vec<(gix::bstr::BString, gix::bstr::BString)>,
+) -> gix::hash::ObjectId {
+    let commit = gix::objs::Commit {
+        tree: tree_oid,
+        parents: Default::default(),
+        author,
+        committer,
+        encoding: None,
+        message: message.into(),
+        extra_headers,
+    };
+    let id = repo.write_object(&commit).expect("write commit").detach();
+    if let Some(reference) = reference {
+        set_reference(repo, reference, id, PreviousValue::Any, "test: update ref")
+            .expect("update ref");
+    }
+    id
+}
+
+/// #564 step 1: a commit imported through the bridge must round-trip every
+/// git-fidelity field — distinct committer identity, both timezone offsets,
+/// the verbatim message, the gpgsig (pulled out of the extra headers), and
+/// the remaining extra headers in order.
+#[test]
+fn import_preserves_commit_git_fidelity_fields() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_git_temp, git_repo) = init_git_repo();
+
+    let tree_oid = empty_tree_oid(&git_repo);
+    let author = gix::actor::Signature {
+        name: "Author".into(),
+        email: "author@example.com".into(),
+        time: gix::date::Time {
+            seconds: 1_000_000,
+            offset: -7 * 3600,
+        },
+    };
+    let committer = gix::actor::Signature {
+        name: "Committer".into(),
+        email: "committer@example.com".into(),
+        time: gix::date::Time {
+            seconds: 2_000_000,
+            offset: 2 * 3600,
+        },
+    };
+    let gpgsig = "-----BEGIN PGP SIGNATURE-----\nABCD\n-----END PGP SIGNATURE-----";
+    let extra_headers = vec![
+        ("gpgsig".into(), gpgsig.into()),
+        ("mergetag".into(), "object deadbeef".into()),
+    ];
+    let commit_oid = commit_with_signatures(
+        &git_repo,
+        Some("refs/heads/main"),
+        tree_oid,
+        "feat: thing\n\nBody.\n",
+        author,
+        committer,
+        extra_headers,
+    );
+
+    let mut bridge = GitBridge::new(&repo);
+    import_all(&mut bridge, Some(git_repo.workdir().expect("workdir"))).expect("import");
+
+    let change_id = bridge.mapping.get_heddle(commit_oid).expect("commit mapped");
+    let state = repo
+        .store()
+        .get_state(&change_id)
+        .expect("load state")
+        .expect("state written");
+
+    let stored_committer = state.committer.expect("committer preserved");
+    assert_eq!(stored_committer.name, "Committer");
+    assert_eq!(stored_committer.email, "committer@example.com");
+    assert_eq!(state.authored_tz_offset, -7 * 3600);
+    assert_eq!(state.committer_tz_offset, 2 * 3600);
+    assert_eq!(
+        state.raw_message.as_deref(),
+        Some("feat: thing\n\nBody.\n".as_bytes())
+    );
+    // gix folds multi-line extra-header values and round-trips them with a
+    // trailing newline; byte-exact State round-tripping is covered by the
+    // ingest unit test. Here we verify gpgsig stays INLINE in extra_headers at
+    // its captured position (not split into a separate field) and the headers
+    // keep their original order.
+    assert_eq!(state.extra_headers.len(), 2, "gpgsig + mergetag, both inline");
+    assert_eq!(state.extra_headers[0].0, b"gpgsig".to_vec());
+    assert_eq!(
+        String::from_utf8_lossy(&state.extra_headers[0].1).trim_end(),
+        gpgsig,
+        "gpgsig preserved inline at its captured position"
+    );
+    assert_eq!(state.extra_headers[1].0, b"mergetag".to_vec());
+    assert_eq!(
+        String::from_utf8_lossy(&state.extra_headers[1].1).trim_end(),
+        "object deadbeef"
+    );
+}
+
+/// #564 de-lossy step 1, close-the-class proof (#565 r3). Every
+/// fidelity-bearing git byte-string of a COMMIT must survive byte-identically
+/// through BOTH import paths — the bridge (`import_all`) and the ingest engine
+/// (`ingest::import_git_into`). A single fixture exercises non-UTF8 bytes in
+/// ALL of: the commit message, a `gpgsig` header (kept inline in
+/// `extra_headers`), a custom extra-header value, and a `mergetag` payload.
+/// `0xe9` (latin-1 `é`) is invalid standalone UTF-8, so any lingering
+/// `String`/`to_string()` hop on any of these would replace it with U+FFFD and
+/// fail an assertion below. This one test fails if ANY sibling of the
+/// byte-vs-String class regresses. (Annotated-tag-object fidelity is out of
+/// scope here — see #575.)
+#[test]
+fn non_utf8_git_fidelity_is_byte_identical_across_bridge_and_ingest() {
+    use ingest::import_git_into;
+
+    let (_git_temp, git_repo) = init_git_repo();
+    let tree_oid = empty_tree_oid(&git_repo);
+
+    // The message keeps its own internal blank line (`\n\n`) to prove the
+    // header/body split isn't fooled by a `\n\n` inside the body.
+    let commit_message = b"caf\xe9 subject\n\nbody with a \xe9 byte\n".to_vec();
+    let gpgsig_value =
+        b"-----BEGIN PGP SIGNATURE-----\n\xe9 not-real-armor\n-----END PGP SIGNATURE-----".to_vec();
+    let custom_value = b"x-note caf\xe9 value".to_vec();
+    // A mergetag value is a whole tag object — multi-line, with its own blank
+    // line and a non-UTF8 byte in the tag name and message lines.
+    let mergetag_value = {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"object 0123456789012345678901234567890123456789\n");
+        v.extend_from_slice(b"type commit\n");
+        v.extend_from_slice(b"tag merged-\xe9\n");
+        v.extend_from_slice(b"tagger Heddle Test <heddle@test> 0 +0000\n");
+        v.extend_from_slice(b"\n");
+        v.extend_from_slice(b"merge note caf\xe9\n");
+        v
+    };
+
+    let commit = gix::objs::Commit {
+        tree: tree_oid,
+        parents: Default::default(),
+        author: test_signature(),
+        committer: test_signature(),
+        encoding: None,
+        message: commit_message.clone().into(),
+        extra_headers: vec![
+            ("gpgsig".into(), gpgsig_value.clone().into()),
+            ("x-custom".into(), custom_value.clone().into()),
+            ("mergetag".into(), mergetag_value.clone().into()),
+        ],
+    };
+    let commit_oid = git_repo.write_object(&commit).expect("write commit").detach();
+    set_reference(
+        &git_repo,
+        "refs/heads/main",
+        commit_oid,
+        PreviousValue::Any,
+        "test: main",
+    )
+    .expect("set main");
+
+    let git_workdir = git_repo.workdir().expect("workdir");
+
+    // ── path 1: bridge import ──
+    let bridge_heddle = TempDir::new().expect("bridge heddle temp");
+    let bridge_repo = Repository::init(bridge_heddle.path()).expect("init bridge heddle");
+    let mut bridge = GitBridge::new(&bridge_repo);
+    import_all(&mut bridge, Some(git_workdir)).expect("bridge import");
+    let bridge_cid = bridge
+        .mapping
+        .get_heddle(commit_oid)
+        .expect("bridge mapped commit");
+    let bridge_state = bridge_repo
+        .store()
+        .get_state(&bridge_cid)
+        .expect("load bridge state")
+        .expect("bridge state written");
+
+    // ── path 2: ingest import ──
+    let ingest_heddle = TempDir::new().expect("ingest heddle temp");
+    let (_stats, ingest_map) =
+        import_git_into(git_workdir, ingest_heddle.path()).expect("ingest import");
+    let ingest_cid = ingest_map
+        .get_commit(&commit_oid.to_string())
+        .expect("ingest mapped commit");
+    let ingest_repo = Repository::open(ingest_heddle.path()).expect("open ingest heddle");
+    let ingest_state = ingest_repo
+        .store()
+        .get_state(&ingest_cid)
+        .expect("load ingest state")
+        .expect("ingest state written");
+
+    // The fixture really is non-UTF8 — otherwise the test proves nothing.
+    assert!(String::from_utf8(commit_message.clone()).is_err());
+
+    // (1) commit message: byte-exact to the original, AND byte-identical
+    // across paths — this pins `message_raw_sloppy` (bridge) and
+    // `message_raw` (ingest) to the same bytes.
+    assert_eq!(
+        bridge_state.raw_message.as_deref(),
+        Some(commit_message.as_slice()),
+        "bridge must preserve the raw commit message verbatim"
+    );
+    assert_eq!(
+        ingest_state.raw_message, bridge_state.raw_message,
+        "raw_message must be byte-identical across bridge and ingest"
+    );
+
+    // (2) extra headers (gpgsig + custom + mergetag): identical across paths,
+    // ordered, non-UTF8 survived. gpgsig is kept INLINE here at its captured
+    // position (not split into a separate field), so its byte-identity is
+    // proved by this same comparison.
+    assert_eq!(
+        bridge_state.extra_headers, ingest_state.extra_headers,
+        "extra_headers must be byte-identical (and same order) across paths"
+    );
+    let keys: Vec<&[u8]> = bridge_state
+        .extra_headers
+        .iter()
+        .map(|(k, _)| k.as_slice())
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            b"gpgsig".as_slice(),
+            b"x-custom".as_slice(),
+            b"mergetag".as_slice(),
+        ],
+        "gpgsig stays inline at its captured position; all three remain in order"
+    );
+    for (key, value) in &bridge_state.extra_headers {
+        assert!(
+            value.contains(&0xe9u8),
+            "extra-header {:?} must preserve its non-UTF8 byte",
+            String::from_utf8_lossy(key)
+        );
+        assert!(String::from_utf8(value.clone()).is_err());
+    }
+}

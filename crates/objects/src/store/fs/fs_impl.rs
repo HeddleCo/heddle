@@ -12,8 +12,8 @@ use super::{
     FsStore,
     fs_io::{list_hashes_from_dir, read_file_bytes, read_file_header},
     fs_paths::{
-        action_path, actions_dir, blobs_dir, hash_path, redaction_path, redactions_dir, state_path,
-        state_visibility_dir, state_visibility_path, states_dir, trees_dir,
+        action_path, actions_dir, blobs_dir, hash_path, redaction_path, redactions_dir,
+        state_path, state_visibility_dir, state_visibility_path, states_dir, trees_dir,
     },
 };
 use crate::{
@@ -1064,4 +1064,5 @@ impl ObjectStore for FsStore {
         }
         Ok(out)
     }
+
 }

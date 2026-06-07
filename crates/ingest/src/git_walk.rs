@@ -81,10 +81,22 @@ pub struct CommitEntry {
     pub parents: Vec<String>,
     pub author: GitSignature,
     pub committer: GitSignature,
-    /// Full commit message (subject + body + trailers), as stored in git.
-    pub message: String,
+    /// Full commit message (subject + body + trailers), verbatim git bytes.
+    ///
+    /// Raw bytes, NOT a `String`: a commit with a non-UTF8 `encoding`
+    /// (latin-1, shift-jis, …) carries message bytes that aren't valid UTF-8,
+    /// and they must reach [`State::raw_message`](objects::object::State) byte-
+    /// identically for #566 reconstruction. Consumers that need a string view
+    /// (attribution / intent parsing) derive a lossy one at the edge.
+    pub message: Vec<u8>,
     pub authored_at: DateTime<Utc>,
     pub committed_at: DateTime<Utc>,
+    /// Every commit header beyond tree/parents/author/committer, in original
+    /// order, as raw bytes so non-UTF8 values survive. ORDER IS LOAD-BEARING
+    /// for #566 byte-exactness. `gpgsig` rides inline here at its captured
+    /// position (not split out) so a non-canonical header order reconstructs
+    /// byte-identically. #564 step 1.
+    pub extra_headers: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 /// Author/committer identity + timestamp.
@@ -93,6 +105,9 @@ pub struct GitSignature {
     pub name: String,
     pub email: String,
     pub time: DateTime<Utc>,
+    /// Timezone offset in seconds east of UTC (git's `+HHMM`). Heddle used
+    /// to discard this; #564 step 1 preserves it for byte-reconstruction.
+    pub tz_offset: i32,
 }
 
 /// One tree entry (direct child of a git tree).
@@ -425,7 +440,9 @@ impl GitSource {
         let message = commit
             .message_raw()
             .map_err(|e| IngestError::Git(format!("message {sha}: {e}")))?
-            .to_string();
+            .to_vec();
+
+        let extra_headers = collect_commit_extra_headers(&commit)?;
 
         Ok(CommitEntry {
             sha: oid.to_string(),
@@ -436,6 +453,7 @@ impl GitSource {
             message,
             authored_at,
             committed_at,
+            extra_headers,
         })
     }
 
@@ -689,14 +707,15 @@ fn collect_one_reflog(
         // have to special-case creation / deletion markers downstream.
         let prev = bstr_hex_or_none(line.previous_oid);
         let new = bstr_hex_or_none(line.new_oid);
-        let seconds = line.signature.time().unwrap_or_default().seconds;
+        let time = line.signature.time().unwrap_or_default();
         let signature = GitSignature {
             name: line.signature.name.to_string(),
             email: line.signature.email.to_string(),
             time: Utc
-                .timestamp_opt(seconds, 0)
+                .timestamp_opt(time.seconds, 0)
                 .single()
                 .unwrap_or_else(Utc::now),
+            tz_offset: time.offset,
         };
         out.push(ReflogEntry {
             ref_name: ref_name.to_string(),
@@ -738,15 +757,31 @@ fn parse_oid(sha: &str) -> crate::Result<gix::hash::ObjectId> {
 }
 
 fn signature_from(sig: gix::actor::SignatureRef<'_>) -> GitSignature {
-    let seconds = sig.time().unwrap_or_default().seconds;
+    let time = sig.time().unwrap_or_default();
     GitSignature {
         name: sig.name.to_string(),
         email: sig.email.to_string(),
         time: Utc
-            .timestamp_opt(seconds, 0)
+            .timestamp_opt(time.seconds, 0)
             .single()
             .unwrap_or_else(Utc::now),
+        tz_offset: time.offset,
     }
+}
+
+/// Collect a commit's extension headers in their original on-the-wire order,
+/// as raw bytes so non-UTF8 values survive. ORDER IS LOAD-BEARING for #566
+/// byte-reconstruction.
+///
+/// Built straight from the raw commit object bytes (`commit.data`) via
+/// [`objects::object::parse_commit_extension_headers`] so `encoding` / `gpgsig`
+/// / `mergetag` / any unknown header all land at their TRUE captured position
+/// through one code path — the SAME path the bridge importer uses. We do NOT
+/// stitch the vec from gix's typed accessors (`CommitRef::encoding`, …): gix
+/// surfaces some headers outside `extra_headers`, and re-inserting them by hand
+/// reorders them (the close-the-class bug this replaces). #564 de-lossy step 1.
+fn collect_commit_extra_headers(commit: &gix::Commit<'_>) -> crate::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    Ok(objects::object::parse_commit_extension_headers(&commit.data))
 }
 
 #[cfg(test)]
@@ -906,7 +941,98 @@ mod tests {
         assert_eq!(commit.parents.len(), 1, "second commit has one parent");
         assert_eq!(commit.author.name, "Test");
         assert_eq!(commit.author.email, "test@example.com");
-        assert!(commit.message.contains("second commit"));
+        assert!(String::from_utf8_lossy(&commit.message).contains("second commit"));
+    }
+
+    /// Close-the-class conformance (ingest path): a commit whose extension
+    /// headers are in NON-canonical order — `x-custom`, then a folded `gpgsig`,
+    /// then `encoding`, then a folded `mergetag` — must reach `extra_headers` in
+    /// that exact on-the-wire order with byte-exact values. Real git always
+    /// emits `encoding` first, so this order can only be hand-crafted; it is
+    /// precisely what a typed-field-stitching importer would mangle. Mirrors the
+    /// bridge-path test of the same name and the shared parser's unit test.
+    #[test]
+    fn read_commit_preserves_noncanonical_extension_header_order() {
+        use std::process::Stdio;
+
+        let tmp = TempDir::new().unwrap();
+        let head = seed_repo(tmp.path());
+        let path = tmp.path();
+
+        let run = |args: &[&str], stdin: Option<&[u8]>| -> String {
+            let mut child = Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .stdin(if stdin.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn git");
+            if let Some(input) = stdin {
+                use std::io::Write;
+                child.stdin.as_mut().unwrap().write_all(input).unwrap();
+            }
+            let out = child.wait_with_output().expect("wait");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+
+        let tree = run(&["rev-parse", "HEAD^{tree}"], None);
+
+        // `--literally` so git writes the non-canonical header order verbatim
+        // instead of normalising/rejecting it.
+        let content: Vec<u8> = [
+            format!("tree {tree}").into_bytes(),
+            format!("parent {head}").into_bytes(),
+            b"author Alice <alice@example.com> 1700000000 +0000".to_vec(),
+            b"committer Bob <bob@example.com> 1700000100 +0000".to_vec(),
+            b"x-custom custom value".to_vec(),
+            b"gpgsig -----BEGIN PGP SIGNATURE-----".to_vec(),
+            b" sig-line-1".to_vec(),
+            b" -----END PGP SIGNATURE-----".to_vec(),
+            b"encoding ISO-8859-1".to_vec(),
+            b"mergetag object 3333333333333333333333333333333333333333".to_vec(),
+            b" type commit".to_vec(),
+            b" tag sidetag".to_vec(),
+            b"".to_vec(),
+            b"the commit message".to_vec(),
+            b"".to_vec(),
+        ]
+        .join(&b'\n');
+
+        let sha = run(
+            &["hash-object", "--literally", "-w", "-t", "commit", "--stdin"],
+            Some(&content),
+        );
+
+        let src = GitSource::open(path).expect("open");
+        let commit = src.read_commit(&sha).expect("read_commit");
+
+        let expected: Vec<(Vec<u8>, Vec<u8>)> = vec![
+            (b"x-custom".to_vec(), b"custom value".to_vec()),
+            (
+                b"gpgsig".to_vec(),
+                b"-----BEGIN PGP SIGNATURE-----\nsig-line-1\n-----END PGP SIGNATURE-----"
+                    .to_vec(),
+            ),
+            (b"encoding".to_vec(), b"ISO-8859-1".to_vec()),
+            (
+                b"mergetag".to_vec(),
+                b"object 3333333333333333333333333333333333333333\ntype commit\ntag sidetag"
+                    .to_vec(),
+            ),
+        ];
+        assert_eq!(commit.extra_headers, expected);
     }
 
     #[test]
@@ -1301,15 +1427,18 @@ mod tests {
                 name: "x".into(),
                 email: "x".into(),
                 time: Utc::now(),
+                tz_offset: 0,
             },
             committer: GitSignature {
                 name: "x".into(),
                 email: "x".into(),
                 time: Utc::now(),
+                tz_offset: 0,
             },
-            message: "".into(),
+            message: Vec::new(),
             authored_at: Utc::now(),
             committed_at: Utc::now(),
+            extra_headers: Vec::new(),
         };
         let commits = vec![
             make("A", &[]),
