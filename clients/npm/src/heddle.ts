@@ -5,17 +5,19 @@ import type {
 } from "../generated/heddle-schemas.js";
 import {
   SpawnExecutor,
+  ExecStreamError,
   type Executor,
   type ExecResult,
 } from "./executor.js";
 import { HeddleError, HeddleStreamingVerbError } from "./errors.js";
 
 /**
- * Verbs that emit JSONL — one JSON object per line — instead of a single
- * JSON payload. These carry `json_kind: "jsonl"` in the CLI command catalog
- * (`heddle watch` streams live oplog activity; `harness-bridge` relays an
- * event stream). A single `JSON.parse` of their stdout is always wrong, so
- * {@link Heddle.run} refuses them — callers iterate {@link Heddle.stream}.
+ * Verbs that ALWAYS emit JSONL — one JSON object per line — instead of a
+ * single JSON payload. These carry `json_kind: "jsonl"` in the CLI command
+ * catalog (`heddle watch` streams live oplog activity; `harness-bridge`
+ * relays an event stream). A single `JSON.parse` of their stdout is always
+ * wrong, so {@link Heddle.run} refuses them outright — callers iterate
+ * {@link Heddle.stream}.
  */
 export type HeddleStreamingVerb = Extract<
   HeddleSchemaVerb,
@@ -28,11 +30,46 @@ export const HEDDLE_STREAMING_VERBS: readonly HeddleStreamingVerb[] = [
   "harness-bridge",
 ];
 
+/**
+ * Verbs that emit a single JSON payload by default but switch to a JSONL
+ * stream under a `--watch`-style flag. These carry `json_kind:
+ * "json_or_jsonl"` in the CLI command catalog (`status`, `thread show`,
+ * `workspace show` all gain a `--watch` live-refresh mode that prints one
+ * JSON snapshot per tick). {@link Heddle.run} accepts them in their default
+ * single-payload mode but refuses them when a watch flag is present, since
+ * the output then streams; {@link Heddle.stream} iterates the snapshots.
+ */
+export type HeddleWatchModeVerb = Extract<
+  HeddleSchemaVerb,
+  "status" | "thread show" | "workspace show"
+>;
+
+/** Runtime mirror of {@link HeddleWatchModeVerb} for value-level checks. */
+export const HEDDLE_WATCH_MODE_VERBS: readonly HeddleWatchModeVerb[] = [
+  "status",
+  "thread show",
+  "workspace show",
+];
+
+/** Flags that flip a {@link HeddleWatchModeVerb} into a JSONL stream. */
+export const HEDDLE_WATCH_FLAGS: readonly string[] = ["--watch"];
+
+/** Every JSONL-capable verb: always-streaming plus watch-mode streaming. */
+export type HeddleJsonlVerb = HeddleStreamingVerb | HeddleWatchModeVerb;
+
 /** Any schema-backed verb that returns a single JSON payload via `run()`. */
 export type HeddleRunVerb = Exclude<HeddleSchemaVerb, HeddleStreamingVerb>;
 
 function isStreamingVerb(verb: string): verb is HeddleStreamingVerb {
   return (HEDDLE_STREAMING_VERBS as readonly string[]).includes(verb);
+}
+
+function isWatchModeVerb(verb: string): verb is HeddleWatchModeVerb {
+  return (HEDDLE_WATCH_MODE_VERBS as readonly string[]).includes(verb);
+}
+
+function requestsWatchMode(args: readonly string[]): boolean {
+  return args.some((arg) => HEDDLE_WATCH_FLAGS.includes(arg));
 }
 
 export interface HeddleOptions {
@@ -94,9 +131,11 @@ export class Heddle {
   /**
    * Run a single-payload schema-backed verb and return its typed payload.
    * Throws {@link HeddleError} on a non-zero exit or unparseable stdout, and
-   * {@link HeddleStreamingVerbError} if given a JSONL/streaming verb (use
-   * {@link Heddle.stream} for those — the type already excludes them, but the
-   * runtime guard catches untyped JS callers).
+   * {@link HeddleStreamingVerbError} if given a JSONL/streaming verb — both
+   * the always-streaming verbs (the type already excludes them; the runtime
+   * guard catches untyped JS callers) and a {@link HeddleWatchModeVerb}
+   * invoked with a `--watch`-style flag, which makes its output stream. Use
+   * {@link Heddle.stream} for those.
    */
   async run<V extends HeddleRunVerb>(
     verb: V,
@@ -104,6 +143,9 @@ export class Heddle {
     options: RunOptions = {},
   ): Promise<HeddleVerbOutputs[V]> {
     if (isStreamingVerb(verb)) {
+      throw new HeddleStreamingVerbError(verb);
+    }
+    if (isWatchModeVerb(verb) && requestsWatchMode(args)) {
       throw new HeddleStreamingVerbError(verb);
     }
 
@@ -129,25 +171,53 @@ export class Heddle {
   }
 
   /**
-   * Drive a streaming (JSONL) verb and yield each line's typed payload. The
-   * default {@link SpawnExecutor} buffers the process output and resolves on
-   * exit, so this iterates the collected lines once the verb terminates (a
-   * snapshot `heddle watch`, `harness-bridge` relay, etc.); incremental
-   * line-by-line delivery awaits a streaming transport (#586). Throws
+   * Drive a JSONL verb and yield each line's typed payload AS IT ARRIVES.
+   * Streaming verbs like `heddle watch` or `status --watch` run
+   * indefinitely, so this must not wait for the process to exit before
+   * producing values. When the {@link Executor} supports streaming
+   * ({@link Executor.execStream}, as the default {@link SpawnExecutor}
+   * does), each stdout line is parsed and yielded the moment it lands; the
+   * iterator ends when the child's stdout closes. A buffered-only executor
+   * (e.g. a daemon backend that implements just {@link Executor.exec}) falls
+   * back to splitting the collected output once the verb terminates. Throws
    * {@link HeddleError} on a non-zero exit or an unparseable line.
    */
-  async *stream<V extends HeddleStreamingVerb>(
+  async *stream<V extends HeddleJsonlVerb>(
     verb: V,
     args: readonly string[] = [],
     options: RunOptions = {},
   ): AsyncGenerator<HeddleVerbOutputs[V], void, unknown> {
-    const result = await this.executor.exec({
+    const req = {
       verb,
       args,
       opId: options.opId,
       repoPath: options.repoPath ?? this.repoPath,
       signal: options.signal,
-    });
+    };
+
+    if (this.executor.execStream) {
+      try {
+        for await (const line of this.executor.execStream(req)) {
+          const trimmed = line.trim();
+          if (trimmed.length === 0) continue;
+          yield parseStreamLine<V>(verb, trimmed);
+        }
+      } catch (err) {
+        if (err instanceof ExecStreamError) {
+          throw new HeddleError({
+            verb,
+            exitCode: err.result.exitCode,
+            stdout: err.result.stdout,
+            stderr: err.result.stderr,
+            envelope: parseErrorEnvelope(err.result),
+          });
+        }
+        throw err;
+      }
+      return;
+    }
+
+    const result = await this.executor.exec(req);
 
     if (result.exitCode !== 0) {
       throw new HeddleError({
@@ -162,18 +232,7 @@ export class Heddle {
     for (const line of result.stdout.split("\n")) {
       const trimmed = line.trim();
       if (trimmed.length === 0) continue;
-      let parsed: HeddleVerbOutputs[V];
-      try {
-        parsed = JSON.parse(trimmed) as HeddleVerbOutputs[V];
-      } catch {
-        throw new HeddleError({
-          verb,
-          exitCode: result.exitCode,
-          stdout: result.stdout,
-          stderr: result.stderr,
-        });
-      }
-      yield parsed;
+      yield parseStreamLine<V>(verb, trimmed);
     }
   }
 
@@ -232,6 +291,23 @@ export class Heddle {
   /** `heddle watch` — stream live oplog activity (JSONL). Read-only. */
   watch(args: readonly string[] = [], options: RunOptions = {}) {
     return this.stream("watch", args, options);
+  }
+}
+
+/** Parse one JSONL line, wrapping a JSON error as a HeddleError. */
+function parseStreamLine<V extends HeddleSchemaVerb>(
+  verb: V,
+  trimmed: string,
+): HeddleVerbOutputs[V] {
+  try {
+    return JSON.parse(trimmed) as HeddleVerbOutputs[V];
+  } catch {
+    throw new HeddleError({
+      verb,
+      exitCode: 0,
+      stdout: trimmed,
+      stderr: "",
+    });
   }
 }
 

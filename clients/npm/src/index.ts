@@ -1,12 +1,20 @@
-export { Heddle, HEDDLE_STREAMING_VERBS } from "./heddle.js";
+export {
+  Heddle,
+  HEDDLE_STREAMING_VERBS,
+  HEDDLE_WATCH_MODE_VERBS,
+  HEDDLE_WATCH_FLAGS,
+} from "./heddle.js";
 export type {
   HeddleOptions,
   RunOptions,
   HeddleStreamingVerb,
+  HeddleWatchModeVerb,
+  HeddleJsonlVerb,
   HeddleRunVerb,
 } from "./heddle.js";
 export {
   SpawnExecutor,
+  ExecStreamError,
   type Executor,
   type ExecRequest,
   type ExecResult,

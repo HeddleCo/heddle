@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 
 /**
  * One CLI invocation, transport-neutral. The `verb` is the canonical
@@ -27,6 +28,21 @@ export interface ExecResult {
 }
 
 /**
+ * Thrown by {@link Executor.execStream} when a streaming invocation exits
+ * non-zero. Carries the same {@link ExecResult} shape (the accumulated
+ * stdout lines + stderr + code) so {@link Heddle.stream} can rebuild the
+ * usual {@link HeddleError}.
+ */
+export class ExecStreamError extends Error {
+  readonly result: ExecResult;
+  constructor(result: ExecResult) {
+    super(`heddle stream exited with code ${result.exitCode}`);
+    this.name = "ExecStreamError";
+    this.result = result;
+  }
+}
+
+/**
  * The transport seam. The default {@link SpawnExecutor} shells out to the
  * `heddle` binary, but a future napi or daemon backend (#586) can implement
  * this same interface and swap in with no change to `Heddle` call sites —
@@ -34,6 +50,17 @@ export interface ExecResult {
  */
 export interface Executor {
   exec(req: ExecRequest): Promise<ExecResult>;
+  /**
+   * Optional streaming transport for JSONL verbs. Yields each stdout line
+   * (newline stripped) as it arrives — without waiting for the process to
+   * exit — so {@link Heddle.stream} can drive indefinite verbs like
+   * `heddle watch` / `status --watch`. The iterator completes when the
+   * child's stdout closes; on a non-zero exit it throws
+   * {@link ExecStreamError}. Executors that can't stream (e.g. a buffered
+   * daemon backend) omit this; {@link Heddle.stream} falls back to
+   * {@link Executor.exec} and splits the buffered output.
+   */
+  execStream?(req: ExecRequest): AsyncIterable<string>;
 }
 
 export interface SpawnExecutorOptions {
@@ -90,6 +117,53 @@ export class SpawnExecutor implements Executor {
         });
       });
     });
+  }
+
+  async *execStream(req: ExecRequest): AsyncGenerator<string, void, unknown> {
+    const argv = this.buildArgv(req);
+    const spawnOptions: Parameters<typeof spawn>[2] = {
+      env: this.env ? { ...process.env, ...this.env } : process.env,
+    };
+    if (this.cwd !== undefined) spawnOptions.cwd = this.cwd;
+    if (req.signal !== undefined) spawnOptions.signal = req.signal;
+
+    const child = spawn(this.binaryPath, argv, spawnOptions);
+    const stderr: Buffer[] = [];
+    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
+    let spawnError: Error | undefined;
+    child.on("error", (err: Error) => {
+      spawnError = err;
+    });
+
+    const stdoutLines: string[] = [];
+    if (child.stdout) {
+      const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
+      // readline yields each line as it arrives on stdout — the loop
+      // produces values during the child's lifetime, not after exit.
+      for await (const line of rl) {
+        stdoutLines.push(line);
+        yield line;
+      }
+    }
+
+    const exitCode = await new Promise<number>((resolve) => {
+      const settle = (code: number | null, signal: NodeJS.Signals | null) =>
+        resolve(code ?? (signal ? 128 : 1));
+      if (child.exitCode !== null || child.signalCode !== null) {
+        settle(child.exitCode, child.signalCode);
+      } else {
+        child.once("close", settle);
+      }
+    });
+
+    if (spawnError) throw spawnError;
+    if (exitCode !== 0) {
+      throw new ExecStreamError({
+        exitCode,
+        stdout: stdoutLines.join("\n"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+      });
+    }
   }
 
   /** `[...verb tokens, --output json, -C <repo>?, --op-id <id>?, ...args]`. */
