@@ -31,7 +31,7 @@ use crate::{
         git_core::clone_url_to_bare,
         git_export::export_all,
         git_import::{
-            import_all, import_all_with_options, import_selected_refs,
+            backfill_fidelity, import_all, import_all_with_options, import_selected_refs,
             import_selected_refs_with_options,
         },
         git_util::{ExportedRef, GitImportOptions, LossyGitImportEntry},
@@ -592,6 +592,59 @@ fn git_import_required_summary(branches: &[String], total: usize) -> String {
         "Git {noun} waiting for Heddle import: {}",
         crate::cli::render::preview_list(branches, total)
     )
+}
+
+#[derive(Serialize)]
+struct BridgeBackfillFidelityOutput {
+    output_kind: &'static str,
+    action: &'static str,
+    states_scanned: usize,
+    states_backfilled: usize,
+    states_skipped: usize,
+}
+
+/// Execute `heddle bridge backfill-fidelity`: re-derive the #565 git-fidelity
+/// fields from the mirror for every state adopted before the format bump.
+pub fn cmd_bridge_backfill_fidelity(cli: &Cli) -> Result<()> {
+    let repo = match &cli.repo {
+        Some(path) => Repository::open(path)?,
+        None => Repository::open(std::env::current_dir()?)?,
+    };
+    let mut bridge = GitBridge::new(&repo);
+    let stats = backfill_fidelity(&mut bridge)?;
+
+    let output = BridgeBackfillFidelityOutput {
+        output_kind: "bridge_backfill_fidelity",
+        action: "bridge backfill-fidelity",
+        states_scanned: stats.scanned,
+        states_backfilled: stats.backfilled,
+        states_skipped: stats.skipped,
+    };
+
+    if should_output_json(cli, Some(repo.config())) {
+        println!("{}", serde_json::to_string(&output)?);
+    } else {
+        println!(
+            "{} backfilled git-fidelity fields from the mirror",
+            style::ok_marker()
+        );
+        println!(
+            "  {}",
+            style::field("scanned", &style::bold(&output.states_scanned.to_string()))
+        );
+        println!(
+            "  {}",
+            style::field(
+                "backfilled",
+                &style::bold(&output.states_backfilled.to_string())
+            )
+        );
+        println!(
+            "  {}",
+            style::field("skipped", &style::bold(&output.states_skipped.to_string()))
+        );
+    }
+    Ok(())
 }
 
 /// Execute bridge subcommands.

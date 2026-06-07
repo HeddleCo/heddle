@@ -139,6 +139,7 @@ const UNSWEPT_TODO: &[&str] = &[
     "attempt",
     "blame",
     "branch",
+    "bridge backfill-fidelity",
     "bridge git export",
     "bridge git ingest",
     "bridge git init",

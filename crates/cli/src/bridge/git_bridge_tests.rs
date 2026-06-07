@@ -30,7 +30,7 @@ use crate::bridge::{
         write_exported_refs, write_mirror_managed_refs,
     },
     git_export::{export_all, export_current_thread, export_tree},
-    git_import::{import_all, import_all_with_options, import_git_tree},
+    git_import::{backfill_fidelity, import_all, import_all_with_options, import_git_tree},
     git_import_tree::GitTreeImporter,
     git_sync::{sync_branches, sync_tags, sync_track_to_branch},
     git_util::GitImportOptions,
@@ -6239,6 +6239,113 @@ fn import_preserves_commit_git_fidelity_fields() {
     assert_eq!(
         String::from_utf8_lossy(&state.extra_headers[1].1).trim_end(),
         "object deadbeef"
+    );
+}
+
+/// #570 (#564 de-lossy step 1b): `backfill_fidelity` re-derives the #565
+/// git-fidelity fields FROM THE MIRROR for a state adopted before the format
+/// bump, and the result is byte-identical to a fresh post-#565 adopt of the
+/// same commit. Idempotency: a second run rewrites nothing.
+#[test]
+fn backfill_fidelity_matches_fresh_adopt_and_is_idempotent() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_git_temp, git_repo) = init_git_repo();
+
+    let tree_oid = empty_tree_oid(&git_repo);
+    let author = gix::actor::Signature {
+        name: "Author".into(),
+        email: "author@example.com".into(),
+        time: gix::date::Time {
+            seconds: 1_000_000,
+            offset: -7 * 3600,
+        },
+    };
+    let committer = gix::actor::Signature {
+        name: "Committer".into(),
+        email: "committer@example.com".into(),
+        time: gix::date::Time {
+            seconds: 2_000_000,
+            offset: 2 * 3600,
+        },
+    };
+    let gpgsig = "-----BEGIN PGP SIGNATURE-----\nABCD\n-----END PGP SIGNATURE-----";
+    let commit_oid = commit_with_signatures(
+        &git_repo,
+        Some("refs/heads/main"),
+        tree_oid,
+        "feat: thing\n\nBody.\n",
+        author,
+        committer,
+        vec![("gpgsig".into(), gpgsig.into())],
+    );
+
+    // Fresh post-#565 adopt: this populates the fidelity fields AND the mirror.
+    let mut bridge = GitBridge::new(&repo);
+    import_all(&mut bridge, Some(git_repo.workdir().expect("workdir"))).expect("import");
+    let change_id = bridge.mapping.get_heddle(commit_oid).expect("commit mapped");
+    let fresh = repo
+        .store()
+        .get_state(&change_id)
+        .expect("load state")
+        .expect("state written");
+    assert!(fresh.committer.is_some(), "fresh adopt carries fidelity");
+
+    // Simulate a repo adopted BEFORE the #565 bump: strip every fidelity field
+    // back to its pre-bump default and rewrite the state.
+    let mut pre_bump = fresh.clone();
+    pre_bump.committer = None;
+    pre_bump.authored_tz_offset = 0;
+    pre_bump.committer_tz_offset = 0;
+    pre_bump.raw_message = None;
+    pre_bump.extra_headers = Vec::new();
+    repo.store().put_state(&pre_bump).expect("write pre-bump state");
+
+    // Backfill re-derives the fields from the mirror.
+    let mut bridge = GitBridge::new(&repo);
+    let stats = backfill_fidelity(&mut bridge).expect("backfill");
+    assert_eq!(stats.scanned, 1, "one mapped commit scanned");
+    assert_eq!(stats.backfilled, 1, "the stripped state was backfilled");
+    assert_eq!(stats.skipped, 0);
+
+    // Byte-identical to the fresh adopt.
+    let mut restored = repo
+        .store()
+        .get_state(&change_id)
+        .expect("reload state")
+        .expect("state present");
+    assert_eq!(restored.committer, fresh.committer);
+    assert_eq!(restored.authored_tz_offset, fresh.authored_tz_offset);
+    assert_eq!(restored.committer_tz_offset, fresh.committer_tz_offset);
+    assert_eq!(restored.raw_message, fresh.raw_message);
+    assert_eq!(restored.extra_headers, fresh.extra_headers);
+    let mut fresh_hash = fresh.clone();
+    assert_eq!(
+        restored.hash(),
+        fresh_hash.hash(),
+        "backfilled state hashes identically to a fresh adopt"
+    );
+
+    // Idempotent: a second run re-derives the same values and rewrites nothing.
+    let mut bridge = GitBridge::new(&repo);
+    let second = backfill_fidelity(&mut bridge).expect("second backfill");
+    assert_eq!(second.scanned, 1);
+    assert_eq!(second.backfilled, 0, "second run backfills nothing");
+    assert_eq!(second.skipped, 1);
+}
+
+/// #570: backfill errors clearly when the git mirror is absent — it is the only
+/// source of the original commit bytes, so it must run before #568 drops it.
+#[test]
+fn backfill_fidelity_errors_without_mirror() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let mut bridge = GitBridge::new(&repo);
+    let err = backfill_fidelity(&mut bridge).expect_err("mirror absent must error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("mirror required"),
+        "error should name the missing mirror, got: {msg}"
     );
 }
 

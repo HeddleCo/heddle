@@ -162,6 +162,41 @@ fn collect_extra_headers(commit: &gix::Commit<'_>) -> GitResult<Vec<(Vec<u8>, Ve
     Ok(parse_commit_extension_headers(&commit.data))
 }
 
+/// The git-fidelity fields (#564 de-lossy step 1, #565) re-derived from a git
+/// commit object: the committer identity, both timezone offsets, the verbatim
+/// message bytes, and the ordered extension headers.
+///
+/// This is the SINGLE extraction path for these fields. Both [`import_commit`]
+/// (fresh adopt) and [`backfill_fidelity`] (the one-time migration for repos
+/// adopted before the #565 format bump) build them through here, so a repo
+/// backfilled from the mirror is byte-identical to a fresh post-#565 adopt and
+/// the two paths can't drift.
+pub(crate) struct CommitFidelityFields {
+    pub committer: Principal,
+    pub authored_tz_offset: i32,
+    pub committer_tz_offset: i32,
+    pub raw_message: Vec<u8>,
+    pub extra_headers: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+/// Re-derive the [`CommitFidelityFields`] from a git commit object. See that
+/// type's docs for why this is the only place the fields are extracted.
+pub(crate) fn extract_commit_fidelity_fields(
+    commit: &gix::Commit<'_>,
+) -> GitResult<CommitFidelityFields> {
+    let author = commit.author().map_err(git_err)?;
+    let authored_tz_offset = author.time().map_err(git_err)?.offset;
+    let committer = commit.committer().map_err(git_err)?;
+    let committer_tz_offset = committer.time().map_err(git_err)?.offset;
+    Ok(CommitFidelityFields {
+        committer: Principal::new(committer.name.to_string(), committer.email.to_string()),
+        authored_tz_offset,
+        committer_tz_offset,
+        raw_message: commit.message_raw_sloppy().to_vec(),
+        extra_headers: collect_extra_headers(commit)?,
+    })
+}
+
 /// Import a single Git commit as a Heddle state.
 pub fn import_commit(
     mapping: &mut SyncMapping,
@@ -170,31 +205,29 @@ pub fn import_commit(
     git_oid: gix::hash::ObjectId,
 ) -> GitResult<ChangeId> {
     let commit = repo.find_commit(git_oid).map_err(git_err)?;
-    // Capture the raw message bytes verbatim for byte-exact reconstruction
-    // (#566): a non-UTF8 message (latin-1, shift-jis, …) must survive intact,
-    // so store bytes, not a String. A lossy String view is derived only for
-    // trailer / intent parsing, which inspect the (ASCII) footer lines.
-    let message_bytes = commit.message_raw_sloppy().to_vec();
-    let message = String::from_utf8_lossy(&message_bytes).into_owned();
+    // #565: re-derive the committer identity, both tz offsets, the verbatim
+    // message bytes, and the ordered extension headers (encoding / gpgsig /
+    // mergetag / unknown each at their captured position) through the single
+    // shared extractor, so this fresh-adopt path and `backfill_fidelity` can't
+    // drift. The verbatim message bytes survive a non-UTF8 encoding (latin-1,
+    // shift-jis, …); a lossy String view is derived only for trailer / intent
+    // parsing, which inspect the (ASCII) footer lines.
+    let fidelity = extract_commit_fidelity_fields(&commit)?;
+    let message = String::from_utf8_lossy(&fidelity.raw_message).into_owned();
     let author = commit.author().map_err(git_err)?;
     let author_name = author.name.to_string();
     let author_email = author.email.to_string();
-    let author_time = author.time().map_err(git_err)?;
-    let authored_seconds = author_time.seconds;
-    let authored_tz_offset = author_time.offset;
-    // #565: also capture the committer identity + time. Git records both an
-    // author (who wrote the change) and a committer (who created this commit
-    // object); the two differ for rebased / cherry-picked / amended commits.
-    let committer = commit.committer().map_err(git_err)?;
-    let committer_name = committer.name.to_string();
-    let committer_email = committer.email.to_string();
-    let committer_time = committer.time().map_err(git_err)?;
-    let committed_seconds = committer_time.seconds;
-    let committer_tz_offset = committer_time.offset;
-    // #565: capture all extension headers in true wire order (encoding /
-    // gpgsig / mergetag / unknown all at their captured position) so the commit
-    // is byte-reconstructable later (#566) without the git mirror (#568).
-    let extra_headers = collect_extra_headers(&commit)?;
+    let authored_seconds = author.time().map_err(git_err)?.seconds;
+    // Git records both an author (who wrote the change) and a committer (who
+    // created this commit object); the two differ for rebased / cherry-picked /
+    // amended commits. We keep the committer time here for `created_at`; its
+    // identity + offset come from `fidelity`.
+    let committed_seconds = commit
+        .committer()
+        .map_err(git_err)?
+        .time()
+        .map_err(git_err)?
+        .seconds;
     let tree_id = commit.tree_id().map_err(git_err)?.detach();
     let parent_git_oids: Vec<gix::hash::ObjectId> =
         commit.parent_ids().map(|id| id.detach()).collect();
@@ -280,10 +313,10 @@ pub fn import_commit(
         .with_intent(intent.unwrap_or_else(|| "Imported from Git".to_string()))
         .with_timestamp(created_at)
         .with_authored_at(authored_at)
-        .with_committer(Principal::new(committer_name, committer_email))
-        .with_tz_offsets(authored_tz_offset, committer_tz_offset)
-        .with_raw_message(message_bytes)
-        .with_extra_headers(extra_headers)
+        .with_committer(fidelity.committer)
+        .with_tz_offsets(fidelity.authored_tz_offset, fidelity.committer_tz_offset)
+        .with_raw_message(&fidelity.raw_message)
+        .with_extra_headers(fidelity.extra_headers)
         .with_status(status);
 
     let state = if let Some(c) = confidence {
@@ -295,6 +328,91 @@ pub fn import_commit(
     tree_importer.write_state(&state)?;
 
     Ok(change_id)
+}
+
+/// Counts reported by [`backfill_fidelity`].
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BackfillStats {
+    /// Mapped git commits whose Heddle state was examined.
+    pub scanned: usize,
+    /// States whose git-fidelity fields were (re-)derived and rewritten.
+    pub backfilled: usize,
+    /// States already carrying the correct fidelity fields (left untouched).
+    pub skipped: usize,
+}
+
+/// One-time migration (#570, #564 de-lossy step 1b): for every Heddle state
+/// that maps to a git commit in the mirror, re-derive the #565 git-fidelity
+/// fields FROM THE MIRROR (the ground truth) and rewrite the state, so the
+/// later mirror drop (#568) is lossless for repos adopted BEFORE the #565
+/// format bump.
+///
+/// The fidelity fields are extracted through [`extract_commit_fidelity_fields`]
+/// — the exact same path `import_commit` uses — so a backfilled state is
+/// byte-identical to a fresh post-#565 adopt of the same commit.
+///
+/// **Idempotent.** A state already carrying the correct fields (a fresh
+/// post-#565 adopt, or a second backfill run) re-derives identical values, so
+/// its hash is unchanged and it is counted as skipped, not rewritten.
+///
+/// Only git COMMITS carry fidelity fields today; annotated-tag-object backfill
+/// is tracked separately in #575 and is out of scope here.
+///
+/// Errors if the mirror is absent — backfill must run BEFORE #568 eliminates
+/// the mirror, since the mirror is the only source of the original git bytes.
+pub fn backfill_fidelity(bridge: &mut GitBridge<'_>) -> GitResult<BackfillStats> {
+    if !bridge.is_initialized() {
+        return Err(GitBridgeError::Git(format!(
+            "git mirror required for backfill but none found at {}; \
+             run `heddle bridge backfill-fidelity` before the mirror is eliminated (#568)",
+            bridge.mirror_path().display()
+        )));
+    }
+
+    // Rebuild the change_id<->git_oid mapping from the sidecar + mirror so we
+    // know which states were imported from git commits.
+    bridge.build_existing_mapping(None)?;
+    let repo = bridge.open_git_repo()?;
+    let store = bridge.heddle_repo.store();
+
+    // Snapshot the mapping pairs up front so the immutable store borrow below
+    // doesn't overlap the mapping borrow.
+    let pairs: Vec<(ChangeId, gix::hash::ObjectId)> = bridge
+        .mapping
+        .iter()
+        .map(|(change_id, git_oid)| (*change_id, *git_oid))
+        .collect();
+
+    let mut stats = BackfillStats::default();
+    for (change_id, git_oid) in pairs {
+        // Skip mapping entries whose object isn't a commit in the mirror
+        // (annotated-tag objects, or objects not present locally): only commits
+        // carry fidelity fields today (#575 covers tag objects).
+        let Ok(commit) = repo.find_commit(git_oid) else {
+            continue;
+        };
+        let Some(state) = store.get_state(&change_id)? else {
+            continue;
+        };
+        stats.scanned += 1;
+
+        let fidelity = extract_commit_fidelity_fields(&commit)?;
+        let before = state.compute_hash();
+        let updated = state
+            .with_committer(fidelity.committer)
+            .with_tz_offsets(fidelity.authored_tz_offset, fidelity.committer_tz_offset)
+            .with_raw_message(&fidelity.raw_message)
+            .with_extra_headers(fidelity.extra_headers);
+
+        if updated.compute_hash() == before {
+            stats.skipped += 1;
+        } else {
+            store.put_state(&updated)?;
+            stats.backfilled += 1;
+        }
+    }
+
+    Ok(stats)
 }
 
 /// Import Git commits into Heddle states.

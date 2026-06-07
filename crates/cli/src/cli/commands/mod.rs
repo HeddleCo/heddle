@@ -116,7 +116,7 @@ pub use agent_cmd::{
 pub use attempt::cmd_attempt;
 pub use blame::cmd_blame;
 #[cfg(feature = "git-overlay")]
-pub use bridge::cmd_bridge_git;
+pub use bridge::{cmd_bridge_backfill_fidelity, cmd_bridge_git};
 pub use checkpoint::run as cmd_checkpoint;
 pub use cherry_pick::cmd_cherry_pick;
 pub use clean::cmd_clean;
