@@ -50,38 +50,18 @@ vendor_one() {
 
     git clone --bare \
         --depth="$depth" \
+        --no-tags \
         --single-branch \
         --branch="$branch" \
         "$url" "$shallow"
 
-    # Pull annotated tags into the shallow clone. `--no-tags` on the clone
-    # (its prior default here) meant tags never arrived, so these fixtures
-    # never carried an annotated tag at all. Fetch tags explicitly so the
-    # real-world corpus exercises annotated-tag *structure* fidelity;
-    # `--tag-of-filtered-object=drop` below still discards any tag whose target
-    # fell outside the shallow window.
-    git -C "$shallow" fetch --depth="$depth" origin 'refs/tags/*:refs/tags/*' \
-        || echo "    (no tags fetched for $name)"
-
     git init --bare "$fresh" >/dev/null
 
-    # `fast-export --signed-tags=strip --tag-of-filtered-object=drop`:
-    #
-    # These fixtures are SHALLOW clones re-rooted via fast-export|fast-import.
-    # That rewrite re-roots the shallow boundary and rewrites commit IDs (see
-    # the header note). A tag signature signs the tag object, which references
-    # the commit OID — so once fast-import rewrites the referenced commit, any
-    # preserved (`--signed-tags=verbatim`) signature no longer matches the tag
-    # it is attached to: `git verify-tag` fails. Shipping such a tag would be
-    # *worse* than honest stripping — a fixture that looks signed but isn't.
-    # So we `strip` signatures from the real-world tags here; genuine signed
-    # fidelity is covered by the directly-generated synthetic fixture in
-    # `tests/roundtrip_fidelity_fixtures/` (never passed through fast-export,
-    # so its signatures stay valid). We still keep the unsigned annotated-tag
-    # *objects* (structure, tagger, message) for non-signature fidelity, and
-    # `--tag-of-filtered-object=drop` discards any tag whose target object we
-    # filtered out of the shallow window. `--all` is a no-op in a single-branch
-    # shallow clone but keeps the script honest if we ever widen the clone.
+    # `fast-export --signed-tags=strip --tag-of-filtered-object=drop`: drop
+    # tag signatures (we ship test fixtures, not release artifacts) and any
+    # tags pointing at objects we filtered out. `--all` would be a no-op in
+    # a single-branch shallow clone but keeps the script honest if we ever
+    # widen the clone.
     git -C "$shallow" fast-export --all \
         --signed-tags=strip \
         --tag-of-filtered-object=drop \
