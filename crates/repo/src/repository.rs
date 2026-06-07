@@ -31,6 +31,7 @@ mod repository_provenance;
 mod repository_resolve;
 #[path = "repository_signing.rs"]
 mod repository_signing;
+pub use repository_signing::ResignOutcome;
 #[path = "repository_snapshot.rs"]
 mod repository_snapshot;
 #[cfg(test)]

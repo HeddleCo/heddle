@@ -6334,6 +6334,191 @@ fn backfill_fidelity_matches_fresh_adopt_and_is_idempotent() {
     assert_eq!(second.skipped, 1);
 }
 
+/// #570 r1 (Codex P2): the backfill re-hashes states, which invalidates any
+/// existing `StateSignature` (it signs the content hash). A signature this
+/// migration CANNOT reproduce — a foreign/third-party key — must NOT be
+/// silently shipped over the new hash: the state is left untouched and
+/// surfaced, so it never carries a signature that fails to verify.
+#[test]
+fn backfill_skips_states_with_foreign_signatures() {
+    use crypto::{Ed25519Signer, SignatureStatus};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_git_temp, git_repo) = init_git_repo();
+
+    let tree_oid = empty_tree_oid(&git_repo);
+    let author = gix::actor::Signature {
+        name: "Author".into(),
+        email: "author@example.com".into(),
+        time: gix::date::Time {
+            seconds: 1_000_000,
+            offset: -7 * 3600,
+        },
+    };
+    let committer = gix::actor::Signature {
+        name: "Committer".into(),
+        email: "committer@example.com".into(),
+        time: gix::date::Time {
+            seconds: 2_000_000,
+            offset: 2 * 3600,
+        },
+    };
+    let commit_oid = commit_with_signatures(
+        &git_repo,
+        Some("refs/heads/main"),
+        tree_oid,
+        "feat: thing\n\nBody.\n",
+        author,
+        committer,
+        vec![],
+    );
+
+    let mut bridge = GitBridge::new(&repo);
+    import_all(&mut bridge, Some(git_repo.workdir().expect("workdir"))).expect("import");
+    let change_id = bridge.mapping.get_heddle(commit_oid).expect("commit mapped");
+
+    // Simulate a pre-#565 adopt: strip the fidelity fields, THEN sign the
+    // stripped state with a FOREIGN key (one this repo's identity does not
+    // control). The foreign signature is valid over the stripped hash — the
+    // backfill must not invalidate it.
+    let mut pre_bump = repo
+        .store()
+        .get_state(&change_id)
+        .expect("load")
+        .expect("state");
+    pre_bump.committer = None;
+    pre_bump.authored_tz_offset = 0;
+    pre_bump.committer_tz_offset = 0;
+    pre_bump.raw_message = None;
+    pre_bump.extra_headers = Vec::new();
+    repo.store().put_state(&pre_bump).expect("write stripped");
+
+    let foreign = Ed25519Signer::generate().expect("foreign key");
+    repo.sign_state(&change_id, &foreign).expect("foreign-sign");
+    assert_eq!(
+        repo.verify_state_signature(&change_id).expect("verify"),
+        SignatureStatus::Valid,
+    );
+
+    let mut bridge = GitBridge::new(&repo);
+    let stats = backfill_fidelity(&mut bridge).expect("backfill");
+    assert_eq!(stats.scanned, 1);
+    assert_eq!(
+        stats.backfilled, 0,
+        "a foreign-signed state must not be rewritten into an invalid signature"
+    );
+    assert_eq!(stats.signature_unreproducible, 1, "it is surfaced, not silently dropped");
+
+    // The state on disk is the untouched stripped form — its foreign signature
+    // still verifies against ITS hash; the migration never produced an invalid
+    // signature.
+    assert_eq!(
+        repo.verify_state_signature(&change_id).expect("verify"),
+        SignatureStatus::Valid,
+        "left-untouched state keeps a verifying signature",
+    );
+    let after = repo
+        .store()
+        .get_state(&change_id)
+        .expect("load")
+        .expect("state");
+    assert!(after.committer.is_none(), "fidelity fields were NOT rewritten");
+}
+
+/// #570 r1 (Codex P2): a state signed by THIS repo's own identity is re-signed
+/// over the new hash during backfill, so the signature stays valid after the
+/// fidelity rewrite (rather than being skipped or left invalid).
+#[test]
+fn backfill_resigns_owned_signed_states() {
+    use crypto::SignatureStatus;
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_git_temp, git_repo) = init_git_repo();
+
+    let tree_oid = empty_tree_oid(&git_repo);
+    let author = gix::actor::Signature {
+        name: "Author".into(),
+        email: "author@example.com".into(),
+        time: gix::date::Time {
+            seconds: 1_000_000,
+            offset: -7 * 3600,
+        },
+    };
+    let committer = gix::actor::Signature {
+        name: "Committer".into(),
+        email: "committer@example.com".into(),
+        time: gix::date::Time {
+            seconds: 2_000_000,
+            offset: 2 * 3600,
+        },
+    };
+    let commit_oid = commit_with_signatures(
+        &git_repo,
+        Some("refs/heads/main"),
+        tree_oid,
+        "feat: thing\n\nBody.\n",
+        author,
+        committer,
+        vec![],
+    );
+
+    let mut bridge = GitBridge::new(&repo);
+    import_all(&mut bridge, Some(git_repo.workdir().expect("workdir"))).expect("import");
+    let change_id = bridge.mapping.get_heddle(commit_oid).expect("commit mapped");
+
+    // Sign with THIS repo's resolvable identity via the authored-state
+    // chokepoint, so backfill's owner-check matches and re-signs.
+    let mut owned = repo
+        .store()
+        .get_state(&change_id)
+        .expect("load")
+        .expect("state");
+    repo.put_authored_state(&mut owned).expect("author-sign");
+    if owned.signature.is_none() {
+        // No signing identity resolvable in this environment; the re-sign path
+        // isn't exercised. The foreign-skip test covers the safety guarantee.
+        return;
+    }
+    assert_eq!(
+        repo.verify_state_signature(&change_id).expect("verify"),
+        SignatureStatus::Valid,
+    );
+
+    // Strip fidelity fields to force the rewrite.
+    let mut pre_bump = repo
+        .store()
+        .get_state(&change_id)
+        .expect("load")
+        .expect("state");
+    pre_bump.committer = None;
+    pre_bump.authored_tz_offset = 0;
+    pre_bump.committer_tz_offset = 0;
+    pre_bump.raw_message = None;
+    pre_bump.extra_headers = Vec::new();
+    repo.store().put_state(&pre_bump).expect("write stripped");
+
+    let mut bridge = GitBridge::new(&repo);
+    let stats = backfill_fidelity(&mut bridge).expect("backfill");
+    assert_eq!(stats.backfilled, 1, "the owned state was rewritten");
+    assert_eq!(stats.resigned, 1, "and re-signed over the new hash");
+    assert_eq!(stats.signature_unreproducible, 0);
+
+    // The rewritten state's signature verifies against its NEW hash.
+    assert_eq!(
+        repo.verify_state_signature(&change_id).expect("verify"),
+        SignatureStatus::Valid,
+        "re-signed state must verify against the backfilled hash",
+    );
+    let after = repo
+        .store()
+        .get_state(&change_id)
+        .expect("load")
+        .expect("state");
+    assert!(after.committer.is_some(), "fidelity fields were rewritten");
+}
+
 /// #570: backfill errors clearly when the git mirror is absent — it is the only
 /// source of the original commit bytes, so it must run before #568 drops it.
 #[test]

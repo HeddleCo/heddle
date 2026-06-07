@@ -601,6 +601,12 @@ struct BridgeBackfillFidelityOutput {
     states_scanned: usize,
     states_backfilled: usize,
     states_skipped: usize,
+    /// Backfilled states whose owned signature was re-signed over the new hash.
+    states_resigned: usize,
+    /// States skipped because they carry a signature this migration cannot
+    /// reproduce (foreign key / no local signer); left untouched so they never
+    /// ship an invalid signature.
+    states_signature_unreproducible: usize,
 }
 
 /// Execute `heddle bridge backfill-fidelity`: re-derive the #565 git-fidelity
@@ -619,6 +625,8 @@ pub fn cmd_bridge_backfill_fidelity(cli: &Cli) -> Result<()> {
         states_scanned: stats.scanned,
         states_backfilled: stats.backfilled,
         states_skipped: stats.skipped,
+        states_resigned: stats.resigned,
+        states_signature_unreproducible: stats.signature_unreproducible,
     };
 
     if should_output_json(cli, Some(repo.config())) {
@@ -643,6 +651,29 @@ pub fn cmd_bridge_backfill_fidelity(cli: &Cli) -> Result<()> {
             "  {}",
             style::field("skipped", &style::bold(&output.states_skipped.to_string()))
         );
+        if output.states_resigned > 0 {
+            println!(
+                "  {}",
+                style::field("re-signed", &style::bold(&output.states_resigned.to_string()))
+            );
+        }
+        if output.states_signature_unreproducible > 0 {
+            println!(
+                "  {}",
+                style::field(
+                    "skipped (unreproducible signature)",
+                    &style::bold(&output.states_signature_unreproducible.to_string())
+                )
+            );
+            println!(
+                "  {} {} state(s) carry a signature this migration cannot reproduce \
+                 (foreign key or no local signer); they were left untouched to avoid \
+                 shipping an invalid signature. Re-derive them with the original signer \
+                 before the mirror is removed (#568).",
+                style::warn_marker(),
+                output.states_signature_unreproducible,
+            );
+        }
     }
     Ok(())
 }

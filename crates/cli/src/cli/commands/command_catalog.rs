@@ -1280,7 +1280,14 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["bridge", "backfill-fidelity"],
         surface(
-            opaque_schemas(DATA_MUTATION, &["bridge backfill-fidelity"]),
+            json_discriminators(
+                opaque_schemas(DATA_MUTATION, &["bridge backfill-fidelity"]),
+                &[json_discriminator(
+                    Some("bridge backfill-fidelity"),
+                    "output_kind",
+                    "bridge_backfill_fidelity",
+                )],
+            ),
             "git_adapter",
         ),
     ),
@@ -5239,6 +5246,7 @@ mod tests {
                 "bridge git import",
                 "bridge git sync",
                 "bridge git reconcile",
+                "bridge backfill-fidelity",
                 "capture",
                 "checkpoint",
                 "cherry-pick",

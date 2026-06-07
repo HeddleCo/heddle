@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Import Git commits into Heddle states functionality.
 
+use objects::lock::RepositoryLockExt;
 use objects::store::ObjectStore;
 use std::{collections::HashSet, path::Path};
 
@@ -10,7 +11,7 @@ use objects::object::{
     parse_commit_extension_headers,
 };
 use refs::{Head, RefExpectation};
-use repo::{Repository as HeddleRepository, ThreadId};
+use repo::{ResignOutcome, Repository as HeddleRepository, ThreadId};
 use tracing::warn;
 
 pub use super::git_import_tree::{GitTreeImporter, import_git_tree};
@@ -339,6 +340,14 @@ pub struct BackfillStats {
     pub backfilled: usize,
     /// States already carrying the correct fidelity fields (left untouched).
     pub skipped: usize,
+    /// Of the `backfilled` states, how many carried a signature owned by this
+    /// repo's identity that was re-signed over the new hash so it stays valid.
+    pub resigned: usize,
+    /// States that NEEDED a rewrite but carried a signature this migration
+    /// cannot reproduce (a foreign/third-party key, or no local signer). They
+    /// are left UNTOUCHED — rewriting them would invalidate their signature —
+    /// and surfaced so the operator can re-derive them deliberately.
+    pub signature_unreproducible: usize,
 }
 
 /// One-time migration (#570, #564 de-lossy step 1b): for every Heddle state
@@ -373,6 +382,18 @@ pub fn backfill_fidelity(bridge: &mut GitBridge<'_>) -> GitResult<BackfillStats>
     // know which states were imported from git commits.
     bridge.build_existing_mapping(None)?;
     let repo = bridge.open_git_repo()?;
+
+    // Hold the repo write lock for the whole read-modify-write below. Existing
+    // states can be mutated concurrently by other processes (review
+    // signatures, discussions, risk sign-off); without the lock such a write
+    // could land between our `get_state` and `put_state` and be silently
+    // clobbered by the rewrite.
+    let _lock = bridge
+        .heddle_repo
+        .locker()
+        .write()
+        .map_err(|e| GitBridgeError::Git(format!("acquire repo write lock for backfill: {e}")))?;
+
     let store = bridge.heddle_repo.store();
 
     // Snapshot the mapping pairs up front so the immutable store borrow below
@@ -398,7 +419,7 @@ pub fn backfill_fidelity(bridge: &mut GitBridge<'_>) -> GitResult<BackfillStats>
 
         let fidelity = extract_commit_fidelity_fields(&commit)?;
         let before = state.compute_hash();
-        let updated = state
+        let mut updated = state
             .with_committer(fidelity.committer)
             .with_tz_offsets(fidelity.authored_tz_offset, fidelity.committer_tz_offset)
             .with_raw_message(&fidelity.raw_message)
@@ -406,9 +427,28 @@ pub fn backfill_fidelity(bridge: &mut GitBridge<'_>) -> GitResult<BackfillStats>
 
         if updated.compute_hash() == before {
             stats.skipped += 1;
-        } else {
-            store.put_state(&updated)?;
-            stats.backfilled += 1;
+            continue;
+        }
+
+        // The rewrite changes `compute_hash()`, which a `StateSignature` signs
+        // over — so any existing signature would no longer verify. Re-sign
+        // states this repo's identity owns (keeping the signature valid over
+        // the new hash); refuse to rewrite states whose signature we cannot
+        // reproduce (foreign key / no signer), leaving them untouched and
+        // counted so they never ship an invalid signature.
+        match bridge.heddle_repo.resign_if_owned(&mut updated) {
+            ResignOutcome::Unsigned => {
+                store.put_state(&updated)?;
+                stats.backfilled += 1;
+            }
+            ResignOutcome::Resigned => {
+                store.put_state(&updated)?;
+                stats.backfilled += 1;
+                stats.resigned += 1;
+            }
+            ResignOutcome::Unreproducible => {
+                stats.signature_unreproducible += 1;
+            }
         }
     }
 

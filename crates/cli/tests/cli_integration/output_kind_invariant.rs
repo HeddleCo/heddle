@@ -65,6 +65,7 @@ const SWEPT: &[&str] = &[
     "bridge git import",
     "bridge git sync",
     "bridge git reconcile",
+    "bridge backfill-fidelity",
     // heddle#272 — output_kind sweep on the named-by-persona verbs.
     "stack",
     "stack ready",
@@ -139,7 +140,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "attempt",
     "blame",
     "branch",
-    "bridge backfill-fidelity",
     "bridge git export",
     "bridge git ingest",
     "bridge git init",
@@ -598,6 +598,17 @@ fn doc_samples_carry_catalog_output_kind_for_every_discriminated_verb() {
 // that run safely in an empty/init'd repo without elaborate fixtures.
 // ---------------------------------------------------------------------
 
+/// Run `git <args>` in `dir`, asserting success. Used by the
+/// `bridge_backfill_fidelity` runtime case to build an adoptable git repo.
+fn run_git(args: &[&str], dir: &std::path::Path) {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .unwrap_or_else(|err| panic!("git {args:?} should run: {err}"));
+    assert!(status.success(), "git {args:?} should succeed");
+}
+
 fn init_fixture() -> TempDir {
     let temp = TempDir::new().expect("tempdir");
     heddle(
@@ -762,6 +773,20 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             let t = init_fixture();
             std::fs::write(t.path().join("untracked.txt"), "junk").unwrap();
             (t, sv(&["clean", "--dry-run"]))
+        }
+        "bridge_backfill_fidelity" => {
+            // Adopt a one-commit git repo so the mirror (the backfill's source
+            // of truth) exists; a fresh adopt already carries fidelity, so the
+            // run scans the state and skips it — exit 0, full JSON payload.
+            let t = TempDir::new().expect("tempdir");
+            run_git(&["init", "-q"], t.path());
+            run_git(&["config", "user.name", "Heddle Test"], t.path());
+            run_git(&["config", "user.email", "heddle@example.com"], t.path());
+            std::fs::write(t.path().join("a.txt"), "base").unwrap();
+            run_git(&["add", "."], t.path());
+            run_git(&["commit", "-q", "-m", "base"], t.path());
+            heddle(&["adopt"], Some(t.path())).expect("adopt");
+            (t, sv(&["bridge", "backfill-fidelity"]))
         }
         "fork" => (init_fixture(), sv(&["fork"])),
         "goto" => {

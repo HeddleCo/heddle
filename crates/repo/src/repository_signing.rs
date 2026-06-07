@@ -10,6 +10,23 @@ use tracing::{debug, instrument};
 
 use super::{HeddleError, Repository, Result};
 
+/// Outcome of [`Repository::resign_if_owned`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResignOutcome {
+    /// The state carried no signature; nothing to preserve.
+    Unsigned,
+    /// The state was signed by this repo's active signing identity and has
+    /// been re-signed over its CURRENT `compute_hash()`, so the signature
+    /// stays valid after an authorized rewrite.
+    Resigned,
+    /// The signature was produced by a key this identity cannot reproduce —
+    /// a foreign/third-party key, or no signer is currently resolvable. The
+    /// state is left UNMODIFIED; the caller must not persist a rewritten
+    /// version of it, since that would ship a signature that no longer
+    /// verifies against the new hash.
+    Unreproducible,
+}
+
 impl Repository {
     /// Path to this repo's per-repo local signing identity (heddle#482).
     fn local_identity_path(&self) -> std::path::PathBuf {
@@ -74,6 +91,40 @@ impl Repository {
         self.sign_state_best_effort(state);
         self.store.put_state(state)?;
         Ok(())
+    }
+
+    /// Re-sign `state` over its CURRENT `compute_hash()` IFF its existing
+    /// signature was produced by this repo's active signing identity, so an
+    /// authorized rewrite (e.g. the #570 fidelity backfill, which re-derives
+    /// hash-bearing fields) keeps a valid signature instead of shipping one
+    /// that no longer verifies.
+    ///
+    /// Ownership is decided by comparing the signature's embedded public key
+    /// against the key the active signer would use. A match means this
+    /// machine controls the key and can legitimately re-sign the new hash.
+    ///
+    /// Returns [`ResignOutcome::Unreproducible`] WITHOUT modifying `state`
+    /// when the signature belongs to a foreign key (or no signer is
+    /// resolvable): re-signing foreign content would falsely attribute it to
+    /// this device, so it is refused outright. The caller MUST NOT persist a
+    /// rewritten version of such a state.
+    pub fn resign_if_owned(&self, state: &mut State) -> ResignOutcome {
+        let Some(existing) = state.signature.clone() else {
+            return ResignOutcome::Unsigned;
+        };
+        let Some(signer) = self.signing_signer() else {
+            return ResignOutcome::Unreproducible;
+        };
+        if hex::encode(signer.public_key()) != existing.public_key {
+            return ResignOutcome::Unreproducible;
+        }
+        match state.sign(&*signer) {
+            Ok(()) => ResignOutcome::Resigned,
+            Err(error) => {
+                tracing::warn!(%error, "re-signing an owned state failed; leaving it unmodified");
+                ResignOutcome::Unreproducible
+            }
+        }
     }
 
     /// Sign a state with the given signer.
