@@ -6290,15 +6290,32 @@ fn backfill_fidelity_matches_fresh_adopt_and_is_idempotent() {
         .expect("load state")
         .expect("state written");
     assert!(fresh.committer.is_some(), "fresh adopt carries fidelity");
+    // A fresh adopt stores the COMMITTER time as `created_at` and the AUTHOR
+    // time as `authored_at` (the fixture uses distinct seconds for each).
+    assert_eq!(
+        fresh.created_at,
+        chrono::DateTime::from_timestamp(2_000_000, 0).expect("committer ts"),
+        "fresh created_at is the committer time",
+    );
+    assert_eq!(
+        fresh.authored_at,
+        Some(chrono::DateTime::from_timestamp(1_000_000, 0).expect("author ts")),
+        "fresh authored_at is the author time",
+    );
 
     // Simulate a repo adopted BEFORE the #565 bump: strip every fidelity field
-    // back to its pre-bump default and rewrite the state.
+    // back to its pre-bump default and rewrite the state. Pre-bump imports also
+    // carried stale/incorrect timestamps (the old path stored the author time
+    // as `created_at` and dropped the committer time), so mangle BOTH to values
+    // that differ from the git commit, forcing the backfill to re-derive them.
     let mut pre_bump = fresh.clone();
     pre_bump.committer = None;
     pre_bump.authored_tz_offset = 0;
     pre_bump.committer_tz_offset = 0;
     pre_bump.raw_message = None;
     pre_bump.extra_headers = Vec::new();
+    pre_bump.created_at = chrono::DateTime::from_timestamp(42, 0).expect("stale created_at");
+    pre_bump.authored_at = Some(chrono::DateTime::from_timestamp(99, 0).expect("stale authored_at"));
     repo.store().put_state(&pre_bump).expect("write pre-bump state");
 
     // Backfill re-derives the fields from the mirror.
@@ -6319,6 +6336,14 @@ fn backfill_fidelity_matches_fresh_adopt_and_is_idempotent() {
     assert_eq!(restored.committer_tz_offset, fresh.committer_tz_offset);
     assert_eq!(restored.raw_message, fresh.raw_message);
     assert_eq!(restored.extra_headers, fresh.extra_headers);
+    assert_eq!(
+        restored.created_at, fresh.created_at,
+        "backfill re-derived the committer time into created_at",
+    );
+    assert_eq!(
+        restored.authored_at, fresh.authored_at,
+        "backfill re-derived the author time into authored_at",
+    );
     let mut fresh_hash = fresh.clone();
     assert_eq!(
         restored.hash(),
@@ -6468,25 +6493,13 @@ fn backfill_resigns_owned_signed_states() {
     import_all(&mut bridge, Some(git_repo.workdir().expect("workdir"))).expect("import");
     let change_id = bridge.mapping.get_heddle(commit_oid).expect("commit mapped");
 
-    // Sign with THIS repo's resolvable identity via the authored-state
-    // chokepoint, so backfill's owner-check matches and re-signs.
-    let mut owned = repo
-        .store()
-        .get_state(&change_id)
-        .expect("load")
-        .expect("state");
-    repo.put_authored_state(&mut owned).expect("author-sign");
-    if owned.signature.is_none() {
-        // No signing identity resolvable in this environment; the re-sign path
-        // isn't exercised. The foreign-skip test covers the safety guarantee.
-        return;
-    }
-    assert_eq!(
-        repo.verify_state_signature(&change_id).expect("verify"),
-        SignatureStatus::Valid,
-    );
-
-    // Strip fidelity fields to force the rewrite.
+    // Reproduce a real pre-#565 adopt: strip the fidelity fields FIRST (the
+    // fields never existed pre-bump), THEN sign the stripped state with THIS
+    // repo's resolvable identity via the authored-state chokepoint — so the
+    // owned signature is valid over the PRE-BUMP hash, exactly as it would have
+    // been on disk before the format bump. (Signing the full state then
+    // stripping would leave a signature that never verified over the stripped
+    // hash, which the re-sign helper now correctly refuses to launder.)
     let mut pre_bump = repo
         .store()
         .get_state(&change_id)
@@ -6497,7 +6510,16 @@ fn backfill_resigns_owned_signed_states() {
     pre_bump.committer_tz_offset = 0;
     pre_bump.raw_message = None;
     pre_bump.extra_headers = Vec::new();
-    repo.store().put_state(&pre_bump).expect("write stripped");
+    repo.put_authored_state(&mut pre_bump).expect("author-sign stripped");
+    if pre_bump.signature.is_none() {
+        // No signing identity resolvable in this environment; the re-sign path
+        // isn't exercised. The foreign-skip test covers the safety guarantee.
+        return;
+    }
+    assert_eq!(
+        repo.verify_state_signature(&change_id).expect("verify"),
+        SignatureStatus::Valid,
+    );
 
     let mut bridge = GitBridge::new(&repo);
     let stats = backfill_fidelity(&mut bridge).expect("backfill");
@@ -6532,6 +6554,55 @@ fn backfill_fidelity_errors_without_mirror() {
         msg.contains("mirror required"),
         "error should name the missing mirror, got: {msg}"
     );
+}
+
+/// #570 (Codex P2): a sidecar entry mapping a state to a git object that is
+/// ABSENT from the mirror must be REPORTED per-state, not silently skipped —
+/// otherwise the operator can't tell that state was left at its pre-bump
+/// fidelity (e.g. a partial mirror, or a dropped object).
+#[test]
+fn backfill_reports_states_missing_from_mirror() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_git_temp, git_repo) = init_git_repo();
+
+    // A normal import so the mirror exists and there's one real mapped commit.
+    let tree_oid = empty_tree_oid(&git_repo);
+    let real_oid = commit_with_signatures(
+        &git_repo,
+        Some("refs/heads/main"),
+        tree_oid,
+        "feat: real\n",
+        test_signature(),
+        test_signature(),
+        vec![],
+    );
+    let mut bridge = GitBridge::new(&repo);
+    import_all(&mut bridge, Some(git_repo.workdir().expect("workdir"))).expect("import");
+    assert!(bridge.mapping.get_heddle(real_oid).is_some(), "real commit mapped");
+
+    // Inject a sidecar entry pointing at an object that is NOT in the mirror,
+    // then persist it so the backfill's mapping rebuild loads it back.
+    let missing_change_id = ChangeId::from_bytes([7u8; 16]);
+    let bogus_oid: gix::hash::ObjectId = "1234567890123456789012345678901234567890"
+        .parse()
+        .expect("valid-looking oid absent from the mirror");
+    bridge.mapping.insert(missing_change_id, bogus_oid);
+    bridge.save_mapping_to_disk().expect("persist injected sidecar entry");
+
+    let mut bridge = GitBridge::new(&repo);
+    let stats = backfill_fidelity(&mut bridge).expect("backfill");
+
+    assert_eq!(
+        stats.missing_mirror_commits.len(),
+        1,
+        "the absent-from-mirror entry is reported, not silently skipped",
+    );
+    let reported = &stats.missing_mirror_commits[0];
+    assert_eq!(reported.change_id, missing_change_id);
+    assert_eq!(reported.git_oid, bogus_oid.to_string());
+    // The real, present commit is still scanned normally.
+    assert_eq!(stats.scanned, 1, "the present commit was scanned");
 }
 
 /// #564 de-lossy step 1, close-the-class proof (#565 r3). Every

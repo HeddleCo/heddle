@@ -607,6 +607,15 @@ struct BridgeBackfillFidelityOutput {
     /// reproduce (foreign key / no local signer); left untouched so they never
     /// ship an invalid signature.
     states_signature_unreproducible: usize,
+    /// Mapping entries whose git object is absent from the mirror, so the state
+    /// could not be backfilled. Reported per-state rather than silently skipped.
+    missing_mirror_commits: Vec<BridgeMissingMirrorCommitOutput>,
+}
+
+#[derive(Serialize)]
+struct BridgeMissingMirrorCommitOutput {
+    change_id: String,
+    git_oid: String,
 }
 
 /// Execute `heddle bridge backfill-fidelity`: re-derive the #565 git-fidelity
@@ -627,6 +636,14 @@ pub fn cmd_bridge_backfill_fidelity(cli: &Cli) -> Result<()> {
         states_skipped: stats.skipped,
         states_resigned: stats.resigned,
         states_signature_unreproducible: stats.signature_unreproducible,
+        missing_mirror_commits: stats
+            .missing_mirror_commits
+            .iter()
+            .map(|m| BridgeMissingMirrorCommitOutput {
+                change_id: m.change_id.to_string(),
+                git_oid: m.git_oid.clone(),
+            })
+            .collect(),
     };
 
     if should_output_json(cli, Some(repo.config())) {
@@ -673,6 +690,24 @@ pub fn cmd_bridge_backfill_fidelity(cli: &Cli) -> Result<()> {
                 style::warn_marker(),
                 output.states_signature_unreproducible,
             );
+        }
+        if !output.missing_mirror_commits.is_empty() {
+            println!(
+                "  {}",
+                style::field(
+                    "missing from mirror",
+                    &style::bold(&output.missing_mirror_commits.len().to_string())
+                )
+            );
+            println!(
+                "  {} {} state(s) map to a git object absent from the mirror, so they \
+                 could not be backfilled and remain at their pre-bump fidelity:",
+                style::warn_marker(),
+                output.missing_mirror_commits.len(),
+            );
+            for missing in &output.missing_mirror_commits {
+                println!("    {} -> {}", missing.change_id, missing.git_oid);
+            }
         }
     }
     Ok(())

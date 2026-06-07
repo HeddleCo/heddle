@@ -5,7 +5,7 @@ use objects::lock::RepositoryLockExt;
 use objects::store::ObjectStore;
 use std::{collections::HashSet, path::Path};
 
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use objects::object::{
     Agent, Attribution, ChangeId, MarkerName, Principal, State, Status, ThreadName,
     parse_commit_extension_headers,
@@ -164,8 +164,9 @@ fn collect_extra_headers(commit: &gix::Commit<'_>) -> GitResult<Vec<(Vec<u8>, Ve
 }
 
 /// The git-fidelity fields (#564 de-lossy step 1, #565) re-derived from a git
-/// commit object: the committer identity, both timezone offsets, the verbatim
-/// message bytes, and the ordered extension headers.
+/// commit object: the committer identity, both timezone offsets, both
+/// timestamps (committer time → `created_at`, author time → `authored_at`),
+/// the verbatim message bytes, and the ordered extension headers.
 ///
 /// This is the SINGLE extraction path for these fields. Both [`import_commit`]
 /// (fresh adopt) and [`backfill_fidelity`] (the one-time migration for repos
@@ -176,6 +177,11 @@ pub(crate) struct CommitFidelityFields {
     pub committer: Principal,
     pub authored_tz_offset: i32,
     pub committer_tz_offset: i32,
+    /// `created_at`: the *committer* time (the commit object's birth).
+    pub created_at: DateTime<Utc>,
+    /// `authored_at`: the *author* time (when the change was first written).
+    /// Differs from `created_at` for rebased / cherry-picked / amended commits.
+    pub authored_at: DateTime<Utc>,
     pub raw_message: Vec<u8>,
     pub extra_headers: Vec<(Vec<u8>, Vec<u8>)>,
 }
@@ -186,13 +192,33 @@ pub(crate) fn extract_commit_fidelity_fields(
     commit: &gix::Commit<'_>,
 ) -> GitResult<CommitFidelityFields> {
     let author = commit.author().map_err(git_err)?;
-    let authored_tz_offset = author.time().map_err(git_err)?.offset;
+    let authored_time = author.time().map_err(git_err)?;
     let committer = commit.committer().map_err(git_err)?;
-    let committer_tz_offset = committer.time().map_err(git_err)?.offset;
+    let committer_time = committer.time().map_err(git_err)?;
+    let created_at = Utc
+        .timestamp_opt(committer_time.seconds, 0)
+        .single()
+        .ok_or_else(|| {
+            GitBridgeError::InvalidMapping(format!(
+                "invalid Git timestamp: {}",
+                committer_time.seconds
+            ))
+        })?;
+    let authored_at = Utc
+        .timestamp_opt(authored_time.seconds, 0)
+        .single()
+        .ok_or_else(|| {
+            GitBridgeError::InvalidMapping(format!(
+                "invalid Git timestamp: {}",
+                authored_time.seconds
+            ))
+        })?;
     Ok(CommitFidelityFields {
         committer: Principal::new(committer.name.to_string(), committer.email.to_string()),
-        authored_tz_offset,
-        committer_tz_offset,
+        authored_tz_offset: authored_time.offset,
+        committer_tz_offset: committer_time.offset,
+        created_at,
+        authored_at,
         raw_message: commit.message_raw_sloppy().to_vec(),
         extra_headers: collect_extra_headers(commit)?,
     })
@@ -218,17 +244,6 @@ pub fn import_commit(
     let author = commit.author().map_err(git_err)?;
     let author_name = author.name.to_string();
     let author_email = author.email.to_string();
-    let authored_seconds = author.time().map_err(git_err)?.seconds;
-    // Git records both an author (who wrote the change) and a committer (who
-    // created this commit object); the two differ for rebased / cherry-picked /
-    // amended commits. We keep the committer time here for `created_at`; its
-    // identity + offset come from `fidelity`.
-    let committed_seconds = commit
-        .committer()
-        .map_err(git_err)?
-        .time()
-        .map_err(git_err)?
-        .seconds;
     let tree_id = commit.tree_id().map_err(git_err)?.detach();
     let parent_git_oids: Vec<gix::hash::ObjectId> =
         commit.parent_ids().map(|id| id.detach()).collect();
@@ -297,23 +312,15 @@ pub fn import_commit(
         })
         .unwrap_or(Status::Draft);
 
-    // #565: `created_at` is the *committer* time (the commit object's
-    // birth) and `authored_at` is the *author* time, matching the
-    // `bridge git ingest` importer. Previously this path stored the author
-    // time as `created_at` and dropped the committer entirely, so the
-    // committer time wasn't recoverable; fidelity requires both.
-    let created_at = Utc.timestamp_opt(committed_seconds, 0).single().ok_or_else(|| {
-        GitBridgeError::InvalidMapping(format!("invalid Git timestamp: {}", committed_seconds))
-    })?;
-    let authored_at = Utc.timestamp_opt(authored_seconds, 0).single().ok_or_else(|| {
-        GitBridgeError::InvalidMapping(format!("invalid Git timestamp: {}", authored_seconds))
-    })?;
-
+    // #565: `created_at` is the *committer* time (the commit object's birth)
+    // and `authored_at` is the *author* time, both re-derived through the
+    // single `fidelity` extractor so this fresh-adopt path and
+    // `backfill_fidelity` can't drift on the timestamps either.
     let state = State::new(tree_hash, parent_oids, attribution)
         .with_change_id(change_id)
         .with_intent(intent.unwrap_or_else(|| "Imported from Git".to_string()))
-        .with_timestamp(created_at)
-        .with_authored_at(authored_at)
+        .with_timestamp(fidelity.created_at)
+        .with_authored_at(fidelity.authored_at)
         .with_committer(fidelity.committer)
         .with_tz_offsets(fidelity.authored_tz_offset, fidelity.committer_tz_offset)
         .with_raw_message(&fidelity.raw_message)
@@ -331,8 +338,19 @@ pub fn import_commit(
     Ok(change_id)
 }
 
+/// A sidecar mapping entry whose git object is absent from the mirror, so its
+/// state could not be backfilled. Surfaced (not silently skipped) so the
+/// operator knows that state was left at its pre-bump fidelity.
+#[derive(Debug, Clone)]
+pub struct MissingMirrorCommit {
+    /// The Heddle state the sidecar mapped to the missing object.
+    pub change_id: ChangeId,
+    /// The git object id the sidecar expected to find in the mirror.
+    pub git_oid: String,
+}
+
 /// Counts reported by [`backfill_fidelity`].
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct BackfillStats {
     /// Mapped git commits whose Heddle state was examined.
     pub scanned: usize,
@@ -348,6 +366,10 @@ pub struct BackfillStats {
     /// are left UNTOUCHED — rewriting them would invalidate their signature —
     /// and surfaced so the operator can re-derive them deliberately.
     pub signature_unreproducible: usize,
+    /// Mapping entries whose git object is absent from the mirror; the state
+    /// could not be backfilled and is reported per-state rather than silently
+    /// skipped.
+    pub missing_mirror_commits: Vec<MissingMirrorCommit>,
 }
 
 /// One-time migration (#570, #564 de-lossy step 1b): for every Heddle state
@@ -378,21 +400,24 @@ pub fn backfill_fidelity(bridge: &mut GitBridge<'_>) -> GitResult<BackfillStats>
         )));
     }
 
-    // Rebuild the change_id<->git_oid mapping from the sidecar + mirror so we
-    // know which states were imported from git commits.
-    bridge.build_existing_mapping(None)?;
     let repo = bridge.open_git_repo()?;
 
-    // Hold the repo write lock for the whole read-modify-write below. Existing
-    // states can be mutated concurrently by other processes (review
-    // signatures, discussions, risk sign-off); without the lock such a write
-    // could land between our `get_state` and `put_state` and be silently
-    // clobbered by the rewrite.
+    // Hold the repo write lock for the WHOLE migration — including the mapping
+    // rebuild below. Existing states can be mutated concurrently by other
+    // processes (review signatures, discussions, risk sign-off); the mapping we
+    // read AND the states we rewrite must be a single consistent snapshot, so a
+    // concurrent write can neither change which states we scan nor land between
+    // our `get_state` and `put_state` and be silently clobbered by the rewrite.
     let _lock = bridge
         .heddle_repo
         .locker()
         .write()
         .map_err(|e| GitBridgeError::Git(format!("acquire repo write lock for backfill: {e}")))?;
+
+    // Rebuild the change_id<->git_oid mapping from the sidecar + mirror so we
+    // know which states were imported from git commits. Done UNDER the lock so
+    // the mapping and the rewrites form one consistent read-modify-write.
+    bridge.build_existing_mapping(None)?;
 
     let store = bridge.heddle_repo.store();
 
@@ -406,12 +431,26 @@ pub fn backfill_fidelity(bridge: &mut GitBridge<'_>) -> GitResult<BackfillStats>
 
     let mut stats = BackfillStats::default();
     for (change_id, git_oid) in pairs {
-        // Skip mapping entries whose object isn't a commit in the mirror
-        // (annotated-tag objects, or objects not present locally): only commits
+        // Distinguish "object absent from the mirror" from "object present but
+        // not a commit". The former means the sidecar maps this state to bytes
+        // we no longer have — REPORT it rather than silently skip, so the
+        // operator knows it was left at its pre-bump fidelity. The latter
+        // (annotated-tag objects, blobs) is a legitimate skip: only commits
         // carry fidelity fields today (#575 covers tag objects).
-        let Ok(commit) = repo.find_commit(git_oid) else {
-            continue;
+        let object = match repo.find_object(git_oid) {
+            Ok(object) => object,
+            Err(_) => {
+                stats.missing_mirror_commits.push(MissingMirrorCommit {
+                    change_id,
+                    git_oid: git_oid.to_string(),
+                });
+                continue;
+            }
         };
+        if object.kind != gix::objs::Kind::Commit {
+            continue;
+        }
+        let commit = repo.find_commit(git_oid).map_err(git_err)?;
         let Some(state) = store.get_state(&change_id)? else {
             continue;
         };
@@ -422,6 +461,8 @@ pub fn backfill_fidelity(bridge: &mut GitBridge<'_>) -> GitResult<BackfillStats>
         let mut updated = state
             .with_committer(fidelity.committer)
             .with_tz_offsets(fidelity.authored_tz_offset, fidelity.committer_tz_offset)
+            .with_timestamp(fidelity.created_at)
+            .with_authored_at(fidelity.authored_at)
             .with_raw_message(&fidelity.raw_message)
             .with_extra_headers(fidelity.extra_headers);
 
@@ -435,8 +476,10 @@ pub fn backfill_fidelity(bridge: &mut GitBridge<'_>) -> GitResult<BackfillStats>
         // states this repo's identity owns (keeping the signature valid over
         // the new hash); refuse to rewrite states whose signature we cannot
         // reproduce (foreign key / no signer), leaving them untouched and
-        // counted so they never ship an invalid signature.
-        match bridge.heddle_repo.resign_if_owned(&mut updated) {
+        // counted so they never ship an invalid signature. `before` is the OLD
+        // hash the existing signature was made over — the helper verifies it
+        // before re-signing so a never-valid signature isn't laundered.
+        match bridge.heddle_repo.resign_if_owned(&mut updated, &before) {
             ResignOutcome::Unsigned => {
                 store.put_state(&updated)?;
                 stats.backfilled += 1;

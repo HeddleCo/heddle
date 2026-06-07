@@ -2930,10 +2930,10 @@ required:
 {"ingested": true, "commits_imported": 2, "states_created": 2, "reason": "mirror update", "remote": "origin"}
 ```
 
-`heddle bridge backfill-fidelity --output json` emits the scanned/backfilled/skipped counts for the one-time #565 git-fidelity migration. `states_resigned` counts backfilled states whose own signature was re-signed over the new hash; `states_signature_unreproducible` counts states left untouched because they carry a signature this migration cannot reproduce (a foreign key or no local signer), so it never ships an invalid signature:
+`heddle bridge backfill-fidelity --output json` emits the scanned/backfilled/skipped counts for the one-time #565 git-fidelity migration. `states_resigned` counts backfilled states whose own signature was re-signed over the new hash; `states_signature_unreproducible` counts states left untouched because they carry a signature this migration cannot reproduce (a foreign key or no local signer), so it never ships an invalid signature. `missing_mirror_commits` lists any mapping entries whose git object is absent from the mirror — those states could not be backfilled and are reported (as `{change_id, git_oid}`) rather than silently skipped:
 
 ```json
-{"output_kind": "bridge_backfill_fidelity", "action": "bridge backfill-fidelity", "states_scanned": 2, "states_backfilled": 2, "states_skipped": 0, "states_resigned": 0, "states_signature_unreproducible": 0}
+{"output_kind": "bridge_backfill_fidelity", "action": "bridge backfill-fidelity", "states_scanned": 2, "states_backfilled": 2, "states_skipped": 0, "states_resigned": 0, "states_signature_unreproducible": 0, "missing_mirror_commits": []}
 ```
 
 `heddle cherry-pick --output json` emits the committed shape by default;
