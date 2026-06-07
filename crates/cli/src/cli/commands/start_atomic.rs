@@ -59,13 +59,31 @@ use super::worktree_cmd::{
     helpers::write_isolated_checkout, hydrate, shared_target::write_cargo_config,
 };
 
-/// Wrap an `anyhow` error from a materialize/hydrate helper into the
+/// Classify an `anyhow` error from a materialize/hydrate helper into the
 /// `HeddleError` the primitive's `Result` requires (mirrors undo/redo's
 /// `apply_error`). The command-level preflights produce the structured
-/// refusals; a message wrapped here only ever surfaces a genuinely
+/// refusals; a message reaching here only ever surfaces a genuinely
 /// unexpected mid-apply failure whose rewind has already run.
+///
+/// This must NOT blanket-wrap every failure as a `Conflict`: a plain I/O
+/// failure mid-materialize (e.g. a `clonefile`/`FICLONE` ENOENT, heddle#571)
+/// would then be reported to the user as `conflict: No such file or directory`,
+/// which is both wrong and blocks diagnosis. So we recover the real variant:
+///   * an already-structured `HeddleError` (the common case — repo-layer errors
+///     propagate through the helpers' `anyhow::Result` via `?`) keeps its
+///     variant, so an `Io`/`NotFound`/etc. stays itself and only a genuine
+///     merge/visibility `Conflict` stays a `Conflict`;
+///   * a bare `std::io::Error` surfaces as `HeddleError::Io` (preserving the
+///     path/os-error its source carries);
+///   * only a genuinely-unclassifiable error falls back to `Conflict`.
 fn apply_error(err: anyhow::Error) -> HeddleError {
-    HeddleError::Conflict(format!("{err:#}"))
+    match err.downcast::<HeddleError>() {
+        Ok(heddle) => heddle,
+        Err(err) => match err.downcast::<std::io::Error>() {
+            Ok(io) => HeddleError::Io(io),
+            Err(err) => HeddleError::Conflict(format!("{err:#}")),
+        },
+    }
 }
 
 // ---- In-process fault seam (unit tests only) ----
@@ -1073,6 +1091,50 @@ mod tests {
     use crate::cli::{ThreadStartArgs, WorkspaceModeArg};
     use repo::Repository;
     use tempfile::TempDir;
+
+    /// heddle#571 (Bug 1): a non-conflict failure on the start path must NOT be
+    /// reported as `conflict:`. The macOS regression was a `clonefile` ENOENT
+    /// (an `io::Error`) bubbling through the materialize helper's
+    /// `anyhow::Result` and getting blanket-wrapped as `HeddleError::Conflict`,
+    /// surfacing to the user as `conflict: No such file or directory (os error
+    /// 2)` — wrong, and it blocked diagnosis. `apply_error` is the classifier on
+    /// that path; assert it preserves the real variant.
+    #[test]
+    fn apply_error_preserves_io_and_does_not_mislabel_as_conflict() {
+        // A bare io::Error (what `clonefile`/`FICLONE` produce on ENOENT).
+        let bare_io = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No such file or directory (os error 2)",
+        ));
+        let mapped = apply_error(bare_io);
+        assert!(
+            matches!(mapped, HeddleError::Io(_)),
+            "a bare io error must surface as Io, got {mapped:?}"
+        );
+        assert!(
+            !format!("{mapped}").starts_with("conflict:"),
+            "io error must not be reported as a conflict: {mapped}"
+        );
+
+        // The real shape from the materialize path: an io error already
+        // converted to `HeddleError::Io`, then propagated through the helper's
+        // `anyhow::Result` via `?`. `apply_error` must recover the Io variant.
+        let structured_io = anyhow::Error::new(HeddleError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No such file or directory (os error 2)",
+        )));
+        assert!(
+            matches!(apply_error(structured_io), HeddleError::Io(_)),
+            "a propagated HeddleError::Io must keep its variant"
+        );
+
+        // A genuine merge/visibility conflict still maps to Conflict.
+        let conflict = anyhow::Error::new(HeddleError::Conflict("real merge conflict".to_string()));
+        assert!(
+            matches!(apply_error(conflict), HeddleError::Conflict(_)),
+            "a genuine conflict must remain a conflict"
+        );
+    }
 
     /// A `--path` solid-thread start that pins its base on `from` (no current-
     /// state bootstrap) and never spawns a daemon — minimal machinery for the

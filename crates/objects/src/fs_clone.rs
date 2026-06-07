@@ -50,6 +50,21 @@ use std::{fs, io, path::Path};
 /// be opened for writing on a regular file, which we create with
 /// `O_CREAT | O_WRONLY | O_TRUNC`.
 pub fn try_reflink(source: &Path, dest: &Path) -> io::Result<bool> {
+    // Never hand `clonefile`/`FICLONE` a source that isn't there: a missing
+    // source is reported as ENOENT, which `reflink_unsupported` deliberately
+    // does NOT swallow (ENOENT is a genuinely-missing file, not "reflink
+    // unsupported"), so it would hard-error. Reflink is only an optimization —
+    // a vanished loose mirror (concurrent prune / torn promote) must degrade to
+    // the caller's copy/bytes-write fallback, not crash. We treat
+    // "source not a usable file right now" exactly like "filesystem can't
+    // reflink": `Ok(false)`. This guard is what stopped `heddle start` from
+    // failing on macOS/APFS with `conflict: No such file or directory`
+    // (heddle#571). A genuinely-missing blob still errors loudly downstream —
+    // `get_blob` returns `NotFound` with the hash when the copy fallback also
+    // can't find the bytes.
+    if !source.exists() {
+        return Ok(false);
+    }
     #[cfg(target_os = "macos")]
     {
         try_clonefile_macos(source, dest)
@@ -223,6 +238,29 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// heddle#571 (Bug 2): reflink must be gated on the source existing. A
+    /// vanished loose mirror (concurrent prune / torn promote) must degrade to
+    /// the caller's copy/bytes-write fallback (`Ok(false)`), NOT hard-error with
+    /// the ENOENT that `clonefile` raises on macOS (and that `reflink_unsupported`
+    /// correctly refuses to swallow). Verifiable on Linux: no syscall is issued.
+    #[test]
+    fn try_reflink_missing_source_falls_back_not_errors() {
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("does-not-exist.txt");
+        let dst = temp.path().join("dst.txt");
+        assert!(!src.exists());
+
+        let result = try_reflink(&src, &dst);
+        assert!(
+            matches!(result, Ok(false)),
+            "a missing reflink source must return Ok(false) (fall back), got {result:?}"
+        );
+        assert!(
+            !dst.exists(),
+            "no destination should be created when the source is missing"
+        );
+    }
 
     #[test]
     fn clonefile_or_copy_creates_destination_with_source_bytes() {

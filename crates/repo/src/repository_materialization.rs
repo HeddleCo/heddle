@@ -706,6 +706,27 @@ impl Repository {
         // make sure we're starting from a clean slate. A previous
         // `goto` could have left a regular file or a stale link here.
         let _ = fs::remove_file(dest);
+        // Reflink is a pure optimization; correctness must never depend on the
+        // loose source still being present at the syscall. `loose_blob_path`
+        // verified it existed, but a concurrent prune or a torn NoSync promote
+        // can remove it before we get here. On macOS, handing `clonefile(2)` a
+        // missing source surfaces as ENOENT — which `reflink_unsupported`
+        // deliberately does NOT swallow (ENOENT means a genuinely missing file,
+        // not "reflink unsupported") — so without this guard the whole
+        // `heddle start` hard-fails (heddle#571). Fall back to the bytes-write
+        // path for THIS blob only by returning `Ok(false)`; do NOT
+        // `disable_reflinks`, so sibling blobs whose mirrors are intact still
+        // clone. The caller (`materialize_blob`) then writes the blob from its
+        // decompressed bytes via `get_blob` — the same path Linux's
+        // ext4-EOPNOTSUPP short-circuit already takes.
+        if !source.exists() {
+            debug!(
+                source = %source.display(),
+                dest = %dest.display(),
+                "loose reflink source missing before clone; falling back to bytes-write for this blob"
+            );
+            return Ok(false);
+        }
         match objects::fs_clone::try_reflink(source, dest) {
             Ok(true) => {
                 set_file_mode(dest, executable)?;
@@ -732,7 +753,12 @@ impl Repository {
                     dest = %dest.display(),
                     "reflink failed with I/O error"
                 );
-                Err(err.into())
+                // Surface the offending loose source path so a
+                // clonefile/FICLONE failure is diagnosable instead of a bare
+                // `No such file or directory (os error 2)` with no context
+                // (heddle#571). `enrich_fs_error` also classifies common
+                // failures (out-of-space, read-only, permission) by ErrorKind.
+                Err(HeddleError::Io(enrich_fs_error(source, "reflinking", err)))
             }
         }
     }
