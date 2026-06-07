@@ -11,7 +11,7 @@
 //! unchanged contract produces a no-op diff. The `gen_ts_types` example writes
 //! it to disk; `tests/ts_types_in_sync.rs` asserts the checked-in files match.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use serde_json::{Map, Value};
@@ -43,57 +43,142 @@ pub fn generate() -> Generated {
     generate_from(verb_schemas)
 }
 
+/// A single global name registry that every emitted type — `$def` *and* root —
+/// flows through, so no two distinct bodies can ever share a sanitized name.
+///
+/// This closes the name-collision class structurally: defs and roots are not
+/// two separate namespaces that can clobber each other, they are one allocation
+/// pass. When two distinct bodies want the same sanitized name (root-vs-root,
+/// root-vs-def, or def-vs-def across verbs) the later one is disambiguated with
+/// a numeric suffix instead of overwriting, and every `$ref` that pointed at the
+/// renamed def is rewritten to its allocated name so it still resolves to the
+/// intended definition.
+struct NameRegistry {
+    /// final emitted name -> type body.
+    types: BTreeMap<String, Value>,
+    /// desired base name -> allocated `(final_name, closure_signature)` pairs.
+    /// A new request reuses an existing final name only when its full ref
+    /// closure is byte-identical (i.e. genuinely the same type); otherwise it
+    /// gets a fresh, suffixed name.
+    by_base: BTreeMap<String, Vec<(String, String)>>,
+}
+
+impl NameRegistry {
+    fn new() -> Self {
+        Self {
+            types: BTreeMap::new(),
+            by_base: BTreeMap::new(),
+        }
+    }
+
+    /// Reserve a unique final name for `base`. `sig` is the body's ref-closure
+    /// signature: identical signatures dedup to one shared type, distinct ones
+    /// are kept apart. Returns `(final_name, is_new)`; when `is_new` the caller
+    /// must store the (ref-rewritten) body under `final_name`.
+    fn allocate(&mut self, base: &str, sig: &str) -> (String, bool) {
+        if let Some(existing) = self.by_base.get(base) {
+            for (final_name, existing_sig) in existing {
+                if existing_sig == sig {
+                    return (final_name.clone(), false);
+                }
+            }
+        }
+        let mut candidate = base.to_string();
+        let mut n = 1;
+        while self.types.contains_key(&candidate) {
+            n += 1;
+            candidate = format!("{base}{n}");
+        }
+        // Claim the name immediately so concurrent allocations in the same pass
+        // can't pick it; the real body is written by the caller when new.
+        self.types.insert(candidate.clone(), Value::Null);
+        self.by_base
+            .entry(base.to_string())
+            .or_default()
+            .push((candidate.clone(), sig.to_string()));
+        (candidate, true)
+    }
+}
+
 /// Core codegen over an explicit `(verb, schema)` list. Split out from
-/// [`generate`] so title-collision handling is unit-testable without the live
+/// [`generate`] so collision handling is unit-testable without the live
 /// catalog.
 fn generate_from(verb_schemas: Vec<(String, Value)>) -> Generated {
-    // name -> type body. `$defs` populate first; a verb's own root overlays its
-    // matching name (the root carries runtime-injected op_id / discriminator
-    // fields that the same struct-as-a-$def elsewhere lacks).
-    let mut types: BTreeMap<String, Value> = BTreeMap::new();
+    // Deterministic processing order so suffix assignment is stable.
+    let mut verb_schemas = verb_schemas;
+    verb_schemas.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut registry = NameRegistry::new();
     let mut verb_to_type: BTreeMap<String, String> = BTreeMap::new();
     let mut raw: BTreeMap<String, Value> = BTreeMap::new();
-    // verb -> (title, stripped root body). Keyed by verb (not title) so two
-    // verbs that share a schema title don't clobber each other's root body.
-    let mut roots: BTreeMap<String, (String, Value)> = BTreeMap::new();
 
-    for (verb, schema) in verb_schemas {
-        if let Some(defs) = schema.get("$defs").and_then(Value::as_object) {
-            for (name, body) in defs {
-                types
-                    .entry(sanitize_ident(name))
+    // A title shared by >1 verb can't name both verbs' root types, so the
+    // colliding verbs each fall back to a distinct per-verb type name.
+    let mut title_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for (verb, schema) in &verb_schemas {
+        let title = root_title(verb, schema);
+        *title_counts.entry(title).or_default() += 1;
+    }
+
+    for (verb, schema) in &verb_schemas {
+        // 1. This verb's `$defs`, keyed by sanitized name (the form `$ref`s and
+        //    `ref_name` resolve to).
+        let mut defs: BTreeMap<String, Value> = BTreeMap::new();
+        if let Some(obj) = schema.get("$defs").and_then(Value::as_object) {
+            for (name, body) in obj {
+                defs.entry(sanitize_ident(name))
                     .or_insert_with(|| body.clone());
             }
         }
 
-        let title = schema
-            .get("title")
-            .and_then(Value::as_str)
-            .map(sanitize_ident)
-            .unwrap_or_else(|| verb_type_name(&verb));
-        roots.insert(verb.clone(), (title, strip_root_meta(&schema)));
-        raw.insert(verb, schema);
-    }
+        // 2. Allocate a global name for every def, building this verb's
+        //    rename map (original sanitized name -> final emitted name).
+        let mut rename: BTreeMap<String, String> = BTreeMap::new();
+        let mut newly: Vec<(String, String)> = Vec::new();
+        for name in defs.keys() {
+            let sig = body_sig(&defs[name], &defs);
+            let (final_name, is_new) = registry.allocate(name, &sig);
+            if is_new {
+                newly.push((name.clone(), final_name.clone()));
+            }
+            rename.insert(name.clone(), final_name);
+        }
 
-    // A title shared by >1 verb can't name both verbs' root types, so the
-    // colliding verbs each get a distinct per-verb type name. Previously the
-    // last verb to write a title won and earlier verbs' root bodies were
-    // dropped, yielding wrong/missing TS types for them.
-    let mut title_counts: BTreeMap<&str, usize> = BTreeMap::new();
-    for (title, _) in roots.values() {
-        *title_counts.entry(title.as_str()).or_default() += 1;
-    }
+        // 3. Store each newly-allocated def body with its `$ref`s rewritten to
+        //    the verb's resolved names. Shared (deduped) defs are already
+        //    present and structurally identical, so they are left untouched.
+        for (orig, final_name) in &newly {
+            let mut body = defs[orig].clone();
+            rewrite_refs(&mut body, &rename);
+            registry.types.insert(final_name.clone(), body);
+        }
 
-    for (verb, (title, body)) in &roots {
-        let type_name = if title_counts.get(title.as_str()).copied().unwrap_or(0) > 1 {
+        // 4. The root: same registry, so it can never overwrite a def of a
+        //    different shape — a collision suffixes the root instead.
+        let title = root_title(verb, schema);
+        let desired = if title_counts.get(&title).copied().unwrap_or(0) > 1 {
             verb_type_name(verb)
         } else {
-            title.clone()
+            title
         };
-        types.insert(type_name.clone(), body.clone());
-        verb_to_type.insert(verb.clone(), type_name);
+        let mut root_body = strip_root_meta(schema);
+        // Sign the root by its *content* (raw refs, like the defs above) so a
+        // root that is genuinely the same shape as a same-named `$def` shares
+        // one type, while a root that differs (e.g. carries a runtime-injected
+        // discriminator the `$def` lacks) gets a distinct, suffixed name instead
+        // of overwriting the `$def`.
+        let root_sig = body_sig(&root_body, &defs);
+        rewrite_refs(&mut root_body, &rename);
+        let (final_name, is_new) = registry.allocate(&desired, &root_sig);
+        if is_new {
+            registry.types.insert(final_name.clone(), root_body);
+        }
+        verb_to_type.insert(verb.clone(), final_name);
+
+        raw.insert(verb.clone(), schema.clone());
     }
 
+    let types = registry.types;
     let typescript = render_ts(&types, &verb_to_type);
     let json = serde_json::to_string_pretty(&serde_json::json!({
         "schemaVersion": SCHEMA_VERSION,
@@ -103,6 +188,114 @@ fn generate_from(verb_schemas: Vec<(String, Value)>) -> Generated {
         + "\n";
 
     Generated { typescript, json }
+}
+
+/// The sanitized type name a verb's root *wants*, before collision handling:
+/// its schema `title`, or a verb-derived name when the schema has no title.
+fn root_title(verb: &str, schema: &Value) -> String {
+    schema
+        .get("title")
+        .and_then(Value::as_str)
+        .map(sanitize_ident)
+        .unwrap_or_else(|| verb_type_name(verb))
+}
+
+/// Recursively rewrite every `$ref` so its terminal name resolves through
+/// `rename` (original sanitized def name -> final emitted name). Refs not in the
+/// map keep their (sanitized) target. This keeps `$ref`s pointing at the right
+/// definition after a colliding def was given a suffixed name.
+fn rewrite_refs(value: &mut Value, rename: &BTreeMap<String, String>) {
+    match value {
+        Value::Object(map) => {
+            let remapped = map.get("$ref").and_then(Value::as_str).and_then(|r| {
+                let terminal = sanitize_ident(r.rsplit('/').next().unwrap_or(r));
+                rename
+                    .get(&terminal)
+                    .filter(|final_name| *final_name != &terminal)
+                    .map(|final_name| format!("#/$defs/{final_name}"))
+            });
+            if let Some(new_ref) = remapped {
+                map.insert("$ref".to_string(), Value::String(new_ref));
+            }
+            for v in map.values_mut() {
+                rewrite_refs(v, rename);
+            }
+        }
+        Value::Array(items) => {
+            for v in items.iter_mut() {
+                rewrite_refs(v, rename);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A deterministic signature of a type body's *full ref closure* within one
+/// verb's `$defs`. Two bodies (def or root) share a name only when their
+/// signatures match — i.e. they are the same type all the way down — so a
+/// shallow same-name/same-body coincidence whose nested refs differ is never
+/// wrongly merged, and a root identical to a same-named `$def` is unified rather
+/// than duplicated.
+fn body_sig(body: &Value, defs: &BTreeMap<String, Value>) -> String {
+    let mut visited = BTreeSet::new();
+    let mut buf = String::new();
+    sig_value(body, defs, &mut visited, &mut buf);
+    buf
+}
+
+fn sig_node(name: &str, defs: &BTreeMap<String, Value>, visited: &mut BTreeSet<String>, buf: &mut String) {
+    if !visited.insert(name.to_string()) {
+        // Back-reference into a cycle: record the name, don't re-expand.
+        buf.push('@');
+        buf.push_str(name);
+        buf.push(';');
+        return;
+    }
+    match defs.get(name) {
+        Some(body) => {
+            buf.push_str(name);
+            buf.push('=');
+            sig_value(body, defs, visited, buf);
+            buf.push(';');
+        }
+        // Ref into another verb / unknown def: name alone, can't expand.
+        None => {
+            buf.push('?');
+            buf.push_str(name);
+            buf.push(';');
+        }
+    }
+}
+
+fn sig_value(value: &Value, defs: &BTreeMap<String, Value>, visited: &mut BTreeSet<String>, buf: &mut String) {
+    match value {
+        Value::Object(map) => {
+            if let Some(reference) = map.get("$ref").and_then(Value::as_str) {
+                let terminal = sanitize_ident(reference.rsplit('/').next().unwrap_or(reference));
+                buf.push_str("ref(");
+                sig_node(&terminal, defs, visited, buf);
+                buf.push(')');
+                return;
+            }
+            buf.push('{');
+            for (k, v) in map {
+                buf.push_str(k);
+                buf.push(':');
+                sig_value(v, defs, visited, buf);
+                buf.push(',');
+            }
+            buf.push('}');
+        }
+        Value::Array(items) => {
+            buf.push('[');
+            for v in items {
+                sig_value(v, defs, visited, buf);
+                buf.push(',');
+            }
+            buf.push(']');
+        }
+        other => buf.push_str(&other.to_string()),
+    }
 }
 
 /// Drop the JSON-Schema envelope keys, keeping only the type body so a root
@@ -417,5 +610,99 @@ mod tests {
         // And each verb is mapped to a type in the verb->payload map.
         assert!(ts.contains("verb_a:"), "verb_a not mapped:\n{ts}");
         assert!(ts.contains("verb_b:"), "verb_b not mapped:\n{ts}");
+    }
+
+    /// Conformance guard for the full collision class across BOTH namespaces:
+    /// (a) two verbs share a root `title`, and (b) a third verb's root name
+    /// collides with a `$def` emitted by another verb. Every distinct type must
+    /// survive and every `$ref` must still resolve to its intended definition —
+    /// no global overwrite of the shared `$def`.
+    #[test]
+    fn root_and_def_name_collisions_emit_distinct_types() {
+        // verb_a: title shared with verb_b (root-vs-root), owns a `Widget` $def
+        // that its own root references by $ref.
+        let schema_a = json!({
+            "title": "SharedTitle",
+            "type": "object",
+            "properties": {
+                "alpha": { "type": "string" },
+                "widget": { "$ref": "#/$defs/Widget" },
+            },
+            "required": ["alpha", "widget"],
+            "$defs": {
+                "Widget": {
+                    "type": "object",
+                    "properties": { "gamma": { "type": "string" } },
+                    "required": ["gamma"],
+                },
+            },
+        });
+        // verb_b: same title as verb_a — root-vs-root collision.
+        let schema_b = json!({
+            "title": "SharedTitle",
+            "type": "object",
+            "properties": { "beta": { "type": "number" } },
+            "required": ["beta"],
+        });
+        // verb_c: its root title sanitizes to `Widget`, colliding with verb_a's
+        // $def name — but it's a different shape (carries `delta`, not `gamma`).
+        let schema_c = json!({
+            "title": "Widget",
+            "type": "object",
+            "properties": { "delta": { "type": "boolean" } },
+            "required": ["delta"],
+        });
+
+        let generated = generate_from(vec![
+            ("verb_c".to_string(), schema_c),
+            ("verb_a".to_string(), schema_a),
+            ("verb_b".to_string(), schema_b),
+        ]);
+        let ts = &generated.typescript;
+
+        // Root-vs-root: both shared-title verbs keep their own distinct body.
+        assert!(ts.contains("alpha"), "verb_a root body missing:\n{ts}");
+        assert!(ts.contains("beta"), "verb_b root body missing:\n{ts}");
+
+        // The shared `$def` is emitted intact and is NOT overwritten by verb_c's
+        // same-named root — `gamma` (the def) and `delta` (the root) coexist as
+        // separate types.
+        assert!(
+            ts.contains("export interface Widget {"),
+            "Widget $def missing:\n{ts}"
+        );
+        let widget_def = ts
+            .split("export interface Widget {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .unwrap_or("");
+        assert!(
+            widget_def.contains("gamma") && !widget_def.contains("delta"),
+            "Widget $def was overwritten by verb_c's root:\n{ts}"
+        );
+
+        // verb_a's $ref still resolves to the `Widget` $def (not verb_c's root).
+        assert!(
+            ts.contains("widget: Widget;"),
+            "verb_a root $ref no longer resolves to the Widget def:\n{ts}"
+        );
+
+        // verb_c's colliding root got a distinct name carrying its own `delta`,
+        // and is mapped — proving it wasn't silently dropped onto the $def.
+        let verb_c_type = generated
+            .typescript
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("verb_c: ").map(|t| t.trim_end_matches(';').to_string()))
+            .expect("verb_c mapped");
+        assert_ne!(verb_c_type, "Widget", "verb_c root collided onto the $def name:\n{ts}");
+        let verb_c_def = ts
+            .split(&format!("export interface {verb_c_type} {{"))
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .unwrap_or("");
+        assert!(
+            verb_c_def.contains("delta"),
+            "verb_c root body ({verb_c_type}) missing its own field:\n{ts}"
+        );
     }
 }
