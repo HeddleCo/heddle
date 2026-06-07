@@ -56,7 +56,7 @@ canonical verbs; the doc column links the field-by-field reference.
 | adopt | `adopt` | `AdoptSchema` | `heddle adopt --output json` |
 | init | `init` | `InitSchema` | `heddle init --output json` |
 | status | `status` | `StatusSchema` | `heddle status --output json` |
-| start thread | `start` / `thread create` | `StartSchema` | `heddle start --output json` |
+| start / thread create | `start` / `thread create` | `StartSchema` / `ThreadCreateSchema` | `heddle start --output json` |
 | commit | `commit` | `CommitSchema` | Core loop mutation schemas |
 | log | `log` | `LogSchema` | `heddle log --output json` |
 | diff | `diff` | `DiffSchema` | `heddle diff --output json` |
