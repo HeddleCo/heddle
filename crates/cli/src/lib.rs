@@ -30,6 +30,7 @@ pub mod operation_id;
 pub mod perf;
 #[cfg(feature = "semantic")]
 pub mod semantic;
+pub mod ts_codegen;
 pub mod util;
 
 // Shared types now live in cli-shared (so heddle-client can depend on
