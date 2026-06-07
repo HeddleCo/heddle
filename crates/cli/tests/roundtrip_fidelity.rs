@@ -550,3 +550,74 @@ fn import_preserves_noncanonical_extension_header_order() {
     ];
     assert_eq!(with_headers[0].extra_headers, expected);
 }
+
+/// Fidelity-guard boundary (#567): a commit whose AUTHOR identity carries a raw
+/// non-UTF8 byte cannot be reconstructed byte-exactly from Heddle state, because
+/// `Principal.name` is a `String` and import lossily replaces the byte with
+/// U+FFFD (the #564-deferred gap). Export must detect this and serve the
+/// VERBATIM mirror bytes at the original OID rather than mint a reconstructed
+/// (wrong-SHA) object. A regression that reconstructs unconditionally fails this
+/// round-trip (the commit OID drifts) — and the pre-fix #567 code errored out of
+/// the export entirely on the mapped-OID mismatch.
+#[test]
+fn roundtrip_non_utf8_author_identity() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    write_and_commit(dir, "f.txt", b"base\n", "base commit");
+
+    let tree = git(dir, &["rev-parse", "HEAD^{tree}"]).trim().to_string();
+    let head = git(dir, &["rev-parse", "HEAD"]).trim().to_string();
+
+    // `\xff` is never valid UTF-8, so `author.name.to_string()` on import maps it
+    // to U+FFFD; the committer is left clean to isolate the author-identity case.
+    let mut content = Vec::new();
+    content.extend_from_slice(format!("tree {tree}\n").as_bytes());
+    content.extend_from_slice(format!("parent {head}\n").as_bytes());
+    content.extend_from_slice(b"author Sven \xff <sven@example.com> 1700000000 +0000\n");
+    content.extend_from_slice(b"committer Bob <bob@example.com> 1700000100 +0000\n");
+    content.extend_from_slice(b"\n");
+    content.extend_from_slice(b"commit with a non-UTF8 author name\n");
+    assert!(content.contains(&0xff), "fixture lost its non-UTF8 byte");
+
+    let sha = git_stdin(
+        dir,
+        &["hash-object", "--literally", "-w", "-t", "commit", "--stdin"],
+        &content,
+    );
+    git(dir, &["update-ref", "refs/heads/crafted", &sha]);
+
+    assert_roundtrip_fidelity("non-utf8-author-identity", dir);
+}
+
+/// As [`roundtrip_non_utf8_author_identity`], for the COMMITTER identity — the
+/// guard checks the distinct `State.committer` principal too, so a non-UTF8
+/// committer name must likewise route to the verbatim-mirror fallback.
+#[test]
+fn roundtrip_non_utf8_committer_identity() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    write_and_commit(dir, "f.txt", b"base\n", "base commit");
+
+    let tree = git(dir, &["rev-parse", "HEAD^{tree}"]).trim().to_string();
+    let head = git(dir, &["rev-parse", "HEAD"]).trim().to_string();
+
+    let mut content = Vec::new();
+    content.extend_from_slice(format!("tree {tree}\n").as_bytes());
+    content.extend_from_slice(format!("parent {head}\n").as_bytes());
+    content.extend_from_slice(b"author Alice <alice@example.com> 1700000000 +0000\n");
+    content.extend_from_slice(b"committer Lars \xff <lars@example.com> 1700000100 +0000\n");
+    content.extend_from_slice(b"\n");
+    content.extend_from_slice(b"commit with a non-UTF8 committer name\n");
+    assert!(content.contains(&0xff), "fixture lost its non-UTF8 byte");
+
+    let sha = git_stdin(
+        dir,
+        &["hash-object", "--literally", "-w", "-t", "commit", "--stdin"],
+        &content,
+    );
+    git(dir, &["update-ref", "refs/heads/crafted", &sha]);
+
+    assert_roundtrip_fidelity("non-utf8-committer-identity", dir);
+}

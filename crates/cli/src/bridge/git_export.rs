@@ -8,7 +8,7 @@ use gix::bstr::ByteSlice;
 use gix::refs::transaction::PreviousValue;
 use objects::{
     error::HeddleError,
-    object::{ChangeId, ContentHash, FileMode, MarkerName, ThreadName},
+    object::{ChangeId, ContentHash, FileMode, MarkerName, Principal, State, ThreadName},
 };
 use repo::{AudienceTier, Repository as HeddleRepository, visible};
 
@@ -20,7 +20,7 @@ use crate::bridge::{
         read_or_seed_mirror_managed_refs, set_reference, write_mirror_managed_refs,
     },
     git_notes,
-    git_reconstruct::{reconstruct_commit_bytes, write_commit_object},
+    git_reconstruct::{commit_object_id, reconstruct_commit_bytes, write_commit_object},
     git_sync::{sync_marker_to_tag, sync_track_to_branch},
     git_util::{ExportStats, ExportedRef},
 };
@@ -38,8 +38,40 @@ const SUBMODULE_PREFIX: &str = "heddle-submodule:";
 /// `raw_message` is the load-bearing signal: the git importer always records it
 /// (even as an empty body for an empty-message commit) for an imported commit,
 /// and never for a native one.
-fn has_git_fidelity(state: &objects::object::State) -> bool {
+fn has_git_fidelity(state: &State) -> bool {
     state.raw_message.is_some()
+}
+
+/// Whether `who`'s name/email round-trip byte-exactly through reconstruction.
+/// `Principal.name/email` are `String`, so the git importer replaced any non-UTF8
+/// identity byte with U+FFFD when it called `to_string()` on the raw actor bytes
+/// (the #565-deferred gap; `Principal` is still `String`, see #564). Those
+/// replaced bytes can't be regenerated, so reconstruction would hash off the
+/// original SHA. A literal U+FFFD that was itself valid UTF-8 in the original
+/// survives fine — so this can only FALSE-POSITIVE into the safe verbatim
+/// fallback, never a wrong-SHA mint.
+fn identity_is_byte_faithful(who: &Principal) -> bool {
+    !who.name.contains('\u{FFFD}') && !who.email.contains('\u{FFFD}')
+}
+
+/// Whether reconstructing `state`'s commit object from Heddle state alone is
+/// guaranteed byte-exact to the original commit — the precondition for the #567
+/// reconstruct-from-state path. False for the two #564 lossy gaps:
+///   1. non-UTF8 author/committer identity bytes (see [`identity_is_byte_faithful`]);
+///   2. `--lossy` imports (`imported_lossy`), where unrepresentable tree entries
+///      were dropped/converted so the rebuilt tree — hence commit — OID diverges.
+///
+/// When false the caller MUST keep the verbatim mirror bytes / preserved mapped
+/// OID rather than mint a wrong-SHA reconstructed object.
+fn commit_is_byte_faithful(state: &State, imported_lossy: bool) -> bool {
+    has_git_fidelity(state)
+        && !imported_lossy
+        && identity_is_byte_faithful(&state.attribution.principal)
+        && state
+            .committer
+            .as_ref()
+            .map(identity_is_byte_faithful)
+            .unwrap_or(true)
 }
 
 /// Export a single state to Git for `audience`.
@@ -80,7 +112,13 @@ pub(crate) fn export_state(
     // reproduce the ORIGINAL commit SHA rather than a footer-mutated one. This
     // is the path that lets the git mirror be dropped (#568): a correct export
     // no longer depends on the mirror holding the verbatim imported bytes.
-    if has_git_fidelity(&state) {
+    // Fidelity guard (#567): reconstruct from state ONLY when fully byte-faithful.
+    // A non-byte-faithful commit (non-UTF8 identity) would mint a WRONG SHA, so
+    // fall THROUGH to the native mint path rather than reconstruct it. This branch
+    // only runs for an UNMAPPED fidelity state (the already-mapped export path
+    // carries the verbatim-mirror fallback), so `--lossy` — keyed by the mapped
+    // git OID — isn't detectable here and is gated on the mapped path instead.
+    if has_git_fidelity(&state) && commit_is_byte_faithful(&state, /*imported_lossy=*/ false) {
         let content = reconstruct_commit_bytes(heddle_repo, repo, mapping, &state)?;
         return Ok(Some(write_commit_object(repo, &content)?));
     }
@@ -382,20 +420,36 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
             if let Some(state) = bridge.heddle_repo.store().get_state(&state_id)?
                 && has_git_fidelity(&state)
             {
-                let content =
-                    reconstruct_commit_bytes(bridge.heddle_repo, &repo, &bridge.mapping, &state)?;
-                let oid = write_commit_object(&repo, &content)?;
-                // The regenerated object MUST hash to the mapped OID; a
-                // mismatch means state-reconstruction diverged from the
-                // imported bytes (a #565/#566 fidelity regression) and would
-                // silently corrupt the export, so fail loud here.
-                if let Some(mapped) = bridge.mapping.get_git(&state_id)
-                    && mapped != oid
-                {
-                    return Err(GitBridgeError::Git(format!(
-                        "reconstructed commit for {state_id} hashed to {oid}, \
-                         but the import mapped it to {mapped} (fidelity regression)"
-                    )));
+                let mapped = bridge.mapping.get_git(&state_id);
+                // mirror still required for non-byte-faithful commits (non-UTF8
+                // identities, --lossy); #568 mirror elimination must account for
+                // these, and full de-lossy needs byte-preserving identities (#564
+                // follow-up).
+                let imported_lossy = mapped
+                    .map(|oid| bridge.mapping.get_git_lossy_entries(oid).is_some())
+                    .unwrap_or(false);
+                // Fidelity guard (#567): regenerate from state ONLY when the
+                // state is fully byte-faithful to the original import. A
+                // non-byte-faithful commit (non-UTF8 identity, or `--lossy`)
+                // would reconstruct to a WRONG SHA, so leave it on the preserved
+                // mapped OID — the verbatim mirror bytes stay the served object
+                // (the pre-#567 behavior for that commit).
+                if commit_is_byte_faithful(&state, imported_lossy) {
+                    let content = reconstruct_commit_bytes(
+                        bridge.heddle_repo,
+                        &repo,
+                        &bridge.mapping,
+                        &state,
+                    )?;
+                    // Safety net: the regenerated object MUST hash to the mapped
+                    // OID. A mismatch means reconstruction diverged from the
+                    // imported bytes (an undetected fidelity gap), so fall back to
+                    // the verbatim mirror / mapped OID rather than write a
+                    // wrong-SHA object.
+                    let reconstructed = commit_object_id(&content);
+                    if mapped.map(|m| m == reconstructed).unwrap_or(true) {
+                        write_commit_object(&repo, &content)?;
+                    }
                 }
             }
             continue;
