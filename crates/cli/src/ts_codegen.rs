@@ -34,22 +34,30 @@ pub struct Generated {
 
 /// Render the TypeScript module and raw-schema JSON from the live catalog.
 pub fn generate() -> Generated {
+    let mut verbs: Vec<&str> = schema_verbs().to_vec();
+    verbs.sort_unstable();
+    let verb_schemas: Vec<(String, Value)> = verbs
+        .into_iter()
+        .filter_map(|verb| schema_for_verb(verb).map(|schema| (verb.to_string(), schema)))
+        .collect();
+    generate_from(verb_schemas)
+}
+
+/// Core codegen over an explicit `(verb, schema)` list. Split out from
+/// [`generate`] so title-collision handling is unit-testable without the live
+/// catalog.
+fn generate_from(verb_schemas: Vec<(String, Value)>) -> Generated {
     // name -> type body. `$defs` populate first; a verb's own root overlays its
     // matching name (the root carries runtime-injected op_id / discriminator
     // fields that the same struct-as-a-$def elsewhere lacks).
     let mut types: BTreeMap<String, Value> = BTreeMap::new();
-    let mut roots: BTreeMap<String, Value> = BTreeMap::new();
     let mut verb_to_type: BTreeMap<String, String> = BTreeMap::new();
     let mut raw: BTreeMap<String, Value> = BTreeMap::new();
+    // verb -> (title, stripped root body). Keyed by verb (not title) so two
+    // verbs that share a schema title don't clobber each other's root body.
+    let mut roots: BTreeMap<String, (String, Value)> = BTreeMap::new();
 
-    let mut verbs: Vec<&str> = schema_verbs().to_vec();
-    verbs.sort_unstable();
-
-    for verb in verbs {
-        let Some(schema) = schema_for_verb(verb) else {
-            continue;
-        };
-
+    for (verb, schema) in verb_schemas {
         if let Some(defs) = schema.get("$defs").and_then(Value::as_object) {
             for (name, body) in defs {
                 types
@@ -62,15 +70,28 @@ pub fn generate() -> Generated {
             .get("title")
             .and_then(Value::as_str)
             .map(sanitize_ident)
-            .unwrap_or_else(|| verb_type_name(verb));
-        roots.insert(title.clone(), strip_root_meta(&schema));
-        verb_to_type.insert(verb.to_string(), title);
-        raw.insert(verb.to_string(), schema);
+            .unwrap_or_else(|| verb_type_name(&verb));
+        roots.insert(verb.clone(), (title, strip_root_meta(&schema)));
+        raw.insert(verb, schema);
     }
 
-    // Roots win over same-named `$defs`.
-    for (name, body) in &roots {
-        types.insert(name.clone(), body.clone());
+    // A title shared by >1 verb can't name both verbs' root types, so the
+    // colliding verbs each get a distinct per-verb type name. Previously the
+    // last verb to write a title won and earlier verbs' root bodies were
+    // dropped, yielding wrong/missing TS types for them.
+    let mut title_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for (title, _) in roots.values() {
+        *title_counts.entry(title.as_str()).or_default() += 1;
+    }
+
+    for (verb, (title, body)) in &roots {
+        let type_name = if title_counts.get(title.as_str()).copied().unwrap_or(0) > 1 {
+            verb_type_name(verb)
+        } else {
+            title.clone()
+        };
+        types.insert(type_name.clone(), body.clone());
+        verb_to_type.insert(verb.clone(), type_name);
     }
 
     let typescript = render_ts(&types, &verb_to_type);
@@ -359,4 +380,42 @@ fn emit_jsdoc(out: &mut String, desc: &str, indent: &str) {
     let one_line = desc.split_whitespace().collect::<Vec<_>>().join(" ");
     let safe = one_line.replace("*/", "*\\/");
     let _ = writeln!(out, "{indent}/** {safe} */");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Two verbs whose schemas share a `title` must each emit their own root
+    /// body — neither overwritten. Regression guard for the title-keyed roots
+    /// map that dropped all-but-the-last verb's root.
+    #[test]
+    fn shared_title_preserves_each_verbs_root_body() {
+        let schema_a = json!({
+            "title": "SharedTitle",
+            "type": "object",
+            "properties": { "alpha": { "type": "string" } },
+            "required": ["alpha"],
+        });
+        let schema_b = json!({
+            "title": "SharedTitle",
+            "type": "object",
+            "properties": { "beta": { "type": "number" } },
+            "required": ["beta"],
+        });
+
+        let generated = generate_from(vec![
+            ("verb_a".to_string(), schema_a),
+            ("verb_b".to_string(), schema_b),
+        ]);
+        let ts = &generated.typescript;
+
+        // Both verbs' distinct fields survive — the earlier root isn't clobbered.
+        assert!(ts.contains("alpha"), "verb_a root body missing:\n{ts}");
+        assert!(ts.contains("beta"), "verb_b root body missing:\n{ts}");
+        // And each verb is mapped to a type in the verb->payload map.
+        assert!(ts.contains("verb_a:"), "verb_a not mapped:\n{ts}");
+        assert!(ts.contains("verb_b:"), "verb_b not mapped:\n{ts}");
+    }
 }

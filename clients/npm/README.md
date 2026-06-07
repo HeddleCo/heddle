@@ -62,7 +62,7 @@ canonical verbs; the doc column links the field-by-field reference.
 | diff | `diff` | `DiffSchema` | `heddle diff --output json` |
 | fetch | `fetch` | `FetchSchema` | (transport schemas) |
 | push | `push` | `PushSchema` | (transport schemas) |
-| export | `bridge git export` | `BridgeExportSchema` | `heddle bridge git …` |
+| export | `bridge git export` | `BridgeExportSchema` | `heddle bridge git export --output json` |
 
 ## `--op-id` retry convention
 

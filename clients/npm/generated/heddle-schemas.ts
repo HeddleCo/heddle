@@ -5,6 +5,23 @@
 
 export const HEDDLE_SCHEMA_VERSION = "0.2.4" as const;
 
+export interface AbortSchema {
+  action: string;
+  blockers: string[];
+  idempotency_status?: string | null;
+  message: string;
+  next_action?: string | null;
+  next_action_template?: ActionTemplateSchema | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind?: string | null;
+  recommended_action?: string | null;
+  recommended_action_template?: ActionTemplateSchema | null;
+  replayed?: boolean | null;
+  status: string;
+  warnings: string[];
+}
+
 export interface ActionTemplate {
   action: string;
   agent_may_fill: boolean;
@@ -106,7 +123,11 @@ export interface ActorListSchema {
   verification: RepositoryVerificationStateSchema;
 }
 
-export interface ActorSingleSchema {
+export interface ActorShowSchema {
+  actor: ActorEntrySchema;
+}
+
+export interface ActorSpawnSchema {
   actor: ActorEntrySchema;
   idempotency_status?: string | null;
   op_id?: string | null;
@@ -138,6 +159,30 @@ export interface AdoptSchema {
   verification: RepositoryVerificationStateSchema;
 }
 
+export interface AgentCaptureSchema {
+  action: string;
+  agent?: CommitAgentSchema | null;
+  change_id: string;
+  confidence?: number | null;
+  content_hash: string;
+  heavy_impact_paths: string[];
+  idempotency_status?: string | null;
+  intent?: string | null;
+  message: string;
+  next_action?: string | null;
+  next_action_template?: ActionTemplateSchema | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind?: string | null;
+  principal: CommitPrincipalSchema;
+  promotion_suggested: boolean;
+  recommended_action?: string | null;
+  recommended_action_template?: ActionTemplateSchema | null;
+  replayed?: boolean | null;
+  signed: boolean;
+  status: string;
+}
+
 export interface AgentDaemonStatusSchema {
   output_kind: string;
   pid?: number | null;
@@ -147,7 +192,36 @@ export interface AgentDaemonStatusSchema {
   verification: RepositoryVerificationStateSchema;
 }
 
-export interface AgentReservationEnvelopeSchema {
+export interface AgentHeartbeatSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  reservation: AgentReservationSchema;
+}
+
+export interface AgentReadySchema {
+  action: string;
+  blockers?: string[] | null;
+  captured: boolean;
+  captured_state?: string | null;
+  idempotency_status?: string | null;
+  message: string;
+  next_action?: string | null;
+  next_action_template?: ActionTemplateSchema | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind?: string | null;
+  recommended_action?: string | null;
+  recommended_action_template?: ActionTemplateSchema | null;
+  replayed?: boolean | null;
+  report: unknown;
+  status: string;
+  thread_state?: string | null;
+  warnings?: string[] | null;
+}
+
+export interface AgentReleaseSchema {
   idempotency_status?: string | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
@@ -177,6 +251,14 @@ export interface AgentReservationSchema {
   task?: string | null;
   thinking_level?: string | null;
   thread: string;
+}
+
+export interface AgentReserveSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  reservation: AgentReservationSchema;
 }
 
 export interface AgentServeSchema {
@@ -317,6 +399,22 @@ export interface BridgeExportSchema {
   states_exported: number;
   tags: ExportedRefSchema[];
   threads_synced: number;
+}
+
+export interface BridgeGitIngestSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
+export interface BridgeGitReasonSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  [key: string]: unknown;
 }
 
 export interface BridgeGitReconcileSchema {
@@ -489,6 +587,15 @@ export interface CheckpointSchema {
   summary: string;
 }
 
+export interface CherryPickSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "cherry_pick";
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
 export interface CleanSchema {
   dry_run: boolean;
   idempotency_status?: string | null;
@@ -518,6 +625,14 @@ export interface CloneSchema {
   status?: string | null;
   success?: boolean | null;
   transport?: string | null;
+}
+
+export interface CollapseSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  [key: string]: unknown;
 }
 
 export interface CommandAction {
@@ -699,7 +814,100 @@ export interface CommitSchema {
   summary: string;
 }
 
+export type ConflictListSchema = Record<string, unknown>;
+
+export type ConflictShowSchema = Record<string, unknown>;
+
+export interface ContextAuditSchema {
+  output_kind: "context_audit";
+  [key: string]: unknown;
+}
+
+export interface ContextCheckSchema {
+  output_kind: "context_check";
+  [key: string]: unknown;
+}
+
+export interface ContextEditSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "context_edit";
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
+export interface ContextGetSchema {
+  output_kind: "context_get";
+  [key: string]: unknown;
+}
+
+export interface ContextHistorySchema {
+  output_kind: "context_history";
+  [key: string]: unknown;
+}
+
+export interface ContextListSchema {
+  output_kind: "context_list";
+  [key: string]: unknown;
+}
+
+export interface ContextRmSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "context_rm";
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
+export interface ContextSetSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "context_set";
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
+export interface ContextSuggestSchema {
+  output_kind: "context_suggest";
+  [key: string]: unknown;
+}
+
+export interface ContextSupersedeSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "context_supersede";
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
+export interface ContinueSchema {
+  action: string;
+  blockers: string[];
+  idempotency_status?: string | null;
+  message: string;
+  next_action?: string | null;
+  next_action_template?: ActionTemplateSchema | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind?: string | null;
+  recommended_action?: string | null;
+  recommended_action_template?: ActionTemplateSchema | null;
+  replayed?: boolean | null;
+  status: string;
+  warnings: string[];
+}
+
 export type CoordinationStatusSchema = "clean" | "ahead" | "diverged" | "blocked" | "merge-ready";
+
+export type DaemonServeSchema = Record<string, unknown>;
+
+export type DaemonStatusSchema = Record<string, unknown>;
+
+export type DaemonStopSchema = Record<string, unknown>;
 
 export interface DelegateSchema {
   delegated: DelegatedThreadSchema[];
@@ -774,7 +982,67 @@ export interface DiffStatsSchema {
 }
 
 /** Per-discussion verbs (`open`/`append`/`resolve`/`show`) emit the discussion payload flattened beneath an `output_kind` discriminator, mirroring `DiscussionEnvelope` in `discuss.rs`. `discuss list` reuses the bare [`DiscussionSchema`] for its inner items — those carry no per-item discriminator (the list envelope owns it), so the discriminator lives on this wrapper rather than on the shared inner struct. */
-export interface DiscussionEnvelopeSchema {
+export interface DiscussAppendSchema {
+  body_changed_since_open: boolean;
+  file: string;
+  id: string;
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  opened_against_state: string;
+  opened_at_secs: number;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  orphaned: boolean;
+  output_kind: "discuss_append";
+  replayed?: boolean | null;
+  resolution: DiscussionResolutionSchema;
+  resolved_annotation_id?: string | null;
+  symbol: string;
+  turns: DiscussionTurnSchema[];
+  visibility: string;
+}
+
+/** Per-discussion verbs (`open`/`append`/`resolve`/`show`) emit the discussion payload flattened beneath an `output_kind` discriminator, mirroring `DiscussionEnvelope` in `discuss.rs`. `discuss list` reuses the bare [`DiscussionSchema`] for its inner items — those carry no per-item discriminator (the list envelope owns it), so the discriminator lives on this wrapper rather than on the shared inner struct. */
+export interface DiscussOpenSchema {
+  body_changed_since_open: boolean;
+  file: string;
+  id: string;
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  opened_against_state: string;
+  opened_at_secs: number;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  orphaned: boolean;
+  output_kind: "discuss_open";
+  replayed?: boolean | null;
+  resolution: DiscussionResolutionSchema;
+  resolved_annotation_id?: string | null;
+  symbol: string;
+  turns: DiscussionTurnSchema[];
+  visibility: string;
+}
+
+/** Per-discussion verbs (`open`/`append`/`resolve`/`show`) emit the discussion payload flattened beneath an `output_kind` discriminator, mirroring `DiscussionEnvelope` in `discuss.rs`. `discuss list` reuses the bare [`DiscussionSchema`] for its inner items — those carry no per-item discriminator (the list envelope owns it), so the discriminator lives on this wrapper rather than on the shared inner struct. */
+export interface DiscussResolveSchema {
+  body_changed_since_open: boolean;
+  file: string;
+  id: string;
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  opened_against_state: string;
+  opened_at_secs: number;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  orphaned: boolean;
+  output_kind: "discuss_resolve";
+  replayed?: boolean | null;
+  resolution: DiscussionResolutionSchema;
+  resolved_annotation_id?: string | null;
+  symbol: string;
+  turns: DiscussionTurnSchema[];
+  visibility: string;
+}
+
+/** Per-discussion verbs (`open`/`append`/`resolve`/`show`) emit the discussion payload flattened beneath an `output_kind` discriminator, mirroring `DiscussionEnvelope` in `discuss.rs`. `discuss list` reuses the bare [`DiscussionSchema`] for its inner items — those carry no per-item discriminator (the list envelope owns it), so the discriminator lives on this wrapper rather than on the shared inner struct. */
+export interface DiscussShowSchema {
   body_changed_since_open: boolean;
   file: string;
   id: string;
@@ -900,6 +1168,15 @@ export interface FetchSchema {
   tags_included?: boolean | null;
 }
 
+export interface ForkSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "fork";
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
 export interface FsckErrorSchema {
   kind: string;
   message: string;
@@ -916,11 +1193,6 @@ export interface FsckSchema {
   replayed?: boolean | null;
   valid: boolean;
   warnings: string[];
-}
-
-export interface GenericJsonObjectSchema {
-  output_kind: "visibility_show";
-  [key: string]: unknown;
 }
 
 export interface GitCheckpointInfoSchema {
@@ -986,6 +1258,28 @@ export interface GotoSchema {
   target: string;
 }
 
+export type HarnessBridgeSchema = Record<string, unknown>;
+
+export type HookEventsSchema = Record<string, unknown>;
+
+export interface HookInstallSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
+export type HookListSchema = Record<string, unknown>;
+
+export interface HookUninstallSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
 export interface IndexSchema {
   directory_entries: number;
   dump?: string | null;
@@ -1030,6 +1324,42 @@ export interface InitSchema {
 }
 
 export type InspectSchema = ShowSchema | ThreadShowSchema;
+
+export type IntegrationDoctorSchema = Record<string, unknown>;
+
+export interface IntegrationInstallSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
+export type IntegrationListSchema = Record<string, unknown>;
+
+export interface IntegrationRelaySchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
+export interface IntegrationUninstallSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
+export interface IntegrationUpgradeSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
 
 export interface LandSchema {
   action: string;
@@ -1128,11 +1458,51 @@ export interface MachineContractCoverageSchema {
   verified_scope_mutating_commands_without_schema: number;
 }
 
+export interface MaintenanceGcSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
+export type MaintenanceInspectSchema = Record<string, unknown>;
+
+export type MaintenanceMonitorSchema = Record<string, unknown>;
+
+export interface MaintenanceRunSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
 export interface MarkerBulkDeleteSchema {
   count: number;
   deleted: MarkerEntrySchema[];
   idempotency_status?: string | null;
   message: string;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+}
+
+export interface MarkerCreateSchema {
+  change_id?: string | null;
+  idempotency_status?: string | null;
+  message: string;
+  name: string;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+}
+
+export interface MarkerDeleteSchema {
+  change_id?: string | null;
+  idempotency_status?: string | null;
+  message: string;
+  name: string;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
   replayed?: boolean | null;
@@ -1147,7 +1517,7 @@ export interface MarkerListSchema {
   markers: MarkerEntrySchema[];
 }
 
-export interface MarkerOpSchema {
+export interface MarkerShowSchema {
   change_id?: string | null;
   message: string;
   name: string;
@@ -1198,23 +1568,6 @@ export interface OperationRecordSchema {
   replayed: boolean;
 }
 
-export interface OperatorCommandSchema {
-  action: string;
-  blockers: string[];
-  idempotency_status?: string | null;
-  message: string;
-  next_action?: string | null;
-  next_action_template?: ActionTemplateSchema | null;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
-  recommended_action?: string | null;
-  recommended_action_template?: ActionTemplateSchema | null;
-  replayed?: boolean | null;
-  status: string;
-  warnings: string[];
-}
-
 export interface ParallelThreadInfoSchema {
   coordination_status: CoordinationStatusSchema;
   current_state?: string | null;
@@ -1249,6 +1602,20 @@ export interface PullSchema {
   success?: boolean | null;
   thread?: string | null;
   transport?: string | null;
+}
+
+export interface PurgeApplySchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "purge_apply";
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
+export interface PurgeListSchema {
+  output_kind: "purge_list";
+  [key: string]: unknown;
 }
 
 export interface PushSchema {
@@ -1321,6 +1688,75 @@ export interface ReadySchema {
   warnings?: string[] | null;
 }
 
+export interface RebaseSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
+export interface RedactApplySchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "redact_apply";
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
+export interface RedactListSchema {
+  output_kind: "redact_list";
+  [key: string]: unknown;
+}
+
+export interface RedactShowSchema {
+  output_kind: "redact_show";
+  [key: string]: unknown;
+}
+
+export interface RedactTrustAddSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "redact_trust_add";
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
+export interface RedactTrustListSchema {
+  output_kind: "redact_trust_list";
+  [key: string]: unknown;
+}
+
+export interface RedactTrustRemoveSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "redact_trust_remove";
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
+export interface RedoSchema {
+  action: string;
+  batches: unknown[];
+  idempotency_status?: string | null;
+  message: string;
+  next_action?: string | null;
+  next_action_template?: ActionTemplateSchema | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "redo";
+  recommended_action?: string | null;
+  recommended_action_template?: ActionTemplateSchema | null;
+  recovery_marker?: string | null;
+  /** heddle#305: the pre-undo state preserved for recovery, and the marker pointing at it. Present only on a completed `undo`. */
+  recovery_state?: string | null;
+  replayed?: boolean | null;
+  status?: string | null;
+}
+
 export interface ReflogEntrySchema {
   actor: string;
   message: string;
@@ -1329,6 +1765,20 @@ export interface ReflogEntrySchema {
   reference: string;
   source: string;
   timestamp?: string | null;
+}
+
+export interface RemoteAddSchema {
+  action: string;
+  default?: string | null;
+  idempotency_status?: string | null;
+  message: string;
+  name: string;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind?: string | null;
+  replayed?: boolean | null;
+  status: string;
+  url?: string | null;
 }
 
 export interface RemoteInfoSchema {
@@ -1344,7 +1794,21 @@ export interface RemoteListSchema {
   remotes: RemoteInfoSchema[];
 }
 
-export interface RemoteMutationSchema {
+export interface RemoteRemoveSchema {
+  action: string;
+  default?: string | null;
+  idempotency_status?: string | null;
+  message: string;
+  name: string;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind?: string | null;
+  replayed?: boolean | null;
+  status: string;
+  url?: string | null;
+}
+
+export interface RemoteSetDefaultSchema {
   action: string;
   default?: string | null;
   idempotency_status?: string | null;
@@ -1540,6 +2004,16 @@ export interface SchemasListSchema {
   status?: string | null;
 }
 
+export type SemanticHotSchema = Record<string, unknown>;
+
+export interface SessionEndSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  session: SessionEntrySchema;
+}
+
 export interface SessionEntrySchema {
   active: boolean;
   created_at: string;
@@ -1547,14 +2021,6 @@ export interface SessionEntrySchema {
   id: string;
   principal: string;
   segments: SessionSegmentSchema[];
-}
-
-export interface SessionEnvelopeSchema {
-  idempotency_status?: string | null;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  replayed?: boolean | null;
-  session: SessionEntrySchema;
 }
 
 export interface SessionListSchema {
@@ -1577,6 +2043,18 @@ export interface SessionSegmentSchema {
   policy_id?: string | null;
   provider: string;
   started_at: string;
+}
+
+export interface SessionShowSchema {
+  session: SessionEntrySchema;
+}
+
+export interface SessionStartSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  session: SessionEntrySchema;
 }
 
 export interface ShowAgentSchema {
@@ -1609,6 +2087,67 @@ export interface ShowSchema {
   verification?: unknown;
 }
 
+export interface StackReadySchema {
+  output_kind: "stack_ready";
+  [key: string]: unknown;
+}
+
+export interface StackSchema {
+  output_kind: "stack";
+  [key: string]: unknown;
+}
+
+export interface StackSnapshotSchema {
+  output_kind: "stack_snapshot";
+  [key: string]: unknown;
+}
+
+export interface StartSchema {
+  action?: string | null;
+  execution_path?: string | null;
+  idempotency_status?: string | null;
+  message: string;
+  name: string;
+  next_action?: string | null;
+  next_action_template?: ActionTemplateSchema | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind?: string | null;
+  path?: string | null;
+  recommended_action?: string | null;
+  recommended_action_template?: ActionTemplateSchema | null;
+  replayed?: boolean | null;
+  status?: string | null;
+  thread?: ThreadSummarySchema | null;
+}
+
+export interface StashApplySchema {
+  idempotency_status?: string | null;
+  message: string;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  stash_index?: number | null;
+}
+
+export interface StashClearSchema {
+  idempotency_status?: string | null;
+  message: string;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  stash_index?: number | null;
+}
+
+export interface StashDropSchema {
+  idempotency_status?: string | null;
+  message: string;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  stash_index?: number | null;
+}
+
 export interface StashListEntrySchema {
   created_at: string;
   index: number;
@@ -1620,7 +2159,16 @@ export interface StashListSchema {
   stashes: StashListEntrySchema[];
 }
 
-export interface StashMutationSchema {
+export interface StashPopSchema {
+  idempotency_status?: string | null;
+  message: string;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  stash_index?: number | null;
+}
+
+export interface StashPushSchema {
   idempotency_status?: string | null;
   message: string;
   op_id?: string | null;
@@ -1818,7 +2366,30 @@ export interface ThreadCleanupSkippedSchema {
   thread: string;
 }
 
-export interface ThreadCommandSchema {
+export interface ThreadCreateSchema {
+  action?: string | null;
+  execution_path?: string | null;
+  idempotency_status?: string | null;
+  message: string;
+  name: string;
+  next_action?: string | null;
+  next_action_template?: ActionTemplateSchema | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind?: string | null;
+  path?: string | null;
+  recommended_action?: string | null;
+  recommended_action_template?: ActionTemplateSchema | null;
+  replayed?: boolean | null;
+  status?: string | null;
+  thread?: ThreadSummarySchema | null;
+}
+
+export interface ThreadCurrentSchema {
+  thread: string;
+}
+
+export interface ThreadDropSchema {
   action: string;
   execution_path?: string | null;
   idempotency_status?: string | null;
@@ -1835,10 +2406,6 @@ export interface ThreadCommandSchema {
   replayed?: boolean | null;
   status: string;
   thread?: ThreadSummarySchema | null;
-}
-
-export interface ThreadCurrentSchema {
-  thread: string;
 }
 
 export interface ThreadDroppedSchema {
@@ -1899,6 +2466,63 @@ export interface ThreadMoveSchema {
   source_change_id?: string | null;
   target_change_id: string;
   to_thread: string;
+}
+
+export interface ThreadPromoteSchema {
+  action: string;
+  execution_path?: string | null;
+  idempotency_status?: string | null;
+  message: string;
+  name: string;
+  next_action?: string | null;
+  next_action_template?: ActionTemplateSchema | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: string;
+  path?: string | null;
+  recommended_action?: string | null;
+  recommended_action_template?: ActionTemplateSchema | null;
+  replayed?: boolean | null;
+  status: string;
+  thread?: ThreadSummarySchema | null;
+}
+
+export interface ThreadRefreshSchema {
+  action: string;
+  execution_path?: string | null;
+  idempotency_status?: string | null;
+  message: string;
+  name: string;
+  next_action?: string | null;
+  next_action_template?: ActionTemplateSchema | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: string;
+  path?: string | null;
+  recommended_action?: string | null;
+  recommended_action_template?: ActionTemplateSchema | null;
+  replayed?: boolean | null;
+  status: string;
+  thread?: ThreadSummarySchema | null;
+}
+
+export interface ThreadRenameSchema {
+  action?: string | null;
+  execution_path?: string | null;
+  idempotency_status?: string | null;
+  message: string;
+  name: string;
+  next_action?: string | null;
+  next_action_template?: ActionTemplateSchema | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind?: string | null;
+  path?: string | null;
+  recommended_action?: string | null;
+  recommended_action_template?: ActionTemplateSchema | null;
+  replayed?: boolean | null;
+  status?: string | null;
+  thread?: ThreadSummarySchema | null;
 }
 
 export interface ThreadResolveSchema {
@@ -1989,25 +2613,6 @@ export interface ThreadShowSchema {
   visibility: string;
 }
 
-export interface ThreadStartSchema {
-  action?: string | null;
-  execution_path?: string | null;
-  idempotency_status?: string | null;
-  message: string;
-  name: string;
-  next_action?: string | null;
-  next_action_template?: ActionTemplateSchema | null;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
-  path?: string | null;
-  recommended_action?: string | null;
-  recommended_action_template?: ActionTemplateSchema | null;
-  replayed?: boolean | null;
-  status?: string | null;
-  thread?: ThreadSummarySchema | null;
-}
-
 export type ThreadStateSchema = "draft" | "active" | "ready" | "blocked" | "merged" | "abandoned" | "promoted";
 
 export interface ThreadSummarySchema {
@@ -2064,6 +2669,41 @@ export interface ThreadSummarySchema {
   visibility: string;
 }
 
+export interface ThreadSwitchSchema {
+  action?: string | null;
+  execution_path?: string | null;
+  idempotency_status?: string | null;
+  message: string;
+  name: string;
+  next_action?: string | null;
+  next_action_template?: ActionTemplateSchema | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind?: string | null;
+  path?: string | null;
+  recommended_action?: string | null;
+  recommended_action_template?: ActionTemplateSchema | null;
+  replayed?: boolean | null;
+  status?: string | null;
+  thread?: ThreadSummarySchema | null;
+}
+
+export interface TransactionAbortSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
+export interface TransactionBeginSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
 export interface TransactionCommitSchema {
   change_id: string;
   idempotency_status?: string | null;
@@ -2072,6 +2712,8 @@ export interface TransactionCommitSchema {
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
   replayed?: boolean | null;
 }
+
+export type TransactionStatusSchema = Record<string, unknown>;
 
 export interface TrySchema {
   action: string;
@@ -2168,6 +2810,34 @@ export interface VerifySchema {
   worktree_state: string;
 }
 
+export interface VisibilityListSchema {
+  output_kind: "visibility_list";
+  [key: string]: unknown;
+}
+
+export interface VisibilityPromoteSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "visibility_promote";
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
+export interface VisibilitySetSchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "visibility_set";
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
+export interface VisibilityShowSchema {
+  output_kind: "visibility_show";
+  [key: string]: unknown;
+}
+
 export interface WatchLineSchema {
   actor?: ActorInfoSchema | null;
   change_id?: string | null;
@@ -2206,19 +2876,19 @@ export interface WorkspaceShowSchema {
 
 /** Maps each `--output json` verb to its output payload type. */
 export interface HeddleVerbOutputs {
-  abort: OperatorCommandSchema;
+  abort: AbortSchema;
   "actor done": ActorDoneSchema;
   "actor explain": ActorExplainSchema;
   "actor list": ActorListSchema;
-  "actor show": ActorSingleSchema;
-  "actor spawn": ActorSingleSchema;
+  "actor show": ActorShowSchema;
+  "actor spawn": ActorSpawnSchema;
   adopt: AdoptSchema;
-  "agent capture": CaptureSchema;
-  "agent heartbeat": AgentReservationEnvelopeSchema;
+  "agent capture": AgentCaptureSchema;
+  "agent heartbeat": AgentHeartbeatSchema;
   "agent list": AgentReservationListSchema;
-  "agent ready": ReadySchema;
-  "agent release": AgentReservationEnvelopeSchema;
-  "agent reserve": AgentReservationEnvelopeSchema;
+  "agent ready": AgentReadySchema;
+  "agent release": AgentReleaseSchema;
+  "agent reserve": AgentReserveSchema;
   "agent serve": AgentServeSchema;
   "agent status": AgentDaemonStatusSchema;
   "agent stop": AgentStopSchema;
@@ -2227,99 +2897,99 @@ export interface HeddleVerbOutputs {
   branch: BranchCompatSchema;
   "bridge git export": BridgeExportSchema;
   "bridge git import": BridgeImportSchema;
-  "bridge git ingest": GenericJsonObjectSchema;
+  "bridge git ingest": BridgeGitIngestSchema;
   "bridge git init": BridgeInitSchema;
   "bridge git pull": BridgePullSchema;
   "bridge git push": BridgePushSchema;
-  "bridge git reason": GenericJsonObjectSchema;
+  "bridge git reason": BridgeGitReasonSchema;
   "bridge git reconcile": BridgeGitReconcileSchema;
   "bridge git status": BridgeGitStatusSchema;
   "bridge git sync": BridgeSyncSchema;
   capture: CaptureSchema;
   checkpoint: CheckpointSchema;
-  "cherry-pick": GenericJsonObjectSchema;
+  "cherry-pick": CherryPickSchema;
   clean: CleanSchema;
   clone: CloneSchema;
-  collapse: GenericJsonObjectSchema;
+  collapse: CollapseSchema;
   commands: CommandCatalogOutput;
   commit: CommitSchema;
-  "conflict list": GenericJsonObjectSchema;
-  "conflict show": GenericJsonObjectSchema;
-  "context audit": GenericJsonObjectSchema;
-  "context check": GenericJsonObjectSchema;
-  "context edit": GenericJsonObjectSchema;
-  "context get": GenericJsonObjectSchema;
-  "context history": GenericJsonObjectSchema;
-  "context list": GenericJsonObjectSchema;
-  "context rm": GenericJsonObjectSchema;
-  "context set": GenericJsonObjectSchema;
-  "context suggest": GenericJsonObjectSchema;
-  "context supersede": GenericJsonObjectSchema;
-  continue: OperatorCommandSchema;
-  "daemon serve": GenericJsonObjectSchema;
-  "daemon status": GenericJsonObjectSchema;
-  "daemon stop": GenericJsonObjectSchema;
+  "conflict list": ConflictListSchema;
+  "conflict show": ConflictShowSchema;
+  "context audit": ContextAuditSchema;
+  "context check": ContextCheckSchema;
+  "context edit": ContextEditSchema;
+  "context get": ContextGetSchema;
+  "context history": ContextHistorySchema;
+  "context list": ContextListSchema;
+  "context rm": ContextRmSchema;
+  "context set": ContextSetSchema;
+  "context suggest": ContextSuggestSchema;
+  "context supersede": ContextSupersedeSchema;
+  continue: ContinueSchema;
+  "daemon serve": DaemonServeSchema;
+  "daemon status": DaemonStatusSchema;
+  "daemon stop": DaemonStopSchema;
   delegate: DelegateSchema;
   diff: DiffSchema;
-  "discuss append": DiscussionEnvelopeSchema;
+  "discuss append": DiscussAppendSchema;
   "discuss list": DiscussionListSchema;
-  "discuss open": DiscussionEnvelopeSchema;
-  "discuss resolve": DiscussionEnvelopeSchema;
-  "discuss show": DiscussionEnvelopeSchema;
+  "discuss open": DiscussOpenSchema;
+  "discuss resolve": DiscussResolveSchema;
+  "discuss show": DiscussShowSchema;
   doctor: DiagnoseSchema;
   "doctor docs": DoctorDocsSchema;
   "doctor schemas": DoctorSchemasSchema;
   error: ErrorEnvelopeSchema;
   fetch: FetchSchema;
-  fork: GenericJsonObjectSchema;
+  fork: ForkSchema;
   fsck: FsckSchema;
   "git-overlay": GitOverlayGuideSchema;
   goto: GotoSchema;
-  "harness-bridge": GenericJsonObjectSchema;
-  "hook events": GenericJsonObjectSchema;
-  "hook install": GenericJsonObjectSchema;
-  "hook list": GenericJsonObjectSchema;
-  "hook uninstall": GenericJsonObjectSchema;
+  "harness-bridge": HarnessBridgeSchema;
+  "hook events": HookEventsSchema;
+  "hook install": HookInstallSchema;
+  "hook list": HookListSchema;
+  "hook uninstall": HookUninstallSchema;
   init: InitSchema;
   inspect: InspectSchema;
-  "integration doctor": GenericJsonObjectSchema;
-  "integration install": GenericJsonObjectSchema;
-  "integration list": GenericJsonObjectSchema;
-  "integration relay": GenericJsonObjectSchema;
-  "integration uninstall": GenericJsonObjectSchema;
-  "integration upgrade": GenericJsonObjectSchema;
+  "integration doctor": IntegrationDoctorSchema;
+  "integration install": IntegrationInstallSchema;
+  "integration list": IntegrationListSchema;
+  "integration relay": IntegrationRelaySchema;
+  "integration uninstall": IntegrationUninstallSchema;
+  "integration upgrade": IntegrationUpgradeSchema;
   land: LandSchema;
   log: LogSchema;
   "log --reflog": LogReflogSchema;
-  "maintenance gc": GenericJsonObjectSchema;
+  "maintenance gc": MaintenanceGcSchema;
   "maintenance index": IndexSchema;
-  "maintenance inspect": GenericJsonObjectSchema;
-  "maintenance monitor": GenericJsonObjectSchema;
-  "maintenance run": GenericJsonObjectSchema;
-  "marker create": MarkerOpSchema;
-  "marker delete": MarkerOpSchema;
+  "maintenance inspect": MaintenanceInspectSchema;
+  "maintenance monitor": MaintenanceMonitorSchema;
+  "maintenance run": MaintenanceRunSchema;
+  "marker create": MarkerCreateSchema;
+  "marker delete": MarkerDeleteSchema;
   "marker delete --prefix": MarkerBulkDeleteSchema;
   "marker list": MarkerListSchema;
-  "marker show": MarkerOpSchema;
+  "marker show": MarkerShowSchema;
   "merge --preview": MergePreviewSchema;
   pull: PullSchema;
-  "purge apply": GenericJsonObjectSchema;
-  "purge list": GenericJsonObjectSchema;
+  "purge apply": PurgeApplySchema;
+  "purge list": PurgeListSchema;
   push: PushSchema;
   query: QuerySchema;
   ready: ReadySchema;
-  rebase: GenericJsonObjectSchema;
-  "redact apply": GenericJsonObjectSchema;
-  "redact list": GenericJsonObjectSchema;
-  "redact show": GenericJsonObjectSchema;
-  "redact trust add": GenericJsonObjectSchema;
-  "redact trust list": GenericJsonObjectSchema;
-  "redact trust remove": GenericJsonObjectSchema;
-  redo: UndoSchema;
-  "remote add": RemoteMutationSchema;
+  rebase: RebaseSchema;
+  "redact apply": RedactApplySchema;
+  "redact list": RedactListSchema;
+  "redact show": RedactShowSchema;
+  "redact trust add": RedactTrustAddSchema;
+  "redact trust list": RedactTrustListSchema;
+  "redact trust remove": RedactTrustRemoveSchema;
+  redo: RedoSchema;
+  "remote add": RemoteAddSchema;
   "remote list": RemoteListSchema;
-  "remote remove": RemoteMutationSchema;
-  "remote set-default": RemoteMutationSchema;
+  "remote remove": RemoteRemoveSchema;
+  "remote set-default": RemoteSetDefaultSchema;
   "remote show": RemoteInfoSchema;
   resolve: ResolveSchema;
   retro: RetroSchema;
@@ -2329,23 +2999,23 @@ export interface HeddleVerbOutputs {
   "review show": ReviewShowSchema;
   "review sign": ReviewSignSchema;
   schemas: SchemasListSchema;
-  "semantic hot": GenericJsonObjectSchema;
-  "session end": SessionEnvelopeSchema;
+  "semantic hot": SemanticHotSchema;
+  "session end": SessionEndSchema;
   "session list": SessionListSchema;
   "session segment": SessionSegmentEnvelopeSchema;
-  "session show": SessionEnvelopeSchema;
-  "session start": SessionEnvelopeSchema;
+  "session show": SessionShowSchema;
+  "session start": SessionStartSchema;
   show: ShowSchema;
-  stack: GenericJsonObjectSchema;
-  "stack ready": GenericJsonObjectSchema;
-  "stack snapshot": GenericJsonObjectSchema;
-  start: ThreadStartSchema;
-  "stash apply": StashMutationSchema;
-  "stash clear": StashMutationSchema;
-  "stash drop": StashMutationSchema;
+  stack: StackSchema;
+  "stack ready": StackReadySchema;
+  "stack snapshot": StackSnapshotSchema;
+  start: StartSchema;
+  "stash apply": StashApplySchema;
+  "stash clear": StashClearSchema;
+  "stash drop": StashDropSchema;
   "stash list": StashListSchema;
-  "stash pop": StashMutationSchema;
-  "stash push": StashMutationSchema;
+  "stash pop": StashPopSchema;
+  "stash push": StashPushSchema;
   "stash show": StashShowSchema;
   status: StatusSchema;
   switch: SwitchCheckoutSchema;
@@ -2356,30 +3026,30 @@ export interface HeddleVerbOutputs {
   "thread captures": Array_of_ThreadCaptureEntrySchema;
   "thread check-merge": ThreadMergeEligibilitySchema;
   "thread cleanup": ThreadCleanupSchema;
-  "thread create": ThreadStartSchema;
+  "thread create": ThreadCreateSchema;
   "thread current": ThreadCurrentSchema;
-  "thread drop": ThreadCommandSchema;
+  "thread drop": ThreadDropSchema;
   "thread list": ThreadListSchema;
   "thread move": ThreadMoveSchema;
-  "thread promote": ThreadCommandSchema;
-  "thread refresh": ThreadCommandSchema;
-  "thread rename": ThreadStartSchema;
+  "thread promote": ThreadPromoteSchema;
+  "thread refresh": ThreadRefreshSchema;
+  "thread rename": ThreadRenameSchema;
   "thread resolve": ThreadResolveSchema;
   "thread revoke-approval": ThreadRevokeApprovalSchema;
   "thread show": ThreadShowSchema;
-  "thread switch": ThreadStartSchema;
-  "transaction abort": GenericJsonObjectSchema;
-  "transaction begin": GenericJsonObjectSchema;
+  "thread switch": ThreadSwitchSchema;
+  "transaction abort": TransactionAbortSchema;
+  "transaction begin": TransactionBeginSchema;
   "transaction commit": TransactionCommitSchema;
-  "transaction status": GenericJsonObjectSchema;
+  "transaction status": TransactionStatusSchema;
   try: TrySchema;
   undo: UndoSchema;
   "undo --list": UndoListSchema;
   verify: VerifySchema;
-  "visibility list": GenericJsonObjectSchema;
-  "visibility promote": GenericJsonObjectSchema;
-  "visibility set": GenericJsonObjectSchema;
-  "visibility show": GenericJsonObjectSchema;
+  "visibility list": VisibilityListSchema;
+  "visibility promote": VisibilityPromoteSchema;
+  "visibility set": VisibilitySetSchema;
+  "visibility show": VisibilityShowSchema;
   watch: WatchLineSchema;
   "workspace show": WorkspaceShowSchema;
 }
