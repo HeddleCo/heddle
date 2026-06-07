@@ -121,23 +121,26 @@ fn generate_from(verb_schemas: Vec<(String, Value)>) -> Generated {
     }
 
     for (verb, schema) in &verb_schemas {
-        // 1. This verb's `$defs`, keyed by sanitized name (the form `$ref`s and
-        //    `ref_name` resolve to).
+        // 1. This verb's `$defs`, keyed by their ORIGINAL (unsanitized) names —
+        //    the stable unique key. `$ref`s resolve by original name too, so two
+        //    defs that *sanitize* to the same identifier (e.g. `Foo-Bar` and
+        //    `Foo_Bar`) stay distinct here and are disambiguated at allocation
+        //    instead of one silently clobbering the other.
         let mut defs: BTreeMap<String, Value> = BTreeMap::new();
         if let Some(obj) = schema.get("$defs").and_then(Value::as_object) {
             for (name, body) in obj {
-                defs.entry(sanitize_ident(name))
-                    .or_insert_with(|| body.clone());
+                defs.insert(name.clone(), body.clone());
             }
         }
 
         // 2. Allocate a global name for every def, building this verb's
-        //    rename map (original sanitized name -> final emitted name).
+        //    rename map (original def name -> final emitted name). The desired
+        //    base is the sanitized form; collisions are suffixed, never dropped.
         let mut rename: BTreeMap<String, String> = BTreeMap::new();
         let mut newly: Vec<(String, String)> = Vec::new();
         for name in defs.keys() {
             let sig = body_sig(&defs[name], &defs);
-            let (final_name, is_new) = registry.allocate(name, &sig);
+            let (final_name, is_new) = registry.allocate(&sanitize_ident(name), &sig);
             if is_new {
                 newly.push((name.clone(), final_name.clone()));
             }
@@ -201,17 +204,17 @@ fn root_title(verb: &str, schema: &Value) -> String {
 }
 
 /// Recursively rewrite every `$ref` so its terminal name resolves through
-/// `rename` (original sanitized def name -> final emitted name). Refs not in the
-/// map keep their (sanitized) target. This keeps `$ref`s pointing at the right
+/// `rename` (original def name -> final emitted name). Every intra-verb ref is
+/// in the map, so all are rewritten to their allocated name; refs to unknown
+/// targets keep their original form. This keeps `$ref`s pointing at the right
 /// definition after a colliding def was given a suffixed name.
 fn rewrite_refs(value: &mut Value, rename: &BTreeMap<String, String>) {
     match value {
         Value::Object(map) => {
             let remapped = map.get("$ref").and_then(Value::as_str).and_then(|r| {
-                let terminal = sanitize_ident(r.rsplit('/').next().unwrap_or(r));
+                let terminal = r.rsplit('/').next().unwrap_or(r);
                 rename
-                    .get(&terminal)
-                    .filter(|final_name| *final_name != &terminal)
+                    .get(terminal)
                     .map(|final_name| format!("#/$defs/{final_name}"))
             });
             if let Some(new_ref) = remapped {
@@ -271,9 +274,9 @@ fn sig_value(value: &Value, defs: &BTreeMap<String, Value>, visited: &mut BTreeS
     match value {
         Value::Object(map) => {
             if let Some(reference) = map.get("$ref").and_then(Value::as_str) {
-                let terminal = sanitize_ident(reference.rsplit('/').next().unwrap_or(reference));
+                let terminal = reference.rsplit('/').next().unwrap_or(reference);
                 buf.push_str("ref(");
-                sig_node(&terminal, defs, visited, buf);
+                sig_node(terminal, defs, visited, buf);
                 buf.push(')');
                 return;
             }
@@ -703,6 +706,122 @@ mod tests {
         assert!(
             verb_c_def.contains("delta"),
             "verb_c root body ({verb_c_type}) missing its own field:\n{ts}"
+        );
+    }
+
+    /// Definitive close-the-class guard: every collision sub-case in ONE run,
+    /// including the one that drips kept reappearing —
+    ///   (a) two verbs share a root `title` (root-vs-root),
+    ///   (b) a verb's root name collides with another verb's `$def` (root-vs-def),
+    ///   (c) two `$defs` WITHIN one schema sanitize to the same identifier
+    ///       (`Foo-Bar` + `Foo_Bar`, def-vs-def intra-schema).
+    /// Because name allocation is keyed by each def's *original* name (not its
+    /// sanitized form) and disambiguates on collision, no body is ever dropped
+    /// and every `$ref` resolves to its intended type.
+    #[test]
+    fn all_name_collision_subcases_emit_distinct_types() {
+        // verb_a: shares title with verb_b (a); owns a `Widget` $def that verb_c
+        // will collide with (b); AND two intra-schema defs that sanitize to the
+        // same ident with DISTINCT bodies, each referenced by the root (c).
+        let schema_a = json!({
+            "title": "SharedTitle",
+            "type": "object",
+            "properties": {
+                "alpha": { "type": "string" },
+                "widget": { "$ref": "#/$defs/Widget" },
+                "fooDash": { "$ref": "#/$defs/Foo-Bar" },
+                "fooUnder": { "$ref": "#/$defs/Foo_Bar" },
+            },
+            "required": ["alpha", "widget", "fooDash", "fooUnder"],
+            "$defs": {
+                "Widget": {
+                    "type": "object",
+                    "properties": { "gamma": { "type": "string" } },
+                    "required": ["gamma"],
+                },
+                "Foo-Bar": {
+                    "type": "object",
+                    "properties": { "dashField": { "type": "string" } },
+                    "required": ["dashField"],
+                },
+                "Foo_Bar": {
+                    "type": "object",
+                    "properties": { "underField": { "type": "number" } },
+                    "required": ["underField"],
+                },
+            },
+        });
+        let schema_b = json!({
+            "title": "SharedTitle",
+            "type": "object",
+            "properties": { "beta": { "type": "number" } },
+            "required": ["beta"],
+        });
+        let schema_c = json!({
+            "title": "Widget",
+            "type": "object",
+            "properties": { "delta": { "type": "boolean" } },
+            "required": ["delta"],
+        });
+
+        let generated = generate_from(vec![
+            ("verb_c".to_string(), schema_c),
+            ("verb_a".to_string(), schema_a),
+            ("verb_b".to_string(), schema_b),
+        ]);
+        let ts = &generated.typescript;
+
+        let iface_body = |name: &str| -> String {
+            ts.split(&format!("export interface {name} {{"))
+                .nth(1)
+                .and_then(|rest| rest.split('}').next())
+                .unwrap_or("")
+                .to_string()
+        };
+        let verb_type = |verb: &str| -> String {
+            ts.lines()
+                .find_map(|l| {
+                    l.trim()
+                        .strip_prefix(&format!("{verb}: "))
+                        .map(|t| t.trim_end_matches(';').to_string())
+                })
+                .unwrap_or_else(|| panic!("{verb} not mapped:\n{ts}"))
+        };
+
+        // (a) root-vs-root: both shared-title verbs keep their own body.
+        assert!(ts.contains("alpha"), "verb_a root body missing:\n{ts}");
+        assert!(ts.contains("beta"), "verb_b root body missing:\n{ts}");
+        assert_ne!(verb_type("verb_a"), verb_type("verb_b"), "roots collapsed:\n{ts}");
+
+        // (b) root-vs-def: the `Widget` $def survives intact, verb_c's same-named
+        // root got a distinct name, and verb_a's $ref still points at the def.
+        assert!(
+            iface_body("Widget").contains("gamma") && !iface_body("Widget").contains("delta"),
+            "Widget $def overwritten by verb_c root:\n{ts}"
+        );
+        assert_ne!(verb_type("verb_c"), "Widget", "verb_c root collided onto the def:\n{ts}");
+        assert!(iface_body(&verb_type("verb_c")).contains("delta"), "verb_c body lost:\n{ts}");
+
+        // (c) def-vs-def intra-schema: BOTH `Foo-Bar` and `Foo_Bar` are emitted as
+        // distinct types (one suffixed), neither dropped, and the root's two refs
+        // resolve to the correct one each.
+        let a_root = iface_body(&verb_type("verb_a"));
+        let dash_ty = a_root
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("fooDash: ").map(|t| t.trim_end_matches(';').to_string()))
+            .expect("fooDash field present");
+        let under_ty = a_root
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("fooUnder: ").map(|t| t.trim_end_matches(';').to_string()))
+            .expect("fooUnder field present");
+        assert_ne!(dash_ty, under_ty, "two intra-schema defs collapsed to one type:\n{ts}");
+        assert!(
+            iface_body(&dash_ty).contains("dashField"),
+            "fooDash ({dash_ty}) resolved to the wrong def:\n{ts}"
+        );
+        assert!(
+            iface_body(&under_ty).contains("underField"),
+            "fooUnder ({under_ty}) resolved to the wrong def:\n{ts}"
         );
     }
 }
