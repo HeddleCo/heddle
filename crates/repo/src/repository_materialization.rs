@@ -688,13 +688,22 @@ impl Repository {
         Ok(())
     }
 
-    /// One clone attempt: returns `Ok(true)` on a successful reflink
-    /// or fallback `fs::copy`, `Ok(false)` only when the
-    /// filesystem-level helper reports the operation isn't supported
-    /// (`EXDEV`/`EOPNOTSUPP`/`ENOSYS`/`EINVAL`). On the unsupported
-    /// verdict the context is flipped so the rest of the batch skips
-    /// straight to the in-memory `fs::write` path without paying the
-    /// failed-syscall tax. Genuine I/O errors bubble up.
+    /// One clone attempt: returns `Ok(true)` on a successful reflink,
+    /// `Ok(false)` when the caller should fall back to the in-memory
+    /// `fs::write` path. The two `Ok(false)` causes are deliberately
+    /// handled differently:
+    ///
+    /// * `ReflinkOutcome::Unsupported` (`EXDEV`/`EOPNOTSUPP`/`ENOSYS`/
+    ///   `EINVAL`) — a filesystem-capability verdict, so the context is
+    ///   flipped (`disable_reflinks`) and the rest of the batch skips
+    ///   straight to `fs::write` without paying the failed-syscall tax.
+    /// * `ReflinkOutcome::SourceVanished` — the loose mirror was pruned
+    ///   mid-flight. A per-blob race, so we fall back for this blob only
+    ///   and leave reflinks ENABLED for the rest of the batch
+    ///   (heddle#571 r3).
+    ///
+    /// Genuine I/O errors bubble up (attributed to the offending side by
+    /// `classify_clone_failure`).
     fn try_clone(
         &self,
         source: &Path,
@@ -727,13 +736,14 @@ impl Repository {
             );
             return Ok(false);
         }
+        use objects::fs_clone::ReflinkOutcome;
         match objects::fs_clone::try_reflink(source, dest) {
-            Ok(true) => {
+            Ok(ReflinkOutcome::Cloned) => {
                 set_file_mode(dest, executable)?;
                 context.record_reflink();
                 Ok(true)
             }
-            Ok(false) => {
+            Ok(ReflinkOutcome::Unsupported) => {
                 // Filesystem doesn't support reflinks. Disable for
                 // the rest of the batch and let the caller fall
                 // through to `fs::write` (which decompresses from
@@ -744,6 +754,22 @@ impl Repository {
                     "reflink not supported on this filesystem; switching batch to fs::write fallback"
                 );
                 context.disable_reflinks();
+                Ok(false)
+            }
+            Ok(ReflinkOutcome::SourceVanished) => {
+                // [heddle#571 r3] The loose mirror was pruned out from under
+                // us between the pre-check and the clone. That's a per-blob
+                // race, NOT a filesystem-capability verdict — so degrade to
+                // the bytes-write fallback for THIS blob only and DO NOT
+                // `disable_reflinks`. Sibling blobs whose mirrors are intact
+                // still get the CoW win. A blob genuinely absent from the
+                // store still errors loudly when the bytes-write fallback's
+                // `get_blob` can't find it.
+                debug!(
+                    source = %source.display(),
+                    dest = %dest.display(),
+                    "loose reflink source vanished before clone; falling back to bytes-write for this blob (reflinks stay enabled batch-wide)"
+                );
                 Ok(false)
             }
             Err(err) => {
@@ -913,8 +939,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        Repository, WorktreeWriteOp, classify_clone_failure, materialization_worker_count,
-        remove_materialized_leaf,
+        MaterializationContext, Repository, WorktreeWriteOp, classify_clone_failure,
+        materialization_worker_count, remove_materialized_leaf,
     };
 
     /// heddle#571 (round 2, finding 2): a clone syscall that raises ENOENT
@@ -970,6 +996,34 @@ mod tests {
             classify_clone_failure(&source, &dest, &other),
             Some((source.as_path(), "reflinking")),
             "an unreadable source must be attributed to the source path"
+        );
+    }
+
+    /// heddle#571 (round 3): a vanished loose source is a per-blob race, not a
+    /// filesystem-capability verdict — `try_clone` must degrade to the
+    /// bytes-write fallback for that blob WITHOUT flipping the batch-wide
+    /// `reflink_supported` flag. Previously the helper's pre-check returned a
+    /// bare `Ok(false)`, indistinguishable from "filesystem can't reflink", so
+    /// one concurrently-pruned mirror needlessly disabled reflinks (forcing
+    /// copy-writes) for every remaining blob in the batch.
+    #[test]
+    fn try_clone_vanished_source_keeps_batch_reflinks_enabled() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let context = MaterializationContext::new();
+        assert!(context.reflinks_enabled(), "context starts optimistic");
+
+        let missing = temp.path().join("pruned.blob");
+        let dest = temp.path().join("wt/out.txt");
+        assert!(!missing.exists());
+
+        let cloned = repo
+            .try_clone(&missing, &dest, false, &context)
+            .expect("a vanished source must fall back, not error");
+        assert!(!cloned, "a vanished source cannot have been reflinked");
+        assert!(
+            context.reflinks_enabled(),
+            "a vanished source must NOT disable reflinks for the rest of the batch"
         );
     }
 
