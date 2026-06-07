@@ -49,8 +49,11 @@ export interface RunOptions {
  */
 export class Heddle {
   private readonly executor: Executor;
+  /** Instance default repo path (`-C`), applied regardless of transport. */
+  private readonly repoPath: string | undefined;
 
   constructor(options: HeddleOptions = {}) {
+    this.repoPath = options.repoPath;
     if (options.executor) {
       this.executor = options.executor;
     } else {
@@ -77,7 +80,7 @@ export class Heddle {
       verb,
       args,
       opId: options.opId,
-      repoPath: options.repoPath,
+      repoPath: options.repoPath ?? this.repoPath,
       signal: options.signal,
     });
 

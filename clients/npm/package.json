@@ -4,12 +4,12 @@
   "description": "Transport-agnostic TypeScript API that drives the heddle CLI over its JSON contract.",
   "license": "MIT",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
     }
   },
   "files": [
@@ -21,7 +21,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsc -p tsconfig.json && node --test dist/test/",
+    "test": "tsc -p tsconfig.json && node --test dist/test/*.test.js",
     "example": "tsc -p tsconfig.json && node dist/examples/smoke.js"
   },
   "engines": {

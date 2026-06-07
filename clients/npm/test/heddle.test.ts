@@ -39,6 +39,16 @@ test("threads --op-id through the executor for mutating verbs", async () => {
   assert.deepEqual(fake.lastRequest?.args, ["-m", "msg"]);
 });
 
+test("applies the instance default repoPath through a custom executor", async () => {
+  const fake = new FakeExecutor({ exitCode: 0, stdout: JSON.stringify(STATUS_JSON), stderr: "" });
+  const heddle = new Heddle({ executor: fake, repoPath: "/repos/demo" });
+  await heddle.status();
+  assert.equal(fake.lastRequest?.repoPath, "/repos/demo");
+  // A per-call repoPath still overrides the instance default.
+  await heddle.status([], { repoPath: "/repos/other" });
+  assert.equal(fake.lastRequest?.repoPath, "/repos/other");
+});
+
 test("maps a non-zero exit to a HeddleError with parsed envelope", async () => {
   const envelope = {
     code: "no_remote",
