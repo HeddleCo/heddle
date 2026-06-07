@@ -1761,7 +1761,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
         ThreadMode::Virtualized => default_virtualized_thread_path(repo, &args.name),
     };
     if args.path.is_some() {
-        ensure_explicit_start_path_outside_repo(repo, &args.name, &path)?;
+        ensure_explicit_start_path_outside_tracked_tree(repo, &args.name, &path)?;
     }
     // The retry-stable idempotency key, resolved BEFORE the fresh-start preflight
     // so a committed retry is recognized before any precondition can reject it
@@ -2646,7 +2646,7 @@ pub(crate) fn cmd_thread_switch(
 
     // "Invisible thread directories" rule: switching to a thread that has
     // its *own* dedicated worktree (the one `heddle start --workspace
-    // private|virtualized` recorded under `.run-heddle-threads/<name>/`)
+    // private|virtualized` recorded under `.heddle/threads/<name>/root/`)
     // is a metadata-only operation. The on-disk worktree at the
     // recorded path is already X's worktree — it was set up by `start`
     // and is kept in sync by the metadata-driven merge/rebase/goto/land
@@ -3390,21 +3390,51 @@ fn non_empty_action(action: &str) -> Option<String> {
     (!action.trim().is_empty()).then(|| action.to_string())
 }
 
-fn default_thread_path(repo: &Repository, name: &str) -> PathBuf {
-    let workspace_root = shared_workspace_root(repo);
-    let repo_name = workspace_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("heddle");
-    let parent = workspace_root
-        .parent()
-        .map(|path| path.to_path_buf())
-        .unwrap_or_else(|| workspace_root.to_path_buf());
-    parent.join(format!("{repo_name}-{}", sanitize_name(name)))
+/// Root for all default thread checkouts: `<repo>/.heddle/threads`.
+///
+/// Living under `.heddle/` (heddle's reserved, never-tracked metadata
+/// dir) keeps the checkout *inside* the repository directory — so a
+/// sandbox scoped to the repo can still reach it — while staying out of
+/// the parent repo's overlay/status traversal. `.heddle/` is excluded
+/// everywhere it matters: the git-overlay status path carries `.heddle/`
+/// in `.git/info/exclude` (`repository::ensure_git_overlay_exclude`), and
+/// the native worktree walk / untracked scan / materialize walk root
+/// their ignore at `/.heddle` (`repo_config::default_ignore` +
+/// `worktree_ignore::canonical_line`). A checkout under
+/// `.heddle/threads/<name>` therefore never pollutes or recurses into the
+/// parent repo's status.
+pub(crate) fn default_threads_root(repo: &Repository) -> PathBuf {
+    repo.heddle_dir().join("threads")
 }
 
-fn ensure_explicit_start_path_outside_repo(
+/// Default checkout directory for a thread, for every workspace mode:
+/// `<repo>/.heddle/threads/<name>/root`.
+///
+/// The `root/` leaf is load-bearing, not cosmetic:
+/// `thread_manifest::manifest_path` already owns
+/// `.heddle/threads/<name>/manifest.toml` as the per-thread stat-cache
+/// sidecar. Nesting the worktree bytes one level down at `<name>/root`
+/// keeps that `manifest.toml` a *sibling* of the checkout rather than a
+/// stray file inside it, and the manifest walk
+/// (`thread_manifest::walk_thread_manifests`) stops at the first
+/// `manifest.toml` it finds, so it never descends into `root/`.
+fn default_thread_checkout_path(repo: &Repository, name: &str) -> PathBuf {
+    default_threads_root(repo)
+        .join(sanitize_name(name))
+        .join("root")
+}
+
+fn default_thread_path(repo: &Repository, name: &str) -> PathBuf {
+    default_thread_checkout_path(repo, name)
+}
+
+/// Guard an explicit `--path`. A checkout may live either OUTSIDE the
+/// repository (the classic sibling-directory escape hatch) or under the
+/// repo's reserved `.heddle/` metadata dir (where the new defaults live,
+/// and which is excluded from overlay/status traversal). What it must NOT
+/// do is land in the repo's *tracked* working tree — a checkout there
+/// would surface as nested unsaved work in the parent repo's status.
+fn ensure_explicit_start_path_outside_tracked_tree(
     repo: &Repository,
     name: &str,
     path: &Path,
@@ -3418,6 +3448,15 @@ fn ensure_explicit_start_path_outside_repo(
         std::env::current_dir()?.join(path)
     };
     let requested_for_check = normalize_path_for_containment(&requested)?;
+    let heddle_dir = normalize_path_for_containment(repo.heddle_dir())?;
+    // Under `.heddle/` is allowed — that's where managed checkouts live.
+    // (`validate_worktree_target` further restricts this to the
+    // `.heddle/threads` subtree so a checkout can't target the store.)
+    // Check this BEFORE the repo-root test, since `.heddle` is itself a
+    // child of the repo root.
+    if requested_for_check == heddle_dir || requested_for_check.starts_with(&heddle_dir) {
+        return Ok(());
+    }
     let repo_root = normalize_path_for_containment(repo.root())?;
     if requested_for_check == repo_root || requested_for_check.starts_with(&repo_root) {
         let suggested = default_thread_path(repo, name);
@@ -3429,10 +3468,10 @@ fn ensure_explicit_start_path_outside_repo(
                 requested_for_check.display()
             ),
             format!(
-                "Choose a sibling checkout outside the repository, for example `{suggested_command}`."
+                "Choose a checkout under `.heddle/threads` (the default) or a sibling outside the repository, for example `{suggested_command}`."
             ),
             format!(
-                "requested checkout path '{}' is inside repository '{}'",
+                "requested checkout path '{}' is inside the tracked working tree of repository '{}'",
                 requested_for_check.display(),
                 repo_root.display()
             ),
@@ -3476,44 +3515,20 @@ fn normalize_path_for_containment(path: &Path) -> Result<PathBuf> {
     Ok(normalized)
 }
 
+/// Lightweight (materialized) checkout path:
+/// `<repo>/.heddle/threads/<name>/root`.
 fn default_lightweight_thread_path(repo: &Repository, name: &str) -> PathBuf {
-    let workspace_root = shared_workspace_root(repo);
-    let repo_name = workspace_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("heddle");
-    let parent = workspace_root
-        .parent()
-        .map(|path| path.to_path_buf())
-        .unwrap_or_else(|| workspace_root.to_path_buf());
-    parent
-        .join(format!(".{repo_name}-heddle-threads"))
-        .join(sanitize_name(name))
-        .join("root")
+    default_thread_checkout_path(repo, name)
 }
 
-/// Mount-point path for a virtualized thread. Sibling to the
-/// lightweight checkout path so a single repo can host both kinds
-/// of threads side-by-side without colliding.
-///
-/// Template: `<repo_parent>/.<repo_name>-heddle-mounts/<sanitized_name>/`
+/// Mount-point path for a virtualized thread:
+/// `<repo>/.heddle/threads/<name>/root`. Shares the same managed
+/// `.heddle/threads/<name>/root` layout as solid/lightweight checkouts
+/// (thread names are unique per repo), keeping the per-thread
+/// `manifest.toml` sidecar a sibling of the mount point rather than a
+/// stray entry inside it.
 fn default_virtualized_thread_path(repo: &Repository, name: &str) -> PathBuf {
-    let workspace_root = shared_workspace_root(repo);
-    let repo_name = workspace_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("heddle");
-    let parent = workspace_root
-        .parent()
-        .map(|path| path.to_path_buf())
-        .unwrap_or_else(|| workspace_root.to_path_buf());
-    mount_lifecycle::default_virtualized_mount_path(&parent, repo_name, &sanitize_name(name))
-}
-
-fn shared_workspace_root(repo: &Repository) -> &std::path::Path {
-    repo.heddle_dir().parent().unwrap_or_else(|| repo.root())
+    default_thread_checkout_path(repo, name)
 }
 
 fn sanitize_name(name: &str) -> String {

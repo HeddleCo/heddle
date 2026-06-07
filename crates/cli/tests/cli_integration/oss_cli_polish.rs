@@ -5612,6 +5612,115 @@ fn start_normalized_nested_path_inside_repo_is_refused() {
 }
 
 #[test]
+fn start_default_path_lands_under_heddle_threads() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_for_json_contract(temp.path(), "main");
+    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
+    git_commit_all_for_json_contract(temp.path(), "seed");
+    heddle(&["adopt"], Some(temp.path())).expect("adopt Git overlay repo");
+
+    for (mode, name) in [("solid", "solid-thread"), ("materialized", "mat-thread")] {
+        let started = json_value(
+            temp.path(),
+            &["--output", "json", "start", name, "--workspace", mode],
+        );
+        let path = started["execution_path"]
+            .as_str()
+            .or_else(|| started["materialized_path"].as_str())
+            .unwrap_or_else(|| panic!("{mode} start output should carry a checkout path: {started}"));
+        let needle = format!("/.heddle/threads/{name}");
+        assert!(
+            path.contains(&needle),
+            "{mode} thread should default under .heddle/threads/<name> (got {path})"
+        );
+        assert!(
+            std::path::Path::new(path).join(".heddle").exists(),
+            "{mode} checkout should be materialized at {path}"
+        );
+    }
+}
+
+#[test]
+fn parent_status_ignores_default_thread_checkout_under_heddle() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_for_json_contract(temp.path(), "main");
+    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
+    git_commit_all_for_json_contract(temp.path(), "seed");
+    heddle(&["adopt"], Some(temp.path())).expect("adopt Git overlay repo");
+
+    // A default `start` drops a full checkout under `.heddle/threads/<name>`.
+    json_value(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "start",
+            "pollution-check",
+            "--workspace",
+            "materialized",
+        ],
+    );
+    assert!(
+        temp.path()
+            .join(".heddle/threads/pollution-check/root/.heddle")
+            .exists(),
+        "thread checkout should materialize under .heddle/threads/"
+    );
+
+    // Git itself must not see the checkout — `.heddle/` lives in
+    // `.git/info/exclude`, so the parent working tree stays clean.
+    let porcelain = git_stdout_for_json_contract(temp.path(), &["status", "--porcelain"]);
+    assert!(
+        porcelain.trim().is_empty(),
+        "parent git status should stay clean; the .heddle/ checkout leaked: {porcelain:?}"
+    );
+
+    // Heddle's overlay verify/status must report the parent as clean too:
+    // the worktree walk roots its ignore at `/.heddle`, so the checkout
+    // never registers as untracked/uncaptured work.
+    let verify = json_value(temp.path(), &["verify", "--output", "json"]);
+    assert_eq!(
+        verify["verified"], true,
+        "parent overlay status should ignore the .heddle/threads checkout: {verify}"
+    );
+    assert_eq!(verify["status"], "clean", "{verify}");
+}
+
+#[test]
+fn start_explicit_path_under_heddle_threads_is_accepted() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_for_json_contract(temp.path(), "main");
+    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
+    git_commit_all_for_json_contract(temp.path(), "seed");
+    heddle(&["adopt"], Some(temp.path())).expect("adopt Git overlay repo");
+
+    // The inverted guard allows an explicit `--path` under `.heddle/`
+    // (heddle's reserved dir) even though it's inside the repo directory.
+    let custom = temp
+        .path()
+        .join(".heddle")
+        .join("threads")
+        .join("explicit-custom");
+    let custom_arg = custom.to_str().unwrap();
+    let started = json_value(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "start",
+            "explicit-under-heddle",
+            "--path",
+            custom_arg,
+        ],
+    );
+    assert_eq!(started["thread"]["name"], "explicit-under-heddle");
+    assert!(
+        custom.join(".heddle").exists(),
+        "explicit .heddle/threads path should be accepted and materialized: {started}"
+    );
+}
+
+#[test]
 fn revert_refuses_dirty_worktree_with_shared_advice() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();

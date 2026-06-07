@@ -2154,24 +2154,13 @@ fn allocate_thread_name(repo: &Repository, base: &str) -> Result<String> {
 }
 
 fn default_private_thread_path(repo: &Repository, name: &str) -> PathBuf {
-    let workspace_root = shared_workspace_root(repo);
-    let repo_name = workspace_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("heddle");
-    let parent = workspace_root
-        .parent()
-        .map(|path| path.to_path_buf())
-        .unwrap_or_else(|| workspace_root.to_path_buf());
-    parent
-        .join(format!(".{repo_name}-heddle-threads"))
+    // Mirror `thread::default_threads_root`: managed checkouts live under
+    // the repo's reserved `.heddle/threads/` dir (excluded from the
+    // parent's overlay/status traversal, reachable from a repo sandbox).
+    repo.heddle_dir()
+        .join("threads")
         .join(sanitize_name(name))
         .join("root")
-}
-
-fn shared_workspace_root(repo: &Repository) -> &Path {
-    repo.heddle_dir().parent().unwrap_or_else(|| repo.root())
 }
 
 fn sanitize_name(name: &str) -> String {

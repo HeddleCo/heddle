@@ -573,8 +573,7 @@ impl Repository {
     ///      name*, which is what auto-capture-on-switch needs.
     ///   2. `snapshot` walks `self.root`. Capture-from-disk walks
     ///      whatever directory the materializer put the thread at —
-    ///      sibling directories under
-    ///      `<workspace_parent>/.<repo>-heddle-mounts/<thread>/`,
+    ///      managed checkouts under `<repo>/.heddle/threads/<thread>/`,
     ///      which are NOT `self.root`.
     ///
     /// Walks `Repository::build_tree` for the slow path so the

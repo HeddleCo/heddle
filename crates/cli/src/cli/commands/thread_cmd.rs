@@ -1333,18 +1333,15 @@ fn print_thread_output(
 }
 
 fn default_materialized_thread_path(repo: &Repository, thread_id: &str) -> PathBuf {
-    let repo_name = repo
-        .root()
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("heddle");
-    let parent = repo
-        .root()
-        .parent()
-        .map(|path| path.to_path_buf())
-        .unwrap_or_else(|| repo.root().to_path_buf());
-    parent.join(format!("{repo_name}-{}", thread_id.replace('/', "-")))
+    // Promote to a solid checkout under the same Heddle-managed
+    // `.heddle/threads/<name>/root` layout the `start` defaults use, so a
+    // promoted thread stays reachable from a repo-scoped sandbox and out
+    // of the parent repo's status. The `root/` leaf keeps the per-thread
+    // `manifest.toml` sidecar a sibling of the checkout, not inside it.
+    // See `thread::default_threads_root`.
+    super::thread::default_threads_root(repo)
+        .join(thread_id.replace('/', "-"))
+        .join("root")
 }
 
 // --- thread cleanup -------------------------------------------------

@@ -100,7 +100,14 @@ fn canonicalize_existing_ancestor(path: &Path) -> Result<PathBuf> {
 }
 
 fn validate_worktree_target(repo: &Repository, path: &Path) -> Result<()> {
-    if path == repo.heddle_dir() || path.starts_with(repo.heddle_dir()) {
+    // `.heddle/threads/` is the managed home for thread checkouts (the
+    // default for `heddle start`), so it's explicitly allowed even though
+    // it sits under `.heddle/`. Everything else under `.heddle/` is repo
+    // metadata storage and stays off-limits — a checkout there could
+    // corrupt the store/refs/oplog.
+    let threads_root = repo.heddle_dir().join("threads");
+    let in_threads_root = path == threads_root || path.starts_with(&threads_root);
+    if !in_threads_root && (path == repo.heddle_dir() || path.starts_with(repo.heddle_dir())) {
         return Err(anyhow::anyhow!(worktree_target_storage_advice(path)));
     }
 

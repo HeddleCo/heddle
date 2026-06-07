@@ -783,7 +783,7 @@ fn branch_name_for(mode: Mode, args: &Args, idx: usize) -> Option<String> {
 /// Create a workdir for `mode` and return the *actual* on-disk path
 /// where cargo should be invoked. For git and solid modes that matches
 /// `desired_path`; for virtualized mode the heddle CLI ignores `--path`
-/// and mounts under `<parent>/.<repo-name>-heddle-mounts/<thread>` —
+/// and mounts under `<repo>/.heddle/threads/<thread>` —
 /// we parse the JSON `path` field from stdout to discover it.
 fn create_workdir(
     mode: Mode,
