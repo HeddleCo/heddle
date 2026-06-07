@@ -18,6 +18,61 @@ Import from the package (#584) like:
 import type { CommitSchema, HeddleVerbOutputs } from "./generated/heddle-schemas";
 ```
 
+## The `Heddle` API (#583)
+
+`src/` is a transport-agnostic TypeScript wrapper that drives the CLI over
+this JSON contract. It spawns `heddle <verb> --output json [...]`, parses the
+stdout envelope, and returns the `HeddleVerbOutputs`-typed payload.
+
+```ts
+import { Heddle, HeddleError } from "@heddle/cli";
+
+// binaryPath is caller-supplied (binary bundling is #584); falls back to
+// "heddle" on PATH.
+const heddle = new Heddle({ binaryPath: "./bin/heddle", repoPath: "/repo" });
+
+const status = await heddle.status();        // typed StatusSchema
+console.log(status.output_kind);
+
+// Mutating verbs thread --op-id for idempotent retries.
+await heddle.commit(["-m", "msg"], { opId: crypto.randomUUID() });
+
+try {
+  await heddle.push();
+} catch (err) {
+  if (err instanceof HeddleError) {
+    // Error envelope is parsed off stderr; retryable is true ONLY for exit 75.
+    if (err.retryable) {/* safe to retry with the same op-id */}
+    else console.error(err.code, err.message); // e.g. "no_remote"
+  }
+}
+```
+
+Covered harness ops have convenience methods (`adopt`, `init`, `status`,
+`start`, `commit`, `log`, `diff`, `fetch`, `push`, `export` →
+`bridge git export`); any schema-backed verb is reachable via
+`heddle.run(verb, args, opts)`.
+
+### Transport seam (#586)
+
+Dispatch goes through an `Executor` interface; the default `SpawnExecutor`
+shells out to the binary. A future napi/daemon backend (#586) implements the
+same interface and swaps in via `new Heddle({ executor })` — call sites don't
+change.
+
+### Build / test
+
+```sh
+npm run typecheck          # tsc --noEmit, strict
+npm test                   # tsc + node --test (deterministic fake-executor)
+HEDDLE_BIN=./bin/heddle npm test   # also runs the real-binary smoke test
+```
+
+> **CI:** heddle's CI has no TypeScript gate yet — wiring the npm typecheck/
+> test/publish matrix is owned by **#584**. Binary bundling
+> (`optionalDependencies`, asar) is also #584; this package takes a
+> caller-supplied `binaryPath` and otherwise relies on PATH.
+
 ## Regenerating
 
 The types come straight from `crates/cli/src/cli/commands/schemas.rs` via the
