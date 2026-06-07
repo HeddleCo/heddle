@@ -87,7 +87,10 @@ impl<'a, S: ObjectStore> StateWriter<'a, S> {
             }
         }
 
-        let state = state_from_commit(commit, tree, parents);
+        // The plain `StateWriter` receives an already-translated tree hash and
+        // does no tree translation itself, so it has no lossy signal to record —
+        // lossy detection lives on the tree-translating `PackedImport` path.
+        let state = state_from_commit(commit, tree, parents, false);
 
         self.store.put_state(&state).map_err(IngestError::from)?;
 
@@ -103,6 +106,7 @@ pub(crate) fn state_from_commit(
     commit: &CommitEntry,
     tree: ContentHash,
     parents: Vec<ChangeId>,
+    git_lossy: bool,
 ) -> State {
     // A lossy string view, derived once for the parsers that need text
     // (attribution trailers, the one-line intent). The verbatim bytes still
@@ -137,6 +141,7 @@ pub(crate) fn state_from_commit(
         ))
         .with_tz_offsets(commit.author.tz_offset, commit.committer.tz_offset)
         .with_raw_message(commit.message.clone())
+        .with_git_lossy(git_lossy)
         .with_extra_headers(commit.extra_headers.clone())
 }
 

@@ -883,6 +883,76 @@ fn import_all_lossy_clean_repo_reports_no_lossy_entries() {
     assert!(stats.lossy_entries.is_empty());
 }
 
+/// The single imported gitlink state must carry git-fidelity (`raw_message`) —
+/// the signal that opts a commit INTO reconstruct-from-state — yet be flagged
+/// `git_lossy`, so the #567 export guard keeps it OFF that path. Asserted for
+/// both lossy population surfaces so they converge on ONE canonical marker.
+fn assert_only_state_is_lossy_with_fidelity(repo: &Repository, surface: &str) {
+    let states: Vec<_> = repo
+        .store()
+        .list_states()
+        .expect("list states")
+        .iter()
+        .filter_map(|id| repo.store().get_state(id).expect("get state"))
+        .collect();
+    assert_eq!(states.len(), 1, "{surface}: single gitlink commit imported");
+    let state = &states[0];
+    assert!(
+        state.raw_message.is_some(),
+        "{surface}: git-fidelity (raw_message) present — without the lossy \
+         marker this is exactly what the buggy guard reconstructs"
+    );
+    assert!(
+        state.git_lossy,
+        "{surface}: a --lossy import must set the canonical git_lossy marker so \
+         export does not reconstruct a wrong-SHA object"
+    );
+}
+
+/// `bridge git import --lossy` records the canonical `git_lossy` marker.
+#[test]
+fn bridge_import_lossy_state_carries_canonical_git_lossy_marker() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_git_temp, git_repo) = init_gitlink_repo();
+
+    let mut bridge = GitBridge::new(&repo);
+    let stats = import_all_with_options(
+        &mut bridge,
+        Some(git_repo.workdir().expect("workdir")),
+        GitImportOptions { lossy: true },
+    )
+    .expect("lossy bridge import succeeds");
+    assert_eq!(stats.lossy_entries.len(), 1, "gitlink is the one lossy entry");
+
+    assert_only_state_is_lossy_with_fidelity(&repo, "bridge import --lossy");
+}
+
+/// Close-the-class regression for #567 round 2: a `bridge git ingest --lossy`
+/// state carries the SAME canonical `git_lossy` marker that `import --lossy`
+/// sets. Before this fix, ingest states satisfied `has_git_fidelity` but
+/// carried no lossy signal reachable from an UNMAPPED state (ingest never
+/// populates the bridge mapping), so the export guard reconstructed them into
+/// wrong-SHA objects. Both paths now set ONE flag the guard reads.
+#[cfg(feature = "ingest")]
+#[test]
+fn ingest_lossy_state_carries_canonical_git_lossy_marker() {
+    use ingest::{ImportOptions, import_git_into_with_options};
+
+    let (_git_temp, git_repo) = init_gitlink_repo();
+    let git_path = git_repo.workdir().expect("workdir");
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let (stats, map) =
+        import_git_into_with_options(git_path, heddle_temp.path(), ImportOptions { lossy: true })
+            .expect("lossy ingest succeeds");
+    drop(map);
+    assert_eq!(stats.lossy_entries.len(), 1, "gitlink is the one lossy entry");
+
+    let repo = Repository::open(heddle_temp.path()).expect("open heddle repo");
+    assert_only_state_is_lossy_with_fidelity(&repo, "bridge git ingest --lossy");
+}
+
 /// Regression: `copy_local_repo_to_bare` (the engine behind `heddle clone
 /// /path/to/bare /work` for git-overlay paths) used to walk every tree
 /// entry without distinguishing gitlinks from regular blobs/subtrees,

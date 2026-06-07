@@ -58,14 +58,23 @@ fn identity_is_byte_faithful(who: &Principal) -> bool {
 /// guaranteed byte-exact to the original commit — the precondition for the #567
 /// reconstruct-from-state path. False for the two #564 lossy gaps:
 ///   1. non-UTF8 author/committer identity bytes (see [`identity_is_byte_faithful`]);
-///   2. `--lossy` imports (`imported_lossy`), where unrepresentable tree entries
-///      were dropped/converted so the rebuilt tree — hence commit — OID diverges.
+///   2. lossy imports, where unrepresentable tree entries were dropped/converted
+///      so the rebuilt tree — hence commit — OID diverges.
+///
+/// (2) is read off ONE canonical signal — [`State::git_lossy`] — that BOTH lossy
+/// population paths (`bridge git import --lossy` AND `bridge git ingest --lossy`)
+/// set, rather than enumerating import surfaces or keying off the mirror's
+/// per-OID lossy log. That log is unreachable for an UNMAPPED state (an ingest
+/// import never populates the bridge mapping), which is exactly the gap that let
+/// an ingest-lossy commit reconstruct to a wrong SHA (#567 round 2); the state
+/// flag closes the whole class, including any future lossy entry point.
 ///
 /// When false the caller MUST keep the verbatim mirror bytes / preserved mapped
-/// OID rather than mint a wrong-SHA reconstructed object.
-fn commit_is_byte_faithful(state: &State, imported_lossy: bool) -> bool {
+/// OID (or fall through to the native mint) rather than mint a wrong-SHA
+/// reconstructed object.
+fn commit_is_byte_faithful(state: &State) -> bool {
     has_git_fidelity(state)
-        && !imported_lossy
+        && !state.git_lossy
         && identity_is_byte_faithful(&state.attribution.principal)
         && state
             .committer
@@ -113,12 +122,15 @@ pub(crate) fn export_state(
     // is the path that lets the git mirror be dropped (#568): a correct export
     // no longer depends on the mirror holding the verbatim imported bytes.
     // Fidelity guard (#567): reconstruct from state ONLY when fully byte-faithful.
-    // A non-byte-faithful commit (non-UTF8 identity) would mint a WRONG SHA, so
-    // fall THROUGH to the native mint path rather than reconstruct it. This branch
-    // only runs for an UNMAPPED fidelity state (the already-mapped export path
-    // carries the verbatim-mirror fallback), so `--lossy` — keyed by the mapped
-    // git OID — isn't detectable here and is gated on the mapped path instead.
-    if has_git_fidelity(&state) && commit_is_byte_faithful(&state, /*imported_lossy=*/ false) {
+    // A non-byte-faithful commit (non-UTF8 identity, or a `--lossy` import) would
+    // mint a WRONG SHA, so fall THROUGH to the native mint path rather than
+    // reconstruct it. This branch runs for an UNMAPPED fidelity state — which
+    // INCLUDES every `bridge git ingest` commit (ingest never populates the bridge
+    // mapping). Lossiness is read off the state's own canonical `git_lossy` flag,
+    // so an ingest-lossy commit is caught here just like an import-lossy one,
+    // rather than slipping through because the mirror's per-OID lossy log is
+    // unreachable for an unmapped state (#567 round 2).
+    if commit_is_byte_faithful(&state) {
         let content = reconstruct_commit_bytes(heddle_repo, repo, mapping, &state)?;
         return Ok(Some(write_commit_object(repo, &content)?));
     }
@@ -425,16 +437,14 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                 // identities, --lossy); #568 mirror elimination must account for
                 // these, and full de-lossy needs byte-preserving identities (#564
                 // follow-up).
-                let imported_lossy = mapped
-                    .map(|oid| bridge.mapping.get_git_lossy_entries(oid).is_some())
-                    .unwrap_or(false);
                 // Fidelity guard (#567): regenerate from state ONLY when the
                 // state is fully byte-faithful to the original import. A
-                // non-byte-faithful commit (non-UTF8 identity, or `--lossy`)
-                // would reconstruct to a WRONG SHA, so leave it on the preserved
-                // mapped OID — the verbatim mirror bytes stay the served object
-                // (the pre-#567 behavior for that commit).
-                if commit_is_byte_faithful(&state, imported_lossy) {
+                // non-byte-faithful commit (non-UTF8 identity, or a `--lossy`
+                // import — both import-lossy and ingest-lossy carry the canonical
+                // `git_lossy` flag) would reconstruct to a WRONG SHA, so leave it
+                // on the preserved mapped OID — the verbatim mirror bytes stay the
+                // served object (the pre-#567 behavior for that commit).
+                if commit_is_byte_faithful(&state) {
                     let content = reconstruct_commit_bytes(
                         bridge.heddle_repo,
                         &repo,
@@ -1082,4 +1092,39 @@ fn submodule_oid_from_blob(content: &[u8]) -> Option<gix::hash::ObjectId> {
     let trimmed = text.strip_prefix(SUBMODULE_PREFIX)?.trim();
 
     trimmed.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objects::object::{Attribution, ContentHash, Principal, State};
+
+    fn fidelity_state() -> State {
+        State::new(
+            ContentHash::from_bytes([7u8; 32]),
+            vec![],
+            Attribution::human(Principal::new("Alice", "alice@example.com")),
+        )
+        .with_raw_message("an imported commit\n")
+    }
+
+    /// The fidelity guard reconstructs a byte-faithful imported commit.
+    #[test]
+    fn byte_faithful_when_fidelity_present_and_not_lossy() {
+        assert!(commit_is_byte_faithful(&fidelity_state()));
+    }
+
+    /// The canonical `git_lossy` marker — set by BOTH `import --lossy` and
+    /// `ingest --lossy` — routes the commit OFF the reconstruct path regardless
+    /// of which import surface produced it. A lossy import drops/converts tree
+    /// entries, so reconstructing from state would mint a wrong SHA.
+    #[test]
+    fn lossy_marker_blocks_reconstruction() {
+        let lossy = fidelity_state().with_git_lossy(true);
+        assert!(
+            !commit_is_byte_faithful(&lossy),
+            "a state carrying the canonical git_lossy marker must NOT be \
+             reconstructed from state, regardless of import surface"
+        );
+    }
 }
