@@ -162,13 +162,64 @@ impl ManifestFile {
     }
 }
 
+/// The single per-thread directory under `<heddle_dir>/threads/`, keyed
+/// off the raw thread name. Slashed ids nest (`feature/x` →
+/// `threads/feature/x/`), matching the manifest walk's name
+/// reconstruction. Thread ids are `validate_thread_id`-checked (no `..`,
+/// no leading `/`) before they ever reach here, so the join stays inside
+/// `threads/`. This is the ONE derivation both the manifest sidecar and
+/// the worktree checkout root key off, so the two never diverge or
+/// collide for a given thread.
+pub fn thread_dir(heddle_dir: &Path, thread: &str) -> PathBuf {
+    heddle_dir.join("threads").join(thread)
+}
+
 /// Where this thread's manifest lives on disk, given the repo's
-/// `heddle_dir` and a sanitised thread name.
+/// `heddle_dir` and a thread name: `<heddle_dir>/threads/<thread>/manifest.toml`.
 pub fn manifest_path(heddle_dir: &Path, thread: &str) -> PathBuf {
-    heddle_dir
-        .join("threads")
-        .join(thread)
-        .join("manifest.toml")
+    thread_dir(heddle_dir, thread).join("manifest.toml")
+}
+
+/// True if `candidate` would land *inside* an already-existing thread's
+/// reserved subtree under `threads_root` (`<heddle_dir>/threads`). A
+/// thread occupies `threads/<name>/`, marked by its `manifest.toml`
+/// sidecar; a new explicit `--path` checkout must not nest below one, or
+/// it would land inside another thread's `root/` worktree. A fresh
+/// `threads/<newname>` or `threads/<newname>/root` (no manifest-bearing
+/// ancestor) returns false.
+///
+/// The marker is the `manifest.toml` sidecar — NOT the presence of a
+/// `root/` subdir: callers that create the target directory *before*
+/// re-validating (e.g. `prepare_worktree_target`) would otherwise see the
+/// just-created `root/` and falsely reject a legitimate fresh checkout.
+/// The manifest is written by the materialize transaction, strictly after
+/// target preparation, so a thread being created right now has none yet.
+///
+/// `threads_root` must be the same `<heddle_dir>/threads` base the caller
+/// tested `candidate`'s containment against, so the prefix strips cleanly.
+pub fn is_inside_existing_thread_dir(threads_root: &Path, candidate: &Path) -> bool {
+    let Ok(rel) = candidate.strip_prefix(threads_root) else {
+        return false;
+    };
+    let comps: Vec<_> = rel
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_owned()),
+            _ => None,
+        })
+        .collect();
+    // Walk every PROPER ancestor directory of `candidate` under
+    // `threads_root` (i.e. drop the candidate leaf itself). If any such
+    // ancestor carries a `manifest.toml`, it is an existing thread root
+    // and `candidate` sits nested inside it.
+    let mut dir = threads_root.to_path_buf();
+    for seg in comps.iter().take(comps.len().saturating_sub(1)) {
+        dir.push(seg);
+        if dir.join("manifest.toml").is_file() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Summary of a single materialized thread, gathered by walking
@@ -729,6 +780,57 @@ mod tests {
     fn read_missing_returns_none() {
         let dir = TempDir::new().unwrap();
         assert!(read_manifest(dir.path(), "no-such").unwrap().is_none());
+    }
+
+    #[test]
+    fn thread_dir_and_manifest_share_one_derivation_for_slashed_ids() {
+        let heddle = Path::new("/repo/.heddle");
+        let dir = thread_dir(heddle, "feature/foo");
+        assert_eq!(dir, Path::new("/repo/.heddle/threads/feature/foo"));
+        // The manifest is a child of the shared per-thread dir, so a checkout
+        // root at `<dir>/root` is its sibling.
+        assert_eq!(manifest_path(heddle, "feature/foo"), dir.join("manifest.toml"));
+        assert!(manifest_path(heddle, "feature/foo").starts_with(heddle.join("threads")));
+    }
+
+    #[test]
+    fn nested_inside_existing_thread_detected_for_slashed_ids() {
+        let dir = TempDir::new().unwrap();
+        let threads_root = dir.path().join("threads");
+
+        // An existing slashed thread `feature/foo` carries its manifest.
+        let foo = threads_root.join("feature").join("foo");
+        std::fs::create_dir_all(foo.join("root")).unwrap();
+        std::fs::write(foo.join("manifest.toml"), b"# stub\n").unwrap();
+
+        // Nested inside the existing thread's checkout → true.
+        assert!(is_inside_existing_thread_dir(
+            &threads_root,
+            &foo.join("root").join("nested")
+        ));
+        // The checkout root itself sits below the manifest-bearing dir → true.
+        assert!(is_inside_existing_thread_dir(&threads_root, &foo.join("root")));
+
+        // A fresh thread under the SAME `feature/` namespace is fine — the
+        // intermediate `feature/` dir carries no manifest of its own.
+        assert!(!is_inside_existing_thread_dir(
+            &threads_root,
+            &threads_root.join("feature").join("bar")
+        ));
+        assert!(!is_inside_existing_thread_dir(
+            &threads_root,
+            &threads_root.join("feature").join("bar").join("root")
+        ));
+        // A brand-new top-level slot is fine.
+        assert!(!is_inside_existing_thread_dir(
+            &threads_root,
+            &threads_root.join("brandnew")
+        ));
+        // A path outside threads_root is never "inside a thread".
+        assert!(!is_inside_existing_thread_dir(
+            &threads_root,
+            Path::new("/elsewhere/foo")
+        ));
     }
 
     #[test]

@@ -3410,18 +3410,22 @@ pub(crate) fn default_threads_root(repo: &Repository) -> PathBuf {
 /// Default checkout directory for a thread, for every workspace mode:
 /// `<repo>/.heddle/threads/<name>/root`.
 ///
-/// The `root/` leaf is load-bearing, not cosmetic:
-/// `thread_manifest::manifest_path` already owns
-/// `.heddle/threads/<name>/manifest.toml` as the per-thread stat-cache
-/// sidecar. Nesting the worktree bytes one level down at `<name>/root`
-/// keeps that `manifest.toml` a *sibling* of the checkout rather than a
-/// stray file inside it, and the manifest walk
-/// (`thread_manifest::walk_thread_manifests`) stops at the first
-/// `manifest.toml` it finds, so it never descends into `root/`.
+/// Keyed off the SAME `thread_manifest::thread_dir` derivation the
+/// per-thread `manifest.toml` sidecar uses — the raw (already
+/// `validate_thread_id`-checked) thread name, NOT a re-sanitised copy.
+/// Sanitising here would diverge from the manifest (a slashed id
+/// `foo/bar` nests as `threads/foo/bar/` for the manifest but collapsed
+/// to `threads/foo-bar/` for the checkout) and could collide two
+/// distinct ids onto one directory. Sharing `thread_dir` guarantees the
+/// checkout root and the manifest sit in the same per-thread directory.
+///
+/// The `root/` leaf is load-bearing, not cosmetic: nesting the worktree
+/// bytes one level down at `<name>/root` keeps `manifest.toml` a
+/// *sibling* of the checkout rather than a stray file inside it, and the
+/// manifest walk (`thread_manifest::walk_thread_manifests`) stops at the
+/// first `manifest.toml` it finds, so it never descends into `root/`.
 fn default_thread_checkout_path(repo: &Repository, name: &str) -> PathBuf {
-    default_threads_root(repo)
-        .join(sanitize_name(name))
-        .join("root")
+    repo::thread_manifest::thread_dir(repo.heddle_dir(), name).join("root")
 }
 
 fn default_thread_path(repo: &Repository, name: &str) -> PathBuf {
@@ -3531,22 +3535,6 @@ fn default_virtualized_thread_path(repo: &Repository, name: &str) -> PathBuf {
     default_thread_checkout_path(repo, name)
 }
 
-fn sanitize_name(name: &str) -> String {
-    let mut out = String::new();
-    let mut last_dash = false;
-    for ch in name.chars() {
-        let keep = ch.is_ascii_alphanumeric();
-        if keep {
-            out.push(ch.to_ascii_lowercase());
-            last_dash = false;
-        } else if !last_dash {
-            out.push('-');
-            last_dash = true;
-        }
-    }
-    out.trim_matches('-').to_string()
-}
-
 fn absolute_path(path: &std::path::Path) -> Result<PathBuf> {
     if path.is_absolute() {
         Ok(path.to_path_buf())
@@ -3596,5 +3584,36 @@ mod tests {
             "heddle bridge git reconcile --prefer heddle --ref feature/git --preview"
         );
         assert!(advice.preserved.contains("Git checkout was left unchanged"));
+    }
+
+    /// A slashed thread id must map the default checkout root and the
+    /// per-thread manifest to the SAME `.heddle/threads/<name>` directory
+    /// (the checkout's `root/` a sibling of `manifest.toml`), and neither
+    /// may escape `.heddle/threads/`. Before the unified `thread_dir`
+    /// derivation the checkout sanitised `foo/bar` to `foo-bar` while the
+    /// manifest nested it as `foo/bar`, so the two diverged and distinct
+    /// ids could collide onto one directory.
+    #[test]
+    fn slashed_thread_id_checkout_and_manifest_agree() {
+        let repo_dir = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+
+        let checkout = default_thread_checkout_path(&repo, "foo/bar");
+        let manifest = repo::thread_manifest::manifest_path(repo.heddle_dir(), "foo/bar");
+        let threads_root = repo.heddle_dir().join("threads");
+
+        // Both live in the same per-thread directory: checkout at
+        // `<dir>/root`, manifest at `<dir>/manifest.toml`.
+        assert_eq!(checkout.parent().unwrap(), manifest.parent().unwrap());
+        assert_eq!(checkout.parent().unwrap(), threads_root.join("foo").join("bar"));
+        assert_eq!(checkout.file_name().unwrap(), "root");
+
+        // Neither escapes `.heddle/threads/`.
+        assert!(checkout.starts_with(&threads_root));
+        assert!(manifest.starts_with(&threads_root));
+
+        // Distinct slashed/dashed ids no longer collide.
+        let other = default_thread_checkout_path(&repo, "foo-bar");
+        assert_ne!(checkout, other);
     }
 }
