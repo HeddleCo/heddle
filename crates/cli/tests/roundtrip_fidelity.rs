@@ -24,6 +24,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
+use cli::ObjectStore;
 use cli::Repository;
 use cli::bridge::git_core::GitBridge;
 use cli::bridge::git_import::import_all_with_options;
@@ -365,4 +366,109 @@ fn roundtrip_empty_and_nested_trees() {
     write_and_commit(dir, "only.txt", b"x\n", "single-file tree");
     write_and_commit(dir, "a/b/c/d/leaf.txt", b"deep\n", "deeply nested tree");
     assert_roundtrip_fidelity("trees", dir);
+}
+
+/// Run a git command feeding `stdin`, returning trimmed stdout. The `git`
+/// helper above can't write stdin, which `hash-object --stdin` needs.
+fn git_stdin(dir: &Path, args: &[&str], stdin: &[u8]) -> String {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .envs(ENV.iter().copied())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
+    child.stdin.as_mut().unwrap().write_all(stdin).unwrap();
+    let out = child.wait_with_output().expect("wait git");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed:\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Close-the-class conformance (bridge path): a commit whose extension headers
+/// are in NON-canonical order — `x-custom`, then a folded `gpgsig`, then
+/// `encoding`, then a folded `mergetag` — must import into `State.extra_headers`
+/// in that exact on-the-wire order with byte-exact values. Real git always
+/// emits `encoding` first, so this order is hand-crafted with `hash-object
+/// --literally`; it is precisely what a typed-field-stitching importer mangles.
+/// Mirrors the ingest-path test and the shared parser's unit test, so both
+/// import paths are proven consistent.
+#[test]
+fn import_preserves_noncanonical_extension_header_order() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    write_and_commit(dir, "f.txt", b"base\n", "base commit");
+
+    let tree = git(dir, &["rev-parse", "HEAD^{tree}"]).trim().to_string();
+    let head = git(dir, &["rev-parse", "HEAD"]).trim().to_string();
+
+    let content: Vec<u8> = [
+        format!("tree {tree}").into_bytes(),
+        format!("parent {head}").into_bytes(),
+        b"author Alice <alice@example.com> 1700000000 +0000".to_vec(),
+        b"committer Bob <bob@example.com> 1700000100 +0000".to_vec(),
+        b"x-custom custom value".to_vec(),
+        b"gpgsig -----BEGIN PGP SIGNATURE-----".to_vec(),
+        b" sig-line-1".to_vec(),
+        b" -----END PGP SIGNATURE-----".to_vec(),
+        b"encoding ISO-8859-1".to_vec(),
+        b"mergetag object 3333333333333333333333333333333333333333".to_vec(),
+        b" type commit".to_vec(),
+        b" tag sidetag".to_vec(),
+        b"".to_vec(),
+        b"the commit message".to_vec(),
+        b"".to_vec(),
+    ]
+    .join(&b'\n');
+
+    let sha = git_stdin(
+        dir,
+        &["hash-object", "--literally", "-w", "-t", "commit", "--stdin"],
+        &content,
+    );
+    git(dir, &["update-ref", "refs/heads/crafted", &sha]);
+
+    let heddle_home = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_home.path()).expect("init heddle repo");
+    let mut bridge = GitBridge::new(&repo);
+    import_all_with_options(&mut bridge, Some(dir), GitImportOptions { lossy: false })
+        .expect("import from git failed");
+
+    // Re-open to read the freshly installed states without a borrow tangle.
+    let repo = Repository::open(heddle_home.path()).expect("reopen heddle repo");
+    let with_headers: Vec<_> = repo
+        .store()
+        .list_states()
+        .expect("list states")
+        .iter()
+        .filter_map(|id| repo.store().get_state(id).expect("get state"))
+        .filter(|s| !s.extra_headers.is_empty())
+        .collect();
+
+    assert_eq!(
+        with_headers.len(),
+        1,
+        "only the crafted commit carries extension headers"
+    );
+    let expected: Vec<(Vec<u8>, Vec<u8>)> = vec![
+        (b"x-custom".to_vec(), b"custom value".to_vec()),
+        (
+            b"gpgsig".to_vec(),
+            b"-----BEGIN PGP SIGNATURE-----\nsig-line-1\n-----END PGP SIGNATURE-----".to_vec(),
+        ),
+        (b"encoding".to_vec(), b"ISO-8859-1".to_vec()),
+        (
+            b"mergetag".to_vec(),
+            b"object 3333333333333333333333333333333333333333\ntype commit\ntag sidetag".to_vec(),
+        ),
+    ];
+    assert_eq!(with_headers[0].extra_headers, expected);
 }

@@ -7,6 +7,7 @@ use std::{collections::HashSet, path::Path};
 use chrono::{TimeZone, Utc};
 use objects::object::{
     Agent, Attribution, ChangeId, MarkerName, Principal, State, Status, ThreadName,
+    parse_commit_extension_headers,
 };
 use refs::{Head, RefExpectation};
 use repo::{Repository as HeddleRepository, ThreadId};
@@ -145,32 +146,20 @@ fn resolve_identity(
     Ok((ChangeId::from_bytes(change_id_bytes), None))
 }
 
-/// Collect a commit's extension headers in their original order, as raw
-/// bytes so non-UTF8 header values survive. ORDER IS LOAD-BEARING for #566
-/// byte-exactness.
+/// Collect a commit's extension headers in their original on-the-wire order,
+/// as raw bytes so non-UTF8 header values survive. ORDER IS LOAD-BEARING for
+/// #566 byte-exactness.
 ///
-/// `gpgsig` is kept INLINE here at its captured ordinal rather than split
-/// into a separate field: when a commit's headers are in non-canonical order
-/// — e.g. `x-custom`, then `gpgsig`, then `mergetag` — splitting gpgsig out
-/// would lose its position and break byte-identical reconstruction. Its
-/// position in this vec is the serialization source of truth (spike §3).
+/// Built straight from the raw commit object bytes (`commit.data`) via
+/// [`parse_commit_extension_headers`] so `encoding` / `gpgsig` / `mergetag` /
+/// any unknown header all land at their TRUE captured position through one code
+/// path. We deliberately do NOT stitch the vec from gix's typed accessors
+/// (`CommitRef::encoding`, …): gix surfaces some headers as typed fields outside
+/// `extra_headers`, and re-inserting them by hand reorders them — the close-the-
+/// class bug this replaces. The raw header block is the source of truth.
 /// #564 de-lossy step 1.
 fn collect_extra_headers(commit: &gix::Commit<'_>) -> GitResult<Vec<(Vec<u8>, Vec<u8>)>> {
-    let decoded = commit.decode().map_err(git_err)?;
-    let mut extra = Vec::new();
-    // gix surfaces git's standard `encoding` header as the typed `.encoding`
-    // field, NOT inside `extra_headers`. If we only iterate `extra_headers` the
-    // charset label is silently dropped — and then a non-UTF8 message can't be
-    // interpreted on reconstruction. Capture it explicitly. git emits
-    // `encoding` immediately after `committer`, ahead of the other extension
-    // headers (spike §1/§4), so it leads the ordered vec.
-    if let Some(encoding) = decoded.encoding {
-        extra.push((b"encoding".to_vec(), encoding.to_vec()));
-    }
-    for (key, value) in decoded.extra_headers {
-        extra.push((key.to_vec(), value.to_vec()));
-    }
-    Ok(extra)
+    Ok(parse_commit_extension_headers(&commit.data))
 }
 
 /// Import a single Git commit as a Heddle state.
@@ -202,9 +191,9 @@ pub fn import_commit(
     let committer_time = committer.time().map_err(git_err)?;
     let committed_seconds = committer_time.seconds;
     let committer_tz_offset = committer_time.offset;
-    // #565: capture all extension headers in order (gpgsig inline at its
-    // position) so the commit is byte-reconstructable later (#566) without
-    // the git mirror (#568).
+    // #565: capture all extension headers in true wire order (encoding /
+    // gpgsig / mergetag / unknown all at their captured position) so the commit
+    // is byte-reconstructable later (#566) without the git mirror (#568).
     let extra_headers = collect_extra_headers(&commit)?;
     let tree_id = commit.tree_id().map_err(git_err)?.detach();
     let parent_git_oids: Vec<gix::hash::ObjectId> =

@@ -769,27 +769,19 @@ fn signature_from(sig: gix::actor::SignatureRef<'_>) -> GitSignature {
     }
 }
 
-/// Collect a commit's extension headers in their original order, as raw
-/// bytes so non-UTF8 values survive. ORDER IS LOAD-BEARING for #566
-/// byte-reconstruction. `gpgsig` is kept INLINE at its captured ordinal (not
-/// split out) so a non-canonical header order reconstructs byte-identically;
-/// its position is the serialization source of truth (spike §3). Mirrors the
-/// bridge import path's `collect_extra_headers`. #564 de-lossy step 1.
+/// Collect a commit's extension headers in their original on-the-wire order,
+/// as raw bytes so non-UTF8 values survive. ORDER IS LOAD-BEARING for #566
+/// byte-reconstruction.
+///
+/// Built straight from the raw commit object bytes (`commit.data`) via
+/// [`objects::object::parse_commit_extension_headers`] so `encoding` / `gpgsig`
+/// / `mergetag` / any unknown header all land at their TRUE captured position
+/// through one code path — the SAME path the bridge importer uses. We do NOT
+/// stitch the vec from gix's typed accessors (`CommitRef::encoding`, …): gix
+/// surfaces some headers outside `extra_headers`, and re-inserting them by hand
+/// reorders them (the close-the-class bug this replaces). #564 de-lossy step 1.
 fn collect_commit_extra_headers(commit: &gix::Commit<'_>) -> crate::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-    let decoded = commit
-        .decode()
-        .map_err(|e| IngestError::Git(format!("decode commit: {e}")))?;
-    let mut extra = Vec::new();
-    // gix exposes git's standard `encoding` header as the typed `.encoding`
-    // field, not in `extra_headers`; capture it explicitly (ahead of the other
-    // extension headers, per spike §1/§4) so the charset label isn't dropped.
-    if let Some(encoding) = decoded.encoding {
-        extra.push((b"encoding".to_vec(), encoding.to_vec()));
-    }
-    for (key, value) in decoded.extra_headers {
-        extra.push((key.to_vec(), value.to_vec()));
-    }
-    Ok(extra)
+    Ok(objects::object::parse_commit_extension_headers(&commit.data))
 }
 
 #[cfg(test)]
@@ -950,6 +942,97 @@ mod tests {
         assert_eq!(commit.author.name, "Test");
         assert_eq!(commit.author.email, "test@example.com");
         assert!(String::from_utf8_lossy(&commit.message).contains("second commit"));
+    }
+
+    /// Close-the-class conformance (ingest path): a commit whose extension
+    /// headers are in NON-canonical order — `x-custom`, then a folded `gpgsig`,
+    /// then `encoding`, then a folded `mergetag` — must reach `extra_headers` in
+    /// that exact on-the-wire order with byte-exact values. Real git always
+    /// emits `encoding` first, so this order can only be hand-crafted; it is
+    /// precisely what a typed-field-stitching importer would mangle. Mirrors the
+    /// bridge-path test of the same name and the shared parser's unit test.
+    #[test]
+    fn read_commit_preserves_noncanonical_extension_header_order() {
+        use std::process::Stdio;
+
+        let tmp = TempDir::new().unwrap();
+        let head = seed_repo(tmp.path());
+        let path = tmp.path();
+
+        let run = |args: &[&str], stdin: Option<&[u8]>| -> String {
+            let mut child = Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .stdin(if stdin.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn git");
+            if let Some(input) = stdin {
+                use std::io::Write;
+                child.stdin.as_mut().unwrap().write_all(input).unwrap();
+            }
+            let out = child.wait_with_output().expect("wait");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+
+        let tree = run(&["rev-parse", "HEAD^{tree}"], None);
+
+        // `--literally` so git writes the non-canonical header order verbatim
+        // instead of normalising/rejecting it.
+        let content: Vec<u8> = [
+            format!("tree {tree}").into_bytes(),
+            format!("parent {head}").into_bytes(),
+            b"author Alice <alice@example.com> 1700000000 +0000".to_vec(),
+            b"committer Bob <bob@example.com> 1700000100 +0000".to_vec(),
+            b"x-custom custom value".to_vec(),
+            b"gpgsig -----BEGIN PGP SIGNATURE-----".to_vec(),
+            b" sig-line-1".to_vec(),
+            b" -----END PGP SIGNATURE-----".to_vec(),
+            b"encoding ISO-8859-1".to_vec(),
+            b"mergetag object 3333333333333333333333333333333333333333".to_vec(),
+            b" type commit".to_vec(),
+            b" tag sidetag".to_vec(),
+            b"".to_vec(),
+            b"the commit message".to_vec(),
+            b"".to_vec(),
+        ]
+        .join(&b'\n');
+
+        let sha = run(
+            &["hash-object", "--literally", "-w", "-t", "commit", "--stdin"],
+            Some(&content),
+        );
+
+        let src = GitSource::open(path).expect("open");
+        let commit = src.read_commit(&sha).expect("read_commit");
+
+        let expected: Vec<(Vec<u8>, Vec<u8>)> = vec![
+            (b"x-custom".to_vec(), b"custom value".to_vec()),
+            (
+                b"gpgsig".to_vec(),
+                b"-----BEGIN PGP SIGNATURE-----\nsig-line-1\n-----END PGP SIGNATURE-----"
+                    .to_vec(),
+            ),
+            (b"encoding".to_vec(), b"ISO-8859-1".to_vec()),
+            (
+                b"mergetag".to_vec(),
+                b"object 3333333333333333333333333333333333333333\ntype commit\ntag sidetag"
+                    .to_vec(),
+            ),
+        ];
+        assert_eq!(commit.extra_headers, expected);
     }
 
     #[test]

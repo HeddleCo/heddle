@@ -834,6 +834,95 @@ fn write_optional_string(hasher: &mut blake3::Hasher, value: &Option<String>) {
     }
 }
 
+/// Parse the *extension* headers from a raw git commit object's content bytes
+/// (the bytes `git cat-file commit <sha>` prints — i.e. gix's `Commit::data`),
+/// in their exact on-the-wire order, ready to store in [`State::extra_headers`].
+///
+/// A commit's header block runs from the start of the content up to the first
+/// blank line (the header/body separator). Its leading headers are always, in
+/// fixed order, `tree`, zero-or-more `parent`, `author`, `committer`; Heddle
+/// models those natively. Every header **after** `committer` is an extension
+/// header (`encoding`, `gpgsig`, `mergetag`, or any unknown/future name) and is
+/// returned here as a `(name, value)` byte pair at its real position.
+///
+/// **This is the single source of truth for extension-header order and bytes.**
+/// Both git import paths (the CLI bridge and the ingest walker) build
+/// `extra_headers` from it. The alternative — stitching the vec back together
+/// from a decoder's *typed* accessors (gix surfaces `encoding`, and historically
+/// `gpgsig`, as fields *outside* its `extra_headers`) — silently reorders the
+/// headers git happens to model as typed fields, which breaks #566 byte-exact
+/// reconstruction. So we never consult those typed accessors for position; the
+/// raw header block is authoritative. (#564 de-lossy step 1 — close-the-class.)
+///
+/// Folded continuation lines (a value line beginning with a single space
+/// `0x20`, used by `gpgsig`/`mergetag`) are **unfolded**: each continuation
+/// contributes a `\n` plus the line with exactly one leading space stripped, so
+/// the stored value holds the value's real internal newlines with no trailing
+/// newline. The serializer (#566) re-folds by mapping every `\n` back to `\n `
+/// (spike §2). A "blank" line inside an armored value is ` \n` on the wire (one
+/// space), so it unfolds to an empty segment — never confused with the
+/// header/body separator, which is a truly empty line.
+pub fn parse_commit_extension_headers(commit_content: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    // The header block ends at the first *empty* line. Folded "blank" lines
+    // inside an armored value are ` \n` (a single space), never empty, so the
+    // first `\n\n` reliably marks the header/body boundary.
+    let header_block = match find_subslice(commit_content, b"\n\n") {
+        Some(idx) => &commit_content[..idx],
+        // No separator (malformed / header-only) — treat all of it as headers.
+        None => commit_content,
+    };
+
+    // Collect every logical header (name, unfolded value) in order; the
+    // extension headers are the ones after the `committer` line.
+    let mut headers: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for line in header_block.split(|&b| b == b'\n') {
+        if line.first() == Some(&b' ') {
+            // Continuation of the current header value: restore the newline
+            // that folding replaced and strip exactly one leading space.
+            if let Some((_, value)) = headers.last_mut() {
+                value.push(b'\n');
+                value.extend_from_slice(&line[1..]);
+            }
+            // A continuation with no preceding header is malformed git; skip it
+            // rather than panic.
+            continue;
+        }
+        // New header: `name<SP>value`. A header line with no space is degenerate
+        // (git never emits one in this region) — record it with an empty value
+        // so no bytes are silently dropped.
+        let (name, value) = match line.iter().position(|&b| b == b' ') {
+            Some(sp) => (line[..sp].to_vec(), line[sp + 1..].to_vec()),
+            None => (line.to_vec(), Vec::new()),
+        };
+        headers.push((name, value));
+    }
+
+    // Extension headers are everything strictly after `committer`. git always
+    // emits exactly one committer line ahead of the extension headers; if it is
+    // somehow absent, fall back to excluding the four core names so nothing is
+    // silently dropped or mis-captured.
+    match headers.iter().position(|(name, _)| name == b"committer") {
+        Some(idx) => headers.split_off(idx + 1),
+        None => headers
+            .into_iter()
+            .filter(|(name, _)| {
+                !matches!(
+                    name.as_slice(),
+                    b"tree" | b"parent" | b"author" | b"committer"
+                )
+            })
+            .collect(),
+    }
+}
+
+/// Index of the first occurrence of `needle` in `haystack`, or `None`.
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1133,5 +1222,79 @@ mod tests {
         b.created_at = base.created_at;
 
         assert_ne!(a.hash(), b.hash());
+    }
+
+    /// Close-the-class conformance: extension headers are captured from the
+    /// raw commit header block in their EXACT on-the-wire order, regardless of
+    /// which ones a decoder would surface as typed fields. A commit whose
+    /// optional headers are in non-canonical order — `x-custom`, then a folded
+    /// `gpgsig`, then `encoding`, then a folded `mergetag` — must reproduce that
+    /// exact ordered `(name, value)` byte sequence. This fails if any header is
+    /// reordered, prepended, appended, or dropped. #564 de-lossy step 1.
+    #[test]
+    fn parse_extension_headers_preserves_noncanonical_wire_order() {
+        // A folded `mergetag` value carries a full tag object, which itself has
+        // an internal blank line between the tag headers and the tag message —
+        // on the wire that blank line is folded to a single space (` `), NEVER
+        // an empty line, so it must not be mistaken for the header/body split.
+        // Built line-by-line (NOT a `\`-continued literal, which would eat the
+        // load-bearing leading space on each folded continuation line).
+        let lines: &[&[u8]] = &[
+            b"tree 1111111111111111111111111111111111111111",
+            b"parent 2222222222222222222222222222222222222222",
+            b"author Alice <alice@example.com> 1700000000 +0000",
+            b"committer Bob <bob@example.com> 1700000100 +0000",
+            b"x-custom custom value",
+            b"gpgsig -----BEGIN PGP SIGNATURE-----",
+            b" sig-line-1",
+            b" -----END PGP SIGNATURE-----",
+            b"encoding ISO-8859-1",
+            b"mergetag object 3333333333333333333333333333333333333333",
+            b" type commit",
+            b" tag sidetag",
+            b" tagger Carol <carol@example.com> 1700000050 +0000",
+            b" ", // folded blank line inside the tag object (one space)
+            b" signed side tag",
+            b"", // the real header/body separator (empty line)
+            b"the commit message",
+            b"",
+        ];
+        let content = lines.join(&b'\n');
+
+        let headers = parse_commit_extension_headers(&content);
+
+        let expected: Vec<(Vec<u8>, Vec<u8>)> = vec![
+            (b"x-custom".to_vec(), b"custom value".to_vec()),
+            (
+                b"gpgsig".to_vec(),
+                // Unfolded: internal newlines restored, NO trailing newline (the
+                // serializer re-folds each `\n` to `\n `, spike §2).
+                b"-----BEGIN PGP SIGNATURE-----\nsig-line-1\n-----END PGP SIGNATURE-----"
+                    .to_vec(),
+            ),
+            (b"encoding".to_vec(), b"ISO-8859-1".to_vec()),
+            (
+                b"mergetag".to_vec(),
+                // The folded ` \n` blank line unfolds to an empty segment, so the
+                // tag object's header/message split survives as a real `\n\n`.
+                b"object 3333333333333333333333333333333333333333\ntype commit\ntag sidetag\ntagger Carol <carol@example.com> 1700000050 +0000\n\nsigned side tag".to_vec(),
+            ),
+        ];
+
+        assert_eq!(headers, expected);
+    }
+
+    /// A commit with no extension headers (the common case) yields an empty
+    /// vec — `tree`/`parent`/`author`/`committer` are modelled natively and
+    /// never leak into `extra_headers`.
+    #[test]
+    fn parse_extension_headers_empty_when_only_core_headers() {
+        let content: &[u8] = b"\
+tree 1111111111111111111111111111111111111111\n\
+author Alice <alice@example.com> 1700000000 +0000\n\
+committer Bob <bob@example.com> 1700000100 +0000\n\
+\n\
+just a message\n";
+        assert!(parse_commit_extension_headers(content).is_empty());
     }
 }
