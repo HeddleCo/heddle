@@ -387,6 +387,15 @@ export interface BranchCompatSchema {
   verification?: RepositoryVerificationStateSchema | null;
 }
 
+export interface BridgeBackfillFidelitySchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "bridge_backfill_fidelity";
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
 export interface BridgeExportSchema {
   branches: ExportedRefSchema[];
   commits_total: number;
@@ -2968,6 +2977,7 @@ export interface HeddleVerbOutputs {
   attempt: AttemptSchema;
   blame: BlameSchema;
   branch: BranchCompatSchema;
+  "bridge backfill-fidelity": BridgeBackfillFidelitySchema;
   "bridge git export": BridgeExportSchema;
   "bridge git import": BridgeImportSchema;
   "bridge git ingest": BridgeGitIngestSchema;
@@ -3150,6 +3160,7 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "attempt",
   "blame",
   "branch",
+  "bridge backfill-fidelity",
   "bridge git export",
   "bridge git import",
   "bridge git ingest",
