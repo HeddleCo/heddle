@@ -339,6 +339,34 @@ impl FsStore {
             return Ok(Some(state.clone()));
         }
 
+        // States are addressed by `change_id`, NOT by content hash, so the same
+        // id can resolve to two different bodies: a copy packed at adopt/import
+        // time and a newer LOOSE copy written by an authorized rewrite (the #570
+        // fidelity backfill re-hashes + rewrites adopted states loose). The
+        // loose object MUST shadow the packed one — read it FIRST and only
+        // consult the pack when no loose object exists, or a cold read (cache
+        // miss) returns the stale packed body. (Trees/blobs are
+        // content-addressed and can't go stale this way, so their read paths
+        // deliberately keep pack-first ordering.)
+        if loose_exists
+            && let Some(data) = read_file_bytes(&path)?
+        {
+            trace!(
+                size = data.as_slice().len(),
+                "State read from loose object (shadows any packed copy)"
+            );
+            let decoded = if is_compressed(data.as_slice()) {
+                decompress(data.as_slice())?
+            } else {
+                data.into_vec()
+            };
+            let state = validate_loaded_state(id, rmp_serde::from_slice(&decoded)?)?;
+            if let Ok(mut cache) = self.recent_states.write() {
+                cache.insert(*id, state.clone());
+            }
+            return Ok(Some(state));
+        }
+
         if let Ok(manager) = self.pack_manager().read()
             && let Some((obj_type, data)) = manager.get_object(&PackObjectId::ChangeId(*id))?
             && obj_type == ObjectType::State
@@ -351,22 +379,7 @@ impl FsStore {
             return Ok(Some(state));
         }
 
-        match read_file_bytes(&path)? {
-            Some(data) => {
-                trace!(size = data.as_slice().len(), "State data read");
-                let decoded = if is_compressed(data.as_slice()) {
-                    decompress(data.as_slice())?
-                } else {
-                    data.into_vec()
-                };
-                let state = validate_loaded_state(id, rmp_serde::from_slice(&decoded)?)?;
-                if let Ok(mut cache) = self.recent_states.write() {
-                    cache.insert(*id, state.clone());
-                }
-                Ok(Some(state))
-            }
-            None => Ok(None),
-        }
+        Ok(None)
     }
 
     fn try_has_state_once(&self, id: &ChangeId) -> Result<bool> {

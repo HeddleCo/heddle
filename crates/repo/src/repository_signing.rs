@@ -118,10 +118,19 @@ impl Repository {
 
     /// Re-sign `state` over its CURRENT `compute_hash()` IFF its existing
     /// signature was both produced by a key this repo controls AND already
-    /// valid over `old_hash` (the hash the signature was made over, BEFORE the
-    /// caller's rewrite). So an authorized rewrite (e.g. the #570 fidelity
-    /// backfill, which re-derives hash-bearing fields) keeps a valid signature
-    /// instead of shipping one that no longer verifies.
+    /// valid over one of `prior_hashes` (the hash candidates the signature
+    /// could have been made over, BEFORE the caller's rewrite). So an
+    /// authorized rewrite (e.g. the #570 fidelity backfill, which re-derives
+    /// hash-bearing fields) keeps a valid signature instead of shipping one
+    /// that no longer verifies.
+    ///
+    /// Multiple candidates are accepted because the #565 format bump changed
+    /// how `compute_hash` folds the git-fidelity fields: a state signed BEFORE
+    /// the bump was signed over its pre-fidelity hash
+    /// ([`State::compute_hash_pre_fidelity`]), while one signed after was signed
+    /// over the current hash. The backfill passes BOTH so a valid legacy
+    /// signature isn't misread as unreproducible just because the new hash
+    /// doesn't match (heddle#570).
     ///
     /// Ownership is decided by [`Self::owning_signer_for`], which tries both the
     /// active signer and the per-repo local key — a repo that signed states
@@ -131,23 +140,28 @@ impl Repository {
     /// Returns [`ResignOutcome::Unreproducible`] WITHOUT modifying `state` when:
     /// - the signature belongs to a foreign key (or no owned signer resolves) —
     ///   re-signing foreign content would falsely attribute it to this device; or
-    /// - the existing signature does NOT verify against `old_hash` — re-signing
-    ///   over it would launder a never-valid signature into a fresh, valid-looking
-    ///   one (heddle#570).
+    /// - the existing signature does NOT verify against ANY of `prior_hashes` —
+    ///   re-signing over it would launder a never-valid signature into a fresh,
+    ///   valid-looking one (heddle#570).
     ///
     /// In both cases the caller MUST NOT persist a rewritten version of the state.
-    pub fn resign_if_owned(&self, state: &mut State, old_hash: &ContentHash) -> ResignOutcome {
+    pub fn resign_if_owned(&self, state: &mut State, prior_hashes: &[ContentHash]) -> ResignOutcome {
         let Some(existing) = state.signature.clone() else {
             return ResignOutcome::Unsigned;
         };
         let Some(signer) = self.owning_signer_for(&existing) else {
             return ResignOutcome::Unreproducible;
         };
-        // Verify the EXISTING signature against the OLD hash before re-signing.
-        // Without this an owned-but-invalid signature (corrupted, or made over
-        // different content) would be silently replaced with a valid signature
-        // over the new content — laundering a bad signature.
-        if verify_state_signature_bytes(&existing, old_hash).is_err() {
+        // Verify the EXISTING signature against the OLD hash(es) before
+        // re-signing. Without this an owned-but-invalid signature (corrupted, or
+        // made over different content) would be silently replaced with a valid
+        // signature over the new content — laundering a bad signature. A legacy
+        // (pre-#565) signature verifies against the pre-fidelity candidate, not
+        // the post-bump one, so we accept ANY candidate.
+        let verifies = prior_hashes
+            .iter()
+            .any(|hash| verify_state_signature_bytes(&existing, hash).is_ok());
+        if !verifies {
             return ResignOutcome::Unreproducible;
         }
         match state.sign(&*signer) {
@@ -641,12 +655,66 @@ mod tests {
             assert_ne!(state.compute_hash(), old_hash, "rewrite changed the hash");
 
             assert_eq!(
-                repo.resign_if_owned(&mut state, &old_hash),
+                repo.resign_if_owned(&mut state, &[old_hash]),
                 ResignOutcome::Resigned,
             );
             state
                 .verify_signature()
                 .expect("re-signed state verifies over the new hash");
+        });
+    }
+
+    /// A state adopted+signed BEFORE the #565 format bump carries a signature
+    /// made over its PRE-fidelity hash, not the post-bump `compute_hash()`. The
+    /// #570 backfill must verify against that legacy hash (passed alongside the
+    /// current one) and re-sign over the new hash — verifying only the post-bump
+    /// hash would wrongly reject a valid legacy signature as unreproducible.
+    #[test]
+    fn resign_if_owned_accepts_legacy_pre_fidelity_signature() {
+        let home = TempDir::new().expect("home temp");
+        with_signing_home(home.path(), || {
+            let (_temp, repo) = setup_repo();
+            let signer = repo.signing_signer().expect("local signer resolves");
+
+            // Simulate a pre-bump signature: sign the PRE-fidelity hash directly
+            // (what the old code's `compute_hash` produced before #565 appended
+            // the git-fidelity block).
+            let mut state = unsigned_state();
+            let legacy_hash = state.compute_hash_pre_fidelity();
+            let post_bump_hash = state.compute_hash();
+            assert_ne!(
+                legacy_hash, post_bump_hash,
+                "pre-fidelity hash differs from the post-bump hash",
+            );
+            state.signature = Some(
+                crypto::state_signature_from_signer(&legacy_hash, &*signer)
+                    .expect("sign legacy hash"),
+            );
+
+            // The backfill re-derives a fidelity field (here raw_message),
+            // changing `compute_hash()`. The pre-fidelity hash is unchanged.
+            let before = state.compute_hash();
+            let before_pre_fidelity = state.compute_hash_pre_fidelity();
+            assert_eq!(before_pre_fidelity, legacy_hash);
+            let mut updated = state.clone().with_raw_message(b"legacy commit message\n");
+
+            // Passing the legacy candidate recognises + re-signs the signature.
+            assert_eq!(
+                repo.resign_if_owned(&mut updated, &[before, before_pre_fidelity]),
+                ResignOutcome::Resigned,
+            );
+            updated
+                .verify_signature()
+                .expect("re-signed legacy state verifies over the new hash");
+
+            // Regression guard: verifying against ONLY the post-bump hash (the
+            // pre-fix behaviour) rejects the valid legacy signature.
+            let mut rejected = state.with_raw_message(b"legacy commit message\n");
+            assert_eq!(
+                repo.resign_if_owned(&mut rejected, &[before]),
+                ResignOutcome::Unreproducible,
+                "the post-bump hash alone does not verify a legacy signature",
+            );
         });
     }
 
@@ -680,7 +748,7 @@ mod tests {
             // The owner check matches (public key intact) but the old signature
             // does not verify over `old_hash`, so re-signing is refused.
             assert_eq!(
-                repo.resign_if_owned(&mut state, &old_hash),
+                repo.resign_if_owned(&mut state, &[old_hash]),
                 ResignOutcome::Unreproducible,
             );
             assert_eq!(
@@ -731,7 +799,7 @@ mod tests {
             // key it was originally signed by), keeping a valid signature.
             state.created_at += chrono::Duration::seconds(1);
             assert_eq!(
-                repo.resign_if_owned(&mut state, &old_hash),
+                repo.resign_if_owned(&mut state, &[old_hash]),
                 ResignOutcome::Resigned,
             );
             state
@@ -760,7 +828,7 @@ mod tests {
             let old_hash = state.compute_hash();
 
             assert_eq!(
-                repo.resign_if_owned(&mut state, &old_hash),
+                repo.resign_if_owned(&mut state, &[old_hash]),
                 ResignOutcome::Unreproducible,
             );
         });
@@ -775,7 +843,7 @@ mod tests {
             let mut state = unsigned_state();
             let old_hash = state.compute_hash();
             assert_eq!(
-                repo.resign_if_owned(&mut state, &old_hash),
+                repo.resign_if_owned(&mut state, &[old_hash]),
                 ResignOutcome::Unsigned,
             );
         });

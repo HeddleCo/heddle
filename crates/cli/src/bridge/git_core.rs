@@ -25,6 +25,7 @@ use gix_transport::{
 };
 use objects::{
     error::HeddleError,
+    lock::{RepositoryLockExt, WriteLockGuard},
     object::{ChangeId, ChangeIdParseError, ContentHash, FileMode, Principal, ThreadName, Tree},
     store::ObjectStore,
 };
@@ -631,6 +632,24 @@ impl<'a> GitBridge<'a> {
             mapping: SyncMapping::new(),
             commit_message_overrides: HashMap::new(),
         }
+    }
+
+    /// Acquire THE canonical repository write lock — the single
+    /// `.heddle/locks/repo.lock` that `Repository::locker()` guards and that
+    /// every state-mutating writer (snapshot/capture, merge, the #570 fidelity
+    /// backfill, AND bridge import) serializes on.
+    ///
+    /// This is the one chokepoint so the lock class stays closed: a new writer
+    /// must call THIS, not invent its own lock. Two writers on two different
+    /// lock files don't exclude each other — e.g. before this, the fidelity
+    /// backfill held `repo.lock` while a concurrent bridge import wrote states
+    /// under no lock at all, so they could race. Both now take this same lock,
+    /// making a fourth "different lock" finding impossible (heddle#570).
+    pub(crate) fn acquire_write_lock(&self) -> GitResult<WriteLockGuard> {
+        self.heddle_repo
+            .locker()
+            .write()
+            .map_err(|e| GitBridgeError::Git(format!("acquire repo write lock: {e}")))
     }
 
     /// Initialize a Git mirror in the .heddle/git directory.

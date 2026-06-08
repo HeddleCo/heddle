@@ -575,6 +575,26 @@ impl State {
         })
     }
 
+    /// The pre-#565 content hash: the hash a state had BEFORE the git-fidelity
+    /// fields were folded into identity (the format bump in #565). It omits the
+    /// trailing fidelity block from both the hashed bytes AND the content-length
+    /// prefix, exactly as the old code did — so for a state signed before the
+    /// bump, this reproduces the hash its `StateSignature` was actually made
+    /// over.
+    ///
+    /// The #570 fidelity backfill verifies an existing signature against this
+    /// (in addition to the current `compute_hash`) before re-signing: a legacy
+    /// signature was made over THIS hash, not the post-bump one, so checking
+    /// only the new hash would wrongly reject a valid legacy signature as
+    /// unreproducible. #565 only *appended* the fidelity block to `hash_len` /
+    /// `update_hash`, so stopping before it is a faithful pre-bump hash.
+    pub fn compute_hash_pre_fidelity(&self) -> ContentHash {
+        let content_len = self.hash_len_core();
+        ContentHash::compute_typed_with_len("state", content_len, |hasher| {
+            self.update_hash_core(hasher);
+        })
+    }
+
     pub fn hash(&mut self) -> ContentHash {
         if self.content_hash.is_none() {
             self.content_hash = Some(self.compute_hash());
@@ -599,6 +619,13 @@ impl State {
     }
 
     fn hash_len(&self) -> u64 {
+        self.hash_len_core() + self.hash_len_fidelity()
+    }
+
+    /// Hashed length of the pre-#565 fields (everything through the status
+    /// byte). Mirrors [`Self::update_hash_core`]. Split out so the pre-bump
+    /// hash ([`Self::compute_hash_pre_fidelity`]) can be reproduced exactly.
+    fn hash_len_core(&self) -> u64 {
         let principal = &self.attribution.principal;
         let mut len = 0u64;
 
@@ -659,6 +686,15 @@ impl State {
 
         len += 1;
 
+        len
+    }
+
+    /// Hashed length of the appended git-fidelity block (#565). Mirrors
+    /// [`Self::update_hash_fidelity`] byte-for-byte. Kept separate from
+    /// [`Self::hash_len_core`] so the pre-bump hash can omit it exactly.
+    fn hash_len_fidelity(&self) -> u64 {
+        let mut len = 0u64;
+
         // git-fidelity fields (#564 step 1). Must mirror `update_hash`
         // byte-for-byte. committer: 1 tag byte + (name+NUL, email+NUL).
         len += 1;
@@ -693,6 +729,15 @@ impl State {
     }
 
     fn update_hash(&self, hasher: &mut blake3::Hasher) {
+        self.update_hash_core(hasher);
+        self.update_hash_fidelity(hasher);
+    }
+
+    /// Hash the pre-#565 fields (everything through the status byte). Mirrors
+    /// [`Self::hash_len_core`]. The pre-bump hash
+    /// ([`Self::compute_hash_pre_fidelity`]) is exactly this with no fidelity
+    /// block appended.
+    fn update_hash_core(&self, hasher: &mut blake3::Hasher) {
         let principal = &self.attribution.principal;
 
         if let Some(logical_change_id) = self.logical_change_id {
@@ -759,15 +804,21 @@ impl State {
         }
 
         hasher.update(&[self.status.to_byte()]);
+    }
 
-        // git-fidelity fields (#564 de-lossy step 1, #565). These are
-        // DELIBERATELY part of the content hash — the opposite of the W1
-        // tail fields above. Two git commits that differ only in committer,
-        // author/committer time, timezone, verbatim message, or extra headers
-        // (gpgsig included) are distinct git objects; folding these into identity
-        // prevents them from dedup-colliding to one State in the
-        // content-addressed store. This re-hashes every pre-#565 state (a real
-        // format bump; acceptable pre-0.3). Keep this in sync with `hash_len`.
+    /// Hash the appended git-fidelity block (#565). Mirrors
+    /// [`Self::hash_len_fidelity`]. Kept separate from
+    /// [`Self::update_hash_core`] so a pre-bump hash can omit it exactly.
+    ///
+    /// git-fidelity fields (#564 de-lossy step 1, #565) are DELIBERATELY part
+    /// of the content hash — the opposite of the W1 tail fields. Two git
+    /// commits that differ only in committer, author/committer time, timezone,
+    /// verbatim message, or extra headers (gpgsig included) are distinct git
+    /// objects; folding these into identity prevents them from dedup-colliding
+    /// to one State in the content-addressed store. This re-hashes every
+    /// pre-#565 state (a real format bump; acceptable pre-0.3). Keep this in
+    /// sync with `hash_len_fidelity`.
+    fn update_hash_fidelity(&self, hasher: &mut blake3::Hasher) {
         if let Some(committer) = &self.committer {
             hasher.update(&[1]);
             hasher.update(committer.name.as_bytes());

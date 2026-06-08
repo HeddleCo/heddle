@@ -325,6 +325,52 @@ fn install_pack_accepts_valid_mixed_native_pack() {
     );
 }
 
+/// States are addressed by `change_id`, NOT content hash, so the same id can
+/// have a stale PACKED body and a newer LOOSE body — the #570 fidelity backfill
+/// re-hashes adopted states (packed at adopt time) and writes them loose. A
+/// cold read (cache miss) MUST return the loose body, not the stale packed one.
+/// Pre-fix the pack was consulted before the loose object and won. (heddle#570)
+#[test]
+fn loose_state_shadows_stale_packed_copy_on_cold_read() {
+    let (_temp, store) = create_test_store();
+
+    let tree = Tree::new();
+    let tree_hash = tree.hash();
+    store.put_tree(&tree).unwrap();
+    let attribution = Attribution::human(Principal::new("Adopt", "adopt@example.com"));
+    let packed = State::new(tree_hash, vec![], attribution).with_intent("stale-packed");
+    let change_id = packed.change_id;
+
+    let mut builder = PackBuilder::new(CompressionConfig::disabled());
+    builder.add_id(
+        PackObjectId::ChangeId(change_id),
+        PackObjectType::State,
+        rmp_serde::to_vec_named(&packed).unwrap(),
+    );
+    let (pack_data, index_data, _) = builder.build().unwrap();
+    store.install_pack(&pack_data, &index_data).unwrap();
+
+    // With only the packed copy present, the read returns it.
+    store.clear_recent_object_caches();
+    assert_eq!(
+        store.get_state(&change_id).unwrap().unwrap().intent,
+        Some("stale-packed".to_string()),
+        "packed state is read before any loose copy exists",
+    );
+
+    // The backfill rewrites the same change_id LOOSE with new content.
+    let fresh = packed.clone().with_intent("fresh-loose");
+    store.put_state(&fresh).unwrap();
+
+    // Cold read (cache miss) must return the loose body, not the packed one.
+    store.clear_recent_object_caches();
+    assert_eq!(
+        store.get_state(&change_id).unwrap().unwrap().intent,
+        Some("fresh-loose".to_string()),
+        "loose write shadows the stale packed copy on a cold read",
+    );
+}
+
 #[cfg(feature = "zstd")]
 #[test]
 fn install_pack_accepts_valid_compressed_blob_pack() {

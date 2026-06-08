@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Import Git commits into Heddle states functionality.
 
-use objects::lock::RepositoryLockExt;
 use objects::store::ObjectStore;
 use std::{collections::HashSet, path::Path};
 
@@ -402,17 +401,14 @@ pub fn backfill_fidelity(bridge: &mut GitBridge<'_>) -> GitResult<BackfillStats>
 
     let repo = bridge.open_git_repo()?;
 
-    // Hold the repo write lock for the WHOLE migration — including the mapping
-    // rebuild below. Existing states can be mutated concurrently by other
-    // processes (review signatures, discussions, risk sign-off); the mapping we
+    // Hold THE canonical repo write lock for the WHOLE migration — including
+    // the mapping rebuild below. Existing states can be mutated concurrently by
+    // other processes (review signatures, discussions, risk sign-off, AND a
+    // concurrent bridge import — which now takes this same lock); the mapping we
     // read AND the states we rewrite must be a single consistent snapshot, so a
     // concurrent write can neither change which states we scan nor land between
     // our `get_state` and `put_state` and be silently clobbered by the rewrite.
-    let _lock = bridge
-        .heddle_repo
-        .locker()
-        .write()
-        .map_err(|e| GitBridgeError::Git(format!("acquire repo write lock for backfill: {e}")))?;
+    let _lock = bridge.acquire_write_lock()?;
 
     // Rebuild the change_id<->git_oid mapping from the sidecar + mirror so we
     // know which states were imported from git commits. Done UNDER the lock so
@@ -458,6 +454,12 @@ pub fn backfill_fidelity(bridge: &mut GitBridge<'_>) -> GitResult<BackfillStats>
 
         let fidelity = extract_commit_fidelity_fields(&commit)?;
         let before = state.compute_hash();
+        // A state adopted+signed BEFORE the #565 format bump was signed over
+        // its PRE-fidelity hash, not the post-bump `compute_hash()` above. Pass
+        // BOTH candidates to `resign_if_owned` so a valid legacy signature is
+        // recognised (and re-signed over the new hash) instead of being wrongly
+        // rejected as unreproducible (heddle#570).
+        let before_pre_fidelity = state.compute_hash_pre_fidelity();
         let mut updated = state
             .with_committer(fidelity.committer)
             .with_tz_offsets(fidelity.authored_tz_offset, fidelity.committer_tz_offset)
@@ -476,10 +478,15 @@ pub fn backfill_fidelity(bridge: &mut GitBridge<'_>) -> GitResult<BackfillStats>
         // states this repo's identity owns (keeping the signature valid over
         // the new hash); refuse to rewrite states whose signature we cannot
         // reproduce (foreign key / no signer), leaving them untouched and
-        // counted so they never ship an invalid signature. `before` is the OLD
-        // hash the existing signature was made over — the helper verifies it
-        // before re-signing so a never-valid signature isn't laundered.
-        match bridge.heddle_repo.resign_if_owned(&mut updated, &before) {
+        // counted so they never ship an invalid signature. `before` /
+        // `before_pre_fidelity` are the OLD hash candidates the existing
+        // signature could have been made over (post- vs pre-#565 bump) — the
+        // helper verifies against them before re-signing so a never-valid
+        // signature isn't laundered.
+        match bridge
+            .heddle_repo
+            .resign_if_owned(&mut updated, &[before, before_pre_fidelity])
+        {
             ResignOutcome::Unsigned => {
                 store.put_state(&updated)?;
                 stats.backfilled += 1;
@@ -585,6 +592,14 @@ fn import_with_ref_filter(
             retry_command: shallow_import_retry_command(wanted_refs),
         });
     }
+
+    // Hold THE canonical repo write lock for the whole import. Import writes new
+    // states (the pack install + mapping commit below), so it must serialize
+    // against every other state-mutating writer on the SAME lock — most
+    // pointedly the #570 fidelity backfill, which re-hashes existing states:
+    // without a shared lock, an import landing a state mid-backfill (or vice
+    // versa) would race. One canonical lock, every writer (heddle#570).
+    let _lock = bridge.acquire_write_lock()?;
 
     let mut stats = ImportStats::default();
     let mut plans: Vec<RefPlan> = Vec::new();
