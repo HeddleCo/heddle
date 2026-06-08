@@ -27,4 +27,9 @@ ignore = [
     "RUSTSEC-2026-0098", # rustls-webpki: URI name constraint accepted
     "RUSTSEC-2026-0099", # rustls-webpki: wildcard SAN constraint bypass
     "RUSTSEC-2026-0104", # rustls-webpki: reachable panic on malformed CRL
+
+    # proc-macro-error2 unmaintained; build-time proc-macro dep only, transitive
+    # via biscuit-quote → biscuit-auth → heddle-client. Not Heddle-removable
+    # until biscuit-quote drops it upstream. See deny.toml for the full rationale.
+    "RUSTSEC-2026-0173", # proc-macro-error2 unmaintained (transitive via biscuit-auth)
 ]
