@@ -636,6 +636,23 @@ impl Repository {
     ///   (per-checkout cached state).
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let start_path = path.as_ref().canonicalize()?;
+        // A virtualized thread mounts at `.heddle/threads/<encoded>/root` and
+        // writes no checkout metadata of its own. Without this guard, the
+        // upward walk below would sail past the metadata-less mount and open
+        // the PARENT repo, so status/capture/thread operations would silently
+        // hit the wrong checkout. Refuse rather than resolve to the parent
+        // (heddle#572 r2). Solid/materialized checkouts have their own
+        // `.heddle` pointer and are handled by the worktree branch below, so
+        // this only fires for a virtualized (or torn-down) mount root.
+        if let Some(mount_root) = metadataless_managed_thread_root(&start_path) {
+            return Err(HeddleError::Config(format!(
+                "'{}' is a Heddle-managed virtualized thread mount with no checkout \
+                 metadata of its own; refusing to operate on the parent repository from \
+                 inside it. Run heddle from the repository root, or use a solid/materialized \
+                 thread checkout.",
+                mount_root.display()
+            )));
+        }
         let mut discovered_git_root = None;
 
         let mut current = Some(start_path.as_path());
@@ -2345,6 +2362,38 @@ fn has_git_metadata(path: &Path) -> bool {
     }
 
     gix::discover(path).is_ok()
+}
+
+/// If `start_path` lies inside a *managed virtualized thread root*
+/// (`<repo>/.heddle/threads/<encoded>/root`) that carries NO checkout
+/// metadata of its own, return that mount root.
+///
+/// Solid and materialized thread checkouts write their own `.heddle`
+/// objectstore pointer at the checkout root, so [`Repository::open`]
+/// resolves them as a worktree before it climbs to the parent. A
+/// *virtualized* thread mounts a content-addressed projection there and
+/// writes no such pointer, so a bare upward walk would sail past the
+/// metadata-less mount and open the PARENT repo. The flat
+/// `thread_manifest::thread_dir` encoding guarantees `<encoded>` is exactly
+/// one path component, so the `root → <encoded> → threads → .heddle`
+/// shape is unambiguous (heddle#572 r2).
+fn metadataless_managed_thread_root(start_path: &Path) -> Option<PathBuf> {
+    let mut cur: Option<&Path> = Some(start_path);
+    while let Some(dir) = cur {
+        if dir.file_name().and_then(|n| n.to_str()) == Some("root")
+            && let Some(thread_dir) = dir.parent()
+            && let Some(threads) = thread_dir.parent()
+            && threads.file_name().and_then(|n| n.to_str()) == Some("threads")
+            && let Some(heddle) = threads.parent()
+            && heddle.file_name().and_then(|n| n.to_str()) == Some(".heddle")
+            && heddle.join("objects").is_dir()
+            && !dir.join(".heddle").exists()
+        {
+            return Some(dir.to_path_buf());
+        }
+        cur = dir.parent();
+    }
+    None
 }
 
 fn git_config_principal(root: &Path) -> Option<Principal> {

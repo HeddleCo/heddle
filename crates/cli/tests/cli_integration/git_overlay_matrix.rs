@@ -1873,9 +1873,14 @@ fn git_overlay_matrix_low_confidence_blocks_ready_and_ship_with_recapture_action
     // thread's confidence, so the recovery must scope the recapture to the
     // thread via the global `--repo` flag. (Contrast the in-thread `ready`
     // recovery above, which stays unscoped.)
+    // The thread's checkout lives under `.heddle/threads/<encoded>/root`, and
+    // the slash in `feature/land-low-confidence` is percent-encoded into one
+    // path segment (`feature%2Fland-low-confidence`, heddle#572 r2). The `%`
+    // is outside `shell_quote`'s bare set, so the breadcrumb single-quotes the
+    // `--repo` path — apply the same quoting here rather than hard-coding it.
     let expected_scoped_recapture = format!(
         "heddle --repo {} commit -m \"...\" --confidence <confidence>",
-        thread_path.display()
+        repo::shell_quote(&thread_path.display().to_string())
     );
     assert_eq!(
         land["recommended_action"], expected_scoped_recapture,

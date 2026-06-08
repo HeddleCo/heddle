@@ -2021,3 +2021,115 @@ fn midsession_ignore_broadening_masks_untracked_without_unlink_git_overlay() {
         after.added,
     );
 }
+
+/// heddle#572 r2: a virtualized thread mounts at
+/// `.heddle/threads/<encoded>/root` with no checkout metadata of its own.
+/// `Repository::open` from inside such a mount must REFUSE rather than climb
+/// past the metadata-less mount and open the PARENT repo (which would apply
+/// status/capture/thread operations to the wrong checkout). Solid/materialized
+/// checkout roots carry their own `.heddle` pointer and are unaffected.
+#[test]
+fn open_refuses_metadataless_virtualized_thread_mount() {
+    let (_temp, repo) = create_test_repo();
+    let heddle = repo.heddle_dir().to_path_buf();
+
+    // Simulate a virtualized thread `virt`: its mount root exists but has no
+    // `.heddle` checkout metadata of its own.
+    let mount_root = crate::thread_manifest::thread_dir(&heddle, "virt").join("root");
+    fs::create_dir_all(&mount_root).unwrap();
+
+    // `Repository` isn't `Debug`, so match rather than `expect_err`.
+    let err = match Repository::open(&mount_root) {
+        Ok(_) => panic!("opening from a metadata-less virtualized mount must refuse the parent climb"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("virtualized thread mount"),
+        "unexpected error opening the virtualized mount root: {err}"
+    );
+
+    // A path deeper inside the mount is refused too (the upward walk catches
+    // the mount root as an ancestor).
+    let deeper = mount_root.join("src");
+    fs::create_dir_all(&deeper).unwrap();
+    assert!(
+        Repository::open(&deeper).is_err(),
+        "a path inside the virtualized mount must also refuse"
+    );
+
+    // The detection is narrow: a solid/materialized checkout root carries its
+    // own `.heddle`, so it is NOT treated as a metadata-less mount.
+    let solid_root = crate::thread_manifest::thread_dir(&heddle, "solid").join("root");
+    fs::create_dir_all(solid_root.join(".heddle")).unwrap();
+    assert!(
+        super::metadataless_managed_thread_root(&solid_root).is_none(),
+        "a checkout root with its own .heddle must not be flagged"
+    );
+    assert!(
+        super::metadataless_managed_thread_root(&mount_root).is_some(),
+        "a metadata-less mount root must be flagged"
+    );
+
+    // Normal open from the repository root still works — the guard is narrow.
+    assert!(
+        Repository::open(repo.root()).is_ok(),
+        "opening the repository root must still succeed"
+    );
+}
+
+/// heddle#572 r3 Finding #5: a solid/materialized thread checkout under
+/// `.heddle/threads/<encoded>/root` is a boundary-delimited worktree. Its own
+/// `.heddle` pointer is the discovery boundary (git's analogue is the
+/// linked-worktree `.git` file): `Repository::open` from inside it must root at
+/// the checkout — capability derived from the checkout's OWN `.git` (absent →
+/// NativeHeddle), HEAD resolved to the THREAD — and must NEVER climb to the
+/// git-overlay parent and adopt the parent's `GitOverlay` capability or branch.
+#[test]
+fn open_solid_checkout_roots_at_boundary_not_git_overlay_parent() {
+    let temp_dir = TempDir::new().unwrap();
+    gix::init(temp_dir.path()).expect("init real git repository");
+    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    assert_eq!(
+        repo.capability(),
+        RepositoryCapability::GitOverlay,
+        "the parent repo is a git-overlay repo"
+    );
+    let heddle = repo.heddle_dir().to_path_buf();
+
+    // Mimic write_isolated_checkout for a solid thread `feature`: a checkout
+    // root under `.heddle/threads/feature/root` carrying its OWN `.heddle`
+    // pointer + per-checkout HEAD (`ref: feature`), but no `.git` of its own.
+    let checkout = crate::thread_manifest::thread_dir(&heddle, "feature").join("root");
+    let co_heddle = checkout.join(".heddle");
+    fs::create_dir_all(&co_heddle).unwrap();
+    fs::write(
+        co_heddle.join("objectstore"),
+        format!("objectstore: {}\n", heddle.display()),
+    )
+    .unwrap();
+    fs::create_dir_all(co_heddle.join("state")).unwrap();
+    fs::write(co_heddle.join("HEAD"), "ref: feature\n").unwrap();
+
+    let opened = Repository::open(&checkout).expect("open solid checkout");
+
+    // Capability roots at the checkout's own boundary (no `.git` AT the
+    // checkout → NativeHeddle), NOT the ancestor git-overlay parent.
+    assert_eq!(
+        opened.capability(),
+        RepositoryCapability::NativeHeddle,
+        "capability must root at the checkout boundary, not the parent .git"
+    );
+    assert!(
+        opened.root().ends_with("threads/feature/root"),
+        "open must root AT the checkout, got {}",
+        opened.root().display()
+    );
+    // HEAD is the thread's own, never the parent branch.
+    assert!(
+        matches!(opened.head_ref().unwrap(), Head::Attached { thread } if thread.as_str() == "feature"),
+        "HEAD must resolve to the thread, not the parent branch"
+    );
+    // The git-overlay branch probe stays inert — the parent branch never leaks.
+    assert_eq!(opened.git_overlay_current_branch().unwrap(), None);
+    assert_eq!(opened.current_lane().unwrap().as_deref(), Some("feature"));
+}

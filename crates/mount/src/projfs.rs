@@ -512,7 +512,7 @@ fn load_or_create_instance_id(root: &Path) -> Result<GUID> {
     let bytes = encode_guid(&guid);
 
     // Best-effort: ensure the primary's parent exists. The CLI
-    // usually creates `<repo_parent>/.<repo_name>-heddle-mounts/`
+    // usually creates `<repo>/.heddle/threads/<thread>/`
     // before calling us, so this is a no-op in the common path.
     if let Some(parent) = primary.parent() {
         let _ = std::fs::create_dir_all(parent);

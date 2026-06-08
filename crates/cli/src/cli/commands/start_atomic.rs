@@ -1619,7 +1619,7 @@ mod tests {
     fn plan_worktree_target_defers_dir_creation() {
         let (temp, repo, _state) = repo_with_state(&[]);
         let target = temp.path().join("iso-deferred");
-        let prepared = plan_worktree_target(&repo, &target).unwrap();
+        let prepared = plan_worktree_target(&repo, &target, None).unwrap();
         assert!(
             prepared.target_dir_created,
             "a non-existent target is flagged as one this start will create"
