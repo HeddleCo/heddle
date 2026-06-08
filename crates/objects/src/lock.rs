@@ -195,21 +195,20 @@ impl RepoLock {
     pub fn try_write(&self) -> Result<Option<WriteLockGuard>> {
         self.ensure_lock_dir()?;
         let entry = entry_for(self.registry_key());
-        let tid = thread::current().id();
         let mut state = lock_gate(&entry);
+        // Non-blocking acquisition is NON-reentrant: a `try_write` while the lock
+        // is held — by ANY thread, including this one — reports contention
+        // (`None`). Reentrancy exists only to keep the BLOCKING `write()` from
+        // self-deadlocking on its own `flock`; a `try_*` can never deadlock, so a
+        // caller that uses it to detect contention (e.g. the undo/redo
+        // serialization lock, heddle#355) must see "held" regardless of holder.
         match state.owner {
-            Some(owner) if owner == tid => {
-                state.depth += 1;
-                Ok(Some(WriteLockGuard {
-                    entry: Arc::clone(&entry),
-                }))
-            }
             Some(_) => Ok(None),
             None => {
                 let file = self.open_lock_file()?;
                 match file.try_lock_exclusive() {
                     Ok(()) => {
-                        state.owner = Some(tid);
+                        state.owner = Some(thread::current().id());
                         state.depth = 1;
                         state.flock = Some(file);
                         Ok(Some(WriteLockGuard {
@@ -422,5 +421,24 @@ mod tests {
             .join()
             .unwrap();
         assert!(now_available, "available after the outermost guard drops");
+    }
+
+    /// `try_write` is intentionally NON-reentrant: even the thread that already
+    /// holds the write lock gets `None`, not a nested guard. Reentrancy exists
+    /// only so the BLOCKING `write()` can't self-deadlock on its own `flock`; a
+    /// non-blocking `try_*` can never deadlock, and callers use it to DETECT
+    /// contention (the undo/redo serialization lock, heddle#355), so it must
+    /// report "held" regardless of holder. Do NOT "fix" this to mirror
+    /// `write()`'s reentrancy.
+    #[test]
+    fn try_write_is_non_reentrant_even_for_owner() {
+        let temp = TempDir::new().unwrap();
+        let lock = RepoLock::new(temp.path());
+
+        let _held = lock.write().unwrap();
+        assert!(
+            lock.try_write().unwrap().is_none(),
+            "try_write must report contention even for the lock's own owner thread"
+        );
     }
 }
