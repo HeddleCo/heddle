@@ -5,7 +5,10 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sley_core::{GitError, ObjectFormat, ObjectId};
-use sley_refs::{branch_ref_name, validate_ref_name, FileRefStore, RefTarget, RefUpdate, ReflogEntry};
+use sley_refs::{
+    branch_ref_name, validate_ref_name, FileRefStore, RefPrecondition, RefTarget, RefUpdate,
+    ReflogEntry,
+};
 
 use crate::framing::actor_suffix_bytes;
 use crate::{GitSubstrateError, Result};
@@ -64,38 +67,48 @@ pub fn set_reference(
     let store = FileRefStore::new(git_dir, format);
     let current = store.read_ref(name).map_err(GitSubstrateError::from)?;
 
-    let expected = match constraint {
-        RefConstraint::Any => None,
-        RefConstraint::MustNotExist => {
-            if current.is_some() {
-                return Err(GitSubstrateError::Git(GitError::Transaction(format!(
-                    "ref {name} already exists"
-                ))));
-            }
-            None
-        }
-        RefConstraint::MustExistAndMatch(oid) => Some(RefTarget::Direct(oid)),
-    };
-
     let old_oid = current
+        .as_ref()
         .and_then(|target| match target {
-            RefTarget::Direct(oid) => Some(oid),
+            RefTarget::Direct(oid) => Some(oid.clone()),
             RefTarget::Symbolic(_) => None,
         })
         .unwrap_or_else(|| zero_oid(format));
 
+    let reflog = ReflogEntry {
+        old_oid,
+        new_oid: target.clone(),
+        committer: bridge_reflog_committer(),
+        message: log_message.as_bytes().to_vec(),
+    };
+
     let mut tx = store.transaction();
-    tx.update(RefUpdate {
-        name: name.to_string(),
-        expected,
-        new: RefTarget::Direct(target.clone()),
-        reflog: Some(ReflogEntry {
-            old_oid,
-            new_oid: target.clone(),
-            committer: bridge_reflog_committer(),
-            message: log_message.as_bytes().to_vec(),
-        }),
-    });
+    match constraint {
+        RefConstraint::Any => {
+            tx.update(RefUpdate {
+                name: name.to_string(),
+                expected: None,
+                new: RefTarget::Direct(target.clone()),
+                reflog: Some(reflog),
+            });
+        }
+        RefConstraint::MustNotExist => {
+            tx.update_to(
+                name,
+                RefTarget::Direct(target.clone()),
+                RefPrecondition::MustNotExist,
+                Some(reflog),
+            );
+        }
+        RefConstraint::MustExistAndMatch(oid) => {
+            tx.update(RefUpdate {
+                name: name.to_string(),
+                expected: Some(RefTarget::Direct(oid)),
+                new: RefTarget::Direct(target.clone()),
+                reflog: Some(reflog),
+            });
+        }
+    }
     tx.commit().map_err(GitSubstrateError::from)
 }
 
@@ -218,6 +231,36 @@ mod tests {
             tree
         );
         write_commit_content(git_dir, format, body.as_bytes()).expect("second commit")
+    }
+
+    #[test]
+    fn set_reference_must_not_exist_rejects_existing_ref() {
+        let temp = TempDir::new().expect("tempdir");
+        let (git_dir, format) = init_bare_repo(&temp);
+        let oid = seed_commit(&git_dir, format);
+        set_reference(
+            &git_dir,
+            format,
+            "refs/heads/feature",
+            &oid,
+            RefConstraint::MustNotExist,
+            "create",
+        )
+        .expect("create branch");
+        let duplicate = set_reference(
+            &git_dir,
+            format,
+            "refs/heads/feature",
+            &oid,
+            RefConstraint::MustNotExist,
+            "duplicate create",
+        );
+        assert!(duplicate.is_err());
+        let store = FileRefStore::new(&git_dir, format);
+        assert_eq!(
+            store.read_ref("refs/heads/feature").expect("read"),
+            Some(RefTarget::Direct(oid))
+        );
     }
 
     #[test]
