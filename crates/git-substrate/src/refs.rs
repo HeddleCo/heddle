@@ -70,14 +70,14 @@ pub fn set_reference(
     let old_oid = current
         .as_ref()
         .and_then(|target| match target {
-            RefTarget::Direct(oid) => Some(oid.clone()),
+            RefTarget::Direct(oid) => Some(*oid),
             RefTarget::Symbolic(_) => None,
         })
         .unwrap_or_else(|| zero_oid(format));
 
     let reflog = ReflogEntry {
         old_oid,
-        new_oid: target.clone(),
+        new_oid: *target,
         committer: bridge_reflog_committer(),
         message: log_message.as_bytes().to_vec(),
     };
@@ -88,14 +88,14 @@ pub fn set_reference(
             tx.update(RefUpdate {
                 name: name.to_string(),
                 expected: None,
-                new: RefTarget::Direct(target.clone()),
+                new: RefTarget::Direct(*target),
                 reflog: Some(reflog),
             });
         }
         RefConstraint::MustNotExist => {
             tx.update_to(
                 name,
-                RefTarget::Direct(target.clone()),
+                RefTarget::Direct(*target),
                 RefPrecondition::MustNotExist,
                 Some(reflog),
             );
@@ -104,7 +104,7 @@ pub fn set_reference(
             tx.update(RefUpdate {
                 name: name.to_string(),
                 expected: Some(RefTarget::Direct(oid)),
-                new: RefTarget::Direct(target.clone()),
+                new: RefTarget::Direct(*target),
                 reflog: Some(reflog),
             });
         }
