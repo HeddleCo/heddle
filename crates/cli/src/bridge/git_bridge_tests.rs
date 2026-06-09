@@ -35,7 +35,7 @@ use crate::bridge::{
     git_util::GitImportOptions,
 };
 use git_substrate::{
-    actor_suffix_bytes, empty_tree_sha1, parse_sha1_hex, write_simple_commit, GitRepo,
+    actor_suffix_bytes, empty_tree_sha1, parse_sha1_hex, write_simple_commit, GitRepo, ObjectKind,
     ObjectType, RefConstraint, Tag, TreeEntryInput, TreeEntryMode,
 };
 
@@ -3056,7 +3056,17 @@ fn round_trip_preserves_annotated_tag_peeled_commit() {
         dest_v10_peeled, commit_oid,
         "annotated tag must peel to the original commit (got {dest_v10_peeled}, want {commit_oid})"
     );
-    let _annotated_tag_oid = annotated_tag_oid;
+    assert!(
+        dest_repo
+            .has_object(&annotated_tag_oid)
+            .expect("has_object"),
+        "destination must contain the annotated tag object"
+    );
+    assert_eq!(
+        dest_repo.read_object_kind(&annotated_tag_oid),
+        Some(ObjectKind::Tag),
+        "annotated tag ref must point at a Tag object, not a commit"
+    );
 }
 
 /// Follow-up B: a repo with one valid ref and one broken tag ref should
