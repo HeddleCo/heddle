@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use sley_core::{ObjectFormat, ObjectId};
-use sley_object::{Commit, EncodedObject, ObjectType, Tag, Tree, TreeEntry};
+use sley_object::{tree_entry_cmp, Commit, EncodedObject, ObjectType, Tag, Tree, TreeEntry};
 use sley_odb::{FileObjectDatabase, ObjectWriter};
 
 use crate::{GitSubstrateError, Result};
@@ -106,13 +106,20 @@ pub fn write_tag(git_dir: &Path, format: ObjectFormat, tag: &Tag) -> Result<Obje
     )
 }
 
-/// Write a tree from `entries`, sorting by entry name (byte order) first.
+/// Write a tree from `entries`, sorting entries in Git's canonical tree order.
 pub fn write_tree(
     git_dir: &Path,
     format: ObjectFormat,
     entries: &mut [TreeEntryInput],
 ) -> Result<ObjectId> {
-    entries.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+    entries.sort_by(|left, right| {
+        tree_entry_cmp(
+            left.name.as_bytes(),
+            left.mode.as_octal_mode(),
+            right.name.as_bytes(),
+            right.mode.as_octal_mode(),
+        )
+    });
     let tree_entries: Vec<TreeEntry> = entries
         .iter()
         .map(|entry| TreeEntry {
@@ -165,6 +172,49 @@ mod tests {
         let mut entries = Vec::new();
         let oid = write_tree(&git_dir, ObjectFormat::Sha1, &mut entries).expect("write tree");
         assert_eq!(oid.to_hex(), empty_tree_sha1().to_hex());
+    }
+
+    #[test]
+    fn write_tree_sorts_subtree_after_same_prefix_blob() {
+        let tmp = TempDir::new().expect("temp");
+        let git_dir = tmp.path().join(".git");
+        std::fs::create_dir_all(git_dir.join("objects")).expect("objects dir");
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").expect("head");
+
+        let blob_foo_txt =
+            write_blob(&git_dir, ObjectFormat::Sha1, b"txt\n").expect("blob foo.txt");
+        let blob_in_foo =
+            write_blob(&git_dir, ObjectFormat::Sha1, b"inner\n").expect("blob in foo");
+        let mut foo_tree_entries = vec![TreeEntryInput {
+            mode: TreeEntryMode::Blob,
+            name: "inner".into(),
+            oid: blob_in_foo,
+        }];
+        let foo_tree_oid =
+            write_tree(&git_dir, ObjectFormat::Sha1, &mut foo_tree_entries).expect("foo tree");
+
+        // Deliberately out of canonical order: subtree `foo` before blob `foo.txt`.
+        let mut entries = vec![
+            TreeEntryInput {
+                mode: TreeEntryMode::Tree,
+                name: "foo".into(),
+                oid: foo_tree_oid,
+            },
+            TreeEntryInput {
+                mode: TreeEntryMode::Blob,
+                name: "foo.txt".into(),
+                oid: blob_foo_txt,
+            },
+        ];
+        let oid = write_tree(&git_dir, ObjectFormat::Sha1, &mut entries).expect("write tree");
+
+        let odb = FileObjectDatabase::from_git_dir(&git_dir, ObjectFormat::Sha1);
+        let object = odb.read_object(&oid).expect("read tree");
+        let tree = Tree::parse(ObjectFormat::Sha1, &object.body).expect("parse tree");
+        assert_eq!(tree.entries.len(), 2);
+        assert_eq!(tree.entries[0].name, b"foo.txt");
+        assert_eq!(tree.entries[1].name, b"foo");
+        assert_eq!(tree.entries[1].mode, 0o040000);
     }
 
     #[test]
