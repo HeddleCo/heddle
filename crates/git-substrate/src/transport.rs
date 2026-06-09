@@ -156,6 +156,10 @@ pub fn fetch_bare_mirror(
     }
 
     let config = GitConfig::default();
+    // `dry_run: true` still downloads packfiles into the ODB; it only skips writing
+    // refs on the remote side. We apply ref updates ourselves via
+    // `apply_fetch_ref_updates` so a crash between fetch and ref-apply leaves
+    // orphaned objects but cannot corrupt ref state.
     let options = FetchOptions {
         quiet: true,
         auto_follow_tags: false,
@@ -503,7 +507,7 @@ fn install_fetch_pack_via_git_protocol(
         wants,
         ..UploadPackRequest::default()
     };
-    let haves = local_have_oids(git_dir, format)?;
+    let haves = local_have_oids(git_dir)?;
     let mut stream = git_protocol_connect(parsed, remote_url)?;
     write_service_request(&mut stream, &git_service_request(parsed, GitService::UploadPack))
         .map_err(GitSubstrateError::from)?;
@@ -836,7 +840,7 @@ fn http_status_error(remote_url: &str, phase: &str, status: u16, body: &[u8]) ->
     )))
 }
 
-fn local_have_oids(git_dir: &Path, format: ObjectFormat) -> Result<Vec<ObjectId>> {
+fn local_have_oids(git_dir: &Path) -> Result<Vec<ObjectId>> {
     let repo = GitRepo::open(git_dir)?;
     let mut seen = HashSet::new();
     let mut haves = Vec::new();
@@ -852,7 +856,6 @@ fn local_have_oids(git_dir: &Path, format: ObjectFormat) -> Result<Vec<ObjectId>
             haves.push(oid);
         }
     }
-    let _ = format;
     Ok(haves)
 }
 
