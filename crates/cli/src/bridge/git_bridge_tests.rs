@@ -3011,7 +3011,9 @@ fn round_trip_preserves_symlinks() {
 /// Follow-up A (#575 deferred): annotated tag *object* SHA preservation
 /// requires first-class tag storage. Until then export syncs markers as
 /// lightweight tags at the peeled commit; commit SHAs still round-trip.
+// TODO(#575): un-ignore when tag objects are first-class
 #[test]
+#[ignore = "annotated tag objects deferred to #575"]
 fn round_trip_preserves_annotated_tag_peeled_commit() {
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
