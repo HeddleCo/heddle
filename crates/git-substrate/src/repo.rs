@@ -562,8 +562,11 @@ fn resolve_workdir(git_dir: &Path) -> Option<PathBuf> {
     let gitdir_file = git_dir.join("gitdir");
     if gitdir_file.is_file() {
         let contents = fs::read_to_string(&gitdir_file).ok()?;
-        let path = contents.trim().strip_prefix("gitdir:")?.trim();
-        let dot_git = PathBuf::from(path);
+        let trimmed = contents.trim();
+        // Worktree-side `.git` pointer: `gitdir: <path>`. Admin-side
+        // `.git/worktrees/<name>/gitdir`: raw path, trailing newline only.
+        let path_str = trimmed.strip_prefix("gitdir:").unwrap_or(trimmed).trim();
+        let dot_git = PathBuf::from(path_str);
         return dot_git.parent().map(|parent| parent.to_path_buf());
     }
     if git_dir.file_name() == Some(OsStr::new(".git")) {
@@ -711,23 +714,43 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let main = temp.path().join("main");
         let linked = temp.path().join("linked");
-        let main_git = main.join(".git");
-        let wt_admin = main_git.join("worktrees").join("wt1");
-        let linked_dot_git = linked.join(".git");
-        std::fs::create_dir_all(wt_admin.join("objects")).expect("wt objects");
-        std::fs::create_dir_all(wt_admin.join("refs/heads")).expect("wt refs");
-        std::fs::write(wt_admin.join("HEAD"), "ref: refs/heads/main\n").expect("wt HEAD");
-        std::fs::write(
-            wt_admin.join("gitdir"),
-            format!("gitdir: {}\n", linked_dot_git.display()),
-        )
-        .expect("wt gitdir");
-        std::fs::create_dir_all(&linked).expect("linked worktree dir");
-        std::fs::write(
-            &linked_dot_git,
-            format!("gitdir: {}\n", wt_admin.display()),
-        )
-        .expect("linked .git file");
+
+        let git_available = std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if git_available {
+            std::process::Command::new("git")
+                .args(["init", main.to_str().expect("main path")])
+                .status()
+                .expect("git init");
+            std::process::Command::new("git")
+                .args(["worktree", "add", linked.to_str().expect("linked path")])
+                .current_dir(&main)
+                .status()
+                .expect("git worktree add");
+        } else {
+            let main_git = main.join(".git");
+            let wt_admin = main_git.join("worktrees").join("wt1");
+            let linked_dot_git = linked.join(".git");
+            std::fs::create_dir_all(wt_admin.join("objects")).expect("wt objects");
+            std::fs::create_dir_all(wt_admin.join("refs/heads")).expect("wt refs");
+            std::fs::write(wt_admin.join("HEAD"), "ref: refs/heads/main\n").expect("wt HEAD");
+            std::fs::create_dir_all(&linked).expect("linked worktree dir");
+            // Admin-side gitdir: raw path, no `gitdir:` prefix (matches real git).
+            std::fs::write(
+                wt_admin.join("gitdir"),
+                format!("{}\n", linked_dot_git.display()),
+            )
+            .expect("wt gitdir");
+            std::fs::write(
+                &linked_dot_git,
+                format!("gitdir: {}\n", wt_admin.display()),
+            )
+            .expect("linked .git file");
+        }
 
         let repo = GitRepo::discover(&linked).expect("open linked worktree");
         assert!(!repo.is_bare().expect("is_bare"));
