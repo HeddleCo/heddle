@@ -4,6 +4,7 @@
 use std::{any::Any, time::Instant};
 
 use anyhow::Result;
+use git_substrate::GitRepo;
 use clap::{Arg, ArgAction, CommandFactory, Parser, error::ErrorKind};
 #[cfg(feature = "semantic")]
 use cli::cli::commands::cmd_semantic;
@@ -1047,7 +1048,7 @@ fn explicit_json_requested(cli: &Cli) -> bool {
 }
 
 fn is_plain_git_without_heddle(start: &std::path::Path) -> bool {
-    let Ok(git_repo) = gix::discover(start) else {
+    let Ok(git_repo) = GitRepo::discover(start) else {
         return false;
     };
     let Some(workdir) = git_repo.workdir() else {

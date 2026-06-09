@@ -1474,8 +1474,8 @@ fn merge_op_targets_state(op: &OpRecord, state: &ChangeId) -> bool {
 }
 
 fn git_rev_parse_head(root: &Path) -> Option<String> {
-    let git = gix::discover(root).ok()?;
-    git.head_id().ok().map(|id| id.to_string())
+    let git = git_substrate::GitRepo::discover(root).ok()?;
+    git.head_commit_hex_or_none().ok().flatten()
 }
 
 /// Extended pre-flight for `--git-commit`. Catches dry-runnable failure

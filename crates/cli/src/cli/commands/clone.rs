@@ -548,28 +548,27 @@ fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Res
         ))
     })?;
     let branch_ref = format!("refs/heads/{branch}");
-    let mut reference = git_repo.find_reference(&branch_ref).map_err(|err| {
-        anyhow!(clone_verification_failed_advice(
-            format!("clone verification failed: selected Git branch '{branch}' is missing: {err}"),
-            format!("Git ref '{branch_ref}' is missing after Git-overlay clone"),
-            "Git status would report upstream tracking for a branch whose local ref is absent",
-            canonical_bridge_import_ref_command(branch),
-        ))
-    })?;
-    let target = reference.peel_to_id().map_err(|err| {
+    let target_oid = git_repo.read_ref_oid(&branch_ref).map_err(|err| {
         anyhow!(clone_verification_failed_advice(
             format!(
                 "clone verification failed: selected Git branch '{branch}' is not readable: {err}"
             ),
-            format!("Git ref '{branch_ref}' could not be peeled to a commit"),
+            format!("Git ref '{branch_ref}' could not be read after Git-overlay clone"),
             "Git status would report upstream tracking for an unreadable branch",
+            canonical_bridge_import_ref_command(branch),
+        ))
+    })?.ok_or_else(|| {
+        anyhow!(clone_verification_failed_advice(
+            format!("clone verification failed: selected Git branch '{branch}' is missing"),
+            format!("Git ref '{branch_ref}' is missing after Git-overlay clone"),
+            "Git status would report upstream tracking for a branch whose local ref is absent",
             canonical_bridge_import_ref_command(branch),
         ))
     })?;
     set_reference(
         &git_repo,
         &format!("refs/remotes/origin/{branch}"),
-        target.detach(),
+        &target_oid,
         gix::refs::transaction::PreviousValue::Any,
         "heddle: seed origin remote-tracking branch after clone",
     )
@@ -682,7 +681,7 @@ fn verify_git_overlay_clone(
 }
 
 fn refresh_git_index_to_head(local_path: &Path) -> Result<()> {
-    let git = gix::discover(local_path).map_err(|err| {
+    let git = git_substrate::GitRepo::discover(local_path).map_err(|err| {
         anyhow!(clone_verification_failed_advice(
             format!("clone verification failed: cannot reopen Git checkout: {err}"),
             format!(
@@ -693,7 +692,7 @@ fn refresh_git_index_to_head(local_path: &Path) -> Result<()> {
             "heddle status",
         ))
     })?;
-    let head_tree = git.head_tree_id_or_empty().map_err(|err| {
+    let tree_oid = git.head_tree_oid_or_empty().map_err(|err| {
         anyhow!(clone_verification_failed_advice(
             format!("clone verification failed: cannot read Git HEAD tree: {err}"),
             "Git HEAD tree could not be read during clone verification",
@@ -701,18 +700,15 @@ fn refresh_git_index_to_head(local_path: &Path) -> Result<()> {
             "heddle status",
         ))
     })?;
-    let mut index = git.index_from_tree(head_tree.as_ref()).map_err(|err| {
+    git_substrate::write_index_from_tree(
+        git.git_dir(),
+        git.object_format(),
+        &tree_oid,
+    )
+    .map_err(|err| {
         anyhow!(clone_verification_failed_advice(
-            format!("clone verification failed: cannot build Git index from HEAD tree: {err}"),
+            format!("clone verification failed: cannot rebuild Git index from HEAD tree: {err}"),
             "Git index could not be rebuilt from HEAD during clone verification",
-            "clone cannot prove the Git index and selected branch agree",
-            "heddle status",
-        ))
-    })?;
-    index.write(Default::default()).map_err(|err| {
-        anyhow!(clone_verification_failed_advice(
-            format!("clone verification failed: cannot write Git index: {err}"),
-            "Git index could not be written during clone verification",
             "clone cannot prove the Git index and selected branch agree",
             "heddle status",
         ))
@@ -1488,12 +1484,11 @@ impl BlobHydrator for GitOverlayBlobHydrator {
 
 impl GitOverlayBlobHydrator {
     fn read_blob_bytes(&self, oid: gix::ObjectId) -> HeddleResult<Vec<u8>> {
-        let local_first = open_repo(&self.git_repo_path)
-            .map_err(|err| HeddleError::Io(std::io::Error::other(err.to_string())))?
-            .find_blob(oid)
-            .ok()
-            .map(|mut blob| blob.take_data());
-        if let Some(bytes) = local_first {
+        let repo = open_repo(&self.git_repo_path)
+            .map_err(|err| HeddleError::Io(std::io::Error::other(err.to_string())))?;
+        let substrate_oid =
+            git_substrate::from_gix(oid).map_err(|err| HeddleError::Config(err.to_string()))?;
+        if let Ok(bytes) = repo.read_blob(&substrate_oid) {
             return Ok(bytes);
         }
 

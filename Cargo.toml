@@ -7,6 +7,7 @@ members = [
     "crates/crypto",
     "crates/daemon",
     "crates/devtools",
+    "crates/git-substrate",
     "crates/grpc",
     "crates/ingest",
     "crates/merge",
@@ -83,6 +84,21 @@ sec1 = { version = "0.8", features = ["pem"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 serial_test = "3"
+sley-core = { path = "../sley/crates/sley-core" }
+sley-config = { path = "../sley/crates/sley-config" }
+sley-fetch = { path = "../sley/crates/sley-fetch" }
+sley-formats = { path = "../sley/crates/sley-formats" }
+sley-index = { path = "../sley/crates/sley-index" }
+sley-notes = { path = "../sley/crates/sley-notes" }
+sley-object = { path = "../sley/crates/sley-object" }
+sley-odb = { path = "../sley/crates/sley-odb" }
+sley-pack = { path = "../sley/crates/sley-pack" }
+sley-protocol = { path = "../sley/crates/sley-protocol" }
+sley-remote = { path = "../sley/crates/sley-remote" }
+sley-refs = { path = "../sley/crates/sley-refs" }
+sley-rev = { path = "../sley/crates/sley-rev" }
+sley-transport = { path = "../sley/crates/sley-transport" }
+sley-worktree = { path = "../sley/crates/sley-worktree" }
 sha2 = { version = "0.10", features = ["oid"] }
 similar = "3"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json"] }

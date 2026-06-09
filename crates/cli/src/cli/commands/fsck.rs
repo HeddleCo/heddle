@@ -149,7 +149,10 @@ fn check_bridge(
 
     for (change_id, git_oid) in bridge.mapping.iter() {
         *objects_checked += 1;
-        if mirror.find_object(*git_oid).is_err() {
+        if !mirror
+            .has_object(git_oid)
+            .map_err(|err| anyhow!("bridge mirror object check failed: {err}"))?
+        {
             errors.push(make_error(
                 "bridge-mapping",
                 &format!("mapped Git object {git_oid} is missing from the mirror"),
@@ -165,7 +168,7 @@ fn check_bridge(
         }
     }
 
-    for (git_oid, note) in git_notes::read_all_notes(&mirror)
+    for (git_oid, note) in git_notes::read_all_notes_repo(&mirror)
         .map_err(|err| anyhow!("bridge notes check failed: {err}"))?
     {
         *objects_checked += 1;
@@ -177,7 +180,7 @@ fn check_bridge(
             ));
             continue;
         };
-        if bridge.mapping.get_git(&change_id) != Some(git_oid) {
+        if bridge.mapping.get_git(&change_id) != Some(git_oid.clone()) {
             errors.push(make_error(
                 "bridge-notes",
                 &format!("note for {git_oid} does not round-trip through the bridge mapping"),
@@ -210,7 +213,7 @@ fn check_checkout_head(
     errors: &mut Vec<FsckError>,
     objects_checked: &mut usize,
 ) -> Result<()> {
-    let Ok(checkout) = gix::discover(repo.root()) else {
+    let Ok(checkout) = git_substrate::GitRepo::discover(repo.root()) else {
         return Ok(());
     };
     let refs::Head::Attached { thread } = repo.head_ref()? else {
@@ -223,13 +226,12 @@ fn check_checkout_head(
         return Ok(());
     };
     let branch_ref = format!("refs/heads/{thread}");
-    let Ok(mut reference) = checkout.find_reference(&branch_ref) else {
+    let Some(actual_git_oid) = checkout
+        .read_ref_oid(&branch_ref)
+        .map_err(|err| anyhow!("checkout HEAD check failed: {err}"))?
+    else {
         return Ok(());
     };
-    let actual_git_oid = reference
-        .peel_to_id()
-        .map_err(|err| anyhow!("checkout HEAD check failed: {err}"))?
-        .detach();
     *objects_checked += 1;
     if actual_git_oid != expected_git_oid {
         errors.push(make_error(

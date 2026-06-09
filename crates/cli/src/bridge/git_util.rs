@@ -182,7 +182,7 @@ pub struct ExportStats {
 #[derive(Debug, Clone)]
 pub struct ExportedRef {
     pub name: String,
-    pub tip: gix::hash::ObjectId,
+    pub tip: crate::bridge::git_core::ObjectId,
 }
 
 /// Statistics for import operation.
@@ -219,9 +219,8 @@ pub struct ImportStats {
     /// skipped (and so a future export can restore them by reading the
     /// preserved git mirror).
     pub skipped_non_commit_refs: Vec<SkippedRef>,
-    /// Refs whose object reachability could not be fully copied into
-    /// the bridge mirror — see [`PartialMirrorRef`]. SHA-stable export
-    /// is degraded for these refs.
+    /// Legacy field retained for schema stability. Import no longer
+    /// populates the bridge mirror (#568); this stays empty.
     pub partial_mirror_refs: Vec<PartialMirrorRef>,
     /// Git tree entries converted under an explicit lossy import opt-in.
     pub lossy_entries: Vec<LossyGitImportEntry>,
@@ -298,17 +297,9 @@ pub struct SkippedRef {
     pub peeled_kind: String,
 }
 
-/// A ref whose object reachability could not be fully copied into the
-/// bridge mirror — typically because the source ODB is missing some
-/// object referenced from the ref's commit graph (a real-world failure
-/// mode in repos like `expressjs/express` and `git-lfs/git-lfs`, where
-/// pack data references objects that aren't actually present and that
-/// `git fsck` doesn't catch because they're not reachable from any
-/// other ref).
-///
-/// SHA-stable export will fall back to recreating commits from heddle
-/// state for the affected refs; their git_oids in the destination will
-/// be heddle-derived rather than verbatim copies.
+/// Legacy import-time mirror degradation record. Import no longer copies
+/// objects into `.heddle/git` (#568); export reconstructs byte-faithful
+/// commits from heddle state instead.
 #[derive(Debug, Clone)]
 pub struct PartialMirrorRef {
     pub name: String,

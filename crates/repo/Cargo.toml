@@ -14,7 +14,7 @@ anyhow.workspace = true
 blake3.workspace = true
 chrono.workspace = true
 hex.workspace = true
-gix.workspace = true
+git-substrate = { path = "../git-substrate", package = "heddle-git-substrate", version = "0.2" }
 ignore.workspace = true
 libc.workspace = true
 objects = { path = "../objects", package = "heddle-objects", version = "0.2" }

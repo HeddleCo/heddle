@@ -3,18 +3,16 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::{Path, PathBuf},
 };
 
-use gix::bstr::{BStr, ByteSlice};
 use objects::object::ThreadName;
 use objects::worktree::WorktreeStatus;
 use refs::Head;
 use repo::{
     CommitGraphIndex, GitOverlayBranchTip, GitOverlayImportHint, GitRemoteTrackingStatus,
     OperationKind, OperationScope, Repository, ThreadManager, ThreadState, describe_thread_advice,
-    git_worktree_status::GitWorktreeEntryState, refresh_thread_freshness,
+    refresh_thread_freshness,
 };
 use schemars::JsonSchema;
 use serde::{Serialize, Serializer};
@@ -1617,7 +1615,7 @@ fn dirty_details(status: &WorktreeStatus) -> BTreeMap<String, String> {
 pub(crate) fn build_plain_git_verification_probe(
     start: &Path,
 ) -> anyhow::Result<Option<PlainGitVerificationProbe>> {
-    let git_repo = match gix::discover(start) {
+    let git_repo = match git_substrate::GitRepo::discover(start) {
         Ok(repo) => repo,
         Err(_) => return Ok(None),
     };
@@ -1858,11 +1856,8 @@ fn plain_git_missing_import_branches(
     dedup_commands(missing)
 }
 
-fn plain_git_current_branch(git_repo: &gix::Repository) -> Option<String> {
-    let raw = fs::read_to_string(git_repo.git_dir().join("HEAD")).ok()?;
-    let target = raw.trim().strip_prefix("ref: ")?;
-    let branch = target.strip_prefix("refs/heads/")?;
-    (!branch.is_empty()).then(|| branch.to_string())
+fn plain_git_current_branch(git_repo: &git_substrate::GitRepo) -> Option<String> {
+    git_repo.current_branch_name()
 }
 
 fn dedup_commands(commands: Vec<String>) -> Vec<String> {
@@ -1873,121 +1868,57 @@ fn dedup_commands(commands: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-fn plain_git_local_branches(git_repo: &gix::Repository) -> Vec<String> {
-    let Ok(references) = git_repo.references() else {
-        return Vec::new();
-    };
-    let Ok(branches) = references.local_branches() else {
-        return Vec::new();
-    };
-    let mut names = branches
-        .filter_map(Result::ok)
-        .map(|branch| branch.name().shorten().to_string())
-        .filter(|branch| !branch.trim().is_empty())
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
-    names
+fn plain_git_local_branches(git_repo: &git_substrate::GitRepo) -> Vec<String> {
+    git_repo.local_branch_names().unwrap_or_default()
 }
 
-fn plain_git_local_tags(git_repo: &gix::Repository) -> Vec<String> {
-    let Ok(references) = git_repo.references() else {
-        return Vec::new();
-    };
-    let Ok(tags) = references.tags() else {
-        return Vec::new();
-    };
-    let mut names = tags
-        .filter_map(Result::ok)
-        .map(|tag| tag.name().shorten().to_string())
-        .filter(|tag| !tag.trim().is_empty())
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
-    names
+fn plain_git_local_tags(git_repo: &git_substrate::GitRepo) -> Vec<String> {
+    git_repo.local_tag_names().unwrap_or_default()
 }
 
 fn plain_git_worktree_status(
     root: &Path,
-    git_repo: &gix::Repository,
+    git_repo: &git_substrate::GitRepo,
 ) -> anyhow::Result<WorktreeStatus> {
-    let index = git_repo.index_or_empty().map_err(|error| {
+    let format = git_repo.object_format();
+    let index = git_substrate::read_disk_index(git_repo.git_dir(), format).map_err(|error| {
         anyhow::anyhow!(
             "failed to inspect Git index at '{}': {error}",
             root.display()
         )
     })?;
-    let head_tree = git_repo.head_tree_id_or_empty().map_err(|error| {
+    let head_tree = git_repo.head_tree_oid_or_empty().map_err(|error| {
         anyhow::anyhow!(
             "failed to inspect Git HEAD tree at '{}': {error}",
             root.display()
         )
     })?;
-    let head_index = git_repo
-        .index_from_tree(head_tree.as_ref())
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "failed to inspect Git HEAD tree at '{}': {error}",
-                root.display()
-            )
-        })?;
+    let head_index =
+        git_substrate::read_index_from_tree(git_repo.git_dir(), format, &head_tree).map_err(
+            |error| {
+                anyhow::anyhow!(
+                    "failed to inspect Git HEAD tree at '{}': {error}",
+                    root.display()
+                )
+            },
+        )?;
 
-    let mut head_entries = BTreeMap::new();
-    for (_, (path, entry)) in head_index.entries_with_paths_by_filter_map(|path, entry| {
-        Some((plain_git_path(path), (entry.id, entry.mode.bits())))
-    }) {
-        head_entries.insert(path, entry);
-    }
-    let index_timestamp_secs = index.timestamp().unix_seconds();
-    let mut index_entries = BTreeMap::new();
-    for (_, (path, entry)) in index.entries_with_paths_by_filter_map(|path, entry| {
-        Some((plain_git_path(path), (entry.id, entry.mode.bits(), entry.stat)))
-    }) {
-        index_entries.insert(path, entry);
-    }
+    let head_entries = git_substrate::tree_index_entry_map(&head_index);
+    let index_timestamp_secs =
+        git_substrate::index_file_mtime_secs(git_repo.git_dir()).unwrap_or(0);
+    let index_entries = index
+        .as_ref()
+        .map(git_substrate::tracked_index_entries)
+        .unwrap_or_default();
 
-    let mut added = BTreeSet::new();
-    let mut modified = BTreeSet::new();
-    let mut deleted = BTreeSet::new();
-
-    for (path, (oid, mode, _stat)) in &index_entries {
-        match head_entries.get(path) {
-            None => {
-                added.insert(PathBuf::from(path));
-            }
-            Some((head_oid, head_mode)) if (head_oid, head_mode) != (oid, mode) => {
-                modified.insert(PathBuf::from(path));
-            }
-            Some(_) => {}
-        }
-    }
-    for path in head_entries.keys() {
-        if !index_entries.contains_key(path) {
-            deleted.insert(PathBuf::from(path));
-        }
-    }
-
-    for (path, (oid, mode, stat)) in &index_entries {
-        let probe = repo::git_worktree_status::IndexStatProbe {
-            stat: *stat,
-            index_timestamp_secs,
-        };
-        match repo::git_worktree_status::git_worktree_entry_state(
+    let (mut added, mut modified, deleted) =
+        repo::git_worktree_status::collect_index_head_worktree_changes(
             root,
-            path,
-            *oid,
-            *mode,
-            Some(probe),
-        )? {
-            GitWorktreeEntryState::Clean => {}
-            GitWorktreeEntryState::Deleted => {
-                deleted.insert(PathBuf::from(path));
-            }
-            GitWorktreeEntryState::Modified => {
-                modified.insert(PathBuf::from(path));
-            }
-        }
-    }
+            index_timestamp_secs,
+            &index_entries,
+            &head_entries,
+            |_| true,
+        )?;
 
     let tracked_paths: BTreeSet<&str> = index_entries.keys().map(String::as_str).collect();
     for path in plain_git_untracked_paths(root, &tracked_paths)? {
@@ -2066,24 +1997,13 @@ fn path_to_plain_git_path(path: &Path) -> String {
         .join("/")
 }
 
-fn plain_git_path(path: &BStr) -> String {
-    path.to_str_lossy().into_owned()
-}
-
 fn plain_git_head_has_commit(
-    git_repo: &gix::Repository,
+    git_repo: &git_substrate::GitRepo,
     git_branch: Option<&str>,
 ) -> anyhow::Result<bool> {
-    let spec = git_branch
-        .map(|branch| format!("refs/heads/{branch}^{{commit}}"))
-        .unwrap_or_else(|| "HEAD^{commit}".to_string());
-    let Ok(id) = git_repo.rev_parse_single(spec.as_bytes().as_bstr()) else {
-        return Ok(false);
-    };
-    let Ok(object) = git_repo.find_object(id.detach()) else {
-        return Ok(false);
-    };
-    Ok(object.kind == gix::objs::Kind::Commit)
+    git_repo
+        .reference_peels_to_commit(git_branch)
+        .map_err(|error| anyhow::anyhow!("failed to inspect Git HEAD: {error}"))
 }
 
 pub(crate) fn action_template(action: &str) -> Option<ActionTemplate> {
@@ -2534,15 +2454,13 @@ fn default_remote_name(repo: &Repository) -> Option<String> {
 }
 
 fn git_default_remote_name(root: &Path) -> Option<String> {
-    let repo = gix::discover(root).ok()?;
-    git_default_remote_name_from_repo(&repo)
+    git_substrate::GitRepo::discover(root)
+        .ok()
+        .and_then(|repo| git_default_remote_name_from_repo(&repo))
 }
 
-fn git_default_remote_name_from_repo(repo: &gix::Repository) -> Option<String> {
-    repo.remote_names()
-        .into_iter()
-        .map(|name| name.to_str_lossy().into_owned())
-        .find(|name| name == "origin")
+fn git_default_remote_name_from_repo(repo: &git_substrate::GitRepo) -> Option<String> {
+    repo.default_remote_name()
 }
 
 pub(crate) fn build_git_overlay_health(repo: &Repository) -> GitOverlayHealth {
@@ -3840,7 +3758,7 @@ mod tests {
             }
         }
 
-        let git_repo = gix::open(root).expect("open gix");
+        let git_repo = git_substrate::GitRepo::discover(root).expect("discover substrate");
         let status = super::plain_git_worktree_status(root, &git_repo).expect("status");
 
         let target = PathBuf::from("file.txt");

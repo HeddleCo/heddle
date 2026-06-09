@@ -45,6 +45,9 @@ use crate::{
     cli::{Cli, should_output_json, worktree_status_options},
     config::UserConfig,
 };
+use git_substrate::{
+    GitRepo, ObjectId, read_index_from_tree, tree_index_entry_map,
+};
 
 const BINARY_DIFF_ERROR: &str = "binary file";
 #[cfg(not(feature = "semantic"))]
@@ -605,16 +608,38 @@ fn render_status_changes(
 /// this check, `head_tree()?` propagates a "no HEAD commit" error and
 /// the whole `--patch` render fails, even though the only honest diff
 /// is "everything is new."
+#[derive(Debug)]
+struct PlainGitHeadTree {
+    entries: std::collections::BTreeMap<String, (ObjectId, u32)>,
+}
+
+impl PlainGitHeadTree {
+    fn load(git_repo: &GitRepo) -> Result<Option<Self>> {
+        if git_repo.head_commit_oid_or_none()?.is_none() {
+            return Ok(None);
+        }
+        let tree_oid = git_repo.head_tree_oid_or_empty()?;
+        let format = git_repo.object_format();
+        let index = read_index_from_tree(git_repo.git_dir(), format, &tree_oid)
+            .map_err(|error| anyhow!("failed to read HEAD tree: {error}"))?;
+        Ok(Some(Self {
+            entries: tree_index_entry_map(&index),
+        }))
+    }
+
+    fn lookup(&self, path: &Path) -> Option<(ObjectId, u32)> {
+        let key = path.to_string_lossy().replace('\\', "/");
+        self.entries.get(&key).cloned()
+    }
+}
+
 fn plain_git_file_changes_with_hunks(
     probe: &PlainGitVerificationProbe,
     unified: usize,
 ) -> Result<Vec<FileChange>> {
-    let git_repo = gix::discover(&probe.root)?;
-    let mut head_tree = if git_repo.head()?.is_unborn() {
-        None
-    } else {
-        Some(git_repo.head_tree()?)
-    };
+    let git_repo = GitRepo::discover(&probe.root)
+        .map_err(|error| anyhow!("failed to discover Git repository: {error}"))?;
+    let mut head_tree = PlainGitHeadTree::load(&git_repo)?;
     // `plain_git_worktree_status` can report the same path as BOTH
     // deleted (index-vs-HEAD) and added (untracked worktree) — e.g.
     // `git rm --cached f` followed by editing the still-present untracked
@@ -653,7 +678,7 @@ fn plain_git_file_changes_with_hunks(
         } else {
             changes.push(plain_git_file_change(
                 &git_repo,
-                head_tree.as_mut(),
+                head_tree.as_ref(),
                 &probe.root,
                 path,
                 "added",
@@ -669,7 +694,7 @@ fn plain_git_file_changes_with_hunks(
         }
         changes.push(plain_git_file_change(
             &git_repo,
-            head_tree.as_mut(),
+            head_tree.as_ref(),
             &probe.root,
             path,
             "deleted",
@@ -682,8 +707,8 @@ fn plain_git_file_changes_with_hunks(
 
 #[allow(clippy::too_many_arguments)]
 fn plain_git_file_change(
-    git_repo: &gix::Repository,
-    head_tree: Option<&mut gix::Tree<'_>>,
+    git_repo: &GitRepo,
+    head_tree: Option<&PlainGitHeadTree>,
     root: &Path,
     path: &std::path::Path,
     kind: &str,
@@ -740,26 +765,23 @@ fn plain_git_file_change(
 }
 
 fn plain_git_lookup_blob_and_mode(
-    git_repo: &gix::Repository,
-    tree: &mut gix::Tree<'_>,
+    git_repo: &GitRepo,
+    tree: &PlainGitHeadTree,
     path: &std::path::Path,
 ) -> Result<Option<(Blob, FileMode)>> {
-    let Some(entry) = tree.peel_to_entry_by_path(path)? else {
+    let Some((oid, mode_raw)) = tree.lookup(path) else {
         return Ok(None);
     };
-    let entry_mode = entry.mode();
-    if !entry_mode.is_blob_or_symlink() {
-        return Ok(None);
-    }
-    let mode = if entry_mode.is_link() {
-        FileMode::Symlink
-    } else if entry_mode.is_executable() {
-        FileMode::Executable
-    } else {
-        FileMode::Normal
+    let mode = match mode_raw {
+        0o120000 => FileMode::Symlink,
+        0o100755 => FileMode::Executable,
+        0o100644 => FileMode::Normal,
+        _ => return Ok(None),
     };
-    let object = git_repo.find_object(entry.object_id())?;
-    Ok(Some((Blob::new(object.data.clone()), mode)))
+    let bytes = git_repo
+        .read_blob(&oid)
+        .map_err(|error| anyhow!("failed to read HEAD blob at {}: {error}", path.display()))?;
+    Ok(Some((Blob::new(bytes), mode)))
 }
 
 /// Classify the HEAD-tree side of a plain-Git path. A tracked entry is a
@@ -768,20 +790,20 @@ fn plain_git_lookup_blob_and_mode(
 /// HEAD) is `Absent`, which `is_type_change` treats as no type change so
 /// the modify renders as content.
 fn plain_git_old_side_kind(
-    head_tree: Option<&mut gix::Tree<'_>>,
+    head_tree: Option<&PlainGitHeadTree>,
     path: &std::path::Path,
-) -> Result<SideKind> {
+) -> SideKind {
     let Some(tree) = head_tree else {
-        return Ok(SideKind::Absent);
+        return SideKind::Absent;
     };
-    let Some(entry) = tree.peel_to_entry_by_path(path)? else {
-        return Ok(SideKind::Absent);
+    let Some((_, mode)) = tree.lookup(path) else {
+        return SideKind::Absent;
     };
-    Ok(if entry.mode().is_link() {
+    if mode == 0o120000 {
         SideKind::Symlink
     } else {
         SideKind::Regular
-    })
+    }
 }
 
 /// Emit the plain-Git `FileChange`(s) for one `modified` (or coalesced-
@@ -796,19 +818,19 @@ fn plain_git_old_side_kind(
 /// their own `added` entries from status). A tracked old side is always a
 /// single blob/symlink, so there is never an old subtree to expand here.
 fn push_plain_git_modified(
-    git_repo: &gix::Repository,
-    head_tree: &mut Option<gix::Tree<'_>>,
+    git_repo: &GitRepo,
+    head_tree: &mut Option<PlainGitHeadTree>,
     root: &Path,
     path: &std::path::Path,
     unified: usize,
     out: &mut Vec<FileChange>,
 ) -> Result<()> {
     let new_kind = worktree_side_kind(&root.join(path));
-    let old_kind = plain_git_old_side_kind(head_tree.as_mut(), path)?;
+    let old_kind = plain_git_old_side_kind(head_tree.as_ref(), path);
     if is_type_change(old_kind, new_kind) {
         out.push(plain_git_file_change(
             git_repo,
-            head_tree.as_mut(),
+            head_tree.as_ref(),
             root,
             path,
             "deleted",
@@ -820,7 +842,7 @@ fn push_plain_git_modified(
         if new_kind != SideKind::Dir {
             out.push(plain_git_file_change(
                 git_repo,
-                head_tree.as_mut(),
+                head_tree.as_ref(),
                 root,
                 path,
                 "added",
@@ -831,7 +853,7 @@ fn push_plain_git_modified(
     } else {
         out.push(plain_git_file_change(
             git_repo,
-            head_tree.as_mut(),
+            head_tree.as_ref(),
             root,
             path,
             "modified",

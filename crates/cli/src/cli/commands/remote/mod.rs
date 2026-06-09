@@ -38,7 +38,7 @@ use crate::{
 mod remote_ops;
 
 pub use remote_ops::{cmd_pull, cmd_remote};
-pub(crate) use remote_ops::{
+pub(crate) use remote_ops::{git_config_remotes,
     resolve_default_remote_name, resolved_default_remote_name,
 };
 
@@ -763,27 +763,19 @@ fn refresh_git_tracking_after_overlay_push(
     if branch.is_empty() {
         return Ok(None);
     }
-    let git = match gix::discover(repo.root()) {
+    let git = match git_substrate::GitRepo::discover(repo.root()) {
         Ok(git) => git,
         Err(_) => return Ok(None),
     };
-    let Ok(head) = git.head_id() else {
+    let Some(head) = git.head_commit_oid_or_none()? else {
         return Ok(None);
     };
-    let head = head.detach();
     let Some(tracking_remote) = resolve_git_tracking_remote_name(repo, remote_name)? else {
         return Ok(None);
     };
 
     let upstream = git
-        .find_reference(format!("refs/heads/{branch}").as_str())
-        .ok()
-        .and_then(|local| {
-            local
-                .remote_tracking_ref_name(gix::remote::Direction::Fetch)?
-                .ok()
-                .map(|name| name.as_ref().as_bstr().to_str_lossy().into_owned())
-        })
+        .upstream_tracking_ref(&branch)?
         .and_then(|name| name.strip_prefix("refs/remotes/").map(str::to_string))
         .unwrap_or_else(|| format!("{}/{branch}", tracking_remote.name));
 
@@ -804,7 +796,7 @@ fn refresh_git_tracking_after_overlay_push(
     if let Err(error) = set_reference(
         &git,
         &full_ref,
-        head,
+        &head,
         PreviousValue::Any,
         &format!("heddle: push to {remote_name}"),
     ) {
@@ -887,21 +879,8 @@ fn resolve_git_tracking_remote_name(
 }
 
 fn git_remote_name_for_url(root: &Path, requested: &str) -> Result<Option<String>> {
-    for name in git_remote_names(root)? {
-        let git = match gix::discover(root) {
-            Ok(git) => git,
-            Err(_) => return Ok(None),
-        };
-        let Some(remote) = git
-            .try_find_remote(name.as_bytes().as_bstr())
-            .and_then(Result::ok)
-        else {
-            continue;
-        };
-        let Some(url) = remote.url(gix::remote::Direction::Push) else {
-            continue;
-        };
-        if remote_urls_match(&url.to_string(), requested) {
+    for (name, url) in remote_ops::git_config_remotes(root) {
+        if remote_urls_match(&url, requested) {
             return Ok(Some(name));
         }
     }
@@ -909,16 +888,11 @@ fn git_remote_name_for_url(root: &Path, requested: &str) -> Result<Option<String
 }
 
 fn git_remote_names(root: &Path) -> Result<Vec<String>> {
-    let git = match gix::discover(root) {
+    let git = match git_substrate::GitRepo::discover(root) {
         Ok(git) => git,
         Err(_) => return Ok(Vec::new()),
     };
-    Ok(git
-        .remote_names()
-        .into_iter()
-        .map(|name| name.to_str_lossy().into_owned())
-        .filter(|name| !name.is_empty())
-        .collect())
+    git.remote_names().map_err(anyhow::Error::msg)
 }
 
 fn git_remote_ref_name_is_valid(_root: &Path, name: &str) -> Result<bool> {
@@ -926,7 +900,7 @@ fn git_remote_ref_name_is_valid(_root: &Path, name: &str) -> Result<bool> {
         return Ok(false);
     }
     let refname = format!("refs/remotes/{name}/HEAD");
-    Ok(gix::refs::FullName::try_from(refname.as_str()).is_ok())
+    Ok(git_substrate::ref_name_is_valid(&refname))
 }
 
 fn write_git_overlay_branch_upstream(root: &Path, branch: &str, remote: &str) -> Result<()> {

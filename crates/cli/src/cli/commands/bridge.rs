@@ -312,7 +312,7 @@ fn exported_refs_summary(refs: &[ExportedRef]) -> String {
             format!(
                 "{} {}",
                 r.name,
-                style::dim(&r.tip.to_hex_with_len(7).to_string())
+                style::dim(&git_substrate::short_hex(&r.tip, 7))
             )
         })
         .collect::<Vec<_>>()
@@ -505,7 +505,7 @@ fn render_bridge_git_import(
     }
     if output.partial_mirror_refs > 0 {
         println!(
-            "{} partial mirror for {} refs; SHA-stable export degraded",
+            "{} partial mirror for {} refs (legacy; import no longer populates mirror)",
             style::warn_marker(),
             style::bold(&output.partial_mirror_refs.to_string())
         );

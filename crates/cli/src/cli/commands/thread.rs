@@ -1419,12 +1419,10 @@ pub(crate) fn thread_is_available_git_ref(entry: &ThreadSummary) -> bool {
 }
 
 fn remote_tracking_local_ref(repo: &Repository, thread_name: &str) -> Option<String> {
-    let git = gix::discover(repo.root()).ok()?;
-    let remotes = git
+    let remotes = git_substrate::GitRepo::discover(repo.root())
+        .ok()?
         .remote_names()
-        .into_iter()
-        .map(|name| name.to_str_lossy().into_owned())
-        .collect::<Vec<_>>();
+        .ok()?;
     remotes
         .iter()
         .find_map(|remote| thread_name.strip_prefix(&format!("{remote}/")))

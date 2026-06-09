@@ -15,45 +15,27 @@
 //! first-class content-addressed objects; lightweight tags need no object (just
 //! a ref at the commit).
 
-use gix::hash::ObjectId;
-use objects::object::{Principal, State};
+use git_substrate::{append_labeled_actor_line, GitRepo, ObjectId};
+use objects::object::State;
 use objects::store::ObjectStore;
 use repo::Repository as HeddleRepository;
 
-use crate::bridge::git_core::{GitBridge, GitBridgeError, GitResult, SyncMapping, git_err};
-use crate::bridge::git_export::export_tree;
+use crate::bridge::git_core::{git_err, GitBridge, GitBridgeError, GitResult, SyncMapping};
+use crate::bridge::git_export::export_tree_repo;
 
-/// Frame an object's content for hashing per spike §0:
-/// `<kind> <ascii-decimal-len>\0<content>`. A git object's id is the SHA-1 of
-/// THIS buffer — never of the bare content (`git cat-file` strips the framing).
-/// `<len>` is the byte length of `content` (after all folding/newlines), with no
-/// leading zeros.
-pub fn frame_git_object(kind: &str, content: &[u8]) -> Vec<u8> {
-    let mut framed = Vec::with_capacity(kind.len() + 2 + 20 + content.len());
-    framed.extend_from_slice(kind.as_bytes());
-    framed.push(b' ');
-    framed.extend_from_slice(content.len().to_string().as_bytes());
-    framed.push(0);
-    framed.extend_from_slice(content);
-    framed
-}
+pub use git_substrate::frame_git_object;
 
 /// The git object id (SHA-1) of a commit whose reconstructed content bytes are
 /// `content`: frame per §0, then hash. Equals the original commit SHA exactly
 /// when `content` is byte-identical to the original object.
 pub fn commit_object_id(content: &[u8]) -> ObjectId {
-    let framed = frame_git_object("commit", content);
-    let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
-    hasher.update(&framed);
-    hasher
-        .try_finalize()
-        .expect("SHA-1 over an in-memory buffer cannot fail")
+    git_substrate::commit_object_id(content).expect("SHA-1 over an in-memory buffer cannot fail")
 }
 
 /// Reconstruct the byte-exact git commit object **content** (the bytes
 /// `git cat-file commit` prints, WITHOUT the §0 framing) for `state`.
 ///
-/// `repo` is any writable gix repo: the git tree OID is resolved by re-exporting
+/// `repo` is any writable git repo: the git tree OID is resolved by re-exporting
 /// `state.tree` through [`export_tree`] (git trees are content-addressed, so the
 /// resulting OID is independent of which repo it is written into — the round-trip
 /// fidelity gate proves this path reproduces the original tree SHA). Parent OIDs
@@ -61,11 +43,11 @@ pub fn commit_object_id(content: &[u8]) -> ObjectId {
 /// `state.parents` order — order is part of a commit's identity (§1.2).
 pub fn reconstruct_commit_bytes(
     heddle_repo: &HeddleRepository,
-    repo: &gix::Repository,
+    repo: &GitRepo,
     mapping: &SyncMapping,
     state: &State,
 ) -> GitResult<Vec<u8>> {
-    let tree_oid = export_tree(heddle_repo, repo, &state.tree)?;
+    let tree_oid = export_tree_repo(heddle_repo, repo, &state.tree)?;
     let parent_oids = state
         .parents
         .iter()
@@ -86,13 +68,11 @@ pub fn reconstruct_commit_bytes(
 /// This is the write side of export-from-state (#567): export regenerates each
 /// commit object from Heddle state and writes it here, rather than relying on the
 /// git mirror still holding the verbatim imported bytes — the dependency #568
-/// removes. Idempotent: `gix`'s `write_buf` hashes first and no-ops when the
-/// object already exists, so re-writing a commit the mirror already carries (the
+/// removes. Idempotent: the sley loose-object sink no-ops when the object
+/// already exists, so re-writing a commit the mirror already carries (the
 /// common case today) costs nothing.
-pub fn write_commit_object(repo: &gix::Repository, content: &[u8]) -> GitResult<ObjectId> {
-    use gix::objs::Write;
-    repo.write_buf(gix::objs::Kind::Commit, content)
-        .map_err(git_err)
+pub fn write_commit_object(repo: &GitRepo, content: &[u8]) -> GitResult<ObjectId> {
+    repo.write_commit_content(content).map_err(git_err)
 }
 
 /// Assemble the commit content bytes from already-resolved OIDs. Pure (no repo,
@@ -119,10 +99,12 @@ fn build_commit_content(state: &State, tree_oid: &ObjectId, parent_oids: &[Objec
     // Principal (author fallback when absent) + `created_at` + `committer_tz_offset`
     // — NOT a hardcoded `+0000`.
     let author_seconds = state.authored_at.unwrap_or(state.created_at).timestamp();
-    write_actor_line(
+    let principal = &state.attribution.principal;
+    append_labeled_actor_line(
         &mut out,
         b"author",
-        &state.attribution.principal,
+        principal.name.as_bytes(),
+        principal.email.as_bytes(),
         author_seconds,
         state.authored_tz_offset,
     );
@@ -130,10 +112,11 @@ fn build_commit_content(state: &State, tree_oid: &ObjectId, parent_oids: &[Objec
         .committer
         .as_ref()
         .unwrap_or(&state.attribution.principal);
-    write_actor_line(
+    append_labeled_actor_line(
         &mut out,
         b"committer",
-        committer,
+        committer.name.as_bytes(),
+        committer.email.as_bytes(),
         state.created_at.timestamp(),
         state.committer_tz_offset,
     );
@@ -163,36 +146,6 @@ fn build_commit_content(state: &State, tree_oid: &ObjectId, parent_oids: &[Objec
     out
 }
 
-/// `<label> <name> <<email>> <unix-seconds> <±HHMM>\n` (§5).
-fn write_actor_line(
-    out: &mut Vec<u8>,
-    label: &[u8],
-    who: &Principal,
-    seconds: i64,
-    tz_offset_secs: i32,
-) {
-    out.extend_from_slice(label);
-    out.push(b' ');
-    out.extend_from_slice(who.name.as_bytes());
-    out.extend_from_slice(b" <");
-    out.extend_from_slice(who.email.as_bytes());
-    out.extend_from_slice(b"> ");
-    out.extend_from_slice(seconds.to_string().as_bytes());
-    out.push(b' ');
-    out.extend_from_slice(format_tz_offset(tz_offset_secs).as_bytes());
-    out.push(b'\n');
-}
-
-/// Render a timezone offset — stored as **seconds** east of UTC (#565's `i32`
-/// unit; gix `Time::offset` is seconds) — as git's `±HHMM` (§5). The sign is
-/// always present; zero is `+0000` (git never emits `-0000` for a real commit);
-/// odd offsets like `-0830` / `+1245` survive verbatim.
-fn format_tz_offset(offset_secs: i32) -> String {
-    let sign = if offset_secs < 0 { '-' } else { '+' };
-    let minutes = offset_secs.unsigned_abs() / 60;
-    format!("{sign}{:02}{:02}", minutes / 60, minutes % 60)
-}
-
 /// Fold a stored (unfolded) extension-header value onto the wire (§2): each
 /// internal `\n` becomes `\n ` (newline + one continuation space). A value with
 /// an internal blank line folds to a line containing exactly one space — never a
@@ -215,7 +168,7 @@ impl GitBridge<'_> {
     /// Open (initializing if necessary) a writable gix repo suitable for
     /// reconstruction's tree-OID resolution. Any writable odb works — git trees
     /// are content-addressed — so the bridge's own mirror is reused.
-    pub fn reconstruction_repo(&mut self) -> GitResult<gix::Repository> {
+    pub fn reconstruction_repo(&mut self) -> GitResult<GitRepo> {
         self.init_mirror()?;
         self.open_git_repo()
     }
@@ -225,7 +178,7 @@ impl GitBridge<'_> {
     /// parent OIDs.
     pub fn reconstruct_commit_bytes(
         &self,
-        repo: &gix::Repository,
+        repo: &GitRepo,
         state: &State,
     ) -> GitResult<Vec<u8>> {
         reconstruct_commit_bytes(self.heddle_repo, repo, &self.mapping, state)
@@ -238,10 +191,10 @@ impl GitBridge<'_> {
     /// the verbatim bytes.
     pub fn reconstruct_and_write_commit(
         &self,
-        repo: &gix::Repository,
+        repo: &GitRepo,
         state: &State,
     ) -> GitResult<ObjectId> {
-        let content = self.reconstruct_commit_bytes(repo, state)?;
+        let content = reconstruct_commit_bytes(self.heddle_repo, repo, &self.mapping, state)?;
         write_commit_object(repo, &content)
     }
 
@@ -251,11 +204,11 @@ impl GitBridge<'_> {
     /// reconstruction of each original commit against its captured golden bytes.
     pub fn reconstruct_commit_for_git_sha(
         &self,
-        repo: &gix::Repository,
+        repo: &GitRepo,
         sha: &str,
     ) -> GitResult<Option<Vec<u8>>> {
-        let oid = ObjectId::from_hex(sha.as_bytes()).map_err(git_err)?;
-        let Some(change_id) = self.mapping.get_heddle(oid) else {
+        let oid = git_substrate::parse_sha1_hex(sha).map_err(git_err)?;
+        let Some(change_id) = self.mapping.get_heddle(&oid) else {
             return Ok(None);
         };
         let Some(state) = self.heddle_repo.store().get_state(&change_id)? else {
@@ -263,7 +216,7 @@ impl GitBridge<'_> {
         };
         Ok(Some(reconstruct_commit_bytes(
             self.heddle_repo,
-            repo,
+            &repo,
             &self.mapping,
             &state,
         )?))
@@ -278,17 +231,20 @@ impl GitBridge<'_> {
     /// copied from the mirror.
     pub fn reconstruct_and_write_commit_for_git_sha(
         &self,
-        repo: &gix::Repository,
+        repo: &GitRepo,
         sha: &str,
     ) -> GitResult<Option<ObjectId>> {
-        let oid = ObjectId::from_hex(sha.as_bytes()).map_err(git_err)?;
-        let Some(change_id) = self.mapping.get_heddle(oid) else {
+        let oid = git_substrate::parse_sha1_hex(sha).map_err(git_err)?;
+        let Some(change_id) = self.mapping.get_heddle(&oid) else {
             return Ok(None);
         };
         let Some(state) = self.heddle_repo.store().get_state(&change_id)? else {
             return Ok(None);
         };
-        Ok(Some(self.reconstruct_and_write_commit(repo, &state)?))
+        Ok(Some(write_commit_object(
+            &repo,
+            &reconstruct_commit_bytes(self.heddle_repo, &repo, &self.mapping, &state)?,
+        )?))
     }
 }
 
@@ -296,17 +252,6 @@ impl GitBridge<'_> {
 mod tests {
     use super::*;
     use objects::object::parse_commit_extension_headers;
-
-    #[test]
-    fn tz_offset_renders_sign_hours_minutes() {
-        assert_eq!(format_tz_offset(0), "+0000");
-        assert_eq!(format_tz_offset(2 * 3600), "+0200");
-        assert_eq!(format_tz_offset(-8 * 3600), "-0800");
-        // Odd, sub-hour offsets survive verbatim (§5).
-        assert_eq!(format_tz_offset(-(8 * 3600 + 30 * 60)), "-0830");
-        assert_eq!(format_tz_offset(12 * 3600 + 45 * 60), "+1245");
-        assert_eq!(format_tz_offset(5 * 3600 + 30 * 60), "+0530");
-    }
 
     #[test]
     fn frame_prepends_kind_len_nul() {

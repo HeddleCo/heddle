@@ -4,6 +4,7 @@
 use objects::store::ObjectStore;
 use std::{collections::HashSet, path::Path};
 
+use git_substrate::{GitRepo, ObjectId, ObjectKind, RefTarget};
 use chrono::{TimeZone, Utc};
 use objects::object::{
     Agent, Attribution, ChangeId, MarkerName, Principal, State, Status, ThreadName,
@@ -17,33 +18,22 @@ pub use super::git_import_tree::{GitTreeImporter, import_git_tree};
 use super::git_import_tree::{PackImportSink, fail_lossy_entry};
 use crate::bridge::{
     git_core::{
-        GitBridge, GitBridgeError, GitResult, RefNamespace, RefUpdate, SyncMapping,
-        apply_ref_updates, copy_reachable_objects, git_err, open_repo, parse_git_ref,
-        thread_is_unclaimed_bootstrap,
+        GitBridge, GitBridgeError, GitResult, RefNamespace, SyncMapping, git_err,
+        open_git_repo_at, parse_git_ref, thread_is_unclaimed_bootstrap,
     },
     git_notes,
-    git_util::{GitImportOptions, ImportStats, PartialMirrorRef, SkippedRef},
+    git_util::{GitImportOptions, ImportStats, SkippedRef},
 };
 
-/// One source ref the import will consider, with both its immediate target
-/// (the OID stored on disk for that ref — for annotated tags this is the
-/// tag *object* OID) and the peeled commit OID we use to walk ancestry.
-///
-/// Keeping both is what lets the bridge round-trip annotated tags as actual
-/// tag objects: we copy the tag object into the mirror and write the
-/// mirror's ref pointing at it, and later `sync_marker_to_tag`'s
-/// already-exists check sees the existing ref peel to the right commit and
-/// preserves the annotated form unchanged.
+/// One source ref the import will consider and the peeled commit OID used
+/// to walk ancestry. Annotated tag *object* SHA preservation on export is
+/// deferred to #575; until then export syncs markers as lightweight tags
+/// at the peeled commit.
 struct RefPlan {
     short_name: String,
     namespace: RefNamespace,
-    /// The OID the source ref points at directly. For lightweight tags
-    /// and branches this is a commit; for annotated tags it's a tag
-    /// object that wraps a commit.
-    immediate_oid: gix::hash::ObjectId,
-    /// The commit reachable by peeling `immediate_oid` through any tag
-    /// chain. Used as a tip for ancestry walking.
-    peeled_commit_oid: gix::hash::ObjectId,
+    /// The commit reachable by peeling the source ref through any tag chain.
+    peeled_commit_oid: ObjectId,
 }
 
 /// Peel `reference` to its final OID and confirm the OID is a commit. If
@@ -58,41 +48,34 @@ struct RefPlan {
 /// this guard prevents the import from crashing on the very common
 /// "tag-points-at-non-commit-blob" pattern in mature OSS repos.
 fn peel_to_commit_oid(
-    repo: &gix::Repository,
-    reference: &mut gix::Reference,
-) -> GitResult<Result<gix::hash::ObjectId, gix::objs::Kind>> {
-    let oid = reference.peel_to_id().map_err(git_err)?.detach();
-    let object = repo.find_object(oid).map_err(git_err)?;
-    if object.kind == gix::objs::Kind::Commit {
-        Ok(Ok(oid))
-    } else {
-        Ok(Err(object.kind))
+    repo: &GitRepo,
+    ref_name: &str,
+) -> GitResult<Result<ObjectId, ObjectKind>> {
+    match repo.peel_reference_to_commit(ref_name).map_err(git_err)? {
+        Ok(oid) => Ok(Ok(oid)),
+        Err(kind) => Ok(Err(kind)),
     }
 }
 
 fn remote_tracking_ref_suggestions(
-    repo: &gix::Repository,
+    repo: &GitRepo,
     missing: &[String],
 ) -> GitResult<Vec<String>> {
     let missing = missing.iter().map(String::as_str).collect::<HashSet<_>>();
     let mut suggestions = Vec::new();
 
-    for reference in repo
-        .references()
-        .map_err(git_err)?
-        .prefixed("refs/remotes/")
-        .map_err(git_err)?
-    {
-        let mut reference = reference.map_err(git_err)?;
-        let Some(_) = reference.target().try_id() else {
+    for reference in repo.list_refs().map_err(git_err)? {
+        let RefTarget::Direct(_) = reference.target else {
             continue;
         };
-        let full = reference.name().as_bstr().to_string();
-        let short = reference.name().shorten().to_string();
-        if short.ends_with("/HEAD") {
+        let full = reference.name;
+        let Some(short) = full.strip_prefix("refs/remotes/") else {
+            continue;
+        };
+        if short.ends_with("/HEAD") || short.is_empty() {
             continue;
         }
-        if peel_to_commit_oid(repo, &mut reference)?.is_err() {
+        if peel_to_commit_oid(repo, &full)?.is_err() {
             continue;
         }
         let Some(parsed) = parse_git_ref(&full) else {
@@ -124,21 +107,22 @@ fn remote_tracking_ref_suggestions(
 ///      which is what we want.
 fn resolve_identity(
     mapping: &SyncMapping,
-    repo: &gix::Repository,
-    git_oid: gix::hash::ObjectId,
+    git_dir: &Path,
+    git_oid: ObjectId,
     trailers: &std::collections::HashMap<String, String>,
 ) -> GitResult<(ChangeId, Option<git_notes::HeddleNote>)> {
-    if let Some(existing) = mapping.get_heddle(git_oid) {
+    if let Some(existing) = mapping.get_heddle(&git_oid) {
         return Ok((existing, None));
     }
-    if let Some(note) = git_notes::read_note(repo, git_oid)? {
+    let note_repo = GitRepo::open(git_dir).map_err(git_err)?;
+    if let Some(note) = git_notes::read_note(&note_repo, &git_oid)? {
         let change_id = ChangeId::parse(&note.change_id)?;
         return Ok((change_id, Some(note)));
     }
     if let Some(id_str) = trailers.get(GitBridge::TRAILER_CHANGE_ID) {
         return Ok((ChangeId::parse(id_str)?, None));
     }
-    let oid_hex = git_oid.to_hex_with_len(40).to_string();
+    let oid_hex = git_oid.to_hex();
     let bytes = hex::decode(&oid_hex[..32])
         .map_err(|err| GitBridgeError::InvalidMapping(err.to_string()))?;
     let mut change_id_bytes = [0u8; 16];
@@ -150,63 +134,152 @@ fn resolve_identity(
 /// as raw bytes so non-UTF8 header values survive. ORDER IS LOAD-BEARING for
 /// #566 byte-exactness.
 ///
-/// Built straight from the raw commit object bytes (`commit.data`) via
+/// Built straight from the raw commit object bytes via
 /// [`parse_commit_extension_headers`] so `encoding` / `gpgsig` / `mergetag` /
 /// any unknown header all land at their TRUE captured position through one code
-/// path. We deliberately do NOT stitch the vec from gix's typed accessors
-/// (`CommitRef::encoding`, …): gix surfaces some headers as typed fields outside
-/// `extra_headers`, and re-inserting them by hand reorders them — the close-the-
-/// class bug this replaces. The raw header block is the source of truth.
-/// #564 de-lossy step 1.
-fn collect_extra_headers(commit: &gix::Commit<'_>) -> GitResult<Vec<(Vec<u8>, Vec<u8>)>> {
-    Ok(parse_commit_extension_headers(&commit.data))
+/// path. The raw header block is the source of truth. #564 de-lossy step 1.
+fn collect_extra_headers(commit_content: &[u8]) -> GitResult<Vec<(Vec<u8>, Vec<u8>)>> {
+    Ok(parse_commit_extension_headers(commit_content))
+}
+
+pub(crate) struct ParsedCommitContent {
+    pub(crate) tree: ObjectId,
+    pub(crate) parents: Vec<ObjectId>,
+    pub(crate) author: Vec<u8>,
+    pub(crate) committer: Vec<u8>,
+    pub(crate) message: Vec<u8>,
+}
+
+/// Parse commit object content from raw bytes without requiring UTF-8 headers.
+pub(crate) fn parse_commit_content(content: &[u8]) -> GitResult<ParsedCommitContent> {
+    let split = content
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .ok_or_else(|| GitBridgeError::Git("commit missing message separator".into()))?;
+    let header_block = &content[..split];
+    let message = content[split + 2..].to_vec();
+
+    let mut tree = None;
+    let mut parents = Vec::new();
+    let mut author = None;
+    let mut committer = None;
+    for line in header_block.split(|&b| b == b'\n') {
+        if let Some(value) = line.strip_prefix(b"tree ") {
+            tree = Some(
+                git_substrate::parse_sha1_hex(std::str::from_utf8(value).map_err(|e| {
+                    GitBridgeError::Git(format!("commit tree line: {e}"))
+                })?)
+                .map_err(git_err)?,
+            );
+        } else if let Some(value) = line.strip_prefix(b"parent ") {
+            parents.push(
+                git_substrate::parse_sha1_hex(std::str::from_utf8(value).map_err(|e| {
+                    GitBridgeError::Git(format!("commit parent line: {e}"))
+                })?)
+                .map_err(git_err)?,
+            );
+        } else if let Some(value) = line.strip_prefix(b"author ") {
+            author = Some(value.to_vec());
+        } else if let Some(value) = line.strip_prefix(b"committer ") {
+            committer = Some(value.to_vec());
+        }
+    }
+
+    Ok(ParsedCommitContent {
+        tree: tree.ok_or_else(|| GitBridgeError::Git("commit missing tree".into()))?,
+        parents,
+        author: author.ok_or_else(|| GitBridgeError::Git("commit missing author".into()))?,
+        committer: committer.ok_or_else(|| GitBridgeError::Git("commit missing committer".into()))?,
+        message,
+    })
+}
+
+fn parse_actor_suffix(actor: &[u8]) -> GitResult<(String, String, i64, i32)> {
+    let text = String::from_utf8_lossy(actor);
+    let (before_tz, tz_part) = text
+        .rsplit_once(' ')
+        .ok_or_else(|| GitBridgeError::Git("actor missing timezone".into()))?;
+    let (identity, seconds_text) = before_tz
+        .rsplit_once(' ')
+        .ok_or_else(|| GitBridgeError::Git("actor missing timestamp".into()))?;
+    let seconds: i64 = seconds_text
+        .parse()
+        .map_err(|e| GitBridgeError::Git(format!("actor timestamp: {e}")))?;
+    let tz_offset = parse_tz_offset(tz_part)?;
+    let (name, email) = parse_name_email(identity)?;
+    Ok((name, email, seconds, tz_offset))
+}
+
+fn parse_tz_offset(text: &str) -> GitResult<i32> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 5 {
+        return Err(GitBridgeError::Git(format!("invalid tz offset: {text}")));
+    }
+    let sign = match bytes[0] {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return Err(GitBridgeError::Git(format!("invalid tz offset: {text}"))),
+    };
+    let hours: i32 = text[1..3]
+        .parse()
+        .map_err(|e| GitBridgeError::Git(format!("invalid tz offset hours: {e}")))?;
+    let minutes: i32 = text[3..5]
+        .parse()
+        .map_err(|e| GitBridgeError::Git(format!("invalid tz offset minutes: {e}")))?;
+    Ok(sign * (hours * 3600 + minutes * 60))
+}
+
+fn parse_name_email(identity: &str) -> GitResult<(String, String)> {
+    let Some((name, email)) = identity.split_once(" <") else {
+        return Err(GitBridgeError::Git(format!(
+            "invalid actor identity: {identity}"
+        )));
+    };
+    let Some(email) = email.strip_suffix('>') else {
+        return Err(GitBridgeError::Git(format!(
+            "invalid actor identity: {identity}"
+        )));
+    };
+    Ok((name.to_string(), email.to_string()))
 }
 
 /// Import a single Git commit as a Heddle state.
 pub fn import_commit(
     mapping: &mut SyncMapping,
-    repo: &gix::Repository,
+    repo: &GitRepo,
     tree_importer: &mut GitTreeImporter<'_>,
-    git_oid: gix::hash::ObjectId,
+    git_oid: ObjectId,
 ) -> GitResult<ChangeId> {
-    let commit = repo.find_commit(git_oid).map_err(git_err)?;
+    let commit_content = repo.read_commit_content(&git_oid).map_err(git_err)?;
+    let parsed = parse_commit_content(&commit_content)?;
     // Capture the raw message bytes verbatim for byte-exact reconstruction
     // (#566): a non-UTF8 message (latin-1, shift-jis, …) must survive intact,
     // so store bytes, not a String. A lossy String view is derived only for
     // trailer / intent parsing, which inspect the (ASCII) footer lines.
-    let message_bytes = commit.message_raw_sloppy().to_vec();
+    let message_bytes = parsed.message;
     let message = String::from_utf8_lossy(&message_bytes).into_owned();
-    let author = commit.author().map_err(git_err)?;
-    let author_name = author.name.to_string();
-    let author_email = author.email.to_string();
-    let author_time = author.time().map_err(git_err)?;
-    let authored_seconds = author_time.seconds;
-    let authored_tz_offset = author_time.offset;
+    let (author_name, author_email, authored_seconds, authored_tz_offset) =
+        parse_actor_suffix(&parsed.author)?;
     // #565: also capture the committer identity + time. Git records both an
     // author (who wrote the change) and a committer (who created this commit
     // object); the two differ for rebased / cherry-picked / amended commits.
-    let committer = commit.committer().map_err(git_err)?;
-    let committer_name = committer.name.to_string();
-    let committer_email = committer.email.to_string();
-    let committer_time = committer.time().map_err(git_err)?;
-    let committed_seconds = committer_time.seconds;
-    let committer_tz_offset = committer_time.offset;
+    let (committer_name, committer_email, committed_seconds, committer_tz_offset) =
+        parse_actor_suffix(&parsed.committer)?;
     // #565: capture all extension headers in true wire order (encoding /
     // gpgsig / mergetag / unknown all at their captured position) so the commit
     // is byte-reconstructable later (#566) without the git mirror (#568).
-    let extra_headers = collect_extra_headers(&commit)?;
-    let tree_id = commit.tree_id().map_err(git_err)?.detach();
-    let parent_git_oids: Vec<gix::hash::ObjectId> =
-        commit.parent_ids().map(|id| id.detach()).collect();
+    let extra_headers = collect_extra_headers(&commit_content)?;
+    let tree_id = parsed.tree;
+    let parent_git_oids = parsed.parents;
 
     let trailers = GitBridge::parse_trailers(&message);
-    let (change_id, note) = resolve_identity(mapping, repo, git_oid, &trailers)?;
+    let (change_id, note) = resolve_identity(mapping, repo.git_dir(), git_oid, &trailers)?;
 
     let parent_oids: Vec<ChangeId> = parent_git_oids
         .iter()
         .map(|parent_oid| {
             mapping
-                .get_heddle(*parent_oid)
+                .get_heddle(parent_oid)
                 .ok_or_else(|| GitBridgeError::CommitNotFound(parent_oid.to_string()))
         })
         .collect::<GitResult<Vec<_>>>()?;
@@ -379,7 +452,7 @@ fn import_with_ref_filter(
     progress: Option<&mut dyn FnMut(usize)>,
 ) -> GitResult<ImportStats> {
     let repo = if let Some(path) = git_path {
-        open_repo(path)?
+        open_git_repo_at(path)?
     } else {
         bridge.open_git_repo()?
     };
@@ -387,8 +460,7 @@ fn import_with_ref_filter(
         return Err(GitBridgeError::ShallowClone {
             repository: repo
                 .workdir()
-                .unwrap_or_else(|| repo.git_dir())
-                .to_path_buf(),
+                .unwrap_or_else(|| repo.git_dir().to_path_buf()),
             retry_command: shallow_import_retry_command(wanted_refs),
         });
     }
@@ -400,118 +472,51 @@ fn import_with_ref_filter(
     // immediate target (annotated-tag-aware) and the peeled commit (for
     // ancestry walking). Non-commit-pointing refs are recorded in
     // `skipped_non_commit_refs` and excluded from the plan list.
-    for reference in repo
-        .references()
-        .map_err(git_err)?
-        .local_branches()
-        .map_err(git_err)?
-    {
-        let mut reference = reference.map_err(git_err)?;
-        let short = reference.name().shorten().to_string();
-        if wanted_refs.is_some_and(|wanted| !wanted.contains(&short)) {
+    for reference in repo.list_refs().map_err(git_err)? {
+        let RefTarget::Direct(immediate) = reference.target else {
             continue;
-        }
-        let immediate = match reference.target().try_id() {
-            Some(id) => id.to_owned(),
-            None => continue, // symbolic ref (e.g. HEAD) — not a real ref to import
         };
-        match peel_to_commit_oid(&repo, &mut reference)? {
-            Ok(commit_oid) => plans.push(RefPlan {
-                short_name: short,
-                namespace: RefNamespace::Branch,
-                immediate_oid: immediate,
-                peeled_commit_oid: commit_oid,
-            }),
-            Err(kind) => {
-                // A *branch* pointing at a non-commit is exceedingly rare
-                // and strongly suggests upstream corruption. Record + skip.
-                warn!(
-                    "skipping local branch {} -> {} (not a commit, kind={:?})",
-                    short, immediate, kind
-                );
-                stats.skipped_non_commit_refs.push(SkippedRef {
-                    name: format!("refs/heads/{short}"),
-                    peeled_oid: immediate.to_string(),
-                    peeled_kind: format!("{kind:?}"),
-                });
-            }
-        }
-    }
-    if wanted_refs.is_some() {
-        for reference in repo
-            .references()
-            .map_err(git_err)?
-            .prefixed("refs/remotes/")
-            .map_err(git_err)?
-        {
-            let mut reference = reference.map_err(git_err)?;
-            let short = reference.name().shorten().to_string();
-            if short.ends_with("/HEAD") {
-                continue;
-            }
-            if wanted_refs.is_some_and(|wanted| !wanted.contains(&short)) {
-                continue;
-            }
-            let immediate = match reference.target().try_id() {
-                Some(id) => id.to_owned(),
-                None => continue,
-            };
-            match peel_to_commit_oid(&repo, &mut reference)? {
-                Ok(commit_oid) => plans.push(RefPlan {
-                    short_name: short,
-                    namespace: RefNamespace::Branch,
-                    immediate_oid: immediate,
-                    peeled_commit_oid: commit_oid,
-                }),
-                Err(kind) => {
-                    warn!(
-                        "skipping remote-tracking branch {} -> {} (not a commit, kind={:?})",
-                        short, immediate, kind
-                    );
-                    stats.skipped_non_commit_refs.push(SkippedRef {
-                        name: format!("refs/remotes/{short}"),
-                        peeled_oid: immediate.to_string(),
-                        peeled_kind: format!("{kind:?}"),
-                    });
+        let (namespace, short, full_name) =
+            if let Some(short) = reference.name.strip_prefix("refs/heads/") {
+                (RefNamespace::Branch, short.to_string(), reference.name.clone())
+            } else if let Some(short) = reference.name.strip_prefix("refs/tags/") {
+                (RefNamespace::Tag, short.to_string(), reference.name.clone())
+            } else if wanted_refs.is_some()
+                && let Some(short) = reference.name.strip_prefix("refs/remotes/")
+            {
+                if short.ends_with("/HEAD") || short.is_empty() {
+                    continue;
                 }
-            }
-        }
-    }
-    for reference in repo
-        .references()
-        .map_err(git_err)?
-        .tags()
-        .map_err(git_err)?
-    {
-        let mut reference = reference.map_err(git_err)?;
-        let short = reference.name().shorten().to_string();
+                (RefNamespace::Branch, short.to_string(), reference.name.clone())
+            } else {
+                continue;
+            };
         if wanted_refs.is_some_and(|wanted| !wanted.contains(&short)) {
             continue;
         }
-        let immediate = match reference.target().try_id() {
-            Some(id) => id.to_owned(),
-            None => continue,
-        };
-        match peel_to_commit_oid(&repo, &mut reference)? {
+        match peel_to_commit_oid(&repo, &full_name)? {
             Ok(commit_oid) => plans.push(RefPlan {
                 short_name: short,
-                namespace: RefNamespace::Tag,
-                immediate_oid: immediate,
+                namespace,
                 peeled_commit_oid: commit_oid,
             }),
             Err(kind) => {
-                // A tag pointing at a non-commit IS a real-world pattern
-                // (junio-gpg-pub, core-gpg-keys, etc.). Skip with a
-                // record so we don't lose track that this ref existed
-                // upstream.
-                warn!(
-                    "skipping tag {} -> {} (not a commit, kind={:?}); \
-                     non-commit-pointing tags are not yet representable in heddle's \
-                     marker model",
-                    short, immediate, kind
-                );
+                let message = match namespace {
+                    RefNamespace::Branch if full_name.starts_with("refs/remotes/") => format!(
+                        "skipping remote-tracking branch {short} -> {immediate} (not a commit, kind={kind:?})"
+                    ),
+                    RefNamespace::Branch => format!(
+                        "skipping local branch {short} -> {immediate} (not a commit, kind={kind:?})"
+                    ),
+                    RefNamespace::Tag => format!(
+                        "skipping tag {short} -> {immediate} (not a commit, kind={kind:?}); \
+                         non-commit-pointing tags are not yet representable in heddle's marker model"
+                    ),
+                    RefNamespace::Note => continue,
+                };
+                warn!("{message}");
                 stats.skipped_non_commit_refs.push(SkippedRef {
-                    name: format!("refs/tags/{short}"),
+                    name: full_name,
                     peeled_oid: immediate.to_string(),
                     peeled_kind: format!("{kind:?}"),
                 });
@@ -544,93 +549,16 @@ fn import_with_ref_filter(
         }
     }
 
-    // Populate the bridge mirror with the source's reachable objects AND
-    // its refs verbatim (when we're importing from an external path
-    // rather than the mirror itself).
-    //
-    // Mirror population enables two things downstream:
-    //   1. **SHA-stable export**: `bridge export --destination Y`
-    //      copies the original commit bytes verbatim from the mirror,
-    //      so destination commits keep their original SHAs.
-    //   2. **Annotated tag preservation**: writing the source ref into
-    //      the mirror at its IMMEDIATE target (the tag object OID, not
-    //      the peeled commit) makes the existing-ref check in
-    //      `sync_marker_to_tag` skip the rewrite — leaving the
-    //      annotated tag intact through to the destination push.
-    //
-    // We do this **per ref** rather than as a single bulk copy. A ref
-    // whose ancestry references a missing object (a known failure mode
-    // in real-world repos like git-lfs, where pack data carries dangling
-    // references that `git fsck` doesn't catch) doesn't poison the rest
-    // of the mirror — only that one ref loses SHA stability.
-    if git_path.is_some() {
-        bridge.init_mirror()?;
-        let mirror_repo = bridge.open_git_repo()?;
-        if mirror_repo.git_dir() != repo.git_dir() {
-            let mut successful_updates: Vec<RefUpdate> = Vec::new();
-            for plan in &plans {
-                // Roots include both the immediate target (tag object for
-                // annotated tags) and the peeled commit (so the walker
-                // descends through commit→tree→blob even when the
-                // immediate object is a tag).
-                let roots = [plan.immediate_oid, plan.peeled_commit_oid];
-                match copy_reachable_objects(&repo, &mirror_repo, roots) {
-                    Ok(()) => successful_updates.push(RefUpdate {
-                        name: plan.short_name.clone(),
-                        target: plan.immediate_oid,
-                        namespace: plan.namespace,
-                    }),
-                    Err(err) => {
-                        let full = match plan.namespace {
-                            RefNamespace::Branch => format!("refs/heads/{}", plan.short_name),
-                            RefNamespace::Tag => format!("refs/tags/{}", plan.short_name),
-                            RefNamespace::Note => format!("refs/notes/{}", plan.short_name),
-                        };
-                        warn!(
-                            "partial mirror for {} (target {}): {}; \
-                             SHA-stable export degraded for commits reachable only \
-                             from this ref",
-                            full, plan.immediate_oid, err
-                        );
-                        stats.partial_mirror_refs.push(PartialMirrorRef {
-                            name: full,
-                            error: err.to_string(),
-                        });
-                    }
-                }
-            }
-            // Write source refs into the mirror. For annotated tags this
-            // points refs/tags/<name> at the tag object (not the peeled
-            // commit), which is what preserves the annotated form across
-            // export.
-            apply_ref_updates(
-                &mirror_repo,
-                &successful_updates,
-                "heddle: import refs from source",
-            )?;
-            let note_updates = collect_note_ref_updates(&repo)?;
-            if !note_updates.is_empty() {
-                copy_reachable_objects(
-                    &repo,
-                    &mirror_repo,
-                    note_updates.iter().map(|update| update.target),
-                )?;
-                apply_ref_updates(
-                    &mirror_repo,
-                    &note_updates,
-                    "heddle: import Heddle notes from source",
-                )?;
-            }
-        }
-    }
-
-    bridge.build_existing_mapping(Some(repo.path()))?;
+    let mapping_root = git_path
+        .map(|path| path.to_path_buf())
+        .or_else(|| repo.workdir());
+    bridge.build_existing_mapping(mapping_root.as_deref())?;
 
     // heddle#555: route the bulk import through a single streaming pack (one
     // atomic install) instead of N loose objects + per-object fsync. Stage
     // under the Heddle store dir so the final install is a same-filesystem
     // rename(2). Only the write sink changes — every bridge import semantic
-    // (identity recovery, annotated-tag mirror, lossy handling, divergence
+    // (identity recovery, lossy handling, divergence
     // checks, ref/tag/marker sync) is preserved by reusing the same walk.
     let staging_dir = bridge
         .heddle_repo
@@ -678,7 +606,7 @@ fn import_with_ref_filter(
         if wanted_refs.is_some_and(|wanted| !wanted.contains(name.as_str())) {
             continue;
         }
-        if let Some(change_id) = bridge.mapping.get_heddle(plan.peeled_commit_oid) {
+        if let Some(change_id) = bridge.mapping.get_heddle(&plan.peeled_commit_oid) {
             // A git branch name becomes a Heddle thread id here. Reject one that
             // isn't a valid thread id (e.g. contains a shell metacharacter git
             // permits in a ref) rather than silently slugifying it — a silent
@@ -732,24 +660,15 @@ fn import_with_ref_filter(
         }
     }
 
-    for tag in repo
-        .references()
-        .map_err(git_err)?
-        .tags()
-        .map_err(git_err)?
-    {
-        let mut tag = tag.map_err(git_err)?;
-        let name = tag.name().shorten().to_string();
-        if wanted_refs.is_some_and(|wanted| !wanted.contains(&name)) {
+    for plan in plans.iter().filter(|plan| plan.namespace == RefNamespace::Tag) {
+        let name = &plan.short_name;
+        if wanted_refs.is_some_and(|wanted| !wanted.contains(name.as_str())) {
             continue;
         }
         // Skip non-commit-pointing tags here too; the tips loop already
         // recorded them in `skipped_non_commit_refs`.
-        let oid = match peel_to_commit_oid(&repo, &mut tag)? {
-            Ok(oid) => oid,
-            Err(_) => continue,
-        };
-        if let Some(change_id) = bridge.mapping.get_heddle(oid) {
+        let oid = plan.peeled_commit_oid.clone();
+        if let Some(change_id) = bridge.mapping.get_heddle(&oid) {
             // Markers become lightweight tags (just a ref → peeled commit);
             // that round-trips through the mirror unchanged and needs no object.
             sync_marker_from_git_tag(bridge, &name, &change_id)?;
@@ -798,32 +717,6 @@ fn sync_marker_from_git_tag(
             }),
         Err(error) => Err(error.into()),
     }
-}
-
-fn collect_note_ref_updates(repo: &gix::Repository) -> GitResult<Vec<RefUpdate>> {
-    let mut updates = Vec::new();
-    for reference in repo
-        .references()
-        .map_err(git_err)?
-        .prefixed("refs/notes/")
-        .map_err(git_err)?
-    {
-        let reference = reference.map_err(git_err)?;
-        let Some(target) = reference.try_id() else {
-            continue;
-        };
-        let full = reference.name().as_bstr().to_string();
-        let short = full
-            .strip_prefix("refs/notes/")
-            .unwrap_or(&full)
-            .to_string();
-        updates.push(RefUpdate {
-            name: short,
-            target: target.detach(),
-            namespace: RefNamespace::Note,
-        });
-    }
-    Ok(updates)
 }
 
 fn should_materialize_imported_current_thread(
@@ -880,8 +773,8 @@ pub(crate) fn thread_can_adopt_change(
 /// queued this commit's parents but haven't emitted the commit itself
 /// yet" without keeping per-node state outside the stack.
 enum WalkPhase {
-    Enter(gix::hash::ObjectId),
-    Emit(gix::hash::ObjectId),
+    Enter(ObjectId),
+    Emit(ObjectId),
 }
 
 /// Iterative ancestry walk — post-order DFS using an explicit stack
@@ -906,7 +799,7 @@ enum WalkPhase {
 #[allow(clippy::too_many_arguments)]
 fn walk_plans_into_states(
     bridge: &mut GitBridge<'_>,
-    repo: &gix::Repository,
+    repo: &GitRepo,
     tree_importer: &mut GitTreeImporter<'_>,
     plans: &[RefPlan],
     stats: &mut ImportStats,
@@ -919,7 +812,7 @@ fn walk_plans_into_states(
             bridge,
             repo,
             tree_importer,
-            plan.peeled_commit_oid,
+            plan.peeled_commit_oid.clone(),
             &mut visiting,
             &mut imported,
             stats,
@@ -932,11 +825,11 @@ fn walk_plans_into_states(
 #[allow(clippy::too_many_arguments)]
 fn import_commit_ancestry(
     bridge: &mut GitBridge<'_>,
-    repo: &gix::Repository,
+    repo: &GitRepo,
     tree_importer: &mut GitTreeImporter<'_>,
-    git_oid: gix::hash::ObjectId,
-    visiting: &mut HashSet<gix::hash::ObjectId>,
-    imported: &mut HashSet<gix::hash::ObjectId>,
+    git_oid: ObjectId,
+    visiting: &mut HashSet<ObjectId>,
+    imported: &mut HashSet<ObjectId>,
     stats: &mut ImportStats,
     progress: &mut dyn FnMut(usize),
 ) -> GitResult<()> {
@@ -956,15 +849,14 @@ fn import_commit_ancestry(
                 if imported.contains(&oid) {
                     continue;
                 }
-                if !visiting.insert(oid) {
+                if !visiting.insert(oid.clone()) {
                     // Already in flight via another merge path — its Emit
                     // is already scheduled, no need to re-queue.
                     continue;
                 }
 
-                let commit = repo.find_commit(oid).map_err(git_err)?;
-                let parent_git_oids: Vec<gix::hash::ObjectId> =
-                    commit.parent_ids().map(|id| id.detach()).collect();
+                let parent_git_oids =
+                    parse_commit_content(&repo.read_commit_content(&oid).map_err(git_err)?)?.parents;
 
                 // Schedule emit AFTER all parents are processed. Stack is
                 // LIFO so the Emit goes on first; then parents on top of
@@ -983,7 +875,7 @@ fn import_commit_ancestry(
                 // change_id (from mapping or trailer or derived) already
                 // has a state in the store, `put_state` overwrites it
                 // with identical bytes.
-                let existing_change_id = bridge.mapping.get_heddle(oid);
+                let existing_change_id = bridge.mapping.get_heddle(&oid);
                 let needs_state = match existing_change_id {
                     // heddle#555 risk #2: a state buffered in the un-finalized
                     // pack isn't readable via the store yet, so check the
@@ -999,15 +891,15 @@ fn import_commit_ancestry(
                 if needs_state {
                     let before_lossy = tree_importer.lossy_entries().len();
                     let change_id =
-                        import_commit(&mut bridge.mapping, repo, tree_importer, oid)?;
-                    bridge.mapping.insert(change_id, oid);
+                        import_commit(&mut bridge.mapping, repo, tree_importer, oid.clone())?;
+                    bridge.mapping.insert(change_id, &oid);
                     let commit_lossy_entries =
                         tree_importer.lossy_entries()[before_lossy..].to_vec();
                     bridge
                         .mapping
-                        .set_git_lossy_entries(oid, commit_lossy_entries);
+                        .set_git_lossy_entries(oid.clone(), commit_lossy_entries);
                     stats.states_created += 1;
-                } else if let Some(lossy_entries) = bridge.mapping.get_git_lossy_entries(oid) {
+                } else if let Some(lossy_entries) = bridge.mapping.get_git_lossy_entries(&oid) {
                     if !tree_importer.lossy_enabled() {
                         return Err(fail_lossy_entry(&lossy_entries[0]));
                     }

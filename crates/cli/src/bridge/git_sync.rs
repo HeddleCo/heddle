@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Sync threads/markers functionality for Git bridge.
 
-use gix::refs::transaction::PreviousValue;
+use git_substrate::{GitRepo, RefConstraint};
 use objects::object::{MarkerName, ThreadName};
 use refs::RefExpectation;
 
 use crate::bridge::{
-    git_core::{
-        GitBridge, GitBridgeError, GitResult, ensure_commit_update_fast_forward, git_err,
-        set_reference,
-    },
+    git_core::{git_err, GitBridge, GitBridgeError, GitResult},
     git_import::thread_can_adopt_change,
 };
 
@@ -23,7 +20,7 @@ pub fn sync_threads(bridge: &mut GitBridge) -> GitResult<usize> {
         if let Some(state_id) = bridge.heddle_repo.refs().get_thread(&track_name)?
             && let Some(git_oid) = bridge.mapping.get_git(&state_id)
         {
-            sync_track_to_branch(&repo, &track_name, git_oid)?;
+            sync_track_to_branch_repo(&repo, &track_name, git_oid)?;
             stats += 1;
         }
     }
@@ -41,7 +38,7 @@ pub fn sync_markers(bridge: &mut GitBridge) -> GitResult<usize> {
         if let Some(state_id) = bridge.heddle_repo.refs().get_marker(&marker_name)?
             && let Some(git_oid) = bridge.mapping.get_git(&state_id)
         {
-            sync_marker_to_tag(&repo, &marker_name, git_oid)?;
+            sync_marker_to_tag_repo(&repo, &marker_name, git_oid)?;
             stats += 1;
         }
     }
@@ -54,16 +51,13 @@ pub fn sync_branches(bridge: &mut GitBridge) -> GitResult<usize> {
     let repo = bridge.open_git_repo()?;
     let mut stats = 0;
 
-    for branch in repo
-        .references()
-        .map_err(git_err)?
-        .local_branches()
-        .map_err(git_err)?
-    {
-        let mut branch = branch.map_err(git_err)?;
-        let name = branch.name().shorten().to_string();
-        let target = branch.peel_to_id().map_err(git_err)?.detach();
-        if let Some(change_id) = bridge.mapping.get_heddle(target) {
+    for name in repo.local_branch_names().map_err(git_err)? {
+        let branch_ref = format!("refs/heads/{name}");
+        let target = match repo.peel_reference_to_commit(&branch_ref).map_err(git_err)? {
+            Ok(oid) => oid,
+            Err(_) => continue,
+        };
+        if let Some(change_id) = bridge.mapping.get_heddle(&target) {
             let tn = ThreadName::new(&name);
             if let Some(existing) = bridge.heddle_repo.refs().get_thread(&tn)?
                 && !thread_can_adopt_change(bridge.heddle_repo, &existing, &change_id)?
@@ -89,17 +83,14 @@ pub fn sync_tags(bridge: &mut GitBridge) -> GitResult<usize> {
     let repo = bridge.open_git_repo()?;
     let mut stats = 0;
 
-    for tag in repo
-        .references()
-        .map_err(git_err)?
-        .tags()
-        .map_err(git_err)?
-    {
-        let mut tag = tag.map_err(git_err)?;
-        let name = tag.name().shorten().to_string();
-        let oid = tag.peel_to_id().map_err(git_err)?.detach();
+    for name in repo.local_tag_names().map_err(git_err)? {
+        let tag_ref = format!("refs/tags/{name}");
+        let oid = match repo.peel_reference_to_commit(&tag_ref).map_err(git_err)? {
+            Ok(oid) => oid,
+            Err(_) => continue,
+        };
 
-        if let Some(change_id) = bridge.mapping.get_heddle(oid) {
+        if let Some(change_id) = bridge.mapping.get_heddle(&oid) {
             let mn = MarkerName::new(&name);
             match bridge.heddle_repo.refs().get_marker(&mn) {
                 Ok(Some(existing)) if existing != change_id => bridge
@@ -122,31 +113,42 @@ pub fn sync_tags(bridge: &mut GitBridge) -> GitResult<usize> {
 
 /// Sync a Heddle thread to a Git branch.
 pub fn sync_track_to_branch(
-    repo: &gix::Repository,
+    repo: &GitRepo,
     track_name: &str,
-    git_oid: gix::hash::ObjectId,
+    git_oid: crate::bridge::git_core::ObjectId,
 ) -> GitResult<()> {
-    let branch_ref = format!("refs/heads/{}", track_name);
+    sync_track_to_branch_repo(repo, track_name, git_oid)
+}
 
-    if let Ok(mut branch) = repo.find_reference(&branch_ref) {
-        let existing = branch.peel_to_id().map_err(git_err)?.detach();
+pub(crate) fn sync_track_to_branch_repo(
+    repo: &GitRepo,
+    track_name: &str,
+    git_oid: crate::bridge::git_core::ObjectId,
+) -> GitResult<()> {
+    let branch_ref = format!("refs/heads/{track_name}");
+
+    if let Some(existing) = repo.read_ref_oid(&branch_ref).map_err(git_err)? {
         if existing != git_oid {
-            ensure_commit_update_fast_forward(repo, &branch_ref, existing, git_oid)?;
-            set_reference(
-                repo,
+            super::git_core::ensure_commit_update_fast_forward(repo, &branch_ref, &existing, &git_oid)?;
+            git_substrate::set_reference(
+                repo.git_dir(),
+                repo.object_format(),
                 &branch_ref,
-                git_oid,
-                PreviousValue::ExistingMustMatch(gix::refs::Target::Object(existing)),
+                &git_oid,
+                RefConstraint::MustExistAndMatch(existing),
                 "heddle: sync thread",
-            )?;
+            )
+            .map_err(git_err)?;
         }
         return Ok(());
     }
 
-    repo.reference(
-        branch_ref,
-        git_oid,
-        PreviousValue::MustNotExist,
+    git_substrate::set_reference(
+        repo.git_dir(),
+        repo.object_format(),
+        &branch_ref,
+        &git_oid,
+        RefConstraint::MustNotExist,
         "heddle: sync thread",
     )
     .map_err(git_err)?;
@@ -155,32 +157,60 @@ pub fn sync_track_to_branch(
 
 /// Sync a Heddle marker to a Git tag.
 pub fn sync_marker_to_tag(
-    repo: &gix::Repository,
+    repo: &GitRepo,
     marker_name: &str,
-    git_oid: gix::hash::ObjectId,
+    git_oid: crate::bridge::git_core::ObjectId,
 ) -> GitResult<()> {
-    let tag_ref = format!("refs/tags/{}", marker_name);
-    if let Ok(mut reference) = repo.find_reference(&tag_ref) {
-        let existing = reference.peel_to_id().map_err(git_err)?.detach();
-        if existing != git_oid {
+    sync_marker_to_tag_repo(repo, marker_name, git_oid)
+}
+
+pub(crate) fn sync_marker_to_tag_repo(
+    repo: &GitRepo,
+    marker_name: &str,
+    git_oid: crate::bridge::git_core::ObjectId,
+) -> GitResult<()> {
+    let tag_ref = format!("refs/tags/{marker_name}");
+    if let Some(existing) = repo.read_ref_oid(&tag_ref).map_err(git_err)? {
+        // Markers map to commit OIDs, but an existing annotated tag ref points at
+        // the tag object. Peel before comparing so import-preserved annotated
+        // tags survive export sync unchanged.
+        let needs_update = if existing == git_oid {
+            false
+        } else if let Ok(Ok(peeled_commit)) = repo.peel_reference_to_commit(&tag_ref).map_err(git_err)
+        {
+            peeled_commit != git_oid
+        } else {
+            true
+        };
+        if needs_update {
             // A marker is a free-move ref (`classify_tag_move`): a legitimate
             // RETARGET to a new served+minted OID must FORCE-set the mirror tag,
             // not abort the whole export with a conflict (heddle#316 S1). The
             // mirror is heddle-owned, so there is no out-of-band tip to spare
             // here; the destination-side ownership gate (`classify_tag_move`,
             // `recorded == old`) still spares an out-of-band DESTINATION tag.
-            set_reference(
-                repo,
+            git_substrate::set_reference(
+                repo.git_dir(),
+                repo.object_format(),
                 &tag_ref,
-                git_oid,
-                PreviousValue::Any,
+                &git_oid,
+                RefConstraint::Any,
                 "heddle: sync marker",
-            )?;
+            )
+            .map_err(git_err)?;
         }
         return Ok(());
     }
 
-    repo.tag_reference(marker_name, git_oid, PreviousValue::MustNotExist)
-        .map_err(git_err)?;
+    git_substrate::set_reference(
+        repo.git_dir(),
+        repo.object_format(),
+        &tag_ref,
+        &git_oid,
+        RefConstraint::MustNotExist,
+        "heddle: sync marker",
+    )
+    .map_err(git_err)?;
     Ok(())
 }
+

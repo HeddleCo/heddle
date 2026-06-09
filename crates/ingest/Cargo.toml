@@ -28,7 +28,10 @@ semantic = { path = "../semantic", package = "heddle-semantic", version = "0.2" 
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
-gix.workspace = true
+sley-object.workspace = true
+sley-odb.workspace = true
+sley-refs.workspace = true
+git-substrate = { path = "../git-substrate", package = "heddle-git-substrate", version = "0.2", default-features = false }
 # `bundled` vendors the SQLite C source so ingest doesn't depend on a
 # system libsqlite3 version. OpenCode's SQLite is read-only to us.
 rusqlite = { version = "0.32", features = ["bundled"] }

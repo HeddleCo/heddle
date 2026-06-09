@@ -147,13 +147,13 @@ pub(crate) fn repo_matches_checkout(candidate: &Path, repo_root: &Path) -> bool 
 }
 
 pub(crate) fn repo_workdir(path: &Path) -> Option<PathBuf> {
-    let repo = gix::discover(path).ok()?;
+    let repo = git_substrate::GitRepo::discover(path).ok()?;
     let workdir = repo.workdir()?;
-    canonicalize_fallback(workdir)
+    canonicalize_fallback(&workdir)
 }
 
 fn repo_common_dir(path: &Path) -> Option<PathBuf> {
-    let repo = gix::discover(path).ok()?;
+    let repo = git_substrate::GitRepo::discover(path).ok()?;
     canonicalize_fallback(repo.common_dir())
 }
 

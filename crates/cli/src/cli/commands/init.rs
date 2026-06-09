@@ -249,7 +249,11 @@ fn resolve_quickstart_target(path: &Path) -> Result<QuickstartTarget> {
 /// is exactly the misclassification this avoids.)
 fn dir_is_git_root(dir: &Path) -> bool {
     let dot_git = dir.join(".git");
-    (dot_git.is_dir() || dot_git.is_file()) && gix::discover(dir).is_ok()
+    if dot_git.is_dir() || dot_git.is_file() {
+        git_substrate::GitRepo::open(&dot_git).is_ok()
+    } else {
+        git_substrate::GitRepo::open(dir).is_ok()
+    }
 }
 
 pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
@@ -277,7 +281,7 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
     // Git next, and pre-seeding would make `main` point at a throwaway
     // empty-tree snapshot. Otherwise, seed `main` so the repo is immediately
     // usable for snapshot/history/etc.
-    let has_git = gix::discover(&path).is_ok();
+    let has_git = git_substrate::GitRepo::discover(&path).is_ok();
 
     // Resolve the single quickstart root ONCE, by read-only discovery, so the
     // preflight (a read-only viability probe) and the write path below operate
@@ -922,26 +926,17 @@ fn prompt_line(label: &str) -> Result<String> {
 /// existing history so the quickstart confirms AND imports rather than
 /// acting as if the repo were empty (which would leave partial/wrong state).
 fn git_has_commits(path: &Path) -> bool {
-    let Ok(repo) = gix::discover(path) else {
+    let Ok(repo) = git_substrate::GitRepo::discover(path) else {
         return false;
     };
-    if repo.head_id().is_ok() {
+    if repo.head_commit_oid_or_none().ok().flatten().is_some() {
         return true;
     }
-    let Ok(platform) = repo.references() else {
+    let Ok(refs) = repo.list_refs() else {
         return false;
     };
-    let Ok(refs) = platform.all() else {
-        return false;
-    };
-    for reference in refs.filter_map(Result::ok) {
-        let mut reference = reference;
-        if let Ok(id) = reference.peel_to_id()
-            && repo
-                .find_object(id.detach())
-                .map(|object| object.kind == gix::objs::Kind::Commit)
-                .unwrap_or(false)
-        {
+    for reference in refs {
+        if matches!(repo.peel_reference_to_commit(&reference.name), Ok(Ok(_))) {
             return true;
         }
     }
@@ -968,22 +963,20 @@ fn quickstart_attachment_decision(
         return QuickstartAttachmentDecision::SkipUnborn;
     }
 
-    let Ok(repo) = gix::discover(path) else {
+    let Ok(repo) = git_substrate::GitRepo::discover(path) else {
         return QuickstartAttachmentDecision::SkipUnborn;
     };
-    let Ok(head) = repo.head_id() else {
+    let Ok(Some(head)) = repo.head_commit_oid_or_none() else {
         return QuickstartAttachmentDecision::SkipUnborn;
     };
-    let Ok(Some(mut reference)) = repo.try_find_reference(&format!("refs/heads/{thread}")) else {
+    let branch_ref = format!("refs/heads/{thread}");
+    if !repo.has_ref(&branch_ref).unwrap_or(false) {
         return QuickstartAttachmentDecision::Attach;
-    };
-    let Ok(branch_tip) = reference.peel_to_id() else {
-        return QuickstartAttachmentDecision::Attach;
-    };
-    if head.detach() == branch_tip.detach() {
-        QuickstartAttachmentDecision::Attach
-    } else {
-        QuickstartAttachmentDecision::RefuseCollision
+    }
+    match repo.peel_reference_to_commit(&branch_ref) {
+        Ok(Ok(branch_tip)) if head == branch_tip => QuickstartAttachmentDecision::Attach,
+        Ok(Ok(_)) => QuickstartAttachmentDecision::RefuseCollision,
+        _ => QuickstartAttachmentDecision::Attach,
     }
 }
 
@@ -996,12 +989,7 @@ fn quickstart_attachment_decision(
 /// checkpoint write-through points `.git/HEAD` at `refs/heads/<name>`, so
 /// reject here exactly what Git's porcelain would refuse there.
 fn git_branch_name_is_valid(name: &str) -> bool {
-    if gix::refs::FullName::try_from(format!("refs/heads/{name}").as_str()).is_err() {
-        return false;
-    }
-    // Branch-shorthand rules `--branch` adds on top of full-ref syntax: not
-    // the reserved `HEAD`, not a bare `@`, and no leading `-`.
-    !(name == "HEAD" || name == "@" || name.starts_with('-'))
+    git_substrate::branch_name_is_valid(name)
 }
 
 /// Whether the discovered Git repository at `path` is a shallow checkout — its
@@ -1010,7 +998,7 @@ fn git_branch_name_is_valid(name: &str) -> bool {
 /// shallow clone before any write rather than after `bootstrap_git_overlay`
 /// already created `.heddle/`.
 fn git_is_shallow(path: &Path) -> bool {
-    gix::discover(path)
+    git_substrate::GitRepo::discover(path)
         .ok()
         .map(|repo| repo.git_dir().join("shallow").is_file())
         .unwrap_or(false)
@@ -1020,9 +1008,9 @@ fn git_is_shallow(path: &Path) -> bool {
 /// (HEAD points directly at a commit instead of an attached branch). An
 /// unborn HEAD reads as not-detached.
 fn git_head_is_detached(path: &Path) -> bool {
-    gix::discover(path)
+    git_substrate::GitRepo::discover(path)
         .ok()
-        .and_then(|repo| repo.head().ok().map(|head| head.is_detached()))
+        .and_then(|repo| repo.head_is_detached().ok())
         .unwrap_or(false)
 }
 

@@ -50,7 +50,7 @@ mod status_tracked_refresh;
 mod status_untracked_scan;
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
@@ -63,10 +63,7 @@ pub use context_suggestions::{
     MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD, SUGGESTION_WINDOW,
     compute_rewrite_pct, is_major_rewrite,
 };
-use gix::{
-    bstr::{BStr, ByteSlice},
-    prelude::ObjectIdExt,
-};
+use git_substrate::{GitRepo, ObjectId};
 pub use objects::object::DiffKind;
 use objects::{
     error::{HeddleError, Result},
@@ -80,7 +77,6 @@ use oplog::{OpLog, OpLogBackend, OpRecord};
 pub use refs::RefSummaryIndexInspection;
 use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
 
-use crate::git_worktree_status::GitWorktreeEntryState;
 pub use repo_config::{HostedConfig, OutputFormat, RedactConfig, RepoConfig, TrustedKey};
 // Review-epic config types — re-exported here so the new
 // `repository_signals.rs` (and external crates wanting to construct a
@@ -107,6 +103,10 @@ use serde::{Deserialize, Serialize};
 const GIT_CHECKPOINTS_FILE: &str = "git-checkpoints.json";
 const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[".heddle/"];
 
+fn git_substrate_err(error: git_substrate::GitSubstrateError) -> HeddleError {
+    HeddleError::Config(error.to_string())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepositoryCapability {
     GitOverlay,
@@ -116,7 +116,7 @@ pub enum RepositoryCapability {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GitHeadState {
     Attached(String),
-    Detached(gix::hash::ObjectId),
+    Detached(ObjectId),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -878,76 +878,65 @@ impl Repository {
             None => return Ok(None),
         };
 
-        let git = match gix::discover(&self.root) {
+        let git = match GitRepo::discover(&self.root) {
             Ok(git) => git,
             Err(_) => return Ok(None),
         };
-        let Some(head) = git_resolve_oid(&git, "HEAD")? else {
+        let Some(head) = git.resolve_revision("HEAD").map_err(git_substrate_err)? else {
             return Ok(None);
         };
 
-        let local_ref_name = format!("refs/heads/{branch}");
-        if let Some(local_ref) = git_find_reference(&git, &local_ref_name)?
-            && let Some(tracking_ref_name) =
-                local_ref.remote_tracking_ref_name(gix::remote::Direction::Fetch)
+        if let Some(tracking_name) = git.upstream_tracking_ref(&branch).map_err(git_substrate_err)?
+            && let Some(upstream_head) =
+                git.resolve_revision(&tracking_name).map_err(git_substrate_err)?
         {
-            let tracking_ref_name = tracking_ref_name.map_err(|error| {
-                HeddleError::Config(format!(
-                    "failed to inspect upstream branch at '{}': {error}",
-                    self.root.display()
-                ))
-            })?;
-            let tracking_ref = tracking_ref_name.as_ref();
-            let tracking_name = tracking_ref.as_bstr().to_str_lossy().into_owned();
-            if let Some(upstream_head) = git_resolve_oid(&git, &tracking_name)? {
-                let (ahead, behind) = git_ahead_behind(&self.root, &git, upstream_head, head)?;
-                if ahead == 0 && behind == 0 {
-                    return Ok(None);
-                }
-                let upstream = git_remote_tracking_display_name(&tracking_name);
-                let local_oid = head.to_string();
-                let upstream_oid = upstream_head.to_string();
-                let upstream_is_undone_checkpoint =
-                    self.remote_tracks_undone_git_checkpoint(&branch, &local_oid, &upstream_oid)?;
-                return Ok(Some(GitRemoteTrackingStatus {
-                    branch: branch.clone(),
-                    upstream: upstream.clone(),
+            let (ahead, behind) = git_ahead_behind(&git, &upstream_head, &head)?;
+            if ahead == 0 && behind == 0 {
+                return Ok(None);
+            }
+            let upstream = git_remote_tracking_display_name(&tracking_name);
+            let local_oid = head.to_hex();
+            let upstream_oid = upstream_head.to_hex();
+            let upstream_is_undone_checkpoint =
+                self.remote_tracks_undone_git_checkpoint(&branch, &local_oid, &upstream_oid)?;
+            return Ok(Some(GitRemoteTrackingStatus {
+                branch: branch.clone(),
+                upstream: upstream.clone(),
+                ahead,
+                behind,
+                local_oid: Some(local_oid),
+                upstream_oid: Some(upstream_oid),
+                upstream_is_undone_checkpoint,
+                message: git_remote_tracking_message(
+                    &branch,
+                    &upstream,
                     ahead,
                     behind,
-                    local_oid: Some(local_oid),
-                    upstream_oid: Some(upstream_oid),
                     upstream_is_undone_checkpoint,
-                    message: git_remote_tracking_message(
-                        &branch,
-                        &upstream,
-                        ahead,
-                        behind,
-                        upstream_is_undone_checkpoint,
-                    ),
-                    next_action: git_remote_tracking_next_action(
-                        ahead,
-                        behind,
-                        upstream_is_undone_checkpoint,
-                    ),
-                }));
-            }
+                ),
+                next_action: git_remote_tracking_next_action(
+                    ahead,
+                    behind,
+                    upstream_is_undone_checkpoint,
+                ),
+            }));
         }
 
-        let remotes = git_remote_names(&self.root)?;
+        let remotes = git.remote_names().map_err(git_substrate_err)?;
         if remotes.is_empty() {
             return Ok(None);
         }
         for remote in &remotes {
             let remote_ref = format!("refs/remotes/{remote}/{branch}");
-            if let Some(remote_head) = git_resolve_oid(&git, &remote_ref)? {
+            if let Some(remote_head) = git.resolve_revision(&remote_ref).map_err(git_substrate_err)? {
                 if remote_head == head {
                     return Ok(None);
                 }
-                let (ahead, behind) = git_ahead_behind(&self.root, &git, remote_head, head)?;
+                let (ahead, behind) = git_ahead_behind(&git, &remote_head, &head)?;
                 if behind > 0 {
                     let upstream = format!("{remote}/{branch}");
-                    let local_oid = head.to_string();
-                    let upstream_oid = remote_head.to_string();
+                    let local_oid = head.to_hex();
+                    let upstream_oid = remote_head.to_hex();
                     let upstream_is_undone_checkpoint = self.remote_tracks_undone_git_checkpoint(
                         &branch,
                         &local_oid,
@@ -983,7 +972,7 @@ impl Repository {
             upstream: String::new(),
             ahead: 0,
             behind: 0,
-            local_oid: Some(head.to_string()),
+            local_oid: Some(head.to_hex()),
             upstream_oid: None,
             upstream_is_undone_checkpoint: false,
             message: format!("Git branch '{branch}' has no upstream tracking branch"),
@@ -1096,11 +1085,10 @@ impl Repository {
             return Ok(Vec::new());
         }
 
-        let git_repo = gix::discover(&self.root).map_err(|error| {
+        let git_repo = GitRepo::discover(&self.root).map_err(|error| {
             HeddleError::Config(format!(
-                "failed to inspect git branches at '{}': {}",
-                self.root.display(),
-                error
+                "failed to inspect git branches at '{}': {error}",
+                self.root.display()
             ))
         })?;
 
@@ -1110,38 +1098,13 @@ impl Repository {
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
         let mut branch_tips = Vec::new();
 
-        for branch in git_repo
-            .references()
-            .map_err(|error| {
-                HeddleError::Config(format!(
-                    "failed to read git references at '{}': {}",
-                    self.root.display(),
-                    error
-                ))
-            })?
-            .local_branches()
-            .map_err(|error| {
-                HeddleError::Config(format!(
-                    "failed to enumerate git branches at '{}': {}",
-                    self.root.display(),
-                    error
-                ))
-            })?
-        {
-            let mut branch = branch.map_err(|error| {
-                HeddleError::Config(format!(
-                    "failed to inspect git branch at '{}': {}",
-                    self.root.display(),
-                    error
-                ))
-            })?;
-            let name = branch.name().shorten().to_string();
+        for name in git_repo.local_branch_names().map_err(git_substrate_err)? {
             let Some(target) =
-                self.git_overlay_commit_tip_oid(&git_repo, &mut branch, "branch", &name)?
+                self.git_overlay_commit_tip_oid(&git_repo, &format!("refs/heads/{name}"))?
             else {
                 continue;
             };
-            let git_commit = target.to_string();
+            let git_commit = target.to_hex();
             let mapped_change = self.git_overlay_mapped_change_for_commit(
                 &git_commit,
                 &bridge_mapping,
@@ -1190,11 +1153,10 @@ impl Repository {
             return Ok(Vec::new());
         }
 
-        let git_repo = gix::discover(&self.root).map_err(|error| {
+        let git_repo = GitRepo::discover(&self.root).map_err(|error| {
             HeddleError::Config(format!(
-                "failed to inspect git tags at '{}': {}",
-                self.root.display(),
-                error
+                "failed to inspect git tags at '{}': {error}",
+                self.root.display()
             ))
         })?;
 
@@ -1204,38 +1166,13 @@ impl Repository {
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
         let mut tag_tips = Vec::new();
 
-        for tag in git_repo
-            .references()
-            .map_err(|error| {
-                HeddleError::Config(format!(
-                    "failed to read git references at '{}': {}",
-                    self.root.display(),
-                    error
-                ))
-            })?
-            .tags()
-            .map_err(|error| {
-                HeddleError::Config(format!(
-                    "failed to enumerate git tags at '{}': {}",
-                    self.root.display(),
-                    error
-                ))
-            })?
-        {
-            let mut tag = tag.map_err(|error| {
-                HeddleError::Config(format!(
-                    "failed to inspect git tag at '{}': {}",
-                    self.root.display(),
-                    error
-                ))
-            })?;
-            let name = tag.name().shorten().to_string();
+        for name in git_repo.local_tag_names().map_err(git_substrate_err)? {
             let Some(target) =
-                self.git_overlay_commit_tip_oid(&git_repo, &mut tag, "tag", &name)?
+                self.git_overlay_commit_tip_oid(&git_repo, &format!("refs/tags/{name}"))?
             else {
                 continue;
             };
-            let git_commit = target.to_string();
+            let git_commit = target.to_hex();
             let mapped_change = self.git_overlay_mapped_change_for_commit(
                 &git_commit,
                 &bridge_mapping,
@@ -1297,100 +1234,48 @@ impl Repository {
         if self.capability() != RepositoryCapability::GitOverlay {
             return Ok(None);
         }
-        let git_repo = match gix::discover(&self.root) {
+        let git_repo = match git_substrate::GitRepo::discover(&self.root) {
             Ok(repo) => repo,
             Err(_) => return Ok(None),
         };
-        if git_repo.workdir().is_none() {
-            return Ok(None);
-        }
 
-        let index = git_repo.index_or_empty().map_err(|error| {
+        let format = git_repo.object_format();
+        let index = git_substrate::read_disk_index(git_repo.git_dir(), format).map_err(|error| {
             HeddleError::Config(format!(
-                "failed to inspect Git index at '{}': {}",
-                self.root.display(),
-                error
+                "failed to inspect Git index at '{}': {error}",
+                self.root.display()
             ))
         })?;
-        let head_tree = git_repo.head_tree_id_or_empty().map_err(|error| {
+        let head_tree = git_repo.head_tree_oid_or_empty().map_err(|error| {
             HeddleError::Config(format!(
-                "failed to inspect Git HEAD tree at '{}': {}",
-                self.root.display(),
-                error
+                "failed to inspect Git HEAD tree at '{}': {error}",
+                self.root.display()
             ))
         })?;
-        let head_index = git_repo
-            .index_from_tree(head_tree.as_ref())
+        let head_index = git_substrate::read_index_from_tree(git_repo.git_dir(), format, &head_tree)
             .map_err(|error| {
                 HeddleError::Config(format!(
-                    "failed to inspect Git HEAD tree at '{}': {}",
-                    self.root.display(),
-                    error
+                    "failed to inspect Git HEAD tree at '{}': {error}",
+                    self.root.display()
                 ))
             })?;
 
-        let mut head_entries = BTreeMap::new();
-        for (_, (path, entry)) in head_index.entries_with_paths_by_filter_map(|path, entry| {
-            Some((git_path(path), (entry.id, entry.mode.bits())))
-        }) {
-            head_entries.insert(path, entry);
-        }
-        let index_timestamp_secs = index.timestamp().unix_seconds();
-        let mut index_entries = BTreeMap::new();
-        for (_, (path, entry)) in index.entries_with_paths_by_filter_map(|path, entry| {
-            Some((git_path(path), (entry.id, entry.mode.bits(), entry.stat)))
-        }) {
-            index_entries.insert(path, entry);
-        }
+        let head_entries = git_substrate::tree_index_entry_map(&head_index);
+        let index_timestamp_secs =
+            git_substrate::index_file_mtime_secs(git_repo.git_dir()).unwrap_or(0);
+        let index_entries = index
+            .as_ref()
+            .map(git_substrate::tracked_index_entries)
+            .unwrap_or_default();
 
-        let mut added = BTreeSet::new();
-        let mut modified = BTreeSet::new();
-        let mut deleted = BTreeSet::new();
-
-        for (path, (oid, mode, _stat)) in &index_entries {
-            if ignored_git_overlay_status_path(path) {
-                continue;
-            }
-            match head_entries.get(path) {
-                None => {
-                    added.insert(PathBuf::from(path));
-                }
-                Some((head_oid, head_mode)) if (head_oid, head_mode) != (oid, mode) => {
-                    modified.insert(PathBuf::from(path));
-                }
-                Some(_) => {}
-            }
-        }
-        for path in head_entries.keys() {
-            if !ignored_git_overlay_status_path(path) && !index_entries.contains_key(path) {
-                deleted.insert(PathBuf::from(path));
-            }
-        }
-
-        for (path, (oid, mode, stat)) in &index_entries {
-            if ignored_git_overlay_status_path(path) {
-                continue;
-            }
-            let probe = crate::git_worktree_status::IndexStatProbe {
-                stat: *stat,
-                index_timestamp_secs,
-            };
-            match crate::git_worktree_status::git_worktree_entry_state(
+        let (mut added, modified, deleted) =
+            crate::git_worktree_status::collect_index_head_worktree_changes(
                 &self.root,
-                path,
-                *oid,
-                *mode,
-                Some(probe),
-            )? {
-                GitWorktreeEntryState::Clean => {}
-                GitWorktreeEntryState::Deleted => {
-                    deleted.insert(PathBuf::from(path));
-                }
-                GitWorktreeEntryState::Modified => {
-                    modified.insert(PathBuf::from(path));
-                }
-            }
-        }
+                index_timestamp_secs,
+                &index_entries,
+                &head_entries,
+                |path| !ignored_git_overlay_status_path(path),
+            )?;
 
         let ignore_patterns = self.ignore_patterns()?;
         let tracked_paths: BTreeSet<&str> = index_entries.keys().map(String::as_str).collect();
@@ -1461,9 +1346,9 @@ impl Repository {
 
     fn git_overlay_mapped_change_for_git_oid(
         &self,
-        git_oid: gix::hash::ObjectId,
+        git_oid: ObjectId,
     ) -> Result<Option<ChangeId>> {
-        let git_commit = git_oid.to_string();
+        let git_commit = git_oid.to_hex();
         let bridge_mapping = self.git_overlay_bridge_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
         self.git_overlay_mapped_change_for_commit(&git_commit, &bridge_mapping, &checkpoint_mapping)
@@ -1499,36 +1384,20 @@ impl Repository {
         }
 
         Ok(match detect_git_head_state(&self.root)? {
-            Some(GitHeadState::Detached(git_oid)) => Some(git_oid.to_string()),
+            Some(GitHeadState::Detached(git_oid)) => Some(git_oid.to_hex()),
             Some(GitHeadState::Attached(_)) | None => None,
         })
     }
 
     fn git_overlay_commit_tip_oid(
         &self,
-        git_repo: &gix::Repository,
-        reference: &mut gix::Reference,
-        ref_kind: &str,
+        git_repo: &GitRepo,
         ref_name: &str,
-    ) -> Result<Option<gix::hash::ObjectId>> {
-        if reference.target().try_id().is_none() {
-            return Ok(None);
+    ) -> Result<Option<ObjectId>> {
+        match git_repo.peel_reference_to_commit(ref_name).map_err(git_substrate_err)? {
+            Ok(commit) => Ok(Some(commit)),
+            Err(_) => Ok(None),
         }
-
-        let target = match reference.peel_to_id() {
-            Ok(target) => target.detach(),
-            Err(_) => return Ok(None),
-        };
-        let object = match git_repo.find_object(target) {
-            Ok(object) => object,
-            Err(_) => return Ok(None),
-        };
-        if object.kind != gix::objs::Kind::Commit {
-            return Ok(None);
-        }
-
-        let _ = (ref_kind, ref_name);
-        Ok(Some(target))
     }
 
     fn heddle_operation_status(&self) -> Result<Option<RepositoryOperationStatus>> {
@@ -2275,7 +2144,7 @@ impl Repository {
 }
 
 fn ensure_git_overlay_exclude(root: &Path) -> Result<()> {
-    let git_dir = match gix::discover(root) {
+    let git_dir = match GitRepo::discover(root) {
         Ok(repo) if repo.workdir().is_some() => repo.git_dir().to_path_buf(),
         _ => root.join(".git"),
     };
@@ -2360,7 +2229,7 @@ fn has_git_metadata(path: &Path) -> bool {
         return false;
     }
 
-    gix::discover(path).is_ok()
+    GitRepo::discover(path).is_ok()
 }
 
 /// If `start_path` lies inside a *managed virtualized thread root*
@@ -2396,14 +2265,9 @@ fn metadataless_managed_thread_root(start_path: &Path) -> Option<PathBuf> {
 }
 
 fn git_config_principal(root: &Path) -> Option<Principal> {
-    let git_repo = gix::discover(root).ok()?;
-    let config = git_repo.config_snapshot();
-    let name = config
-        .string("user.name")
-        .map(|value| value.to_str_lossy().into_owned())?;
-    let email = config
-        .string("user.email")
-        .map(|value| value.to_str_lossy().into_owned())?;
+    let git_repo = GitRepo::discover(root).ok()?;
+    let name = git_repo.config_string("user", "name").ok()??;
+    let email = git_repo.config_string("user", "email").ok()??;
     if name.trim().is_empty() || email.trim().is_empty() {
         return None;
     }
@@ -2489,85 +2353,31 @@ fn path_to_git_path(path: &Path) -> String {
         .join("/")
 }
 
-fn git_path(path: &BStr) -> String {
-    path.to_str_lossy().into_owned()
-}
-
 fn ignored_git_overlay_status_path(path: &str) -> bool {
     path == ".heddle" || path.starts_with(".heddle/")
 }
 
-fn git_remote_names(root: &Path) -> Result<Vec<String>> {
-    let repo = match gix::discover(root) {
-        Ok(repo) => repo,
-        Err(_) => return Ok(Vec::new()),
-    };
-    Ok(repo
-        .remote_names()
-        .into_iter()
-        .map(|name| name.to_str_lossy().into_owned())
-        .filter(|name| !name.trim().is_empty())
-        .collect())
-}
-
-fn git_find_reference<'repo>(
-    repo: &'repo gix::Repository,
-    name: &str,
-) -> Result<Option<gix::Reference<'repo>>> {
-    repo.try_find_reference(name).map_err(|error| {
-        HeddleError::Config(format!("failed to inspect Git reference '{name}': {error}"))
-    })
-}
-
-fn git_resolve_oid(repo: &gix::Repository, rev: &str) -> Result<Option<gix::ObjectId>> {
-    match repo.rev_parse_single(rev.as_bytes().as_bstr()) {
-        Ok(id) => Ok(Some(id.detach())),
-        Err(_) => Ok(None),
-    }
-}
-
 fn git_ahead_behind(
-    root: &Path,
-    repo: &gix::Repository,
-    upstream: gix::ObjectId,
-    head: gix::ObjectId,
+    repo: &GitRepo,
+    upstream: &ObjectId,
+    head: &ObjectId,
 ) -> Result<(usize, usize)> {
     if upstream == head {
         return Ok((0, 0));
     }
-    let ahead = git_reachable_count(root, repo, head, upstream)?;
-    let behind = git_reachable_count(root, repo, upstream, head)?;
+    let ahead = repo.count_commits_since(head, upstream).map_err(|error| {
+        HeddleError::Config(format!(
+            "failed to inspect Git upstream drift at '{}': {error}",
+            repo.git_dir().display()
+        ))
+    })?;
+    let behind = repo.count_commits_since(upstream, head).map_err(|error| {
+        HeddleError::Config(format!(
+            "failed to inspect Git upstream drift at '{}': {error}",
+            repo.git_dir().display()
+        ))
+    })?;
     Ok((ahead, behind))
-}
-
-fn git_reachable_count(
-    root: &Path,
-    repo: &gix::Repository,
-    tip: gix::ObjectId,
-    hidden: gix::ObjectId,
-) -> Result<usize> {
-    let walk = tip
-        .attach(repo)
-        .ancestors()
-        .with_hidden([hidden])
-        .all()
-        .map_err(|error| {
-            HeddleError::Config(format!(
-                "failed to inspect Git upstream drift at '{}': {error}",
-                root.display()
-            ))
-        })?;
-    let mut count = 0;
-    for entry in walk {
-        entry.map_err(|error| {
-            HeddleError::Config(format!(
-                "failed to inspect Git upstream drift at '{}': {error}",
-                root.display()
-            ))
-        })?;
-        count += 1;
-    }
-    Ok(count)
 }
 
 fn git_remote_tracking_display_name(name: &str) -> String {
@@ -2644,29 +2454,21 @@ fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Resul
     Ok(())
 }
 
-/// Read git's HEAD ref via `gix::discover` (~25ms — full repository
+/// Read git's HEAD via the substrate adapter (~25ms — full repository
 /// inspection). Used as a fallback when the fast path can't parse the
 /// raw `.git/HEAD` file (e.g. detached HEAD, multi-worktree layouts).
-fn detect_git_head_state_via_gix(path: &Path) -> Result<Option<GitHeadState>> {
-    let repo = gix::discover(path).map_err(|error| {
+fn detect_git_head_state_via_substrate(path: &Path) -> Result<Option<GitHeadState>> {
+    let repo = GitRepo::discover(path).map_err(|error| {
         HeddleError::Config(format!(
-            "failed to inspect git repository at '{}': {}",
-            path.display(),
-            error
+            "failed to inspect git repository at '{}': {error}",
+            path.display()
         ))
     })?;
-    let head = match repo.head() {
-        Ok(head) => head,
-        Err(_) => return Ok(None),
-    };
-
-    if let Some(name) = head.referent_name() {
-        return Ok(Some(GitHeadState::Attached(name.shorten().to_string())));
+    if let Some(branch) = repo.current_branch_name() {
+        return Ok(Some(GitHeadState::Attached(branch)));
     }
-    if head.is_detached()
-        && let Some(id) = head.id()
-    {
-        return Ok(Some(GitHeadState::Detached(id.detach())));
+    if let Some(oid) = repo.head_commit_oid_or_none().map_err(git_substrate_err)? {
+        return Ok(Some(GitHeadState::Detached(oid)));
     }
     Ok(None)
 }
@@ -2675,15 +2477,15 @@ fn detect_git_head_state(path: &Path) -> Result<Option<GitHeadState>> {
     if let Some(head) = detect_git_head_fast(path) {
         return Ok(Some(head));
     }
-    detect_git_head_state_via_gix(path)
+    detect_git_head_state_via_substrate(path)
 }
 
 /// Detect git's current HEAD branch.
 ///
 /// The fast path reads `.git/HEAD` directly as text. `.git/HEAD` is a
 /// tiny file (~30 bytes for `ref: refs/heads/<name>\n`) and a direct
-/// read is ~50us vs. `gix::discover()`'s ~25ms full repository
-/// inspection. Falls back to gix only for the cases the text parser
+/// read is ~50us vs. a full repository discover's ~25ms inspection.
+/// Falls back to the substrate adapter only for the cases the text parser
 /// can't handle: detached HEAD, multi-worktree `gitdir:` indirections,
 /// and any malformed file (where we'd rather surface the right error
 /// than guess).
@@ -2717,11 +2519,10 @@ fn detect_git_head_fast(path: &Path) -> Option<GitHeadState> {
 }
 
 fn resolve_git_dir(path: &Path) -> Result<PathBuf> {
-    let repo = gix::discover(path).map_err(|error| {
+    let repo = GitRepo::discover(path).map_err(|error| {
         HeddleError::Config(format!(
-            "failed to resolve git dir at '{}': {}",
-            path.display(),
-            error
+            "failed to resolve git dir at '{}': {error}",
+            path.display()
         ))
     })?;
     Ok(repo.git_dir().to_path_buf())

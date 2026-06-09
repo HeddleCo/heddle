@@ -143,7 +143,12 @@ fn preflight_importable_git_history(git_root: &Path, refs: &[String]) -> Result<
 
     let missing = refs
         .iter()
-        .filter(|name| !git_ref_points_to_commit(git_root, name).unwrap_or(false))
+        .filter(|name| {
+            !git_substrate::GitRepo::discover(git_root)
+                .ok()
+                .and_then(|git| git_ref_points_to_commit(&git, name).ok())
+                .unwrap_or(false)
+        })
         .cloned()
         .collect::<Vec<_>>();
     if missing.is_empty() {
@@ -155,39 +160,30 @@ fn preflight_importable_git_history(git_root: &Path, refs: &[String]) -> Result<
 
 fn git_repo_has_any_commit_ref(git_root: &Path) -> Result<bool> {
     let git =
-        gix::discover(git_root).map_err(|error| anyhow!("failed to inspect Git refs: {error}"))?;
-    let references = git
-        .references()
-        .map_err(|error| anyhow!("failed to inspect Git refs: {error}"))?;
-    for branch in references
-        .local_branches()
+        git_substrate::GitRepo::discover(git_root).map_err(|error| anyhow!("failed to inspect Git refs: {error}"))?;
+    for branch in git
+        .local_branch_names()
         .map_err(|error| anyhow!("failed to inspect Git refs: {error}"))?
     {
-        let branch = branch.map_err(|error| anyhow!("failed to inspect Git ref: {error}"))?;
-        if git_ref_points_to_commit(git_root, &branch.name().as_bstr().to_str_lossy())? {
+        if git_ref_points_to_commit(&git, &format!("refs/heads/{branch}"))? {
             return Ok(true);
         }
     }
-    let references = git
-        .references()
-        .map_err(|error| anyhow!("failed to inspect Git refs: {error}"))?;
-    for tag in references
-        .tags()
+    for tag in git
+        .local_tag_names()
         .map_err(|error| anyhow!("failed to inspect Git refs: {error}"))?
     {
-        let tag = tag.map_err(|error| anyhow!("failed to inspect Git ref: {error}"))?;
-        if git_ref_points_to_commit(git_root, &tag.name().as_bstr().to_str_lossy())? {
+        if git_ref_points_to_commit(&git, &format!("refs/tags/{tag}"))? {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-fn git_ref_points_to_commit(git_root: &Path, name: &str) -> Result<bool> {
-    let spec = format!("{name}^{{commit}}");
-    let git = gix::discover(git_root)
-        .map_err(|error| anyhow!("failed to inspect Git ref '{name}': {error}"))?;
-    Ok(git.rev_parse_single(spec.as_bytes().as_bstr()).is_ok())
+fn git_ref_points_to_commit(git: &git_substrate::GitRepo, name: &str) -> Result<bool> {
+    Ok(git
+        .resolve_revision(&format!("{name}^{{commit}}"))?
+        .is_some())
 }
 
 fn no_git_commits_to_adopt_advice(git_root: &Path, missing_refs: Vec<String>) -> RecoveryAdvice {
@@ -245,7 +241,7 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
 }
 
 fn git_worktree_root(start: &Path) -> Result<PathBuf> {
-    let git = gix::discover(start).map_err(|error| {
+    let git = git_substrate::GitRepo::discover(start).map_err(|error| {
         anyhow!(RecoveryAdvice::adopt_requires_git_worktree(Some(format!(
             "Git inspection failed: {error}"
         ))))
@@ -253,7 +249,7 @@ fn git_worktree_root(start: &Path) -> Result<PathBuf> {
     let Some(workdir) = git.workdir() else {
         bail!(RecoveryAdvice::adopt_requires_git_worktree(None));
     };
-    Ok(workdir.to_path_buf())
+    Ok(workdir)
 }
 
 fn render_adopt(output: &AdoptOutput, json: bool) -> Result<()> {

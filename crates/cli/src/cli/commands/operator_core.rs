@@ -551,19 +551,20 @@ pub(crate) fn recommend_next_action(
 }
 
 fn git_unmerged_paths(repo: &Repository) -> Result<Vec<String>> {
-    let git = match gix::discover(repo.root()) {
-        Ok(git) => git,
+    let git_repo = match git_substrate::GitRepo::discover(repo.root()) {
+        Ok(git_repo) => git_repo,
         Err(_) => return Ok(Vec::new()),
     };
-    let index = match git.index_or_empty() {
-        Ok(index) => index,
-        Err(_) => return Ok(Vec::new()),
+    let format = git_repo.object_format();
+    let index = match git_substrate::read_disk_index(git_repo.git_dir(), format) {
+        Ok(Some(index)) => index,
+        _ => return Ok(Vec::new()),
     };
     let mut paths = BTreeSet::new();
-    for (_, path) in index.entries_with_paths_by_filter_map(|path, entry| {
-        (entry.stage_raw() != 0).then(|| path.to_str_lossy().into_owned())
-    }) {
-        paths.insert(path);
+    for entry in &index.entries {
+        if git_substrate::index_entry_stage(entry.flags) != 0 {
+            paths.insert(String::from_utf8_lossy(&entry.path).into_owned());
+        }
     }
     Ok(paths.into_iter().collect())
 }

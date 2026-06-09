@@ -4,24 +4,21 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fs,
-    io::Write,
-    num::NonZeroU32,
     path::{Path, PathBuf},
-    sync::atomic::AtomicBool,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use gix::{
     bstr::ByteSlice,
-    hash::{Kind as ObjectHashKind, ObjectId},
     refs::{
         Target,
-        transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog},
+        transaction::PreviousValue,
     },
 };
-use gix_transport::{
-    Protocol, Service,
-    client::{MessageKind, WriteMode, blocking_io::Transport},
+pub use git_substrate::ObjectId;
+use git_substrate::{
+    self, actor_suffix_bytes, index_lock_exists, null_sha1, parse_sha1_hex,
+    write_index_from_commit, GitRepo, IntentToAddMode, RefConstraint, RefDeleteConstraint,
+    reconcile_intent_to_add,
 };
 use objects::{
     error::HeddleError,
@@ -36,6 +33,22 @@ use super::{
     git_import::import_all,
     git_util::{ImportStats, LossyGitImportEntry},
 };
+
+fn gix_oid(oid: &ObjectId) -> GitResult<gix::hash::ObjectId> {
+    git_substrate::to_gix(oid).map_err(|err| GitBridgeError::Git(err.to_string()))
+}
+
+fn substrate_oid(oid: gix::hash::ObjectId) -> GitResult<ObjectId> {
+    git_substrate::from_gix(oid).map_err(|err| GitBridgeError::Git(err.to_string()))
+}
+
+/// Wire URL for native transport, preserving embedded credentials.
+///
+/// `gix::Url::to_string()` redacts passwords for safe logging; transport
+/// needs the real secret to authenticate HTTP remotes.
+fn gix_transport_url(url: &gix::Url) -> String {
+    url.to_bstring().to_string()
+}
 
 /// Errors specific to Git bridge operations.
 #[derive(Debug, thiserror::Error)]
@@ -384,7 +397,7 @@ impl std::fmt::Display for WriteThroughSkipReason {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteThroughOutcome {
     Wrote(ObjectId),
     Skipped(WriteThroughSkipReason),
@@ -410,6 +423,15 @@ impl LocalGitIdentity {
             email: self.email.as_str().into(),
             time: gix::date::Time { seconds, offset: 0 },
         }
+    }
+
+    pub(crate) fn to_actor_suffix(&self, seconds: i64) -> Vec<u8> {
+        actor_suffix_bytes(
+            self.name.as_bytes(),
+            self.email.as_bytes(),
+            seconds,
+            0,
+        )
     }
 }
 
@@ -448,17 +470,18 @@ impl SyncMapping {
     }
 
     /// Insert a mapping.
-    pub fn insert(&mut self, change_id: ChangeId, git_oid: ObjectId) {
+    pub fn insert(&mut self, change_id: ChangeId, git_oid: &ObjectId) {
         if let Some(previous_git) = self.heddle_to_git.remove(&change_id) {
             self.git_to_heddle.remove(&previous_git);
-            if previous_git != git_oid {
+            if &previous_git != git_oid {
                 self.git_lossy_entries.remove(&previous_git);
             }
         }
-        if let Some(previous_change) = self.git_to_heddle.remove(&git_oid) {
+        if let Some(previous_change) = self.git_to_heddle.remove(git_oid) {
             self.heddle_to_git.remove(&previous_change);
         }
-        self.heddle_to_git.insert(change_id, git_oid);
+        let git_oid = git_oid.clone();
+        self.heddle_to_git.insert(change_id, git_oid.clone());
         self.git_to_heddle.insert(git_oid, change_id);
     }
 
@@ -466,10 +489,10 @@ impl SyncMapping {
     pub(crate) fn insert_checked(
         &mut self,
         change_id: ChangeId,
-        git_oid: ObjectId,
+        git_oid: &ObjectId,
     ) -> GitResult<()> {
         if let Some(existing) = self.heddle_to_git.get(&change_id)
-            && *existing != git_oid
+            && *existing != *git_oid
         {
             return Err(GitBridgeError::Conflict(format!(
                 "change id {} mapped to {} (new {})",
@@ -492,12 +515,12 @@ impl SyncMapping {
 
     /// Get Git object id for a Heddle ChangeId.
     pub fn get_git(&self, change_id: &ChangeId) -> Option<ObjectId> {
-        self.heddle_to_git.get(change_id).copied()
+        self.heddle_to_git.get(change_id).cloned()
     }
 
     /// Get Heddle ChangeId for a Git object id.
-    pub fn get_heddle(&self, git_oid: ObjectId) -> Option<ChangeId> {
-        self.git_to_heddle.get(&git_oid).copied()
+    pub fn get_heddle(&self, git_oid: &ObjectId) -> Option<ChangeId> {
+        self.git_to_heddle.get(git_oid).copied()
     }
 
     /// Check if a mapping exists for a ChangeId.
@@ -523,8 +546,8 @@ impl SyncMapping {
     }
 
     /// Check if a mapping exists for a Git object id.
-    pub fn has_git(&self, git_oid: ObjectId) -> bool {
-        self.git_to_heddle.contains_key(&git_oid)
+    pub fn has_git(&self, git_oid: &ObjectId) -> bool {
+        self.git_to_heddle.contains_key(git_oid)
     }
 
     pub(crate) fn set_git_lossy_entries(
@@ -541,9 +564,9 @@ impl SyncMapping {
 
     pub(crate) fn get_git_lossy_entries(
         &self,
-        git_oid: ObjectId,
+        git_oid: &ObjectId,
     ) -> Option<&[LossyGitImportEntry]> {
-        self.git_lossy_entries.get(&git_oid).map(Vec::as_slice)
+        self.git_lossy_entries.get(git_oid).map(Vec::as_slice)
     }
 
     /// Iterate over mappings.
@@ -551,20 +574,17 @@ impl SyncMapping {
         self.heddle_to_git.iter()
     }
 
-    pub(crate) fn retain_git_objects(&mut self, repo: &gix::Repository) {
+    pub(crate) fn retain_git_objects(&mut self, repo: &GitRepo) {
         let retained: Vec<(ChangeId, ObjectId, Option<Vec<LossyGitImportEntry>>)> = self
             .heddle_to_git
             .iter()
             .filter_map(|(change_id, git_oid)| {
-                repo.find_object(*git_oid)
-                    .ok()
-                    .map(|_| {
-                        (
-                            *change_id,
-                            *git_oid,
-                            self.git_lossy_entries.get(git_oid).cloned(),
-                        )
-                    })
+                repo.has_object(git_oid).ok()?.then_some(())?;
+                Some((
+                    *change_id,
+                    git_oid.clone(),
+                    self.git_lossy_entries.get(git_oid).cloned(),
+                ))
             })
             .collect();
 
@@ -572,7 +592,7 @@ impl SyncMapping {
         self.git_to_heddle.clear();
         self.git_lossy_entries.clear();
         for (change_id, git_oid, lossy_entries) in retained {
-            self.insert(change_id, git_oid);
+            self.insert(change_id, &git_oid);
             if let Some(lossy_entries) = lossy_entries {
                 self.set_git_lossy_entries(git_oid, lossy_entries);
             }
@@ -585,11 +605,11 @@ impl SyncMapping {
         let retained: Vec<(ChangeId, ObjectId, Option<Vec<LossyGitImportEntry>>)> = self
             .heddle_to_git
             .iter()
-            .filter(|(_, git_oid)| reachable.contains(*git_oid))
+            .filter(|(_, git_oid)| reachable.contains(git_oid))
             .map(|(change_id, git_oid)| {
                 (
                     *change_id,
-                    *git_oid,
+                    git_oid.clone(),
                     self.git_lossy_entries.get(git_oid).cloned(),
                 )
             })
@@ -599,7 +619,7 @@ impl SyncMapping {
         self.git_to_heddle.clear();
         self.git_lossy_entries.clear();
         for (change_id, git_oid, lossy_entries) in retained {
-            self.insert(change_id, git_oid);
+            self.insert(change_id, &git_oid);
             if let Some(lossy_entries) = lossy_entries {
                 self.set_git_lossy_entries(git_oid, lossy_entries);
             }
@@ -648,11 +668,11 @@ impl<'a> GitBridge<'a> {
         let git_dir = self.heddle_repo.heddle_dir().join("git");
 
         let did_create = if git_dir.exists() {
-            let _ = open_repo(&git_dir)?;
+            let _ = GitRepo::open(&git_dir).map_err(git_err)?;
             false
         } else {
             fs::create_dir_all(&git_dir)?;
-            let _ = gix::init_bare(&git_dir).map_err(git_err)?;
+            let _ = GitRepo::init_bare(&git_dir).map_err(git_err)?;
             true
         };
 
@@ -670,16 +690,16 @@ impl<'a> GitBridge<'a> {
         self.mirror_path().exists()
     }
 
-    /// Open the Git repository (mirror or regular).
-    pub(crate) fn open_git_repo(&self) -> GitResult<gix::Repository> {
+    /// Open the Git repository (mirror or regular) via the sley substrate.
+    pub(crate) fn open_git_repo(&self) -> GitResult<GitRepo> {
         if let Some(ref path) = self.git_repo_path {
-            open_repo(path)
+            open_git_repo_at(path)
         } else {
             let mirror_path = self.mirror_path();
             if mirror_path.exists() {
-                open_repo(&mirror_path)
+                open_git_repo_at(&mirror_path)
             } else {
-                open_repo(self.heddle_repo.root())
+                open_git_repo_at(self.heddle_repo.root())
             }
         }
     }
@@ -855,18 +875,16 @@ impl<'a> GitBridge<'a> {
         force: bool,
     ) -> GitResult<()> {
         let mirror_repo = self.open_git_repo()?;
-        let target_repo = if target_path.exists() {
-            open_repo(target_path)?
-        } else if init_if_missing {
+        if !target_path.exists() && init_if_missing {
             fs::create_dir_all(target_path)?;
-            gix::init_bare(target_path).map_err(git_err)?;
-            open_repo(target_path)?
-        } else {
+            GitRepo::init_bare(target_path).map_err(git_err)?;
+        } else if !target_path.exists() {
             return Err(GitBridgeError::Git(format!(
                 "destination '{}' does not exist",
                 target_path.display()
             )));
-        };
+        }
+        let target_repo = GitRepo::open(target_path).map_err(git_err)?;
 
         // The WHOLE-MIRROR served frontier — the SAME projection the mirror
         // reconcile materialized (heddle#316 r14/r16). It drives BOTH the object
@@ -886,7 +904,7 @@ impl<'a> GitBridge<'a> {
         copy_reachable_objects(
             &mirror_repo,
             &target_repo,
-            served_frontier.iter().map(|update| update.target),
+            served_frontier.iter().map(|update| update.target.clone()),
         )?;
 
         // The ONE served-frontier reconciliation, shared with the URL/network
@@ -910,17 +928,17 @@ impl<'a> GitBridge<'a> {
         for write in &plan.writes {
             // The plan already decided force-vs-FF per ref (erroring on a fork
             // unless `force`), so the destination write itself is unconditional —
-            // `PreviousValue::Any` mirrors the forced mirror-side branch rewind.
-            set_reference(
+            // `RefConstraint::Any` mirrors the forced mirror-side branch rewind.
+            set_git_repo_reference(
                 &target_repo,
                 &write.full_name,
-                write.new,
-                PreviousValue::Any,
+                &write.new,
+                RefConstraint::Any,
                 log_message,
             )?;
         }
         for delete in &plan.deletes {
-            delete_reference_if_present(&target_repo, &delete.full_name)?;
+            delete_git_repo_reference_if_present(&target_repo, &delete.full_name)?;
         }
         write_exported_refs(&target_repo, &plan.new_manifest)?;
         Ok(())
@@ -959,12 +977,12 @@ impl<'a> GitBridge<'a> {
         let mirror_repo = self.open_git_repo()?;
         match self.resolve_remote(remote_name, gix::remote::Direction::Fetch)? {
             ResolvedRemote::Local(path) => {
-                let remote_repo = open_repo(&path)?;
+                let remote_repo = open_git_repo_at(&path)?;
                 let updates = collect_ref_updates_for_fetch(&remote_repo, scope)?;
                 copy_reachable_objects(
                     &remote_repo,
                     &mirror_repo,
-                    updates.iter().map(|update| update.target),
+                    updates.iter().map(|update| update.target.clone()),
                 )?;
                 apply_ref_updates(
                     &mirror_repo,
@@ -1137,12 +1155,11 @@ impl<'a> GitBridge<'a> {
         };
         let mirror_repo = self.open_git_repo()?;
         let branch_ref = format!("refs/heads/{thread}");
-        let Ok(mut reference) = mirror_repo.find_reference(&branch_ref) else {
+        let Some(remote_git_oid) = mirror_repo.read_ref_oid(&branch_ref).map_err(git_err)? else {
             return Ok(());
         };
-        let remote_git_oid = reference.peel_to_id().map_err(git_err)?.detach();
         if remote_git_oid == local_git_oid
-            || commit_is_descendant_of(&mirror_repo, remote_git_oid, local_git_oid)?
+            || commit_is_descendant_of(&mirror_repo, &remote_git_oid, &local_git_oid)?
         {
             return Ok(());
         }
@@ -1160,7 +1177,7 @@ impl<'a> GitBridge<'a> {
         }
 
         let mirror_repo = self.open_git_repo()?;
-        let checkout_repo = gix::discover(self.heddle_repo.root()).map_err(git_err)?;
+        let checkout_repo = GitRepo::discover(self.heddle_repo.root()).map_err(git_err)?;
         if checkout_repo.git_dir() == mirror_repo.git_dir() {
             return Ok(());
         }
@@ -1173,10 +1190,10 @@ impl<'a> GitBridge<'a> {
             return Ok(());
         }
 
-        copy_reachable_objects(
-            &object_repo,
-            &mirror_repo,
-            tag_updates.iter().map(|u| u.target),
+        copy_reachable_git_dirs(
+            object_repo.common_dir(),
+            mirror_repo.git_dir(),
+            tag_updates.iter().map(|u| u.target.clone()),
         )?;
         apply_ref_updates(
             &mirror_repo,
@@ -1192,7 +1209,7 @@ impl<'a> GitBridge<'a> {
         // (heddle#316).
         let mut record = read_mirror_managed_refs(&mirror_repo)?;
         for update in &tag_updates {
-            record.insert(full_ref_name(update), update.target);
+            record.insert(full_ref_name(update), update.target.clone());
         }
         write_mirror_managed_refs(&mirror_repo, &record)?;
         Ok(())
@@ -1200,13 +1217,13 @@ impl<'a> GitBridge<'a> {
 
     pub(crate) fn seed_git_checkpoint_mappings_from_checkout(
         &mut self,
-        mirror_repo: &gix::Repository,
+        mirror_repo: &GitRepo,
     ) -> GitResult<()> {
         if !self.heddle_repo.root().join(".git").exists() {
             return Ok(());
         }
 
-        let checkout_repo = match gix::discover(self.heddle_repo.root()) {
+        let checkout_repo = match GitRepo::discover(self.heddle_repo.root()) {
             Ok(repo) => repo,
             Err(_) => return Ok(()),
         };
@@ -1217,19 +1234,21 @@ impl<'a> GitBridge<'a> {
 
         for record in self.heddle_repo.list_git_checkpoints()? {
             let change_id = ChangeId::parse(&record.change_id)?;
-            let git_oid = record
-                .git_commit
-                .parse::<ObjectId>()
+            let git_oid = parse_sha1_hex(&record.git_commit)
                 .map_err(|err| GitBridgeError::InvalidMapping(err.to_string()))?;
 
-            if mirror_repo.find_object(git_oid).is_err() {
-                copy_reachable_objects(&object_repo, mirror_repo, [git_oid])?;
+            if !mirror_repo.has_object(&git_oid).map_err(git_err)? {
+                copy_reachable_git_dirs(
+                    object_repo.common_dir(),
+                    mirror_repo.git_dir(),
+                    [git_oid.clone()],
+                )?;
             }
-            mirror_repo
-                .find_object(git_oid)
-                .map_err(|_| GitBridgeError::CommitNotFound(record.git_commit.clone()))?;
+            if !mirror_repo.has_object(&git_oid).map_err(git_err)? {
+                return Err(GitBridgeError::CommitNotFound(record.git_commit.clone()));
+            }
 
-            self.mapping.insert(change_id, git_oid);
+            self.mapping.insert(change_id, &git_oid);
             // Only publish a note for a state served to the public mirror.
             // `collect_ref_updates` copies `refs/notes/*`, so writing a note for
             // a now-embargoed checkpoint here would leak that commit's metadata
@@ -1245,11 +1264,11 @@ impl<'a> GitBridge<'a> {
                     GitBridgeError::Git(format!("resolve visibility for {change_id}: {e:#}"))
                 })?;
             if repo::visible(&tier, &repo::AudienceTier::Public)
-                && super::git_notes::read_note(mirror_repo, git_oid)?.is_none()
+                && super::git_notes::read_note_repo(mirror_repo, &git_oid)?.is_none()
                 && let Some(state) = self.heddle_repo.store().get_state(&change_id)?
             {
                 let note = super::git_notes::HeddleNote::from_state(&state);
-                super::git_notes::write_note(mirror_repo, git_oid, &note)?;
+                super::git_notes::write_note_repo(mirror_repo, &git_oid, &note)?;
             }
         }
 
@@ -1332,14 +1351,10 @@ impl<'a> GitBridge<'a> {
         if !root.join(".git").exists() {
             return Ok(());
         }
-        let checkout_repo = gix::discover(root).map_err(git_err)?;
+        let checkout_repo = GitRepo::discover(root).map_err(git_err)?;
         // Skip detached HEAD: write-through only mirrors attached
         // threads, and there is no branch context to reason about here.
-        if checkout_repo
-            .head()
-            .map(|head| head.is_detached())
-            .unwrap_or(false)
-        {
+        if checkout_repo.head_is_detached().map_err(git_err)? {
             return Ok(());
         }
 
@@ -1357,88 +1372,25 @@ impl<'a> GitBridge<'a> {
         // `captured_paths` is empty too, so the PRUNE pass clears every prior
         // intent-to-add entry (all are now stale) and the ADD loop is a no-op.
 
-        // Reconcile the index's intent-to-add set against the captured
-        // state. Real (committed) entries are left untouched; the
-        // intent-to-add set must end up equal to the captured paths that
-        // are not yet real entries. So we both ADD newly-captured paths
-        // and PRUNE intent-to-add entries whose path left the captured
-        // set (deleted, or now committed) — otherwise a stale entry
-        // surfaces as a phantom ` D path` in `git status`.
-        let mut index = checkout_repo.open_index().map_err(git_err)?;
-
-        // Partition existing entries: real tracked paths vs. the
-        // intent-to-add placeholders we manage here.
-        let mut real_tracked: HashSet<String> = HashSet::new();
-        let mut existing_ita: HashSet<String> = HashSet::new();
-        for entry in index.entries() {
-            let path = entry
-                .path_in(index.path_backing())
-                .to_str_lossy()
-                .into_owned();
-            if entry.flags.contains(gix_index::entry::Flags::INTENT_TO_ADD) {
-                existing_ita.insert(path);
-            } else {
-                real_tracked.insert(path);
-            }
-        }
-
-        // Desired intent-to-add set: captured paths not backed by a real
-        // (committed) index entry.
-        let captured_paths: HashSet<&str> = captured.iter().map(|(p, _)| p.as_str()).collect();
-
-        // PRUNE: any intent-to-add entry whose path is no longer desired.
-        let mut changed = false;
-        index.remove_entries(|_, path, entry| {
-            let stale = entry.flags.contains(gix_index::entry::Flags::INTENT_TO_ADD)
-                && !captured_paths.contains(path.to_str_lossy().as_ref());
-            if stale {
-                changed = true;
-            }
-            stale
-        });
-
-        // ADD: newly-captured paths not already tracked or marked.
-        let empty_blob = checkout_repo.object_hash().empty_blob();
-        for (path, mode) in &captured {
-            if real_tracked.contains(path) || existing_ita.contains(path) {
-                continue;
-            }
-            // Git's index cannot hold both a blob `foo` and a blob
-            // `foo/bar` — a path is either a file or a directory. An
-            // added path that file↔directory-PREFIX-conflicts with a
-            // still-tracked real entry is not a clean "new file": the
-            // real entry wins. Writing an intent-to-add placeholder for
-            // it would corrupt the index into a file/dir conflict, so
-            // skip it (checked in both directions).
-            if real_tracked
-                .iter()
-                .any(|tracked| path_prefix_conflict(path, tracked))
-            {
-                continue;
-            }
-            let entry_mode = match mode {
-                FileMode::Executable => gix_index::entry::Mode::FILE_EXECUTABLE,
-                FileMode::Symlink => gix_index::entry::Mode::SYMLINK,
-                FileMode::Normal => gix_index::entry::Mode::FILE,
-            };
-            index.dangerously_push_entry(
-                gix_index::entry::Stat::default(),
-                empty_blob,
-                gix_index::entry::Flags::INTENT_TO_ADD | gix_index::entry::Flags::EXTENDED,
-                entry_mode,
-                path.as_bytes().as_bstr(),
-            );
-            changed = true;
-        }
-
-        if changed {
-            // `dangerously_push_entry` appends without preserving sort
-            // order; restore it so subsequent path lookups stay correct.
-            index.sort_entries();
-            index
-                .write(gix_index::write::Options::default())
-                .map_err(git_err)?;
-        }
+        let captured_for_index = captured
+            .iter()
+            .map(|(path, mode)| {
+                (
+                    path.clone(),
+                    match mode {
+                        FileMode::Executable => IntentToAddMode::Executable,
+                        FileMode::Symlink => IntentToAddMode::Symlink,
+                        FileMode::Normal => IntentToAddMode::Normal,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        reconcile_intent_to_add(
+            checkout_repo.git_dir(),
+            checkout_repo.object_format(),
+            &captured_for_index,
+        )
+        .map_err(git_err)?;
         Ok(())
     }
 
@@ -1515,7 +1467,7 @@ impl<'a> GitBridge<'a> {
         };
 
         let mirror_repo = self.open_git_repo()?;
-        let checkout_repo = gix::discover(self.heddle_repo.root()).map_err(git_err)?;
+        let checkout_repo = GitRepo::discover(self.heddle_repo.root()).map_err(git_err)?;
         if checkout_repo.git_dir() == mirror_repo.git_dir() {
             return Ok(WriteThroughOutcome::Skipped(
                 WriteThroughSkipReason::MirrorIsWorktree,
@@ -1529,7 +1481,7 @@ impl<'a> GitBridge<'a> {
         // concurrent lock surfaces as a structured `IndexAlreadyDirty`
         // skip rather than a raw "Could not acquire lock" error from
         // gix.
-        if git_dir.join("index.lock").exists() {
+        if index_lock_exists(&git_dir) {
             return Ok(WriteThroughOutcome::Skipped(
                 WriteThroughSkipReason::IndexAlreadyDirty,
             ));
@@ -1541,27 +1493,28 @@ impl<'a> GitBridge<'a> {
         let index_path = git_dir.join("index");
         let previous_head = fs::read(&head_path).ok();
         let previous_index = fs::read(&index_path).ok();
-        let previous_branch = object_repo
-            .find_reference(&branch_ref)
-            .ok()
-            .and_then(|mut reference| reference.peel_to_id().ok())
-            .map(|id| id.detach());
+        let previous_branch = object_repo.read_ref_oid(&branch_ref).ok().flatten();
 
         let write_result = (|| -> GitResult<()> {
-            copy_reachable_objects(&mirror_repo, &object_repo, [git_oid])?;
+            copy_reachable_git_dirs(
+                mirror_repo.git_dir(),
+                object_repo.common_dir(),
+                [git_oid.clone()],
+            )?;
             fs::write(&head_path, format!("ref: {branch_ref}\n"))?;
 
-            let commit = checkout_repo.find_commit(git_oid).map_err(git_err)?;
-            let tree_id = commit.tree_id().map_err(git_err)?;
-            let mut index = checkout_repo.index_from_tree(&tree_id).map_err(git_err)?;
-            index
-                .write(gix_index::write::Options::default())
-                .map_err(git_err)?;
+            write_index_from_commit(
+                self.heddle_repo.root(),
+                &git_dir,
+                checkout_repo.object_format(),
+                &git_oid,
+            )
+            .map_err(git_err)?;
 
             update_checkout_head_ref(
                 &checkout_repo,
-                git_oid,
-                previous_branch,
+                &git_oid,
+                previous_branch.as_ref(),
                 "heddle: write-through current thread",
             )?;
 
@@ -1580,11 +1533,11 @@ impl<'a> GitBridge<'a> {
             restore_file(head_path.clone(), previous_head.as_deref())?;
             restore_file(index_path.clone(), previous_index.as_deref())?;
             if let Some(previous_branch) = previous_branch {
-                set_reference(
+                set_git_repo_reference(
                     &object_repo,
                     &branch_ref,
-                    previous_branch,
-                    PreviousValue::Any,
+                    &previous_branch,
+                    RefConstraint::Any,
                     "heddle: rollback failed write-through",
                 )?;
             } else {
@@ -1597,7 +1550,7 @@ impl<'a> GitBridge<'a> {
                 // reverted. Best-effort: a missing ref here means the
                 // failure happened before set_reference ran, which is
                 // already the correct rolled-back state.
-                let _ = delete_reference_if_present(&object_repo, &branch_ref);
+                let _ = delete_git_repo_reference_if_present(&object_repo, &branch_ref);
             }
             // fsync the rollback so the recovered files are durable
             // even if the caller crashes immediately after.
@@ -1607,7 +1560,7 @@ impl<'a> GitBridge<'a> {
             return Err(err);
         }
 
-        Ok(WriteThroughOutcome::Wrote(git_oid))
+        Ok(WriteThroughOutcome::Wrote(git_oid.clone()))
     }
 
     fn refresh_checkout_remote_tracking_ref(
@@ -1627,22 +1580,25 @@ impl<'a> GitBridge<'a> {
 
         let mirror_repo = self.open_git_repo()?;
         let branch_ref = format!("refs/heads/{branch}");
-        let Ok(mut reference) = mirror_repo.find_reference(&branch_ref) else {
+        let Some(target) = mirror_repo.read_ref_oid(&branch_ref).map_err(git_err)? else {
             return Ok(());
         };
-        let target = reference.peel_to_id().map_err(git_err)?.detach();
 
-        let checkout_repo = gix::discover(self.heddle_repo.root()).map_err(git_err)?;
+        let checkout_repo = GitRepo::discover(self.heddle_repo.root()).map_err(git_err)?;
         if checkout_repo.git_dir() == mirror_repo.git_dir() {
             return Ok(());
         }
         let object_repo = common_repo_for_worktree(&checkout_repo)?;
-        copy_reachable_objects(&mirror_repo, &object_repo, [target])?;
-        set_reference(
+        copy_reachable_git_dirs(
+            mirror_repo.git_dir(),
+            object_repo.common_dir(),
+            [target.clone()],
+        )?;
+        set_git_repo_reference(
             &object_repo,
             &format!("refs/remotes/{tracking_remote}/{branch}"),
-            target,
-            PreviousValue::Any,
+            &target,
+            RefConstraint::Any,
             "heddle: refresh remote-tracking branch after pull",
         )?;
         Ok(())
@@ -1660,35 +1616,32 @@ impl<'a> GitBridge<'a> {
         reject_reserved_git_remote_name(&tracking_remote)?;
 
         let mirror_repo = self.open_git_repo()?;
-        let checkout_repo = gix::discover(self.heddle_repo.root()).map_err(git_err)?;
+        let checkout_repo = GitRepo::discover(self.heddle_repo.root()).map_err(git_err)?;
         if checkout_repo.git_dir() == mirror_repo.git_dir() {
             return Ok(());
         }
         let object_repo = common_repo_for_worktree(&checkout_repo)?;
         let prefix = format!("refs/remotes/{remote_name}/");
-        for reference in mirror_repo
-            .references()
-            .map_err(git_err)?
-            .prefixed(prefix.as_str())
-            .map_err(git_err)?
-        {
-            let reference = reference.map_err(git_err)?;
-            let Some(target) = reference.target().try_id().map(ToOwned::to_owned) else {
+        for reference in mirror_repo.list_refs().map_err(git_err)? {
+            let git_substrate::RefTarget::Direct(target) = reference.target else {
                 continue;
             };
-            let full = reference.name().as_bstr().to_string();
-            let Some(branch) = full.strip_prefix(&prefix) else {
+            let Some(branch) = reference.name.strip_prefix(&prefix) else {
                 continue;
             };
-            if branch.ends_with("/HEAD") {
+            if branch.ends_with("/HEAD") || branch.is_empty() {
                 continue;
             }
-            copy_reachable_objects(&mirror_repo, &object_repo, [target])?;
-            set_reference(
+            copy_reachable_git_dirs(
+                mirror_repo.git_dir(),
+                object_repo.common_dir(),
+                [target.clone()],
+            )?;
+            set_git_repo_reference(
                 &object_repo,
                 &format!("refs/remotes/{tracking_remote}/{branch}"),
-                target,
-                PreviousValue::Any,
+                &target,
+                RefConstraint::Any,
                 "heddle: refresh remote-tracking branch after fetch",
             )?;
         }
@@ -1701,7 +1654,7 @@ impl<'a> GitBridge<'a> {
         }
 
         let mirror_repo = self.open_git_repo()?;
-        let checkout_repo = gix::discover(self.heddle_repo.root()).map_err(git_err)?;
+        let checkout_repo = GitRepo::discover(self.heddle_repo.root()).map_err(git_err)?;
         if checkout_repo.git_dir() == mirror_repo.git_dir() {
             return Ok(());
         }
@@ -1714,10 +1667,10 @@ impl<'a> GitBridge<'a> {
             return Ok(());
         }
 
-        copy_reachable_objects(
-            &mirror_repo,
-            &object_repo,
-            note_updates.iter().map(|u| u.target),
+        copy_reachable_git_dirs(
+            mirror_repo.git_dir(),
+            object_repo.common_dir(),
+            note_updates.iter().map(|u| u.target.clone()),
         )?;
         apply_ref_updates(
             &object_repo,
@@ -1733,7 +1686,7 @@ impl<'a> GitBridge<'a> {
         direction: gix::remote::Direction,
     ) -> GitResult<ResolvedRemote> {
         let repo = self.open_git_repo()?;
-        let url = match remote_url_from_repo(&repo, remote_name, direction)? {
+        let url = match remote_url_from_git_repo(&repo, remote_name, direction)? {
             Some(url) => Some(url),
             None => self.checkout_remote_url(remote_name, direction)?,
         };
@@ -1760,31 +1713,39 @@ impl<'a> GitBridge<'a> {
         {
             return Ok(Some(url));
         }
-        let Ok(repo) = gix::discover(self.heddle_repo.root()) else {
+        let Ok(repo) = GitRepo::discover(self.heddle_repo.root()) else {
             return Ok(None);
         };
-        remote_url_from_repo(&repo, remote_name, direction)
+        remote_url_from_git_repo(&repo, remote_name, direction)
     }
 }
 
-fn remote_url_from_repo(
-    repo: &gix::Repository,
+fn remote_url_from_git_repo(
+    repo: &GitRepo,
     remote_name: &str,
     direction: gix::remote::Direction,
 ) -> GitResult<Option<gix::Url>> {
-    if direction == gix::remote::Direction::Fetch {
-        if let Some(url) = remote_fetch_url_from_config(repo, remote_name)? {
-            return Ok(Some(url));
+    let base = repo.workdir().unwrap_or_else(|| repo.git_dir().to_path_buf());
+    for config_path in git_repo_config_paths(repo) {
+        if direction == gix::remote::Direction::Fetch {
+            if let Some(url) = parse_remote_fetch_url_from_config(&config_path, remote_name)? {
+                return parse_configured_remote_url(&url, &base).map(Some);
+            }
         }
-        if let Ok(remote) = repo.find_remote(remote_name.as_bytes().as_bstr()) {
-            return Ok(remote.url(direction).cloned());
+        if let Some(url) = parse_remote_url_from_config(&config_path, remote_name)? {
+            return parse_configured_remote_url(&url, &base).map(Some);
         }
-        Ok(None)
-    } else if let Ok(remote) = repo.find_remote(remote_name.as_bytes().as_bstr()) {
-        Ok(remote.url(direction).cloned())
-    } else {
-        Ok(None)
     }
+    Ok(None)
+}
+
+fn git_repo_config_paths(repo: &GitRepo) -> Vec<PathBuf> {
+    let mut paths = vec![repo.git_dir().join("config")];
+    let common_config = repo.common_dir().join("config");
+    if !paths.iter().any(|path| path == &common_config) {
+        paths.push(common_config);
+    }
+    paths
 }
 
 fn checkout_tracking_remote_name(root: &Path, requested: &str) -> GitResult<Option<String>> {
@@ -1822,11 +1783,11 @@ fn checkout_note_ref_exists(root: &Path) -> GitResult<bool> {
     if !root.join(".git").exists() {
         return Ok(false);
     }
-    let checkout_repo = gix::discover(root).map_err(git_err)?;
+    let checkout_repo = GitRepo::discover(root).map_err(git_err)?;
     let object_repo = common_repo_for_worktree(&checkout_repo)?;
-    Ok(object_repo
-        .find_reference(super::git_notes::NOTES_REF)
-        .is_ok())
+    object_repo
+        .has_ref(super::git_notes::NOTES_REF)
+        .map_err(git_err)
 }
 
 fn parse_remote_url_items_from_config(
@@ -1994,12 +1955,19 @@ fn common_git_dir_from_git_dir(git_dir: &Path) -> Option<PathBuf> {
 
 fn repo_config_paths(repo: &gix::Repository) -> GitResult<Vec<PathBuf>> {
     let mut paths = vec![repo.git_dir().join("config")];
-    let common_repo = common_repo_for_worktree(repo)?;
-    let common_config = common_repo.git_dir().join("config");
-    if !paths.iter().any(|path| path == &common_config) {
-        paths.push(common_config);
+    if let Ok(checkout) = GitRepo::discover(
+        repo.workdir().unwrap_or_else(|| repo.git_dir()),
+    ) {
+        let common_config = checkout.common_dir().join("config");
+        if !paths.iter().any(|path| path == &common_config) {
+            paths.push(common_config);
+        }
     }
     Ok(paths)
+}
+
+fn parse_remote_url_from_config(path: &Path, remote_name: &str) -> GitResult<Option<String>> {
+    parse_remote_fetch_url_from_config(path, remote_name)
 }
 
 fn parse_remote_fetch_url_from_config(path: &Path, remote_name: &str) -> GitResult<Option<String>> {
@@ -2032,24 +2000,88 @@ fn parse_remote_fetch_url_from_config(path: &Path, remote_name: &str) -> GitResu
     Ok(None)
 }
 
-fn common_repo_for_worktree(repo: &gix::Repository) -> GitResult<gix::Repository> {
-    let common_dir_file = repo.git_dir().join("commondir");
-    let Ok(contents) = fs::read_to_string(&common_dir_file) else {
-        return Ok(repo.clone());
-    };
-    let target = contents.trim();
-    if target.is_empty() {
-        return Ok(repo.clone());
-    }
-    let common_dir = {
-        let path = Path::new(target);
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            repo.git_dir().join(path)
+fn common_repo_for_worktree(checkout: &GitRepo) -> GitResult<GitRepo> {
+    checkout.common_repo().map_err(git_err)
+}
+
+fn copy_reachable_git_dirs(
+    source_git_dir: &Path,
+    target_git_dir: &Path,
+    roots: impl IntoIterator<Item = ObjectId>,
+) -> GitResult<()> {
+    let source = GitRepo::open(source_git_dir).map_err(git_err)?;
+    let target = GitRepo::open(target_git_dir).map_err(git_err)?;
+    git_substrate::copy_reachable_objects(&source, &target, roots).map_err(git_err)
+}
+
+pub(crate) fn collect_ref_updates(repo: &GitRepo) -> GitResult<Vec<RefUpdate>> {
+    let refs = repo.list_refs().map_err(git_err)?;
+    let mut updates = Vec::new();
+    for reference in refs {
+        let git_substrate::RefTarget::Direct(target) = reference.target else {
+            continue;
+        };
+        if let Some(name) = reference.name.strip_prefix("refs/heads/") {
+            updates.push(RefUpdate {
+                name: name.to_string(),
+                target,
+                namespace: RefNamespace::Branch,
+            });
+        } else if let Some(name) = reference.name.strip_prefix("refs/tags/") {
+            updates.push(RefUpdate {
+                name: name.to_string(),
+                target,
+                namespace: RefNamespace::Tag,
+            });
+        } else if let Some(name) = reference.name.strip_prefix("refs/notes/") {
+            updates.push(RefUpdate {
+                name: name.to_string(),
+                target,
+                namespace: RefNamespace::Note,
+            });
         }
-    };
-    open_repo(&common_dir)
+    }
+    Ok(updates)
+}
+
+pub(crate) fn apply_ref_updates(
+    repo: &GitRepo,
+    updates: &[RefUpdate],
+    log_message: &str,
+) -> GitResult<()> {
+    for update in updates {
+        set_git_repo_reference(
+            repo,
+            &full_ref_name(update),
+            &update.target,
+            RefConstraint::Any,
+            log_message,
+        )?;
+    }
+    Ok(())
+}
+
+fn set_git_repo_reference(
+    repo: &GitRepo,
+    name: &str,
+    target: &ObjectId,
+    constraint: RefConstraint,
+    log_message: &str,
+) -> GitResult<()> {
+    git_substrate::set_reference(
+        repo.git_dir(),
+        repo.object_format(),
+        name,
+        target,
+        constraint,
+        log_message,
+    )
+    .map_err(git_err)
+}
+
+fn delete_git_repo_reference_if_present(repo: &GitRepo, name: &str) -> GitResult<()> {
+    git_substrate::delete_reference_if_present(repo.git_dir(), repo.object_format(), name)
+        .map_err(git_err)
 }
 
 pub(crate) fn git_err(err: impl std::fmt::Display) -> GitBridgeError {
@@ -2147,10 +2179,15 @@ pub(crate) fn thread_is_unclaimed_bootstrap(
     Ok(tree == Tree::new())
 }
 
-pub(crate) fn open_repo(path: &Path) -> GitResult<gix::Repository> {
-    match gix::discover(path) {
+/// Open a repository at `path`, preferring an exact git-dir match over upward discovery.
+pub(crate) fn open_repo(path: &Path) -> GitResult<GitRepo> {
+    open_git_repo_at(path)
+}
+
+pub(crate) fn open_git_repo_at(path: &Path) -> GitResult<GitRepo> {
+    match GitRepo::open(path) {
         Ok(repo) => Ok(repo),
-        Err(_) => gix::open(path).map_err(git_err),
+        Err(_) => GitRepo::discover(path).map_err(git_err),
     }
 }
 
@@ -2161,70 +2198,75 @@ pub(crate) fn open_repo(path: &Path) -> GitResult<gix::Repository> {
 /// concurrent writer that *just* updated this ref isn't silently
 /// clobbered — if the ref vanished underneath us between our read and
 /// the delete, that's the rollback we wanted anyway.
-pub(crate) fn delete_reference_if_present(repo: &gix::Repository, name: &str) -> GitResult<()> {
-    let signature = bridge_signature();
-    let mut time_buf = gix::date::parse::TimeBuf::default();
-    let edit = RefEdit {
-        change: Change::Delete {
-            log: RefLog::AndReference,
-            expected: PreviousValue::MustExist,
-        },
-        name: name
-            .try_into()
-            .map_err(|err| GitBridgeError::Git(format!("invalid ref {name}: {err}")))?,
-        deref: false,
+pub(crate) fn delete_reference_if_present(repo: &GitRepo, name: &str) -> GitResult<()> {
+    delete_git_repo_reference_if_present(repo, name)
+}
+
+/// Delete a ref when an optional compare-and-swap precondition is met.
+pub(crate) fn delete_reference_matching(
+    repo: &GitRepo,
+    name: &str,
+    expected: Option<ObjectId>,
+    log_message: &str,
+) -> GitResult<()> {
+    let constraint = match expected {
+        Some(oid) => RefDeleteConstraint::MustExistAndMatch(oid),
+        None => RefDeleteConstraint::MustExist,
     };
-    match repo.edit_references_as([edit], Some(signature.to_ref(&mut time_buf))) {
-        Ok(_) => Ok(()),
-        // Missing ref → already rolled back; treat as success. gix's
-        // error message on an absent ref reads "for deletion did not
-        // exist or could not be parsed".
-        Err(err) if err.to_string().contains("did not exist") => Ok(()),
-        Err(err) => Err(git_err(err)),
-    }
+    git_substrate::delete_reference_matching(
+        repo.git_dir(),
+        repo.object_format(),
+        name,
+        constraint,
+        log_message,
+    )
+    .map_err(git_err)
+}
+
+pub(crate) fn set_git_reference(
+    repo: &GitRepo,
+    name: &str,
+    target: &ObjectId,
+    constraint: RefConstraint,
+    log_message: &str,
+) -> GitResult<()> {
+    set_git_repo_reference(repo, name, target, constraint, log_message)
 }
 
 pub(crate) fn set_reference(
-    repo: &gix::Repository,
+    repo: &GitRepo,
     name: &str,
-    target: ObjectId,
+    target: &ObjectId,
     constraint: PreviousValue,
     log_message: &str,
 ) -> GitResult<()> {
-    let signature = bridge_signature();
-    let mut time_buf = gix::date::parse::TimeBuf::default();
-    let edit = RefEdit {
-        change: Change::Update {
-            log: LogChange {
-                mode: RefLog::AndReference,
-                force_create_reflog: false,
-                message: log_message.into(),
-            },
-            expected: constraint,
-            new: Target::Object(target),
-        },
-        name: name
-            .try_into()
-            .map_err(|err| GitBridgeError::Git(format!("invalid ref {name}: {err}")))?,
-        deref: false,
-    };
-    repo.edit_references_as([edit], Some(signature.to_ref(&mut time_buf)))
-        .map_err(git_err)?;
-    Ok(())
+    set_git_repo_reference(
+        repo,
+        name,
+        target,
+        ref_constraint_from_gix(constraint)?,
+        log_message,
+    )
 }
 
-/// Whether two index paths file↔directory-PREFIX-conflict: one names a
-/// blob that is a directory prefix of the other (`foo` vs `foo/bar`, in
-/// either order). Git's index cannot hold both, since a path is either a
-/// file or a directory. Equal paths do NOT count here — that case is an
-/// exact match handled separately by the caller.
-fn path_prefix_conflict(a: &str, b: &str) -> bool {
-    let child_of = |parent: &str, child: &str| {
-        child
-            .strip_prefix(parent)
-            .is_some_and(|rest| rest.starts_with('/'))
-    };
-    child_of(a, b) || child_of(b, a)
+fn ref_constraint_from_gix(constraint: PreviousValue) -> GitResult<RefConstraint> {
+    match constraint {
+        PreviousValue::Any => Ok(RefConstraint::Any),
+        PreviousValue::MustNotExist => Ok(RefConstraint::MustNotExist),
+        PreviousValue::MustExistAndMatch(Target::Object(oid)) => {
+            Ok(RefConstraint::MustExistAndMatch(
+                git_substrate::from_gix(oid).map_err(git_err)?,
+            ))
+        }
+        PreviousValue::ExistingMustMatch(Target::Object(oid)) => {
+            Ok(RefConstraint::MustExistAndMatch(
+                git_substrate::from_gix(oid).map_err(git_err)?,
+            ))
+        }
+        other => Err(GitBridgeError::Git(format!(
+            "unsupported ref constraint for substrate write: {other:?}"
+        ))),
+    }
 }
 
 /// Recursively collect every file path (blob and symlink) in `tree`,
@@ -2255,39 +2297,29 @@ fn collect_capture_paths<S: ObjectStore + ?Sized>(
 }
 
 fn update_checkout_head_ref(
-    repo: &gix::Repository,
-    target: ObjectId,
-    previous_branch: Option<ObjectId>,
+    repo: &GitRepo,
+    target: &ObjectId,
+    previous_branch: Option<&ObjectId>,
     log_message: &str,
 ) -> GitResult<()> {
-    let signature = bridge_signature();
-    let mut time_buf = gix::date::parse::TimeBuf::default();
-    let expected = previous_branch.map_or(PreviousValue::MustNotExist, |oid| {
-        PreviousValue::MustExistAndMatch(Target::Object(oid))
+    let constraint = previous_branch.map_or(RefConstraint::MustNotExist, |oid| {
+        RefConstraint::MustExistAndMatch(oid.clone())
     });
-    let edit = RefEdit {
-        change: Change::Update {
-            log: LogChange {
-                mode: RefLog::AndReference,
-                force_create_reflog: false,
-                message: log_message.into(),
-            },
-            expected,
-            new: Target::Object(target),
-        },
-        name: "HEAD"
-            .try_into()
-            .map_err(|err| GitBridgeError::Git(format!("invalid ref HEAD: {err}")))?,
-        deref: true,
-    };
-    repo.edit_references_as([edit], Some(signature.to_ref(&mut time_buf)))
-        .map_err(git_err)?;
-    Ok(())
+    git_substrate::update_head_target_ref(
+        repo.git_dir(),
+        repo.object_format(),
+        target,
+        constraint,
+        log_message,
+    )
+    .map_err(git_err)
 }
 
 fn checkout_git_head_is_detached(root: &Path) -> GitResult<bool> {
-    let repo = gix::discover(root).map_err(git_err)?;
-    Ok(repo.head().map(|head| head.is_detached()).unwrap_or(false))
+    GitRepo::discover(root)
+        .map_err(git_err)?
+        .head_is_detached()
+        .map_err(git_err)
 }
 
 pub(crate) fn resolve_git_commit_identity(
@@ -2327,13 +2359,33 @@ pub(crate) fn principal_is_default_unknown(principal: &Principal) -> bool {
 }
 
 fn git_config_value_with_global_fallback(repo_root: &Path, key: &str) -> GitResult<Option<String>> {
-    let Ok(repo) = gix::discover(repo_root) else {
+    let Ok((section, name)) = parse_config_key(key) else {
         return Ok(None);
     };
-    Ok(repo
-        .config_snapshot()
-        .string(key)
-        .map(|value| value.to_str_lossy().into_owned()))
+    if let Ok(repo) = GitRepo::discover(repo_root) {
+        if let Ok(Some(value)) = repo.config_string(section, name) {
+            return Ok(Some(value));
+        }
+        if let Ok(common) = repo.common_repo() {
+            if let Ok(Some(value)) = common.config_string(section, name) {
+                return Ok(Some(value));
+            }
+        }
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Ok(None);
+    };
+    let global = git_substrate::GitConfig::read(home.join(".gitconfig"))
+        .ok()
+        .and_then(|config| config.get(section, None, name).map(str::to_string));
+    Ok(global)
+}
+
+fn parse_config_key(key: &str) -> GitResult<(&str, &str)> {
+    let (section, name) = key
+        .split_once('.')
+        .ok_or_else(|| GitBridgeError::Git(format!("invalid git config key '{key}'")))?;
+    Ok((section, name))
 }
 
 fn git_config_value(value: &str) -> GitResult<String> {
@@ -2366,18 +2418,6 @@ fn git_config_value(value: &str) -> GitResult<String> {
     Ok(out)
 }
 
-fn bridge_signature() -> gix::actor::Signature {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or(0);
-    gix::actor::Signature {
-        name: "Heddle".into(),
-        email: "heddle@local".into(),
-        time: gix::date::Time { seconds, offset: 0 },
-    }
-}
-
 fn local_path_from_url(url: &gix::Url) -> GitResult<PathBuf> {
     if url.scheme != gix::url::Scheme::File {
         return Err(GitBridgeError::Git(format!(
@@ -2396,72 +2436,7 @@ fn local_path_from_url(url: &gix::Url) -> GitResult<PathBuf> {
     Ok(path)
 }
 
-fn collect_ref_updates(repo: &gix::Repository) -> GitResult<Vec<RefUpdate>> {
-    let mut updates = Vec::new();
 
-    for branch in repo
-        .references()
-        .map_err(git_err)?
-        .local_branches()
-        .map_err(git_err)?
-    {
-        let branch = branch.map_err(git_err)?;
-        let Some(target) = branch.try_id() else {
-            continue;
-        };
-        updates.push(RefUpdate {
-            name: branch.name().shorten().to_string(),
-            target: target.detach(),
-            namespace: RefNamespace::Branch,
-        });
-    }
-
-    for tag in repo
-        .references()
-        .map_err(git_err)?
-        .tags()
-        .map_err(git_err)?
-    {
-        let tag = tag.map_err(git_err)?;
-        let Some(target) = tag.try_id() else {
-            continue;
-        };
-        updates.push(RefUpdate {
-            name: tag.name().shorten().to_string(),
-            target: target.detach(),
-            namespace: RefNamespace::Tag,
-        });
-    }
-
-    // Pick up refs/notes/* (currently just refs/notes/heddle) so the
-    // change_id metadata travels alongside branches/tags on every push.
-    for note_ref in repo
-        .references()
-        .map_err(git_err)?
-        .prefixed("refs/notes/")
-        .map_err(git_err)?
-    {
-        let note_ref = note_ref.map_err(git_err)?;
-        let Some(target) = note_ref.try_id() else {
-            continue;
-        };
-        // shorten() on refs/notes/<n> returns "<n>" (the path beneath the
-        // notes/ prefix). We want to round-trip "<n>", not "notes/<n>",
-        // since apply_ref_updates rebuilds the full name.
-        let full = note_ref.name().as_bstr().to_string();
-        let short = full
-            .strip_prefix("refs/notes/")
-            .unwrap_or(&full)
-            .to_string();
-        updates.push(RefUpdate {
-            name: short,
-            target: target.detach(),
-            namespace: RefNamespace::Note,
-        });
-    }
-
-    Ok(updates)
-}
 
 /// A partition of the commits that land in the destination, computed over
 /// the SINGLE copied ref set. `total` is every unique commit reachable from
@@ -2491,49 +2466,49 @@ pub(crate) struct ExportedCommitCounts {
 /// rest as `already`. Routing both the total and the newly count through
 /// this single walk guarantees they can never diverge.
 pub(crate) fn count_exported_commits(
-    repo: &gix::Repository,
+    repo: &GitRepo,
     newly_minted: &HashSet<ObjectId>,
 ) -> GitResult<ExportedCommitCounts> {
+    use git_substrate::ObjectKind;
+
     let tips: Vec<ObjectId> = collect_ref_updates(repo)?
         .into_iter()
         .filter(|update| matches!(update.namespace, RefNamespace::Branch | RefNamespace::Tag))
-        .map(|update| update.target)
+        .map(|update| update.target.clone())
         .collect();
 
     let mut stack = tips;
     let mut seen = HashSet::new();
     let mut counts = ExportedCommitCounts::default();
     while let Some(oid) = stack.pop() {
-        if !seen.insert(oid) {
+        if !seen.insert(oid.clone()) {
             continue;
         }
-        let object = repo.find_object(oid).map_err(git_err)?;
-        match object.kind {
-            gix::objs::Kind::Commit => {
+        match repo.read_object_kind(&oid) {
+            Some(ObjectKind::Commit) => {
                 counts.total += 1;
                 if newly_minted.contains(&oid) {
                     counts.newly += 1;
                 }
-                let commit = repo.find_commit(oid).map_err(git_err)?;
-                for parent in commit.parent_ids() {
-                    stack.push(parent.detach());
+                if let Ok(commit) = repo.read_commit(&oid) {
+                    stack.extend(commit.parents);
                 }
             }
-            // An annotated tag dereferences to its target (commit, or a
-            // blob/tree for the rare blob/tree-pointing tag). Follow it;
-            // only a Commit at the end increments the count.
-            gix::objs::Kind::Tag => {
-                let tag = repo.find_tag(oid).map_err(git_err)?;
-                stack.push(tag.target_id().map_err(git_err)?.detach());
+            Some(ObjectKind::Tag) => {
+                if let Ok(object) = repo.read_object(&oid)
+                    && let Ok(tag) = git_substrate::Tag::parse(repo.object_format(), &object.body)
+                {
+                    stack.push(tag.object);
+                }
             }
-            gix::objs::Kind::Tree | gix::objs::Kind::Blob => {}
+            _ => {}
         }
     }
     Ok(counts)
 }
 
 fn collect_ref_updates_for_fetch(
-    repo: &gix::Repository,
+    repo: &GitRepo,
     scope: GitFetchScope,
 ) -> GitResult<Vec<RefUpdate>> {
     let updates = collect_ref_updates(repo)?;
@@ -2555,20 +2530,20 @@ fn full_ref_name(update: &RefUpdate) -> String {
 }
 
 pub(crate) fn ensure_commit_update_fast_forward(
-    repo: &gix::Repository,
+    repo: &GitRepo,
     name: &str,
-    old: ObjectId,
-    new: ObjectId,
+    old: &ObjectId,
+    new: &ObjectId,
 ) -> GitResult<()> {
-    if old == new || old == repo.object_hash().null() {
+    if old == new || *old == null_sha1() {
         return Ok(());
     }
     match commit_is_descendant_of(repo, new, old) {
         Ok(true) => Ok(()),
         Ok(false) => Err(GitBridgeError::NonFastForwardRef {
             name: name.to_string(),
-            old,
-            new,
+            old: old.clone(),
+            new: new.clone(),
         }),
         Err(err) => Err(GitBridgeError::Git(format!(
             "ref update would move {name}: {old} -> {new}, but Heddle could not verify it as a fast-forward ({err}); fetch/import first or inspect the refs explicitly"
@@ -2576,24 +2551,22 @@ pub(crate) fn ensure_commit_update_fast_forward(
     }
 }
 
-fn commit_is_descendant_of(
-    repo: &gix::Repository,
-    descendant: ObjectId,
-    ancestor: ObjectId,
+pub(crate) fn commit_is_descendant_of(
+    repo: &GitRepo,
+    descendant: &ObjectId,
+    ancestor: &ObjectId,
 ) -> GitResult<bool> {
-    let mut stack = vec![descendant];
+    let mut stack = vec![descendant.clone()];
     let mut seen = HashSet::new();
     while let Some(oid) = stack.pop() {
-        if oid == ancestor {
+        if &oid == ancestor {
             return Ok(true);
         }
-        if !seen.insert(oid) {
+        if !seen.insert(oid.clone()) {
             continue;
         }
-        let commit = repo.find_commit(oid).map_err(git_err)?;
-        for parent in commit.parent_ids() {
-            stack.push(parent.detach());
-        }
+        let commit = repo.read_commit(&oid).map_err(git_err)?;
+        stack.extend(commit.parents);
     }
     Ok(false)
 }
@@ -2617,7 +2590,7 @@ const HEDDLE_EXPORTED_REFS_FILE: &str = "heddle-exported-refs";
 /// only difference being WHERE the record is stored (heddle#316 r11).
 const HEDDLE_NETWORK_EXPORTED_REFS_DIR: &str = "git-network-exported-refs";
 
-fn exported_refs_manifest_path(target_repo: &gix::Repository) -> PathBuf {
+fn exported_refs_manifest_path(target_repo: &GitRepo) -> PathBuf {
     target_repo.git_dir().join(HEDDLE_EXPORTED_REFS_FILE)
 }
 
@@ -2663,8 +2636,8 @@ fn read_exported_refs_at(path: &Path) -> GitResult<HashMap<String, ObjectId>> {
                 };
                 let tip = parts
                     .next()
-                    .and_then(|token| token.parse::<ObjectId>().ok())
-                    .unwrap_or_else(|| ObjectId::null(ObjectHashKind::Sha1));
+                    .and_then(|token| parse_sha1_hex(token).ok())
+                    .unwrap_or_else(null_sha1);
                 map.insert(name.to_string(), tip);
             }
             Ok(map)
@@ -2698,7 +2671,7 @@ fn write_exported_refs_at(path: &Path, refs: &HashMap<String, ObjectId>) -> GitR
 /// Heddle's exported-refs record for `target_repo` (full ref name → last-published
 /// tip OID), the local-path destination record. See [`read_exported_refs_at`].
 pub(crate) fn read_exported_refs(
-    target_repo: &gix::Repository,
+    target_repo: &GitRepo,
 ) -> GitResult<HashMap<String, ObjectId>> {
     read_exported_refs_at(&exported_refs_manifest_path(target_repo))
 }
@@ -2706,7 +2679,7 @@ pub(crate) fn read_exported_refs(
 /// Persist the local-path destination's exported-refs record. See
 /// [`write_exported_refs_at`].
 pub(crate) fn write_exported_refs(
-    target_repo: &gix::Repository,
+    target_repo: &GitRepo,
     refs: &HashMap<String, ObjectId>,
 ) -> GitResult<()> {
     write_exported_refs_at(&exported_refs_manifest_path(target_repo), refs)
@@ -2726,7 +2699,7 @@ pub(crate) fn write_exported_refs(
 const HEDDLE_MIRROR_MANAGED_REFS_FILE: &str = "heddle-mirror-managed-refs";
 
 /// On-disk path of the mirror's managed-refs record.
-fn mirror_managed_refs_path(mirror_repo: &gix::Repository) -> PathBuf {
+fn mirror_managed_refs_path(mirror_repo: &GitRepo) -> PathBuf {
     mirror_repo.git_dir().join(HEDDLE_MIRROR_MANAGED_REFS_FILE)
 }
 
@@ -2735,7 +2708,7 @@ fn mirror_managed_refs_path(mirror_repo: &gix::Repository) -> PathBuf {
 /// mirror ref set so pre-existing heddle refs aren't all misread as foreign)
 /// from a record that exists but is empty (everything was legitimately dropped —
 /// do NOT re-seed).
-pub(crate) fn mirror_managed_refs_recorded(mirror_repo: &gix::Repository) -> bool {
+pub(crate) fn mirror_managed_refs_recorded(mirror_repo: &GitRepo) -> bool {
     mirror_managed_refs_path(mirror_repo).exists()
 }
 
@@ -2743,7 +2716,7 @@ pub(crate) fn mirror_managed_refs_recorded(mirror_repo: &gix::Repository) -> boo
 /// tip OID). `Ok(empty)` when the record is absent — callers seed a first run from
 /// the current mirror ref set; see [`mirror_managed_refs_recorded`].
 pub(crate) fn read_mirror_managed_refs(
-    mirror_repo: &gix::Repository,
+    mirror_repo: &GitRepo,
 ) -> GitResult<HashMap<String, ObjectId>> {
     read_exported_refs_at(&mirror_managed_refs_path(mirror_repo))
 }
@@ -2751,7 +2724,7 @@ pub(crate) fn read_mirror_managed_refs(
 /// Persist the mirror's managed-refs record. Atomic temp+rename via
 /// [`write_exported_refs_at`].
 pub(crate) fn write_mirror_managed_refs(
-    mirror_repo: &gix::Repository,
+    mirror_repo: &GitRepo,
     refs: &HashMap<String, ObjectId>,
 ) -> GitResult<()> {
     write_exported_refs_at(&mirror_managed_refs_path(mirror_repo), refs)
@@ -2770,14 +2743,14 @@ pub(crate) fn write_mirror_managed_refs(
 /// run is correct. A record that EXISTS but is empty (everything was legitimately
 /// dropped) is NOT re-seeded — only a truly-absent record triggers the seed.
 pub(crate) fn read_or_seed_mirror_managed_refs(
-    mirror_repo: &gix::Repository,
+    mirror_repo: &GitRepo,
 ) -> GitResult<HashMap<String, ObjectId>> {
     if mirror_managed_refs_recorded(mirror_repo) {
         read_mirror_managed_refs(mirror_repo)
     } else {
         Ok(collect_ref_updates(mirror_repo)?
             .into_iter()
-            .map(|update| (full_ref_name(&update), update.target))
+            .map(|update| (full_ref_name(&update), update.target.clone()))
             .collect())
     }
 }
@@ -2792,7 +2765,7 @@ pub(crate) fn read_or_seed_mirror_managed_refs(
 /// The FETCH path keeps using [`collect_ref_updates`]/[`collect_ref_updates_for_fetch`]
 /// (it must see every ref); only the export/push frontier is managed-filtered.
 pub(crate) fn collect_managed_ref_updates(
-    repo: &gix::Repository,
+    repo: &GitRepo,
     record: &HashMap<String, ObjectId>,
 ) -> GitResult<Vec<RefUpdate>> {
     Ok(collect_ref_updates(repo)?
@@ -2847,7 +2820,7 @@ enum RefMove {
 /// but heddle never published it, so it is [`RefMove::Diverged`] and must not be
 /// force-overwritten (heddle#316 r12).
 fn classify_ref_move(
-    repo: &gix::Repository,
+    repo: &GitRepo,
     old: Option<ObjectId>,
     new: ObjectId,
     recorded_tip: Option<ObjectId>,
@@ -2855,7 +2828,7 @@ fn classify_ref_move(
     let Some(old) = old else {
         return Ok(RefMove::Create);
     };
-    if old == repo.object_hash().null() {
+    if old == null_sha1() {
         return Ok(RefMove::Create);
     }
     if old == new {
@@ -2863,7 +2836,7 @@ fn classify_ref_move(
     }
     // `new` is the served frontier we just minted/copied, so walking from it is
     // always safe. A fast-forward is `new` reaching `old`.
-    if commit_is_descendant_of(repo, new, old)? {
+    if commit_is_descendant_of(repo, &new, &old)? {
         return Ok(RefMove::FastForward);
     }
     // A backward rewind is `old` reaching `new`. Forcing it past the FF guard is
@@ -2875,9 +2848,9 @@ fn classify_ref_move(
     // newer commit survives. `old`'s objects survive in the mirror because heddle
     // published it (the embargo purge drops the ChangeId→OID mapping, never the
     // object); if `old` is NOT resolvable here we cannot prove a rewind anyway.
-    if recorded_tip == Some(old)
-        && repo.find_commit(old).is_ok()
-        && commit_is_descendant_of(repo, old, new)?
+    if recorded_tip.as_ref() == Some(&old)
+        && repo.read_commit(&old).is_ok()
+        && commit_is_descendant_of(repo, &old, &new)?
     {
         return Ok(RefMove::Rewind);
     }
@@ -2936,9 +2909,9 @@ fn classify_tag_move(
         // No tip at the destination — a fresh tag.
         None => WriteVerdict::Write,
         // Already at the served target — nothing to do.
-        Some(o) if o == target => WriteVerdict::Skip,
+        Some(ref o) if *o == target => WriteVerdict::Skip,
         // heddle owns the tip it is overwriting — its published move lands.
-        Some(o) if recorded == Some(o) => WriteVerdict::Write,
+        Some(ref o) if recorded.as_ref() == Some(o) => WriteVerdict::Write,
         // An out-of-band tag heddle never published — spare it unless `--force`.
         Some(_) => WriteVerdict::RequireForce,
     }
@@ -3060,7 +3033,7 @@ fn creatable_ref_names(
 /// * `force` — the user's explicit `--force`: additionally forces a true fork
 ///   AND authorizes retracting an out-of-band destination tip.
 pub(crate) fn plan_destination_reconcile(
-    mirror_repo: &gix::Repository,
+    mirror_repo: &GitRepo,
     served_frontier: &[RefUpdate],
     creatable_names: Option<&HashSet<String>>,
     old_at_destination: &HashMap<String, ObjectId>,
@@ -3089,10 +3062,11 @@ pub(crate) fn plan_destination_reconcile(
     let mut new_manifest: HashMap<String, ObjectId> = HashMap::new();
 
     for full in names {
-        let old = old_at_destination.get(&full).copied();
-        let recorded = previously_exported.get(&full).copied();
+        let old = old_at_destination.get(&full).cloned();
+        let recorded = previously_exported.get(&full).cloned();
 
-        if let Some(update) = desired.get(&full).copied() {
+        if let Some(update) = desired.get(&full) {
+            let target = update.target.clone();
             // MATERIALIZATION gate (the mirror reconcile's `existing.is_none() &&
             // !in_scope` skip, applied to the destination): an out-of-scope ref
             // ABSENT from the destination must not be CREATED by a scoped push —
@@ -3117,9 +3091,16 @@ pub(crate) fn plan_destination_reconcile(
             // heddle never recorded is spared at EVERY namespace unless `--force`.
             let verdict = match update.namespace {
                 RefNamespace::Branch | RefNamespace::Note => {
-                    verdict_from_move(classify_ref_move(mirror_repo, old, update.target, recorded)?)
+                    verdict_from_move(classify_ref_move(
+                        mirror_repo,
+                        old.clone(),
+                        target.clone(),
+                        recorded.clone(),
+                    )?)
                 }
-                RefNamespace::Tag => classify_tag_move(old, update.target, recorded),
+                RefNamespace::Tag => {
+                    classify_tag_move(old.clone(), target.clone(), recorded.clone())
+                }
             };
             let proceed = match verdict {
                 WriteVerdict::Skip => false,
@@ -3130,8 +3111,8 @@ pub(crate) fn plan_destination_reconcile(
                     } else {
                         return Err(GitBridgeError::NonFastForwardRef {
                             name: full.clone(),
-                            old: old.unwrap_or_else(|| mirror_repo.object_hash().null()),
-                            new: update.target,
+                            old: old.unwrap_or_else(null_sha1),
+                            new: target.clone(),
                         });
                     }
                 }
@@ -3140,7 +3121,7 @@ pub(crate) fn plan_destination_reconcile(
                 writes.push(PlannedRefWrite {
                     full_name: full.clone(),
                     old,
-                    new: update.target,
+                    new: target.clone(),
                 });
             }
             // CLAIM ownership in the record ONLY for a ref heddle actually writes
@@ -3151,7 +3132,7 @@ pub(crate) fn plan_destination_reconcile(
             // destination foreign-ref over-claim). Spare it: leave it out of the
             // manifest so it stays unowned.
             if proceed || recorded.is_some() {
-                new_manifest.insert(full, update.target);
+                new_manifest.insert(full, target);
             }
             continue;
         }
@@ -3165,10 +3146,10 @@ pub(crate) fn plan_destination_reconcile(
         // is spared (it survives) and KEEPS its ownership token, so a later
         // `--force` can still retract it (heddle#316 r13).
         match old {
-            Some(old) if recorded == Some(old) || force => {
+            Some(ref old) if recorded.as_ref() == Some(old) || force => {
                 deletes.push(PlannedRefDelete {
                     full_name: full,
-                    old,
+                    old: old.clone(),
                 });
                 // Deleted ⇒ no longer owned ⇒ drops from the record.
             }
@@ -3195,33 +3176,15 @@ pub(crate) fn plan_destination_reconcile(
 /// The destination's current ref tips (full name → oid) across the namespaces
 /// heddle manages (heads, tags, notes) — the `old_at_destination` input to
 /// [`plan_destination_reconcile`] for a local-path destination.
-fn read_destination_ref_map(repo: &gix::Repository) -> GitResult<HashMap<String, ObjectId>> {
+fn read_destination_ref_map(repo: &GitRepo) -> GitResult<HashMap<String, ObjectId>> {
     Ok(collect_ref_updates(repo)?
         .iter()
-        .map(|update| (full_ref_name(update), update.target))
+        .map(|update| (full_ref_name(update), update.target.clone()))
         .collect())
 }
 
-pub(crate) fn apply_ref_updates(
-    repo: &gix::Repository,
-    updates: &[RefUpdate],
-    log_message: &str,
-) -> GitResult<()> {
-    for update in updates {
-        let full_name = full_ref_name(update);
-        set_reference(
-            repo,
-            &full_name,
-            update.target,
-            PreviousValue::Any,
-            log_message,
-        )?;
-    }
-    Ok(())
-}
-
 fn apply_remote_tracking_ref_updates(
-    repo: &gix::Repository,
+    repo: &GitRepo,
     remote_name: &str,
     updates: &[RefUpdate],
     log_message: &str,
@@ -3231,11 +3194,11 @@ fn apply_remote_tracking_ref_updates(
         .iter()
         .filter(|update| update.namespace == RefNamespace::Branch)
     {
-        set_reference(
+        set_git_repo_reference(
             repo,
             &format!("refs/remotes/{remote_name}/{}", update.name),
-            update.target,
-            PreviousValue::Any,
+            &update.target,
+            RefConstraint::Any,
             log_message,
         )?;
     }
@@ -3247,13 +3210,15 @@ fn apply_remote_tracking_ref_updates(
 /// Git-overlay workflow when the user does not have `git` installed.
 pub fn copy_local_repo_to_bare(source_path: &Path, dest: &Path) -> GitResult<()> {
     fs::create_dir_all(dest)?;
-    let source = open_repo(source_path)?;
-    let target = match open_repo(dest) {
+    let source = open_git_repo_at(source_path)?;
+    // Open the destination as an exact git dir only. `discover` would walk from
+    // `.heddle/tmp/import-*` scratch paths up into the Heddle metadata dir.
+    let target = match GitRepo::open(dest) {
         Ok(repo) => repo,
-        Err(_) => gix::init_bare(dest).map_err(git_err)?,
+        Err(_) => GitRepo::init_bare(dest).map_err(git_err)?,
     };
     let updates = collect_ref_updates(&source)?;
-    copy_reachable_objects(&source, &target, updates.iter().map(|update| update.target))?;
+    copy_reachable_objects(&source, &target, updates.iter().map(|update| update.target.clone()))?;
     apply_ref_updates(
         &target,
         &updates,
@@ -3273,16 +3238,7 @@ pub fn copy_local_repo_to_bare(source_path: &Path, dest: &Path) -> GitResult<()>
         .map(|update| update.name.as_str())
         .collect();
     let source_head_branch = source
-        .head_name()
-        .ok()
-        .flatten()
-        .and_then(|full_name| {
-            full_name
-                .as_bstr()
-                .to_str()
-                .ok()
-                .and_then(|s| s.strip_prefix("refs/heads/").map(str::to_owned))
-        })
+        .current_branch_name()
         .filter(|branch| copied_branches.contains(branch.as_str()));
     if let Some(branch) = source_head_branch {
         fs::write(dest.join("HEAD"), format!("ref: refs/heads/{branch}\n"))?;
@@ -3345,7 +3301,7 @@ pub fn clone_url_to_bare(
         return copy_local_repo_to_bare(&source_path, dest);
     }
     let default_branch =
-        clone_url_to_bare_via_gix(url, dest, depth)?.or_else(|| default_branch_from_file_url(url));
+        clone_url_to_bare_via_network(url, dest, depth)?.or_else(|| default_branch_from_file_url(url));
     // gix's `init_bare` writes `.git/HEAD = ref: refs/heads/<init.defaultBranch>`
     // (typically "main" or "master") regardless of what the remote
     // advertises, and the fetch above doesn't touch HEAD. If we leave
@@ -3377,209 +3333,89 @@ fn default_branch_from_file_url(url: &gix::Url) -> Option<String> {
 
 fn bare_branch_exists(repo_path: &Path, branch: &str) -> GitResult<bool> {
     let repo = open_repo(repo_path)?;
-    Ok(repo.find_reference(&format!("refs/heads/{branch}")).is_ok())
+    Ok(repo.has_ref(&format!("refs/heads/{branch}")).map_err(git_err)?)
 }
 
-fn clone_url_to_bare_via_gix(
+fn clone_url_to_bare_via_network(
+    url: &gix::Url,
+    dest: &Path,
+    depth: Option<u32>,
+) -> GitResult<Option<String>> {
+    let url_string = gix_transport_url(url);
+    if !git_substrate::supports_native_fetch_with_depth(&url_string, depth) {
+        let depth_note = depth
+            .map(|d| format!(" at depth {d}"))
+            .unwrap_or_default();
+        return Err(GitBridgeError::Git(format!(
+            "clone from {url}{depth_note} is not supported by Heddle's native transport; use HTTP, HTTPS, SSH, or git:// remotes"
+        )));
+    }
+    clone_url_to_bare_via_substrate(url, dest, depth)
+}
+
+fn clone_url_to_bare_via_substrate(
     url: &gix::Url,
     dest: &Path,
     depth: Option<u32>,
 ) -> GitResult<Option<String>> {
     fs::create_dir_all(dest)?;
-    let repo = gix::init_bare(dest).map_err(git_err)?;
-    let mut remote = repo.remote_at(url.clone()).map_err(git_err)?;
-    remote
-        .replace_refspecs(
-            heddle_mirror_fetch_refspecs().iter().map(String::as_str),
-            gix::remote::Direction::Fetch,
-        )
-        .map_err(git_err)?;
-    remote = remote.with_fetch_tags(gix::remote::fetch::Tags::All);
-    let mut connection = remote
-        .connect(gix::remote::Direction::Fetch)
-        .map_err(git_err)?;
-    // Suppress interactive credential prompts in CI/agent contexts.
-    // The closure never produces an `Err`; the `result_large_err` lint
-    // is fired by gix's 192-byte protocol error type we never return.
-    #[allow(clippy::result_large_err)]
-    fn no_creds(
-        _action: gix::credentials::helper::Action,
-    ) -> Result<Option<gix::credentials::protocol::Outcome>, gix::credentials::protocol::Error>
-    {
-        Ok(None)
-    }
-    connection.set_credentials(no_creds);
-    let mut prepare = connection
-        .prepare_fetch(
-            gix::progress::Discard,
-            gix::remote::ref_map::Options::default(),
-        )
-        .map_err(git_err)?;
-    if let Some(d) = depth.and_then(NonZeroU32::new) {
-        prepare = prepare.with_shallow(gix::remote::fetch::Shallow::DepthAtRemote(d));
-    }
-    let outcome = prepare
-        .with_reflog_message(gix::remote::fetch::RefLogMessage::Override {
-            message: format!("heddle: clone from {url}").into(),
-        })
-        .receive(gix::progress::Discard, &AtomicBool::new(false))
-        .map_err(|err| GitBridgeError::Git(format!("clone failed for {url}: {err}")))?;
-    Ok(default_branch_from_ref_map(&outcome.ref_map))
-}
-
-fn default_branch_from_ref_map(ref_map: &gix::remote::fetch::RefMap) -> Option<String> {
-    for remote_ref in &ref_map.remote_refs {
-        let target = match remote_ref {
-            gix_protocol::handshake::Ref::Symbolic {
-                full_ref_name,
-                target,
-                ..
-            } if full_ref_name.as_bstr() == "HEAD" => target,
-            gix_protocol::handshake::Ref::Unborn {
-                full_ref_name,
-                target,
-            } if full_ref_name.as_bstr() == "HEAD" => target,
-            _ => continue,
-        };
-        let branch = target.as_bstr().strip_prefix(b"refs/heads/")?;
-        if !branch.is_empty() {
-            return Some(branch.to_str_lossy().into_owned());
-        }
-    }
-    None
+    let repo = GitRepo::init_bare(dest).map_err(git_err)?;
+    let refspecs = heddle_mirror_fetch_refspecs()
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>();
+    git_substrate::fetch_bare_mirror(
+        repo.git_dir(),
+        repo.object_format(),
+        &gix_transport_url(url),
+        &refspecs,
+        true,
+        depth,
+        &format!("heddle: clone from {url}"),
+    )
+    .map_err(git_err)
 }
 
 pub(crate) fn copy_reachable_objects(
-    source: &gix::Repository,
-    target: &gix::Repository,
+    source: &GitRepo,
+    target: &GitRepo,
     roots: impl IntoIterator<Item = ObjectId>,
 ) -> GitResult<()> {
-    if source.object_hash() != target.object_hash() {
-        return Err(GitBridgeError::Git(format!(
-            "object hash mismatch: {:?} vs {:?}",
-            source.object_hash(),
-            target.object_hash()
-        )));
-    }
-
-    for oid in collect_reachable_object_ids(source, roots)? {
-        let object = source.find_object(oid).map_err(git_err)?;
-        let object_ref =
-            gix::objs::ObjectRef::from_bytes(&object.data, object.kind, source.object_hash())
-                .map_err(git_err)?;
-        target.write_object(object_ref).map_err(git_err)?;
-    }
-
-    Ok(())
-}
-
-fn collect_reachable_object_ids(
-    source: &gix::Repository,
-    roots: impl IntoIterator<Item = ObjectId>,
-) -> GitResult<Vec<ObjectId>> {
-    let mut stack: Vec<ObjectId> = roots.into_iter().collect();
-    let mut seen = HashSet::new();
-    let mut ordered = Vec::new();
-
-    while let Some(oid) = stack.pop() {
-        if !seen.insert(oid) {
-            continue;
-        }
-        ordered.push(oid);
-
-        let object = source.find_object(oid).map_err(git_err)?;
-        match object.kind {
-            gix::objs::Kind::Commit => {
-                let commit = source.find_commit(oid).map_err(git_err)?;
-                stack.push(commit.tree_id().map_err(git_err)?.detach());
-                for parent in commit.parent_ids() {
-                    stack.push(parent.detach());
-                }
-            }
-            gix::objs::Kind::Tree => {
-                let tree = source.find_tree(oid).map_err(git_err)?;
-                for entry in tree.iter() {
-                    let entry = entry.map_err(git_err)?;
-                    // Gitlink (mode 160000) entries point at a commit
-                    // in the *submodule's* repository, not this one —
-                    // by Git's design, that commit is never stored
-                    // locally. Pushing its OID onto the walk would
-                    // make the next `find_object` fail with
-                    // "object … could not be found", which is what
-                    // happens on a normal clone of any repo with
-                    // submodules (e.g. git/git's
-                    // sha1collisiondetection). The bridge import
-                    // path (`import_gitlink`) records the foreign OID
-                    // as a `heddle-submodule:` blob, which is what
-                    // round-trips on export — so skipping it here is
-                    // safe: we still emit the parent tree, just
-                    // without trying to resolve a foreign-repo
-                    // commit we cannot read.
-                    if entry.mode().kind() == gix::object::tree::EntryKind::Commit {
-                        continue;
-                    }
-                    stack.push(entry.object_id());
-                }
-            }
-            gix::objs::Kind::Tag => {
-                let tag = source.find_tag(oid).map_err(git_err)?;
-                stack.push(tag.target_id().map_err(git_err)?.detach());
-            }
-            gix::objs::Kind::Blob => {}
-        }
-    }
-
-    Ok(ordered)
+    git_substrate::copy_reachable_objects(source, target, roots).map_err(git_err)
 }
 
 fn fetch_network_remote(
-    mirror_repo: &gix::Repository,
+    mirror_repo: &GitRepo,
     remote_name: &str,
     url: &gix::Url,
     scope: GitFetchScope,
 ) -> GitResult<()> {
-    let mut remote = mirror_repo.remote_at(url.clone()).map_err(git_err)?;
-    remote
-        .replace_refspecs(
-            heddle_mirror_fetch_refspecs().iter().map(String::as_str),
-            gix::remote::Direction::Fetch,
-        )
-        .map_err(git_err)?;
-    remote = remote.with_fetch_tags(match scope {
-        GitFetchScope::BranchesAndNotes => gix::remote::fetch::Tags::None,
-        GitFetchScope::AllRefs => gix::remote::fetch::Tags::All,
-    });
-
-    let mut connection = remote
-        .connect(gix::remote::Direction::Fetch)
-        .map_err(git_err)?;
-    // Suppress interactive credential prompts in CI/agent contexts.
-    // The closure never produces an `Err`; the `result_large_err` lint
-    // is fired by gix's 192-byte protocol error type we never return.
-    #[allow(clippy::result_large_err)]
-    fn no_creds(
-        _action: gix::credentials::helper::Action,
-    ) -> Result<Option<gix::credentials::protocol::Outcome>, gix::credentials::protocol::Error>
-    {
-        Ok(None)
+    let url_string = gix_transport_url(url);
+    if !git_substrate::supports_native_fetch_with_depth(&url_string, None) {
+        return Err(GitBridgeError::Git(format!(
+            "fetch from {url} is not supported by Heddle's native transport; use HTTP, HTTPS, SSH, or git:// remotes"
+        )));
     }
-    connection.set_credentials(no_creds);
-    let progress = gix::progress::Discard;
-    let prepare = connection
-        .prepare_fetch(progress, gix::remote::ref_map::Options::default())
-        .map_err(git_err)?;
-    let progress = gix::progress::Discard;
-    prepare
-        .with_reflog_message(gix::remote::fetch::RefLogMessage::Override {
-            message: format!("heddle: fetch from {remote_name}").into(),
-        })
-        .receive(progress, &AtomicBool::new(false))
-        .map_err(|err| GitBridgeError::Git(format!("failed to fetch from {url}: {err}")))?;
-    Ok(())
+    let refspecs = heddle_mirror_fetch_refspecs()
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>();
+    let fetch_tags = matches!(scope, GitFetchScope::AllRefs);
+    git_substrate::fetch_bare_mirror(
+        mirror_repo.git_dir(),
+        mirror_repo.object_format(),
+        &url_string,
+        &refspecs,
+        fetch_tags,
+        None,
+        &format!("heddle: fetch from {remote_name}"),
+    )
+    .map(|_| ())
+    .map_err(git_err)
 }
 
 fn push_network_remote(
-    mirror_repo: &gix::Repository,
+    mirror_repo: &GitRepo,
     heddle_dir: &Path,
     url: &gix::Url,
     scope: GitPushScope,
@@ -3608,28 +3444,9 @@ fn push_network_remote(
         return Ok(());
     }
 
-    let mut transport = gix_transport::client::blocking_io::connect::connect(
-        url.clone(),
-        gix_transport::client::blocking_io::connect::Options {
-            version: Protocol::V1,
-            ..Default::default()
-        },
-    )
-    .map_err(|err| GitBridgeError::Git(format!("failed to connect to {url}: {err}")))?;
-
-    let remote_refs = {
-        let mut handshake = transport
-            .handshake(Service::ReceivePack, &[])
-            .map_err(|err| {
-                GitBridgeError::Git(format!("receive-pack handshake failed for {url}: {err}"))
-            })?;
-        if !handshake.capabilities.contains("report-status") {
-            return Err(GitBridgeError::Git(format!(
-                "remote {url} does not support report-status; refusing to push without server acknowledgement"
-            )));
-        }
-        remote_refs_from_receive_pack_handshake(&mut handshake)?
-    };
+    let url_string = gix_transport_url(url);
+    let object_format = mirror_repo.object_format();
+    let remote_refs = remote_refs_for_network_push(&url_string, object_format)?;
 
     // The SAME served-frontier plan the local-path destination runs: writes
     // (forcing embargo rewinds, rejecting forks), the retraction delete-set
@@ -3645,16 +3462,16 @@ fn push_network_remote(
         force,
     )?;
 
-    let null_oid = mirror_repo.object_hash().null();
+    let null_oid = null_sha1();
     let mut commands: Vec<(String, ObjectId, ObjectId)> = Vec::new();
     for write in &plan.writes {
-        let old = write.old.unwrap_or(null_oid);
-        commands.push((write.full_name.clone(), old, write.new));
+        let old = write.old.clone().unwrap_or_else(null_sha1);
+        commands.push((write.full_name.clone(), old, write.new.clone()));
     }
     for delete in &plan.deletes {
         // A wire delete is `<old> <zero> <ref>` — the retraction sibling of a
         // write, sent to URL/network remotes too (heddle#316 r11).
-        commands.push((delete.full_name.clone(), delete.old, null_oid));
+        commands.push((delete.full_name.clone(), delete.old.clone(), null_oid.clone()));
     }
 
     if commands.is_empty() {
@@ -3665,148 +3482,56 @@ fn push_network_remote(
     }
 
     // Pack only the SURVIVORS' new objects — a delete carries no new object.
-    let pack = pack_reachable_objects(mirror_repo, plan.writes.iter().map(|write| write.new))?;
-    let mut request = transport
-        .request(
-            WriteMode::OneLfTerminatedLinePerWriteCall,
-            MessageKind::Flush,
-            false,
-        )
-        .map_err(git_err)?;
-    for (idx, (name, old, new_oid)) in commands.iter().enumerate() {
-        let mut line = format!("{old} {new_oid} {name}");
-        if idx == 0 {
-            line.push('\0');
-            line.push_str("report-status");
-        }
-        request.write_all(line.as_bytes()).map_err(git_err)?;
-    }
-    request.write_message(MessageKind::Flush).map_err(git_err)?;
-
-    let (mut raw_writer, mut reader) = request.into_parts();
-    raw_writer.write_all(&pack).map_err(git_err)?;
-    raw_writer.flush().map_err(git_err)?;
-    drop(raw_writer);
-
-    read_receive_pack_status(&mut reader, &commands, url)?;
+    let pack = pack_reachable_objects(
+        mirror_repo,
+        plan.writes.iter().map(|write| write.new.clone()),
+    )?;
+    push_receive_pack_to_network_remote(&url_string, object_format, &commands, &pack)?;
     // Only persist the record once the remote has acknowledged every command, so
     // a failed push never leaves a ref recorded as exported that did not land.
     write_exported_refs_at(&manifest_path, &plan.new_manifest)?;
     Ok(())
 }
 
-fn remote_refs_from_receive_pack_handshake(
-    handshake: &mut gix_transport::client::blocking_io::SetServiceResponse<'_>,
+fn remote_refs_for_network_push(
+    url_string: &str,
+    object_format: git_substrate::ObjectFormat,
 ) -> GitResult<HashMap<String, ObjectId>> {
-    let mut remote_refs = HashMap::new();
-    let Some(refs) = handshake.refs.as_mut() else {
-        return Ok(remote_refs);
-    };
-    let (parsed, _) =
-        gix_protocol::handshake::refs::from_v1_refs_received_as_part_of_handshake_and_capabilities(
-            refs,
-            handshake.capabilities.iter(),
-        )
-        .map_err(git_err)?;
-
-    for remote_ref in parsed {
-        let (name, target, _) = remote_ref.unpack();
-        let Some(target) = target else {
-            continue;
-        };
-        remote_refs.insert(name.to_string(), target.to_owned());
+    if !git_substrate::supports_native_push(url_string) {
+        return Err(GitBridgeError::Git(format!(
+            "push ref probe for {url_string} is not supported by Heddle's native transport; use HTTP, HTTPS, SSH, or git:// remotes"
+        )));
     }
-    Ok(remote_refs)
+    git_substrate::receive_pack_ref_map(url_string, object_format).map_err(git_err)
+}
+
+fn push_receive_pack_to_network_remote(
+    url_string: &str,
+    object_format: git_substrate::ObjectFormat,
+    commands: &[(String, ObjectId, ObjectId)],
+    pack: &[u8],
+) -> GitResult<()> {
+    if !git_substrate::supports_native_push(url_string) {
+        return Err(GitBridgeError::Git(format!(
+            "push to {url_string} is not supported by Heddle's native transport; use HTTP, HTTPS, SSH, or git:// remotes"
+        )));
+    }
+    let push_commands = commands
+        .iter()
+        .map(|(name, old, new_oid)| git_substrate::PushCommand {
+            name: name.clone(),
+            old_id: old.clone(),
+            new_id: new_oid.clone(),
+        })
+        .collect::<Vec<_>>();
+    git_substrate::push_receive_pack(url_string, object_format, &push_commands, pack).map_err(git_err)
 }
 
 fn pack_reachable_objects(
-    repo: &gix::Repository,
+    repo: &GitRepo,
     roots: impl IntoIterator<Item = ObjectId>,
 ) -> GitResult<Vec<u8>> {
-    let oids = collect_reachable_object_ids(repo, roots)?;
-    let mut entries = Vec::with_capacity(oids.len());
-    for oid in &oids {
-        let object = repo.find_object(*oid).map_err(git_err)?;
-        let data = gix::objs::Data {
-            kind: object.kind,
-            data: &object.data,
-            object_hash: repo.object_hash(),
-        };
-        let count = gix_pack::data::output::Count::from_data(*oid, None);
-        let entry = gix_pack::data::output::Entry::from_data(&count, &data).map_err(git_err)?;
-        entries.push(entry);
-    }
-
-    let mut pack = Vec::new();
-    let input = std::iter::once(Ok::<_, GitBridgeError>(entries));
-    let mut writer = gix_pack::data::output::bytes::FromEntriesIter::new(
-        input,
-        &mut pack,
-        oids.len().try_into().map_err(|_| {
-            GitBridgeError::Git(format!(
-                "push pack has too many objects to encode: {}",
-                oids.len()
-            ))
-        })?,
-        gix_pack::data::Version::V2,
-        ObjectHashKind::Sha1,
-    );
-    for result in writer.by_ref() {
-        result.map_err(git_err)?;
-    }
-    drop(writer);
-    Ok(pack)
-}
-
-fn read_receive_pack_status(
-    reader: &mut (dyn gix_transport::client::blocking_io::ExtendedBufRead<'_> + Unpin),
-    commands: &[(String, ObjectId, ObjectId)],
-    url: &gix::Url,
-) -> GitResult<()> {
-    let mut line = String::new();
-    let mut saw_unpack_ok = false;
-    let mut acknowledged = HashSet::new();
-
-    loop {
-        line.clear();
-        let read = reader.readline_str(&mut line).map_err(git_err)?;
-        if read == 0 {
-            break;
-        }
-        let status = line.trim_end_matches(['\r', '\n']);
-        if status == "unpack ok" {
-            saw_unpack_ok = true;
-            continue;
-        }
-        if let Some(name) = status.strip_prefix("ok ") {
-            acknowledged.insert(name.to_string());
-            continue;
-        }
-        if let Some(rest) = status.strip_prefix("ng ") {
-            return Err(GitBridgeError::Git(format!(
-                "push rejected by {url}: {rest}"
-            )));
-        }
-        if let Some(rest) = status.strip_prefix("unpack ") {
-            return Err(GitBridgeError::Git(format!(
-                "push pack rejected by {url}: {rest}"
-            )));
-        }
-    }
-
-    if !saw_unpack_ok {
-        return Err(GitBridgeError::Git(format!(
-            "push to {url} did not return an unpack acknowledgement"
-        )));
-    }
-    for (name, _, _) in commands {
-        if !acknowledged.contains(name) {
-            return Err(GitBridgeError::Git(format!(
-                "push to {url} did not acknowledge ref {name}"
-            )));
-        }
-    }
-    Ok(())
+    git_substrate::pack_reachable_objects(repo, roots).map_err(git_err)
 }
 
 #[cfg(test)]
@@ -3898,12 +3623,13 @@ mod tests {
     #[test]
     fn fast_forward_guard_reports_exact_rewrite_before_after() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let repo = gix::init_bare(tmp.path()).expect("init bare repo");
-        let root = test_commit(&repo, "root", &[]);
-        let old = test_commit(&repo, "old", &[root]);
-        let new = test_commit(&repo, "new", &[root]);
+        let gix_repo = gix::init_bare(tmp.path()).expect("init bare repo");
+        let root = test_commit(&gix_repo, "root", &[]);
+        let old = test_commit(&gix_repo, "old", &[root.clone()]);
+        let new = test_commit(&gix_repo, "new", &[root]);
+        let repo = GitRepo::open(tmp.path()).expect("open substrate repo");
 
-        let err = ensure_commit_update_fast_forward(&repo, "refs/heads/main", old, new)
+        let err = ensure_commit_update_fast_forward(&repo, "refs/heads/main", &old, &new)
             .expect_err("sibling commit update should be refused");
         let message = err.to_string();
         assert!(message.contains("refs/heads/main"));
@@ -3915,19 +3641,20 @@ mod tests {
     #[test]
     fn fast_forward_guard_allows_descendant_update() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let repo = gix::init_bare(tmp.path()).expect("init bare repo");
-        let old = test_commit(&repo, "old", &[]);
-        let new = test_commit(&repo, "new", &[old]);
+        let gix_repo = gix::init_bare(tmp.path()).expect("init bare repo");
+        let old = test_commit(&gix_repo, "old", &[]);
+        let new = test_commit(&gix_repo, "new", &[old.clone()]);
+        let repo = GitRepo::open(tmp.path()).expect("open substrate repo");
 
-        ensure_commit_update_fast_forward(&repo, "refs/heads/main", old, new)
+        ensure_commit_update_fast_forward(&repo, "refs/heads/main", &old, &new)
             .expect("descendant update should be allowed");
     }
 
     fn test_commit(
         repo: &gix::Repository,
         message: &str,
-        parents: &[gix::ObjectId],
-    ) -> gix::ObjectId {
+        parents: &[ObjectId],
+    ) -> ObjectId {
         let empty_tree_oid: gix::ObjectId = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
             .parse()
             .expect("parse empty tree oid");
@@ -3941,15 +3668,17 @@ mod tests {
         };
         let mut committer_buf = gix::date::parse::TimeBuf::default();
         let mut author_buf = gix::date::parse::TimeBuf::default();
-        repo.new_commit_as(
-            sig.to_ref(&mut committer_buf),
-            sig.to_ref(&mut author_buf),
-            message,
-            empty_tree_oid,
-            parents.iter().copied(),
-        )
-        .expect("write test commit")
-        .id
+        let id = repo
+            .new_commit_as(
+                sig.to_ref(&mut committer_buf),
+                sig.to_ref(&mut author_buf),
+                message,
+                empty_tree_oid,
+                parents.iter().map(|parent| gix_oid(parent).expect("parent oid")),
+            )
+            .expect("write test commit")
+            .id;
+        substrate_oid(id).expect("test commit oid")
     }
 
     /// heddle#141 regression: when the URL-fetch path of
@@ -3959,7 +3688,7 @@ mod tests {
     /// resulting dest bare must have `HEAD` pointing at the remote
     /// default — not gix's init-time guess.
     #[test]
-    fn clone_url_to_bare_via_gix_honours_remote_head_symref() {
+    fn clone_url_to_bare_via_network_honours_remote_head_symref() {
         let tmp = tempfile::TempDir::new().unwrap();
         let source = tmp.path().join("source.git");
         let dest = tmp.path().join("dest.git");
@@ -4001,8 +3730,10 @@ mod tests {
             )
             .expect("seed commit")
             .id;
+        let seed = substrate_oid(seed).expect("convert seed commit oid");
+        let src_repo = GitRepo::open(src.git_dir()).expect("open substrate source");
         for name in ["refs/heads/trunk", "refs/heads/abc-feature"] {
-            set_reference(&src, name, seed, PreviousValue::Any, "test: seed branch")
+            set_reference(&src_repo, name, &seed, PreviousValue::Any, "test: seed branch")
                 .expect("set ref");
         }
         // Make sure HEAD on the source points at trunk so

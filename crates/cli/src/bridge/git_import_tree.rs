@@ -8,6 +8,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use git_substrate::{empty_tree_sha1, GitRepo};
 use objects::object::{Blob, ChangeId, ContentHash, FileMode, State, Tree, TreeEntry};
 use objects::store::{
     CompressionConfig, ObjectStore,
@@ -21,14 +22,16 @@ use crate::bridge::git_util::{GitImportOptions, LossyGitImportEntry};
 
 const SUBMODULE_PREFIX: &str = "heddle-submodule:";
 
+const GITLINK_MODE: u32 = 0o160000;
+
 pub struct GitTreeImporter<'a> {
     heddle_repo: &'a HeddleRepository,
-    repo: &'a gix::Repository,
-    tree_cache: HashMap<gix::hash::ObjectId, ContentHash>,
-    blob_cache: HashMap<gix::hash::ObjectId, ContentHash>,
+    repo: &'a GitRepo,
+    tree_cache: HashMap<crate::bridge::git_core::ObjectId, ContentHash>,
+    blob_cache: HashMap<crate::bridge::git_core::ObjectId, ContentHash>,
     options: GitImportOptions,
     lossy_entries: Vec<LossyGitImportEntry>,
-    lossy_by_tree: HashMap<gix::hash::ObjectId, Vec<LossyGitImportEntry>>,
+    lossy_by_tree: HashMap<crate::bridge::git_core::ObjectId, Vec<LossyGitImportEntry>>,
     /// When set, imported blobs/trees/states stream into a single native
     /// pack instead of N loose objects (heddle#555). `None` keeps the
     /// legacy loose-write path for callers like [`import_git_tree`].
@@ -36,13 +39,13 @@ pub struct GitTreeImporter<'a> {
 }
 
 impl<'a> GitTreeImporter<'a> {
-    pub fn new(heddle_repo: &'a HeddleRepository, repo: &'a gix::Repository) -> Self {
+    pub fn new(heddle_repo: &'a HeddleRepository, repo: &'a GitRepo) -> Self {
         Self::with_options(heddle_repo, repo, GitImportOptions::default())
     }
 
     pub fn with_options(
         heddle_repo: &'a HeddleRepository,
-        repo: &'a gix::Repository,
+        repo: &'a GitRepo,
         options: GitImportOptions,
     ) -> Self {
         Self {
@@ -63,7 +66,7 @@ impl<'a> GitTreeImporter<'a> {
     /// [`Self::abort_pack`] on failure) to durably install the pack.
     pub(crate) fn with_options_packed(
         heddle_repo: &'a HeddleRepository,
-        repo: &'a gix::Repository,
+        repo: &'a GitRepo,
         options: GitImportOptions,
         sink: PackImportSink,
     ) -> Self {
@@ -153,13 +156,13 @@ impl<'a> GitTreeImporter<'a> {
         self.options.lossy
     }
 
-    pub fn import_tree(&mut self, tree_oid: gix::hash::ObjectId) -> GitResult<ContentHash> {
+    pub fn import_tree(&mut self, tree_oid: crate::bridge::git_core::ObjectId) -> GitResult<ContentHash> {
         self.import_tree_at(tree_oid, "")
     }
 
     fn import_tree_at(
         &mut self,
-        tree_oid: gix::hash::ObjectId,
+        tree_oid: crate::bridge::git_core::ObjectId,
         path_prefix: &str,
     ) -> GitResult<ContentHash> {
         if let Some(hash) = self.tree_cache.get(&tree_oid) {
@@ -173,51 +176,55 @@ impl<'a> GitTreeImporter<'a> {
             return Ok(*hash);
         }
 
+        if tree_oid == empty_tree_sha1() {
+            let tree = Tree::from_entries(Vec::new());
+            let hash = tree.hash();
+            self.write_tree(hash, &tree)?;
+            self.tree_cache.insert(tree_oid.clone(), hash);
+            self.lossy_by_tree.insert(tree_oid, Vec::new());
+            return Ok(hash);
+        }
+
         let git_tree = self
             .repo
-            .find_tree(tree_oid)
+            .read_tree(&tree_oid)
             .map_err(|err| GitBridgeError::Git(err.to_string()))?;
 
         let mut entries = Vec::new();
         let before_lossy = self.lossy_entries.len();
 
-        for entry in git_tree.iter() {
-            let entry = entry.map_err(|err| GitBridgeError::Git(err.to_string()))?;
+        for entry in git_tree.entries {
             let Some(name) =
-                self.import_entry_name(path_prefix, entry.filename().as_ref(), entry.object_id())?
+                self.import_entry_name(
+                    path_prefix,
+                    entry.name.as_bytes(),
+                    entry.oid.clone(),
+                )?
             else {
                 continue;
             };
 
-            match entry.kind() {
-                gix::object::tree::EntryKind::Blob
-                | gix::object::tree::EntryKind::BlobExecutable => {
-                    let hash = self.import_blob(entry.object_id())?;
-
-                    let mode =
-                        if matches!(entry.kind(), gix::object::tree::EntryKind::BlobExecutable) {
-                            FileMode::Executable
-                        } else {
-                            FileMode::Normal
-                        };
-
+            match entry.mode {
+                0o100644 => {
+                    let hash = self.import_blob(entry.oid)?;
                     entries.push(TreeEntry {
                         name,
-                        mode,
+                        mode: FileMode::Normal,
                         entry_type: objects::object::EntryType::Blob,
                         hash,
                     });
                 }
-                gix::object::tree::EntryKind::Link => {
-                    let hash = self.import_blob(entry.object_id())?;
-                    // Phase E: must be `EntryType::Symlink` so the
-                    // materialization planner reaches the symlink-write
-                    // branch. Previously this said `EntryType::Blob`,
-                    // which routed checkout through the regular file
-                    // path and wrote the symlink target as file content
-                    // (so e.g. ripgrep's `HomebrewFormula -> pkg/brew`
-                    // appeared on disk as an 8-byte text file containing
-                    // "pkg/brew" rather than a symlink).
+                0o100755 => {
+                    let hash = self.import_blob(entry.oid)?;
+                    entries.push(TreeEntry {
+                        name,
+                        mode: FileMode::Executable,
+                        entry_type: objects::object::EntryType::Blob,
+                        hash,
+                    });
+                }
+                0o120000 => {
+                    let hash = self.import_blob(entry.oid)?;
                     entries.push(TreeEntry {
                         name,
                         mode: FileMode::Symlink,
@@ -225,9 +232,11 @@ impl<'a> GitTreeImporter<'a> {
                         hash,
                     });
                 }
-                gix::object::tree::EntryKind::Tree => {
-                    let subtree_hash = self
-                        .import_tree_at(entry.object_id(), &join_tree_path(path_prefix, &name))?;
+                0o040000 => {
+                    let subtree_hash = self.import_tree_at(
+                        entry.oid,
+                        &join_tree_path(path_prefix, &name),
+                    )?;
                     entries.push(TreeEntry {
                         name,
                         mode: FileMode::Normal,
@@ -235,14 +244,23 @@ impl<'a> GitTreeImporter<'a> {
                         hash: subtree_hash,
                     });
                 }
-                gix::object::tree::EntryKind::Commit => {
+                GITLINK_MODE => {
                     let lossy = LossyGitImportEntry::converted(
                         join_tree_path(path_prefix, &name),
-                        Some(entry.object_id().to_string()),
+                        Some(entry.oid.to_string()),
                         "gitlink/submodule entry converted to a heddle-submodule blob",
                     );
                     self.record_lossy(lossy)?;
-                    let hash = self.import_gitlink(entry.object_id())?;
+                    let hash = self.import_gitlink(entry.oid)?;
+                    entries.push(TreeEntry {
+                        name,
+                        mode: FileMode::Normal,
+                        entry_type: objects::object::EntryType::Blob,
+                        hash,
+                    });
+                }
+                _ => {
+                    let hash = self.import_blob(entry.oid)?;
                     entries.push(TreeEntry {
                         name,
                         mode: FileMode::Normal,
@@ -260,7 +278,7 @@ impl<'a> GitTreeImporter<'a> {
         let tree = Tree::from_entries(entries);
         let hash = tree.hash();
         self.write_tree(hash, &tree)?;
-        self.tree_cache.insert(tree_oid, hash);
+        self.tree_cache.insert(tree_oid.clone(), hash);
         self.lossy_by_tree.insert(tree_oid, tree_lossy_entries);
         Ok(hash)
     }
@@ -269,7 +287,7 @@ impl<'a> GitTreeImporter<'a> {
         &mut self,
         path_prefix: &str,
         raw_name: &[u8],
-        object_id: gix::hash::ObjectId,
+        object_id: crate::bridge::git_core::ObjectId,
     ) -> GitResult<Option<String>> {
         match classify_git_tree_name(raw_name) {
             GitTreeNameClassification::Representable(name) => Ok(Some(name)),
@@ -306,24 +324,24 @@ impl<'a> GitTreeImporter<'a> {
         Ok(())
     }
 
-    fn import_blob(&mut self, blob_oid: gix::hash::ObjectId) -> GitResult<ContentHash> {
+    fn import_blob(&mut self, blob_oid: crate::bridge::git_core::ObjectId) -> GitResult<ContentHash> {
         if let Some(hash) = self.blob_cache.get(&blob_oid) {
             return Ok(*hash);
         }
 
-        let mut blob = self
+        let content = self
             .repo
-            .find_blob(blob_oid)
+            .read_blob(&blob_oid)
             .map_err(|err| GitBridgeError::Git(err.to_string()))?;
 
-        let heddle_blob = Blob::new(blob.take_data());
+        let heddle_blob = Blob::new(content);
         let hash = heddle_blob.hash();
         self.write_blob(hash, heddle_blob)?;
         self.blob_cache.insert(blob_oid, hash);
         Ok(hash)
     }
 
-    fn import_gitlink(&mut self, oid: gix::hash::ObjectId) -> GitResult<ContentHash> {
+    fn import_gitlink(&mut self, oid: crate::bridge::git_core::ObjectId) -> GitResult<ContentHash> {
         if let Some(hash) = self.blob_cache.get(&oid) {
             return Ok(*hash);
         }
@@ -339,8 +357,8 @@ impl<'a> GitTreeImporter<'a> {
 /// Import a Git tree as a Heddle tree.
 pub fn import_git_tree(
     heddle_repo: &HeddleRepository,
-    repo: &gix::Repository,
-    tree_oid: gix::hash::ObjectId,
+    repo: &GitRepo,
+    tree_oid: crate::bridge::git_core::ObjectId,
 ) -> GitResult<ContentHash> {
     GitTreeImporter::new(heddle_repo, repo).import_tree(tree_oid)
 }

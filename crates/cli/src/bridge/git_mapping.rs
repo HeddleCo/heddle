@@ -8,11 +8,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use git_substrate::{GitRepo, ObjectKind, RefTarget, Tag};
 use objects::object::ChangeId;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    git_core::{GitBridge, GitBridgeError, GitResult, git_err},
+    git_core::{git_err, GitBridge, GitBridgeError, GitResult},
+    git_import::parse_commit_content,
     git_util::LossyGitImportEntry,
 };
 
@@ -92,11 +94,9 @@ impl<'a> GitBridge<'a> {
 
         for entry in file.entries {
             let change_id = ChangeId::parse(&entry.change_id)?;
-            let git_oid = entry
-                .git_oid
-                .parse::<gix::hash::ObjectId>()
+            let git_oid = git_substrate::parse_sha1_hex(&entry.git_oid)
                 .map_err(|err| GitBridgeError::InvalidMapping(err.to_string()))?;
-            self.mapping.insert_checked(change_id, git_oid)?;
+            self.mapping.insert_checked(change_id, &git_oid)?;
             self.mapping
                 .set_git_lossy_entries(git_oid, entry.lossy_entries);
         }
@@ -127,7 +127,7 @@ impl<'a> GitBridge<'a> {
                 git_oid: git_oid.to_string(),
                 lossy_entries: self
                     .mapping
-                    .get_git_lossy_entries(*git_oid)
+                    .get_git_lossy_entries(git_oid)
                     .map(|entries| entries.to_vec())
                     .unwrap_or_default(),
             })
@@ -197,17 +197,17 @@ impl<'a> GitBridge<'a> {
         self.load_mapping_from_disk()?;
 
         let repo = match git_repo_path {
-            Some(path) => super::git_core::open_repo(path)?,
+            Some(path) => super::git_core::open_git_repo_at(path)?,
             None => self.open_git_repo()?,
         };
 
         // Phase B: scan refs/notes/heddle first. Notes carry change_ids
         // without altering commit SHAs, so they're our preferred fallback
         // source after the sidecar.
-        let notes = super::git_notes::read_all_notes(&repo)?;
+        let notes = super::git_notes::read_all_notes_repo(&repo)?;
         for (oid, note) in &notes {
             let change_id = ChangeId::parse(&note.change_id)?;
-            self.mapping.insert_checked(change_id, *oid)?;
+            self.mapping.insert_checked(change_id, oid)?;
         }
 
         // Legacy: scan commit-message trailers for any commits not already
@@ -215,15 +215,20 @@ impl<'a> GitBridge<'a> {
         // were exported by pre-Phase-B builds.
         let commit_oids = collect_commit_oids(&repo)?;
         for oid in commit_oids {
-            if self.mapping.has_git(oid) {
+            if self.mapping.has_git(&oid) {
                 continue;
             }
-            let commit = repo.find_commit(oid).map_err(git_err)?;
-            let message = commit.message_raw_sloppy();
-            let trailers = GitBridge::parse_trailers(&message.to_string());
+            let content = repo.read_commit_content(&oid).map_err(git_err)?;
+            let body_start = content
+                .windows(2)
+                .position(|window| window == b"\n\n")
+                .map(|index| index + 2)
+                .unwrap_or(content.len());
+            let message = String::from_utf8_lossy(&content[body_start..]);
+            let trailers = GitBridge::parse_trailers(&message);
             if let Some(change_id) = trailers.get(GitBridge::TRAILER_CHANGE_ID) {
                 let change_id = ChangeId::parse(change_id)?;
-                self.mapping.insert_checked(change_id, oid)?;
+                self.mapping.insert_checked(change_id, &oid)?;
             }
         }
 
@@ -248,40 +253,42 @@ impl<'a> GitBridge<'a> {
 /// to non-commit objects (annotated-tag-points-at-blob/tree); see
 /// `git_import::peel_to_commit_oid` for the full rationale and the
 /// `SkippedRef` recording layer.
-fn collect_commit_oids(repo: &gix::Repository) -> GitResult<Vec<gix::hash::ObjectId>> {
+fn collect_commit_oids(repo: &GitRepo) -> GitResult<Vec<crate::bridge::git_core::ObjectId>> {
     let mut tips = Vec::new();
-    for reference in repo
-        .references()
-        .map_err(git_err)?
-        .local_branches()
-        .map_err(git_err)?
-    {
-        let mut reference = reference.map_err(git_err)?;
-        let oid = reference.peel_to_id().map_err(git_err)?.detach();
-        if let Ok(object) = repo.find_object(oid)
-            && object.kind == gix::objs::Kind::Commit
-        {
-            tips.push(oid);
+    for reference in repo.list_refs().map_err(git_err)? {
+        let RefTarget::Direct(_) = reference.target else {
+            continue;
+        };
+        let is_tip_ref = reference.name.starts_with("refs/heads/")
+            || reference.name.starts_with("refs/tags/");
+        if !is_tip_ref {
+            continue;
         }
-    }
-    for reference in repo
-        .references()
-        .map_err(git_err)?
-        .tags()
-        .map_err(git_err)?
-    {
-        let mut reference = reference.map_err(git_err)?;
-        let oid = reference.peel_to_id().map_err(git_err)?.detach();
-        if let Ok(object) = repo.find_object(oid)
-            && object.kind == gix::objs::Kind::Commit
-        {
-            tips.push(oid);
+        match repo.peel_reference_to_commit(&reference.name).map_err(git_err)? {
+            Ok(commit_oid) => tips.push(commit_oid),
+            Err(_) => {}
         }
     }
 
     let mut seen = HashSet::new();
-    for info in repo.rev_walk(tips).all().map_err(git_err)? {
-        seen.insert(info.map_err(git_err)?.id);
+    let mut stack = tips;
+    while let Some(oid) = stack.pop() {
+        if !seen.insert(oid.clone()) {
+            continue;
+        }
+        match repo.read_object_kind(&oid) {
+            Some(ObjectKind::Commit) => {
+                let content = repo.read_commit_content(&oid).map_err(git_err)?;
+                let parents = parse_commit_content(&content)?.parents;
+                stack.extend(parents);
+            }
+            Some(ObjectKind::Tag) => {
+                let object = repo.read_object(&oid).map_err(git_err)?;
+                let tag = Tag::parse(repo.object_format(), &object.body).map_err(git_err)?;
+                stack.push(tag.object);
+            }
+            _ => {}
+        }
     }
 
     Ok(seen.into_iter().collect())

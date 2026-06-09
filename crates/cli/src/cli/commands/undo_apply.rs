@@ -5,17 +5,9 @@ use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Result, anyhow};
-use gix::{
-    ObjectId,
-    refs::{
-        Target,
-        transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog},
-    },
-};
 use objects::error::{HeddleError, Result as HeddleResult};
 use objects::lock::{RepoLock, WriteLockGuard};
 use objects::object::{ChangeId, ContentHash, MarkerName, ThreadName};
@@ -29,7 +21,13 @@ use repo::{
 };
 
 use super::{advice::RecoveryAdvice, thread_cmd::thread_not_found_advice};
-use crate::bridge::git_core::{open_repo as open_git_repo, set_reference};
+use git_substrate::{
+    parse_sha1_hex, update_head_target_ref, write_index_from_commit, GitRepo, RefConstraint,
+};
+
+use crate::bridge::git_core::{
+    delete_reference_matching, open_repo as open_git_repo, set_git_reference, ObjectId,
+};
 
 pub(super) fn preflight_undo_batches(repo: &Repository, batches: &[OpBatch]) -> Result<()> {
     if !batches_have_git_checkpoint(batches) {
@@ -100,9 +98,9 @@ fn batches_have_git_checkpoint(batches: &[OpBatch]) -> bool {
 
 fn current_git_head(repo: &Repository) -> Result<String> {
     let git = git_checkout_repo(repo)?;
-    git.head_id()
-        .map(|id| id.detach().to_string())
-        .map_err(|error| anyhow!("failed to inspect Git HEAD: {error}"))
+    git.head_commit_hex_or_none()
+        .map_err(|error| anyhow!("failed to inspect Git HEAD: {error}"))?
+        .ok_or_else(|| anyhow!("failed to inspect Git HEAD: no commit at HEAD"))
 }
 
 fn ensure_simulated_git_head_is(
@@ -1012,7 +1010,7 @@ fn capture_git_state(repo: &Repository, branch: &str) -> HeddleResult<GitState> 
         ref_target_oid(&git, &format!("refs/heads/{branch}")).map_err(apply_error)?
     };
     let head_file = fs::read_to_string(git.git_dir().join("HEAD")).ok();
-    let checkout_head_oid = git.head_id().ok().map(|id| id.detach().to_string());
+    let checkout_head_oid = git.head_commit_hex_or_none().ok().flatten();
     let mirror_branch_oid = capture_mirror_oid(repo, branch).map_err(apply_error)?;
     Ok(GitState {
         head_file,
@@ -1027,14 +1025,15 @@ fn capture_git_state(repo: &Repository, branch: &str) -> HeddleResult<GitState> 
 /// entry's steps) is idempotent.
 fn restore_git_state(repo: &Repository, branch: &str, state: &GitState) -> HeddleResult<()> {
     let git = git_checkout_repo(repo).map_err(apply_error)?;
+    let checkout = open_git_repo(repo.root()).map_err(|error| apply_error(anyhow!(error)))?;
     if branch != "HEAD" {
         let ref_name = format!("refs/heads/{branch}");
-        match state.checkout_branch_oid {
-            Some(oid) => set_reference(
-                &git,
+        match state.checkout_branch_oid.as_ref() {
+            Some(oid) => set_git_reference(
+                &checkout,
                 &ref_name,
-                oid,
-                PreviousValue::Any,
+                &oid,
+                RefConstraint::Any,
                 "heddle: rollback git checkpoint",
             )
             .map_err(|error| apply_error(anyhow!(error)))?,
@@ -1050,7 +1049,7 @@ fn restore_git_state(repo: &Repository, branch: &str, state: &GitState) -> Heddl
         let oid = parse_git_oid(oid).map_err(apply_error)?;
         reset_git_index_to_commit(&git, oid).map_err(apply_error)?;
     }
-    restore_mirror_oid(repo, branch, state.mirror_branch_oid).map_err(apply_error)?;
+    restore_mirror_oid(repo, branch, state.mirror_branch_oid.clone()).map_err(apply_error)?;
     Ok(())
 }
 
@@ -1077,11 +1076,11 @@ fn restore_mirror_oid(repo: &Repository, branch: &str, oid: Option<ObjectId>) ->
     let git = open_git_repo(&mirror)?;
     let ref_name = format!("refs/heads/{branch}");
     match oid {
-        Some(oid) => set_reference(
+        Some(oid) => set_git_reference(
             &git,
             &ref_name,
-            oid,
-            PreviousValue::Any,
+            &oid,
+            RefConstraint::Any,
             "heddle: rollback mirror checkpoint ref",
         )
         .map_err(|error| anyhow!(error)),
@@ -1089,9 +1088,10 @@ fn restore_mirror_oid(repo: &Repository, branch: &str, oid: Option<ObjectId>) ->
     }
 }
 
-fn delete_ref_if_present(git: &gix::Repository, ref_name: &str) -> Result<()> {
+fn delete_ref_if_present(git: &GitRepo, ref_name: &str) -> Result<()> {
     if ref_target_oid(git, ref_name)?.is_some() {
-        delete_reference_matching(git, ref_name, None)?;
+        delete_reference_matching(git, ref_name, None, "heddle: delete git ref")
+            .map_err(|error| anyhow!(error))?;
     }
     Ok(())
 }
@@ -1113,8 +1113,10 @@ fn apply_git_checkpoint_undo(
             if branch != "HEAD" {
                 let git = git_checkout_repo(repo).map_err(apply_error)?;
                 if ref_target_oid(&git, &format!("refs/heads/{branch}")).map_err(apply_error)?
-                    != Some(previous_oid)
+                    != Some(previous_oid.clone())
                 {
+                    let previous_oid = previous_oid.clone();
+                    let new_oid = new_oid.clone();
                     steps.git_restore_snapshot(repo, branch, &snapshot, || {
                         attach_git_head_to_branch(&git_checkout_repo(repo)?, branch)
                     })?;
@@ -1122,8 +1124,8 @@ fn apply_git_checkpoint_undo(
                         set_attached_git_head(
                             &git_checkout_repo(repo)?,
                             branch,
-                            previous_oid,
-                            new_oid,
+                            &previous_oid,
+                            &new_oid,
                             "heddle: undo git checkpoint",
                         )
                     })?;
@@ -1132,6 +1134,7 @@ fn apply_git_checkpoint_undo(
                     attach_git_head_to_branch(&git_checkout_repo(repo)?, branch)
                 })?;
             }
+            let previous_oid = previous_oid.clone();
             steps.git_restore_snapshot(repo, branch, &snapshot, || {
                 reset_git_index_to_commit(&git_checkout_repo(repo)?, previous_oid)
             })?;
@@ -1148,7 +1151,9 @@ fn apply_git_checkpoint_undo(
                         &git_checkout_repo(repo)?,
                         &format!("refs/heads/{branch}"),
                         Some(new_oid),
+                        "heddle: undo git checkpoint",
                     )
+                    .map_err(|error| anyhow!(error))
                 })?;
             }
             let new_git_oid = new_git_oid.to_string();
@@ -1179,23 +1184,25 @@ fn apply_git_checkpoint_redo(
                 steps.git_restore_snapshot(repo, branch, &snapshot, || {
                     attach_git_head_to_branch(&git_checkout_repo(repo)?, branch)
                 })?;
+                let new_oid = new_oid.clone();
+                let previous_oid = previous_oid.clone();
                 steps.git_restore_snapshot(repo, branch, &snapshot, || {
                     set_attached_git_head(
                         &git_checkout_repo(repo)?,
                         branch,
-                        new_oid,
-                        previous_oid,
+                        &new_oid,
+                        &previous_oid,
                         "heddle: redo git checkpoint",
                     )
                 })?;
             }
             None => {
                 steps.git_restore_snapshot(repo, branch, &snapshot, || {
-                    set_reference(
-                        &git_checkout_repo(repo)?,
+                    set_git_reference(
+                        &open_git_repo(repo.root())?,
                         &format!("refs/heads/{branch}"),
-                        new_oid,
-                        PreviousValue::Any,
+                        &new_oid,
+                        RefConstraint::Any,
                         "heddle: redo git checkpoint",
                     )
                     .map_err(|error| anyhow!(error))
@@ -1206,6 +1213,7 @@ fn apply_git_checkpoint_redo(
             }
         }
     }
+    let new_oid = new_oid.clone();
     steps.git_restore_snapshot(repo, branch, &snapshot, || {
         reset_git_index_to_commit(&git_checkout_repo(repo)?, new_oid)
     })?;
@@ -1243,26 +1251,42 @@ fn update_mirror_branch_ref(
         return Ok(());
     }
     match (target_oid, expected_old_oid) {
-        (Some(target), Some(expected)) => set_reference(
-            &git,
-            &ref_name,
-            parse_git_oid(target)?,
-            PreviousValue::MustExistAndMatch(Target::Object(parse_git_oid(expected)?)),
-            "heddle: update mirror checkpoint ref",
-        )
-        .map_err(|error| anyhow!(error)),
-        (Some(target), None) => set_reference(
-            &git,
-            &ref_name,
-            parse_git_oid(target)?,
-            PreviousValue::Any,
-            "heddle: update mirror checkpoint ref",
-        )
-        .map_err(|error| anyhow!(error)),
-        (None, Some(expected)) => {
-            delete_reference_matching(&git, &ref_name, Some(parse_git_oid(expected)?))
+        (Some(target), Some(expected)) => {
+            let target_oid = parse_git_oid(target)?;
+            set_git_reference(
+                &git,
+                &ref_name,
+                &target_oid,
+                RefConstraint::MustExistAndMatch(parse_git_oid(expected)?),
+                "heddle: update mirror checkpoint ref",
+            )
+            .map_err(|error| anyhow!(error))
         }
-        (None, None) => delete_reference_matching(&git, &ref_name, None),
+        (Some(target), None) => {
+            let target_oid = parse_git_oid(target)?;
+            set_git_reference(
+                &git,
+                &ref_name,
+                &target_oid,
+                RefConstraint::Any,
+                "heddle: update mirror checkpoint ref",
+            )
+            .map_err(|error| anyhow!(error))
+        }
+        (None, Some(expected)) => delete_reference_matching(
+            &git,
+            &ref_name,
+            Some(parse_git_oid(expected)?),
+            "heddle: update mirror checkpoint ref",
+        )
+        .map_err(|error| anyhow!(error)),
+        (None, None) => delete_reference_matching(
+            &git,
+            &ref_name,
+            None,
+            "heddle: update mirror checkpoint ref",
+        )
+        .map_err(|error| anyhow!(error)),
     }
 }
 
@@ -1318,29 +1342,20 @@ fn format_status_paths(kind: &str, paths: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 
-fn git_checkout_repo(repo: &Repository) -> Result<gix::Repository> {
-    open_git_repo(repo.root()).map_err(|error| anyhow!(error))
+fn git_checkout_repo(repo: &Repository) -> Result<GitRepo> {
+    GitRepo::discover(repo.root()).map_err(|error| anyhow!(error))
 }
 
 fn parse_git_oid(oid: &str) -> Result<ObjectId> {
-    oid.parse::<ObjectId>()
-        .map_err(|error| anyhow!("invalid Git object id '{oid}': {error}"))
+    parse_sha1_hex(oid).map_err(|error| anyhow!("invalid Git object id '{oid}': {error}"))
 }
 
-fn ref_target_oid(repo: &gix::Repository, name: &str) -> Result<Option<ObjectId>> {
-    let Some(mut reference) = repo
-        .try_find_reference(name)
-        .map_err(|error| anyhow!("failed to inspect Git reference '{name}': {error}"))?
-    else {
-        return Ok(None);
-    };
-    reference
-        .peel_to_id()
-        .map(|id| Some(id.detach()))
-        .map_err(|error| anyhow!("failed to resolve Git reference '{name}': {error}"))
+fn ref_target_oid(repo: &GitRepo, name: &str) -> Result<Option<ObjectId>> {
+    repo.read_ref_oid(name)
+        .map_err(|error| anyhow!("failed to inspect Git reference '{name}': {error}"))
 }
 
-fn attach_git_head_to_branch(repo: &gix::Repository, branch: &str) -> Result<()> {
+fn attach_git_head_to_branch(repo: &GitRepo, branch: &str) -> Result<()> {
     if branch == "HEAD" {
         return Ok(());
     }
@@ -1352,85 +1367,29 @@ fn attach_git_head_to_branch(repo: &gix::Repository, branch: &str) -> Result<()>
 }
 
 fn set_attached_git_head(
-    repo: &gix::Repository,
+    repo: &GitRepo,
     branch: &str,
-    target: ObjectId,
-    expected: ObjectId,
+    target: &ObjectId,
+    expected: &ObjectId,
     log_message: &str,
 ) -> Result<()> {
-    let signature = git_signature();
-    let mut time_buf = gix::date::parse::TimeBuf::default();
-    let edit = RefEdit {
-        change: Change::Update {
-            log: LogChange {
-                mode: RefLog::AndReference,
-                force_create_reflog: false,
-                message: log_message.into(),
-            },
-            expected: PreviousValue::MustExistAndMatch(Target::Object(expected)),
-            new: Target::Object(target),
-        },
-        name: "HEAD"
-            .try_into()
-            .map_err(|error| anyhow!("invalid Git HEAD ref: {error}"))?,
-        deref: true,
-    };
-    repo.edit_references_as([edit], Some(signature.to_ref(&mut time_buf)))
-        .map_err(|error| anyhow!("failed to update Git HEAD for branch '{branch}': {error}"))?;
-    Ok(())
+    update_head_target_ref(
+        repo.git_dir(),
+        repo.object_format(),
+        target,
+        RefConstraint::MustExistAndMatch(expected.clone()),
+        log_message,
+    )
+    .map_err(|error| anyhow!("failed to update Git HEAD for branch '{branch}': {error}"))
 }
 
-fn reset_git_index_to_commit(repo: &gix::Repository, oid: ObjectId) -> Result<()> {
-    let commit = repo
-        .find_commit(oid)
-        .map_err(|error| anyhow!("failed to inspect Git commit {oid}: {error}"))?;
-    let tree_id = commit
-        .tree_id()
-        .map_err(|error| anyhow!("failed to inspect Git commit tree {oid}: {error}"))?;
-    let mut index = repo
-        .index_from_tree(tree_id.as_ref())
-        .map_err(|error| anyhow!("failed to build Git index for commit {oid}: {error}"))?;
-    index
-        .write(gix_index::write::Options::default())
-        .map_err(|error| anyhow!("failed to write Git index for commit {oid}: {error}"))?;
+fn reset_git_index_to_commit(repo: &GitRepo, oid: ObjectId) -> Result<()> {
+    let worktree = repo
+        .workdir()
+        .ok_or_else(|| anyhow!("Git repository has no working tree for index reset"))?;
+    write_index_from_commit(&worktree, repo.git_dir(), repo.object_format(), &oid)
+        .map_err(|error| anyhow!("failed to rebuild Git index for commit {oid}: {error}"))?;
     Ok(())
-}
-
-fn delete_reference_matching(
-    repo: &gix::Repository,
-    name: &str,
-    expected: Option<ObjectId>,
-) -> Result<()> {
-    let signature = git_signature();
-    let mut time_buf = gix::date::parse::TimeBuf::default();
-    let expected = expected.map_or(PreviousValue::MustExist, |oid| {
-        PreviousValue::MustExistAndMatch(Target::Object(oid))
-    });
-    let edit = RefEdit {
-        change: Change::Delete {
-            log: RefLog::AndReference,
-            expected,
-        },
-        name: name
-            .try_into()
-            .map_err(|error| anyhow!("invalid Git reference '{name}': {error}"))?,
-        deref: false,
-    };
-    repo.edit_references_as([edit], Some(signature.to_ref(&mut time_buf)))
-        .map_err(|error| anyhow!("failed to delete Git reference '{name}': {error}"))?;
-    Ok(())
-}
-
-fn git_signature() -> gix::actor::Signature {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or(0);
-    gix::actor::Signature {
-        name: "Heddle".into(),
-        email: "heddle@local".into(),
-        time: gix::date::Time { seconds, offset: 0 },
-    }
 }
 
 fn fsync_file_and_parent(path: &Path) -> Result<()> {

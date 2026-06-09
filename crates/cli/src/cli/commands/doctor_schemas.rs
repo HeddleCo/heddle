@@ -984,9 +984,8 @@ fn find_repo_root(start: &Path) -> Option<PathBuf> {
             return Some(ancestor.to_path_buf());
         }
     }
-    let repo = gix::discover(start).ok()?;
+    let repo = git_substrate::GitRepo::discover(start).ok()?;
     repo.workdir()
-        .map(Path::to_path_buf)
         .or_else(|| repo.git_dir().parent().map(Path::to_path_buf))
 }
 

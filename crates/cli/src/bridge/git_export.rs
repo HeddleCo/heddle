@@ -4,8 +4,10 @@
 use objects::store::ObjectStore;
 use std::collections::HashSet;
 
-use gix::bstr::ByteSlice;
-use gix::refs::transaction::PreviousValue;
+use git_substrate::{
+    actor_suffix_bytes, empty_tree_sha1, parse_sha1_hex, write_blob, write_simple_commit,
+    write_tree, GitRepo, ObjectFormat, RefConstraint, TreeEntryInput, TreeEntryMode,
+};
 use objects::{
     error::HeddleError,
     object::{ChangeId, ContentHash, FileMode, MarkerName, Principal, State, ThreadName},
@@ -15,13 +17,13 @@ use repo::{AudienceTier, Repository as HeddleRepository, visible};
 use crate::bridge::{
     git_core::{
         GitBridge, GitBridgeError, GitResult, LocalGitIdentity, SyncMapping,
-        count_exported_commits, delete_reference_if_present,
-        git_config_identity_with_global_fallback, git_err, principal_is_default_unknown,
-        read_or_seed_mirror_managed_refs, set_reference, write_mirror_managed_refs,
+        count_exported_commits, git_config_identity_with_global_fallback, git_err,
+        principal_is_default_unknown, read_or_seed_mirror_managed_refs,
+        write_mirror_managed_refs,
     },
     git_notes,
     git_reconstruct::{commit_object_id, reconstruct_commit_bytes, write_commit_object},
-    git_sync::{sync_marker_to_tag, sync_track_to_branch},
+    git_sync::{sync_marker_to_tag_repo, sync_track_to_branch_repo},
     git_util::{ExportStats, ExportedRef},
 };
 
@@ -94,12 +96,12 @@ fn commit_is_byte_faithful(state: &State) -> bool {
 pub(crate) fn export_state(
     mapping: &mut SyncMapping,
     heddle_repo: &HeddleRepository,
-    repo: &gix::Repository,
+    repo: &GitRepo,
     state_id: &ChangeId,
     identity: Option<&LocalGitIdentity>,
     message_override: Option<&str>,
     audience: &AudienceTier,
-) -> GitResult<Option<gix::hash::ObjectId>> {
+) -> GitResult<Option<crate::bridge::git_core::ObjectId>> {
     let state = heddle_repo
         .store()
         .get_state(state_id)?
@@ -143,10 +145,10 @@ pub(crate) fn export_state(
         return Ok(Some(write_commit_object(repo, &content)?));
     }
 
-    // Native heddle commit: no original to preserve. Mint via `new_commit_as`
-    // and inject the durable W2 footer (and the "No intent specified"
+    // Native heddle commit: no original to preserve. Mint via the sley write
+    // sink and inject the durable W2 footer (and the "No intent specified"
     // placeholder for an empty intent) — these ride ONLY native commits.
-    let git_tree_oid = export_tree(heddle_repo, repo, &state.tree)?;
+    let git_tree_oid = export_tree_repo(heddle_repo, repo, &state.tree)?;
     // R6: emit the W2 footer on every exported commit. The footer is
     // durable across remotes; per-scope breakdowns ride on the opt-in
     // git note. For first-pass we audit nothing about the state's
@@ -167,7 +169,7 @@ pub(crate) fn export_state(
             GitBridge::build_commit_message_with_footer(&state, hosted_url, /*omitted=*/ 0)
         }
     };
-    let parent_oids: Vec<gix::hash::ObjectId> = state
+    let parent_oids: Vec<crate::bridge::git_core::ObjectId> = state
         .parents
         .iter()
         .map(|parent_id| {
@@ -177,78 +179,96 @@ pub(crate) fn export_state(
         })
         .collect::<GitResult<Vec<_>>>()?;
 
-    let sig = if principal_is_default_unknown(&state.attribution.principal) {
+    let actor = if principal_is_default_unknown(&state.attribution.principal) {
         let Some(identity) = identity else {
             return Err(GitBridgeError::Git(
                 "refusing to write a Git commit with Unknown <unknown@example.com>; configure user.name/user.email, HEDDLE_PRINCIPAL_NAME/HEDDLE_PRINCIPAL_EMAIL, or .heddle principal".to_string(),
             ));
         };
-        identity.to_signature(state.created_at.timestamp())
-    } else {
-        state_to_signature(&state)
-    };
-    let mut committer_buf = gix::date::parse::TimeBuf::default();
-    let mut author_buf = gix::date::parse::TimeBuf::default();
-    let commit = repo
-        .new_commit_as(
-            sig.to_ref(&mut committer_buf),
-            sig.to_ref(&mut author_buf),
-            &message,
-            git_tree_oid,
-            parent_oids,
+        actor_suffix_bytes(
+            identity.name.as_bytes(),
+            identity.email.as_bytes(),
+            state.created_at.timestamp(),
+            0,
         )
-        .map_err(git_err)?;
-    Ok(Some(commit.id))
+    } else {
+        actor_suffix_bytes(
+            state.attribution.principal.name.as_bytes(),
+            state.attribution.principal.email.as_bytes(),
+            state.created_at.timestamp(),
+            0,
+        )
+    };
+    let commit_oid = write_simple_commit(
+        repo.git_dir(),
+        repo.object_format(),
+        &git_tree_oid,
+        &parent_oids,
+        &actor,
+        &actor,
+        message.as_bytes(),
+    )
+    .map_err(git_err)?;
+    Ok(Some(commit_oid))
 }
 
-/// Export a Heddle tree to Git.
+/// Export a Heddle tree to Git via the sley loose-object write sink.
 pub fn export_tree(
     heddle_repo: &HeddleRepository,
-    repo: &gix::Repository,
+    repo: &GitRepo,
     tree_hash: &ContentHash,
-) -> GitResult<gix::hash::ObjectId> {
+) -> GitResult<crate::bridge::git_core::ObjectId> {
+    export_tree_repo(heddle_repo, repo, tree_hash)
+}
+
+pub(crate) fn export_tree_repo(
+    heddle_repo: &HeddleRepository,
+    repo: &GitRepo,
+    tree_hash: &ContentHash,
+) -> GitResult<crate::bridge::git_core::ObjectId> {
+    export_tree_at(
+        heddle_repo,
+        repo.git_dir(),
+        repo.object_format(),
+        tree_hash,
+    )
+}
+
+fn export_tree_at(
+    heddle_repo: &HeddleRepository,
+    git_dir: &std::path::Path,
+    format: ObjectFormat,
+    tree_hash: &ContentHash,
+) -> GitResult<crate::bridge::git_core::ObjectId> {
     let tree = heddle_repo
         .store()
         .get_tree(tree_hash)?
         .ok_or_else(|| HeddleError::NotFound(format!("tree {}", tree_hash)))?;
 
-    let empty_tree = gix::hash::ObjectId::empty_tree(repo.object_hash());
-    let mut editor = repo.edit_tree(empty_tree).map_err(git_err)?;
+    if tree.entries().is_empty() {
+        return Ok(empty_tree_sha1());
+    }
 
+    let mut entries = Vec::with_capacity(tree.entries().len());
     for entry in tree.entries() {
-        let (kind, id) = if entry.is_tree() {
+        let (mode, oid) = if entry.is_tree() {
             (
-                gix::object::tree::EntryKind::Tree,
-                export_tree(heddle_repo, repo, &entry.hash)?,
+                TreeEntryMode::Tree,
+                export_tree_at(heddle_repo, git_dir, format, &entry.hash)?,
             )
         } else {
             // Redaction safety: if the blob carries an active redaction
             // record, export the stub instead of the bytes. This is the
             // single chokepoint between Heddle-side redactions and any
             // downstream Git remote (GitHub, internal mirrors, ...).
-            // Bytes that escape via the bridge are bytes that escape,
-            // full stop — we cannot retroactively scrub them from
-            // outside repos. The check sits *here*, not in
-            // `materialize_blob`, because export reads `blob.content()`
-            // directly (we never touch the materialize path) and writes
-            // the raw bytes through `repo.write_blob`.
             let stub = heddle_repo
                 .redaction_stub_for_blob(&entry.hash)
                 .map_err(|err| HeddleError::Config(format!("redaction lookup failed: {err}")))?;
 
             if let Some(stub_text) = stub {
-                // Stubs are text-only; ASCII safe across newline/BOM
-                // quirks and submodule-pointer detection.
-                let kind = match entry.mode {
-                    FileMode::Symlink => gix::object::tree::EntryKind::Link,
-                    FileMode::Executable => gix::object::tree::EntryKind::BlobExecutable,
-                    _ => gix::object::tree::EntryKind::Blob,
-                };
-                let oid = repo
-                    .write_blob(stub_text.as_bytes())
-                    .map_err(git_err)?
-                    .detach();
-                (kind, oid)
+                let mode = blob_tree_entry_mode(&entry.mode);
+                let oid = write_blob(git_dir, format, stub_text.as_bytes()).map_err(git_err)?;
+                (mode, oid)
             } else {
                 let blob = heddle_repo
                     .store()
@@ -258,23 +278,31 @@ pub fn export_tree(
                 if entry.mode == FileMode::Normal
                     && let Some(oid) = submodule_oid_from_blob(blob.content())
                 {
-                    (gix::object::tree::EntryKind::Commit, oid)
+                    (TreeEntryMode::GitLink, oid)
                 } else {
-                    let kind = match entry.mode {
-                        FileMode::Normal => gix::object::tree::EntryKind::Blob,
-                        FileMode::Executable => gix::object::tree::EntryKind::BlobExecutable,
-                        FileMode::Symlink => gix::object::tree::EntryKind::Link,
-                    };
-                    let oid = repo.write_blob(blob.content()).map_err(git_err)?.detach();
-                    (kind, oid)
+                    let mode = blob_tree_entry_mode(&entry.mode);
+                    let oid = write_blob(git_dir, format, blob.content()).map_err(git_err)?;
+                    (mode, oid)
                 }
             }
         };
 
-        editor.upsert(&entry.name, kind, id).map_err(git_err)?;
+        entries.push(TreeEntryInput {
+            mode,
+            name: entry.name.clone(),
+            oid,
+        });
     }
 
-    Ok(editor.write().map_err(git_err)?.detach())
+    write_tree(git_dir, format, &mut entries).map_err(git_err)
+}
+
+fn blob_tree_entry_mode(mode: &FileMode) -> TreeEntryMode {
+    match mode {
+        FileMode::Executable => TreeEntryMode::BlobExecutable,
+        FileMode::Symlink => TreeEntryMode::Link,
+        _ => TreeEntryMode::Blob,
+    }
 }
 
 /// Export all Heddle states to Git commits.
@@ -318,7 +346,6 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     // boundary (absent from both).
     let reachable: HashSet<ChangeId> = sorted_states.iter().copied().collect();
     let repo = bridge.open_git_repo()?;
-    bridge.mapping.retain_git_objects(&repo);
     bridge.seed_git_checkpoint_mappings_from_checkout(&repo)?;
 
     // The desired/actual ref sets span the WHOLE mirror, not just this export's
@@ -330,7 +357,7 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     // thread/marker regardless of scope; the mint loop below stays scoped (only the
     // requested thread's new commits are minted), so widening changes WHICH refs
     // are reconciled, never what gets created.
-    let remote_names = git_remote_names(bridge.heddle_repo);
+    let remote_names = git_remote_names(&repo)?;
     let threads: Vec<String> = {
         let mut all: Vec<String> = bridge
             .heddle_repo
@@ -390,8 +417,8 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     // mirror, so the notes-ref retraction below must consider all of them —
     // including the states the purge is about to drop AND any orphaned mapping a
     // deleted thread left behind, which no current-ref frontier reaches (heddle#316).
-    let pre_purge_targets: Vec<(ChangeId, gix::hash::ObjectId)> =
-        bridge.mapping.iter().map(|(c, o)| (*c, *o)).collect();
+    let pre_purge_targets: Vec<(ChangeId, crate::bridge::git_core::ObjectId)> =
+        bridge.mapping.iter().map(|(c, o)| (*c, o.clone())).collect();
 
     let purge_reachable: HashSet<ChangeId> = sorted_states
         .iter()
@@ -420,7 +447,7 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     // is a subset of the same walk that produces the total, never a
     // parallel tally over `list_states()` that could include an orphan
     // state reachable from no copied ref.
-    let mut newly_minted: HashSet<gix::hash::ObjectId> = HashSet::new();
+    let mut newly_minted: HashSet<crate::bridge::git_core::ObjectId> = HashSet::new();
 
     for state_id in sorted_states {
         // Already mapped to a git object — the common case for git-imported
@@ -512,17 +539,23 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
             // Embargoed for this audience — emit absence (no commit minted).
             continue;
         };
-        bridge.mapping.insert(state_id, git_oid);
-        newly_minted.insert(git_oid);
+        bridge.mapping.insert(state_id, &git_oid);
+        newly_minted.insert(git_oid.clone());
 
         // Attach a heddle note to the freshly-created commit so the
         // change_id survives a fresh `git clone` of the destination
         // (when only the git side travels, without our sidecar).
         if let Some(state) = bridge.heddle_repo.store().get_state(&state_id)? {
             let note = git_notes::HeddleNote::from_state(&state);
-            git_notes::write_note(&repo, git_oid, &note)?;
+            git_notes::write_note_repo(&repo, &git_oid, &note)?;
         }
     }
+
+    // Drop mappings whose git objects are absent from the mirror AFTER the
+    // reconstruct/mint pass materialized fidelity commits (#568). Running
+    // this before mint would strip every import mapping from an empty mirror
+    // and falsely count reconstructed commits as newly minted.
+    bridge.mapping.retain_git_objects(&repo);
 
     // The downward-closure served set across EVERY note target — the pre-purge
     // mapping (commits that may already carry a note in the mirror) UNION the
@@ -554,8 +587,8 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     // path above), make sure the note is present too. This covers two
     // cases: (a) the state was imported from a non-heddle git source and
     // never had a note, and (b) the note was deleted from the mirror.
-    let note_targets: Vec<(ChangeId, gix::hash::ObjectId)> =
-        bridge.mapping.iter().map(|(c, o)| (*c, *o)).collect();
+    let note_targets: Vec<(ChangeId, crate::bridge::git_core::ObjectId)> =
+        bridge.mapping.iter().map(|(c, o)| (*c, o.clone())).collect();
     for (change_id, git_oid) in note_targets {
         // Gate the backfill on the downward-closure served set, not the commit's
         // DIRECT tier. The mapping can carry orphaned entries (a deleted thread's
@@ -566,11 +599,11 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         // uses, so no note-write site can emit metadata for an unserved commit
         // (heddle#316).
         if note_served.contains(&change_id)
-            && git_notes::read_note(&repo, git_oid)?.is_none()
+            && git_notes::read_note_repo(&repo, &git_oid)?.is_none()
             && let Some(state) = bridge.heddle_repo.store().get_state(&change_id)?
         {
             let note = git_notes::HeddleNote::from_state(&state);
-            git_notes::write_note(&repo, git_oid, &note)?;
+            git_notes::write_note_repo(&repo, &git_oid, &note)?;
         }
     }
 
@@ -584,20 +617,20 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     // ancestor embargo stranded on a deleted thread's commit. Guard the
     // degenerate case where a still-served state maps to the same git OID by
     // keeping any OID a served target maps to.
-    let served_note_oids: HashSet<gix::hash::ObjectId> = pre_purge_targets
+    let served_note_oids: HashSet<crate::bridge::git_core::ObjectId> = pre_purge_targets
         .iter()
-        .copied()
-        .chain(bridge.mapping.iter().map(|(c, o)| (*c, *o)))
+        .cloned()
+        .chain(bridge.mapping.iter().map(|(c, o)| (*c, o.clone())))
         .filter(|(c, _)| note_served.contains(c))
         .map(|(_, oid)| oid)
         .collect();
-    let notes_to_retract: HashSet<gix::hash::ObjectId> = pre_purge_targets
+    let notes_to_retract: HashSet<crate::bridge::git_core::ObjectId> = pre_purge_targets
         .iter()
         .filter(|(c, _)| !note_served.contains(c))
-        .map(|(_, oid)| *oid)
+        .map(|(_, oid)| oid.clone())
         .filter(|oid| !served_note_oids.contains(oid))
         .collect();
-    git_notes::remove_notes(&repo, &notes_to_retract)?;
+    git_notes::remove_notes_repo(&repo, &notes_to_retract)?;
 
     // THE PROJECTION (heddle#316 r13): the desired heddle-owned ref-set for this
     // audience — heads lagged to the served frontier, tags at served markers — as
@@ -629,7 +662,7 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     // form the downward-closed git-ancestry set — no separate git walk is needed
     // (heddle#316). Replaces the prior `embargoed_oids` (this-run-only purge
     // drop-set) classification that leaked a prior-run / out-of-scope embargo.
-    let served_oids: HashSet<gix::hash::ObjectId> = frontier_served
+    let served_oids: HashSet<crate::bridge::git_core::ObjectId> = frontier_served
         .iter()
         .filter_map(|state| bridge.mapping.get_git(state))
         .collect();
@@ -665,20 +698,20 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         }
         let branch_ref = format!("refs/heads/{track_name}");
         let in_scope = thread.is_none() || thread == Some(track_name.as_str());
-        let desired_oid = desired.get(&branch_ref).copied();
+        let desired_oid = desired.get(&branch_ref).cloned();
         let existing_oid = branch_tip_oid(&repo, &branch_ref);
         match reconcile_ref(
             ReconcileNs::Head,
-            desired_oid,
-            existing_oid,
+            desired_oid.clone(),
+            existing_oid.clone(),
             in_scope,
             /* marker_served_unminted */ false,
             &served_oids,
         ) {
             ReconcileOp::Write => {
-                let git_oid = desired_oid.expect("Write implies a desired target");
-                sync_track_to_branch(&repo, track_name, git_oid)?;
-                managed_record.insert(branch_ref.clone(), git_oid);
+                let git_oid = desired_oid.clone().expect("Write implies a desired target");
+                sync_track_to_branch_repo(&repo, track_name, git_oid.clone())?;
+                managed_record.insert(branch_ref.clone(), git_oid.clone());
                 stats.threads_synced += 1;
                 stats.branches.push(ExportedRef {
                     name: track_name.clone(),
@@ -686,15 +719,17 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                 });
             }
             ReconcileOp::ForceRewind => {
-                let git_oid = desired_oid.expect("ForceRewind implies a desired target");
-                set_reference(
-                    &repo,
+                let git_oid = desired_oid.clone().expect("ForceRewind implies a desired target");
+                git_substrate::set_reference(
+                    repo.git_dir(),
+                    repo.object_format(),
                     &branch_ref,
-                    git_oid,
-                    PreviousValue::Any,
+                    &git_oid,
+                    RefConstraint::Any,
                     "heddle: retract embargoed thread frontier",
-                )?;
-                managed_record.insert(branch_ref.clone(), git_oid);
+                )
+                .map_err(git_err)?;
+                managed_record.insert(branch_ref.clone(), git_oid.clone());
                 stats.threads_synced += 1;
                 stats.branches.push(ExportedRef {
                     name: track_name.clone(),
@@ -702,7 +737,12 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                 });
             }
             ReconcileOp::Delete => {
-                delete_reference_if_present(&repo, &branch_ref)?;
+                git_substrate::delete_reference_if_present(
+                    repo.git_dir(),
+                    repo.object_format(),
+                    &branch_ref,
+                )
+                .map_err(git_err)?;
                 managed_record.remove(&branch_ref);
             }
             // A head has no preserve path — `frontier_git_oid` recomputes the
@@ -733,7 +773,7 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     for name in &tag_names {
         let tag_ref = format!("refs/tags/{name}");
         let existing_oid = branch_tip_oid(&repo, &tag_ref);
-        let desired_oid = desired.get(&tag_ref).copied();
+        let desired_oid = desired.get(&tag_ref).cloned();
         let in_scope = thread.is_none();
         // A live marker whose served target was NOT minted into the mapping this
         // run (a scoped export that didn't reach it). The desired projection omits
@@ -752,16 +792,16 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
         };
         match reconcile_ref(
             ReconcileNs::Tag,
-            desired_oid,
-            existing_oid,
+            desired_oid.clone(),
+            existing_oid.clone(),
             in_scope,
             marker_served_unminted,
             &served_oids,
         ) {
             ReconcileOp::Write => {
-                let git_oid = desired_oid.expect("Write implies a desired target");
-                sync_marker_to_tag(&repo, name, git_oid)?;
-                managed_record.insert(tag_ref.clone(), git_oid);
+                let git_oid = desired_oid.clone().expect("Write implies a desired target");
+                sync_marker_to_tag_repo(&repo, name, git_oid.clone())?;
+                managed_record.insert(tag_ref.clone(), git_oid.clone());
                 stats.markers_synced += 1;
                 stats.tags.push(ExportedRef {
                     name: name.clone(),
@@ -769,7 +809,12 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
                 });
             }
             ReconcileOp::Delete => {
-                delete_reference_if_present(&repo, &tag_ref)?;
+                git_substrate::delete_reference_if_present(
+                    repo.git_dir(),
+                    repo.object_format(),
+                    &tag_ref,
+                )
+                .map_err(git_err)?;
                 managed_record.remove(&tag_ref);
             }
             // PRESERVE keeps the existing served tag (still managed → stays in the
@@ -850,16 +895,17 @@ enum ReconcileOp {
 /// out-of-scope embargo).
 fn reconcile_ref(
     ns: ReconcileNs,
-    desired_oid: Option<gix::hash::ObjectId>,
-    existing_oid: Option<gix::hash::ObjectId>,
+    desired_oid: Option<crate::bridge::git_core::ObjectId>,
+    existing_oid: Option<crate::bridge::git_core::ObjectId>,
     in_scope: bool,
     marker_served_unminted: bool,
-    served_oids: &HashSet<gix::hash::ObjectId>,
+    served_oids: &HashSet<crate::bridge::git_core::ObjectId>,
 ) -> ReconcileOp {
     // `existing_oid` is already the peeled commit OID (`branch_tip_oid`), so this
     // membership test compares commit-against-commit (risk #2).
     let existing_served = existing_oid
-        .map(|oid| served_oids.contains(&oid))
+        .as_ref()
+        .map(|oid| served_oids.contains(oid))
         .unwrap_or(false);
     match (desired_oid, existing_oid) {
         // Scoped export, would-create: never materialize a ref the caller did not
@@ -889,15 +935,13 @@ fn reconcile_ref(
     }
 }
 
-fn git_remote_names(heddle_repo: &HeddleRepository) -> HashSet<String> {
-    let Ok(repo) = gix::discover(heddle_repo.root()) else {
-        return HashSet::new();
-    };
-    repo.remote_names()
+fn git_remote_names(repo: &GitRepo) -> GitResult<HashSet<String>> {
+    Ok(repo
+        .remote_names()
+        .map_err(git_err)?
         .into_iter()
-        .map(|name| name.to_str_lossy().into_owned())
         .filter(|name| !name.trim().is_empty())
-        .collect()
+        .collect())
 }
 
 fn is_remote_tracking_thread_name(thread: &str, remote_names: &HashSet<String>) -> bool {
@@ -925,9 +969,9 @@ fn purge_unserved_mappings(
     sorted_states: &[ChangeId],
     reachable: &HashSet<ChangeId>,
     audience: &AudienceTier,
-) -> GitResult<HashSet<gix::hash::ObjectId>> {
+) -> GitResult<HashSet<crate::bridge::git_core::ObjectId>> {
     let served = served_change_ids(heddle_repo, sorted_states, reachable, audience)?;
-    let mut purged: HashSet<gix::hash::ObjectId> = HashSet::new();
+    let mut purged: HashSet<crate::bridge::git_core::ObjectId> = HashSet::new();
     for state_id in sorted_states {
         if !served.contains(state_id)
             && let Some(oid) = mapping.remove(state_id)
@@ -974,9 +1018,11 @@ fn served_change_ids(
 
 /// Resolve `ref_name` to its tip commit OID in the mirror, or `None` when the
 /// ref is absent or unpeelable.
-fn branch_tip_oid(repo: &gix::Repository, ref_name: &str) -> Option<gix::hash::ObjectId> {
-    let mut reference = repo.find_reference(ref_name).ok()?;
-    reference.peel_to_id().ok().map(|id| id.detach())
+fn branch_tip_oid(repo: &GitRepo, ref_name: &str) -> Option<crate::bridge::git_core::ObjectId> {
+    match repo.peel_reference_to_commit(ref_name) {
+        Ok(Ok(oid)) => Some(oid),
+        _ => None,
+    }
 }
 
 /// Project the DESIRED heddle-owned ref-set for an export: full ref name → its
@@ -1004,7 +1050,7 @@ fn project_desired_refs(
     mapping: &SyncMapping,
     threads: &[String],
     markers: &[MarkerName],
-) -> GitResult<std::collections::HashMap<String, gix::hash::ObjectId>> {
+) -> GitResult<std::collections::HashMap<String, crate::bridge::git_core::ObjectId>> {
     let mut desired = std::collections::HashMap::new();
     for track_name in threads {
         let Some(tip) = heddle_repo.refs().get_thread(&ThreadName::new(track_name))? else {
@@ -1035,7 +1081,7 @@ fn frontier_git_oid(
     heddle_repo: &HeddleRepository,
     mapping: &SyncMapping,
     tip: ChangeId,
-) -> GitResult<Option<gix::hash::ObjectId>> {
+) -> GitResult<Option<crate::bridge::git_core::ObjectId>> {
     let mut visited = HashSet::new();
     let mut stack = vec![tip];
     let mut frontier: Vec<ChangeId> = Vec::new();
@@ -1083,23 +1129,12 @@ fn reachable_states(
     Ok(states)
 }
 
-fn state_to_signature(state: &objects::object::State) -> gix::actor::Signature {
-    gix::actor::Signature {
-        name: state.attribution.principal.name.as_str().into(),
-        email: state.attribution.principal.email.as_str().into(),
-        time: gix::date::Time {
-            seconds: state.created_at.timestamp(),
-            offset: 0,
-        },
-    }
-}
-
-fn submodule_oid_from_blob(content: &[u8]) -> Option<gix::hash::ObjectId> {
+fn submodule_oid_from_blob(content: &[u8]) -> Option<crate::bridge::git_core::ObjectId> {
     let text = std::str::from_utf8(content).ok()?;
     let text = text.trim();
     let trimmed = text.strip_prefix(SUBMODULE_PREFIX)?.trim();
 
-    trimmed.parse().ok()
+    parse_sha1_hex(trimmed).ok()
 }
 
 #[cfg(test)]

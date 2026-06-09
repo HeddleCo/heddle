@@ -8,21 +8,20 @@
 //! when the sidecar is missing or empty (e.g., a developer ran `git clone
 //! <url>` of a heddle-exported repo without copying the heddle dir).
 //!
-//! gix v0.80 has no high-level notes API; we hand-roll the standard tree
-//! layout (entry name = full 40-hex commit SHA, entry blob = serialized JSON)
-//! using the same primitives the rest of the bridge already relies on
-//! (`write_blob`, `edit_tree`, `new_commit_as`, `set_reference`).
+//! Notes use the standard tree layout (entry name = full 40-hex commit SHA,
+//! entry blob = serialized JSON). Tree read/write is delegated to
+//! [`sley-notes`] (fanout-aware reads, flat writes, incremental upsert/remove).
 
-use std::{
-    collections::HashMap,
-    time::{SystemTime, UNIX_EPOCH},
+use std::collections::HashMap;
+
+use git_substrate::{
+    bridge_reflog_committer, iter_notes, notes_ref_expected, read_note_bytes, remove_notes_for,
+    upsert_note_bytes_for, GitRepo, NotesCommitIdentity, NotesRef, ObjectId,
 };
-
-use gix::{hash::ObjectId, refs::transaction::PreviousValue};
 use objects::object::{State, Status};
 use serde::{Deserialize, Serialize};
 
-use super::git_core::{GitBridgeError, GitResult, git_err, set_reference};
+use super::git_core::{git_err, GitBridgeError, GitResult};
 
 /// The notes ref heddle uses. Git-compatible notes readers can opt into
 /// this location, while Heddle reads and writes it natively.
@@ -145,75 +144,48 @@ impl HeddleNote {
     }
 }
 
-/// Resolve the current notes-commit OID and the tree it points at. Returns
-/// `(None, empty_tree)` when `refs/notes/heddle` does not yet exist.
-fn read_notes_head(repo: &gix::Repository) -> GitResult<(Option<ObjectId>, ObjectId)> {
-    let parent = match repo.find_reference(NOTES_REF) {
-        Ok(reference) => {
-            let mut reference = reference;
-            Some(reference.peel_to_id().map_err(git_err)?.detach())
-        }
-        Err(_) => None,
-    };
-    let tree_oid = if let Some(commit_oid) = parent {
-        let commit = repo.find_commit(commit_oid).map_err(git_err)?;
-        commit.tree_id().map_err(git_err)?.detach()
-    } else {
-        gix::hash::ObjectId::empty_tree(repo.object_hash())
-    };
-    Ok((parent, tree_oid))
+fn heddle_notes_ref() -> NotesRef {
+    NotesRef::expand(NOTES_REF)
+}
+
+fn notes_commit_identity() -> NotesCommitIdentity {
+    let actor = bridge_reflog_committer();
+    NotesCommitIdentity {
+        author: actor.clone(),
+        committer: actor,
+    }
 }
 
 /// Attach `note` to `commit_oid` in `repo` under `refs/notes/heddle`.
 ///
 /// Each call creates one new notes commit on top of any previous notes
-/// history. The notes ref is updated atomically via the bridge's standard
-/// `set_reference` helper.
-pub fn write_note(
-    repo: &gix::Repository,
-    commit_oid: ObjectId,
+/// history when the payload changes. The notes ref is updated atomically
+/// via compare-and-swap on the prior notes head.
+pub fn write_note(repo: &GitRepo, commit_oid: &ObjectId, note: &HeddleNote) -> GitResult<()> {
+    write_note_repo(repo, commit_oid, note)
+}
+
+pub(crate) fn write_note_repo(
+    repo: &GitRepo,
+    commit_oid: &ObjectId,
     note: &HeddleNote,
 ) -> GitResult<()> {
     let json = note.to_json_bytes()?;
-    let blob_oid = repo.write_blob(&json).map_err(git_err)?.detach();
-
-    let (parent_commit, current_tree_oid) = read_notes_head(repo)?;
-    let mut editor = repo.edit_tree(current_tree_oid).map_err(git_err)?;
-    let entry_name = commit_oid.to_hex_with_len(40).to_string();
-    editor
-        .upsert(
-            entry_name.as_str(),
-            gix::object::tree::EntryKind::Blob,
-            blob_oid,
-        )
-        .map_err(git_err)?;
-    let new_tree_oid = editor.write().map_err(git_err)?.detach();
-
-    let signature = bridge_notes_signature();
-    let mut author_buf = gix::date::parse::TimeBuf::default();
-    let mut committer_buf = gix::date::parse::TimeBuf::default();
-    let parents: Vec<ObjectId> = parent_commit.iter().copied().collect();
-    let new_commit = repo
-        .new_commit_as(
-            signature.to_ref(&mut committer_buf),
-            signature.to_ref(&mut author_buf),
-            "heddle: state metadata",
-            new_tree_oid,
-            parents,
-        )
-        .map_err(git_err)?;
-
-    let constraint = match parent_commit {
-        Some(prev) => PreviousValue::ExistingMustMatch(gix::refs::Target::Object(prev)),
-        None => PreviousValue::MustNotExist,
-    };
-    set_reference(
-        repo,
-        NOTES_REF,
-        new_commit.id,
-        constraint,
+    let notes_ref = heddle_notes_ref();
+    let store = repo.ref_store();
+    let ref_expected = notes_ref_expected(&store, &notes_ref).map_err(git_err)?;
+    upsert_note_bytes_for(
+        repo.git_dir(),
+        repo.object_format(),
+        &store,
+        &notes_ref,
+        commit_oid,
+        &json,
         "heddle: write state note",
-    )?;
+        &notes_commit_identity(),
+        ref_expected,
+    )
+    .map_err(git_err)?;
     Ok(())
 }
 
@@ -232,126 +204,86 @@ pub fn write_note(
 /// No-op — no new commit, no ref churn — when the notes ref is absent or none
 /// of `commit_oids` actually has an entry.
 pub fn remove_notes(
-    repo: &gix::Repository,
+    repo: &GitRepo,
+    commit_oids: &std::collections::HashSet<ObjectId>,
+) -> GitResult<()> {
+    remove_notes_repo(repo, commit_oids)
+}
+
+pub(crate) fn remove_notes_repo(
+    repo: &GitRepo,
     commit_oids: &std::collections::HashSet<ObjectId>,
 ) -> GitResult<()> {
     if commit_oids.is_empty() {
         return Ok(());
     }
-    let (parent_commit, current_tree_oid) = read_notes_head(repo)?;
-    // No notes ref at all → nothing published, nothing to retract.
-    let Some(parent) = parent_commit else {
-        return Ok(());
-    };
-
-    // Only the requested OIDs that actually have an entry need removing.
-    // Checking first avoids churning the ref (a new empty-delta commit) when a
-    // retraction touches commits that never carried a note.
-    let target_names: std::collections::HashSet<String> = commit_oids
-        .iter()
-        .map(|oid| oid.to_hex_with_len(40).to_string())
-        .collect();
-    let tree = repo.find_tree(current_tree_oid).map_err(git_err)?;
-    let mut to_remove: Vec<String> = Vec::new();
-    for entry in tree.iter() {
-        let entry = entry.map_err(git_err)?;
-        let name = entry.filename().to_string();
-        if target_names.contains(&name) {
-            to_remove.push(name);
-        }
-    }
-    if to_remove.is_empty() {
+    let notes_ref = heddle_notes_ref();
+    let store = repo.ref_store();
+    let ref_expected = notes_ref_expected(&store, &notes_ref).map_err(git_err)?;
+    if ref_expected.is_none() {
         return Ok(());
     }
-
-    let mut editor = repo.edit_tree(current_tree_oid).map_err(git_err)?;
-    for name in &to_remove {
-        editor.remove(name.as_str()).map_err(git_err)?;
-    }
-    let new_tree_oid = editor.write().map_err(git_err)?.detach();
-
-    let signature = bridge_notes_signature();
-    let mut author_buf = gix::date::parse::TimeBuf::default();
-    let mut committer_buf = gix::date::parse::TimeBuf::default();
-    let new_commit = repo
-        .new_commit_as(
-            signature.to_ref(&mut committer_buf),
-            signature.to_ref(&mut author_buf),
-            "heddle: retract state metadata",
-            new_tree_oid,
-            vec![parent],
-        )
-        .map_err(git_err)?;
-
-    set_reference(
-        repo,
-        NOTES_REF,
-        new_commit.id,
-        PreviousValue::ExistingMustMatch(gix::refs::Target::Object(parent)),
-        "heddle: retract state note",
-    )?;
+    let annotated: Vec<ObjectId> = commit_oids.iter().copied().collect();
+    remove_notes_for(
+        repo.git_dir(),
+        repo.object_format(),
+        &store,
+        &notes_ref,
+        &annotated,
+        "heddle: retract state metadata",
+        &notes_commit_identity(),
+        ref_expected,
+    )
+    .map_err(git_err)?;
     Ok(())
 }
 
 /// Look up the note attached to `commit_oid`, if any.
-pub fn read_note(repo: &gix::Repository, commit_oid: ObjectId) -> GitResult<Option<HeddleNote>> {
-    let Ok(reference) = repo.find_reference(NOTES_REF) else {
+pub fn read_note(repo: &GitRepo, commit_oid: &ObjectId) -> GitResult<Option<HeddleNote>> {
+    read_note_repo(repo, commit_oid)
+}
+
+pub(crate) fn read_note_repo(repo: &GitRepo, commit_oid: &ObjectId) -> GitResult<Option<HeddleNote>> {
+    let notes_ref = heddle_notes_ref();
+    let store = repo.ref_store();
+    let Some(bytes) = read_note_bytes(
+        repo.git_dir(),
+        repo.object_format(),
+        &store,
+        &notes_ref,
+        commit_oid,
+    )
+    .map_err(git_err)?
+    else {
         return Ok(None);
     };
-    let mut reference = reference;
-    let notes_commit_oid = reference.peel_to_id().map_err(git_err)?.detach();
-    let notes_commit = repo.find_commit(notes_commit_oid).map_err(git_err)?;
-    let notes_tree_oid = notes_commit.tree_id().map_err(git_err)?.detach();
-    let notes_tree = repo.find_tree(notes_tree_oid).map_err(git_err)?;
-
-    let target_name = commit_oid.to_hex_with_len(40).to_string();
-    for entry in notes_tree.iter() {
-        let entry = entry.map_err(git_err)?;
-        if *entry.filename() == *target_name.as_bytes() {
-            let object = repo.find_object(entry.object_id()).map_err(git_err)?;
-            return HeddleNote::from_json_bytes(&object.data).map(Some);
-        }
-    }
-    Ok(None)
+    HeddleNote::from_json_bytes(&bytes).map(Some)
 }
 
 /// Read every (commit_oid → note) entry under `refs/notes/heddle`. Used by
 /// the import path's identity-recovery scan.
-pub fn read_all_notes(repo: &gix::Repository) -> GitResult<HashMap<ObjectId, HeddleNote>> {
-    let mut out = HashMap::new();
-    let Ok(reference) = repo.find_reference(NOTES_REF) else {
-        return Ok(out);
-    };
-    let mut reference = reference;
-    let notes_commit_oid = reference.peel_to_id().map_err(git_err)?.detach();
-    let notes_commit = repo.find_commit(notes_commit_oid).map_err(git_err)?;
-    let notes_tree_oid = notes_commit.tree_id().map_err(git_err)?.detach();
-    let notes_tree = repo.find_tree(notes_tree_oid).map_err(git_err)?;
+pub fn read_all_notes(repo: &GitRepo) -> GitResult<HashMap<ObjectId, HeddleNote>> {
+    read_all_notes_repo(repo)
+}
 
-    for entry in notes_tree.iter() {
+pub(crate) fn read_all_notes_repo(repo: &GitRepo) -> GitResult<HashMap<ObjectId, HeddleNote>> {
+    let mut out = HashMap::new();
+    let notes_ref = heddle_notes_ref();
+    let store = repo.ref_store();
+    for entry in iter_notes(
+        repo.git_dir(),
+        repo.object_format(),
+        &store,
+        &notes_ref,
+    )
+    .map_err(git_err)?
+    {
         let entry = entry.map_err(git_err)?;
-        let name = entry.filename().to_string();
-        let Ok(target_oid) = name.parse::<ObjectId>() else {
-            continue;
-        };
-        let object = repo.find_object(entry.object_id()).map_err(git_err)?;
-        // Skip entries that aren't well-formed heddle notes — could be left
-        // over from `git notes --ref=heddle add` by an external tool.
-        if let Ok(note) = HeddleNote::from_json_bytes(&object.data) {
-            out.insert(target_oid, note);
+        if let Ok(data) = repo.read_blob(&entry.blob).map_err(git_err)
+            && let Ok(note) = HeddleNote::from_json_bytes(&data)
+        {
+            out.insert(entry.annotated, note);
         }
     }
     Ok(out)
-}
-
-fn bridge_notes_signature() -> gix::actor::Signature {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    gix::actor::Signature {
-        name: "Heddle".into(),
-        email: "heddle@local".into(),
-        time: gix::date::Time { seconds, offset: 0 },
-    }
 }

@@ -4,10 +4,13 @@
 use objects::store::ObjectStore;
 #[cfg(feature = "client")]
 use std::net::SocketAddr;
-use std::{borrow::Cow, collections::BTreeMap, fs, path::Path};
+use std::{collections::BTreeMap, fs, path::{Path, PathBuf}};
 
 use anyhow::{Context, Result};
-use gix::bstr::{BStr, BString};
+use git_substrate::{
+    add_remote_with_fetch, load_config_with_includes, remove_remote, ConfigIncludeContext, GitConfig,
+    GitRepo, RemoteEditError,
+};
 #[cfg(feature = "client")]
 use heddle_client::grpc_hosted::{HostedAuthMode, PullMaterialization};
 use objects::{
@@ -436,8 +439,8 @@ async fn pull_local(
 }
 
 fn git_checkout_head_oid(root: &Path) -> Option<String> {
-    let git = gix::discover(root).ok()?;
-    Some(git.head_id().ok()?.detach().to_string())
+    let git = GitRepo::discover(root).ok()?;
+    git.head_commit_hex_or_none().ok().flatten()
 }
 
 fn short_oid(oid: &str) -> String {
@@ -854,14 +857,12 @@ fn git_overlay_default_remote_name(repo: &Repository) -> Option<String> {
 
 fn git_upstream_remote_name(repo: &Repository) -> Option<String> {
     let branch = repo.git_overlay_current_branch().ok().flatten()?;
-    let git = gix::discover(repo.root()).ok()?;
-    let local = git
-        .find_reference(format!("refs/heads/{branch}").as_str())
-        .ok()?;
-    local
-        .remote_name(gix::remote::Direction::Fetch)
-        .and_then(|name| name.as_symbol().map(str::to_string))
+    let git = GitRepo::discover(repo.root()).ok()?;
+    let config = GitConfig::read(git.common_dir().join("config")).ok()?;
+    config
+        .get("branch", Some(&branch), "remote")
         .filter(|remote| !remote.is_empty())
+        .map(str::to_string)
 }
 
 
@@ -914,6 +915,10 @@ fn is_local_git_repository(path: &Path) -> bool {
     path.join("HEAD").is_file() && path.join("objects").is_dir() && path.join("refs").is_dir()
 }
 
+pub(crate) fn git_config_remotes(root: &Path) -> BTreeMap<String, String> {
+    plain_git_remote_items(root)
+}
+
 fn plain_git_remote_items(root: &Path) -> BTreeMap<String, String> {
     let Some(ctx) = GitConfigContext::discover(root) else {
         return BTreeMap::new();
@@ -941,34 +946,34 @@ fn git_overlay_config_remotes(repo: &Repository) -> BTreeMap<String, String> {
 }
 
 /// The resolved Git directory layout for a repository, used to read remote
-/// definitions from `.git/config` (and its layered companions) through
-/// `gix_config`, which correctly handles quoting, inline comments, include
+/// definitions from `.git/config` (and its layered companions) through the
+/// sley config stack, which handles quoting, inline comments, include
 /// directives, and conditional `includeIf` directives.
 struct GitConfigContext {
-    git_dir: std::path::PathBuf,
-    common_dir: std::path::PathBuf,
-    branch: Option<gix::refs::FullName>,
+    git_dir: PathBuf,
+    common_dir: PathBuf,
+    branch: Option<String>,
 }
 
 impl GitConfigContext {
     fn discover(root: &Path) -> Option<Self> {
-        let git = gix::discover(root).ok()?;
+        let git = GitRepo::discover(root).ok()?;
         Some(Self {
             git_dir: git.git_dir().to_path_buf(),
             common_dir: git.common_dir().to_path_buf(),
-            branch: git.head_name().ok().flatten(),
+            branch: git.current_branch_name(),
         })
     }
 
-    fn branch_ref(&self) -> Option<&gix::refs::FullNameRef> {
-        self.branch.as_ref().map(AsRef::as_ref)
+    fn include_context(&self) -> ConfigIncludeContext {
+        ConfigIncludeContext::new(Some(self.git_dir.clone()), self.branch.clone())
     }
 
     /// The standard repository config files, ordered highest-precedence first:
     /// the per-worktree `config.worktree` (only when `extensions.worktreeConfig`
     /// is enabled), then the git-dir `config`, then the shared common-dir
     /// `config` for linked worktrees.
-    fn layered_paths(&self) -> Vec<std::path::PathBuf> {
+    fn layered_paths(&self) -> Vec<PathBuf> {
         let mut paths = Vec::new();
         if self.worktree_config_enabled() {
             paths.push(self.git_dir.join("config.worktree"));
@@ -985,10 +990,14 @@ impl GitConfigContext {
         if self.common_dir != self.git_dir {
             paths.push(self.common_dir.join("config"));
         }
-        self.load(paths)
-            .and_then(|file| file.boolean("extensions.worktreeConfig"))
-            .and_then(Result::ok)
-            .unwrap_or(false)
+        for path in paths {
+            if let Ok(config) = GitConfig::read(&path) {
+                if config.get_bool("extensions", None, "worktreeConfig") == Some(true) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// The file a write to remote `name` must target so the next
@@ -1036,28 +1045,16 @@ impl GitConfigContext {
     /// section metadata records the file each section physically lives in,
     /// so an include-defined remote resolves to the included file — the one
     /// a write must edit — not the including config.
-    fn defining_files_for(&self, name: &str) -> Vec<std::path::PathBuf> {
-        let Some(file) = self.load(self.layered_paths()) else {
-            return Vec::new();
-        };
-        let Some(sections) = file.sections_by_name("remote") else {
-            return Vec::new();
-        };
+    fn defining_files_for(&self, name: &str) -> Vec<PathBuf> {
         let mut files = Vec::new();
-        for section in sections {
-            let matches = section
-                .header()
-                .subsection_name()
-                .map(|subsection| subsection.to_string());
-            if matches.as_deref() != Some(name) {
-                continue;
-            }
-            let Some(path) = section.meta().path.clone() else {
-                continue;
-            };
-            if !files.contains(&path) {
-                files.push(path);
-            }
+        for path in self.layered_paths() {
+            let _ = collect_remote_defining_files(
+                &path,
+                name,
+                &self.include_context(),
+                0,
+                &mut files,
+            );
         }
         files
     }
@@ -1074,47 +1071,186 @@ impl GitConfigContext {
         })
     }
 
-    fn remotes(&self, paths: Vec<std::path::PathBuf>) -> BTreeMap<String, String> {
+    fn remotes(&self, paths: Vec<PathBuf>) -> BTreeMap<String, String> {
         let mut remotes = BTreeMap::new();
-        let Some(file) = self.load(paths) else {
-            return remotes;
-        };
-        let Some(sections) = file.sections_by_name("remote") else {
-            return remotes;
-        };
-        for section in sections {
-            let Some(name) = section.header().subsection_name() else {
+        let context = self.include_context();
+        for section in self.layered_sections(&paths, &context).sections {
+            if section.name != "remote" {
+                continue;
+            }
+            let Some(name) = section.subsection.as_deref() else {
                 continue;
             };
-            let Some(url) = section.value("url") else {
+            let Some(url) = section
+                .entries
+                .iter()
+                .find(|entry| entry.key.eq_ignore_ascii_case("url"))
+                .and_then(|entry| entry.value.as_deref())
+            else {
                 continue;
             };
-            remotes
-                .entry(name.to_string())
-                .or_insert_with(|| url.to_string());
+            remotes.entry(name.to_string()).or_insert_with(|| url.to_string());
         }
         remotes
     }
 
-    fn load(&self, paths: Vec<std::path::PathBuf>) -> Option<gix_config::File<'static>> {
-        let options = gix_config::file::init::Options {
-            includes: gix_config::file::includes::Options::follow(
-                gix_config::path::interpolate::Context::default(),
-                gix_config::file::includes::conditional::Context {
-                    git_dir: Some(&self.git_dir),
-                    branch_name: self.branch_ref(),
-                },
-            ),
-            lossy: true,
-            ignore_io_errors: true,
+    fn layered_sections(&self, paths: &[PathBuf], context: &ConfigIncludeContext) -> GitConfig {
+        let mut merged = GitConfig::default();
+        for path in paths {
+            if let Ok(config) = load_config_with_includes(path, context) {
+                merged.sections.extend(config.sections);
+            }
+        }
+        merged
+    }
+}
+
+fn collect_remote_defining_files(
+    path: &Path,
+    name: &str,
+    context: &ConfigIncludeContext,
+    depth: usize,
+    out: &mut Vec<PathBuf>,
+) -> Result<()> {
+    const MAX_INCLUDE_DEPTH: usize = 10;
+    if depth >= MAX_INCLUDE_DEPTH || !path.exists() {
+        return Ok(());
+    }
+    let config = GitConfig::read(path)?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    for section in &config.sections {
+        if section.name == "remote" && section.subsection.as_deref() == Some(name) {
+            let path = path.to_path_buf();
+            if !out.contains(&path) {
+                out.push(path);
+            }
+        }
+    }
+    for section in &config.sections {
+        let include = match section.name.as_str() {
+            "include" if section.subsection.is_none() => true,
+            "includeIf" => section
+                .subsection
+                .as_deref()
+                .is_some_and(|condition| include_if_condition_matches(condition, base_dir, context)),
+            _ => false,
         };
-        let mut metadata = paths
-            .into_iter()
-            .map(|path| gix_config::file::Metadata::from(gix_config::Source::Local).at(path));
-        let mut buf = Vec::new();
-        gix_config::File::from_paths_metadata_buf(&mut metadata, &mut buf, false, options)
-            .ok()
-            .flatten()
+        if !include {
+            continue;
+        }
+        for entry in &section.entries {
+            if !entry.key.eq_ignore_ascii_case("path") {
+                continue;
+            }
+            let Some(raw) = entry.value.as_deref() else {
+                continue;
+            };
+            let included = resolve_config_include_path(raw, base_dir);
+            collect_remote_defining_files(&included, name, context, depth + 1, out)?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_config_include_path(raw: &str, base_dir: &Path) -> PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME")
+            && !home.is_empty()
+        {
+            return PathBuf::from(home).join(rest);
+        }
+        return base_dir.join(rest);
+    }
+    let candidate = Path::new(raw);
+    if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        base_dir.join(candidate)
+    }
+}
+
+fn include_if_condition_matches(
+    condition: &str,
+    base_dir: &Path,
+    context: &ConfigIncludeContext,
+) -> bool {
+    if let Some(pattern) = condition.strip_prefix("gitdir:") {
+        return gitdir_include_condition_matches(pattern, base_dir, context, false);
+    }
+    if let Some(pattern) = condition.strip_prefix("gitdir/i:") {
+        return gitdir_include_condition_matches(pattern, base_dir, context, true);
+    }
+    if let Some(pattern) = condition.strip_prefix("onbranch:") {
+        return context
+            .current_branch
+            .as_deref()
+            .is_some_and(|branch| onbranch_include_pattern_matches(pattern, branch));
+    }
+    false
+}
+
+fn gitdir_include_condition_matches(
+    pattern: &str,
+    base_dir: &Path,
+    context: &ConfigIncludeContext,
+    case_insensitive: bool,
+) -> bool {
+    let Some(git_dir) = context.git_dir.as_ref() else {
+        return false;
+    };
+    let target = git_dir.canonicalize().unwrap_or_else(|_| git_dir.clone());
+    let target = target.to_string_lossy().replace('\\', "/");
+    let mut expanded = pattern.to_string();
+    if expanded.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME")
+            && !home.is_empty()
+        {
+            expanded = format!("{}/{}", home.trim_end_matches('/'), &expanded[2..]);
+        }
+    } else if let Some(rest) = expanded.strip_prefix("./") {
+        expanded = base_dir.join(rest).to_string_lossy().into_owned();
+    }
+    let mut pattern = expanded.replace('\\', "/");
+    if pattern.ends_with('/') {
+        pattern.push_str("**");
+    }
+    glob::simple_match(&pattern, &target, case_insensitive)
+}
+
+fn onbranch_include_pattern_matches(pattern: &str, branch: &str) -> bool {
+    glob::simple_match(pattern, branch, false)
+}
+
+mod glob {
+    pub fn simple_match(pattern: &str, value: &str, case_insensitive: bool) -> bool {
+        let pattern = if case_insensitive {
+            pattern.to_ascii_lowercase()
+        } else {
+            pattern.to_string()
+        };
+        let value = if case_insensitive {
+            value.to_ascii_lowercase()
+        } else {
+            value.to_string()
+        };
+        simple_glob_match(pattern.as_bytes(), value.as_bytes())
+    }
+
+    fn simple_glob_match(pattern: &[u8], value: &[u8]) -> bool {
+        if pattern.starts_with(b"**") {
+            return simple_glob_match(&pattern[2..], value)
+                || value.first().is_some_and(|_| simple_glob_match(pattern, &value[1..]));
+        }
+        match (pattern.first(), value.first()) {
+            (Some(b'*'), _) => simple_glob_match(&pattern[1..], value)
+                || value.first().is_some_and(|_| simple_glob_match(pattern, &value[1..])),
+            (Some(b'?'), _) => value
+                .first()
+                .is_some_and(|_| simple_glob_match(&pattern[1..], &value[1..])),
+            (Some(p), Some(v)) if p == v => simple_glob_match(&pattern[1..], &value[1..]),
+            (None, None) => true,
+            _ => false,
+        }
     }
 }
 
@@ -1161,59 +1297,40 @@ fn validate_git_overlay_remote_name(name: &str) -> Result<()> {
 }
 
 /// Add or replace the `[remote "<name>"]` section in a single physical config
-/// file via `gix_config`'s structured editing, so the writer resolves the same
-/// section the reader does regardless of the surface header form (quoted
-/// `[remote "x"]`, legacy dotted `[remote.x]`, or comment-suffixed). Every
-/// existing definition of the remote is dropped before a fresh canonical
-/// section is appended, so an upsert replaces rather than appends a duplicate
-/// that the first-seen (stale) section would win over on the next read.
+/// file via structured sley config editing. Every existing definition of the
+/// remote in that file is dropped before a fresh canonical section is appended.
 fn upsert_git_remote_config(config_path: &Path, name: &str, url: &str) -> Result<()> {
     if let Some(parent) = config_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut file = load_config_file_for_edit(config_path)?;
-    remove_remote_sections(&mut file, name);
-    let mut section = file
-        .new_section("remote", Some(Cow::Owned(BString::from(name))))
-        .with_context(|| format!("invalid git remote section name '{name}'"))?;
-    section.push(git_config_key("url")?, Some(BStr::new(url)));
-    let fetch = format!("+refs/heads/*:refs/remotes/{name}/*");
-    section.push(git_config_key("fetch")?, Some(BStr::new(fetch.as_str())));
-    let serialized = file.to_bstring();
-    write_file_atomic(config_path, &serialized)?;
+    let mut config = load_config_file_for_edit(config_path)?;
+    config.sections.retain(|section| {
+        !(section.name == "remote" && section.subsection.as_deref() == Some(name))
+    });
+    add_remote_with_fetch(&mut config, name, url, &[]).map_err(|err| match err {
+        RemoteEditError::AlreadyExists => {
+            anyhow::anyhow!("remote '{name}' already exists in {}", config_path.display())
+        }
+        RemoteEditError::NotFound => {
+            anyhow::anyhow!("remote '{name}' disappeared while updating {}", config_path.display())
+        }
+    })?;
+    write_file_atomic(config_path, &config.to_canonical_bytes())?;
     Ok(())
 }
 
-/// Remove every `[remote "<name>"]` section from a single physical config file
-/// via `gix_config`, matching whatever header form the reader resolves the
-/// remote through. No-ops (no write) when the file is absent or defines no such
-/// remote.
+/// Remove every `[remote "<name>"]` section from a single physical config file.
+/// No-ops (no write) when the file is absent or defines no such remote.
 fn remove_git_remote_config(config_path: &Path, name: &str) -> Result<()> {
     if !config_path.exists() {
         return Ok(());
     }
-    let mut file = load_config_file_for_edit(config_path)?;
-    if !remove_remote_sections(&mut file, name) {
+    let mut config = load_config_file_for_edit(config_path)?;
+    if remove_remote(&mut config, name).is_err() {
         return Ok(());
     }
-    let serialized = file.to_bstring();
-    write_file_atomic(config_path, &serialized)?;
+    write_file_atomic(config_path, &config.to_canonical_bytes())?;
     Ok(())
-}
-
-/// Drop every `[remote "<name>"]` section from `file`, returning whether any
-/// was removed. `gix_config` keys sections by parsed name + subsection, so this
-/// matches the remote regardless of its surface header syntax. `remove_section`
-/// removes only the last match, so loop until none remain.
-fn remove_remote_sections(file: &mut gix_config::File<'static>, name: &str) -> bool {
-    let mut removed = false;
-    while file
-        .remove_section("remote", Some(BStr::new(name)))
-        .is_some()
-    {
-        removed = true;
-    }
-    removed
 }
 
 /// Load a single physical config file for in-place editing. Includes are NOT
@@ -1221,17 +1338,12 @@ fn remove_remote_sections(file: &mut gix_config::File<'static>, name: &str) -> b
 /// remote (see `defining_files_for`), and a write must round-trip that file
 /// alone rather than inline the content of any files it includes. A missing
 /// file yields an empty document so a brand-new remote can be appended.
-fn load_config_file_for_edit(config_path: &Path) -> Result<gix_config::File<'static>> {
+fn load_config_file_for_edit(config_path: &Path) -> Result<GitConfig> {
     if !config_path.exists() {
-        return Ok(gix_config::File::default());
+        return Ok(GitConfig::default());
     }
-    gix_config::File::from_path_no_includes(config_path.to_path_buf(), gix_config::Source::Local)
+    GitConfig::read(config_path)
         .with_context(|| format!("reading git config at {}", config_path.display()))
-}
-
-fn git_config_key(key: &'static str) -> Result<gix_config::parse::section::ValueName<'static>> {
-    gix_config::parse::section::ValueName::try_from(key)
-        .with_context(|| format!("invalid git config key '{key}'"))
 }
 
 #[cfg(feature = "client")]

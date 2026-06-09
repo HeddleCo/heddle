@@ -11,19 +11,17 @@ use objects::store::ObjectStore;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow};
-use gix::{
-    bstr::ByteSlice,
-    refs::{
-        Target,
-        transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog},
-    },
-};
 use objects::object::{Attribution, ChangeId};
 use repo::Repository;
 use serde::Serialize;
 
 use super::super::advice::RecoveryAdvice;
-use crate::bridge::{git_core::LocalGitIdentity, git_export};
+use git_substrate::{
+    parse_sha1_hex, update_head_target_ref, write_index_from_tree, write_simple_commit, GitRepo,
+    RefConstraint,
+};
+
+use crate::bridge::git_export;
 
 /// Outcome of `--git-commit --preview` — what *would* be committed if
 /// the merge ran for real.
@@ -82,7 +80,7 @@ pub(super) fn validate_git_state(
 
     // Detached HEAD blocks the commit — a merge commit on a detached
     // HEAD would be unreachable once HEAD moves.
-    let git = match gix::discover(repo_root) {
+    let git = match GitRepo::discover(repo_root) {
         Ok(git) => git,
         Err(err) => {
             blockers.push(format!("failed to inspect git repository: {err}"));
@@ -90,15 +88,7 @@ pub(super) fn validate_git_state(
         }
     };
     let attached_branch = git
-        .head_name()
-        .ok()
-        .flatten()
-        .and_then(|name| {
-            name.as_bstr()
-                .to_str()
-                .ok()
-                .and_then(|name| name.strip_prefix("refs/heads/").map(str::to_string))
-        })
+        .current_branch_name()
         .filter(|branch| !branch.is_empty());
     if attached_branch.is_none() {
         blockers.push("git HEAD is detached (--git-commit requires an attached branch)".into());
@@ -212,12 +202,12 @@ pub(super) fn write_git_commit(
         return Err(anyhow!(merge_git_commit_empty_advice()));
     }
     let repo_root = repo.root();
-    let git = gix::discover(repo_root)
+    let git = GitRepo::discover(repo_root)
         .with_context(|| format!("failed to open Git checkout at {}", repo_root.display()))?;
     let old_head = git
-        .head_id()
+        .head_commit_oid_or_none()
         .context("failed to resolve Git HEAD before merge --git-commit")?
-        .detach();
+        .ok_or_else(|| anyhow!("git HEAD has no commit (--git-commit requires an attached branch)"))?;
     let state = repo
         .store()
         .get_state(state_id)?
@@ -233,13 +223,13 @@ pub(super) fn write_git_commit(
         ))
     })?;
 
-    let mut parents = vec![old_head];
+    let mut parents = vec![old_head.clone()];
     for parent in extra_parents {
-        let oid = parent
-            .parse::<gix::hash::ObjectId>()
+        let oid = parse_sha1_hex(parent)
             .with_context(|| format!("invalid extra Git parent '{parent}'"))?;
-        git.find_commit(oid)
-            .with_context(|| format!("extra Git parent '{parent}' is not a commit"))?;
+        if !git.is_commit(&oid) {
+            return Err(anyhow!("extra Git parent '{parent}' is not a commit"));
+        }
         if !parents.contains(&oid) {
             parents.push(oid);
         }
@@ -249,43 +239,41 @@ pub(super) fn write_git_commit(
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0);
-    let signature = identity.to_signature(seconds);
-    let mut committer_buf = gix::date::parse::TimeBuf::default();
-    let mut author_buf = gix::date::parse::TimeBuf::default();
-    let commit = git
-        .new_commit_as(
-            signature.to_ref(&mut committer_buf),
-            signature.to_ref(&mut author_buf),
-            message,
-            tree_id,
-            parents,
-        )
-        .map_err(|err| {
-            anyhow!(merge_git_commit_failed_advice(
-                "writing Git commit object",
-                err.to_string()
-            ))
-        })?;
+    let actor = identity.to_actor_suffix(seconds);
+    let commit_oid = write_simple_commit(
+        git.git_dir(),
+        git.object_format(),
+        &tree_id,
+        &parents,
+        &actor,
+        &actor,
+        message.as_bytes(),
+    )
+    .map_err(|err| {
+        anyhow!(merge_git_commit_failed_advice(
+            "writing Git commit object",
+            err.to_string()
+        ))
+    })?;
 
     // Keep the checkout index aligned with the committed tree. This is
     // the native equivalent of `git add <merge paths>` followed by
     // `git commit`: after HEAD moves, `git status` should be clean.
-    let mut index = git.index_from_tree(&tree_id).map_err(|err| {
+    write_index_from_tree(git.git_dir(), git.object_format(), &tree_id).map_err(|err| {
         anyhow!(merge_git_commit_failed_advice(
             "writing Git index",
             err.to_string()
         ))
     })?;
-    index
-        .write(gix_index::write::Options::default())
-        .map_err(|err| {
-            anyhow!(merge_git_commit_failed_advice(
-                "writing Git index",
-                err.to_string()
-            ))
-        })?;
 
-    update_head_ref(&git, commit.id, old_head, &identity).map_err(|err| {
+    update_head_target_ref(
+        git.git_dir(),
+        git.object_format(),
+        &commit_oid,
+        RefConstraint::MustExistAndMatch(old_head),
+        "heddle: merge --git-commit",
+    )
+    .map_err(|err| {
         anyhow!(merge_git_commit_failed_advice(
             "updating Git HEAD",
             err.to_string()
@@ -293,41 +281,9 @@ pub(super) fn write_git_commit(
     })?;
 
     Ok(GitCommitInfo {
-        sha: commit.id.to_string(),
+        sha: commit_oid.to_hex(),
         message: message.to_string(),
     })
-}
-
-fn update_head_ref(
-    git: &gix::Repository,
-    new_head: gix::hash::ObjectId,
-    old_head: gix::hash::ObjectId,
-    identity: &LocalGitIdentity,
-) -> Result<()> {
-    let seconds = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or(0);
-    let signature = identity.to_signature(seconds);
-    let mut time_buf = gix::date::parse::TimeBuf::default();
-    let edit = RefEdit {
-        change: Change::Update {
-            log: LogChange {
-                mode: RefLog::AndReference,
-                force_create_reflog: false,
-                message: "heddle: merge --git-commit".into(),
-            },
-            expected: PreviousValue::MustExistAndMatch(Target::Object(old_head)),
-            new: Target::Object(new_head),
-        },
-        name: "HEAD"
-            .try_into()
-            .map_err(|err| anyhow!("invalid Git HEAD ref: {err}"))?,
-        deref: true,
-    };
-    git.edit_references_as([edit], Some(signature.to_ref(&mut time_buf)))
-        .context("failed to update Git HEAD")?;
-    Ok(())
 }
 
 fn merge_git_commit_empty_advice() -> RecoveryAdvice {

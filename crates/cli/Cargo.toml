@@ -29,12 +29,9 @@ chrono.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 futures.workspace = true
-gix-config = "0.57"
-gix-index = "0.52"
-gix-pack = "0.71"
-gix-protocol = { version = "0.62", features = ["blocking-client"] }
-gix-transport.workspace = true
+
 gix.workspace = true
+git-substrate = { path = "../git-substrate", package = "heddle-git-substrate", version = "0.2" }
 hex.workspace = true
 ignore.workspace = true
 libc.workspace = true

@@ -40,6 +40,7 @@ use cli::bridge::git_core::GitBridge;
 use cli::bridge::git_import::import_all_with_options;
 use cli::bridge::git_reconstruct::commit_object_id;
 use cli::bridge::git_util::GitImportOptions;
+use git_substrate::to_gix;
 use tempfile::TempDir;
 
 /// Pinned identity + config so the in-process fixtures produce stable SHAs
@@ -329,14 +330,16 @@ fn assert_all_commits_export_from_state(case: &str, source: &Path) {
     // commit object, so a regenerated commit landing here is provably rebuilt
     // from state rather than copied from the mirror's verbatim import.
     let fresh_home = TempDir::new().expect("fresh temp");
-    let fresh = gix::init_bare(fresh_home.path().join("fresh.git"))
+    let fresh_gix = gix::init_bare(fresh_home.path().join("fresh.git"))
         .unwrap_or_else(|e| panic!("[{case}] init fresh bare repo failed: {e}"));
+    let fresh = git_substrate::GitRepo::open(fresh_gix.git_dir())
+        .unwrap_or_else(|e| panic!("[{case}] open fresh substrate repo failed: {e}"));
 
     for sha in &shas {
         let oid = gix::ObjectId::from_hex(sha.as_bytes())
             .unwrap_or_else(|e| panic!("[{case}] bad sha {sha}: {e}"));
         assert!(
-            !fresh.has_object(oid),
+            !fresh_gix.has_object(oid),
             "[{case}] fresh repo unexpectedly already holds commit {sha} before \
              reconstruction — the from-state independence guarantee is void"
         );
@@ -355,19 +358,21 @@ fn assert_all_commits_export_from_state(case: &str, source: &Path) {
         // (2) ... and now physically exists in the fresh repo (written from
         // state, not copied) ...
         assert!(
-            fresh.has_object(written),
+            fresh.has_object(&written).unwrap_or_else(|e| {
+                panic!("[{case}] fresh repo object check for {sha} failed: {e}")
+            }),
             "[{case}] commit {sha} absent from fresh repo after reconstruct+write"
         );
         // (3) ... byte-identical to git's own view of the original object.
         let golden = cat_commit(source, sha);
         let object = fresh
-            .find_object(written)
+            .read_commit_content(&written)
             .unwrap_or_else(|e| panic!("[{case}] find regenerated {sha} failed: {e}"));
         assert_eq!(
-            object.data, golden,
+            object, golden,
             "[{case}] commit {sha} regenerated to DIFFERENT bytes\n  \
              reconstructed: {:?}\n  golden:        {:?}",
-            String::from_utf8_lossy(&object.data),
+            String::from_utf8_lossy(&object),
             String::from_utf8_lossy(&golden),
         );
     }
