@@ -359,7 +359,7 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let (git_dir, format) = init_repo(&temp);
         let blob = crate::write_blob(&git_dir, format, b"x\n").expect("blob");
-        let mut parent_entries = vec![TreeEntryInput {
+        let mut parent_entries = vec![crate::TreeEntryInput {
             mode: crate::TreeEntryMode::Blob,
             name: "..".into(),
             oid: blob,

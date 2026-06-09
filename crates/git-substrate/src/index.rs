@@ -177,9 +177,9 @@ fn stat_times(stat: &libc::stat) -> (u32, u32, u32, u32) {
     {
         (
             stat.st_mtime as u32,
-            stat.st_mtim.tv_nsec as u32,
+            stat.st_mtime_nsec as u32,
             stat.st_ctime as u32,
-            stat.st_ctim.tv_nsec as u32,
+            stat.st_ctime_nsec as u32,
         )
     }
     #[cfg(target_os = "macos")]

@@ -3049,12 +3049,12 @@ fn round_trip_preserves_annotated_tag_peeled_commit() {
         "lightweight tag should still point at the commit"
     );
 
-    // Annotated tag: until #575, export writes a lightweight tag at the
-    // peeled commit. The commit SHA must still match across the round-trip.
-    let dest_v10_peeled = git_repo_ref_oid(&dest_repo, "refs/tags/v1.0");
+    // Annotated tag: dest's refs/tags/v1.0 must point at the SAME tag
+    // object OID as the source — not at the underlying commit.
+    let dest_v10_immediate = git_repo_ref_oid(&dest_repo, "refs/tags/v1.0");
     assert_eq!(
-        dest_v10_peeled, commit_oid,
-        "annotated tag must peel to the original commit (got {dest_v10_peeled}, want {commit_oid})"
+        dest_v10_immediate, annotated_tag_oid,
+        "annotated tag SHA must match (got {dest_v10_immediate}, want {annotated_tag_oid})"
     );
     assert!(
         dest_repo
