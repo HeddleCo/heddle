@@ -219,8 +219,8 @@ pub struct ImportStats {
     /// skipped (and so a future export can restore them by reading the
     /// preserved git mirror).
     pub skipped_non_commit_refs: Vec<SkippedRef>,
-    /// Refs whose mirror population failed during import (partial SHA-stable
-    /// export for commits reachable only from that ref).
+    /// Legacy field retained for schema stability. Import no longer
+    /// populates the bridge mirror (#568); this stays empty.
     pub partial_mirror_refs: Vec<PartialMirrorRef>,
     /// Git tree entries converted under an explicit lossy import opt-in.
     pub lossy_entries: Vec<LossyGitImportEntry>,

@@ -18,31 +18,21 @@ pub use super::git_import_tree::{GitTreeImporter, import_git_tree};
 use super::git_import_tree::{PackImportSink, fail_lossy_entry};
 use crate::bridge::{
     git_core::{
-        GitBridge, GitBridgeError, GitResult, RefNamespace, RefUpdate, SyncMapping,
-        apply_ref_updates, copy_reachable_objects, git_err, open_git_repo_at, parse_git_ref,
-        thread_is_unclaimed_bootstrap,
+        GitBridge, GitBridgeError, GitResult, RefNamespace, SyncMapping, git_err,
+        open_git_repo_at, parse_git_ref, thread_is_unclaimed_bootstrap,
     },
     git_notes,
-    git_util::{GitImportOptions, ImportStats, PartialMirrorRef, SkippedRef},
+    git_util::{GitImportOptions, ImportStats, SkippedRef},
 };
 
-/// One source ref the import will consider, with both its immediate target
-/// (the OID stored on disk for that ref — for annotated tags this is the
-/// tag *object* OID) and the peeled commit OID we use to walk ancestry.
-///
-/// Keeping both is what lets the bridge round-trip annotated tags as actual
-/// tag objects: we copy the tag object into the mirror and write the
-/// mirror's ref pointing at it, and later `sync_marker_to_tag`'s
-/// already-exists check sees the existing ref peel to the right commit and
-/// preserves the annotated form unchanged.
+/// One source ref the import will consider and the peeled commit OID used
+/// to walk ancestry. Annotated tag *object* SHA preservation on export is
+/// deferred to #575; until then export syncs markers as lightweight tags
+/// at the peeled commit.
 struct RefPlan {
     short_name: String,
     namespace: RefNamespace,
-    /// The OID the source ref points at directly. For lightweight tags
-    /// and branches this is a commit; for annotated tags it's a tag
-    /// object that wraps a commit.
-    immediate_oid: ObjectId,
-    /// The commit reachable by peeling `immediate_oid` through any tag chain.
+    /// The commit reachable by peeling the source ref through any tag chain.
     peeled_commit_oid: ObjectId,
 }
 
@@ -508,7 +498,6 @@ fn import_with_ref_filter(
             Ok(commit_oid) => plans.push(RefPlan {
                 short_name: short,
                 namespace,
-                immediate_oid: immediate,
                 peeled_commit_oid: commit_oid,
             }),
             Err(kind) => {
@@ -560,62 +549,6 @@ fn import_with_ref_filter(
         }
     }
 
-    // Populate the bridge mirror with the source's reachable objects and its
-    // refs verbatim when importing from an external path. Annotated tags are
-    // written at their immediate tag-object OID so export preserves them.
-    if git_path.is_some() {
-        bridge.init_mirror()?;
-        let mirror_repo = bridge.open_git_repo()?;
-        if mirror_repo.git_dir() != repo.git_dir() {
-            let mut successful_updates: Vec<RefUpdate> = Vec::new();
-            for plan in &plans {
-                let roots = [plan.immediate_oid.clone(), plan.peeled_commit_oid.clone()];
-                match copy_reachable_objects(&repo, &mirror_repo, roots) {
-                    Ok(()) => successful_updates.push(RefUpdate {
-                        name: plan.short_name.clone(),
-                        target: plan.immediate_oid.clone(),
-                        namespace: plan.namespace,
-                    }),
-                    Err(err) => {
-                        let full = match plan.namespace {
-                            RefNamespace::Branch => format!("refs/heads/{}", plan.short_name),
-                            RefNamespace::Tag => format!("refs/tags/{}", plan.short_name),
-                            RefNamespace::Note => format!("refs/notes/{}", plan.short_name),
-                        };
-                        warn!(
-                            "partial mirror for {} (target {}): {}; \
-                             SHA-stable export degraded for commits reachable only \
-                             from this ref",
-                            full, plan.immediate_oid, err
-                        );
-                        stats.partial_mirror_refs.push(PartialMirrorRef {
-                            name: full,
-                            error: err.to_string(),
-                        });
-                    }
-                }
-            }
-            apply_ref_updates(
-                &mirror_repo,
-                &successful_updates,
-                "heddle: import refs from source",
-            )?;
-            let note_updates = collect_note_ref_updates(&repo)?;
-            if !note_updates.is_empty() {
-                copy_reachable_objects(
-                    &repo,
-                    &mirror_repo,
-                    note_updates.iter().map(|update| update.target.clone()),
-                )?;
-                apply_ref_updates(
-                    &mirror_repo,
-                    &note_updates,
-                    "heddle: import Heddle notes from source",
-                )?;
-            }
-        }
-    }
-
     let mapping_root = git_path
         .map(|path| path.to_path_buf())
         .or_else(|| repo.workdir());
@@ -625,7 +558,7 @@ fn import_with_ref_filter(
     // atomic install) instead of N loose objects + per-object fsync. Stage
     // under the Heddle store dir so the final install is a same-filesystem
     // rename(2). Only the write sink changes — every bridge import semantic
-    // (identity recovery, annotated-tag mirror, lossy handling, divergence
+    // (identity recovery, lossy handling, divergence
     // checks, ref/tag/marker sync) is preserved by reusing the same walk.
     let staging_dir = bridge
         .heddle_repo
@@ -989,22 +922,4 @@ fn import_commit_ancestry(
     }
 
     Ok(())
-}
-
-fn collect_note_ref_updates(repo: &GitRepo) -> GitResult<Vec<RefUpdate>> {
-    let mut updates = Vec::new();
-    for reference in repo.list_refs().map_err(git_err)? {
-        let RefTarget::Direct(target) = reference.target else {
-            continue;
-        };
-        let Some(short) = reference.name.strip_prefix("refs/notes/") else {
-            continue;
-        };
-        updates.push(RefUpdate {
-            name: short.to_string(),
-            target,
-            namespace: RefNamespace::Note,
-        });
-    }
-    Ok(updates)
 }
