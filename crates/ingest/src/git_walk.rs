@@ -434,7 +434,7 @@ impl GitSource {
 
         let mut out = Vec::new();
         for entry in tree.entries {
-            let kind = tree_entry_kind(entry.mode);
+            let kind = tree_entry_kind(entry.mode)?;
             let raw_name = entry.name.as_bytes().to_vec();
             out.push(TreeChild {
                 name: String::from_utf8_lossy(&raw_name).into_owned(),
@@ -665,17 +665,19 @@ fn oid_hex_or_none(oid: &git_substrate::ObjectId) -> Option<String> {
     Some(hex)
 }
 
-fn tree_entry_kind(mode: u32) -> TreeChildKind {
+fn tree_entry_kind(mode: u32) -> crate::Result<TreeChildKind> {
     use git_substrate::TreeEntryMode;
     match mode {
-        m if m == TreeEntryMode::Tree.as_octal_mode() => TreeChildKind::Tree,
-        m if m == TreeEntryMode::Blob.as_octal_mode() => TreeChildKind::Blob { executable: false },
-        m if m == TreeEntryMode::BlobExecutable.as_octal_mode() => {
-            TreeChildKind::Blob { executable: true }
+        m if m == TreeEntryMode::Tree.as_octal_mode() => Ok(TreeChildKind::Tree),
+        m if m == TreeEntryMode::Blob.as_octal_mode() => {
+            Ok(TreeChildKind::Blob { executable: false })
         }
-        m if m == TreeEntryMode::Link.as_octal_mode() => TreeChildKind::Symlink,
-        m if m == TreeEntryMode::GitLink.as_octal_mode() => TreeChildKind::Gitlink,
-        _ => TreeChildKind::Blob { executable: false },
+        m if m == TreeEntryMode::BlobExecutable.as_octal_mode() => {
+            Ok(TreeChildKind::Blob { executable: true })
+        }
+        m if m == TreeEntryMode::Link.as_octal_mode() => Ok(TreeChildKind::Symlink),
+        m if m == TreeEntryMode::GitLink.as_octal_mode() => Ok(TreeChildKind::Gitlink),
+        other => Err(IngestError::Git(format!("unknown tree entry mode: {other:o}"))),
     }
 }
 
