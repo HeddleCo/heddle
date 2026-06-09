@@ -1640,7 +1640,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         init_git(tmp.path());
         let git_dir = tmp.path().join(".git");
-        // A valid Git header gix accepts but the hand-rolled writer didn't:
+        // A valid Git header sley-config accepts but the hand-rolled writer didn't:
         // an inline comment trails the `[remote "origin"]` header.
         fs::write(
             git_dir.join("config"),
@@ -1666,7 +1666,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         init_git(tmp.path());
         let git_dir = tmp.path().join(".git");
-        // The legacy dotted subsection form, equally valid to gix.
+        // The legacy dotted subsection form, equally valid to sley-config.
         fs::write(
             git_dir.join("config"),
             "[remote.origin]\n\turl = https://example.com/repo\n",

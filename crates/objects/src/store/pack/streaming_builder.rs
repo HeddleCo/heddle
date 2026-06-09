@@ -199,7 +199,7 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
     /// Per-entry, the only allocations are:
     ///
     /// - `data: Vec<u8>` (the input, owned by the caller — comes from
-    ///   gix' `find_object` and isn't ours to stream further).
+    ///   an upstream object read and isn't ours to stream further).
     /// - A ~40-byte stack scratch for the entry header.
     /// - zstd's internal compression context (~128 KB constant).
     /// - One 50-byte index-bucket entry buffered into the bucket's

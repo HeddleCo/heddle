@@ -1891,7 +1891,7 @@ fn import_skips_tags_pointing_at_blob_or_tree() {
 
     // And the second QA failure mode: an annotated tag pointing at a tree.
     // Build a real (non-empty) tree containing one blob so the tree is in
-    // the source ODB; gix doesn't special-case the well-known empty-tree
+    // the source ODB; the substrate reader doesn't special-case the well-known empty-tree
     // OID for `find_object`, and the failure path expects to be able to
     // look up the kind of the peeled object.
     let key_blob = source_repo
@@ -2093,7 +2093,7 @@ fn build_source_repo_three_commits_with_blobs() -> (
 }
 
 /// Regression: scratch bare clones live under `.heddle/tmp/import-*`. `open_repo`
-/// must not `gix::discover` upward into the Heddle metadata dir (which also
+/// must not discover upward into the Heddle metadata dir (which also
 /// has HEAD + objects) when opening the scratch path directly.
 #[test]
 fn open_repo_does_not_discover_heddle_metadata_from_scratch_import_path() {
@@ -2251,11 +2251,10 @@ fn copy_local_repo_to_bare_from_git_cli_bare_origin_is_sley_readable() {
     assert!(mirror.has_object(&parsed.tree).expect("has tree"));
 }
 
-/// `file://` clones use the native local-copy path rather than gix's
-/// file transport, because that transport spawns Git upload-pack
-/// helpers. Until Heddle has native shallow-object pruning for local
-/// copies, shallow `file://` clones fail closed instead of requiring a
-/// Git executable suite on the host.
+/// `file://` clones use the native local-copy path rather than spawning
+/// Git upload-pack helpers via the system `git` binary. Until Heddle has
+/// native shallow-object pruning for local copies, shallow `file://` clones
+/// fail closed instead of requiring a Git executable suite on the host.
 #[test]
 fn clone_url_to_bare_rejects_shallow_file_url_without_shelling_to_git() {
     use crate::bridge::git_core::clone_url_to_bare;
@@ -6430,7 +6429,7 @@ fn import_preserves_commit_git_fidelity_fields() {
         state.raw_message.as_deref(),
         Some("feat: thing\n\nBody.\n".as_bytes())
     );
-    // gix folds multi-line extra-header values and round-trips them with a
+    // Git decoders fold multi-line extra-header values and round-trip them with a
     // trailing newline; byte-exact State round-tripping is covered by the
     // ingest unit test. Here we verify gpgsig stays INLINE in extra_headers at
     // its captured position (not split into a separate field) and the headers

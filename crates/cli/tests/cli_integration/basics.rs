@@ -3418,7 +3418,7 @@ fn test_cli_diff_patch_works_on_plain_git_fast_path() {
 
 /// Plain-Git `--patch` for a NEW file (no entry in HEAD, present in
 /// the worktree) must emit a `--- /dev/null`-style add hunk via the
-/// gix path. The status-only fast path used to silently drop the body
+/// substrate path. The status-only fast path used to silently drop the body
 /// for every kind, not just modified, so the added branch needs its
 /// own coverage. We additionally assert the patch applies through
 /// `git apply --check` against a clone of the seed state.
@@ -4220,7 +4220,7 @@ fn test_cli_diff_patch_state_to_state_add_carries_mode() {
 
 /// Deleting a committed executable and symlink on the plain-Git fast
 /// path must carry their real modes (`100755` / `120000`), read from the
-/// gix HEAD tree entry, and round-trip through `git apply`.
+/// substrate HEAD tree entry, and round-trip through `git apply`.
 #[cfg(unix)]
 #[test]
 fn test_cli_diff_patch_plain_git_delete_executable_and_symlink_modes() {

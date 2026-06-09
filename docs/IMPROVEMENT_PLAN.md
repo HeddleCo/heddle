@@ -139,12 +139,12 @@ Each phase ends **GREEN** on verification gates (§7) before the next phase star
 **Status: complete** (P1 #596 is next; full `gix*` dep removal remains P4 #598)
 
 1. ✅ Add `crates/git-substrate` (`heddle-git-substrate`) with local `../sley` path deps (`git-core`, `git-formats`, `git-odb`, `git-refs`, `git-rev`).
-2. ✅ Implement read-only adapter: `ObjectId`, `ObjectKind`, framing/hash (`frame_git_object`, `object_id_for_content`), `GitRepo` wrapper, `gix_interop` helpers.
+2. ✅ Implement read-only adapter: `ObjectId`, `ObjectKind`, framing/hash (`frame_git_object`, `object_id_for_content`), `GitRepo` wrapper, `object` helpers.
 3. ✅ Migrate P0 call-sites:
    - `ingest/src/git_walk.rs` — `GitSource` holds `GitRepo`; `is_commit` / `object_is_commit` via sley odb
    - `cli/src/bridge/git_import.rs` — `peel_to_commit_oid` + import path object-kind reads via substrate
    - `cli/src/bridge/git_reconstruct.rs` — framing/hash delegates to `git_substrate`
-   - `repo/src/git_worktree_status.rs` — blob hashing via `gix_blob_object_id`
+   - `repo/src/git_worktree_status.rs` — blob hashing via `blob_object_id`
 4. ✅ Type-alias blast-radius bound: production bridge + `git_bridge_tests` + integration tests use `git_substrate::ObjectId`; `gix::hash::ObjectId` remains only at gix API boundaries via `from_gix`/`to_gix` until P4.
 5. ✅ Conformance test: `git_substrate` framing/hash round-trip + `commit_conformance` (4/4).
 6. ✅ Gates: `git_replacement_matrix` (24/24), `commit_conformance` (4/4), `check-no-silent-default-tree-load.sh` clean, default build + `cargo test -p heddle-cli --lib bridge::git` (109/109). `realworld_git` nightly matrix still `#[ignore]` in CI (registry parse gate passes).

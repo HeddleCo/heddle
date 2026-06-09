@@ -241,7 +241,7 @@ struct GitBridgeMappingFile {
 ///
 /// Two production implementations exist:
 /// - Git-overlay clones: `cli::commands::clone::GitOverlayBlobHydrator`
-///   uses gix promisor-fetch semantics against the bare `.git/` repo.
+///   uses promisor-fetch semantics against the bare `.git/` repo.
 /// - Hosted clones: `heddle_client::grpc_hosted::LazyHostedHydrator`
 ///   bridges sync `hydrate` calls to async gRPC via a dedicated worker
 ///   thread + private Tokio runtime; on each call the worker invokes
@@ -2505,7 +2505,7 @@ fn detect_git_head(path: &Path) -> Result<Option<Head>> {
 /// when `.git/HEAD` is the simple `ref: refs/heads/<name>` form;
 /// returns `None` for any case we don't trust ourselves to parse
 /// correctly (detached HEAD raw OIDs, `gitdir:` worktree pointers,
-/// missing files), letting the gix fallback handle it.
+/// missing files), letting the full HEAD parse fallback handle it.
 fn detect_git_head_fast(path: &Path) -> Option<GitHeadState> {
     let head_path = path.join(".git").join("HEAD");
     // `.git` may also be a *file* (the gitdir: pointer used by

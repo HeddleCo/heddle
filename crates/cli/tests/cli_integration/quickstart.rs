@@ -1240,7 +1240,7 @@ fn quickstart_install_none_installs_nothing() {
     );
 }
 
-/// Codex r7 (cid 3329270261): the preflight used `gix::discover` to decide
+/// Codex r7 (cid 3329270261): the preflight used ancestor discovery to decide
 /// `has_git`, which walks to an ANCESTOR Git checkout — so a native Heddle
 /// repo nested inside an ancestor Git checkout was wrongly treated as a Git
 /// overlay and refused for the ancestor's detached HEAD, even though

@@ -148,8 +148,8 @@ local = []
 git-overlay = ["repo/git-overlay", "ingest"]
 native = ["repo/native"]
 client = ["dep:heddle-client", "dep:tokio-tungstenite"]
-# Deep git import + AI-session reasoning extraction. Pulls in `gix`'s
-# transport layer, `rusqlite` for OpenCode, and the transcript matchers.
+# Deep git import + AI-session reasoning extraction. Pulls in `rusqlite`
+# for OpenCode and the transcript matchers.
 # Auto-enabled by `git-overlay` since import is part of the overlay flow;
 # can also be enabled standalone for the `heddle-ingest` binary use case.
 ingest = ["dep:ingest"]

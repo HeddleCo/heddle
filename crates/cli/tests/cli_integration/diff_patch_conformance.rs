@@ -788,7 +788,7 @@ fn special_char_path_rename_round_trips() {
 
 /// Control-char / backslash names that heddle can't track but git can:
 /// exercise modify + delete on the plain-Git surface so the header quoting
-/// holds for the gix-read tree side too.
+/// holds for the substrate-read tree side too.
 #[test]
 fn plain_git_special_char_path_modify_round_trips() {
     for path in worktree_only_quoting_paths() {
@@ -1140,7 +1140,7 @@ fn state_cell_bytes(pre: &[Entry], mutate: impl Fn(&Path), expect: &[Expect]) {
     apply_oracle_bytes(pre, &patch, expect);
 }
 
-/// Plain-Git fast-path byte cell: no `heddle init`; HEAD read via gix.
+/// Plain-Git fast-path byte cell: no `heddle init`; HEAD read via git_substrate.
 fn plain_git_cell_bytes(
     pre: &[Entry],
     stage: bool,
@@ -2185,7 +2185,7 @@ fn binary_pure_chmod_round_trips() {
 // ---------------------------------------------------------------------------
 
 /// Run a plain-Git fast-path cell: the worktree is a plain git repo with
-/// no `heddle init`. `heddle diff` reads HEAD via gix. The oracle seeds
+/// no `heddle init`. `heddle diff` reads HEAD via git_substrate. The oracle seeds
 /// the same committed state.
 fn plain_git_cell(pre: &[Entry], stage: bool, mutate: impl Fn(&Path), expect: &[Expect]) {
     let h = TempDir::new().unwrap();

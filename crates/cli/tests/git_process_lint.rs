@@ -3,7 +3,7 @@
 //!
 //! Heddle's public Git-overlay workflows must not depend on a `git`
 //! executable being present on PATH. Git-format work is handled by
-//! native code and gix; tests and fixture builders may shell out to Git,
+//! native code and git-substrate; tests and fixture builders may shell out to Git,
 //! but runtime CLI crates may not.
 
 use std::{
@@ -52,7 +52,7 @@ fn runtime_git_process_spawns_match_reviewed_allowlist() {
 
     assert!(
         unexpected.is_empty(),
-        "runtime `git` process spawn(s) are not allowed:\n{}\nReplace the call with native/gix behavior or move fixture setup into tests.",
+        "runtime `git` process spawn(s) are not allowed:\n{}\nReplace the call with native/git-substrate behavior or move fixture setup into tests.",
         unexpected
             .iter()
             .map(|site| format!(

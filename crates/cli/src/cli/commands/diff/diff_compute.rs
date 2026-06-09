@@ -535,7 +535,7 @@ fn render_plain_git_head_diff(
 ) -> Result<()> {
     // The plain-Git fast path has no heddle Repository, so there is
     // no in-tree blob source `get_worktree_diff` can read from. When
-    // patch text is needed we read the HEAD blobs through `gix`
+    // patch text is needed we read the HEAD blobs through `git_substrate`
     // and feed them through the same `diff_blobs` + renderer pipeline
     // the heddle paths use — that way the `\ No newline at end of
     // file` handling stays in one place.
@@ -599,7 +599,7 @@ fn render_status_changes(
 }
 
 /// Build one `FileChange` per status entry in the plain-Git probe,
-/// computing real hunks against the gix-read HEAD blobs so `--patch`
+/// computing real hunks against the substrate-read HEAD blobs so `--patch`
 /// emits a body the regular renderer can stamp newline markers onto.
 ///
 /// Unborn HEAD (plain `git init` + staged file, no commit yet) has

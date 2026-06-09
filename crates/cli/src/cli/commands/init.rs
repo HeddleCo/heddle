@@ -245,7 +245,7 @@ fn resolve_quickstart_target(path: &Path) -> Result<QuickstartTarget> {
 
 /// Whether `dir` is itself a Git checkout root — Git metadata AT `dir`, mirroring
 /// the repo crate's `has_git_metadata`/`repository_capability_for_root`. (A
-/// `gix::discover` probe would instead walk to an ANCESTOR Git checkout, which
+/// A discover-style probe would instead walk to an ancestor Git checkout, which
 /// is exactly the misclassification this avoids.)
 fn dir_is_git_root(dir: &Path) -> bool {
     let dot_git = dir.join(".git");
@@ -380,7 +380,7 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
 
     // Output reflects the repo that was actually created/opened. For quickstart
     // that is the resolved target's capability (a subdirectory invocation may
-    // have opened a native repo even though `gix::discover` finds an ancestor
+    // have opened a native repo even though ancestor discovery finds a parent
     // Git checkout); the non-quickstart path keeps its prior `has_git` framing.
     let repo_is_git_overlay = if args.quickstart {
         repo.capability() == RepositoryCapability::GitOverlay

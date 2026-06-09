@@ -265,7 +265,7 @@ fn realworld_git_large_binary_blob_stress_without_git_on_path() {
 // W4b/W8b: complex Git workflow stress matrix
 //
 // Each scenario builds a synthetic but structurally rich Git repo in
-// memory via `gix`, drives it through the heddle bridge, and asserts
+// memory via `git_substrate`, drives it through the heddle bridge, and asserts
 // invariants the launch-quality matrix calls out (rebase fidelity,
 // multi-remote resolution, tag-rename round-trip, cherry-pick
 // distinctness, GC vs. mapping). Hermetic: no network, no vendored
@@ -623,7 +623,7 @@ fn realworld_git_gc_prunes_unreachable_mapping_entries() {
 
     // Inject a fabricated entry pointing at a never-reachable oid.
     // The format is the same `entries: [{change_id, git_oid}]`
-    // sidecar gix-bridge writes; we splice a row in.
+    // sidecar git-bridge writes; we splice a row in.
     let mut value: Value = serde_json::from_str(&mapping_text).unwrap();
     let entries = value["entries"].as_array_mut().unwrap();
     // Synthetic change_id: 26 lowercase base32 chars after the
@@ -679,7 +679,7 @@ fn realworld_fixtures_clone_and_import_round_trip() {
         let work_root = TempDir::new().unwrap();
         let work = work_root.path().join("work");
 
-        // Heddle's `clone` subcommand uses gix transport, which handles
+        // Heddle's `clone` subcommand uses sley transport, which handles
         // local bare-repo paths without needing git on PATH.
         heddle_without_git(
             &["clone", bare.to_str().unwrap(), work.to_str().unwrap()],

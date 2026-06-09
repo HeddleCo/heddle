@@ -957,7 +957,7 @@ pub fn find_thread_summary(repo: &Repository, name: &str) -> Result<Option<Threa
 ///   them needs a global parent-thread scan; callers that display these
 ///   relations should route through `find_thread_summary` instead.
 /// - `git_branch_tip` and `history_imported` are not populated for
-///   the same reason — discovering them needs the full gix branch walk.
+///   the same reason — discovering them needs the full Git branch walk.
 ///   `tip_only` thread_health is therefore not surfaced; the import-
 ///   hint line on the surrounding render already nudges the user.
 ///
@@ -987,7 +987,7 @@ pub fn find_thread_summary_single(repo: &Repository, name: &str) -> Result<Optio
         name.to_string(),
         entries,
         thread_record,
-        None, // skip branch_tip lookup (would require full gix walk)
+        None, // skip branch_tip lookup (would require full Git branch walk)
     )?;
     let mut summary = ThreadSummary::from_view(view, coordination_status);
 

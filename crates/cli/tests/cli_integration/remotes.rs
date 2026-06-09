@@ -1274,7 +1274,7 @@ fn clone_network_removes_self_created_destination_after_later_failure() {
 
 #[test]
 fn test_cli_clone_git_overlay_depth_is_rejected() {
-    // Issue 49 / 20b: `--depth` is wired through to gix at the wire
+    // Issue 49 / 20b: `--depth` is wired through to sley transport at the wire
     // layer (`clone_url_to_bare` honours it), but the import step
     // (`import_all` ancestry walk) still requires every parent commit
     // locally. Until the importer tolerates missing parents, the
@@ -1435,7 +1435,7 @@ fn test_cli_clone_git_overlay_lands_on_remote_default_branch_and_log_walks_histo
     // commits so we can confirm log walks history) and
     // `abc-feature` (alphabetically first — the trap heddle#141 used
     // to fall into). Branch names deliberately avoid `main`/`master`
-    // so neither gix's `init.defaultBranch` nor the previous
+    // so neither `init.defaultBranch` nor the previous
     // fallback could land here by accident.
     let src = git_substrate::GitRepo::init_bare(&source).expect("init bare source");
     let empty_tree = git_empty_tree_oid(&src);

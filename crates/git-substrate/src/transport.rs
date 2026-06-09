@@ -50,7 +50,7 @@ pub fn transport_capabilities() -> TransportCapabilities {
     TransportCapabilities::current()
 }
 
-/// Whether [`fetch_bare_mirror`] can handle `url` without delegating to gix.
+/// Whether [`fetch_bare_mirror`] can handle `url` natively.
 ///
 /// When `depth` is `Some`, shallow fetch must be supported for the transport class.
 pub fn supports_native_fetch(url: &str) -> bool {
@@ -82,7 +82,7 @@ pub fn supports_native_fetch_with_depth(url: &str, depth: Option<u32>) -> bool {
 }
 
 /// Whether [`push_receive_pack`] / [`receive_pack_ref_map`] can handle `url`
-/// without delegating to gix.
+/// natively.
 pub fn supports_native_push(url: &str) -> bool {
     if let Ok(parsed) = parse_remote_url(url) {
         // `git://` is not SSH; substrate keeps the git-daemon wire path.

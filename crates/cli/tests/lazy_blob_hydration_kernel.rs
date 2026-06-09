@@ -288,13 +288,13 @@ fn hydration_fires_against_torvalds_linux() {
     }
     eprintln!("clone completed in {:?}", started.elapsed());
 
-    let gix_repo = GitRepo::open(&bare).expect("open kernel bare repo");
-    let tip = gix_repo
+    let git_repo = GitRepo::open(&bare).expect("open kernel bare repo");
+    let tip = git_repo
         .head_commit_oid_or_none()
         .expect("head")
         .expect("commit");
-    let tree = gix_repo.read_commit(&tip).expect("read HEAD commit").tree;
-    let tree_obj = gix_repo.read_tree(&tree).expect("read tip tree");
+    let tree = git_repo.read_commit(&tip).expect("read HEAD commit").tree;
+    let tree_obj = git_repo.read_tree(&tree).expect("read tip tree");
     let blob_oid = tree_obj
         .entries
         .iter()

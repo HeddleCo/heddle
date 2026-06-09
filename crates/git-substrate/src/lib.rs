@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Single gix↔sley translation point for Heddle git operations (#595).
+//! Sley-backed git substrate for Heddle git operations (#595).
 //!
 //! Object ids, framing/hashing, object kinds, read/write adapters over the local
 //! [`sley`](../../sley) checkout (`git-core`, `git-formats`, `git-odb`, `git-refs`,
@@ -7,7 +7,7 @@
 
 pub mod copy;
 pub mod framing;
-pub mod gix_interop;
+pub mod object;
 pub mod remote;
 pub mod transport;
 pub mod id;
@@ -22,7 +22,7 @@ pub use framing::{
     actor_suffix_bytes, append_labeled_actor_line, format_tz_offset, frame_git_object,
     object_id_for_content,
 };
-pub use gix_interop::{blob_object_id, commit_object_id, is_commit, read_object_kind};
+pub use object::{blob_object_id, commit_object_id, is_commit, read_object_kind};
 pub use sley_config::{
     load_config_with_includes, ConfigIncludeContext, GitConfig,
 };

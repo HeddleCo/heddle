@@ -1450,13 +1450,13 @@ impl<'a> GitBridge<'a> {
             ));
         }
         let git_dir = checkout_repo.git_dir().to_path_buf();
-        // gix-index manages its own `index.lock` (atomic `O_CREAT |
+        // sley-index manages its own `index.lock` (atomic `O_CREAT |
         // O_EXCL`) inside `index.write`, so we don't create a parallel
-        // lock here — that would deadlock with gix's writer. The
+        // lock here — that would deadlock with the index writer. The
         // existence check below is a UX nicety so a stale or
         // concurrent lock surfaces as a structured `IndexAlreadyDirty`
         // skip rather than a raw "Could not acquire lock" error from
-        // gix.
+        // the substrate index layer.
         if index_lock_exists(&git_dir) {
             return Ok(WriteThroughOutcome::Skipped(
                 WriteThroughSkipReason::IndexAlreadyDirty,
@@ -3135,7 +3135,7 @@ pub fn copy_local_repo_to_bare(source_path: &Path, dest: &Path) -> GitResult<()>
 }
 
 /// Clone a remote git URL into `dest` as a bare repository, fetching all
-/// branches and tags. Mirrors the gix recipe used by `fetch_network_remote`
+/// branches and tags. Mirrors the sley fetch recipe used by `fetch_network_remote`
 /// but starts from an empty `init_bare` rather than an existing repo.
 ///
 /// Used by `bridge import --path <URL>` (Phase F): we clone into a
@@ -3157,10 +3157,9 @@ pub fn clone_url_to_bare(
     depth: Option<u32>,
     filter: Option<&str>,
 ) -> GitResult<()> {
-    // gix 0.80's high-level fetch builder (`Connection::prepare_fetch` →
-    // `Prepare`) does not expose the v2 partial-clone `filter`
-    // capability. Older code delegated that case to `git clone`, but
-    // public Git-overlay workflows must run on machines with no Git
+    // The native transport stack does not yet expose the v2 partial-clone
+    // `filter` capability. Older code delegated that case to `git clone`,
+    // but public Git-overlay workflows must run on machines with no Git
     // executable installed. Keep depth-only clones native and reject
     // filtered clones until we have a native implementation.
     if let Some(spec) = filter {
@@ -3181,7 +3180,7 @@ pub fn clone_url_to_bare(
     }
     let default_branch =
         clone_url_to_bare_via_network(url, dest, depth)?.or_else(|| default_branch_from_file_url(url));
-    // gix's `init_bare` writes `.git/HEAD = ref: refs/heads/<init.defaultBranch>`
+    // `GitRepo::init_bare` writes `.git/HEAD = ref: refs/heads/<init.defaultBranch>`
     // (typically "main" or "master") regardless of what the remote
     // advertises, and the fetch above doesn't touch HEAD. If we leave
     // that in place, downstream `select_clone_thread` and
@@ -3545,9 +3544,9 @@ mod tests {
     /// heddle#141 regression: when the URL-fetch path of
     /// `clone_url_to_bare` runs against a bare repo whose `HEAD`
     /// points at a branch that is *not* alphabetically first (and
-    /// crucially, not what gix's `init_bare` defaults to), the
+    /// crucially, not what `init_bare` defaults to), the
     /// resulting dest bare must have `HEAD` pointing at the remote
-    /// default — not gix's init-time guess.
+    /// default — not the init-time guess.
     #[test]
     fn clone_url_to_bare_via_network_honours_remote_head_symref() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -3556,7 +3555,7 @@ mod tests {
 
         // Build a bare source with two branches under
         // deliberately-non-default names: `trunk` (will be the
-        // remote default — neither gix's `init.defaultBranch` nor
+        // remote default — neither `init.defaultBranch` nor
         // the alphabetically-first imported ref would land here by
         // accident) and `abc-feature` (alphabetically first — what
         // the buggy fallback used to pick).
@@ -3584,7 +3583,7 @@ mod tests {
         assert_eq!(
             dest_head.trim(),
             "ref: refs/heads/trunk",
-            "dest HEAD must mirror the remote's symref (trunk), not gix's \
+            "dest HEAD must mirror the remote's symref (trunk), not the \
              init-time default and not the alphabetically-first branch \
              (abc-feature) — see heddle#141"
         );

@@ -384,7 +384,7 @@ fn finish_git_overlay_clone(
     // Re-attach HEAD to the cloned thread, AND mirror the choice into
     // `.git/HEAD`. `Repository::open` on a git-overlay repo
     // unconditionally syncs heddle's HEAD from `.git/HEAD` via
-    // `detect_git_head`, so if we left `.git/HEAD` pointing at gix's
+    // `detect_git_head`, so if we left `.git/HEAD` pointing at the
     // init-time default ("main" / "master") the very next `heddle`
     // command would silently reset HEAD to a thread that doesn't
     // exist — and `current_state` would return `None`, causing
@@ -959,7 +959,7 @@ fn read_git_head_branch(git_dir: &Path) -> Option<String> {
 
 /// Pin `.git/HEAD` to `refs/heads/<branch>`. Called after clone so a
 /// future `Repository::open` reads the same branch heddle attached to,
-/// rather than the init-time default gix wrote (typically `main`).
+/// rather than the init-time default `init_bare` wrote (typically `main`).
 fn write_git_head_branch(git_dir: &Path, branch: &str) -> Result<()> {
     fs::write(git_dir.join("HEAD"), format!("ref: refs/heads/{branch}\n"))?;
     Ok(())
@@ -1408,7 +1408,7 @@ fn clone_symlink_unsupported_advice(path: &Path, dest_path: &Path) -> RecoveryAd
 /// blake3-hashed blob is recorded in `.heddle/partial-fetch` but is
 /// absent from the local object store — the read path delegates here.
 /// This hydrator looks up the corresponding Git object id, fetches the
-/// blob from the underlying gix repo when it is already present locally
+/// blob from the underlying Git mirror when it is already present locally
 /// and writes the bytes into the heddle store. Native promisor fetching
 /// for absent Git blobs is not implemented yet; Heddle rejects public
 /// Git-overlay lazy/filtered clones until that path can run without a
@@ -1808,7 +1808,7 @@ mod tests {
     /// Standalone helpers to exercise [`GitOverlayBlobHydrator`]'s
     /// error and fallback branches that the kernel/hermetic end-to-end
     /// test (in `tests/lazy_blob_hydration_kernel.rs`) doesn't reach.
-    /// Each test sets up the smallest possible bare gix repo it needs;
+    /// Each test sets up the smallest possible bare Git repo it needs;
     /// none of them hit the network.
     mod git_overlay_hydrator {
         use objects::object::ContentHash;
@@ -1817,7 +1817,7 @@ mod tests {
 
         use super::*;
 
-        /// Build a fresh empty bare gix repo and a fresh `Repository`,
+        /// Build a fresh empty bare Git repo and a fresh `Repository`,
         /// returning `(temp, bare_path, repo)` for use in a single test.
         fn fixtures() -> (TempDir, std::path::PathBuf, Repository) {
             let temp = TempDir::new().expect("temp");

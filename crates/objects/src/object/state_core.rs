@@ -865,7 +865,7 @@ fn write_optional_string(hasher: &mut blake3::Hasher, value: &Option<String>) {
 }
 
 /// Parse the *extension* headers from a raw git commit object's content bytes
-/// (the bytes `git cat-file commit <sha>` prints — i.e. gix's `Commit::data`),
+/// (the bytes `git cat-file commit <sha>` prints — raw commit content),
 /// in their exact on-the-wire order, ready to store in [`State::extra_headers`].
 ///
 /// A commit's header block runs from the start of the content up to the first
@@ -878,7 +878,7 @@ fn write_optional_string(hasher: &mut blake3::Hasher, value: &Option<String>) {
 /// **This is the single source of truth for extension-header order and bytes.**
 /// Both git import paths (the CLI bridge and the ingest walker) build
 /// `extra_headers` from it. The alternative — stitching the vec back together
-/// from a decoder's *typed* accessors (gix surfaces `encoding`, and historically
+/// from a decoder's *typed* accessors (Git decoders surface `encoding`, and historically
 /// `gpgsig`, as fields *outside* its `extra_headers`) — silently reorders the
 /// headers git happens to model as typed fields, which breaks #566 byte-exact
 /// reconstruction. So we never consult those typed accessors for position; the

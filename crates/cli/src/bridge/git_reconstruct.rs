@@ -165,7 +165,7 @@ fn append_folded(out: &mut Vec<u8>, value: &[u8]) {
 }
 
 impl GitBridge<'_> {
-    /// Open (initializing if necessary) a writable gix repo suitable for
+    /// Open (initializing if necessary) a writable `GitRepo` suitable for
     /// reconstruction's tree-OID resolution. Any writable odb works — git trees
     /// are content-addressed — so the bridge's own mirror is reused.
     pub fn reconstruction_repo(&mut self) -> GitResult<GitRepo> {
