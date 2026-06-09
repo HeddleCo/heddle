@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-//! [`ObjectKind`] — shared object-type vocabulary across sley and gix.
+//! [`ObjectKind`] — shared object-type vocabulary.
 
 use sley_object::ObjectType;
 
-/// Git object kind shared by sley and gix callers.
+/// Git object kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ObjectKind {
     Blob,
@@ -28,26 +28,6 @@ impl ObjectKind {
             ObjectType::Tree => Self::Tree,
             ObjectType::Commit => Self::Commit,
             ObjectType::Tag => Self::Tag,
-        }
-    }
-
-    #[cfg(feature = "gix-interop")]
-    pub const fn from_gix(kind: gix::objs::Kind) -> Self {
-        match kind {
-            gix::objs::Kind::Blob => Self::Blob,
-            gix::objs::Kind::Tree => Self::Tree,
-            gix::objs::Kind::Commit => Self::Commit,
-            gix::objs::Kind::Tag => Self::Tag,
-        }
-    }
-
-    #[cfg(feature = "gix-interop")]
-    pub const fn to_gix(self) -> gix::objs::Kind {
-        match self {
-            Self::Blob => gix::objs::Kind::Blob,
-            Self::Tree => gix::objs::Kind::Tree,
-            Self::Commit => gix::objs::Kind::Commit,
-            Self::Tag => gix::objs::Kind::Tag,
         }
     }
 }

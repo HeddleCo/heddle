@@ -43,15 +43,8 @@ fn bridge_recovers_from_crash_after_tmp_before_commit() {
     // short-circuit the fault checkpoint). Reuses the helpers from
     // `cli_integration.rs` so the fixture shape matches the other
     // bridge tests.
-    let origin_repo = gix::init_bare(&origin).expect("init origin");
-    let blob = origin_repo.write_blob(b"fn a() {}\n").unwrap().detach();
-    let mut tree_editor = origin_repo
-        .edit_tree(origin_repo.empty_tree().id)
-        .expect("tree editor");
-    tree_editor
-        .upsert("core.rs", gix::object::tree::EntryKind::Blob, blob)
-        .unwrap();
-    let tree_oid = tree_editor.write().unwrap().detach();
+    let origin_repo = git_substrate::GitRepo::init_bare(&origin).expect("init origin");
+    let tree_oid = git_tree_with_file(&origin_repo, "core.rs", b"fn a() {}\n");
     let _commit =
         git_commit_with_tree(&origin_repo, Some("refs/heads/main"), tree_oid, "seed", &[]);
 

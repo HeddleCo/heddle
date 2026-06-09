@@ -4,7 +4,7 @@ use std::{collections::BTreeSet, path::Path};
 
 use anyhow::Result;
 use chrono::Utc;
-use gix::bstr::ByteSlice;
+
 use objects::object::ThreadName;
 use repo::{
     shell_quote, update_thread_state_from_state, GitOverlayImportHint, GitRemoteTrackingStatus,

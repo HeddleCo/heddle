@@ -174,8 +174,8 @@ pub async fn cmd_clone(
             if looks_like_local_path(&remote) {
                 return Err(anyhow!(clone_remote_not_found_advice(Path::new(&remote))));
             }
-            if let Ok(url) = gix::url::parse(remote.as_bytes().into()) {
-                return clone_git_overlay_url(cli, &url, local_path, &options);
+            if git_substrate::parse_remote_url(&remote).is_ok() {
+                return clone_git_overlay_url(cli, &remote, local_path, &options);
             }
             return Err(anyhow!(clone_invalid_remote_url_advice(&remote)));
         }
@@ -183,7 +183,9 @@ pub async fn cmd_clone(
 
     match target {
         RemoteTarget::Local(remote_path) => {
-            if !remote_path.join(".heddle").exists() && gix::open(&remote_path).is_ok() {
+            if !remote_path.join(".heddle").exists()
+                && git_substrate::GitRepo::discover(&remote_path).is_ok()
+            {
                 return clone_git_overlay_path(cli, &remote_path, local_path, &options);
             }
             clone_local(cli, &remote_path, local_path, &options).await?;
@@ -248,7 +250,7 @@ fn looks_like_local_path(remote: &str) -> bool {
 
 fn clone_git_overlay_url(
     cli: &Cli,
-    url: &gix::Url,
+    url: &str,
     local_path: &Path,
     options: &CloneOptions,
 ) -> Result<()> {
@@ -266,7 +268,7 @@ fn clone_git_overlay_path(
 ) -> Result<()> {
     reject_unsupported_for_git_overlay(options)?;
     fs::create_dir_all(local_path)?;
-    gix::init(local_path).map_err(anyhow::Error::msg)?;
+    git_substrate::GitRepo::init(local_path).map_err(anyhow::Error::msg)?;
     copy_local_repo_to_bare(remote_path, &local_path.join(".git")).map_err(anyhow::Error::msg)?;
     let remote_label = fs::canonicalize(remote_path)
         .unwrap_or_else(|_| remote_path.to_path_buf())
@@ -569,7 +571,7 @@ fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Res
         &git_repo,
         &format!("refs/remotes/origin/{branch}"),
         &target_oid,
-        gix::refs::transaction::PreviousValue::Any,
+        git_substrate::RefConstraint::Any,
         "heddle: seed origin remote-tracking branch after clone",
     )
     .map_err(|err| {
@@ -1415,7 +1417,7 @@ fn clone_symlink_unsupported_advice(path: &Path, dest_path: &Path) -> RecoveryAd
 /// ## Why a side-table?
 ///
 /// `PartialFetchMetadata` records blake3 hashes only, but
-/// `gix::Repository::find_blob` is keyed by Git OID. The bridge
+/// `GitRepo::read_blob` is keyed by Git OID. The bridge
 /// already computes blake3↔git mappings *for commits* (see
 /// `SyncMapping` in `bridge/git_core.rs`); blob mappings are
 /// constructed on-the-fly during import. We accept the same shape of
@@ -1430,7 +1432,7 @@ pub struct GitOverlayBlobHydrator {
     /// `Send + Sync` while still allowing the mapping to grow over
     /// time (e.g. if the import path is later extended to record new
     /// blobs as it walks).
-    blob_oid_map: Mutex<std::collections::HashMap<ContentHash, gix::ObjectId>>,
+    blob_oid_map: Mutex<std::collections::HashMap<ContentHash, git_substrate::ObjectId>>,
 }
 
 impl GitOverlayBlobHydrator {
@@ -1443,7 +1445,7 @@ impl GitOverlayBlobHydrator {
 
     /// Pre-seed the blake3 → git OID mapping. Called by the importer
     /// (or by tests) as missing blobs are discovered.
-    pub fn record_blob_oid(&self, hash: ContentHash, oid: gix::ObjectId) {
+    pub fn record_blob_oid(&self, hash: ContentHash, oid: git_substrate::ObjectId) {
         self.blob_oid_map.lock().unwrap().insert(hash, oid);
     }
 }
@@ -1483,12 +1485,10 @@ impl BlobHydrator for GitOverlayBlobHydrator {
 }
 
 impl GitOverlayBlobHydrator {
-    fn read_blob_bytes(&self, oid: gix::ObjectId) -> HeddleResult<Vec<u8>> {
+    fn read_blob_bytes(&self, oid: git_substrate::ObjectId) -> HeddleResult<Vec<u8>> {
         let repo = open_repo(&self.git_repo_path)
             .map_err(|err| HeddleError::Io(std::io::Error::other(err.to_string())))?;
-        let substrate_oid =
-            git_substrate::from_gix(oid).map_err(|err| HeddleError::Config(err.to_string()))?;
-        if let Ok(bytes) = repo.read_blob(&substrate_oid) {
+        if let Ok(bytes) = repo.read_blob(&oid) {
             return Ok(bytes);
         }
 
@@ -1822,7 +1822,7 @@ mod tests {
         fn fixtures() -> (TempDir, std::path::PathBuf, Repository) {
             let temp = TempDir::new().expect("temp");
             let bare = temp.path().join("source.git");
-            gix::init_bare(&bare).expect("init bare gix");
+            git_substrate::GitRepo::init_bare(&bare).expect("init bare git repo");
             let heddle_root = temp.path().join("heddle");
             std::fs::create_dir_all(&heddle_root).expect("mkdir heddle");
             let repo =
@@ -1831,9 +1831,9 @@ mod tests {
         }
 
         /// Write a single blob into the bare repo and return its OID.
-        fn write_local_blob(bare: &std::path::Path, payload: &[u8]) -> gix::ObjectId {
-            let g = gix::open(bare).expect("open bare");
-            g.write_blob(payload).expect("write blob").detach()
+        fn write_local_blob(bare: &std::path::Path, payload: &[u8]) -> git_substrate::ObjectId {
+            let g = git_substrate::GitRepo::open(bare).expect("open bare");
+            g.write_blob(payload).expect("write blob")
         }
 
         #[test]
@@ -1902,7 +1902,7 @@ mod tests {
             // shell out to `git cat-file`; the error should name the
             // missing OID and the native lazy-hydration boundary.
             let (_temp, bare, _repo) = fixtures();
-            let absent_oid = gix::ObjectId::null(gix::hash::Kind::Sha1);
+            let absent_oid = git_substrate::null_sha1();
             let hydrator = GitOverlayBlobHydrator::new(bare.clone());
 
             let err = hydrator

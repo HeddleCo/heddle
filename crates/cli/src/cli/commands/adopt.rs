@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
-use gix::bstr::ByteSlice;
+
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 

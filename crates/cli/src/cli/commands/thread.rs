@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use gix::bstr::ByteSlice;
+
 use objects::{
     object::{ChangeId, State, ThreadName, Tree},
     store::{AgentEntry, AgentRegistry, AgentStatus, current_boot_id},

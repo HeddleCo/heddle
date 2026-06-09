@@ -13,7 +13,10 @@ use std::{
     str,
 };
 
-use gix::refs::transaction::PreviousValue;
+use git_substrate::{
+    GitRepo, ObjectId, ObjectType, RefConstraint, Tag, TreeEntryInput, TreeEntryMode,
+    actor_suffix_bytes, empty_tree_sha1, set_reference, write_simple_commit,
+};
 use repo::Repository;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -359,15 +362,8 @@ pub(crate) fn git_hermetic(args: &[&str], dir: &std::path::Path) {
     assert!(status.success(), "git {args:?} failed in {}", dir.display());
 }
 
-fn git_test_signature() -> gix::actor::Signature {
-    gix::actor::Signature {
-        name: "Heddle Test".into(),
-        email: "heddle@test".into(),
-        time: gix::date::Time {
-            seconds: 0,
-            offset: 0,
-        },
-    }
+fn git_test_actor() -> Vec<u8> {
+    actor_suffix_bytes(b"Heddle Test", b"heddle@test", 0, 0)
 }
 
 fn seed_default_test_user_config(
@@ -405,51 +401,107 @@ fn default_test_user_config_path(cwd: &std::path::Path) -> std::path::PathBuf {
     ))
 }
 
-fn git_empty_tree_oid(repo: &gix::Repository) -> gix::hash::ObjectId {
-    repo.empty_tree().id
+fn git_empty_tree_oid(_repo: &GitRepo) -> ObjectId {
+    empty_tree_sha1()
 }
 
-fn git_set_reference(repo: &gix::Repository, name: &str, target: gix::hash::ObjectId) {
-    let sig = git_test_signature();
-    let mut time_buf = gix::date::parse::TimeBuf::default();
-    let edit = gix::refs::transaction::RefEdit {
-        change: gix::refs::transaction::Change::Update {
-            log: gix::refs::transaction::LogChange {
-                mode: gix::refs::transaction::RefLog::AndReference,
-                force_create_reflog: false,
-                message: "test: update ref".into(),
-            },
-            expected: PreviousValue::Any,
-            new: gix::refs::Target::Object(target),
-        },
-        name: name.try_into().expect("valid ref name"),
-        deref: false,
-    };
-    repo.edit_references_as([edit], Some(sig.to_ref(&mut time_buf)))
-        .expect("update ref");
+fn git_set_reference(repo: &GitRepo, name: &str, target: ObjectId) {
+    set_reference(
+        repo.git_dir(),
+        repo.object_format(),
+        name,
+        &target,
+        RefConstraint::Any,
+        "test: update ref",
+    )
+    .expect("update ref");
+}
+
+fn git_tree_with_file(repo: &GitRepo, path: &str, content: &[u8]) -> ObjectId {
+    let blob = repo.write_blob(content).expect("write git blob");
+    let mut entries = vec![TreeEntryInput {
+        mode: TreeEntryMode::Blob,
+        name: path.to_string(),
+        oid: blob,
+    }];
+    repo.write_tree(&mut entries).expect("write git tree")
 }
 
 fn git_commit_with_tree(
-    repo: &gix::Repository,
+    repo: &GitRepo,
     reference: Option<&str>,
-    tree_oid: gix::hash::ObjectId,
+    tree_oid: ObjectId,
     message: &str,
-    parents: &[gix::hash::ObjectId],
-) -> gix::hash::ObjectId {
-    let sig = git_test_signature();
-    let mut committer_buf = gix::date::parse::TimeBuf::default();
-    let mut author_buf = gix::date::parse::TimeBuf::default();
-    let commit = repo
-        .new_commit_as(
-            sig.to_ref(&mut committer_buf),
-            sig.to_ref(&mut author_buf),
-            message,
-            tree_oid,
-            parents.to_vec(),
-        )
-        .expect("commit");
+    parents: &[ObjectId],
+) -> ObjectId {
+    let actor = git_test_actor();
+    let commit_oid = write_simple_commit(
+        repo.git_dir(),
+        repo.object_format(),
+        &tree_oid,
+        parents,
+        &actor,
+        &actor,
+        message.as_bytes(),
+    )
+    .expect("commit");
     if let Some(reference) = reference {
-        git_set_reference(repo, reference, commit.id);
+        git_set_reference(repo, reference, commit_oid.clone());
     }
-    commit.id
+    commit_oid
+}
+
+fn git_head_oid(path: &std::path::Path) -> String {
+    GitRepo::open(path)
+        .or_else(|_| GitRepo::discover(path))
+        .expect("open git repo")
+        .read_ref_oid("HEAD")
+        .expect("head")
+        .expect("peel")
+        .to_hex()
+}
+
+fn git_rev_list_count(path: &std::path::Path, rev: &str) -> usize {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-list", "--count", rev])
+        .output()
+        .expect("spawn git rev-list");
+    assert!(
+        output.status.success(),
+        "git rev-list --count {rev} failed in {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("rev-list count should parse")
+}
+
+fn git_create_annotated_tag(
+    repo: &GitRepo,
+    name: &str,
+    target: &ObjectId,
+    message: &str,
+) -> ObjectId {
+    let tag = Tag {
+        object: target.clone(),
+        object_type: ObjectType::Commit,
+        name: name.as_bytes().to_vec(),
+        tagger: Some(git_test_actor()),
+        message: message.as_bytes().to_vec(),
+    };
+    let tag_id = repo.write_tag(&tag).expect("write tag");
+    set_reference(
+        repo.git_dir(),
+        repo.object_format(),
+        &format!("refs/tags/{name}"),
+        &tag_id,
+        RefConstraint::Any,
+        "test: create tag",
+    )
+    .expect("set tag ref");
+    tag_id
 }

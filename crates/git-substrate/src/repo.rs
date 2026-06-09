@@ -27,6 +27,18 @@ pub struct GitRepo {
 }
 
 impl GitRepo {
+    /// Create a new non-bare repository at `path` and return an open handle.
+    pub fn init(path: impl AsRef<Path>) -> Result<Self> {
+        Self::init_with_format(path, ObjectFormat::Sha1)
+    }
+
+    /// Create a new non-bare repository at `path` using `format`.
+    pub fn init_with_format(path: impl AsRef<Path>, format: ObjectFormat) -> Result<Self> {
+        let path = path.as_ref();
+        RepositoryLayout::init_at(path, format, false).map_err(GitSubstrateError::from)?;
+        Self::discover(path)
+    }
+
     /// Create a new bare repository at `path` and return an open handle.
     pub fn init_bare(path: impl AsRef<Path>) -> Result<Self> {
         Self::init_bare_with_format(path, ObjectFormat::Sha1)
@@ -85,6 +97,16 @@ impl GitRepo {
         resolve_workdir(&self.git_dir)
     }
 
+    /// Whether this repository is bare (`core.bare = true`).
+    pub fn is_bare(&self) -> Result<bool> {
+        if let Ok(config) = self.git_config()
+            && let Some(bare) = config.get_bool("core", None, "bare")
+        {
+            return Ok(bare);
+        }
+        Ok(self.git_dir.file_name().and_then(|name| name.to_str()) != Some(".git"))
+    }
+
     pub(crate) fn object_db(&self) -> FileObjectDatabase {
         FileObjectDatabase::from_git_dir(&self.common_dir, self.format)
     }
@@ -131,6 +153,11 @@ impl GitRepo {
     /// Write a tree from `entries` into this repository's object database.
     pub fn write_tree(&self, entries: &mut [crate::write::TreeEntryInput]) -> Result<ObjectId> {
         crate::write::write_tree(self.git_dir(), self.format, entries)
+    }
+
+    /// Write an annotated tag object into this repository's object database.
+    pub fn write_tag(&self, tag: &sley_object::Tag) -> Result<ObjectId> {
+        crate::write::write_tag(self.git_dir(), self.format, tag)
     }
 
     /// Read a blob object's raw bytes from the object database.

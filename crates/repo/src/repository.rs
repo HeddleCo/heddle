@@ -1238,6 +1238,11 @@ impl Repository {
             Ok(repo) => repo,
             Err(_) => return Ok(None),
         };
+        // Embedded bare mirrors (heddle clone <url>) have no git worktree; status
+        // must fall back to heddle's tree-compare path instead of index diffs.
+        if git_repo.is_bare().unwrap_or(false) {
+            return Ok(None);
+        }
 
         let format = git_repo.object_format();
         let index = git_substrate::read_disk_index(git_repo.git_dir(), format).map_err(|error| {

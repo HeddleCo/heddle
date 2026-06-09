@@ -80,28 +80,19 @@ fn extract_fixture(name: &str) -> (TempDir, std::path::PathBuf) {
         "bare repo missing HEAD after extract: {}",
         bare.display()
     );
-    let extracted = gix::open(&bare).expect("open extracted bare repo");
+    let extracted = git_substrate::GitRepo::open(&bare).expect("open extracted bare repo");
     let head = extracted
-        .head_commit()
-        .expect("extracted fixture should resolve HEAD");
+        .head_commit_oid_or_none()
+        .expect("head")
+        .expect("head commit");
     assert_eq!(
-        head.id().to_string(),
+        head.to_hex(),
         entry.commit,
         "fixture {name} drifted: registry pinned {} but extracted tip is {}",
         entry.commit,
-        head.id()
+        head.to_hex()
     );
     (temp, bare)
-}
-
-fn git_tree_with_file(repo: &gix::Repository, path: &str, content: &[u8]) -> gix::hash::ObjectId {
-    let blob = repo.write_blob(content).expect("write git blob").detach();
-    let empty = git_empty_tree_oid(repo);
-    let mut editor = repo.edit_tree(empty).expect("edit git tree");
-    editor
-        .upsert(path, gix::object::tree::EntryKind::Blob, blob)
-        .expect("add file to git tree");
-    editor.write().expect("write git tree").detach()
 }
 
 #[test]
@@ -151,7 +142,7 @@ fn realworld_git_complex_fixture_round_trips_overlay_inventory_without_git_on_pa
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
-    let origin_repo = gix::init_bare(&origin).expect("init synthetic real-world origin");
+    let origin_repo = git_substrate::GitRepo::init_bare(&origin).expect("init synthetic real-world origin");
 
     let base_tree = git_tree_with_file(&origin_repo, "core.rs", b"pub fn base() {}\n");
     let base = git_commit_with_tree(
@@ -238,7 +229,7 @@ fn realworld_git_large_binary_blob_stress_without_git_on_path() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
-    let origin_repo = gix::init_bare(&origin).expect("init large origin");
+    let origin_repo = git_substrate::GitRepo::init_bare(&origin).expect("init large origin");
 
     let large = vec![0xA5; size_mb * 1024 * 1024];
     let tree = git_tree_with_file(&origin_repo, "large.bin", &large);
@@ -292,7 +283,7 @@ fn realworld_git_rebase_chain_round_trips_overlay() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
-    let origin_repo = gix::init_bare(&origin).expect("init origin");
+    let origin_repo = git_substrate::GitRepo::init_bare(&origin).expect("init origin");
 
     // Build a base commit and five feature commits chained off it.
     let base_tree = git_tree_with_file(&origin_repo, "core.rs", b"fn base() {}\n");
@@ -407,8 +398,8 @@ fn realworld_git_multi_remote_divergent_main_resolves_origin_first() {
     let origin = temp.path().join("origin.git");
     let upstream = temp.path().join("upstream.git");
     let work = temp.path().join("work");
-    let origin_repo = gix::init_bare(&origin).expect("init origin");
-    let upstream_repo = gix::init_bare(&upstream).expect("init upstream");
+    let origin_repo = git_substrate::GitRepo::init_bare(&origin).expect("init origin");
+    let upstream_repo = git_substrate::GitRepo::init_bare(&upstream).expect("init upstream");
 
     // Origin's main: A → B
     let tree_a = git_tree_with_file(&origin_repo, "core.rs", b"fn a() {}\n");
@@ -456,7 +447,7 @@ fn realworld_git_annotated_tag_rename_round_trips() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
-    let origin_repo = gix::init_bare(&origin).expect("init origin");
+    let origin_repo = git_substrate::GitRepo::init_bare(&origin).expect("init origin");
 
     let tree_a = git_tree_with_file(&origin_repo, "core.rs", b"fn a() {}\n");
     let a = git_commit_with_tree(&origin_repo, Some("refs/heads/main"), tree_a, "A", &[]);
@@ -465,34 +456,12 @@ fn realworld_git_annotated_tag_rename_round_trips() {
     git_set_reference(&origin_repo, "HEAD", a);
 
     // Initial annotated tag points at A with message "v0.1".
-    let tag_a = origin_repo
-        .tag(
-            "v0.1",
-            a,
-            gix::object::Kind::Commit,
-            None,
-            "v0.1 release\n",
-            gix::refs::transaction::PreviousValue::Any,
-        )
-        .expect("tag v0.1");
+    let tag_a = git_create_annotated_tag(&origin_repo, "v0.1", &a, "v0.1 release\n");
 
-    // Retarget the tag to B with a new message; gix replaces the
+    // Retarget the tag to B with a new message; substrate replaces the
     // previous tag object.
-    let tag_b = origin_repo
-        .tag(
-            "v0.1",
-            b,
-            gix::object::Kind::Commit,
-            None,
-            "v0.1 retargeted to B\n",
-            gix::refs::transaction::PreviousValue::Any,
-        )
-        .expect("retarget v0.1");
-    assert_ne!(
-        tag_a.id(),
-        tag_b.id(),
-        "retargeting should mint a new tag oid"
-    );
+    let tag_b = git_create_annotated_tag(&origin_repo, "v0.1", &b, "v0.1 retargeted to B\n");
+    assert_ne!(tag_a, tag_b, "retargeting should mint a new tag oid");
 
     heddle_without_git(
         &["clone", origin.to_str().unwrap(), work.to_str().unwrap()],
@@ -504,22 +473,21 @@ fn realworld_git_annotated_tag_rename_round_trips() {
     // The bridge mirror should expose the retargeted tag at the new
     // tag oid; both A and B remain reachable.
     let mirror = work.join(".heddle").join("git");
-    let mirror_repo = gix::open(&mirror).expect("open bridge mirror");
-    let tag_ref = mirror_repo
-        .find_reference("refs/tags/v0.1")
-        .expect("v0.1 ref present");
-    let tag_oid = tag_ref.target().try_id().expect("tag oid").to_owned();
+    let mirror_repo = git_substrate::GitRepo::open(&mirror).expect("open bridge mirror");
+    let tag_oid = mirror_repo
+        .read_ref_oid("refs/tags/v0.1")
+        .expect("v0.1 ref present")
+        .expect("tag oid");
     assert_eq!(
-        tag_oid,
-        tag_b.id(),
+        tag_oid, tag_b,
         "bridge mirror should track the retargeted tag oid"
     );
     assert!(
-        mirror_repo.find_object(a).is_ok(),
+        mirror_repo.has_object(&a).expect("check commit A"),
         "original commit A must remain reachable in the mirror"
     );
     assert!(
-        mirror_repo.find_object(b).is_ok(),
+        mirror_repo.has_object(&b).expect("check commit B"),
         "retargeted commit B must remain reachable in the mirror"
     );
 }
@@ -534,7 +502,7 @@ fn realworld_git_cherry_pick_assigns_distinct_change_ids() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
-    let origin_repo = gix::init_bare(&origin).expect("init origin");
+    let origin_repo = git_substrate::GitRepo::init_bare(&origin).expect("init origin");
 
     // base on main
     let base_tree = git_tree_with_file(&origin_repo, "core.rs", b"fn base() {}\n");
@@ -627,7 +595,7 @@ fn realworld_git_gc_prunes_unreachable_mapping_entries() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
-    let origin_repo = gix::init_bare(&origin).expect("init origin");
+    let origin_repo = git_substrate::GitRepo::init_bare(&origin).expect("init origin");
 
     let base_tree = git_tree_with_file(&origin_repo, "core.rs", b"fn base() {}\n");
     let base = git_commit_with_tree(
@@ -806,11 +774,12 @@ fn marketing_moments_walkthrough_against_real_fixture() {
     // Create a raw git branch off HEAD before bridge import; the import
     // should surface it as a thread and `bridge git list` should advise
     // the scoped import command for any remaining unimported tip.
-    let cloned = gix::open(&work).expect("open cloned working tree");
+    let cloned = git_substrate::GitRepo::open(&work).expect("open cloned working tree");
     let head = cloned
-        .head_commit()
-        .expect("cloned repo should have a HEAD commit");
-    git_set_reference(&cloned, "refs/heads/raw-side-branch", head.id().detach());
+        .head_commit_oid_or_none()
+        .expect("head")
+        .expect("head commit");
+    git_set_reference(&cloned, "refs/heads/raw-side-branch", head);
     heddle_without_git(&["bridge", "import"], &work).unwrap();
     let threads_json = heddle_without_git(&["thread", "list", "--output", "json"], &work).unwrap();
     let threads: Value = serde_json::from_str(&threads_json).unwrap();

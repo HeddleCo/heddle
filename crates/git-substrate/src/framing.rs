@@ -72,7 +72,6 @@ mod tests {
     use sley_object::{EncodedObject, ObjectType};
 
     use super::*;
-    use crate::id::{from_gix, to_gix};
 
     #[test]
     fn frame_prepends_kind_len_nul() {
@@ -129,16 +128,6 @@ mod tests {
 
             let oid = object_id_for_content(kind, content).expect("hash object");
             assert_eq!(oid.to_hex(), expected_hex);
-
-            let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
-            hasher.update(&framed);
-            let gix_hash = hasher.try_finalize().expect("sha1");
-            assert_eq!(oid.to_hex(), gix_hash.to_hex().to_string());
-            assert_eq!(to_gix(&oid).expect("to_gix"), gix_hash);
-            assert_eq!(
-                from_gix(gix_hash).expect("from_gix").to_hex(),
-                expected_hex
-            );
         }
     }
 }

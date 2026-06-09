@@ -4616,7 +4616,7 @@ fn parse_exactly_one_json_value(raw: &str) -> Result<Value, String> {
 #[test]
 fn git_compat_commit_branch_and_switch_shims_work() {
     let temp = TempDir::new().unwrap();
-    gix::init(temp.path()).expect("init git repo");
+    git_substrate::GitRepo::init(temp.path()).expect("init git repo");
     configure_repo_local_git_identity_for_json_contract(temp.path());
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
@@ -4736,8 +4736,8 @@ fn thread_switch_refuses_dirty_worktree_without_force() {
 fn remote_list_and_show_json_share_git_overlay_remote_view() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
-    gix::init_bare(&origin).expect("init bare origin");
-    gix::init(temp.path()).expect("init git worktree");
+    git_substrate::GitRepo::init_bare(&origin).expect("init bare origin");
+    git_substrate::GitRepo::init(temp.path()).expect("init git worktree");
     std::fs::OpenOptions::new()
         .append(true)
         .open(temp.path().join(".git/config"))
@@ -5955,7 +5955,7 @@ fn revert_empty_state_uses_typed_advice() {
 #[test]
 fn checkpoint_refuses_uncaptured_worktree_with_shared_advice() {
     let temp = TempDir::new().unwrap();
-    gix::init(temp.path()).expect("init git repo");
+    git_substrate::GitRepo::init(temp.path()).expect("init git repo");
     configure_repo_local_git_identity_for_json_contract(temp.path());
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
@@ -11828,30 +11828,21 @@ fn freshly_initialized_repo_reports_clean_health() {
 /// commits, suitable for `heddle clone` from a local path.
 fn make_local_master_git_repo(parent: &std::path::Path, commits: usize) -> std::path::PathBuf {
     let bare = parent.join("origin.git");
-    let repo = gix::init_bare(&bare).expect("init bare origin");
-    let mut parent_oid: Option<gix::hash::ObjectId> = None;
+    let repo = git_substrate::GitRepo::init_bare(&bare).expect("init bare origin");
+    let mut parent_oid: Option<git_substrate::ObjectId> = None;
     for i in 0..commits {
-        let blob = repo
-            .write_blob(format!("content {i}\n").as_bytes())
-            .expect("write blob")
-            .detach();
-        let empty = repo.empty_tree().id;
-        let mut editor = repo.edit_tree(empty).expect("edit tree");
-        editor
-            .upsert(
-                format!("f{i}.txt"),
-                gix::object::tree::EntryKind::Blob,
-                blob,
-            )
-            .expect("add file");
-        let tree = editor.write().expect("write tree").detach();
-        let parents = parent_oid.map(|p| vec![p]).unwrap_or_default();
+        let tree = git_tree_with_file(
+            &repo,
+            &format!("f{i}.txt"),
+            format!("content {i}\n").as_bytes(),
+        );
+        let parents = parent_oid.as_ref().map(std::slice::from_ref).unwrap_or(&[]);
         let commit = git_commit_with_tree(
             &repo,
             Some("refs/heads/master"),
             tree,
             &format!("c{i}"),
-            &parents,
+            parents,
         );
         parent_oid = Some(commit);
     }

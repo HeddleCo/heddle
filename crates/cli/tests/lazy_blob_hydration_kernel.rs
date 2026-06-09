@@ -4,8 +4,8 @@
 //! Verifies that [`Repository::require_blob`], when a blob is recorded
 //! in `.heddle/partial-fetch` and absent from the local heddle object
 //! store, delegates to a registered [`repo::BlobHydrator`] which
-//! materialises the bytes via gix promisor semantics against the
-//! upstream Git repository.
+//! materialises the bytes via the git substrate against the upstream Git
+//! repository.
 //!
 //! Two test entry points:
 //!
@@ -29,50 +29,54 @@ use std::{
 };
 
 use cli::{bridge::git_core::clone_url_to_bare, cli::commands::GitOverlayBlobHydrator};
+use git_substrate::{
+    GitRepo, ObjectId, RefConstraint, TreeEntryInput, TreeEntryMode, actor_suffix_bytes,
+    set_reference, write_simple_commit,
+};
 use objects::object::Blob;
 use repo::Repository;
 use tempfile::TempDir;
 
-/// Build a minimal bare gix repo with a single commit / tree / blob,
+/// Build a minimal bare git repo with a single commit / tree / blob,
 /// returning `(temp_dir, bare_path, blob_oid, blob_bytes)`. The temp
 /// dir must outlive the test that uses it.
-fn build_local_bare_with_one_blob() -> (TempDir, std::path::PathBuf, gix::ObjectId, Vec<u8>) {
+fn build_local_bare_with_one_blob() -> (TempDir, std::path::PathBuf, ObjectId, Vec<u8>) {
     let temp = TempDir::new().expect("temp for bare git");
     let bare = temp.path().join("source.git");
-    let repo = gix::init_bare(&bare).expect("init bare gix");
+    let repo = GitRepo::init_bare(&bare).expect("init bare git repo");
 
     let blob_bytes = b"# Hydration sentinel\nlazy lazy lazy\n".to_vec();
     let blob_oid = repo
         .write_blob(blob_bytes.as_slice())
-        .expect("write blob")
-        .detach();
+        .expect("write blob");
 
-    let empty_tree = repo.empty_tree().id;
-    let mut editor = repo.edit_tree(empty_tree).expect("edit tree");
-    editor
-        .upsert("README.md", gix::object::tree::EntryKind::Blob, blob_oid)
-        .expect("add file");
-    let tree_oid = editor.write().expect("write tree").detach();
+    let mut entries = vec![TreeEntryInput {
+        mode: TreeEntryMode::Blob,
+        name: "README.md".to_string(),
+        oid: blob_oid.clone(),
+    }];
+    let tree_oid = repo.write_tree(&mut entries).expect("write tree");
 
-    let sig = gix::actor::Signature {
-        name: "Heddle Test".into(),
-        email: "test@heddle".into(),
-        time: gix::date::Time {
-            seconds: 0,
-            offset: 0,
-        },
-    };
-    let mut author_buf = gix::date::parse::TimeBuf::default();
-    let mut committer_buf = gix::date::parse::TimeBuf::default();
-    let _commit = repo
-        .new_commit_as(
-            sig.to_ref(&mut committer_buf),
-            sig.to_ref(&mut author_buf),
-            "seed",
-            tree_oid,
-            Vec::<gix::hash::ObjectId>::new(),
-        )
-        .expect("commit");
+    let actor = actor_suffix_bytes(b"Heddle Test", b"test@heddle", 0, 0);
+    let _commit = write_simple_commit(
+        repo.git_dir(),
+        repo.object_format(),
+        &tree_oid,
+        &[],
+        &actor,
+        &actor,
+        b"seed",
+    )
+    .expect("commit");
+    set_reference(
+        repo.git_dir(),
+        repo.object_format(),
+        "refs/heads/main",
+        &_commit,
+        RefConstraint::Any,
+        "test: seed main",
+    )
+    .expect("set main ref");
 
     (temp, bare, blob_oid, blob_bytes)
 }
@@ -86,7 +90,7 @@ fn build_local_bare_with_one_blob() -> (TempDir, std::path::PathBuf, gix::Object
 /// caller can attach a perf line to the PR description.
 fn drive_hydration_round_trip(
     git_bare: &Path,
-    blob_oid: gix::ObjectId,
+    blob_oid: ObjectId,
     blob_bytes: &[u8],
 ) -> Duration {
     let blake3 = Blob::new(blob_bytes.to_vec()).hash();
@@ -144,7 +148,7 @@ fn drive_hydration_round_trip(
 fn hydration_fires_against_local_git_overlay() {
     let (_temp, bare, oid, bytes) = build_local_bare_with_one_blob();
     let elapsed = drive_hydration_round_trip(&bare, oid, &bytes);
-    // Sanity: a local file-backed gix find_blob should be sub-second.
+    // Sanity: a local file-backed read_blob should be sub-second.
     // The kernel test gets a much looser budget below.
     assert!(
         elapsed < Duration::from_secs(5),
@@ -226,12 +230,11 @@ fn hydration_survives_repository_reopen() {
 
     // Second reopen with a *new* missing blob in the bare repo to
     // confirm the registry isn't a one-shot install.
-    let bare_open = gix::open(&bare).expect("open bare for second blob");
+    let bare_open = GitRepo::open(&bare).expect("open bare for second blob");
     let payload2 = b"second-blob-after-reopen\n".to_vec();
     let oid2 = bare_open
         .write_blob(payload2.as_slice())
-        .expect("write blob 2")
-        .detach();
+        .expect("write blob 2");
     let blake3_2 = Blob::new(payload2.clone()).hash();
     // Re-register the factory under the same kind to seed the new
     // OID — last-write-wins, mirroring how the production path could
@@ -275,43 +278,38 @@ fn hydration_fires_against_torvalds_linux() {
 
     let temp = TempDir::new().expect("temp for linux clone");
     let bare = temp.path().join("linux.git");
-    let url = gix::url::parse("https://github.com/torvalds/linux.git".as_bytes().into())
-        .expect("parse url");
+    let url = "https://github.com/torvalds/linux.git";
 
     eprintln!("cloning torvalds/linux.git at depth=1 + filter=blob:none ...");
     let started = Instant::now();
-    if let Err(err) = clone_url_to_bare(&url, &bare, Some(1), Some("blob:none")) {
+    if let Err(err) = clone_url_to_bare(url, &bare, Some(1), Some("blob:none")) {
         eprintln!("SKIP: kernel clone failed (network?): {err}");
         return;
     }
     eprintln!("clone completed in {:?}", started.elapsed());
 
-    let gix_repo = gix::open(&bare).expect("open kernel bare repo");
-    let tip = gix_repo.head_commit().expect("HEAD commit").id().detach();
-    let tree = gix_repo
-        .find_commit(tip)
-        .expect("find HEAD commit")
-        .tree_id()
-        .expect("commit tree id")
-        .detach();
-    let tree_obj = gix_repo.find_tree(tree).expect("read tip tree");
+    let gix_repo = GitRepo::open(&bare).expect("open kernel bare repo");
+    let tip = gix_repo
+        .head_commit_oid_or_none()
+        .expect("head")
+        .expect("commit");
+    let tree = gix_repo.read_commit(&tip).expect("read HEAD commit").tree;
+    let tree_obj = gix_repo.read_tree(&tree).expect("read tip tree");
     let blob_oid = tree_obj
+        .entries
         .iter()
-        .filter_map(|entry| entry.ok())
-        .find(|entry| matches!(entry.mode().kind(), gix::object::tree::EntryKind::Blob))
-        .map(|entry| entry.oid().to_owned())
+        .find(|entry| entry.mode == 0o100644 || entry.mode == 0o100755)
+        .map(|entry| entry.oid.clone())
         .expect("tip tree must contain at least one blob entry");
     eprintln!("targeting blob {blob_oid} for hydration");
 
     // Materialise the blob bytes once via the git CLI so we know
-    // what blake3 to mark missing. gix 0.80 cannot trigger the
-    // promisor fetch itself; we rely on the same mechanism the
-    // hydrator uses internally (`git -C <bare> cat-file -p <oid>`).
+    // what blake3 to mark missing.
     let cat = std::process::Command::new("git")
         .arg("-C")
         .arg(&bare)
         .args(["cat-file", "-p"])
-        .arg(blob_oid.to_string())
+        .arg(blob_oid.to_hex())
         .output()
         .expect("git cat-file invocation");
     assert!(
@@ -321,11 +319,6 @@ fn hydration_fires_against_torvalds_linux() {
     );
     let bytes = cat.stdout;
     eprintln!("blob materialised ({} bytes)", bytes.len());
-
-    // gix can confirm the blob is now in the ODB after the promisor
-    // refetch — the hydrator's local-first read will hit this path
-    // on the test's second `cat-file` call rather than re-fetching.
-    let _ = gix_repo;
 
     let elapsed = drive_hydration_round_trip(&bare, blob_oid, &bytes);
     eprintln!("hydration round-trip: {elapsed:?}");

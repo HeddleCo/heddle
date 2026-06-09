@@ -7,9 +7,9 @@
 
 pub mod copy;
 pub mod framing;
-pub mod transport;
-#[cfg(feature = "gix-interop")]
 pub mod gix_interop;
+pub mod remote;
+pub mod transport;
 pub mod id;
 pub mod index;
 pub mod kind;
@@ -22,16 +22,7 @@ pub use framing::{
     actor_suffix_bytes, append_labeled_actor_line, format_tz_offset, frame_git_object,
     object_id_for_content,
 };
-pub use gix_interop::{
-    blob_object_id, commit_object_id, is_commit, read_object_kind,
-};
-#[cfg(feature = "gix-interop")]
-pub use gix_interop::{
-    gix_blob_object_id, gix_commit_object_id, gix_is_commit, gix_object_format,
-    read_gix_object_kind,
-};
-#[cfg(feature = "gix-interop")]
-pub use id::{from_gix, to_gix};
+pub use gix_interop::{blob_object_id, commit_object_id, is_commit, read_object_kind};
 pub use sley_config::{
     load_config_with_includes, ConfigIncludeContext, GitConfig,
 };
@@ -55,11 +46,16 @@ pub use refs::{
     RefConstraint, RefDeleteConstraint,
 };
 pub use copy::{collect_reachable_object_ids, copy_reachable_objects, pack_reachable_objects};
+pub use remote::{
+    configured_remote_is_local_path, configured_remote_local_path, local_path_from_remote_url,
+    normalize_configured_remote_url, remote_url_is_file,
+};
 pub use repo::GitRepo;
 pub use transport::{
     fetch_bare_mirror, push_receive_pack, receive_pack_ref_map, supports_native_fetch,
     supports_native_fetch_with_depth, supports_native_push, transport_capabilities, PushCommand,
 };
+pub use sley_transport::parse_remote_url;
 pub use sley_remote::TransportCapabilities;
 pub use index::{
     index_cached_stat_from_path, index_entry_is_intent_to_add, index_entry_stage,
@@ -71,7 +67,7 @@ pub use worktree::{
     write_index_from_commit, write_index_from_tree, IntentToAddMode,
 };
 pub use write::{
-    write_blob, write_commit_content, write_simple_commit, write_tree, TreeEntryInput,
+    write_blob, write_commit_content, write_simple_commit, write_tag, write_tree, TreeEntryInput,
     TreeEntryMode,
 };
 

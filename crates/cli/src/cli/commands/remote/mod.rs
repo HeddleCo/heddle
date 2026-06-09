@@ -9,7 +9,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use gix::{bstr::ByteSlice, refs::transaction::PreviousValue};
 use objects::{fs_atomic::write_file_atomic, object::ThreadName};
 use refs::Head;
 use repo::{Repository, RepositoryCapability};
@@ -797,7 +796,7 @@ fn refresh_git_tracking_after_overlay_push(
         &git,
         &full_ref,
         &head,
-        PreviousValue::Any,
+        git_substrate::RefConstraint::Any,
         &format!("heddle: push to {remote_name}"),
     ) {
         return Err(anyhow!(

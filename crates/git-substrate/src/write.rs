@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use sley_core::{ObjectFormat, ObjectId};
-use sley_object::{Commit, EncodedObject, ObjectType, Tree, TreeEntry};
+use sley_object::{Commit, EncodedObject, ObjectType, Tag, Tree, TreeEntry};
 use sley_odb::{FileObjectDatabase, ObjectWriter};
 
 use crate::{GitSubstrateError, Result};
@@ -95,6 +95,15 @@ pub fn write_simple_commit(
         message: message.to_vec(),
     };
     write_commit_content(git_dir, format, &commit.write())
+}
+
+/// Write an annotated tag object into `git_dir`'s object database.
+pub fn write_tag(git_dir: &Path, format: ObjectFormat, tag: &Tag) -> Result<ObjectId> {
+    write_encoded(
+        git_dir,
+        format,
+        EncodedObject::new(ObjectType::Tag, tag.write()),
+    )
 }
 
 /// Write a tree from `entries`, sorting by entry name (byte order) first.

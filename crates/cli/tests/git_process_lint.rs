@@ -318,7 +318,7 @@ fn git_spawn_detector_catches_aliases_and_shell_wrappers() {
         "Command::new(\"heddle\")",
         "Command::new(\"xdg-open\")",
         "Command::new(\"cmd\").args([\"/C\", \"start\", url])",
-        "let git = gix::open(path)?;",
+        "let git = git_substrate::GitRepo::open(path)?;",
     ] {
         assert!(!is_git_spawn(line), "should not flag {line:?}");
     }
@@ -350,5 +350,5 @@ fn git_spawn_detector_catches_multiline_and_local_aliases() {
         parse_git_command_alias("let mut git_cmd = r#\"git\"#;"),
         Some("git_cmd")
     );
-    assert_eq!(parse_git_command_alias("let git = gix::open(path)?;"), None);
+    assert_eq!(parse_git_command_alias("let git = git_substrate::GitRepo::open(path)?;"), None);
 }

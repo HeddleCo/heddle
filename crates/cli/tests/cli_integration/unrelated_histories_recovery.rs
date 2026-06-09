@@ -51,18 +51,50 @@
 //! $ heddle bridge graft --onto 87199280 HEAD
 //! ```
 
+use std::process::Command;
+
+use git_substrate::{GitRepo, ObjectId, parse_sha1_hex};
+
 use super::*;
 
-/// Build a tree containing a single file. Local helper because the
-/// sibling modules that already define this keep theirs private.
-fn git_tree_with_file(repo: &gix::Repository, path: &str, content: &[u8]) -> gix::hash::ObjectId {
-    let blob = repo.write_blob(content).expect("write git blob").detach();
-    let empty = repo.empty_tree().id;
-    let mut editor = repo.edit_tree(empty).expect("edit git tree");
-    editor
-        .upsert(path, gix::object::tree::EntryKind::Blob, blob)
-        .expect("add file to git tree");
-    editor.write().expect("write git tree").detach()
+fn git_merge_base(repo_path: &std::path::Path, a: &ObjectId, b: &ObjectId) -> Option<ObjectId> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["merge-base", &a.to_hex(), &b.to_hex()])
+        .output()
+        .expect("spawn git merge-base");
+    if !output.status.success() {
+        return None;
+    }
+    let hex = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if hex.is_empty() {
+        return None;
+    }
+    Some(parse_sha1_hex(&hex).expect("merge-base oid"))
+}
+
+fn git_rev_list(repo_path: &std::path::Path, tip: &ObjectId) -> Vec<ObjectId> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["rev-list", &tip.to_hex()])
+        .output()
+        .expect("spawn git rev-list");
+    assert!(
+        output.status.success(),
+        "git rev-list failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| parse_sha1_hex(line).expect("rev-list oid"))
+        .collect()
+}
+
+fn git_commit_tree(repo: &GitRepo, commit: &ObjectId) -> ObjectId {
+    repo.read_commit(commit).expect("read commit").tree
 }
 
 /// Build a fixture mirroring the Codex Cloud bootstrap pattern, then
@@ -90,7 +122,7 @@ fn git_tree_with_file(repo: &gix::Repository, path: &str, content: &[u8]) -> gix
 fn unrelated_histories_recover_via_tree_hash_match() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
-    let origin_repo = gix::init_bare(&origin).expect("init origin");
+    let origin_repo = git_substrate::GitRepo::init_bare(&origin).expect("init origin");
 
     // Build A → B → C on origin's main.
     let tree_a = git_tree_with_file(&origin_repo, "core.rs", b"pub fn a() {}\n");
@@ -161,10 +193,7 @@ fn unrelated_histories_recover_via_tree_hash_match() {
     //
     // `git merge-base origin/main work` produces no output — the
     // graphs share no ancestor. This is the load-bearing diagnostic.
-    let merge_base = origin_repo
-        .merge_base(commit_y, _commit_c)
-        .ok()
-        .map(|m| m.detach());
+    let merge_base = git_merge_base(&origin, &commit_y, &_commit_c);
     assert!(
         merge_base.is_none(),
         "synthetic root must have no common ancestor with origin/main; \
@@ -177,22 +206,10 @@ fn unrelated_histories_recover_via_tree_hash_match() {
     // whose tree hash equals the synthetic root's tree hash. That's
     // the commit Codex Cloud (or `git archive`, or whoever) sourced
     // the snapshot from.
-    let synthetic_root_tree = origin_repo
-        .find_commit(synthetic_root)
-        .expect("find synthetic root")
-        .tree_id()
-        .expect("synthetic root tree id")
-        .detach();
-    let mut canonical_ancestor: Option<gix::hash::ObjectId> = None;
-    for info in origin_repo
-        .rev_walk([_commit_c])
-        .all()
-        .expect("rev-walk origin/main")
-    {
-        let info = info.expect("walk step");
-        let oid = info.id;
-        let commit = origin_repo.find_commit(oid).expect("find commit");
-        let tree_id = commit.tree_id().expect("tree id").detach();
+    let synthetic_root_tree = git_commit_tree(&origin_repo, &synthetic_root);
+    let mut canonical_ancestor: Option<git_substrate::ObjectId> = None;
+    for oid in git_rev_list(&origin, &_commit_c) {
+        let tree_id = git_commit_tree(&origin_repo, &oid);
         if tree_id == synthetic_root_tree {
             canonical_ancestor = Some(oid);
             break;
@@ -215,12 +232,7 @@ fn unrelated_histories_recover_via_tree_hash_match() {
     // `A ─ B ─ {graft = synthetic + X + Y squashed}` — a branch
     // with proper graph lineage that's content-equivalent to the
     // pre-recovery work tip.
-    let work_tip_tree = origin_repo
-        .find_commit(commit_y)
-        .expect("find work tip")
-        .tree_id()
-        .expect("work tip tree id")
-        .detach();
+    let work_tip_tree = git_commit_tree(&origin_repo, &commit_y);
     let grafted = git_commit_with_tree(
         &origin_repo,
         None,
@@ -228,12 +240,7 @@ fn unrelated_histories_recover_via_tree_hash_match() {
         "graft: replay work onto canonical ancestor",
         &[canonical],
     );
-    let grafted_tree = origin_repo
-        .find_commit(grafted)
-        .expect("find grafted")
-        .tree_id()
-        .expect("grafted tree id")
-        .detach();
+    let grafted_tree = git_commit_tree(&origin_repo, &grafted);
     assert_eq!(
         grafted_tree, work_tip_tree,
         "grafted commit's tree must exactly match the original work tip's tree \
@@ -245,10 +252,8 @@ fn unrelated_histories_recover_via_tree_hash_match() {
     // `git merge-base grafted origin/main` should now resolve to the
     // canonical ancestor. The phantom-conflict storm (one AA conflict
     // per shared file) is gone because there's a real common base.
-    let recovered_base = origin_repo
-        .merge_base(grafted, _commit_c)
-        .expect("recovery merge-base resolves")
-        .detach();
+    let recovered_base = git_merge_base(&origin, &grafted, &_commit_c)
+        .expect("recovery merge-base resolves");
     assert_eq!(
         recovered_base, canonical,
         "post-graft, the merge-base of the recovered branch and origin/main \
@@ -280,27 +285,19 @@ fn unrelated_histories_recover_via_tree_hash_match() {
 
     // ─── Step 6: final invariant — the recovered branch contains
     //              every distinguishing change from both lineages.
-    let final_tree = origin_repo
-        .find_commit(rebased)
-        .expect("find recovered tip")
-        .tree_id()
-        .expect("final tree id")
-        .detach();
+    let final_tree = git_commit_tree(&origin_repo, &rebased);
     let final_root_tree = origin_repo
-        .find_object(final_tree)
-        .expect("read final tree")
-        .into_tree();
+        .read_tree(&final_tree)
+        .expect("read final tree");
     let core_entry = final_root_tree
+        .entries
         .iter()
-        .find_map(|entry| {
-            let entry = entry.expect("tree entry");
-            (entry.filename() == b"core.rs".as_slice()).then(|| entry.oid().to_owned())
-        })
+        .find(|entry| entry.name.as_bytes() == b"core.rs")
+        .map(|entry| entry.oid.clone())
         .expect("core.rs in final tree");
-    let core_blob = origin_repo
-        .find_object(core_entry)
+    let core_bytes = origin_repo
+        .read_blob(&core_entry)
         .expect("find core.rs blob");
-    let core_bytes = core_blob.data.clone();
     for token in [
         b"pub fn a()" as &[u8],
         b"pub fn b()",
@@ -333,7 +330,7 @@ fn unrelated_histories_recover_via_tree_hash_match() {
 fn synthetic_root_tree_resolves_to_unique_canonical_ancestor() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
-    let origin_repo = gix::init_bare(&origin).expect("init origin");
+    let origin_repo = git_substrate::GitRepo::init_bare(&origin).expect("init origin");
 
     let tree_a = git_tree_with_file(&origin_repo, "core.rs", b"// a\n");
     let a = git_commit_with_tree(&origin_repo, Some("refs/heads/main"), tree_a, "A", &[]);
@@ -348,12 +345,10 @@ fn synthetic_root_tree_resolves_to_unique_canonical_ancestor() {
     let synced_tree = tree_b;
 
     let mut matches = Vec::new();
-    for info in origin_repo.rev_walk([c]).all().expect("rev-walk") {
-        let info = info.expect("walk step");
-        let commit = origin_repo.find_commit(info.id).expect("find commit");
-        let tree_id = commit.tree_id().expect("tree id").detach();
+    for oid in git_rev_list(&origin, &c) {
+        let tree_id = git_commit_tree(&origin_repo, &oid);
         if tree_id == synced_tree {
-            matches.push(info.id);
+            matches.push(oid);
         }
     }
     assert_eq!(

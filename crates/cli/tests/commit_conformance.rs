@@ -40,7 +40,6 @@ use cli::bridge::git_core::GitBridge;
 use cli::bridge::git_import::import_all_with_options;
 use cli::bridge::git_reconstruct::commit_object_id;
 use cli::bridge::git_util::GitImportOptions;
-use git_substrate::to_gix;
 use tempfile::TempDir;
 
 /// Pinned identity + config so the in-process fixtures produce stable SHAs
@@ -330,16 +329,14 @@ fn assert_all_commits_export_from_state(case: &str, source: &Path) {
     // commit object, so a regenerated commit landing here is provably rebuilt
     // from state rather than copied from the mirror's verbatim import.
     let fresh_home = TempDir::new().expect("fresh temp");
-    let fresh_gix = gix::init_bare(fresh_home.path().join("fresh.git"))
+    let fresh = git_substrate::GitRepo::init_bare(fresh_home.path().join("fresh.git"))
         .unwrap_or_else(|e| panic!("[{case}] init fresh bare repo failed: {e}"));
-    let fresh = git_substrate::GitRepo::open(fresh_gix.git_dir())
-        .unwrap_or_else(|e| panic!("[{case}] open fresh substrate repo failed: {e}"));
 
     for sha in &shas {
-        let oid = gix::ObjectId::from_hex(sha.as_bytes())
+        let oid = git_substrate::parse_sha1_hex(sha)
             .unwrap_or_else(|e| panic!("[{case}] bad sha {sha}: {e}"));
         assert!(
-            !fresh_gix.has_object(oid),
+            !fresh.has_object(&oid).unwrap_or_else(|e| panic!("[{case}] object check failed: {e}")),
             "[{case}] fresh repo unexpectedly already holds commit {sha} before \
              reconstruction — the from-state independence guarantee is void"
         );

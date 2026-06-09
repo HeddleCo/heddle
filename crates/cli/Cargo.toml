@@ -30,7 +30,6 @@ clap.workspace = true
 clap_complete.workspace = true
 futures.workspace = true
 
-gix.workspace = true
 git-substrate = { path = "../git-substrate", package = "heddle-git-substrate", version = "0.2" }
 hex.workspace = true
 ignore.workspace = true
@@ -200,8 +199,6 @@ mount = [
 
 [dev-dependencies]
 criterion = "0.8"
-gix.workspace = true
-gix-transport.workspace = true
 hyper-util.workspace = true
 review = { path = "../review", package = "heddle-review" }
 ntest.workspace = true

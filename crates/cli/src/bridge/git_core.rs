@@ -7,18 +7,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use gix::{
-    bstr::ByteSlice,
-    refs::{
-        Target,
-        transaction::PreviousValue,
-    },
-};
 pub use git_substrate::ObjectId;
 use git_substrate::{
-    self, actor_suffix_bytes, index_lock_exists, null_sha1, parse_sha1_hex,
-    write_index_from_commit, GitRepo, IntentToAddMode, RefConstraint, RefDeleteConstraint,
-    reconcile_intent_to_add,
+    self, actor_suffix_bytes, configured_remote_is_local_path, index_lock_exists,
+    local_path_from_remote_url, normalize_configured_remote_url, null_sha1, parse_sha1_hex,
+    remote_url_is_file, write_index_from_commit, GitRepo, IntentToAddMode, RefConstraint,
+    RefDeleteConstraint, reconcile_intent_to_add,
 };
 use objects::{
     error::HeddleError,
@@ -33,22 +27,6 @@ use super::{
     git_import::import_all,
     git_util::{ImportStats, LossyGitImportEntry},
 };
-
-fn gix_oid(oid: &ObjectId) -> GitResult<gix::hash::ObjectId> {
-    git_substrate::to_gix(oid).map_err(|err| GitBridgeError::Git(err.to_string()))
-}
-
-fn substrate_oid(oid: gix::hash::ObjectId) -> GitResult<ObjectId> {
-    git_substrate::from_gix(oid).map_err(|err| GitBridgeError::Git(err.to_string()))
-}
-
-/// Wire URL for native transport, preserving embedded credentials.
-///
-/// `gix::Url::to_string()` redacts passwords for safe logging; transport
-/// needs the real secret to authenticate HTTP remotes.
-fn gix_transport_url(url: &gix::Url) -> String {
-    url.to_bstring().to_string()
-}
 
 /// Errors specific to Git bridge operations.
 #[derive(Debug, thiserror::Error)]
@@ -356,10 +334,16 @@ enum RefreshCheckoutAfterFetch {
     No,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteDirection {
+    Fetch,
+    Push,
+}
+
 #[derive(Debug, Clone)]
 enum ResolvedRemote {
     Local(PathBuf),
-    Url(gix::Url),
+    Url(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -414,14 +398,6 @@ impl LocalGitIdentity {
         Self {
             name: principal.name.clone(),
             email: principal.email.clone(),
-        }
-    }
-
-    pub(crate) fn to_signature(&self, seconds: i64) -> gix::actor::Signature {
-        gix::actor::Signature {
-            name: self.name.as_str().into(),
-            email: self.email.as_str().into(),
-            time: gix::date::Time { seconds, offset: 0 },
         }
     }
 
@@ -802,7 +778,7 @@ impl<'a> GitBridge<'a> {
         // inside each path — never a scope-filtered subset; the scope lives in the
         // mirror state, not in a second destination filter (heddle#316 r16).
         let log_message = format!("heddle: push from {}", self.heddle_repo.root().display());
-        match self.resolve_remote(remote_name, gix::remote::Direction::Push)? {
+        match self.resolve_remote(remote_name, RemoteDirection::Push)? {
             ResolvedRemote::Local(target_path) => self.copy_mirror_to_path(
                 &target_path,
                 &log_message,
@@ -975,7 +951,7 @@ impl<'a> GitBridge<'a> {
         }
 
         let mirror_repo = self.open_git_repo()?;
-        match self.resolve_remote(remote_name, gix::remote::Direction::Fetch)? {
+        match self.resolve_remote(remote_name, RemoteDirection::Fetch)? {
             ResolvedRemote::Local(path) => {
                 let remote_repo = open_git_repo_at(&path)?;
                 let updates = collect_ref_updates_for_fetch(&remote_repo, scope)?;
@@ -1683,9 +1659,10 @@ impl<'a> GitBridge<'a> {
     fn resolve_remote(
         &self,
         remote_name: &str,
-        direction: gix::remote::Direction,
+        direction: RemoteDirection,
     ) -> GitResult<ResolvedRemote> {
         let repo = self.open_git_repo()?;
+        let base = repo.workdir().unwrap_or_else(|| repo.git_dir().to_path_buf());
         let url = match remote_url_from_git_repo(&repo, remote_name, direction)? {
             Some(url) => Some(url),
             None => self.checkout_remote_url(remote_name, direction)?,
@@ -1693,21 +1670,30 @@ impl<'a> GitBridge<'a> {
 
         let url = match url {
             Some(url) => url,
-            None => gix::url::parse(remote_name.as_bytes().as_bstr()).map_err(git_err)?,
+            None => {
+                if configured_remote_is_local_path(remote_name) {
+                    parse_configured_remote_url(remote_name, &base)?
+                } else {
+                    remote_name.to_string()
+                }
+            }
         };
 
-        match url.scheme {
-            gix::url::Scheme::File => Ok(ResolvedRemote::Local(local_path_from_url(&url)?)),
-            _ => Ok(ResolvedRemote::Url(url)),
+        if remote_url_is_file(&url).map_err(git_err)? {
+            Ok(ResolvedRemote::Local(
+                local_path_from_remote_url(&url, &base).map_err(git_err)?,
+            ))
+        } else {
+            Ok(ResolvedRemote::Url(url))
         }
     }
 
     fn checkout_remote_url(
         &self,
         remote_name: &str,
-        direction: gix::remote::Direction,
-    ) -> GitResult<Option<gix::Url>> {
-        if direction == gix::remote::Direction::Fetch
+        direction: RemoteDirection,
+    ) -> GitResult<Option<String>> {
+        if direction == RemoteDirection::Fetch
             && let Some(url) =
                 remote_fetch_url_from_checkout_config(self.heddle_repo.root(), remote_name)?
         {
@@ -1723,11 +1709,11 @@ impl<'a> GitBridge<'a> {
 fn remote_url_from_git_repo(
     repo: &GitRepo,
     remote_name: &str,
-    direction: gix::remote::Direction,
-) -> GitResult<Option<gix::Url>> {
+    direction: RemoteDirection,
+) -> GitResult<Option<String>> {
     let base = repo.workdir().unwrap_or_else(|| repo.git_dir().to_path_buf());
     for config_path in git_repo_config_paths(repo) {
-        if direction == gix::remote::Direction::Fetch {
+        if direction == RemoteDirection::Fetch {
             if let Some(url) = parse_remote_fetch_url_from_config(&config_path, remote_name)? {
                 return parse_configured_remote_url(&url, &base).map(Some);
             }
@@ -1844,24 +1830,10 @@ fn looks_like_remote_location(value: &str) -> bool {
         || value.contains('\\')
 }
 
-fn remote_fetch_url_from_config(
-    repo: &gix::Repository,
-    remote_name: &str,
-) -> GitResult<Option<gix::Url>> {
-    for config_path in repo_config_paths(repo)? {
-        let Some(url) = parse_remote_fetch_url_from_config(&config_path, remote_name)? else {
-            continue;
-        };
-        let base = repo.workdir().unwrap_or_else(|| repo.git_dir());
-        return parse_configured_remote_url(&url, base).map(Some);
-    }
-    Ok(None)
-}
-
 fn remote_fetch_url_from_checkout_config(
     root: &Path,
     remote_name: &str,
-) -> GitResult<Option<gix::Url>> {
+) -> GitResult<Option<String>> {
     for config_path in checkout_git_config_paths(root) {
         let Some(url) = parse_remote_fetch_url_from_config(&config_path, remote_name)? else {
             continue;
@@ -1871,41 +1843,8 @@ fn remote_fetch_url_from_checkout_config(
     Ok(None)
 }
 
-fn parse_configured_remote_url(value: &str, relative_base: &Path) -> GitResult<gix::Url> {
-    if configured_remote_is_local_path(value) {
-        let path = configured_remote_local_path(value, relative_base);
-        return gix::url::parse(format!("file://{}", path.display()).as_bytes().as_bstr())
-            .map_err(git_err);
-    }
-    gix::url::parse(value.as_bytes().as_bstr()).map_err(git_err)
-}
-
-fn configured_remote_local_path(value: &str, relative_base: &Path) -> PathBuf {
-    if value == "~"
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return PathBuf::from(home);
-    }
-    if let Some(rest) = value.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(rest);
-    }
-
-    let path = Path::new(value);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        relative_base.join(path)
-    }
-}
-
-fn configured_remote_is_local_path(value: &str) -> bool {
-    value.starts_with('/')
-        || value.starts_with("./")
-        || value.starts_with("../")
-        || value.starts_with('~')
-        || value.starts_with(std::path::MAIN_SEPARATOR)
+fn parse_configured_remote_url(value: &str, relative_base: &Path) -> GitResult<String> {
+    normalize_configured_remote_url(value, relative_base).map_err(git_err)
 }
 
 fn checkout_git_config_paths(root: &Path) -> Vec<PathBuf> {
@@ -1951,19 +1890,6 @@ fn common_git_dir_from_git_dir(git_dir: &Path) -> Option<PathBuf> {
     } else {
         git_dir.join(path)
     })
-}
-
-fn repo_config_paths(repo: &gix::Repository) -> GitResult<Vec<PathBuf>> {
-    let mut paths = vec![repo.git_dir().join("config")];
-    if let Ok(checkout) = GitRepo::discover(
-        repo.workdir().unwrap_or_else(|| repo.git_dir()),
-    ) {
-        let common_config = checkout.common_dir().join("config");
-        if !paths.iter().any(|path| path == &common_config) {
-            paths.push(common_config);
-        }
-    }
-    Ok(paths)
 }
 
 fn parse_remote_url_from_config(path: &Path, remote_name: &str) -> GitResult<Option<String>> {
@@ -2194,7 +2120,7 @@ pub(crate) fn open_git_repo_at(path: &Path) -> GitResult<GitRepo> {
 /// Delete a reference if present; missing-ref is a no-op. Used by the
 /// write-through rollback path to drop a branch that was created by a
 /// failed write-through but isn't reachable from any prior state. We
-/// scope the deletion with `PreviousValue::MustExist` so an unrelated
+/// scope the deletion to refs that still exist so an unrelated
 /// concurrent writer that *just* updated this ref isn't silently
 /// clobbered — if the ref vanished underneath us between our read and
 /// the delete, that's the rollback we wanted anyway.
@@ -2237,36 +2163,10 @@ pub(crate) fn set_reference(
     repo: &GitRepo,
     name: &str,
     target: &ObjectId,
-    constraint: PreviousValue,
+    constraint: RefConstraint,
     log_message: &str,
 ) -> GitResult<()> {
-    set_git_repo_reference(
-        repo,
-        name,
-        target,
-        ref_constraint_from_gix(constraint)?,
-        log_message,
-    )
-}
-
-fn ref_constraint_from_gix(constraint: PreviousValue) -> GitResult<RefConstraint> {
-    match constraint {
-        PreviousValue::Any => Ok(RefConstraint::Any),
-        PreviousValue::MustNotExist => Ok(RefConstraint::MustNotExist),
-        PreviousValue::MustExistAndMatch(Target::Object(oid)) => {
-            Ok(RefConstraint::MustExistAndMatch(
-                git_substrate::from_gix(oid).map_err(git_err)?,
-            ))
-        }
-        PreviousValue::ExistingMustMatch(Target::Object(oid)) => {
-            Ok(RefConstraint::MustExistAndMatch(
-                git_substrate::from_gix(oid).map_err(git_err)?,
-            ))
-        }
-        other => Err(GitBridgeError::Git(format!(
-            "unsupported ref constraint for substrate write: {other:?}"
-        ))),
-    }
+    set_git_repo_reference(repo, name, target, constraint, log_message)
 }
 
 /// Recursively collect every file path (blob and symlink) in `tree`,
@@ -2417,26 +2317,6 @@ fn git_config_value(value: &str) -> GitResult<String> {
     }
     Ok(out)
 }
-
-fn local_path_from_url(url: &gix::Url) -> GitResult<PathBuf> {
-    if url.scheme != gix::url::Scheme::File {
-        return Err(GitBridgeError::Git(format!(
-            "remote '{}' uses unsupported scheme {:?}; only local path and file:// remotes are supported",
-            url, url.scheme
-        )));
-    }
-
-    let path = PathBuf::from(String::from_utf8_lossy(url.path.as_ref()).into_owned());
-    if path.as_os_str().is_empty() {
-        return Err(GitBridgeError::Git(format!(
-            "remote '{}' has no filesystem path",
-            url
-        )));
-    }
-    Ok(path)
-}
-
-
 
 /// A partition of the commits that land in the destination, computed over
 /// the SINGLE copied ref set. `total` is every unique commit reachable from
@@ -2598,10 +2478,8 @@ fn exported_refs_manifest_path(target_repo: &GitRepo) -> PathBuf {
 /// Keyed by a hash of the URL string so an arbitrarily long / non-ASCII URL maps
 /// to a fixed-length, filesystem-safe filename. Stored under heddle's own dir
 /// (the remote is not local, so there is no destination git dir to host it).
-fn network_exported_refs_path(heddle_dir: &Path, url: &gix::Url) -> PathBuf {
-    let key =
-        ContentHash::compute_typed("git-network-exported-refs", url.to_string().as_bytes())
-            .to_hex();
+fn network_exported_refs_path(heddle_dir: &Path, url: &str) -> PathBuf {
+    let key = ContentHash::compute_typed("git-network-exported-refs", url.as_bytes()).to_hex();
     heddle_dir
         .join(HEDDLE_NETWORK_EXPORTED_REFS_DIR)
         .join(format!("{key}.refs"))
@@ -3274,7 +3152,7 @@ pub fn copy_local_repo_to_bare(source_path: &Path, dest: &Path) -> GitResult<()>
 ///   intentionally Git-compatible but not Git-binary-dependent, and the
 ///   native transport path does not yet expose partial-clone filtering.
 pub fn clone_url_to_bare(
-    url: &gix::Url,
+    url: &str,
     dest: &Path,
     depth: Option<u32>,
     filter: Option<&str>,
@@ -3290,8 +3168,9 @@ pub fn clone_url_to_bare(
             "partial Git clone filter `{spec}` is not supported in Heddle's native no-git runtime yet; retry without --filter/--lazy so Heddle can import a complete object graph"
         )));
     }
-    if url.scheme == gix::url::Scheme::File {
-        let source_path = local_path_from_url(url)?;
+    if remote_url_is_file(url).map_err(git_err)? {
+        let source_path = local_path_from_remote_url(url, dest.parent().unwrap_or(dest))
+            .map_err(git_err)?;
         if depth.is_some() {
             return Err(GitBridgeError::Git(
                 "shallow file:// Git clones are not supported in Heddle's native no-git runtime yet; retry without --depth so Heddle can copy the local Git object graph without spawning Git transport helpers"
@@ -3319,8 +3198,8 @@ pub fn clone_url_to_bare(
     Ok(())
 }
 
-fn default_branch_from_file_url(url: &gix::Url) -> Option<String> {
-    let source_path = local_path_from_url(url).ok()?;
+fn default_branch_from_file_url(url: &str) -> Option<String> {
+    let source_path = local_path_from_remote_url(url, Path::new(".")).ok()?;
     let head_path = if source_path.join("HEAD").is_file() {
         source_path.join("HEAD")
     } else {
@@ -3337,12 +3216,11 @@ fn bare_branch_exists(repo_path: &Path, branch: &str) -> GitResult<bool> {
 }
 
 fn clone_url_to_bare_via_network(
-    url: &gix::Url,
+    url: &str,
     dest: &Path,
     depth: Option<u32>,
 ) -> GitResult<Option<String>> {
-    let url_string = gix_transport_url(url);
-    if !git_substrate::supports_native_fetch_with_depth(&url_string, depth) {
+    if !git_substrate::supports_native_fetch_with_depth(url, depth) {
         let depth_note = depth
             .map(|d| format!(" at depth {d}"))
             .unwrap_or_default();
@@ -3354,7 +3232,7 @@ fn clone_url_to_bare_via_network(
 }
 
 fn clone_url_to_bare_via_substrate(
-    url: &gix::Url,
+    url: &str,
     dest: &Path,
     depth: Option<u32>,
 ) -> GitResult<Option<String>> {
@@ -3367,7 +3245,7 @@ fn clone_url_to_bare_via_substrate(
     git_substrate::fetch_bare_mirror(
         repo.git_dir(),
         repo.object_format(),
-        &gix_transport_url(url),
+        url,
         &refspecs,
         true,
         depth,
@@ -3387,11 +3265,10 @@ pub(crate) fn copy_reachable_objects(
 fn fetch_network_remote(
     mirror_repo: &GitRepo,
     remote_name: &str,
-    url: &gix::Url,
+    url: &str,
     scope: GitFetchScope,
 ) -> GitResult<()> {
-    let url_string = gix_transport_url(url);
-    if !git_substrate::supports_native_fetch_with_depth(&url_string, None) {
+    if !git_substrate::supports_native_fetch_with_depth(url, None) {
         return Err(GitBridgeError::Git(format!(
             "fetch from {url} is not supported by Heddle's native transport; use HTTP, HTTPS, SSH, or git:// remotes"
         )));
@@ -3404,7 +3281,7 @@ fn fetch_network_remote(
     git_substrate::fetch_bare_mirror(
         mirror_repo.git_dir(),
         mirror_repo.object_format(),
-        &url_string,
+        url,
         &refspecs,
         fetch_tags,
         None,
@@ -3417,7 +3294,7 @@ fn fetch_network_remote(
 fn push_network_remote(
     mirror_repo: &GitRepo,
     heddle_dir: &Path,
-    url: &gix::Url,
+    url: &str,
     scope: GitPushScope,
     current_branch: Option<&str>,
     force: bool,
@@ -3444,9 +3321,8 @@ fn push_network_remote(
         return Ok(());
     }
 
-    let url_string = gix_transport_url(url);
     let object_format = mirror_repo.object_format();
-    let remote_refs = remote_refs_for_network_push(&url_string, object_format)?;
+    let remote_refs = remote_refs_for_network_push(url, object_format)?;
 
     // The SAME served-frontier plan the local-path destination runs: writes
     // (forcing embargo rewinds, rejecting forks), the retraction delete-set
@@ -3486,7 +3362,7 @@ fn push_network_remote(
         mirror_repo,
         plan.writes.iter().map(|write| write.new.clone()),
     )?;
-    push_receive_pack_to_network_remote(&url_string, object_format, &commands, &pack)?;
+    push_receive_pack_to_network_remote(url, object_format, &commands, &pack)?;
     // Only persist the record once the remote has acknowledged every command, so
     // a failed push never leaves a ref recorded as exported that did not land.
     write_exported_refs_at(&manifest_path, &plan.new_manifest)?;
@@ -3537,6 +3413,7 @@ fn pack_reachable_objects(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use git_substrate::{empty_tree_sha1, write_simple_commit};
 
     #[test]
     fn parse_git_ref_local_branch() {
@@ -3623,11 +3500,11 @@ mod tests {
     #[test]
     fn fast_forward_guard_reports_exact_rewrite_before_after() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let gix_repo = gix::init_bare(tmp.path()).expect("init bare repo");
-        let root = test_commit(&gix_repo, "root", &[]);
-        let old = test_commit(&gix_repo, "old", &[root.clone()]);
-        let new = test_commit(&gix_repo, "new", &[root]);
+        GitRepo::init_bare(tmp.path()).expect("init bare repo");
         let repo = GitRepo::open(tmp.path()).expect("open substrate repo");
+        let root = test_commit(&repo, "root", &[]);
+        let old = test_commit(&repo, "old", &[root.clone()]);
+        let new = test_commit(&repo, "new", &[root]);
 
         let err = ensure_commit_update_fast_forward(&repo, "refs/heads/main", &old, &new)
             .expect_err("sibling commit update should be refused");
@@ -3641,44 +3518,28 @@ mod tests {
     #[test]
     fn fast_forward_guard_allows_descendant_update() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let gix_repo = gix::init_bare(tmp.path()).expect("init bare repo");
-        let old = test_commit(&gix_repo, "old", &[]);
-        let new = test_commit(&gix_repo, "new", &[old.clone()]);
+        GitRepo::init_bare(tmp.path()).expect("init bare repo");
         let repo = GitRepo::open(tmp.path()).expect("open substrate repo");
+        let old = test_commit(&repo, "old", &[]);
+        let new = test_commit(&repo, "new", &[old.clone()]);
 
         ensure_commit_update_fast_forward(&repo, "refs/heads/main", &old, &new)
             .expect("descendant update should be allowed");
     }
 
-    fn test_commit(
-        repo: &gix::Repository,
-        message: &str,
-        parents: &[ObjectId],
-    ) -> ObjectId {
-        let empty_tree_oid: gix::ObjectId = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-            .parse()
-            .expect("parse empty tree oid");
-        let sig = gix::actor::Signature {
-            name: "Heddle Test".into(),
-            email: "heddle@test".into(),
-            time: gix::date::Time {
-                seconds: 0,
-                offset: 0,
-            },
-        };
-        let mut committer_buf = gix::date::parse::TimeBuf::default();
-        let mut author_buf = gix::date::parse::TimeBuf::default();
-        let id = repo
-            .new_commit_as(
-                sig.to_ref(&mut committer_buf),
-                sig.to_ref(&mut author_buf),
-                message,
-                empty_tree_oid,
-                parents.iter().map(|parent| gix_oid(parent).expect("parent oid")),
-            )
-            .expect("write test commit")
-            .id;
-        substrate_oid(id).expect("test commit oid")
+    fn test_commit(repo: &GitRepo, message: &str, parents: &[ObjectId]) -> ObjectId {
+        let actor = b"Heddle Test <heddle@test> 0 +0000";
+        let tree = empty_tree_sha1();
+        write_simple_commit(
+            repo.git_dir(),
+            repo.object_format(),
+            &tree,
+            parents,
+            actor,
+            actor,
+            message.as_bytes(),
+        )
+        .expect("write test commit")
     }
 
     /// heddle#141 regression: when the URL-fetch path of
@@ -3699,49 +3560,24 @@ mod tests {
         // the alphabetically-first imported ref would land here by
         // accident) and `abc-feature` (alphabetically first — what
         // the buggy fallback used to pick).
-        let src = gix::init_bare(&source).expect("init bare source");
-        // Empty tree (well-known OID) so we don't have to build a
-        // tree object explicitly.
-        let empty_tree_oid: gix::ObjectId = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-            .parse()
-            .expect("parse empty tree oid");
-        // Use an explicit signature via `new_commit_as` rather than
-        // `Repository::commit`. The latter reads `user.name`/`user.email`
-        // from git config, which CI runners don't set — leading to
-        // `AuthorMissing` errors. The clone path under test doesn't care
-        // who authored these seed commits.
-        let sig = gix::actor::Signature {
-            name: "Heddle Test".into(),
-            email: "heddle@test".into(),
-            time: gix::date::Time {
-                seconds: 0,
-                offset: 0,
-            },
-        };
-        let mut committer_buf = gix::date::parse::TimeBuf::default();
-        let mut author_buf = gix::date::parse::TimeBuf::default();
-        let seed = src
-            .new_commit_as(
-                sig.to_ref(&mut committer_buf),
-                sig.to_ref(&mut author_buf),
-                "seed",
-                empty_tree_oid,
-                gix::commit::NO_PARENT_IDS,
-            )
-            .expect("seed commit")
-            .id;
-        let seed = substrate_oid(seed).expect("convert seed commit oid");
-        let src_repo = GitRepo::open(src.git_dir()).expect("open substrate source");
+        GitRepo::init_bare(&source).expect("init bare source");
+        let src_repo = GitRepo::open(&source).expect("open substrate source");
+        let seed = test_commit(&src_repo, "seed", &[]);
         for name in ["refs/heads/trunk", "refs/heads/abc-feature"] {
-            set_reference(&src_repo, name, &seed, PreviousValue::Any, "test: seed branch")
-                .expect("set ref");
+            set_git_repo_reference(
+                &src_repo,
+                name,
+                &seed,
+                RefConstraint::Any,
+                "test: seed branch",
+            )
+            .expect("set ref");
         }
         // Make sure HEAD on the source points at trunk so
         // `git ls-remote --symref` reports trunk.
         std::fs::write(source.join("HEAD"), b"ref: refs/heads/trunk\n").unwrap();
 
-        let url = gix::url::parse(format!("file://{}", source.display()).as_bytes().into())
-            .expect("parse file:// url");
+        let url = format!("file://{}", source.display());
         clone_url_to_bare(&url, &dest, None, None).expect("clone url to bare");
 
         let dest_head = std::fs::read_to_string(dest.join("HEAD")).expect("read dest HEAD");

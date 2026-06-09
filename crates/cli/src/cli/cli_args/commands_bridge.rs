@@ -4,10 +4,10 @@
 use std::path::PathBuf;
 
 use clap::Subcommand;
-use gix::bstr::ByteSlice;
+use git_substrate::parse_remote_url;
 
 /// Source for a git import: either a local filesystem path or a URL that
-/// gix can fetch from.
+/// the git substrate transport can fetch from.
 ///
 /// We discriminate by inspecting the input string: anything containing
 /// `://` (https/ssh/git/file URLs) or starting with `git@` (ssh shorthand)
@@ -17,14 +17,14 @@ use gix::bstr::ByteSlice;
 #[derive(Debug, Clone)]
 pub enum GitSource {
     Path(PathBuf),
-    Url(gix::Url),
+    Url(String),
 }
 
 impl GitSource {
     pub fn parse(s: &str) -> Result<Self, String> {
         if s.contains("://") || s.starts_with("git@") {
-            let url = gix::url::parse(s.as_bytes().as_bstr()).map_err(|e| e.to_string())?;
-            Ok(GitSource::Url(url))
+            parse_remote_url(s).map_err(|e| e.to_string())?;
+            Ok(GitSource::Url(s.to_string()))
         } else {
             Ok(GitSource::Path(PathBuf::from(s)))
         }
@@ -33,7 +33,7 @@ impl GitSource {
     pub fn display(&self) -> String {
         match self {
             GitSource::Path(p) => p.display().to_string(),
-            GitSource::Url(u) => u.to_string(),
+            GitSource::Url(u) => u.clone(),
         }
     }
 }

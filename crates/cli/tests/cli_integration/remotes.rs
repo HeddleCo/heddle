@@ -206,7 +206,7 @@ fn native_remote_add_rejects_local_git_remote_before_configuring_default() {
     let temp = TempDir::new().unwrap();
     let bare = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
-    gix::init_bare(bare.path()).expect("init bare Git remote");
+    git_substrate::GitRepo::init_bare(bare.path()).expect("init bare Git remote");
 
     let output = heddle_output(
         &[
@@ -255,7 +255,7 @@ fn native_push_and_pull_reject_direct_git_remote_before_native_sync() {
     let temp = TempDir::new().unwrap();
     let bare = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
-    gix::init_bare(bare.path()).expect("init bare Git remote");
+    git_substrate::GitRepo::init_bare(bare.path()).expect("init bare Git remote");
 
     for command in ["push", "pull"] {
         let output = heddle_output(
@@ -666,21 +666,21 @@ fn git_overlay_push_defaults_to_current_thread_branch() {
     assert_eq!(parsed["thread"], "main");
 
     assert!(
-        remote_repo.find_reference("refs/heads/main").is_ok(),
+        remote_repo.has_ref("refs/heads/main").expect("ref"),
         "default push should push the current branch"
     );
     assert!(
-        remote_repo.find_reference("refs/heads/side").is_err(),
+        !remote_repo.has_ref("refs/heads/side").expect("ref"),
         "default push must not push sibling Heddle threads"
     );
     assert!(
-        remote_repo.find_reference("refs/tags/v1.0").is_err(),
+        !remote_repo.has_ref("refs/tags/v1.0").expect("ref"),
         "default push must not push tags"
     );
     assert!(
         remote_repo
-            .find_reference(cli::bridge::git_notes::NOTES_REF)
-            .is_ok(),
+            .has_ref(cli::bridge::git_notes::NOTES_REF)
+            .expect("ref"),
         "default push must carry Heddle notes so clones preserve state identity"
     );
 }
@@ -700,9 +700,9 @@ fn git_overlay_push_all_threads_preserves_all_refs_behavior() {
     assert_eq!(parsed["tags_included"], true);
     assert!(parsed["thread"].is_null());
 
-    assert!(remote_repo.find_reference("refs/heads/main").is_ok());
-    assert!(remote_repo.find_reference("refs/heads/side").is_ok());
-    assert!(remote_repo.find_reference("refs/tags/v1.0").is_ok());
+    assert!(remote_repo.has_ref("refs/heads/main").expect("ref"));
+    assert!(remote_repo.has_ref("refs/heads/side").expect("ref"));
+    assert!(remote_repo.has_ref("refs/tags/v1.0").expect("ref"));
 }
 
 #[test]
@@ -727,13 +727,13 @@ fn git_overlay_push_all_threads_does_not_promote_remote_tracking_threads() {
     assert_eq!(parsed["push_scope"], "all_threads");
 
     assert!(
-        remote_repo.find_reference("refs/heads/main").is_ok(),
+        remote_repo.has_ref("refs/heads/main").expect("ref"),
         "all-threads push should still publish owned local threads"
     );
     assert!(
-        remote_repo
-            .find_reference("refs/heads/origin/remote-only")
-            .is_err(),
+        !remote_repo
+            .has_ref("refs/heads/origin/remote-only")
+            .expect("ref"),
         "all-threads push must not promote remote-tracking-shaped threads into remote heads"
     );
 }
@@ -784,13 +784,13 @@ fn git_overlay_push_all_threads_skips_threads_pruned_by_cleanup() {
     assert_eq!(parsed["push_scope"], "all_threads");
 
     assert!(
-        remote_repo.find_reference("refs/heads/main").is_ok(),
+        remote_repo.has_ref("refs/heads/main").expect("ref"),
         "all-threads push should still publish the active main thread"
     );
     assert!(
-        remote_repo
-            .find_reference("refs/heads/feature/cleaned")
-            .is_err(),
+        !remote_repo
+            .has_ref("refs/heads/feature/cleaned")
+            .expect("ref"),
         "all-threads push must not recreate a Git branch for a cleaned merged thread"
     );
 }
@@ -809,7 +809,7 @@ fn git_overlay_push_all_threads_includes_checkout_tags_created_after_adopt() {
     assert_eq!(parsed["tags_included"], true);
 
     assert!(
-        remote_repo.find_reference("refs/tags/v2-local").is_ok(),
+        remote_repo.has_ref("refs/tags/v2-local").expect("ref"),
         "all-threads push should include raw checkout tags created after Heddle adoption"
     );
 }
@@ -818,8 +818,8 @@ fn git_overlay_push_all_threads_includes_checkout_tags_created_after_adopt() {
 fn git_overlay_remote_list_show_labels_local_bare_git_remote_as_git_overlay() {
     let work = TempDir::new().unwrap();
     let remote = TempDir::new().unwrap();
-    gix::init(work.path()).expect("init git worktree");
-    gix::init_bare(remote.path()).expect("init bare git remote");
+    git_substrate::GitRepo::init(work.path()).expect("init git worktree");
+    git_substrate::GitRepo::init_bare(remote.path()).expect("init bare git remote");
 
     heddle(&["init"], Some(work.path())).unwrap();
     let remote_path = remote.path().to_str().expect("remote path utf8");
@@ -866,7 +866,7 @@ fn git_overlay_remote_remove_uneditable_include_leaves_both_configs_unmutated() 
     // remote or neither does. The old order saved the Heddle removal first and
     // only then hit the include refusal, stranding partial state.
     let work = TempDir::new().unwrap();
-    gix::init(work.path()).expect("init git worktree");
+    git_substrate::GitRepo::init(work.path()).expect("init git worktree");
     heddle(&["init"], Some(work.path())).unwrap();
 
     // A `[remote "origin"]` section in a config file outside the repository's
@@ -930,11 +930,11 @@ fn git_overlay_remote_remove_uneditable_include_leaves_both_configs_unmutated() 
     );
 }
 
-fn setup_git_overlay_push_fixture() -> (TempDir, TempDir, gix::Repository) {
+fn setup_git_overlay_push_fixture() -> (TempDir, TempDir, git_substrate::GitRepo) {
     let work = TempDir::new().unwrap();
     let remote = TempDir::new().unwrap();
-    let remote_repo = gix::init_bare(remote.path()).expect("init bare remote");
-    let git_repo = gix::init(work.path()).expect("init git repo");
+    let remote_repo = git_substrate::GitRepo::init_bare(remote.path()).expect("init bare remote");
+    let git_repo = git_substrate::GitRepo::init(work.path()).expect("init git repo");
     let tree = git_empty_tree_oid(&git_repo);
     let main = git_commit_with_tree(&git_repo, Some("refs/heads/main"), tree, "main", &[]);
     let side = git_commit_with_tree(&git_repo, Some("refs/heads/side"), tree, "side", &[main]);
@@ -1074,7 +1074,7 @@ fn test_cli_clone_local_bare_git_heddle_remote_skips_admin_files_and_sets_origin
     std::fs::write(source.join("app.txt"), "from source\n").unwrap();
     heddle_without_git_for_remote_tests(&["capture", "-m", "seed app"], &source);
 
-    gix::init_bare(&remote).expect("init local bare Git remote");
+    git_substrate::GitRepo::init_bare(&remote).expect("init local bare Git remote");
     heddle_without_git_for_remote_tests(&["init"], &remote);
     heddle_without_git_for_remote_tests(
         &["push", remote.to_str().expect("remote path utf8")],
@@ -1283,7 +1283,7 @@ fn test_cli_clone_git_overlay_depth_is_rejected() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
-    gix::init_bare(&origin).expect("init bare git origin");
+    git_substrate::GitRepo::init_bare(&origin).expect("init bare git origin");
 
     let err = heddle(
         &[
@@ -1315,7 +1315,7 @@ fn test_cli_clone_git_overlay_lazy_is_rejected() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
-    gix::init_bare(&origin).expect("init bare git origin");
+    git_substrate::GitRepo::init_bare(&origin).expect("init bare git origin");
 
     let err = heddle(
         &[
@@ -1344,37 +1344,9 @@ fn test_cli_clone_git_overlay_missing_requested_branch_uses_typed_advice() {
     let source = temp.path().join("source.git");
     let work = temp.path().join("work");
 
-    let src = gix::init_bare(&source).expect("init bare source");
-    let empty_tree: gix::ObjectId = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-        .parse()
-        .expect("parse empty tree oid");
-    let sig = gix::actor::Signature {
-        name: "Heddle Test".into(),
-        email: "heddle@test".into(),
-        time: gix::date::Time {
-            seconds: 0,
-            offset: 0,
-        },
-    };
-    let mut committer_buf = gix::date::parse::TimeBuf::default();
-    let mut author_buf = gix::date::parse::TimeBuf::default();
-    let main_tip = src
-        .new_commit_as(
-            sig.to_ref(&mut committer_buf),
-            sig.to_ref(&mut author_buf),
-            "seed main",
-            empty_tree,
-            Vec::<gix::ObjectId>::new(),
-        )
-        .expect("commit succeeds")
-        .id;
-    src.reference(
-        "refs/heads/main",
-        main_tip,
-        gix::refs::transaction::PreviousValue::Any,
-        "test: seed main",
-    )
-    .expect("set main ref");
+    let src = git_substrate::GitRepo::init_bare(&source).expect("init bare source");
+    let empty_tree = git_empty_tree_oid(&src);
+    let _main_tip = git_commit_with_tree(&src, Some("refs/heads/main"), empty_tree, "seed main", &[]);
     std::fs::write(source.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
 
     let output = heddle_output(
@@ -1465,53 +1437,23 @@ fn test_cli_clone_git_overlay_lands_on_remote_default_branch_and_log_walks_histo
     // to fall into). Branch names deliberately avoid `main`/`master`
     // so neither gix's `init.defaultBranch` nor the previous
     // fallback could land here by accident.
-    let src = gix::init_bare(&source).expect("init bare source");
-    let empty_tree: gix::ObjectId = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-        .parse()
-        .expect("parse empty tree oid");
-    // Use an explicit signature via `new_commit_as` rather than
-    // `Repository::commit`. The latter reads `user.name`/`user.email`
-    // from git config, which CI runners don't set — leading to
-    // `AuthorMissing` errors. The clone path under test doesn't care
-    // who authored these seed commits.
-    let sig = gix::actor::Signature {
-        name: "Heddle Test".into(),
-        email: "heddle@test".into(),
-        time: gix::date::Time {
-            seconds: 0,
-            offset: 0,
-        },
-    };
-    let commit_as = |message: &str, parents: Vec<gix::ObjectId>| -> gix::ObjectId {
-        let mut committer_buf = gix::date::parse::TimeBuf::default();
-        let mut author_buf = gix::date::parse::TimeBuf::default();
-        src.new_commit_as(
-            sig.to_ref(&mut committer_buf),
-            sig.to_ref(&mut author_buf),
-            message,
-            empty_tree,
-            parents,
-        )
-        .expect("commit succeeds")
-        .id
-    };
-    let trunk_first = commit_as("seed trunk", vec![]);
-    let trunk_tip = commit_as("advance trunk", vec![trunk_first]);
-    let abc_feature = commit_as("seed abc-feature", vec![]);
-    src.reference(
-        "refs/heads/trunk",
-        trunk_tip,
-        gix::refs::transaction::PreviousValue::Any,
-        "test: seed trunk",
-    )
-    .expect("set trunk ref");
-    src.reference(
-        "refs/heads/abc-feature",
-        abc_feature,
-        gix::refs::transaction::PreviousValue::Any,
-        "test: seed abc-feature",
-    )
-    .expect("set abc-feature ref");
+    let src = git_substrate::GitRepo::init_bare(&source).expect("init bare source");
+    let empty_tree = git_empty_tree_oid(&src);
+    let trunk_first = git_commit_with_tree(&src, None, empty_tree.clone(), "seed trunk", &[]);
+    let trunk_tip = git_commit_with_tree(
+        &src,
+        Some("refs/heads/trunk"),
+        empty_tree.clone(),
+        "advance trunk",
+        &[trunk_first],
+    );
+    let _abc_feature = git_commit_with_tree(
+        &src,
+        Some("refs/heads/abc-feature"),
+        empty_tree,
+        "seed abc-feature",
+        &[],
+    );
     std::fs::write(source.join("HEAD"), b"ref: refs/heads/trunk\n").unwrap();
 
     let source_arg = source.to_str().expect("source path utf8");
@@ -1591,16 +1533,6 @@ fn test_cli_clone_git_overlay_lands_on_remote_default_branch_and_log_walks_histo
     );
 }
 
-fn git_tree_with_file(repo: &gix::Repository, path: &str, content: &[u8]) -> gix::hash::ObjectId {
-    let blob = repo.write_blob(content).expect("write git blob").detach();
-    let empty = git_empty_tree_oid(repo);
-    let mut editor = repo.edit_tree(empty).expect("edit git tree");
-    editor
-        .upsert(path, gix::object::tree::EntryKind::Blob, blob)
-        .expect("add file to git tree");
-    editor.write().expect("write git tree").detach()
-}
-
 fn git_ok(args: &[&str], cwd: &std::path::Path) {
     let output = Command::new("git")
         .arg("-C")
@@ -1639,7 +1571,7 @@ fn test_cli_clone_git_overlay_sets_origin_tracking_for_selected_branch() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("source.git");
     let work = temp.path().join("work");
-    let src = gix::init_bare(&source).expect("init bare source");
+    let src = git_substrate::GitRepo::init_bare(&source).expect("init bare source");
 
     let tree = git_tree_with_file(&src, "tracked.txt", b"one\n");
     let main = git_commit_with_tree(&src, Some("refs/heads/main"), tree, "one", &[]);
@@ -1667,7 +1599,7 @@ fn test_cli_clone_git_overlay_rewrites_origin_and_default_pull_keeps_git_clean()
     let source = temp.path().join("source.git");
     let stale_origin = temp.path().join("stale-origin.git");
     let work = temp.path().join("work");
-    let src = gix::init_bare(&source).expect("init bare source");
+    let src = git_substrate::GitRepo::init_bare(&source).expect("init bare source");
 
     let first_tree = git_tree_with_file(&src, "tracked.txt", b"one\n");
     let first = git_commit_with_tree(&src, Some("refs/heads/main"), first_tree, "one", &[]);
@@ -1812,7 +1744,7 @@ fn test_cli_git_overlay_fetch_refreshes_tracking_ref_and_verify_reports_behind()
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("source.git");
     let work = temp.path().join("work");
-    let src = gix::init_bare(&source).expect("init bare source");
+    let src = git_substrate::GitRepo::init_bare(&source).expect("init bare source");
 
     let first_tree = git_tree_with_file(&src, "tracked.txt", b"one\n");
     let first = git_commit_with_tree(&src, Some("refs/heads/main"), first_tree, "one", &[]);
@@ -1855,11 +1787,11 @@ fn test_cli_git_overlay_fetch_refreshes_tracking_ref_and_verify_reports_behind()
         "fetch must not move the local checkout HEAD"
     );
 
-    let mirror = gix::open(work.join(".heddle").join("git")).expect("open Git-overlay mirror");
+    let mirror = git_substrate::GitRepo::open(work.join(".heddle").join("git")).expect("open Git-overlay mirror");
     assert!(
         mirror
-            .find_reference(cli::bridge::git_notes::NOTES_REF)
-            .is_ok(),
+            .has_ref(cli::bridge::git_notes::NOTES_REF)
+            .expect("ref"),
         "fetch should carry refs/notes/heddle for Heddle identity metadata"
     );
     assert_eq!(
@@ -1868,7 +1800,7 @@ fn test_cli_git_overlay_fetch_refreshes_tracking_ref_and_verify_reports_behind()
         "fetch should refresh the checkout's refs/notes/heddle when it reports fetching Heddle notes"
     );
     assert!(
-        mirror.find_reference("refs/tags/v2.0").is_err(),
+        !mirror.has_ref("refs/tags/v2.0").expect("ref"),
         "default Git-overlay fetch should not import arbitrary Git tags"
     );
 
@@ -1892,7 +1824,7 @@ fn test_cli_git_overlay_fetch_resolves_relative_local_git_remote_from_checkout_r
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
     let other = temp.path().join("other");
-    gix::init_bare(&origin).expect("init bare origin");
+    git_substrate::GitRepo::init_bare(&origin).expect("init bare origin");
     std::fs::write(origin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
 
     std::fs::create_dir_all(&work).unwrap();
@@ -1950,7 +1882,7 @@ fn test_cli_git_overlay_fetch_uses_configured_default_not_origin_fallback() {
     let source = temp.path().join("source.git");
     let work = temp.path().join("work");
     let missing_origin = temp.path().join("missing-origin.git");
-    let src = gix::init_bare(&source).expect("init bare source");
+    let src = git_substrate::GitRepo::init_bare(&source).expect("init bare source");
 
     let first_tree = git_tree_with_file(&src, "tracked.txt", b"one\n");
     let first = git_commit_with_tree(&src, Some("refs/heads/main"), first_tree, "one", &[]);
@@ -2021,8 +1953,8 @@ fn test_cli_git_overlay_remote_add_does_not_steal_tracked_branch_default() {
     let origin = temp.path().join("origin.git");
     let backup = temp.path().join("backup.git");
     let work = temp.path().join("work");
-    gix::init_bare(&origin).expect("init bare origin");
-    gix::init_bare(&backup).expect("init bare backup");
+    git_substrate::GitRepo::init_bare(&origin).expect("init bare origin");
+    git_substrate::GitRepo::init_bare(&backup).expect("init bare backup");
     std::fs::write(origin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
     std::fs::write(backup.join("HEAD"), "ref: refs/heads/main\n").unwrap();
 
@@ -2119,7 +2051,7 @@ fn test_cli_git_overlay_current_push_carries_notes_for_cross_clone_identity() {
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
     let clone = temp.path().join("clone");
-    gix::init_bare(&origin).expect("init bare origin");
+    git_substrate::GitRepo::init_bare(&origin).expect("init bare origin");
     std::fs::write(origin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
 
     std::fs::create_dir_all(&work).unwrap();
@@ -2206,7 +2138,7 @@ fn test_cli_git_overlay_explicit_path_push_discloses_configured_git_tracking_rem
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
-    gix::init_bare(&origin).expect("init bare origin");
+    git_substrate::GitRepo::init_bare(&origin).expect("init bare origin");
     std::fs::write(origin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
 
     std::fs::create_dir_all(&work).unwrap();
@@ -2242,7 +2174,7 @@ fn test_cli_git_overlay_explicit_path_push_json_reports_configured_git_tracking_
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
-    gix::init_bare(&origin).expect("init bare origin");
+    git_substrate::GitRepo::init_bare(&origin).expect("init bare origin");
     std::fs::write(origin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
 
     std::fs::create_dir_all(&work).unwrap();
@@ -2280,7 +2212,7 @@ fn test_cli_raw_git_clone_adopt_fetches_notes_before_import() {
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
     let raw_clone = temp.path().join("raw-clone");
-    gix::init_bare(&origin).expect("init bare origin");
+    git_substrate::GitRepo::init_bare(&origin).expect("init bare origin");
     std::fs::write(origin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
 
     std::fs::create_dir_all(&work).unwrap();
@@ -2384,7 +2316,7 @@ fn test_cli_git_overlay_push_refuses_to_rewrite_remote_heddle_notes() {
     let work = temp.path().join("work");
     let raw_clone = temp.path().join("raw-clone");
     let missing_remote = temp.path().join("missing.git");
-    gix::init_bare(&origin).expect("init bare origin");
+    git_substrate::GitRepo::init_bare(&origin).expect("init bare origin");
     std::fs::write(origin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
 
     std::fs::create_dir_all(&work).unwrap();
@@ -2496,7 +2428,7 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
     let origin = temp.path().join("origin.git");
     let local = temp.path().join("local");
     let peer = temp.path().join("peer");
-    gix::init_bare(&origin).expect("init bare origin");
+    git_substrate::GitRepo::init_bare(&origin).expect("init bare origin");
     std::fs::write(origin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
 
     git_ok(
@@ -2740,7 +2672,7 @@ fn test_cli_git_overlay_pull_refuses_diverged_branch_before_visible_git_updates(
     let origin = temp.path().join("origin.git");
     let local = temp.path().join("local");
     let peer = temp.path().join("peer");
-    gix::init_bare(&origin).expect("init bare origin");
+    git_substrate::GitRepo::init_bare(&origin).expect("init bare origin");
     std::fs::write(origin.join("HEAD"), "ref: refs/heads/main\n").unwrap();
 
     git_ok(
@@ -2829,7 +2761,7 @@ fn test_cli_clone_git_overlay_filter_is_rejected() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
-    gix::init_bare(&origin).expect("init bare git origin");
+    git_substrate::GitRepo::init_bare(&origin).expect("init bare git origin");
 
     let err = heddle(
         &[
@@ -2864,7 +2796,7 @@ fn test_cli_clone_git_overlay_file_url_rejects_unsupported_flags() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
-    gix::init_bare(&origin).expect("init bare git origin");
+    git_substrate::GitRepo::init_bare(&origin).expect("init bare git origin");
 
     let file_url = format!("file://{}", origin.display());
     let err = heddle(

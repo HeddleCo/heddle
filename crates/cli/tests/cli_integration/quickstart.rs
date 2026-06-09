@@ -413,15 +413,7 @@ fn quickstart_unborn_git_yields_single_capture_and_checkpoint() {
 
     // And exactly one Git checkpoint commit (no extra bootstrap parent in
     // the exported history).
-    let grepo = gix::open(dir).expect("open git repo");
-    let tip = grepo
-        .head_id()
-        .expect("HEAD resolves to a checkpoint commit");
-    let commit_count = grepo
-        .rev_walk([tip.detach()])
-        .all()
-        .expect("rev-walk checkpoint history")
-        .count();
+    let commit_count = git_rev_list_count(dir, "HEAD");
     assert_eq!(
         commit_count, 1,
         "exactly one checkpoint commit, no extra bootstrap parent"
@@ -1592,13 +1584,7 @@ fn quickstart_from_subdir_targets_discovered_git_root() {
 
     // The checkpoint advanced a real branch — impossible if it had come up as a
     // native repo at the subdir. History (initial) plus the checkpoint commit.
-    let grepo = gix::open(root).expect("open git repo at the discovered root");
-    let tip = grepo.head_id().expect("HEAD resolves to a commit");
-    let commit_count = grepo
-        .rev_walk([tip.detach()])
-        .all()
-        .expect("rev-walk checkpoint history")
-        .count();
+    let commit_count = git_rev_list_count(root, "HEAD");
     assert!(
         commit_count >= 2,
         "the Git-overlay quickstart imported history and added a checkpoint commit: count={commit_count}"
@@ -1858,8 +1844,7 @@ fn quickstart_rejects_shallow_git_clone_before_writes() {
     // Mark the checkout shallow the way a `--depth` clone would: a `.git/shallow`
     // file listing the shallow boundary. `import_all` keys on its presence
     // (`git_dir()/shallow`), and so does the preflight's `git_is_shallow`.
-    let grepo = gix::open(dir).unwrap();
-    let head = grepo.head_id().unwrap().to_string();
+    let head = git_head_oid(dir);
     std::fs::write(dir.join(".git").join("shallow"), format!("{head}\n")).unwrap();
 
     let out = heddle_output(
@@ -1972,13 +1957,7 @@ fn quickstart_nested_git_below_ancestor_heddle_targets_nested_git() {
     );
     // The nested Git history was imported AND checkpointed: the nested Git root
     // now has the original commit plus the checkpoint commit.
-    let grepo = gix::open(&nested).expect("open nested git repo");
-    let tip = grepo.head_id().expect("nested HEAD resolves");
-    let commit_count = grepo
-        .rev_walk([tip.detach()])
-        .all()
-        .expect("rev-walk nested history")
-        .count();
+    let commit_count = git_rev_list_count(&nested, "HEAD");
     assert!(
         commit_count >= 2,
         "the nested Git history was imported and a checkpoint added: count={commit_count}"
@@ -2031,20 +2010,11 @@ fn quickstart_git_overlay_capture_and_checkpoint_land_on_quickstart_thread() {
         "the active thread is quickstart: {status}"
     );
 
-    let grepo = gix::open(dir).expect("open git repo");
     // `quickstart` advanced past the imported tip (initial + checkpoint = 2),
     // while `main` stayed at the imported tip (1 commit) — proof the capture and
     // checkpoint landed on the requested thread, not on main.
     let count_on = |branch: &str| -> usize {
-        let mut reference = grepo
-            .find_reference(branch)
-            .unwrap_or_else(|_| panic!("ref {branch} exists"));
-        let tip = reference.peel_to_id().expect("ref peels");
-        grepo
-            .rev_walk([tip.detach()])
-            .all()
-            .expect("rev-walk")
-            .count()
+        git_rev_list_count(dir, branch)
     };
     assert_eq!(count_on("main"), 1, "main stayed at the imported tip");
     assert_eq!(
@@ -2078,13 +2048,9 @@ fn quickstart_refuses_clobbering_existing_divergent_quickstart_branch() {
     git_hermetic(&["checkout", "main"], dir);
 
     let tip_before = {
-        let grepo = gix::open(dir).expect("open git repo");
-        grepo
-            .find_reference("quickstart")
-            .expect("quickstart branch exists")
-            .peel_to_id()
-            .expect("peels")
-            .detach()
+        let grepo = git_substrate::GitRepo::open(dir).expect("open git repo");
+        grepo.read_ref_oid("quickstart").expect("ref").expect("peel")
+            
     };
 
     let out = heddle_output(
@@ -2117,13 +2083,9 @@ fn quickstart_refuses_clobbering_existing_divergent_quickstart_branch() {
 
     // The user's branch is UNCHANGED.
     let tip_after = {
-        let grepo = gix::open(dir).expect("open git repo");
-        grepo
-            .find_reference("quickstart")
-            .expect("quickstart branch still exists")
-            .peel_to_id()
-            .expect("peels")
-            .detach()
+        let grepo = git_substrate::GitRepo::open(dir).expect("open git repo");
+        grepo.read_ref_oid("quickstart").expect("ref").expect("peel")
+            
     };
     assert_eq!(
         tip_before, tip_after,

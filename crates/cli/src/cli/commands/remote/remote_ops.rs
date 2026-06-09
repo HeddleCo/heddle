@@ -1363,7 +1363,7 @@ mod tests {
     use super::*;
 
     fn init_git(root: &Path) {
-        gix::init(root).expect("init git repo");
+        git_substrate::GitRepo::init(root).expect("init git repo");
     }
 
     #[test]

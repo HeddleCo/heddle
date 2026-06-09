@@ -1268,7 +1268,7 @@ fn test_fast_forward_attached_when_detached_stays_detached() {
 #[test]
 fn test_open_preserves_explicit_detached_head_in_git_overlay() {
     let temp_dir = TempDir::new().unwrap();
-    gix::init(temp_dir.path()).expect("init real git repository");
+    git_substrate::GitRepo::init(temp_dir.path()).expect("init real git repository");
 
     let repo = Repository::init_default(temp_dir.path()).unwrap();
     assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);
@@ -1310,7 +1310,7 @@ fn test_open_preserves_explicit_detached_head_in_git_overlay() {
 fn git_overlay_worktree_status_is_none_when_embedded_git_is_bare() {
     let temp_dir = TempDir::new().unwrap();
     let git_dir = temp_dir.path().join(".git");
-    gix::init_bare(&git_dir).expect("init bare .git");
+    git_substrate::GitRepo::init_bare(&git_dir).expect("init bare .git");
     let repo = Repository::init_default(temp_dir.path()).unwrap();
     assert_eq!(
         repo.capability(),
@@ -1964,7 +1964,7 @@ fn dir_only_ignore_covers_node_modules_symlink_git_overlay() {
 
     let temp = TempDir::new().unwrap();
     let root = temp.path();
-    gix::init(root).expect("init real git repository");
+    git_substrate::GitRepo::init(root).expect("init real git repository");
     let repo = Repository::init_default(root).unwrap();
     assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);
 
@@ -1996,7 +1996,7 @@ fn dir_only_ignore_covers_node_modules_symlink_git_overlay() {
 fn midsession_ignore_broadening_masks_untracked_without_unlink_git_overlay() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
-    gix::init(root).expect("init real git repository");
+    git_substrate::GitRepo::init(root).expect("init real git repository");
     let repo = Repository::init_default(root).unwrap();
     assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);
 
@@ -2087,7 +2087,7 @@ fn open_refuses_metadataless_virtualized_thread_mount() {
 #[test]
 fn open_solid_checkout_roots_at_boundary_not_git_overlay_parent() {
     let temp_dir = TempDir::new().unwrap();
-    gix::init(temp_dir.path()).expect("init real git repository");
+    git_substrate::GitRepo::init(temp_dir.path()).expect("init real git repository");
     let repo = Repository::init_default(temp_dir.path()).unwrap();
     assert_eq!(
         repo.capability(),
