@@ -722,7 +722,7 @@ mod tests {
             format!("gitdir: {}\n", linked_dot_git.display()),
         )
         .expect("wt gitdir");
-        std::fs::create_dir_all(linked.parent().expect("linked parent")).expect("linked parent");
+        std::fs::create_dir_all(&linked).expect("linked worktree dir");
         std::fs::write(
             &linked_dot_git,
             format!("gitdir: {}\n", wt_admin.display()),
