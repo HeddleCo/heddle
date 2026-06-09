@@ -104,7 +104,7 @@ impl GitRepo {
         {
             return Ok(bare);
         }
-        Ok(self.git_dir.file_name().and_then(|name| name.to_str()) != Some(".git"))
+        Ok(resolve_workdir(&self.git_dir).is_none())
     }
 
     pub(crate) fn object_db(&self) -> FileObjectDatabase {
@@ -704,6 +704,38 @@ mod tests {
         assert_eq!(repo.git_dir(), git_dir);
         assert_eq!(repo.object_format(), ObjectFormat::Sha1);
         assert!(repo.has_ref("HEAD").expect("HEAD"));
+    }
+
+    #[test]
+    fn is_bare_false_for_linked_worktree_gitdir() {
+        let temp = TempDir::new().expect("tempdir");
+        let main = temp.path().join("main");
+        let linked = temp.path().join("linked");
+        let main_git = main.join(".git");
+        let wt_admin = main_git.join("worktrees").join("wt1");
+        let linked_dot_git = linked.join(".git");
+        std::fs::create_dir_all(wt_admin.join("objects")).expect("wt objects");
+        std::fs::create_dir_all(wt_admin.join("refs/heads")).expect("wt refs");
+        std::fs::write(wt_admin.join("HEAD"), "ref: refs/heads/main\n").expect("wt HEAD");
+        std::fs::write(
+            wt_admin.join("gitdir"),
+            format!("gitdir: {}\n", linked_dot_git.display()),
+        )
+        .expect("wt gitdir");
+        std::fs::create_dir_all(linked.parent().expect("linked parent")).expect("linked parent");
+        std::fs::write(
+            &linked_dot_git,
+            format!("gitdir: {}\n", wt_admin.display()),
+        )
+        .expect("linked .git file");
+
+        let repo = GitRepo::discover(&linked).expect("open linked worktree");
+        assert!(!repo.is_bare().expect("is_bare"));
+        assert_eq!(
+            repo.workdir().as_deref(),
+            Some(linked.as_path()),
+            "linked worktree must resolve a workdir"
+        );
     }
 
     #[test]
