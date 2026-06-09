@@ -121,7 +121,7 @@ external-default-features = "allow"
 
 deny = [
     # Heddle standardizes on rustls (see workspace Cargo.toml: reqwest,
-    # gix, tonic, tokio-rustls all pin the rustls flavor explicitly).
+    # sley-remote, tonic, tokio-rustls all pin the rustls flavor explicitly).
     # Pulling in OpenSSL would re-introduce system-OpenSSL coupling, widen
     # the CVE-relevant surface, and break our reproducible-build story on
     # platforms without a system libssl. If you have a justified need,

@@ -4,8 +4,8 @@
 # For each entry below: shallow-clone the upstream, then `fast-export |
 # fast-import` into a fresh bare repo. The fast-export step is what makes the
 # fixture self-contained: shallow clones leave a `.git/shallow` boundary that
-# gix/heddle clone refuses to walk past, and `--filter=blob:limit` partial
-# clones leave a missing-object set that gix/heddle import refuses to walk.
+# sley/heddle clone refuses to walk past, and `--filter=blob:limit` partial
+# clones leave a missing-object set that heddle import refuses to walk.
 # Re-rooting via fast-import drops the parent edges at the boundary so every
 # extracted fixture is a complete, walkable repository.
 #
@@ -28,7 +28,7 @@ mkdir -p "$SCRATCH"
 
 # url, name, depth, branch
 fixtures=(
-    "https://github.com/GitoxideLabs/gitoxide.git|gix-shaped|50|main"
+    "https://github.com/GitoxideLabs/gitoxide.git|gitoxide-shaped|50|main"
     "https://github.com/tokio-rs/tokio.git|tokio-shaped|100|master"
     "https://github.com/BurntSushi/ripgrep.git|ripgrep-shaped|200|master"
     # Deep merge-heavy DAG with a real gitlink (`sha1collisiondetection`).

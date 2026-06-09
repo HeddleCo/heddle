@@ -150,7 +150,7 @@ Keep only dependencies needed for core functionality:
   - `aws-config`
   - `aws-sdk-s3`
   - `async-trait`
-- possibly `gix` if Git bridge remains in core
+- `git-substrate` (sley-backed) if Git bridge remains in core
 
 Try to keep `tokio` out of `objects` unless it is truly required for storage backends that stay there.
 

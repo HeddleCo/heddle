@@ -16,7 +16,7 @@ single command that collapses that ramp into one invocation.
 `crates/cli/src/cli/commands/init.rs:22-94` (`cmd_init`):
 
 1. Resolves the target path (cwd by default).
-2. Detects `.git/` via `gix::discover` (`init.rs:37`). If found, calls
+2. Detects `.git/` via `git_substrate::GitRepo::discover` (`init.rs`). If found, calls
    `Repository::bootstrap_git_overlay`; otherwise
    `Repository::init_default` (`crates/repo/src/repository.rs:453-457`).
 3. Installs the default `.heddleignore` if absent

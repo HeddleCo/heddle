@@ -1,5 +1,7 @@
 # CLI Dependency Audit — 2026-05-12
 
+> **2026-06-09 update:** The third-party git-library subtree called out below (`gix`, `gix-protocol`, `gix-transport`) was removed in the P4 sley substrate swap ([#598](https://github.com/HeddleCo/heddle/issues/598)). Figures in this document are the pre-swap baseline; re-run `cargo metadata` for current counts.
+
 ## Why this exists
 
 A dogfooding-driven dep audit on PR #75 found that the `heddle` CLI pulls **485 transitive packages** for a binary whose default behavior is local-only VCS. That number is excessive for a tool whose competitor (`git`) compiles to a static binary with a much smaller transitive footprint, and is the single largest reason `cargo build -p heddle-cli` from a cold cache is slow.
@@ -227,7 +229,7 @@ cargo tree -p heddle-cli --edges normal --invert <dep>
 2. **Tier 5 (feature-gating)** — cheap, no behavior change, often unblocks downstream feature unification once Tier 1 stops dragging `server` in.
 3. **Tier 3 (hand-write schemas)** — half day, eliminates a layer of derive-macro fighting.
 4. **Tier 4 (drop chrono)** — half day, ergonomic win for binary size.
-5. **Tier 2 (gix net I/O via subprocess)** — needs dogfooding the URL-source import path; do after Tier 1 unblocks easier compilation.
+5. **Tier 2 (native transport)** — needs dogfooding the URL-source import path; sley transport now backs fetch/push/clone.
 6. **Tier 6 (light logger)** — last; bikeshed-prone, low leverage.
 
 ## What this does NOT touch

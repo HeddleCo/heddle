@@ -2,17 +2,17 @@
 
 **Tracking document for the June 2026 improvement reconnaissance.**
 
-Last updated: 2026-06-08
+Last updated: 2026-06-09
 
 ---
 
 ## 1. Executive summary
 
-Reconnaissance (2026-06-08) compared heddle's current **gix** substrate against **[sley](https://github.com/HeddleCo/sley)** — HeddleCo's conformance-tested, pure-Rust Git library. On representative object-read workloads (`cat-file`, `rev-parse`, `rev-list`, `ls-tree`), sley is **~1.25× faster than system git** on the sley `scripts/bench-vs-git.sh` harness. Byte-exact framing/hash parity is proven; the swap is a dep-pin + adapter pattern, not a fidelity gamble.
+Reconnaissance (2026-06-08) compared heddle's former third-party git-library substrate against **[sley](https://github.com/HeddleCo/sley)** — HeddleCo's conformance-tested, pure-Rust Git library. On representative object-read workloads (`cat-file`, `rev-parse`, `rev-list`, `ls-tree`), sley is **~1.25× faster than system git** on the sley `scripts/bench-vs-git.sh` harness. Byte-exact framing/hash parity is proven; the swap is a dep-pin + adapter pattern, not a fidelity gamble.
 
-**Decision:** replace gix with sley ([epic #594](https://github.com/HeddleCo/heddle/issues/594)). This drops ~277 transitive gix deps from the CLI subtree, gives heddle an owned substrate (SHA-256-ready, no third-party git-library churn), and unblocks the de-lossy epic ([#564](https://github.com/HeddleCo/heddle/issues/564)) with a native byte-exact object sink.
+**Decision (shipped):** heddle now runs on sley only ([epic #594](https://github.com/HeddleCo/heddle/issues/594), P4 [#598](https://github.com/HeddleCo/heddle/issues/598)). The ~277-transitive-dep third-party git-library subtree is gone from the CLI; heddle owns the substrate (SHA-256-ready, no third-party git-library churn), and the de-lossy epic ([#564](https://github.com/HeddleCo/heddle/issues/564)) builds on a native byte-exact object sink.
 
-**Tier 1 (substrate swap) is in execution.** `crates/git-substrate` (`heddle-git-substrate`) depends on the **local sley checkout** at `../sley` (`git-core`, `git-formats`, `git-odb`, `git-refs`, `git-rev` path deps). P0 ([#595](https://github.com/HeddleCo/heddle/issues/595)) and **P1 ([#596](https://github.com/HeddleCo/heddle/issues/596)) object/tree write** are **complete** on the bridge write surface; **P2** refs/index/worktree is next.
+**Tier 1 substrate swap:** P0–P4 are **complete**. `crates/git-substrate` (`heddle-git-substrate`) is sley-only — `ObjectId`, framing/hash, read/write, refs, index, worktree, and transport all go through sley. **P2** refs/index/worktree and remaining de-lossy work continue on this foundation.
 
 ---
 
@@ -30,7 +30,7 @@ Reconnaissance (2026-06-08) compared heddle's current **gix** substrate against 
 | `crypto` | Signing primitives |
 | `daemon` | Local agent kernel (grpc local impl) |
 | `devtools` | Repo asserters (`check-no-silent-default-tree-load`, etc.) |
-| **`git-substrate`** | **gix↔sley adapter (new, #595)** |
+| **`git-substrate`** | **Sley-backed git substrate (#595)** |
 | `ingest` | Deep git import / state writer |
 | `merge` / `semantic` | Merge + semantic analysis |
 | `mount` | FUSE mount daemon |
@@ -46,7 +46,7 @@ Hosted server (`weft`) and web (`tapestry`) live in sibling repos.
 
 ### Goals driving this plan
 
-1. **Own the git substrate** — drop gix; depend on local `../sley` during dev (pin git rev before publish); single adapter module for all translation.
+1. **Own the git substrate** — sley-only via `git-substrate`; depend on local `../sley` during dev (pin git rev before publish); single adapter crate for all Git-format I/O.
 2. **Byte-exact git interop** — de-lossy reconstruction from heddle state; eliminate the adopt mirror (~80–90% of adopt time).
 3. **Agent/CI-safe git overlay** — no `git` on `PATH` for product paths (`git_replacement_matrix`, `realworld_git`).
 4. **Architecture depth** — extract the 4k-line git bridge from `cli` into shared crates ([ADR 0014](https://github.com/HeddleCo/heddle/blob/main/docs/adr/0014-command-surface-before-collaboration-expansion.md)); deepen command surface before collaboration expansion.
@@ -56,31 +56,31 @@ Hosted server (`weft`) and web (`tapestry`) live in sibling repos.
 
 | Epic | Link | Relationship |
 |---|---|---|
-| gix→sley substrate swap | [#594](https://github.com/HeddleCo/heddle/issues/594) | **Tier 1 — active** |
+| sley substrate swap | [#594](https://github.com/HeddleCo/heddle/issues/594) | **Tier 1 — complete (P0–P4)** |
 | De-lossy git fidelity | [#564](https://github.com/HeddleCo/heddle/issues/564) | Tier 3; P1+ sley sink subsumes framing/hash |
 | Command surface (ADR 0014) | [ADR 0014](docs/adr/0014-command-surface-before-collaboration-expansion.md) | Tier 2; bridge extraction prerequisite |
 | Whole-CLI consolidation | [spike](docs/spikes/whole-cli-consolidation.md) | Deferred until command surface stable |
-| CLI dep reduction | [audit](docs/CLI_DEP_AUDIT_2026-05-12.md) | Tier 4; gix removal is the largest win |
+| CLI dep reduction | [audit](docs/CLI_DEP_AUDIT_2026-05-12.md) | Tier 4; largest win (sley swap) landed |
 
 ---
 
 ## 3. Improvement tiers (reconnaissance)
 
-### Tier 1 — Git substrate swap (sley) · **IN EXECUTION**
+### Tier 1 — Git substrate swap (sley) · **COMPLETE (P0–P4)**
 
-Replace gix across `cli`, `repo`, `ingest`, `objects` (~45 files, ~14 capability groups; concentrated in `cli/src/bridge/git_core.rs`). Local `../sley` path deps (`git-core`, `git-formats`, `git-odb`, `git-refs`, `git-rev`; `git-remote` when P3 lands); **all** gix↔sley translation in `heddle-git-substrate`.
+Sley now backs `cli`, `repo`, `ingest`, and `objects` (~45 files, ~14 capability groups; concentrated in `cli/src/bridge/git_core.rs`). Local `../sley` workspace path deps (`sley-core`, `sley-formats`, `sley-odb`, `sley-refs`, `sley-rev`, `sley-remote`, `sley-transport`, …); **all** Git-format translation lives in `heddle-git-substrate` (`object`, `repo`, `write`, `transport`, …).
 
 | Item | Issue | Key paths | Effort | Notes |
 |---|---|---|---|---|
-| **P0: dep + object-read/hashing** | [#595](https://github.com/HeddleCo/heddle/issues/595) | `crates/git-substrate/`, `ingest/src/git_walk.rs`, `cli/src/bridge/git_import.rs`, `cli/src/bridge/git_reconstruct.rs`, `repo/src/git_worktree_status.rs` | **3–5 d** | **Done** — read adapter + ObjectId sweep; gix interop at boundaries only |
+| **P0: dep + object-read/hashing** | [#595](https://github.com/HeddleCo/heddle/issues/595) | `crates/git-substrate/`, `ingest/src/git_walk.rs`, `cli/src/bridge/git_import.rs`, `cli/src/bridge/git_reconstruct.rs`, `repo/src/git_worktree_status.rs` | **3–5 d** | **Done** — read adapter + `ObjectId` sweep on `git_substrate::ObjectId` |
 | **P1: object/tree write + serialization** | [#596](https://github.com/HeddleCo/heddle/issues/596) | `cli/src/bridge/git_export.rs`, `git_reconstruct.rs`, `git_notes.rs`, `git-substrate/src/write.rs` | **5–7 d** | **Done** — sley sink for blob/tree/commit write; `build_commit_content` kept authoritative |
 | **P2: refs + index + worktree/checkout** | [#597](https://github.com/HeddleCo/heddle/issues/597) | `cli/src/bridge/git_core.rs:1335-1558`, `repo/src/git_worktree_status.rs` | **1–2 wk** | Adapter-needed: sley worktree free fns over `git_dir` |
 | **P3: transport (fetch/push/clone)** | [#577](https://github.com/HeddleCo/heddle/issues/577) | `cli/src/bridge/git_core.rs:3624-3799` (receive-pack hand-roll) | **3–5 d** | Wire `sley-remote`; pre-gate: audit remotes for v1+`deepen` |
-| **P4: drop gix + mirror-drop finalize** | [#598](https://github.com/HeddleCo/heddle/issues/598) | All `Cargo.toml` gix* deps, adapter fallback | **3–5 d** | Closes #568 mirror elimination on sley-only reconstruction |
+| **P4: sley-only finalize** | [#598](https://github.com/HeddleCo/heddle/issues/598) | Workspace `Cargo.toml`, `git-substrate` | **3–5 d** | **Done** — zero third-party git-library deps; sley-only reconstruction |
 
-**Epic:** [#594](https://github.com/HeddleCo/heddle/issues/594) · Spike: `.heddleco-orchestrator/spikes/gix-to-sley-substrate.md` §1–§6
+**Epic:** [#594](https://github.com/HeddleCo/heddle/issues/594) · Spike: `.heddleco-orchestrator/spikes/gix-to-sley-substrate.md` §1–§6 (historical)
 
-**Cumulative impact (est.):** ~277 transitive deps removed from CLI gix subtree; adopt mirror phase → ~0 after P1+#568; compile/link time and binary size drop materially.
+**Cumulative impact (landed):** ~277 transitive deps removed from the former CLI git-library subtree; adopt mirror phase → ~0 after P1+#568; compile/link time and binary size drop materially.
 
 ---
 
@@ -99,7 +99,7 @@ Deepen modules before collaboration expansion. The git bridge (~4025 lines in `g
 
 ### Tier 3 — De-lossy epic alignment with sley
 
-Epic [#564](https://github.com/HeddleCo/heddle/issues/564): reconstruct byte-identical git objects from heddle state; drop the internal git mirror. Substrate swap **resequences** steps 4–5 onto the sley sink (don't build more gix-then-rework).
+Epic [#564](https://github.com/HeddleCo/heddle/issues/564): reconstruct byte-identical git objects from heddle state; drop the internal git mirror. Substrate swap **resequenced** steps 4–5 onto the sley sink (now the only write path).
 
 | Step | Issue | Key paths | Effort | Status / sequencing |
 |---|---|---|---|---|
@@ -136,7 +136,7 @@ Each phase ends **GREEN** on verification gates (§7) before the next phase star
 
 ### Phase A — P0 [#595](https://github.com/HeddleCo/heddle/issues/595): `git-substrate` crate + sley dep
 
-**Status: complete** (P1 #596 is next; full `gix*` dep removal remains P4 #598)
+**Status: complete**
 
 1. ✅ Add `crates/git-substrate` (`heddle-git-substrate`) with local `../sley` path deps (`git-core`, `git-formats`, `git-odb`, `git-refs`, `git-rev`).
 2. ✅ Implement read-only adapter: `ObjectId`, `ObjectKind`, framing/hash (`frame_git_object`, `object_id_for_content`), `GitRepo` wrapper, `object` helpers.
@@ -145,7 +145,7 @@ Each phase ends **GREEN** on verification gates (§7) before the next phase star
    - `cli/src/bridge/git_import.rs` — `peel_to_commit_oid` + import path object-kind reads via substrate
    - `cli/src/bridge/git_reconstruct.rs` — framing/hash delegates to `git_substrate`
    - `repo/src/git_worktree_status.rs` — blob hashing via `blob_object_id`
-4. ✅ Type-alias blast-radius bound: production bridge + `git_bridge_tests` + integration tests use `git_substrate::ObjectId`; `gix::hash::ObjectId` remains only at gix API boundaries via `from_gix`/`to_gix` until P4.
+4. ✅ Type-alias blast-radius bound: production bridge + `git_bridge_tests` + integration tests use `git_substrate::ObjectId` (`sley_core::ObjectId`).
 5. ✅ Conformance test: `git_substrate` framing/hash round-trip + `commit_conformance` (4/4).
 6. ✅ Gates: `git_replacement_matrix` (24/24), `commit_conformance` (4/4), `check-no-silent-default-tree-load.sh` clean, default build + `cargo test -p heddle-cli --lib bridge::git` (109/109). `realworld_git` nightly matrix still `#[ignore]` in CI (registry parse gate passes).
 
@@ -174,9 +174,9 @@ Runs in parallel with P2 once P1 is green; do not block substrate phases on full
 
 1. Create `crates/git-bridge` (or equivalent); move `cli/src/bridge/{git_core,git_import,git_export,git_sync,git_reconstruct}.rs` + tests.
 2. `cli` depends on `git-bridge` for dispatch only; `ingest`/`repo` depend on `git-bridge` + `git-substrate`.
-3. Collapse duplicate gix open/discover patterns behind `git_substrate::GitRepo`.
+3. Collapse duplicate open/discover patterns behind `git_substrate::GitRepo`.
 4. Align with ADR 0014: command facts stay local; bridge commands keep schema/doc gates.
-5. Update `git_process_lint.rs` / import boundaries so bridge crate is the sole gix/sley consumer.
+5. Update `git_process_lint.rs` / import boundaries so bridge crate is the sole `git-substrate` consumer.
 
 **Effort:** 1–2 weeks · **Risk:** `grpc_local_impl` / hosted paths must not regress during file moves.
 
@@ -192,7 +192,7 @@ Sequence after P1; P4 finalizes mirror-drop.
 | Principal byte preservation | #587 + #591 merged | [#593](https://github.com/HeddleCo/heddle/issues/593): `Principal.name/email` → `Vec<u8>`; non-UTF8 conformance corpus |
 | Tag objects in CA store | P1 #596 | [#575](https://github.com/HeddleCo/heddle/issues/575): delete sidecars; sync-propagating tag objects |
 | Mirror elimination | P1 + export-from-state | [#568](https://github.com/HeddleCo/heddle/issues/568): drop `init_mirror`/`copy_reachable_objects`; adopt timing gate |
-| Full gix removal + mirror gone | P3 #577 | [#598](https://github.com/HeddleCo/heddle/issues/598): zero `gix*` deps; sley-only reconstruction |
+| Sley-only substrate + mirror gone | P4 #598 (done) | [#568](https://github.com/HeddleCo/heddle/issues/568): drop mirror on sley-only reconstruction |
 
 ---
 
@@ -200,12 +200,12 @@ Sequence after P1; P4 finalizes mirror-drop.
 
 ### Tier 1 — Substrate swap
 
-- [ ] **Epic** [#594](https://github.com/HeddleCo/heddle/issues/594) — replace gix with sley
-- [x] **P0** [#595](https://github.com/HeddleCo/heddle/issues/595) — `git-substrate` crate + object-read/hashing *(ObjectId sweep + acceptance gates green; gix boundary interop retained until P4)*
-- [x] **P1** [#596](https://github.com/HeddleCo/heddle/issues/596) — object/tree write + sley sink *(all bridge object-write paths on sley sink; gix retained for read/peel/refs until P2/P4)*
+- [x] **Epic** [#594](https://github.com/HeddleCo/heddle/issues/594) — sley substrate swap
+- [x] **P0** [#595](https://github.com/HeddleCo/heddle/issues/595) — `git-substrate` crate + object-read/hashing
+- [x] **P1** [#596](https://github.com/HeddleCo/heddle/issues/596) — object/tree write + sley sink
 - [ ] **P2** [#597](https://github.com/HeddleCo/heddle/issues/597) — refs + index + worktree/checkout
 - [ ] **P3** [#577](https://github.com/HeddleCo/heddle/issues/577) — `sley-remote` transport
-- [ ] **P4** [#598](https://github.com/HeddleCo/heddle/issues/598) — drop gix entirely + finalize #568
+- [x] **P4** [#598](https://github.com/HeddleCo/heddle/issues/598) — sley-only finalize
 
 ### Tier 2 — Architecture (ADR 0014)
 
@@ -244,7 +244,7 @@ Sequence after P1; P4 finalizes mirror-drop.
 | **P0 #595** complete | **P1 #596** | Adapter + object-read must land first |
 | **P1 #596** complete | **#568**, **#575**, **P2 #597** | sley sink required for write/reconstruct paths |
 | **P2 #597** complete | **P3 #577** | refs/index/worktree on adapter before transport |
-| **P3 #577** complete | **P4 #598** | transport before full gix removal |
+| **P3 #577** complete | mirror-drop polish | transport hardening before #568 finalize |
 | **#593** (principal bytes) | Full **#568** mirror drop for non-UTF8 identities | Independent of sley phases but overlaps `git_import`; claim after #587 + #591 |
 | Pre-P3 gate: remote protocol audit | **P3 #577** | Confirm heddle remotes need only git protocol v1 + `deepen` (not v2-only HTTP) |
 | sley pre-1.0 churn | All sley phases | Local `../sley` path dep during dev; pin exact rev before publish; conformance test on every bump; adapter is single fallback surface |
@@ -294,7 +294,7 @@ bash scripts/check-no-silent-default-tree-load.sh
 
 ### Substrate-specific (add per #594 DoD)
 
-- [x] Conformance: round-trip real git objects through sley adapter (framing/hash byte-exact vs gix baseline) — `commit_conformance` (4/4) + `git_substrate` unit tests.
+- [x] Conformance: round-trip real git objects through sley adapter (framing/hash byte-exact vs system-git baseline) — `commit_conformance` (4/4) + `git_substrate` unit tests.
 - [ ] `heddle doctor schemas` clean after any `Principal`/output-boundary change (#593).
 - [x] `commit_conformance.rs` green for gpgsig/extra-headers/non-UTF8 identities; `roundtrip_fidelity.rs` unchanged (P1+).
 
@@ -312,13 +312,13 @@ bash scripts/check-no-silent-default-tree-load.sh
 | **Signed-fidelity** | [#562](https://github.com/HeddleCo/heddle/issues/562) open; #533 strips signatures | Add signed commit/tag to conformance corpus; assert adopt→export SHA equality |
 | **Coverage floor** | 72% line ([STABILITY.md](docs/STABILITY.md)); 1.0 target 80% | Raise floor as bridge/substrate crates gain unit tests in `git-substrate` |
 | **Large-blob soak** | `realworld_git_large_binary_blob_stress` is `#[ignore]` | Optional scheduled job with `HEDDLE_LARGE_BLOB_MB` for release candidates |
-| **gix transitive dep tracking** | 277-dep subtree ([CLI audit](docs/CLI_DEP_AUDIT_2026-05-12.md)) | Re-run `cargo metadata` script after each P-phase; track CLI transitive count → target ~135 post-P4 |
+| **CLI transitive dep tracking** | ~277-dep git-library subtree removed post-P4 ([CLI audit](docs/CLI_DEP_AUDIT_2026-05-12.md)) | Re-run `cargo metadata` script; track CLI transitive count vs pre-swap baseline |
 
 ---
 
 ## 9. References
 
-- Spike: `.heddleco-orchestrator/spikes/gix-to-sley-substrate.md` (§1 inventory, §3 write paths, §5 risks, §6 phased plan)
+- Spike (historical): `.heddleco-orchestrator/spikes/gix-to-sley-substrate.md` (§1 inventory, §3 write paths, §5 risks, §6 phased plan)
 - sley repo: https://github.com/HeddleCo/sley
 - sley benchmarks: `sley/scripts/bench-vs-git.sh`, `sley/crates/git-bench/`
 - Verification map: [docs/VERIFICATION_STATE_LOGIC_MAP.md](VERIFICATION_STATE_LOGIC_MAP.md)

@@ -6,7 +6,7 @@ captured as `*.tar.gz` and pinned by tip OID in
 
 | Fixture | Source | Depth | Shape |
 |---|---|---|---|
-| `gix-shaped.tar.gz` | GitoxideLabs/gitoxide @ main | 50 | packed-refs, binary-churn, tags |
+| `gitoxide-shaped.tar.gz` | GitoxideLabs/gitoxide @ main | 50 | packed-refs, binary-churn, tags |
 | `tokio-shaped.tar.gz` | tokio-rs/tokio @ master | 100 | merge-heavy, multi-branch |
 | `ripgrep-shaped.tar.gz` | BurntSushi/ripgrep @ master | 200 | many-small-files |
 | `git-shaped.tar.gz` | git/git @ master | 10 | deep-dag, octopus, gitlink |

@@ -11,9 +11,9 @@
 # delta on the four `*.tar.gz` files before committing.
 
 [[repo]]
-name = "gix-shaped"
+name = "gitoxide-shaped"
 source = "https://github.com/GitoxideLabs/gitoxide"
-fixture = "fixtures/gix-shaped.tar.gz"
+fixture = "fixtures/gitoxide-shaped.tar.gz"
 commit = "4e028c91db6c1a39179f4663f28527b15b5b5915"
 shape = ["packed-refs", "large-history", "binary-churn", "tags"]
 
