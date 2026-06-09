@@ -12,10 +12,9 @@ use sley_odb::{repository_common_dir, FileObjectDatabase, ObjectReader};
 use sley_worktree::{read_repository_index, repository_index_path};
 
 use crate::id::{empty_blob_sha1, empty_tree_sha1};
+use crate::index::{INDEX_FLAG_EXTENDED, INDEX_FLAG_INTENT_TO_ADD};
 use crate::{GitSubstrateError, Result};
 
-const INDEX_FLAG_EXTENDED: u16 = 0x4000;
-const INDEX_FLAG_INTENT_TO_ADD: u16 = 0x2000;
 const INDEX_NAME_MASK: u16 = 0x0FFF;
 
 /// Path to the repository index (honours `GIT_INDEX_FILE`).
@@ -157,10 +156,28 @@ fn empty_index(version: u32) -> Index {
 }
 
 fn write_index(git_dir: &Path, format: ObjectFormat, index: &Index) -> Result<()> {
+    let path = repository_index_path(git_dir);
     let bytes = index.write(format).map_err(GitSubstrateError::from)?;
-    fs::write(repository_index_path(git_dir), bytes)
-        .map_err(|err| GitSubstrateError::Other(err.to_string()))?;
-    Ok(())
+    let lock_path = path.with_extension("lock");
+    {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+            .map_err(|err| GitSubstrateError::Other(err.to_string()))?;
+        use std::io::Write;
+        file.write_all(&bytes)
+            .map_err(|err| GitSubstrateError::Other(err.to_string()))?;
+        file.sync_all()
+            .map_err(|err| GitSubstrateError::Other(err.to_string()))?;
+    }
+    match fs::rename(&lock_path, &path) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = fs::remove_file(lock_path);
+            Err(GitSubstrateError::Other(err.to_string()))
+        }
+    }
 }
 
 fn index_from_tree(
@@ -213,6 +230,7 @@ fn collect_tree_blob_entries(
     let tree = Tree::parse(format, &object.body).map_err(GitSubstrateError::from)?;
     for entry in tree.entries {
         let name = String::from_utf8_lossy(&entry.name);
+        validate_tree_entry_name(name.as_ref())?;
         let path = if prefix.is_empty() {
             name.into_owned()
         } else {
@@ -266,6 +284,15 @@ fn intent_to_add_entry(path: &[u8], mode: u32, oid: &ObjectId) -> IndexEntry {
         flags_extended: INDEX_FLAG_INTENT_TO_ADD,
         path: path.into(),
     }
+}
+
+fn validate_tree_entry_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+        return Err(GitSubstrateError::Other(format!(
+            "invalid tree entry name: {name:?}"
+        )));
+    }
+    Ok(())
 }
 
 fn path_prefix_conflict(a: &str, b: &str) -> bool {
@@ -325,6 +352,25 @@ mod tests {
             .expect("read")
             .expect("index exists");
         assert!(index.entries.is_empty());
+    }
+
+    #[test]
+    fn collect_tree_blob_entries_rejects_parent_segment_name() {
+        let temp = TempDir::new().expect("tempdir");
+        let (git_dir, format) = init_repo(&temp);
+        let blob = crate::write_blob(&git_dir, format, b"x\n").expect("blob");
+        let mut parent_entries = vec![TreeEntryInput {
+            mode: crate::TreeEntryMode::Blob,
+            name: "..".into(),
+            oid: blob,
+        }];
+        let parent_tree =
+            crate::write_tree(&git_dir, format, &mut parent_entries).expect("parent tree");
+        let err = read_index_from_tree(&git_dir, format, &parent_tree).expect_err("reject ..");
+        assert!(
+            err.to_string().contains("invalid tree entry name"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
