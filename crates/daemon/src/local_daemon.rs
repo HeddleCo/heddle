@@ -495,4 +495,53 @@ mod tests {
         // can't verify the file is ours.
         assert!(PidFileContents::parse("12345").is_none());
     }
+
+    #[test]
+    fn enforce_peer_uid_admits_matching_uid() {
+        // The everyday case: the CLI and the daemon run as the same user,
+        // so the peer's uid equals the daemon's. The gate must admit it.
+        assert!(enforce_peer_uid(1000, 1000).is_ok());
+    }
+
+    #[test]
+    fn enforce_peer_uid_rejects_mismatched_uid() {
+        // A connection from a different uid (only reachable if the socket's
+        // mode 0600 were somehow widened) must be refused with a Conflict.
+        let err = enforce_peer_uid(1001, 1000).unwrap_err();
+        assert!(
+            matches!(err, HeddleError::Conflict(_)),
+            "mismatched peer uid must be a Conflict, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn guard_propagates_listener_io_errors() {
+        // Listener-level accept() errors must reach tonic unchanged — the
+        // peer-cred gate only drops mismatched peers, it never swallows
+        // I/O errors that tonic's own error handling should see.
+        let io_err = std::io::Error::other("accept failed");
+        let out = guard_peer_connection(Err(io_err));
+        assert!(matches!(out, Some(Err(_))), "io errors must propagate");
+    }
+
+    #[tokio::test]
+    async fn guard_admits_same_process_peer() {
+        // Both ends of a socketpair share this process's uid, so the gate
+        // must admit the connection — proving the serve-path filter does
+        // not reject the everyday same-user CLI connection.
+        let (peer, _local) = tokio::net::UnixStream::pair().expect("socketpair");
+        let out = guard_peer_connection(Ok(peer));
+        assert!(
+            matches!(out, Some(Ok(_))),
+            "a same-uid peer must be admitted by the gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_peer_uid_matches_self_admits_socketpair() {
+        // Direct check on a real UnixStream: same-process socketpair ends
+        // share our uid, so the SO_PEERCRED / getpeereid comparison passes.
+        let (peer, _local) = tokio::net::UnixStream::pair().expect("socketpair");
+        assert!(check_peer_uid_matches_self(&peer).is_ok());
+    }
 }
