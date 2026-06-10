@@ -75,7 +75,7 @@ pub use repository::{
     HistoryQuery, HostedConfig, MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD,
     MissingBlob, OperationKind, OperationScope, OutputFormat, PackFilesInspection,
     PartialFetchInspection, PullPlannerCacheInspection, RedactConfig, RefCountsInspection,
-    RefSummaryIndexInspection, RepoConfig, Repository, RepositoryCapability,
+    RefSummaryIndexInspection, RepoConfig, Repository, RepositoryCapability, ResignOutcome,
     RepositoryMaintenanceRunReport, RepositoryOperationStatus,
     RepositoryPerformanceInspectionReport, SUGGESTION_WINDOW, SnapshotExecution, SnapshotProfile,
     ThreadCaptureOutcome, TreeBuildProfile, TrustedKey, UntrackedSet, UntrackedSubtree,

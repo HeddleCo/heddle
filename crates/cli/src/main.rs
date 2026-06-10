@@ -10,7 +10,7 @@ use cli::cli::commands::cmd_semantic;
 #[cfg(feature = "git-overlay")]
 use cli::cli::{
     BridgeCommands,
-    commands::{cmd_bridge_git, cmd_git_overlay_guide},
+    commands::{cmd_bridge_backfill_fidelity, cmd_bridge_git, cmd_git_overlay_guide},
 };
 use cli::{
     cli::{
@@ -728,6 +728,7 @@ async fn async_main() -> Result<()> {
         #[cfg(feature = "git-overlay")]
         Commands::Bridge { command } => match command {
             BridgeCommands::Git { command } => cmd_bridge_git(&cli, command.clone()),
+            BridgeCommands::BackfillFidelity => cmd_bridge_backfill_fidelity(&cli),
         },
 
         #[cfg(feature = "semantic")]

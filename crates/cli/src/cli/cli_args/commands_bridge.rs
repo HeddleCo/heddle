@@ -49,6 +49,17 @@ pub enum BridgeCommands {
         #[command(subcommand)]
         command: GitCommands,
     },
+
+    /// Backfill git-fidelity fields on states adopted before the #565 format
+    /// bump.
+    ///
+    /// One-time migration: for every Heddle state that maps to a git commit in
+    /// the mirror, re-derive the committer identity, timezone offsets, verbatim
+    /// message, and ordered extension headers from the mirror (the ground
+    /// truth) and rewrite the state, so dropping the mirror later (#568) stays
+    /// lossless. Idempotent — a second run rewrites nothing. Requires the
+    /// mirror, so run it before #568 eliminates it.
+    BackfillFidelity,
 }
 
 #[derive(Subcommand, Clone)]

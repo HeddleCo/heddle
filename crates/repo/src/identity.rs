@@ -228,6 +228,20 @@ pub fn resolve_signer(local_path: &Path, device_path: &Path) -> Option<Box<dyn S
     }
 }
 
+/// Load the per-repo local signing key at `path` as a ready signer, WITHOUT
+/// minting one when absent. Returns `None` when there is no local key, it is
+/// unreadable, or its PEM can't be parsed.
+///
+/// Used to recognise a state signed with the per-repo local key as
+/// owner-reproducible even after `auth login` has linked a device key that now
+/// supersedes it for new states (heddle#570): such a state is still ours to
+/// re-sign, and minting a fresh local key here would only ever produce a
+/// non-matching key, so the lookup is load-only.
+pub fn load_local_signer(local_path: &Path) -> Option<Box<dyn Signer>> {
+    let local = load_local(local_path).ok().flatten()?;
+    signer_from_pem(&local.private_key_pem).ok()
+}
+
 /// Load the per-repo local identity at `path`, minting and persisting a fresh
 /// ed25519 key if the file is absent.
 pub fn load_or_mint_local(path: &Path) -> std::io::Result<LocalIdentity> {

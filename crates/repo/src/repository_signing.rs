@@ -4,11 +4,28 @@
 use std::sync::Arc;
 
 use crypto::{Signer, StateSigningExt, load_signer, verify_state_signature_bytes};
-use objects::object::{ChangeId, SignatureStatus, State, StateSignature};
+use objects::object::{ChangeId, ContentHash, SignatureStatus, State, StateSignature};
 use objects::store::ObjectStore;
 use tracing::{debug, instrument};
 
 use super::{HeddleError, Repository, Result};
+
+/// Outcome of [`Repository::resign_if_owned`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResignOutcome {
+    /// The state carried no signature; nothing to preserve.
+    Unsigned,
+    /// The state was signed by this repo's active signing identity and has
+    /// been re-signed over its CURRENT `compute_hash()`, so the signature
+    /// stays valid after an authorized rewrite.
+    Resigned,
+    /// The signature was produced by a key this identity cannot reproduce —
+    /// a foreign/third-party key, or no signer is currently resolvable. The
+    /// state is left UNMODIFIED; the caller must not persist a rewritten
+    /// version of it, since that would ship a signature that no longer
+    /// verifies against the new hash.
+    Unreproducible,
+}
 
 impl Repository {
     /// Path to this repo's per-repo local signing identity (heddle#482).
@@ -74,6 +91,86 @@ impl Repository {
         self.sign_state_best_effort(state);
         self.store.put_state(state)?;
         Ok(())
+    }
+
+    /// Resolve a signer THIS repo controls whose public key matches the one
+    /// embedded in `signature`, or `None` if the signature is foreign.
+    ///
+    /// Tries two keys (heddle#570): first the *active* signer (the device key
+    /// after an `auth login`, else the per-repo local key), then — if that
+    /// misses — the per-repo local key explicitly. The second try matters
+    /// because the device key supersedes the local key for *new* states, so a
+    /// state signed with the local key BEFORE a device key was linked would
+    /// otherwise be misclassified as foreign even though this repo still owns
+    /// its key and can legitimately re-sign it.
+    fn owning_signer_for(&self, signature: &StateSignature) -> Option<Arc<dyn Signer>> {
+        if let Some(signer) = self.signing_signer()
+            && hex::encode(signer.public_key()) == signature.public_key
+        {
+            return Some(signer);
+        }
+        let local = crate::identity::load_local_signer(&self.local_identity_path())?;
+        if hex::encode(local.public_key()) == signature.public_key {
+            return Some(Arc::from(local));
+        }
+        None
+    }
+
+    /// Re-sign `state` over its CURRENT `compute_hash()` IFF its existing
+    /// signature was both produced by a key this repo controls AND already
+    /// valid over one of `prior_hashes` (the hash candidates the signature
+    /// could have been made over, BEFORE the caller's rewrite). So an
+    /// authorized rewrite (e.g. the #570 fidelity backfill, which re-derives
+    /// hash-bearing fields) keeps a valid signature instead of shipping one
+    /// that no longer verifies.
+    ///
+    /// Multiple candidates are accepted because the #565 format bump changed
+    /// how `compute_hash` folds the git-fidelity fields: a state signed BEFORE
+    /// the bump was signed over its pre-fidelity hash
+    /// ([`State::compute_hash_pre_fidelity`]), while one signed after was signed
+    /// over the current hash. The backfill passes BOTH so a valid legacy
+    /// signature isn't misread as unreproducible just because the new hash
+    /// doesn't match (heddle#570).
+    ///
+    /// Ownership is decided by [`Self::owning_signer_for`], which tries both the
+    /// active signer and the per-repo local key — a repo that signed states
+    /// with its local key before linking a device key is still recognised as
+    /// the owner (heddle#570).
+    ///
+    /// Returns [`ResignOutcome::Unreproducible`] WITHOUT modifying `state` when:
+    /// - the signature belongs to a foreign key (or no owned signer resolves) —
+    ///   re-signing foreign content would falsely attribute it to this device; or
+    /// - the existing signature does NOT verify against ANY of `prior_hashes` —
+    ///   re-signing over it would launder a never-valid signature into a fresh,
+    ///   valid-looking one (heddle#570).
+    ///
+    /// In both cases the caller MUST NOT persist a rewritten version of the state.
+    pub fn resign_if_owned(&self, state: &mut State, prior_hashes: &[ContentHash]) -> ResignOutcome {
+        let Some(existing) = state.signature.clone() else {
+            return ResignOutcome::Unsigned;
+        };
+        let Some(signer) = self.owning_signer_for(&existing) else {
+            return ResignOutcome::Unreproducible;
+        };
+        // Verify the EXISTING signature against the OLD hash(es) before
+        // re-signing. Without this an owned-but-invalid signature (corrupted, or
+        // made over different content) would be silently replaced with a valid
+        // signature over the new content — laundering a bad signature. A legacy
+        // (pre-#565) signature verifies against the pre-fidelity candidate, not
+        // the post-bump one, so we accept ANY candidate.
+        let verifies = prior_hashes
+            .iter()
+            .any(|hash| verify_state_signature_bytes(&existing, hash).is_ok());
+        if !verifies {
+            return ResignOutcome::Unreproducible;
+        }
+        match state.sign(&*signer) {
+            Ok(()) => ResignOutcome::Resigned,
+            Err(error) => {
+                tracing::warn!(%error, "re-signing an owned state failed; leaving it unmodified");
+                ResignOutcome::Unreproducible
+            }
+        }
     }
 
     /// Sign a state with the given signer.
@@ -526,6 +623,228 @@ mod tests {
                 repo.verify_state_signature(&state.change_id)
                     .expect("verify"),
                 SignatureStatus::Unsigned,
+            );
+        });
+    }
+
+    // ----- heddle#570: the unified re-sign decision (verify-old → try-local
+    // -key → resign/skip) used by the fidelity backfill -----
+
+    /// Build an unsigned root state for the re-sign tests.
+    fn unsigned_state() -> State {
+        use objects::object::Tree;
+        let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
+        State::new(Tree::new().hash(), vec![], attribution)
+    }
+
+    /// An owned signature that was valid over the old hash is re-signed over the
+    /// new hash after an authorized rewrite.
+    #[test]
+    fn resign_if_owned_resigns_active_owned_signature() {
+        let home = TempDir::new().expect("home temp");
+        with_signing_home(home.path(), || {
+            let (_temp, repo) = setup_repo();
+            let signer = repo.signing_signer().expect("local signer resolves");
+
+            let mut state = unsigned_state();
+            state.sign(&*signer).expect("sign with the repo's own key");
+            let old_hash = state.compute_hash();
+
+            // An authorized rewrite changes the content hash.
+            state.created_at += chrono::Duration::seconds(1);
+            assert_ne!(state.compute_hash(), old_hash, "rewrite changed the hash");
+
+            assert_eq!(
+                repo.resign_if_owned(&mut state, &[old_hash]),
+                ResignOutcome::Resigned,
+            );
+            state
+                .verify_signature()
+                .expect("re-signed state verifies over the new hash");
+        });
+    }
+
+    /// A state adopted+signed BEFORE the #565 format bump carries a signature
+    /// made over its PRE-fidelity hash, not the post-bump `compute_hash()`. The
+    /// #570 backfill must verify against that legacy hash (passed alongside the
+    /// current one) and re-sign over the new hash — verifying only the post-bump
+    /// hash would wrongly reject a valid legacy signature as unreproducible.
+    #[test]
+    fn resign_if_owned_accepts_legacy_pre_fidelity_signature() {
+        let home = TempDir::new().expect("home temp");
+        with_signing_home(home.path(), || {
+            let (_temp, repo) = setup_repo();
+            let signer = repo.signing_signer().expect("local signer resolves");
+
+            // Simulate a pre-bump signature: sign the PRE-fidelity hash directly
+            // (what the old code's `compute_hash` produced before #565 appended
+            // the git-fidelity block).
+            let mut state = unsigned_state();
+            let legacy_hash = state.compute_hash_pre_fidelity();
+            let post_bump_hash = state.compute_hash();
+            assert_ne!(
+                legacy_hash, post_bump_hash,
+                "pre-fidelity hash differs from the post-bump hash",
+            );
+            state.signature = Some(
+                crypto::state_signature_from_signer(&legacy_hash, &*signer)
+                    .expect("sign legacy hash"),
+            );
+
+            // The backfill re-derives a fidelity field (here raw_message),
+            // changing `compute_hash()`. The pre-fidelity hash is unchanged.
+            let before = state.compute_hash();
+            let before_pre_fidelity = state.compute_hash_pre_fidelity();
+            assert_eq!(before_pre_fidelity, legacy_hash);
+            let mut updated = state.clone().with_raw_message(b"legacy commit message\n");
+
+            // Passing the legacy candidate recognises + re-signs the signature.
+            assert_eq!(
+                repo.resign_if_owned(&mut updated, &[before, before_pre_fidelity]),
+                ResignOutcome::Resigned,
+            );
+            updated
+                .verify_signature()
+                .expect("re-signed legacy state verifies over the new hash");
+
+            // Regression guard: verifying against ONLY the post-bump hash (the
+            // pre-fix behaviour) rejects the valid legacy signature.
+            let mut rejected = state.with_raw_message(b"legacy commit message\n");
+            assert_eq!(
+                repo.resign_if_owned(&mut rejected, &[before]),
+                ResignOutcome::Unreproducible,
+                "the post-bump hash alone does not verify a legacy signature",
+            );
+        });
+    }
+
+    /// An owned signature that does NOT verify over the old hash (corrupted, or
+    /// made over different content) must NOT be re-signed: re-signing would
+    /// launder a never-valid signature into a fresh, valid-looking one. The
+    /// state is left untouched and reported `Unreproducible` (heddle#570).
+    #[test]
+    fn resign_if_owned_refuses_to_launder_an_invalid_owned_signature() {
+        let home = TempDir::new().expect("home temp");
+        with_signing_home(home.path(), || {
+            let (_temp, repo) = setup_repo();
+            let signer = repo.signing_signer().expect("local signer resolves");
+
+            let mut state = unsigned_state();
+            state.sign(&*signer).expect("sign with the repo's own key");
+
+            // Corrupt the signature so it no longer verifies — but keep the
+            // public key intact so the OWNERSHIP check still matches.
+            let corrupted = {
+                let sig = state.signature.as_ref().expect("signed");
+                let mut bytes = hex::decode(&sig.signature).expect("decode sig");
+                bytes[0] ^= 0xff;
+                hex::encode(&bytes)
+            };
+            if let Some(sig) = state.signature.as_mut() {
+                sig.signature = corrupted.clone();
+            }
+            let old_hash = state.compute_hash();
+
+            // The owner check matches (public key intact) but the old signature
+            // does not verify over `old_hash`, so re-signing is refused.
+            assert_eq!(
+                repo.resign_if_owned(&mut state, &[old_hash]),
+                ResignOutcome::Unreproducible,
+            );
+            assert_eq!(
+                state.signature.as_ref().expect("still signed").signature,
+                corrupted,
+                "the state is left untouched, not re-signed",
+            );
+        });
+    }
+
+    /// A state signed with the per-repo LOCAL key before an `auth login` linked
+    /// a device key is still owner-reproducible: the device key now supersedes
+    /// the local key for new states, but `owning_signer_for` falls back to the
+    /// local key, so the backfill re-signs it rather than declaring ownership
+    /// lost (heddle#570).
+    #[test]
+    fn resign_if_owned_recognizes_local_key_after_device_link() {
+        let home = TempDir::new().expect("home temp");
+        with_signing_home(home.path(), || {
+            let (_temp, repo) = setup_repo();
+
+            // Sign with the local key (no device key linked yet).
+            let local = repo.signing_signer().expect("local signer resolves");
+            let local_pubkey = hex::encode(local.public_key());
+            let mut state = unsigned_state();
+            state.sign(&*local).expect("sign with local key");
+            let old_hash = state.compute_hash();
+
+            // `auth login`: link a DISTINCT device key, which now supersedes the
+            // local key for new states.
+            let device = Ed25519Signer::generate().expect("device key");
+            let device_pubkey = hex::encode(device.public_key());
+            assert_ne!(device_pubkey, local_pubkey, "device key is distinct");
+            crate::identity::link_device_key(
+                device.public_key(),
+                &device.to_pem().expect("device pem"),
+                "grpc.example",
+            )
+            .expect("link device key");
+            assert_eq!(
+                hex::encode(repo.signing_signer().expect("signer").public_key()),
+                device_pubkey,
+                "active signer is now the device key",
+            );
+
+            // An authorized rewrite, then re-sign: ownership is recognised via
+            // the local key fallback and the state is re-signed (with the local
+            // key it was originally signed by), keeping a valid signature.
+            state.created_at += chrono::Duration::seconds(1);
+            assert_eq!(
+                repo.resign_if_owned(&mut state, &[old_hash]),
+                ResignOutcome::Resigned,
+            );
+            state
+                .verify_signature()
+                .expect("re-signed state verifies over the new hash");
+            assert_eq!(
+                state.signature.as_ref().expect("signed").public_key,
+                local_pubkey,
+                "re-signed with the owning local key, not the device key",
+            );
+        });
+    }
+
+    /// A foreign signature (a key this repo does not control) is not re-signed
+    /// even after trying the local-key fallback: ownership genuinely cannot be
+    /// reproduced, so the state is left untouched (heddle#570).
+    #[test]
+    fn resign_if_owned_refuses_foreign_signature() {
+        let home = TempDir::new().expect("home temp");
+        with_signing_home(home.path(), || {
+            let (_temp, repo) = setup_repo();
+
+            let foreign = Ed25519Signer::generate().expect("foreign key");
+            let mut state = unsigned_state();
+            state.sign(&foreign).expect("foreign-sign");
+            let old_hash = state.compute_hash();
+
+            assert_eq!(
+                repo.resign_if_owned(&mut state, &[old_hash]),
+                ResignOutcome::Unreproducible,
+            );
+        });
+    }
+
+    /// An unsigned state needs no signature preserved.
+    #[test]
+    fn resign_if_owned_reports_unsigned() {
+        let home = TempDir::new().expect("home temp");
+        with_signing_home(home.path(), || {
+            let (_temp, repo) = setup_repo();
+            let mut state = unsigned_state();
+            let old_hash = state.compute_hash();
+            assert_eq!(
+                repo.resign_if_owned(&mut state, &[old_hash]),
+                ResignOutcome::Unsigned,
             );
         });
     }

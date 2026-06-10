@@ -1278,6 +1278,20 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
+        &["bridge", "backfill-fidelity"],
+        surface(
+            json_discriminators(
+                opaque_schemas(DATA_MUTATION, &["bridge backfill-fidelity"]),
+                &[json_discriminator(
+                    Some("bridge backfill-fidelity"),
+                    "output_kind",
+                    "bridge_backfill_fidelity",
+                )],
+            ),
+            "git_adapter",
+        ),
+    ),
+    entry(
         &["capture"],
         json_discriminators(
             documented_schemas(compact_json(CAPTURE), &["capture"]),
@@ -4020,6 +4034,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 #[cfg(feature = "ingest")]
                 GitCommands::Reason { .. } => vec!["bridge", "git", "reason"],
             },
+            BridgeCommands::BackfillFidelity => vec!["bridge", "backfill-fidelity"],
         },
         #[cfg(feature = "semantic")]
         Commands::Semantic { command } => match command {
@@ -4132,6 +4147,11 @@ mod tests {
         sample(&["attempt"], &["attempt", "1", "true"]),
         sample(&["blame"], &["blame", "src/lib.rs"]),
         sample(&["branch"], &["branch"]),
+        #[cfg(feature = "git-overlay")]
+        sample(
+            &["bridge", "backfill-fidelity"],
+            &["bridge", "backfill-fidelity"],
+        ),
         #[cfg(feature = "git-overlay")]
         sample(&["bridge", "git", "status"], &["bridge", "git", "status"]),
         #[cfg(feature = "git-overlay")]
@@ -5226,6 +5246,7 @@ mod tests {
                 "bridge git import",
                 "bridge git sync",
                 "bridge git reconcile",
+                "bridge backfill-fidelity",
                 "capture",
                 "checkpoint",
                 "cherry-pick",
