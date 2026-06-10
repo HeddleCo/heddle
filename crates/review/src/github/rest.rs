@@ -126,6 +126,11 @@ impl GitHubRestClient {
         Ok(Self {
             http: reqwest::Client::builder()
                 .user_agent("heddle-review")
+                // Never follow redirects: GitHub REST pagination returns
+                // `200`+`Link`, never `3xx`. Following a server-controlled
+                // `Location` would bypass the `validate_pagination_origin`
+                // Link-header check and re-open the SSRF gap it closes (#521).
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|err| ReviewError::Github(err.to_string()))?,
             api_base_url,
@@ -952,6 +957,35 @@ mod tests {
         assert!(
             err.to_string().contains("unexpected origin"),
             "expected an origin-rejection error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_files_does_not_follow_redirect_to_internal_address() {
+        // The client must not follow redirects: GitHub pagination is
+        // `200`+`Link`, never `3xx`. A server-controlled `302` whose
+        // `Location` points at an internal/dead address would bypass the
+        // Link-header origin check entirely if reqwest auto-followed it
+        // (the SSRF sibling of the cross-origin pagination case, #521).
+        // With redirects disabled, the `302` surfaces as a non-success
+        // status and the fetch fails loudly *without* ever connecting to
+        // the dead port — proving the redirect was not chased.
+        let base_url = spawn_server(|_| {
+            vec![
+                MockResponse::json(302, String::new()).with_header(
+                    "Location",
+                    "http://127.0.0.1:1/repos/heddle/repo/pulls/439/files?per_page=100&page=2",
+                ),
+            ]
+        })
+        .await;
+        let err = client_for(&base_url)
+            .fetch_files(&review_key(), None)
+            .await
+            .expect_err("a redirect to an internal address must not be followed");
+        assert!(
+            err.to_string().contains("pull request files fetch failed"),
+            "expected a non-success status error from the unfollowed 302, got: {err}"
         );
     }
 
