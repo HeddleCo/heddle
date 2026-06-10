@@ -126,6 +126,11 @@ impl GitHubRestClient {
         Ok(Self {
             http: reqwest::Client::builder()
                 .user_agent("heddle-review")
+                // Never follow redirects: GitHub REST pagination returns
+                // `200`+`Link`, never `3xx`. Following a server-controlled
+                // `Location` would bypass the `validate_pagination_origin`
+                // Link-header check and re-open the SSRF gap it closes (#521).
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|err| ReviewError::Github(err.to_string()))?,
             api_base_url,
@@ -404,7 +409,11 @@ impl GitHubRestClient {
                 .await
                 .map_err(|err| ReviewError::Serialization(err.to_string()))?;
             items.extend(page);
-            url = next_page_url(link_header.as_deref())?;
+            let next = next_page_url(link_header.as_deref())?;
+            if let Some(candidate) = next.as_deref() {
+                validate_pagination_origin(&self.api_base_url, candidate)?;
+            }
+            url = next;
         }
 
         Ok(items)
@@ -445,6 +454,28 @@ fn parse_next_link(link: &str) -> Result<Option<String>> {
         }
     }
     Ok(next)
+}
+
+/// Reject a server-provided pagination URL whose origin (scheme + host + port)
+/// differs from the configured API base. GitHub's `Link` header is
+/// server-controlled; without this check a spoofed or compromised endpoint
+/// could point pagination at an internal address (SSRF-adjacent, #521).
+fn validate_pagination_origin(base: &str, candidate: &str) -> Result<()> {
+    let base_url = reqwest::Url::parse(base)
+        .map_err(|err| ReviewError::Github(format!("invalid API base URL `{base}`: {err}")))?;
+    let next_url = reqwest::Url::parse(candidate).map_err(|err| {
+        ReviewError::Github(format!("malformed pagination URL `{candidate}`: {err}"))
+    })?;
+    let same_origin = next_url.scheme() == base_url.scheme()
+        && next_url.host_str() == base_url.host_str()
+        && next_url.port_or_known_default() == base_url.port_or_known_default();
+    if !same_origin {
+        return Err(ReviewError::Github(format!(
+            "refusing to follow pagination URL to unexpected origin `{candidate}` \
+             (expected the origin of `{base}`)"
+        )));
+    }
+    Ok(())
 }
 
 fn is_agent_author(name: &str, email: &str) -> bool {
@@ -698,6 +729,61 @@ mod tests {
         assert!(err.to_string().contains("malformed Link header"));
     }
 
+    #[test]
+    fn validate_pagination_origin_accepts_same_origin() {
+        validate_pagination_origin(
+            "https://api.github.com",
+            "https://api.github.com/repositories/1/pulls?per_page=100&page=2",
+        )
+        .expect("same-origin pagination URL must be accepted");
+    }
+
+    #[test]
+    fn validate_pagination_origin_accepts_explicit_default_port() {
+        validate_pagination_origin(
+            "https://api.github.com",
+            "https://api.github.com:443/resource?page=2",
+        )
+        .expect("an explicit default port is the same origin as the implicit one");
+    }
+
+    #[test]
+    fn validate_pagination_origin_rejects_foreign_host() {
+        let err = validate_pagination_origin(
+            "https://api.github.com",
+            "https://169.254.169.254/resource?page=2",
+        )
+        .expect_err("a foreign host must be rejected");
+        assert!(err.to_string().contains("unexpected origin"));
+    }
+
+    #[test]
+    fn validate_pagination_origin_rejects_scheme_downgrade() {
+        let err = validate_pagination_origin(
+            "https://api.github.com",
+            "http://api.github.com/resource?page=2",
+        )
+        .expect_err("a scheme downgrade must be rejected");
+        assert!(err.to_string().contains("unexpected origin"));
+    }
+
+    #[test]
+    fn validate_pagination_origin_rejects_foreign_port() {
+        let err = validate_pagination_origin(
+            "https://api.github.com",
+            "https://api.github.com:8443/resource?page=2",
+        )
+        .expect_err("a foreign port must be rejected");
+        assert!(err.to_string().contains("unexpected origin"));
+    }
+
+    #[test]
+    fn validate_pagination_origin_rejects_unparseable_candidate() {
+        let err = validate_pagination_origin("https://api.github.com", "not a url")
+            .expect_err("an unparseable pagination URL must be rejected");
+        assert!(err.to_string().contains("malformed pagination URL"));
+    }
+
     #[tokio::test]
     async fn fetch_pull_request_accepts_complete_data() {
         let base_url = spawn_server(|_| {
@@ -848,6 +934,59 @@ mod tests {
             .await
             .expect_err("malformed Link header must not return a partial file list");
         assert!(err.to_string().contains("malformed Link header"));
+    }
+
+    #[tokio::test]
+    async fn fetch_files_rejects_cross_origin_pagination_url() {
+        let base_url = spawn_server(|_| {
+            // Same host, but a port nothing answers on — a stand-in for an
+            // attacker-controlled `next` redirecting pagination off-origin
+            // (e.g. at a cloud metadata endpoint). Validation must refuse it
+            // before any request is issued, so the error is an origin
+            // rejection rather than a connection failure.
+            vec![MockResponse::json(200, file_page(0, GITHUB_PER_PAGE)).with_header(
+                "Link",
+                "<http://127.0.0.1:1/repos/heddle/repo/pulls/439/files?per_page=100&page=2>; rel=\"next\"",
+            )]
+        })
+        .await;
+        let err = client_for(&base_url)
+            .fetch_files(&review_key(), None)
+            .await
+            .expect_err("cross-origin pagination URL must be rejected");
+        assert!(
+            err.to_string().contains("unexpected origin"),
+            "expected an origin-rejection error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_files_does_not_follow_redirect_to_internal_address() {
+        // The client must not follow redirects: GitHub pagination is
+        // `200`+`Link`, never `3xx`. A server-controlled `302` whose
+        // `Location` points at an internal/dead address would bypass the
+        // Link-header origin check entirely if reqwest auto-followed it
+        // (the SSRF sibling of the cross-origin pagination case, #521).
+        // With redirects disabled, the `302` surfaces as a non-success
+        // status and the fetch fails loudly *without* ever connecting to
+        // the dead port — proving the redirect was not chased.
+        let base_url = spawn_server(|_| {
+            vec![
+                MockResponse::json(302, String::new()).with_header(
+                    "Location",
+                    "http://127.0.0.1:1/repos/heddle/repo/pulls/439/files?per_page=100&page=2",
+                ),
+            ]
+        })
+        .await;
+        let err = client_for(&base_url)
+            .fetch_files(&review_key(), None)
+            .await
+            .expect_err("a redirect to an internal address must not be followed");
+        assert!(
+            err.to_string().contains("pull request files fetch failed"),
+            "expected a non-success status error from the unfollowed 302, got: {err}"
+        );
     }
 
     #[tokio::test]
