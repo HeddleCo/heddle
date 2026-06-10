@@ -41,7 +41,7 @@ use grpc::{
 use objects::error::{HeddleError, Result};
 use repo::{Repository, operation_dedup::OperationDedupStore};
 use tokio::net::UnixListener;
-use tokio_stream::wrappers::UnixListenerStream;
+use tokio_stream::{StreamExt, wrappers::UnixListenerStream};
 use tonic::transport::Server;
 
 use crate::grpc_local_impl::{
@@ -337,7 +337,12 @@ pub async fn serve(
     let transaction = TransactionServiceServer::new(LocalTransactionService::new(inner.clone()));
     let hook = HookServiceServer::new(LocalHookService::new(inner));
 
-    let incoming = UnixListenerStream::new(listener);
+    // Per-connection SO_PEERCRED gate. Mode 0600 already keeps other users
+    // from opening the socket; this filter is the defense-in-depth layer
+    // the module docs promise — every accepted connection is checked
+    // against the daemon's uid (and dropped on mismatch) before tonic ever
+    // sees it.
+    let incoming = UnixListenerStream::new(listener).filter_map(guard_peer_connection);
 
     Server::builder()
         .add_service(state_review)
@@ -360,25 +365,56 @@ fn set_socket_mode_0600(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Verify that a connecting peer's UID matches our own. Called by tonic's
-/// connection acceptor *if* the local-impl decides to enforce per-connection
-/// peer credentials. For first ship we rely on the socket file's mode 0600
-/// to keep other users out, which is the standard Unix posture for a
-/// single-user daemon. This helper is exported so a future hardening pass
-/// can wire it into a tonic interceptor without rewriting the daemon.
+/// Verify that a connecting peer's UID matches the daemon's own. Wired
+/// into the [`serve`] accept path via [`guard_peer_connection`]: every UDS
+/// connection passes through this check before tonic handles it. The
+/// socket's mode 0600 already keeps other users from opening it; this
+/// SO_PEERCRED check (`getpeereid` on macOS) is the defense-in-depth layer
+/// that enforces the same-user boundary per-connection even if the socket
+/// permissions were somehow widened.
 pub fn check_peer_uid_matches_self(stream: &tokio::net::UnixStream) -> Result<()> {
     let creds = stream
         .peer_cred()
         .map_err(|e| HeddleError::InvalidObject(format!("peer_cred failed: {e}")))?;
-    // SAFETY: getuid() never fails.
+    // SAFETY: geteuid() never fails.
     let our_uid = unsafe { libc::geteuid() };
-    if creds.uid() != our_uid {
+    enforce_peer_uid(creds.uid(), our_uid)
+}
+
+/// Compare a peer's UID against the daemon's effective UID, erroring when
+/// they differ. Split out from [`check_peer_uid_matches_self`] so the
+/// accept/reject decision is unit-testable without a real cross-UID
+/// connection (which would need root or a second user).
+fn enforce_peer_uid(peer_uid: u32, our_uid: u32) -> Result<()> {
+    if peer_uid != our_uid {
         return Err(HeddleError::Conflict(format!(
-            "peer uid {} does not match daemon uid {our_uid}",
-            creds.uid()
+            "peer uid {peer_uid} does not match daemon uid {our_uid}"
         )));
     }
     Ok(())
+}
+
+/// Per-connection gate applied to the [`serve`] accept stream. Each
+/// accepted UDS connection is checked with [`check_peer_uid_matches_self`];
+/// a peer whose UID doesn't match the daemon's is dropped here (its
+/// `UnixStream` is closed) and never handed to tonic. Listener-level I/O
+/// errors pass through unchanged so tonic's own error handling still runs.
+fn guard_peer_connection(
+    conn: std::io::Result<tokio::net::UnixStream>,
+) -> Option<std::io::Result<tokio::net::UnixStream>> {
+    match conn {
+        Ok(stream) => match check_peer_uid_matches_self(&stream) {
+            Ok(()) => Some(Ok(stream)),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "local-daemon: rejecting connection from peer with mismatched uid"
+                );
+                None
+            }
+        },
+        Err(e) => Some(Err(e)),
+    }
 }
 
 #[cfg(test)]
