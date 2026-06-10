@@ -52,6 +52,14 @@ ignore = [
     { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.101: wildcard SAN constraint bypass. Transitive via aws-sdk-s3 → smithy-http-client → old rustls 0.21. Heddle doesn't validate certificates with wildcard name constraints on attacker-supplied trust anchors; mitigation is the aws-sdk-s3 bump tracked as a follow-up." },
     { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.101: URI name constraint accepted. Same transitive chain as RUSTSEC-2026-0099; same mitigation path." },
     { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.101: reachable panic parsing malformed CRL. Heddle does not consume attacker-supplied CRLs over the aws-sdk-s3 path (S3 endpoint TLS uses a small fixed root set); same mitigation path." },
+
+    # proc-macro-error2 2.0.1: unmaintained (RUSTSEC-2026-0173). Pulled
+    # transitively via biscuit-quote → biscuit-auth 6.0 (heddle-client's auth
+    # lib). It is a BUILD-TIME proc-macro helper, not a runtime dependency, and
+    # "unmaintained" is a maintenance-status warning, not a vulnerability — no
+    # CVE, no runtime attack surface. Remove this ignore when biscuit-auth drops
+    # proc-macro-error2 upstream.
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 unmaintained; transitive build-time proc-macro via biscuit-quote → biscuit-auth 6.0; no runtime exposure, no CVE. Remove when biscuit-auth drops it." },
 ]
 
 # ---------------------------------------------------------------------------
