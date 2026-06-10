@@ -61,3 +61,52 @@ fn test_auth_context() {
     assert!(!ctx.can_write());
     assert!(!ctx.is_admin());
 }
+
+fn namespace_ctx(scope: &str) -> AuthContext {
+    AuthContext {
+        user: "alice".to_string(),
+        permissions: vec![Permission::Read],
+        token_id: "token123".to_string(),
+        scope: TokenScope::NamespaceTree(scope.to_string()),
+    }
+}
+
+#[test]
+fn test_namespace_tree_exact_match() {
+    let ctx = namespace_ctx("team");
+    assert!(ctx.can_access_namespace("team"));
+}
+
+#[test]
+fn test_namespace_tree_downward_access() {
+    // A token scoped to a namespace can reach the namespace itself and its descendants.
+    let ctx = namespace_ctx("team");
+    assert!(ctx.can_access_namespace("team/project"));
+    assert!(ctx.can_access_namespace("team/project/sub"));
+}
+
+#[test]
+fn test_namespace_tree_no_upward_access() {
+    // A token scoped to a child namespace must NOT reach its parent or ancestors.
+    let ctx = namespace_ctx("team/project");
+    assert!(ctx.can_access_namespace("team/project")); // exact still allowed
+    assert!(!ctx.can_access_namespace("team")); // parent — DENIED
+    assert!(!ctx.can_access_namespace("")); // root — DENIED
+}
+
+#[test]
+fn test_namespace_tree_no_sibling_access() {
+    // Siblings under a shared ancestor must not reach one another.
+    let ctx = namespace_ctx("team/project");
+    assert!(!ctx.can_access_namespace("team/other"));
+}
+
+#[test]
+fn test_namespace_tree_no_prefix_false_positive() {
+    // A non-boundary prefix match must not grant access in either direction.
+    let ctx = namespace_ctx("team");
+    assert!(!ctx.can_access_namespace("teamwork"));
+
+    let child = namespace_ctx("teamwork");
+    assert!(!child.can_access_namespace("team"));
+}
