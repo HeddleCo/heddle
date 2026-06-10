@@ -53,6 +53,10 @@ impl GitHubAuthClient {
         Ok(Self {
             http: reqwest::Client::builder()
                 .user_agent("heddle-review")
+                // Mirror the REST client: never follow redirects, so a
+                // server-controlled `Location` can't steer auth traffic
+                // off-origin (SSRF, #521).
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|err| ReviewError::Github(err.to_string()))?,
             app_id,
