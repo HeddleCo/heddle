@@ -455,7 +455,21 @@ fn parse_next_link(link: &str) -> Result<Option<String>> {
 /// differs from the configured API base. GitHub's `Link` header is
 /// server-controlled; without this check a spoofed or compromised endpoint
 /// could point pagination at an internal address (SSRF-adjacent, #521).
-fn validate_pagination_origin(_base: &str, _candidate: &str) -> Result<()> {
+fn validate_pagination_origin(base: &str, candidate: &str) -> Result<()> {
+    let base_url = reqwest::Url::parse(base)
+        .map_err(|err| ReviewError::Github(format!("invalid API base URL `{base}`: {err}")))?;
+    let next_url = reqwest::Url::parse(candidate).map_err(|err| {
+        ReviewError::Github(format!("malformed pagination URL `{candidate}`: {err}"))
+    })?;
+    let same_origin = next_url.scheme() == base_url.scheme()
+        && next_url.host_str() == base_url.host_str()
+        && next_url.port_or_known_default() == base_url.port_or_known_default();
+    if !same_origin {
+        return Err(ReviewError::Github(format!(
+            "refusing to follow pagination URL to unexpected origin `{candidate}` \
+             (expected the origin of `{base}`)"
+        )));
+    }
     Ok(())
 }
 
