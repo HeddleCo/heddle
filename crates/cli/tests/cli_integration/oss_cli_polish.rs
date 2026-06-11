@@ -7,7 +7,7 @@ use super::*;
 
 #[test]
 fn git_overlay_guide_is_concise_and_actionable() {
-    let help = heddle(&["help", "git-overlay"], None).unwrap();
+    let help = heddle_help(&["help", "git-overlay"]);
     assert!(
         help.contains("Git-overlay quick start")
             && help.contains("heddle adopt")
@@ -52,7 +52,7 @@ fn git_overlay_guide_is_concise_and_actionable() {
 
 #[test]
 fn model_help_topic_gives_short_first_time_mental_model() {
-    let help = heddle(&["help", "model"], None).expect("model help topic should render");
+    let help = heddle_help(&["help", "model"]);
     assert!(
         help.contains("Heddle mental model")
             && help.contains("State:")
@@ -72,7 +72,7 @@ fn model_help_topic_gives_short_first_time_mental_model() {
 
 #[test]
 fn bridge_help_topic_teaches_adoption_before_export_notes() {
-    let help = heddle(&["help", "bridge"], None).expect("bridge help topic should render");
+    let help = heddle_help(&["help", "bridge"]);
     assert!(
         help.starts_with("Git bridge"),
         "bridge topic should open with the workflow, not advanced notes metadata: {help}"
@@ -106,7 +106,7 @@ fn bridge_help_topic_teaches_adoption_before_export_notes() {
 
 #[test]
 fn import_alias_leads_to_adopt_instead_of_clap_guesswork() {
-    let help = heddle(&["import", "--help"], None).expect("import alias help should render");
+    let help = heddle_help(&["import", "--help"]);
     assert!(
         help.contains("Adopt the current Git repository into Heddle")
             && help.contains("heddle adopt"),
@@ -116,7 +116,7 @@ fn import_alias_leads_to_adopt_instead_of_clap_guesswork() {
 
 #[test]
 fn adopt_help_does_not_claim_dirty_git_worktree_becomes_clean() {
-    let help = heddle(&["adopt", "--help"], None).expect("adopt help should render");
+    let help = heddle_help(&["adopt", "--help"]);
     assert!(
         help.contains("without modifying existing Git worktree changes"),
         "adopt help should say adoption leaves existing dirty work untouched: {help}"
@@ -246,7 +246,7 @@ fn switch_print_cd_path_alias_matches_thread_switch() {
 
 #[test]
 fn log_help_examples_use_singular_path_flag() {
-    let help = heddle(&["log", "--help"], None).expect("log help should render");
+    let help = heddle_help(&["log", "--help"]);
     assert!(
         help.contains("heddle log --path src/auth.rs"),
         "log help should document the implemented --path flag: {help}"
@@ -259,7 +259,7 @@ fn log_help_examples_use_singular_path_flag() {
 
 #[test]
 fn verify_help_names_checks_and_core_examples() {
-    let help = heddle(&["verify", "--help"], None).expect("verify help should render");
+    let help = heddle_help(&["verify", "--help"]);
     assert!(
         help.contains(
             "Checks: Git mapping, worktree, remote, operation, clone verification, machine contract."
@@ -281,7 +281,7 @@ fn verify_help_names_checks_and_core_examples() {
 #[test]
 fn thread_cleanup_help_renders_modes_as_bullets() {
     let help =
-        heddle(&["thread", "cleanup", "--help"], None).expect("thread cleanup help should render");
+        heddle_help(&["thread", "cleanup", "--help"]);
     assert!(
         help.contains("Modes:")
             && help.contains("  - --merged: clean up threads recorded as merged.")
@@ -2651,7 +2651,7 @@ fn git_overlay_commit_without_no_all_checkpoints_pending_capture() {
 
 #[test]
 fn commit_help_surfaces_index_vs_worktree_auto_switch() {
-    let commit = heddle(&["commit", "--help"], None).expect("heddle commit --help should render");
+    let commit = heddle_help(&["commit", "--help"]);
     assert!(
         commit.contains("auto-switches on the Git index")
             && commit.contains("with nothing staged it commits all worktree paths")
@@ -8079,7 +8079,7 @@ fn global_flags_only_json_renders_command_catalog_for_agents() {
 
 #[test]
 fn advanced_help_does_not_repeat_everyday_human_path() {
-    let advanced = heddle(&["help", "advanced"], None).expect("advanced help should render");
+    let advanced = heddle_help(&["help", "advanced"]);
     assert!(
         advanced.contains(
             "Advanced commands for power users, agents, automation, Git interop, and recovery."
@@ -8101,19 +8101,19 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
         );
     }
 
-    let push_help = heddle(&["push", "--help"], None).expect("push help should render");
+    let push_help = heddle_help(&["push", "--help"]);
     assert!(
         push_help.contains("Remote name, local path, URL, or hosted address"),
         "push help should match Git-overlay and hosted reality, not only host:port remotes: {push_help}"
     );
-    let pull_help = heddle(&["pull", "--help"], None).expect("pull help should render");
+    let pull_help = heddle_help(&["pull", "--help"]);
     assert!(
         pull_help.contains("Remote name, local path, URL, or hosted address"),
         "pull help should match Git-overlay and hosted reality, not only host:port remotes: {pull_help}"
     );
 
     let operation_ids =
-        heddle(&["help", "operation-ids"], None).expect("operation ids help should render");
+        heddle_help(&["help", "operation-ids"]);
     assert!(
         operation_ids.contains("supports_op_id: true")
             && operation_ids.contains("op_id_behavior: explicit_replay")
@@ -8123,7 +8123,7 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
         "operation-id help should defer to the command contract table: {operation_ids}"
     );
 
-    let capture_help = heddle(&["capture", "--help"], None).expect("capture help should render");
+    let capture_help = heddle_help(&["capture", "--help"]);
     assert!(
         !capture_help.contains("HEDDLE_SESSION_ID")
             && !capture_help.contains("HEDDLE_SESSION_SEGMENT"),
@@ -8145,7 +8145,7 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
         );
     }
 
-    let start_help = heddle(&["start", "--help"], None).expect("start help should render");
+    let start_help = heddle_help(&["start", "--help"]);
     for hidden in [
         "--agent-provider",
         "--agent-model",
@@ -8167,7 +8167,7 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
         "start help should describe workspace modes in human language: {start_help}"
     );
 
-    let clone_help = heddle(&["clone", "--help"], None).expect("clone help should render");
+    let clone_help = heddle_help(&["clone", "--help"]);
     for hidden in ["--lazy", "--filter", "v0.3.1", "blob:none"] {
         assert!(
             !clone_help.contains(hidden),
@@ -8176,13 +8176,13 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
     }
 
     let promote_help =
-        heddle(&["thread", "promote", "--help"], None).expect("thread promote help should render");
+        heddle_help(&["thread", "promote", "--help"]);
     assert!(
         !promote_help.contains("heavy checkout"),
         "thread promote help should use product-facing workspace language: {promote_help}"
     );
 
-    let try_help = heddle(&["try", "--help"], None).expect("try help should render");
+    let try_help = heddle_help(&["try", "--help"]);
     assert!(
         try_help.contains("Defaults to `materialized`")
             && try_help.contains("auto")
@@ -8192,7 +8192,7 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
         "try help should use current workspace mode terms: {try_help}"
     );
 
-    let attempt_help = heddle(&["attempt", "--help"], None).expect("attempt help should render");
+    let attempt_help = heddle_help(&["attempt", "--help"]);
     assert!(
         attempt_help.contains("Defaults to `materialized`")
             && attempt_help.contains("auto")
@@ -9081,8 +9081,7 @@ fn command_catalog_filters_bound_agent_queries() {
 
 #[test]
 fn git_dependencies_help_topic_explains_no_git_contract() {
-    let help = heddle(&["help", "git-dependencies"], None)
-        .expect("git-dependencies help topic should render");
+    let help = heddle_help(&["help", "git-dependencies"]);
     assert!(
         help.contains("without `git` on PATH")
             && help.contains("Git-compatible, not Git-binary-dependent")
@@ -9097,7 +9096,7 @@ fn git_dependencies_help_topic_explains_no_git_contract() {
 
 #[test]
 fn remotes_help_topic_is_available_from_default_topic_list() {
-    let help = heddle(&["help", "remotes"], None).expect("remotes help topic should render");
+    let help = heddle_help(&["help", "remotes"]);
     assert!(
         help.contains("heddle remote add origin <url-or-path>")
             && help.contains("heddle push")
@@ -9429,7 +9428,7 @@ fn help_for_verb_prefixes_usage_with_heddle() {
     // `Usage: status` would suggest the user can run `status` standalone.
     for verb in ["status", "capture", "log", "merge", "undo", "start", "init"] {
         let output =
-            heddle(&["help", verb], None).unwrap_or_else(|err| panic!("heddle help {verb}: {err}"));
+            heddle_help(&["help", verb]);
         assert!(
             output.contains(&format!("Usage: heddle {verb}")),
             "`heddle help {verb}` must prefix the Usage line with `heddle`: {output}"
@@ -9439,8 +9438,8 @@ fn help_for_verb_prefixes_usage_with_heddle() {
 
 #[test]
 fn help_for_verb_includes_visible_global_flags() {
-    let topic = heddle(&["help", "status"], None).expect("heddle help status should render");
-    let direct = heddle(&["status", "--help"], None).expect("heddle status --help should render");
+    let topic = heddle_help(&["help", "status"]);
+    let direct = heddle_help(&["status", "--help"]);
     for flag in ["--output <OUTPUT>", "--repo <PATH>", "--quiet", "--verbose"] {
         assert!(
             topic.contains(flag),
@@ -9455,7 +9454,7 @@ fn help_for_verb_includes_visible_global_flags() {
 
 #[test]
 fn op_id_help_is_visible_only_for_supported_commands() {
-    let commit = heddle(&["commit", "--help"], None).expect("heddle commit --help should render");
+    let commit = heddle_help(&["commit", "--help"]);
     assert!(
         commit.contains("--op-id <UUID>"),
         "op-id capable command help should expose --op-id: {commit}"
@@ -9467,13 +9466,13 @@ fn op_id_help_is_visible_only_for_supported_commands() {
         "commit help should explain all-worktree and staged-index semantics for Git users: {commit}"
     );
 
-    let init = heddle(&["help", "init"], None).expect("heddle help init should render");
+    let init = heddle_help(&["help", "init"]);
     assert!(
         init.contains("--op-id <UUID>"),
         "first-contact mutator help should expose --op-id: {init}"
     );
 
-    let status = heddle(&["status", "--help"], None).expect("heddle status --help should render");
+    let status = heddle_help(&["status", "--help"]);
     assert!(
         !status.contains("--op-id"),
         "observe-only command help should not advertise --op-id: {status}"
@@ -9482,6 +9481,9 @@ fn op_id_help_is_visible_only_for_supported_commands() {
 
 #[test]
 fn public_command_paths_have_all_required_help_entrypoints() {
+    // Stays on the spawned binary (not the in-process `heddle_help`): this
+    // asserts the *process* contract — exit code 0 and an empty stderr stream —
+    // for every help entrypoint, which only a real subprocess can model.
     let paths = public_command_paths();
     assert!(
         paths.len() > 40,
@@ -9590,16 +9592,14 @@ fn everyday_commands_have_all_required_help_entrypoints() {
     }
 
     for verb in everyday {
-        let topic = heddle(&["help", verb], None)
-            .unwrap_or_else(|err| panic!("heddle help {verb} should succeed: {err}"));
+        let topic = heddle_help(&["help", verb]);
         assert!(
             !topic.trim().is_empty() && !topic.contains("no topic"),
             "heddle help {verb} should render useful help: {topic}"
         );
 
         for flag in ["--help", "-h"] {
-            let output = heddle(&[verb, flag], None)
-                .unwrap_or_else(|err| panic!("heddle {verb} {flag} should succeed: {err}"));
+            let output = heddle_help(&[verb, flag]);
             assert!(
                 output.contains("Usage:") && output.contains("heddle") && output.contains(verb),
                 "heddle {verb} {flag} should render command help with usage: {output}"

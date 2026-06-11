@@ -464,7 +464,7 @@ fn test_cli_pull_local_dirty_refusal_leaves_thread_ref_unchanged() {
 
 #[test]
 fn test_cli_clone_help_hides_planned_lazy_flag() {
-    let output = heddle(&["clone", "--help"], None).unwrap();
+    let output = heddle_help(&["clone", "--help"]);
     assert!(
         !output.contains("--lazy") && !output.contains("--filter"),
         "clone help should keep planned lazy/partial clone flags out of first-run help: {output}"
@@ -636,7 +636,7 @@ fn test_cli_pull_local_detached_head_materializes_then_publishes_thread() {
 
 #[test]
 fn test_cli_pull_help_hides_planned_lazy_flag() {
-    let output = heddle(&["pull", "--help"], None).unwrap();
+    let output = heddle_help(&["pull", "--help"]);
     assert!(
         !output.contains("--lazy"),
         "pull help should keep planned lazy pull out of first-run help: {output}"
@@ -645,7 +645,7 @@ fn test_cli_pull_help_hides_planned_lazy_flag() {
 
 #[test]
 fn git_overlay_push_help_names_git_tag_scope_explicitly() {
-    let help = heddle(&["push", "--help"], None).expect("push help should render");
+    let help = heddle_help(&["push", "--help"]);
     assert!(
         help.contains("Git tag visible to this checkout")
             && help.contains("skips Git tags")
