@@ -91,7 +91,9 @@ targets=(
   "aarch64-unknown-linux-gnu"
   "x86_64-unknown-linux-gnu"
   "x86_64-pc-windows-msvc"
-  "aarch64-pc-windows-msvc"
+  # aarch64-pc-windows-msvc parked until cosign ships win-arm64 binaries
+  # (cosign-installer@v3 has no asset; signing hard-fails). See the
+  # re-enable tracking issue before adding it back here AND in release.yml.
 )
 for t in "${targets[@]}"; do
   if grep -F "$t" "$WF" >/dev/null; then
