@@ -124,6 +124,18 @@ fn validate_next_actions_at_path(
                 if matches!(key.as_str(), "next_action" | "recommended_action")
                     && let Some(action) = child.as_str()
                 {
+                    // Action-field contract (HeddleCo/heddle#645): "no
+                    // action needed" is `null` and "not applicable" is an
+                    // absent field — the empty string is never a valid
+                    // serialized action. Route emitters through
+                    // `normalized_action` so empties become `None` before
+                    // they reach this boundary.
+                    if action.trim().is_empty() {
+                        return Err(next_action_validation_error(format!(
+                            "empty {key} at {child_path}: serialize no-action as null (or omit \
+                             the field), never \"\" — see normalized_action"
+                        )));
+                    }
                     validate_next_action(action, context)
                         .with_context(|| format!("invalid {key} at {child_path}"))?;
                 }
@@ -406,7 +418,27 @@ pub(crate) fn thread_recovery_action_is_primary(
         || thread_action.starts_with("heddle thread promote ")
 }
 
-fn non_empty_action(action: Option<&str>) -> Option<&str> {
+/// The single normalizer for serialized action fields
+/// (HeddleCo/heddle#645). The internal selection helpers above use
+/// `String` with "empty means no action"; this collapses that convention
+/// at the boundary — empty/whitespace-only becomes `None`, so JSON output
+/// serializes `null` (or omits the field) and `""` can never leak into a
+/// `next_action`/`recommended_action`. Route every output-struct
+/// assignment through here instead of ad-hoc `.is_empty()` checks; the
+/// serialization walker in `validate_next_actions_at_path` rejects any
+/// empty string that slips past.
+pub(crate) fn normalized_action(action: impl Into<String>) -> Option<String> {
+    let action = action.into();
+    if action.trim().is_empty() {
+        None
+    } else {
+        Some(action)
+    }
+}
+
+/// Borrowed sibling of [`normalized_action`] for render paths that only
+/// need to know whether an action exists.
+pub(crate) fn non_empty_action(action: Option<&str>) -> Option<&str> {
     action.filter(|action| !action.trim().is_empty())
 }
 
@@ -468,6 +500,45 @@ mod tests {
         )
         .expect_err("ready must not point back to ready");
         assert!(err.to_string().contains("self-loop"));
+    }
+
+    #[test]
+    fn normalized_action_maps_empty_and_whitespace_to_none() {
+        assert_eq!(normalized_action(""), None);
+        assert_eq!(normalized_action("   "), None);
+        assert_eq!(
+            normalized_action("heddle status"),
+            Some("heddle status".to_string())
+        );
+    }
+
+    #[test]
+    fn boundary_rejects_empty_string_actions() {
+        // HeddleCo/heddle#645: `""` is not a valid serialized action —
+        // no-action is `null`, not-applicable is an absent field.
+        for payload in [
+            json!({"recommended_action": ""}),
+            json!({"next_action": "  "}),
+            json!({"nested": {"checks": [{"recommended_action": ""}]}}),
+        ] {
+            let err = validate_next_actions_in_value(&payload, ctx(&["status"]))
+                .expect_err("empty-string action must fail the serialization boundary");
+            assert!(
+                err.to_string().contains("empty"),
+                "rejection should name the empty-action contract: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn boundary_accepts_null_and_absent_actions() {
+        for payload in [
+            json!({"recommended_action": null, "next_action": null}),
+            json!({"output_kind": "status"}),
+        ] {
+            validate_next_actions_in_value(&payload, ctx(&["status"]))
+                .expect("null/absent actions are the documented no-action encodings");
+        }
     }
 
     #[test]

@@ -35,7 +35,6 @@ pub fn print_error_with_hint(cli: &Cli, err: &anyhow::Error) {
         let primary_command_template = command_template(&classification.primary_command);
         let recovery_action_templates = command_templates(&classification.recovery_commands);
         let mut body = serde_json::json!({
-            "code": kind,
             "error": envelope_error,
             "exit_code": HeddleExitCode::from_error(err).as_u8(),
             "hint": hint,
@@ -144,7 +143,6 @@ pub fn print_parse_error_json_envelope(err: &ClapError) {
     ];
     let recovery_action_templates = command_templates(&recovery_commands);
     let body = serde_json::json!({
-        "code": "parse_error",
         "error": err.to_string(),
         "exit_code": HeddleExitCode::from_clap(err).as_u8(),
         "hint": "Run `heddle commands --output json` to inspect the command surface.",

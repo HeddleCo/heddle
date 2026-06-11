@@ -6261,7 +6261,7 @@ fn git_overlay_matrix_ship_undo_restores_git_and_heddle_together() {
     let stderr = String::from_utf8_lossy(&redo_refusal.stderr);
     let envelope: Value = serde_json::from_str(stderr.trim())
         .unwrap_or_else(|err| panic!("dirty redo should emit JSON envelope: {err}: {stderr}"));
-    assert_eq!(envelope["code"], "dirty_worktree");
+    assert_eq!(envelope["kind"], "dirty_worktree");
     assert!(
         !temp.path().join("feature.txt").exists(),
         "redo refusal must not partially re-apply Heddle/worktree state"

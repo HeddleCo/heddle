@@ -19,7 +19,8 @@ use super::{
     },
     merge::{ThreadPreviewReport, build_thread_preview_report},
     next_action::{
-        NextActionInput, NextActionValidationContext, effective_next_action, write_command_json,
+        NextActionInput, NextActionValidationContext, effective_next_action, non_empty_action,
+        normalized_action, write_command_json,
     },
     operator_core::{
         OperatorCommandOutput, VerificationClaimPolicy, exit_if_blocked_operator_status,
@@ -288,8 +289,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
         report.recommended_action = recommended_action.clone();
         report.refresh_recommended_action_metadata();
     }
-    let recommended_action_value =
-        (!recommended_action.is_empty()).then(|| recommended_action.clone());
+    let recommended_action_value = normalized_action(recommended_action.clone());
 
     let status = if thread.state == ThreadState::Ready || !has_integration_target {
         "completed"
@@ -439,7 +439,7 @@ fn write_trust_blocked_setup(recommended_action: Option<&str>) {
         style::field("status", &style::thread_state("blocked"))
     );
     println!("  {}", style::field("checks", "not run"));
-    if let Some(recommended_action) = recommended_action.filter(|action| !action.is_empty()) {
+    if let Some(recommended_action) = non_empty_action(recommended_action) {
         println!();
         print_next(recommended_action);
     }
@@ -647,7 +647,7 @@ fn write_preview_report(report: &ThreadPreviewReport, recommended_action: Option
             println!("  {} {}", style::warn("-"), style::warn(blocker));
         }
     }
-    if let Some(recommended_action) = recommended_action.filter(|action| !action.is_empty()) {
+    if let Some(recommended_action) = non_empty_action(recommended_action) {
         println!();
         print_next(recommended_action);
     }
@@ -666,11 +666,7 @@ fn ready_report_recommended_action(report: &ThreadPreviewReport) -> Option<Strin
     if report.semantic_result == "no_target" {
         return None;
     }
-    if report.recommended_action.trim().is_empty() {
-        None
-    } else {
-        Some(report.recommended_action.clone())
-    }
+    normalized_action(report.recommended_action.clone())
 }
 
 fn trust_blocked_report_for(
