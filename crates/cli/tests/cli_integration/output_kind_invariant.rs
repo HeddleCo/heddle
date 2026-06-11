@@ -108,6 +108,55 @@ const SWEPT: &[&str] = &[
     "review next",
     "review health",
     "cherry-pick",
+    // heddle#641 — swept the remaining verbs whose runtime JSON already
+    // emits `output_kind`. Every value below was probed live against the
+    // built binary (or read off the emitting struct for the daemon-style
+    // verbs that can't run in a synthetic fixture); several carry
+    // wire-frozen values that differ from the snake-cased display path —
+    // see `output_kind_override`.
+    "abort",
+    "adopt",
+    "agent capture",
+    "agent ready",
+    "agent serve",
+    "agent status",
+    "agent stop",
+    "blame",
+    "branch",
+    "bridge git pull",
+    "bridge git push",
+    "conflict show",
+    "continue",
+    "daemon stop",
+    "doctor",
+    "fetch",
+    "inspect",
+    "land",
+    "log",
+    "maintenance gc",
+    "maintenance index",
+    "merge",
+    "pull",
+    "push",
+    "query",
+    "ready",
+    "remote add",
+    "remote list",
+    "remote remove",
+    "remote set-default",
+    "remote show",
+    "start",
+    "switch",
+    "sync",
+    "thread cleanup",
+    "thread create",
+    "thread drop",
+    "thread promote",
+    "thread refresh",
+    "thread rename",
+    "thread resolve",
+    "thread revoke-approval",
+    "thread switch",
 ];
 
 /// The catalog itself advertises its container kind as `"kind":
@@ -121,41 +170,25 @@ const KIND_FIELD_EXCEPTIONS: &[&str] = &["commands"];
 /// up the sweep instead. This list is the rolldown surface for
 /// follow-up work tracked separately from #272.
 const UNSWEPT_TODO: &[&str] = &[
-    "abort",
-    "adopt",
     "actor done",
     "actor explain",
     "actor list",
     "actor show",
     "actor spawn",
-    "agent capture",
     "agent heartbeat",
     "agent list",
-    "agent ready",
     "agent release",
     "agent reserve",
-    "agent serve",
-    "agent status",
-    "agent stop",
     "attempt",
-    "blame",
-    "branch",
     "bridge git export",
     "bridge git ingest",
     "bridge git init",
-    "bridge git pull",
-    "bridge git push",
     "bridge git reason",
     "collapse",
     "conflict list",
-    "conflict show",
-    "continue",
     "daemon serve",
     "daemon status",
-    "daemon stop",
     "delegate",
-    "doctor",
-    "fetch",
     "fsck",
     "git-overlay",
     "harness-bridge",
@@ -163,16 +196,12 @@ const UNSWEPT_TODO: &[&str] = &[
     "hook install",
     "hook list",
     "hook uninstall",
-    "inspect",
     "integration doctor",
     "integration install",
     "integration list",
     "integration relay",
     "integration uninstall",
     "integration upgrade",
-    "log",
-    "maintenance gc",
-    "maintenance index",
     "maintenance inspect",
     "maintenance monitor",
     "maintenance run",
@@ -180,17 +209,7 @@ const UNSWEPT_TODO: &[&str] = &[
     "marker delete",
     "marker list",
     "marker show",
-    "merge",
-    "pull",
-    "push",
-    "query",
     "rebase",
-    "ready",
-    "remote add",
-    "remote list",
-    "remote remove",
-    "remote set-default",
-    "remote show",
     "resolve",
     "retro",
     "semantic hot",
@@ -199,32 +218,19 @@ const UNSWEPT_TODO: &[&str] = &[
     "session segment",
     "session show",
     "session start",
-    "land",
     "show",
     "stash apply",
     "stash clear",
     "stash drop",
     "stash pop",
     "stash push",
-    "start",
-    "switch",
-    "sync",
     "thread absorb",
     "thread approvals",
     "thread approve",
     "thread captures",
     "thread check-merge",
-    "thread cleanup",
-    "thread create",
     "thread current",
-    "thread drop",
     "thread move",
-    "thread promote",
-    "thread refresh",
-    "thread rename",
-    "thread resolve",
-    "thread revoke-approval",
-    "thread switch",
     "transaction abort",
     "transaction begin",
     "transaction commit",
@@ -252,6 +258,39 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         // `workspace_summary` (the underlying struct's semantic name)
         // rather than the snake-cased path. Wire-format-stable.
         "workspace show" => Some("workspace_summary"),
+        // heddle#641 — runtime-probed wire values that pre-date the
+        // snake-cased-path rule. The catalog advertises what the
+        // commands actually emit TODAY; renaming any of these is a
+        // wire-format break that must update the emitting struct, the
+        // catalog discriminator, and this override in lockstep.
+        //
+        // `agent capture` / `agent ready` are session-validated
+        // aliases that delegate to `cmd_snapshot` / `cmd_ready`, so
+        // they emit the delegate's kind.
+        "agent capture" => Some("capture"),
+        "agent ready" => Some("ready"),
+        // Git-compat verbs delegate to the thread family and emit the
+        // delegate's kind.
+        "branch" => Some("thread_list"),
+        "inspect" => Some("thread_show"),
+        "start" => Some("thread_start"),
+        "switch" => Some("thread_switch"),
+        // `doctor` is implemented by the diagnose module.
+        "doctor" => Some("diagnose"),
+        // The maintenance wrappers emit their inner tool's kind.
+        "maintenance gc" => Some("gc"),
+        "maintenance index" => Some("index"),
+        // The thread lifecycle verbs that route through the shared
+        // operator envelope emit the generic `thread` (drop / promote /
+        // refresh), `resolve`, or the dotted `thread.cleanup` action
+        // name. Flagged as struct-level inconsistencies for a follow-up
+        // sweep; until the structs change, the catalog must advertise
+        // the live values.
+        "thread cleanup" => Some("thread.cleanup"),
+        "thread drop" => Some("thread"),
+        "thread promote" => Some("thread"),
+        "thread refresh" => Some("thread"),
+        "thread resolve" => Some("resolve"),
         _ => None,
     }
 }
@@ -643,6 +682,27 @@ fn runtime_invocation_args(display: &str) -> Option<(&'static [&'static str], bo
         "review health" => Some((&["review", "health"], true)),
         // `fork` succeeds in an init'd repo (forks the empty initial state).
         "fork" => Some((&["fork"], true)),
+        // heddle#641 — the swept verbs that run clean (exit 0, full JSON
+        // payload) in the shared init'd fixture, verified live before
+        // being added here. Each pins runtime emission against the
+        // catalog value, including the override-table verbs (`branch` →
+        // `thread_list`, `doctor` → `diagnose`, `inspect` →
+        // `thread_show`, `maintenance gc`/`index` → `gc`/`index`).
+        // `inspect` names `main` explicitly because the earlier `fork`
+        // invocation leaves the shared fixture without a current
+        // thread; `ready` (which rejects imported-Git-ref targets and
+        // has no equivalent escape hatch here) is runtime-covered by
+        // its `agent ready` delegation probe instead.
+        "abort" => Some((&["abort"], true)),
+        "branch" => Some((&["branch"], true)),
+        "continue" => Some((&["continue"], true)),
+        "doctor" => Some((&["doctor"], true)),
+        "inspect" => Some((&["inspect", "main"], true)),
+        "log" => Some((&["log"], true)),
+        "maintenance gc" => Some((&["maintenance", "gc"], true)),
+        "maintenance index" => Some((&["maintenance", "index"], true)),
+        "query" => Some((&["query"], true)),
+        "remote list" => Some((&["remote", "list"], true)),
         _ => None,
     }
 }

@@ -1153,7 +1153,24 @@ const CONTRACTS: &[CommandContractEntry] = &[
         git_adapter_action(
             json_discriminators(
                 documented_schemas(MUTATING, &["branch"]),
-                &[json_discriminator(Some("branch"), "output_kind", "thread_list")],
+                &[
+                    // No-arg `branch` emits the thread-list contract; this
+                    // is the shape the registered `branch` schema mirrors.
+                    json_discriminator(Some("branch"), "output_kind", "thread_list"),
+                    // `branch <name>` (create/rename/delete) delegates to
+                    // the thread family and emits the delegate's record
+                    // (e.g. `thread_create`). Advertised without a schema
+                    // verb — only the listing shape is schema-backed —
+                    // mirroring how hosted `clone` advertises its
+                    // preliminary `clone_connection` envelope.
+                    json_discriminator_no_schema(
+                        "branch mutations delegate to the thread family; the \
+                         registered `branch` schema mirrors only the no-arg \
+                         listing shape",
+                        "output_kind",
+                        "thread_create",
+                    ),
+                ],
             ),
             "thread",
             "command_family",
@@ -1460,10 +1477,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["conflict", "show"],
-        json_discriminators(
-            opaque_schemas(READ_JSON, &["conflict show"]),
-            &[json_discriminator(Some("conflict show"), "output_kind", "conflict_show")],
-        ),
+        opaque_schemas(READ_JSON, &["conflict show"]),
     ),
     entry(
         &["continue"],
@@ -1781,10 +1795,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ],
         ),
     ),
-    entry(&["inspect"], json_discriminators(
-                        documented_schemas(READ_JSON, &["inspect"]),
-                        &[json_discriminator(Some("inspect"), "output_kind", "thread_show")],
-                    )),
+    entry(&["inspect"], documented_schemas(READ_JSON, &["inspect"])),
     entry(&["integration"], surface(GROUP, "admin")),
     entry(
         &["integration", "list"],
@@ -5398,6 +5409,7 @@ mod tests {
                 "agent ready",
                 "blame",
                 "branch",
+                "branch",
                 "bridge git status",
                 "bridge git import",
                 "bridge git sync",
@@ -5413,7 +5425,6 @@ mod tests {
                 "clone",
                 "commit",
                 "commands",
-                "conflict show",
                 "continue",
                 "context set",
                 "context get",
@@ -5439,7 +5450,6 @@ mod tests {
                 "fork",
                 "goto",
                 "init",
-                "inspect",
                 // `log` appears twice: the entry advertises both `log` and the
                 // `log --reflog` variant (`log_reflog`), mirroring `undo`/`clone`.
                 "log",
