@@ -188,7 +188,11 @@ jobs:
             runner: macos-14
             archive: tar.gz
           - target: x86_64-apple-darwin
-            runner: macos-13
+            # macos-13 was retired 2025-12-04 (jobs queue for hours, then a
+            # brownout cancels the whole run — observed on the v0.3.0-rc.1
+            # dry-run). macos-15-intel is the LAST x86_64 macOS image and
+            # lives until August 2027; plan the Intel-mac sunset before then.
+            runner: macos-15-intel
             archive: tar.gz
           - target: aarch64-unknown-linux-gnu
             # glibc floor: ubuntu-22.04 ships glibc 2.35, so the -gnu
@@ -203,9 +207,12 @@ jobs:
           - target: x86_64-pc-windows-msvc
             runner: windows-2022
             archive: zip
-          - target: aarch64-pc-windows-msvc
-            runner: windows-11-arm
-            archive: zip
+          # aarch64-pc-windows-msvc is parked: the binary builds fine, but
+          # sigstore/cosign-installer@v3 ships no Windows-arm64 asset, so the
+          # signing step hard-fails (observed on the v0.3.0-rc.1 dry-run).
+          # Unsigned artifacts in an otherwise-signed release are worse than
+          # absence. Re-add when cosign ships win-arm64 binaries — tracked in
+          # the "re-enable aarch64-pc-windows-msvc" issue.
     steps:
       - uses: actions/checkout@v4
         with:
