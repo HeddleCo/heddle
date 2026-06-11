@@ -4,36 +4,83 @@
 //! This module provides a generic tree diffing algorithm that can be used
 //! by both `repo` and `semantic` crates.
 
+use std::ops::ControlFlow;
+
 use super::FileChangeSet;
 use crate::{
-    object::{EntryType, Tree, TreeEntry},
+    object::{DiffKind, EntryType, FileChange, Tree, TreeEntry},
     store::ObjectStore,
 };
 
 /// Collect all file changes between two trees.
+///
+/// This is the materializing variant: it walks the trees via
+/// [`diff_trees_visit`] and collects every [`FileChange`] into a
+/// [`FileChangeSet`]. Streaming or early-exit consumers should prefer
+/// [`diff_trees_visit`], which avoids allocating the full change list.
 pub fn diff_trees<S: ObjectStore + ?Sized>(
     store: &S,
     from: &crate::object::ContentHash,
     to: &crate::object::ContentHash,
 ) -> Result<FileChangeSet, anyhow::Error> {
-    if from == to {
-        return Ok(FileChangeSet::new());
-    }
-    let from_tree = store.get_tree(from)?;
-    let to_tree = store.get_tree(to)?;
     let mut changes = FileChangeSet::new();
-    diff_trees_recursive(store, &from_tree, &to_tree, "", &mut changes)?;
+    // The visitor never short-circuits here, so the `ControlFlow` result is
+    // always `Continue(())`; we ignore it and return the collected set.
+    let _ = diff_trees_visit(store, from, to, |change| {
+        changes.push(change);
+        ControlFlow::<()>::Continue(())
+    })?;
     Ok(changes)
 }
 
-/// Recursively diff two trees, collecting file changes.
-fn diff_trees_recursive<S: ObjectStore + ?Sized>(
+/// Diff two trees with internal iteration, invoking `visitor` for each
+/// [`FileChange`] in traversal order.
+///
+/// This is the streaming counterpart to [`diff_trees`]. The visitor returns a
+/// [`ControlFlow`]: `Continue(())` keeps walking, while `Break(value)` stops
+/// the traversal immediately — no further subtrees are loaded and no further
+/// changes are produced. Early-exit consumers (e.g. "does anything under path
+/// X differ?", first-N, quick-status checks) use this to avoid materializing
+/// the entire change list.
+///
+/// On early exit the carried `B` is returned as `Ok(ControlFlow::Break(b))`;
+/// on full completion it returns `Ok(ControlFlow::Continue(()))`. Changes are
+/// emitted in exactly the same order as [`diff_trees`] collects them, so the
+/// two paths are behavior-identical.
+pub fn diff_trees_visit<S, V, B>(
+    store: &S,
+    from: &crate::object::ContentHash,
+    to: &crate::object::ContentHash,
+    mut visitor: V,
+) -> Result<ControlFlow<B>, anyhow::Error>
+where
+    S: ObjectStore + ?Sized,
+    V: FnMut(FileChange) -> ControlFlow<B>,
+{
+    if from == to {
+        return Ok(ControlFlow::Continue(()));
+    }
+    let from_tree = store.get_tree(from)?;
+    let to_tree = store.get_tree(to)?;
+    diff_trees_recursive(store, &from_tree, &to_tree, "", &mut visitor)
+}
+
+/// Recursively diff two trees, invoking `visitor` for each change.
+///
+/// Returns `Ok(ControlFlow::Break(b))` as soon as the visitor breaks, so the
+/// caller can propagate the short-circuit up the recursion without walking the
+/// remaining entries or loading further subtrees.
+fn diff_trees_recursive<S, V, B>(
     store: &S,
     from: &Option<Tree>,
     to: &Option<Tree>,
     prefix: &str,
-    changes: &mut FileChangeSet,
-) -> Result<(), anyhow::Error> {
+    visitor: &mut V,
+) -> Result<ControlFlow<B>, anyhow::Error>
+where
+    S: ObjectStore + ?Sized,
+    V: FnMut(FileChange) -> ControlFlow<B>,
+{
     let from_entries = from.as_ref().map_or(&[][..], Tree::entries);
     let to_entries = to.as_ref().map_or(&[][..], Tree::entries);
 
@@ -45,11 +92,19 @@ fn diff_trees_recursive<S: ObjectStore + ?Sized>(
     {
         match from_entry.name.cmp(&to_entry.name) {
             std::cmp::Ordering::Less => {
-                push_deleted_entry(store, prefix, from_entry, changes)?;
+                if let ControlFlow::Break(b) =
+                    visit_deleted_entry(store, prefix, from_entry, visitor)?
+                {
+                    return Ok(ControlFlow::Break(b));
+                }
                 from_index += 1;
             }
             std::cmp::Ordering::Greater => {
-                push_added_entry(store, prefix, to_entry, changes)?;
+                if let ControlFlow::Break(b) =
+                    visit_added_entry(store, prefix, to_entry, visitor)?
+                {
+                    return Ok(ControlFlow::Break(b));
+                }
                 to_index += 1;
             }
             std::cmp::Ordering::Equal => {
@@ -60,10 +115,18 @@ fn diff_trees_recursive<S: ObjectStore + ?Sized>(
                         let from_subtree = store.get_tree(&from_entry.hash)?;
                         let to_subtree = store.get_tree(&to_entry.hash)?;
                         let path = child_path(prefix, &to_entry.name);
-                        diff_trees_recursive(store, &from_subtree, &to_subtree, &path, changes)?;
+                        if let ControlFlow::Break(b) =
+                            diff_trees_recursive(store, &from_subtree, &to_subtree, &path, visitor)?
+                        {
+                            return Ok(ControlFlow::Break(b));
+                        }
                     } else {
                         let path = child_path(prefix, &to_entry.name);
-                        changes.push_modified(&path);
+                        if let ControlFlow::Break(b) =
+                            visitor(FileChange::new(path, DiffKind::Modified))
+                        {
+                            return Ok(ControlFlow::Break(b));
+                        }
                     }
                 }
                 from_index += 1;
@@ -73,48 +136,58 @@ fn diff_trees_recursive<S: ObjectStore + ?Sized>(
     }
 
     for from_entry in &from_entries[from_index..] {
-        push_deleted_entry(store, prefix, from_entry, changes)?;
+        if let ControlFlow::Break(b) = visit_deleted_entry(store, prefix, from_entry, visitor)? {
+            return Ok(ControlFlow::Break(b));
+        }
     }
 
     for to_entry in &to_entries[to_index..] {
-        push_added_entry(store, prefix, to_entry, changes)?;
+        if let ControlFlow::Break(b) = visit_added_entry(store, prefix, to_entry, visitor)? {
+            return Ok(ControlFlow::Break(b));
+        }
     }
 
-    Ok(())
+    Ok(ControlFlow::Continue(()))
 }
 
-fn push_added_entry<S: ObjectStore + ?Sized>(
+fn visit_added_entry<S, V, B>(
     store: &S,
     prefix: &str,
     to_entry: &TreeEntry,
-    changes: &mut FileChangeSet,
-) -> Result<(), anyhow::Error> {
+    visitor: &mut V,
+) -> Result<ControlFlow<B>, anyhow::Error>
+where
+    S: ObjectStore + ?Sized,
+    V: FnMut(FileChange) -> ControlFlow<B>,
+{
     // Symmetric with the delete branch below: if the added entry is itself a
     // directory, recurse into it so callers see per-leaf `added` entries.
     let path = child_path(prefix, &to_entry.name);
     if to_entry.entry_type == EntryType::Tree {
         let to_subtree = store.get_tree(&to_entry.hash)?;
-        diff_trees_recursive(store, &None, &to_subtree, &path, changes)?;
+        diff_trees_recursive(store, &None, &to_subtree, &path, visitor)
     } else {
-        changes.push_added(&path);
+        Ok(visitor(FileChange::new(path, DiffKind::Added)))
     }
-    Ok(())
 }
 
-fn push_deleted_entry<S: ObjectStore + ?Sized>(
+fn visit_deleted_entry<S, V, B>(
     store: &S,
     prefix: &str,
     from_entry: &TreeEntry,
-    changes: &mut FileChangeSet,
-) -> Result<(), anyhow::Error> {
+    visitor: &mut V,
+) -> Result<ControlFlow<B>, anyhow::Error>
+where
+    S: ObjectStore + ?Sized,
+    V: FnMut(FileChange) -> ControlFlow<B>,
+{
     let path = child_path(prefix, &from_entry.name);
     if from_entry.entry_type == EntryType::Tree {
         let from_subtree = store.get_tree(&from_entry.hash)?;
-        diff_trees_recursive(store, &from_subtree, &None, &path, changes)?;
+        diff_trees_recursive(store, &from_subtree, &None, &path, visitor)
     } else {
-        changes.push_deleted(&path);
+        Ok(visitor(FileChange::new(path, DiffKind::Deleted)))
     }
-    Ok(())
 }
 
 fn child_path(prefix: &str, name: &str) -> String {
@@ -356,5 +429,160 @@ mod tests {
                 ("z.txt".to_string(), crate::object::DiffKind::Modified),
             ]
         );
+    }
+
+    /// The visitor variant must emit changes in exactly the same order as
+    /// `diff_trees` collects them. This is the byte-identical guarantee that
+    /// lets `diff_trees` delegate to `diff_trees_visit` without changing
+    /// observable output.
+    #[test]
+    fn test_visit_matches_collect_order() {
+        let store = InMemoryStore::new();
+        let from_sub_blob = create_blob(&store, "old nested");
+        let from_sub_tree = Tree::from_entries(vec![TreeEntry {
+            name: "c.txt".to_string(),
+            mode: FileMode::Normal,
+            hash: from_sub_blob,
+            entry_type: EntryType::Blob,
+        }]);
+        let from_sub_hash = store.put_tree(&from_sub_tree).unwrap();
+        let to_sub_blob = create_blob(&store, "new nested");
+        let to_sub_tree = Tree::from_entries(vec![TreeEntry {
+            name: "b.txt".to_string(),
+            mode: FileMode::Normal,
+            hash: to_sub_blob,
+            entry_type: EntryType::Blob,
+        }]);
+        let to_sub_hash = store.put_tree(&to_sub_tree).unwrap();
+
+        let from_hash = create_tree(
+            &store,
+            vec![
+                ("z.txt", create_blob(&store, "old z"), EntryType::Blob),
+                ("dir", from_sub_hash, EntryType::Tree),
+                ("m.txt", create_blob(&store, "same"), EntryType::Blob),
+                ("a.txt", create_blob(&store, "old a"), EntryType::Blob),
+            ],
+        );
+        let to_hash = create_tree(
+            &store,
+            vec![
+                ("b.txt", create_blob(&store, "new b"), EntryType::Blob),
+                ("dir", to_sub_hash, EntryType::Tree),
+                ("m.txt", create_blob(&store, "same"), EntryType::Blob),
+                ("z.txt", create_blob(&store, "new z"), EntryType::Blob),
+            ],
+        );
+
+        let collected: Vec<_> = diff_trees(&store, &from_hash, &to_hash)
+            .unwrap()
+            .into_iter()
+            .map(FileChange::into_tuple)
+            .collect();
+
+        let mut visited = Vec::new();
+        let flow = diff_trees_visit(&store, &from_hash, &to_hash, |change| {
+            visited.push(change.into_tuple());
+            ControlFlow::<()>::Continue(())
+        })
+        .unwrap();
+
+        assert!(flow.is_continue());
+        assert_eq!(visited, collected);
+    }
+
+    #[test]
+    fn test_visit_identical_trees_never_calls_visitor() {
+        let store = InMemoryStore::new();
+        let hash = create_tree(
+            &store,
+            vec![("a.txt", create_blob(&store, "content"), EntryType::Blob)],
+        );
+        let mut count = 0usize;
+        let flow = diff_trees_visit(&store, &hash, &hash, |_change| {
+            count += 1;
+            ControlFlow::<()>::Continue(())
+        })
+        .unwrap();
+        assert!(flow.is_continue());
+        assert_eq!(count, 0);
+    }
+
+    /// Early-exit: breaking from the visitor stops the walk and stops loading
+    /// further subtrees. We assert both the carried `Break` payload and that
+    /// the visitor saw strictly fewer changes than the full diff.
+    #[test]
+    fn test_visit_early_exit_stops_walk() {
+        let store = InMemoryStore::new();
+        // Five distinct top-level files all added → five `added` changes in
+        // sorted order: a, b, c, d, e.
+        let from_hash = create_tree(&store, vec![]);
+        let to_hash = create_tree(
+            &store,
+            vec![
+                ("a.txt", create_blob(&store, "a"), EntryType::Blob),
+                ("b.txt", create_blob(&store, "b"), EntryType::Blob),
+                ("c.txt", create_blob(&store, "c"), EntryType::Blob),
+                ("d.txt", create_blob(&store, "d"), EntryType::Blob),
+                ("e.txt", create_blob(&store, "e"), EntryType::Blob),
+            ],
+        );
+
+        let mut seen = Vec::new();
+        let flow = diff_trees_visit(&store, &from_hash, &to_hash, |change| {
+            seen.push(change.path.clone());
+            if change.path == "c.txt" {
+                ControlFlow::Break("found c")
+            } else {
+                ControlFlow::Continue(())
+            }
+        })
+        .unwrap();
+
+        assert_eq!(flow, ControlFlow::Break("found c"));
+        // Stopped at c.txt — never visited d.txt or e.txt.
+        assert_eq!(seen, vec!["a.txt", "b.txt", "c.txt"]);
+    }
+
+    /// Early-exit must also short-circuit out of nested-subtree recursion, not
+    /// just the top level.
+    #[test]
+    fn test_visit_early_exit_inside_subtree() {
+        let store = InMemoryStore::new();
+        let sub_tree = Tree::from_entries(vec![
+            TreeEntry {
+                name: "x.txt".to_string(),
+                mode: FileMode::Normal,
+                hash: create_blob(&store, "x"),
+                entry_type: EntryType::Blob,
+            },
+            TreeEntry {
+                name: "y.txt".to_string(),
+                mode: FileMode::Normal,
+                hash: create_blob(&store, "y"),
+                entry_type: EntryType::Blob,
+            },
+        ]);
+        let sub_hash = store.put_tree(&sub_tree).unwrap();
+        let from_hash = create_tree(&store, vec![]);
+        let to_hash = create_tree(
+            &store,
+            vec![
+                ("dir", sub_hash, EntryType::Tree),
+                ("z.txt", create_blob(&store, "z"), EntryType::Blob),
+            ],
+        );
+
+        let mut seen = Vec::new();
+        let flow = diff_trees_visit(&store, &from_hash, &to_hash, |change| {
+            seen.push(change.path.clone());
+            ControlFlow::Break(())
+        })
+        .unwrap();
+
+        assert_eq!(flow, ControlFlow::Break(()));
+        // Broke on the very first leaf inside `dir`; `dir/y.txt` and `z.txt`
+        // were never visited.
+        assert_eq!(seen, vec!["dir/x.txt"]);
     }
 }

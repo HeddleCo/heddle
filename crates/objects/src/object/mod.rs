@@ -71,4 +71,4 @@ pub use structured_conflict::{
     ConflictError, ConflictResolution, ConflictSide, ConflictSymbol, StructuredConflict,
 };
 pub use tree::{EntryType, FileMode, Tree, TreeEntry, TreeError, validate_name as validate_tree_entry_name};
-pub use tree_diff::diff_trees;
+pub use tree_diff::{diff_trees, diff_trees_visit};

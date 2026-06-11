@@ -2,6 +2,7 @@
 //! Shared history traversal and filtering primitives.
 
 use objects::store::ObjectStore;
+use std::ops::ControlFlow;
 use std::path::{Component, Path};
 
 use objects::object::{ChangeId, State, Tree};
@@ -218,13 +219,18 @@ impl Repository {
         changed_paths: &ChangedPathFilters,
     ) -> Result<bool> {
         let base_tree = self.parent_tree_hash(state)?;
-        let changes = self.diff_trees(&base_tree, &state.tree)?;
-        let matched = changes
-            .iter()
-            .any(|change| changed_paths.matches(&change.path));
+        // Early-exit: stop diffing the moment the first change matches the
+        // filter, rather than materializing the whole change list to scan it.
+        let flow = self.diff_trees_visit(&base_tree, &state.tree, |change| {
+            if changed_paths.matches(&change.path) {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })?;
+        let matched = flow.is_break();
         trace!(
             state = %state.change_id,
-            change_count = changes.len(),
             matched,
             "evaluated changed-path filters"
         );
