@@ -110,3 +110,60 @@ fn test_namespace_tree_no_prefix_false_positive() {
     let child = namespace_ctx("teamwork");
     assert!(!child.can_access_namespace("team"));
 }
+
+fn namespace_token(scope: &str) -> AuthToken {
+    AuthToken::new("token123", "alice").with_scope(TokenScope::NamespaceTree(scope.to_string()))
+}
+
+#[test]
+fn test_namespace_tree_traversal_denied_context_namespace() {
+    // heddle#631: "a/b/../c" matched the old prefix check against scope "a/b"
+    // but normalizes to the sibling "a/c" — must be denied.
+    let ctx = namespace_ctx("a/b");
+    assert!(!ctx.can_access_namespace("a/b/../c"));
+    assert!(!ctx.can_access_namespace("a/b/./c")); // deny, never normalize
+    assert!(!ctx.can_access_namespace("a//b")); // empty segment
+    assert!(!ctx.can_access_namespace("a/c")); // sibling
+    assert!(!ctx.can_access_namespace("a/bc")); // non-boundary prefix
+    assert!(ctx.can_access_namespace("a/b")); // exact still allowed
+    assert!(ctx.can_access_namespace("a/b/c")); // legitimate child still allowed
+}
+
+#[test]
+fn test_namespace_tree_traversal_denied_context_repo() {
+    let ctx = namespace_ctx("a/b");
+    assert!(!ctx.can_access_repo("a/b/../c"));
+    assert!(!ctx.can_access_repo("a/b/./c"));
+    assert!(!ctx.can_access_repo("a//b"));
+    assert!(!ctx.can_access_repo("a/c"));
+    assert!(!ctx.can_access_repo("a/bc"));
+    assert!(ctx.can_access_repo("a/b"));
+    assert!(ctx.can_access_repo("a/b/c"));
+}
+
+#[test]
+fn test_namespace_tree_traversal_denied_token_repo() {
+    // AuthToken::can_access_repo is the leg with live production consumers
+    // (weft); it must share the segment-aware primitive.
+    let token = namespace_token("a/b");
+    assert!(!token.can_access_repo("a/b/../c"));
+    assert!(!token.can_access_repo("a/b/./c"));
+    assert!(!token.can_access_repo("a//b"));
+    assert!(!token.can_access_repo("a/c"));
+    assert!(!token.can_access_repo("a/bc"));
+    assert!(token.can_access_repo("a/b"));
+    assert!(token.can_access_repo("a/b/c"));
+}
+
+#[test]
+fn test_namespace_tree_malformed_scope_denies_all() {
+    // A scope containing traversal or empty segments is misconfigured —
+    // deny everything rather than guess at intent.
+    let ctx = namespace_ctx("a/../b");
+    assert!(!ctx.can_access_namespace("a/../b"));
+    assert!(!ctx.can_access_namespace("b"));
+
+    let token = namespace_token("a//b");
+    assert!(!token.can_access_repo("a//b"));
+    assert!(!token.can_access_repo("a/b"));
+}
