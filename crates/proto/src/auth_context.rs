@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-use crate::{Permission, TokenScope};
+use crate::{Permission, TokenScope, scope_contains};
 
 #[derive(Debug, Clone)]
 pub struct AuthContext {
@@ -34,9 +34,7 @@ impl AuthContext {
         match &self.scope {
             TokenScope::Global => true,
             TokenScope::Repositories(repos) => repos.iter().any(|candidate| candidate == repo),
-            TokenScope::NamespaceTree(namespace) => {
-                repo == namespace || repo.starts_with(&format!("{}/", namespace))
-            }
+            TokenScope::NamespaceTree(namespace) => scope_contains(namespace, repo),
         }
     }
 
@@ -46,13 +44,15 @@ impl AuthContext {
     /// namespace itself and any descendant (`scope/...`). It deliberately does
     /// NOT grant upward access — a token scoped to a child namespace cannot
     /// reach its parent or ancestors. This mirrors [`Self::can_access_repo`].
+    ///
+    /// Containment is segment-aware via [`scope_contains`]: candidates with
+    /// `.`/`..`/empty segments are denied outright (no check-then-normalize
+    /// bypass).
     pub fn can_access_namespace(&self, namespace: &str) -> bool {
         match &self.scope {
             TokenScope::Global => true,
             TokenScope::Repositories(_) => false,
-            TokenScope::NamespaceTree(scope) => {
-                namespace == scope || namespace.starts_with(&format!("{}/", scope))
-            }
+            TokenScope::NamespaceTree(scope) => scope_contains(scope, namespace),
         }
     }
 }

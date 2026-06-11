@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use serde::{Deserialize, Serialize};
 
-use crate::Permission;
+use crate::{Permission, scope_contains};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthToken {
@@ -64,9 +64,7 @@ impl AuthToken {
         match &self.scope {
             TokenScope::Global => true,
             TokenScope::Repositories(repos) => repos.contains(&repo.to_string()),
-            TokenScope::NamespaceTree(namespace) => {
-                repo == namespace || repo.starts_with(&format!("{}/", namespace))
-            }
+            TokenScope::NamespaceTree(namespace) => scope_contains(namespace, repo),
         }
     }
 
