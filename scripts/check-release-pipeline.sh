@@ -84,7 +84,7 @@ else
   err "validate-tag must refuse stable tags (vX.Y.Z) from workflow_dispatch; see RELEASING.md and release.yml comment on softprops update-if-exists"
 fi
 
-# All six target triples.
+# All five active target triples (win-arm64 parked, see below).
 targets=(
   "aarch64-apple-darwin"
   "x86_64-apple-darwin"
