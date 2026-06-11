@@ -422,6 +422,15 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                 };
             }
             match heddle_err {
+                // Corrupted stored state (HeddleCo/heddle#642): decode
+                // failures must surface as a recovery path, not raw msgpack
+                // internals — `heddle status` is the natural recovery probe
+                // and would otherwise dead-end on the same opaque error.
+                HeddleError::Serialization(detail) => {
+                    return ErrorClassification::from_advice(
+                        &RecoveryAdvice::serialization_error(detail),
+                    );
+                }
                 HeddleError::RepositoryNotFound(path) => {
                     let command =
                         format!("heddle init {}", shell_quote(&path.display().to_string()));
