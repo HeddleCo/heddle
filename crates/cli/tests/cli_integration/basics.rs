@@ -434,6 +434,47 @@ fn test_cli_init_in_git_repo_bootstraps_sidecar() {
     assert_eq!(parsed["storage_model"], "git+heddle-sidecar");
 }
 
+/// heddle#644: a successful non-quickstart init on an empty directory
+/// must end with a next step in both text and JSON — the first save —
+/// instead of a null `recommended_action`.
+#[test]
+fn test_cli_init_empty_dir_recommends_first_save() {
+    let temp = TempDir::new().unwrap();
+    let text = heddle(&["init"], Some(temp.path())).unwrap();
+    assert!(
+        text.contains("heddle commit -m"),
+        "text init output should point at the first save: {text}"
+    );
+
+    let temp = TempDir::new().unwrap();
+    let json = heddle(&["--output", "json", "init"], Some(temp.path())).unwrap();
+    let parsed: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        parsed["recommended_action"], "heddle commit -m \"...\"",
+        "JSON init output carries the first-save recommendation: {parsed}"
+    );
+    assert_eq!(parsed["next_action"], parsed["recommended_action"]);
+}
+
+/// heddle#644: a non-quickstart init over existing Git history must
+/// recommend the adopt/import path (text + JSON), mirroring the
+/// workflow-choice pathways in the main help.
+#[test]
+fn test_cli_init_with_git_history_recommends_adopt() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo(temp.path());
+    std::fs::write(temp.path().join("seed.txt"), "history").unwrap();
+    git_commit_all(temp.path(), "seed commit");
+
+    let json = heddle(&["--output", "json", "init"], Some(temp.path())).unwrap();
+    let parsed: Value = serde_json::from_str(&json).unwrap();
+    let action = parsed["recommended_action"].as_str().unwrap_or_default();
+    assert!(
+        action.contains("adopt") || action.contains("import"),
+        "init over existing Git history recommends adopting it, got {action:?}: {parsed}"
+    );
+}
+
 #[test]
 fn test_cli_status_bootstraps_plain_git_repo_and_adopts_current_branch() {
     let temp = TempDir::new().unwrap();

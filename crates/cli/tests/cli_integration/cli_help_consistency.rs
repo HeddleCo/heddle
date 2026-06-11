@@ -174,3 +174,81 @@ fn capture_help_keeps_help_agent_hidden_but_keeps_the_pointer() {
         "`capture --help` must not list the hidden `--help-agent` flag (only the after-help pointer): {help}"
     );
 }
+
+/// heddle#646. The hidden `--lazy`/`--filter` clone flags need a discovery
+/// affordance: a git veteran who knows `git clone --filter` must be able to
+/// learn from `clone --help` that the flags exist, where they work today
+/// (hosted/network remotes), and the Git-transport timeline (v0.3.1) —
+/// before a failure teaches them.
+#[test]
+fn clone_help_carries_hidden_flag_breadcrumb() {
+    let help = heddle_help(&["clone", "--help"]);
+    assert!(
+        help.contains("--lazy") && help.contains("--filter blob:none"),
+        "clone help should name the hidden lazy/filter flags: {help}"
+    );
+    assert!(
+        help.contains("planned for v0.3.1"),
+        "clone help should state the Git-transport timeline for lazy clones: {help}"
+    );
+}
+
+/// heddle#646 (same class, pull surface). `pull --lazy` is hidden too; the
+/// breadcrumb keeps it discoverable.
+#[test]
+fn pull_help_carries_hidden_flag_breadcrumb() {
+    let help = heddle_help(&["pull", "--help"]);
+    assert!(
+        help.contains("--lazy") && help.contains("planned for v0.3.1"),
+        "pull help should name the hidden --lazy flag and its timeline: {help}"
+    );
+}
+
+/// heddle#646 (same class, start surface). The hidden automation/power
+/// flags on `start` are named in an advanced-flags stanza so agents and
+/// power users can discover them without reading the source.
+#[test]
+fn start_help_carries_hidden_flag_breadcrumb() {
+    let help = heddle_help(&["start", "--help"]);
+    for flag in [
+        "--agent-provider",
+        "--agent-model",
+        "--parent-thread",
+        "--print-cd-path",
+        "--daemon",
+        "--no-daemon",
+        "--shared-target",
+    ] {
+        assert!(
+            help.contains(flag),
+            "start help should name the hidden `{flag}` flag in its advanced stanza: {help}"
+        );
+    }
+}
+
+/// heddle#654. A user piping `heddle diff --patch | patch -p1` must learn
+/// from `--help` — not from a silent failure — that patch(1) compatibility
+/// is best-effort and `git apply` is the canonical consumer.
+#[test]
+fn diff_help_warns_patch_compat_is_best_effort() {
+    let help = heddle_help(&["diff", "--help"]);
+    assert!(
+        help.contains("git apply") && help.contains("patch(1)") && help.contains("best-effort"),
+        "diff help should state that patch(1) support is best-effort and git apply is canonical: {help}"
+    );
+    assert!(
+        help.contains("type changes") && help.contains("mode bits"),
+        "diff help should name the git-extended-header cases that need git apply: {help}"
+    );
+}
+
+/// heddle#655. `[aliases: --intent]` on commit's `-m` reads as a typo
+/// without an explanation; the help text must say why the alias exists.
+#[test]
+fn commit_help_explains_intent_alias() {
+    let help = heddle_help(&["commit", "--help"]);
+    assert!(
+        help.contains("--intent") && help.contains("WHY"),
+        "commit help should explain the deliberate --intent alias: {help}"
+    );
+}

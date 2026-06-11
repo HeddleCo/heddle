@@ -398,10 +398,20 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
     let trust = build_repository_verification_state(&repo);
     // After a quickstart the user has a captured state to inspect, so
     // point them at `heddle log` regardless of the trust-derived action.
+    //
+    // A non-quickstart init must never end without a next step
+    // (heddle#644). When the repo has existing Git history the trust
+    // state already recommends the exact adopt/import command; when it
+    // doesn't (fresh native repo, or a Git checkout with no commits),
+    // trust has nothing to flag, so point at the first save — `heddle
+    // commit` records the first state (and, in Git-overlay repos, the
+    // matching Git checkpoint).
     let next_action = if quickstart.is_some() {
         Some("heddle log".to_string())
+    } else if !trust.recommended_action.is_empty() {
+        Some(trust.recommended_action.clone())
     } else {
-        (!trust.recommended_action.is_empty()).then(|| trust.recommended_action.clone())
+        Some("heddle commit -m \"...\"".to_string())
     };
     let principal_status = init_principal_status(&repo, &user_config)?;
     let output = InitOutput {

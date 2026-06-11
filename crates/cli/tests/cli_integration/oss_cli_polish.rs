@@ -11381,6 +11381,15 @@ fn push_without_default_remote_uses_typed_json_recovery() {
                 && hint.contains("heddle remote set-default <name>")),
         "push remote setup hint should be specific and actionable: {envelope}"
     );
+    // heddle#653: the hint must say whether ad-hoc (git `push <url>`
+    // style) targets work, not leave veterans to discover it by trial.
+    assert!(
+        envelope["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("heddle push <remote>")
+                && hint.contains("positionally")),
+        "push no-remote hint should state that ad-hoc positional targets are supported: {envelope}"
+    );
     assert_eq!(
         envelope["primary_command"],
         "heddle remote add <name> <url>"
