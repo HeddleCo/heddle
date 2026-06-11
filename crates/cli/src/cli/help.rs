@@ -85,62 +85,71 @@ fn catalog_summary(catalog: &crate::cli::commands::CommandCatalogOutput, verb: &
 /// `Ok(())` even for unknown topics; the printer surfaces the
 /// suggestion text rather than erroring.
 pub fn print_help(cmd: &clap::Command, topic: &[String]) -> std::io::Result<()> {
-    use std::io::Write;
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
+    crate::cli::render::write_stdout(&render_help(cmd, topic))
+        .map_err(|err| std::io::Error::other(err.to_string()))
+}
+
+/// Render the curated help surface to a `String` instead of stdout.
+///
+/// [`print_help`] is a thin `write_stdout(&render_help(..))` wrapper over
+/// this, so the bytes are identical. Extracted so in-process tests can
+/// assert on help prose without spawning the binary (HeddleCo/heddle#381).
+pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
     match topic {
         [] => {
             let catalog = crate::cli::commands::build_command_catalog();
-            writeln!(out, "Heddle — AI-native version control")?;
-            writeln!(out)?;
-            writeln!(out, "Common loop:")?;
+            let _ = writeln!(out, "Heddle — AI-native version control");
+            let _ = writeln!(out);
+            let _ = writeln!(out, "Common loop:");
             for name in primary_loop_verbs(&catalog) {
                 let blurb = catalog_summary(&catalog, name);
                 if blurb.is_empty() {
                     continue;
                 }
-                writeln!(out, "  {:<10}  {}", name, blurb)?;
+                let _ = writeln!(out, "  {:<10}  {}", name, blurb);
             }
-            writeln!(out)?;
-            writeln!(
+            let _ = writeln!(out);
+            let _ = writeln!(
                 out,
                 "Existing Git: heddle status -> heddle adopt -> heddle verify -> heddle commit -m \"...\" -> heddle push"
-            )?;
-            writeln!(
+            );
+            let _ = writeln!(
                 out,
                 "Isolated work: heddle start <name> --path ../<name> -> heddle commit -m \"...\" -> heddle ready -> heddle land"
-            )?;
-            writeln!(out)?;
-            writeln!(
+            );
+            let _ = writeln!(out);
+            let _ = writeln!(
                 out,
                 "Nearby: `heddle undo`, `heddle verify`, `heddle push`, `heddle pull`."
-            )?;
-            writeln!(
+            );
+            let _ = writeln!(
                 out,
                 "Start here: `heddle init`, `heddle adopt`, or `heddle clone`."
-            )?;
-            writeln!(out)?;
-            writeln!(
+            );
+            let _ = writeln!(out);
+            let _ = writeln!(
                 out,
                 "Output: text is the default; pass `--output json` for the \
                  full machine contract (stable `output_kind`, exit codes, recovery \
                  templates), or `--output json-compact` for the decision surface \
                  only (fewer tokens, same `output_kind`). No TTY/pipe auto-detection."
-            )?;
-            writeln!(out)?;
-            writeln!(
+            );
+            let _ = writeln!(out);
+            let _ = writeln!(
                 out,
                 "Run `heddle help model` for the short mental model, \
                  `heddle help advanced` for power surfaces, automation, and Git interop, \
                  or `heddle help <topic>` for a topic page (e.g. `git-overlay`, \
                  `threads`, `daemon`, `signals`, `bridge`, `operation-ids`, \
                  `remotes`, `git-dependencies`)."
-            )?;
+            );
         }
         [name] if name == "advanced" => {
             let catalog = crate::cli::commands::build_command_catalog();
-            writeln!(out, "{}", ADVANCED_HELP)?;
-            writeln!(out, "Advanced commands:")?;
+            let _ = writeln!(out, "{}", ADVANCED_HELP);
+            let _ = writeln!(out, "Advanced commands:");
             for name in advanced_verbs() {
                 let blurb = catalog_summary(&catalog, name);
                 if blurb.is_empty() {
@@ -156,41 +165,52 @@ pub fn print_help(cmd: &clap::Command, topic: &[String]) -> std::io::Result<()> 
                 let canonical = crate::cli::commands::command_canonical_command(name)
                     .map(|canonical| format!("; use `{canonical}`"))
                     .unwrap_or_default();
-                writeln!(out, "  {:<14}  {} [{}{}]", name, blurb, label, canonical)?;
+                let _ = writeln!(out, "  {:<14}  {} [{}{}]", name, blurb, label, canonical);
             }
         }
         [name] if topic_text(name).is_some() => {
-            writeln!(out, "{}", topic_text(name).expect("checked above"))?;
+            let _ = writeln!(out, "{}", topic_text(name).expect("checked above"));
         }
         path => {
             if let Some(mut subcommand) = help_command_for_path(cmd, path) {
                 // `heddle help <command path>` falls through to that
                 // command's clap-derived help so the contract on
                 // `Commands::Help` holds for nested public paths too.
-                drop(out);
-                subcommand.print_help()?;
+                let _ = write!(out, "{}", subcommand.render_help());
             } else {
                 let name = path.join(" ");
-                writeln!(
+                let _ = writeln!(
                     out,
                     "no topic or command '{name}'. Run `heddle help advanced` for \
                      the full advanced list, or `heddle help` for the \
                      curated everyday surface."
-                )?;
+                );
             }
         }
     }
-    Ok(())
+    out
 }
 
 pub fn print_direct_help_for_raw(
     cmd: &clap::Command,
     raw: &[String],
 ) -> Option<std::io::Result<()>> {
+    let rendered = render_direct_help_for_raw(cmd, raw)?;
+    Some(
+        crate::cli::render::write_stdout(&rendered)
+            .map_err(|err| std::io::Error::other(err.to_string())),
+    )
+}
+
+/// Render the `heddle <path> --help` pre-parse help to a `String`.
+///
+/// In-process sibling of [`print_direct_help_for_raw`]; the printer is a
+/// `write_stdout` wrapper over this so the bytes match (HeddleCo/heddle#381).
+pub fn render_direct_help_for_raw(cmd: &clap::Command, raw: &[String]) -> Option<String> {
     let path = command_path_from_raw_help_request(cmd, raw)?;
     Some(match help_command_for_path(cmd, &path) {
-        Some(mut subcommand) => subcommand.print_long_help(),
-        None => print_help(cmd, &path),
+        Some(mut subcommand) => subcommand.render_long_help().to_string(),
+        None => render_help(cmd, &path),
     })
 }
 
@@ -233,11 +253,20 @@ fn reveal_capture_agent_flags(command: clap::Command) -> clap::Command {
 /// any legal position — is handled natively; there is no hand-rolled
 /// pre-parse token scan to keep in sync with clap's grammar.
 pub fn print_capture_agent_help(cmd: &clap::Command) -> std::io::Result<()> {
+    crate::cli::render::write_stdout(&render_capture_agent_help(cmd))
+        .map_err(|err| std::io::Error::other(err.to_string()))
+}
+
+/// Render `capture --help-agent` to a `String` (the reveal-help variant).
+///
+/// In-process sibling of [`print_capture_agent_help`]; the printer is a
+/// `write_stdout` wrapper over this so the bytes match (HeddleCo/heddle#381).
+pub fn render_capture_agent_help(cmd: &clap::Command) -> String {
     let capture = find_subcommand_or_alias(cmd, "capture")
         .expect("capture subcommand exists in the clap command tree");
     let bin_name = format!("{} {}", cmd.get_name(), capture.get_name());
     let mut help = reveal_capture_agent_flags(capture.clone()).bin_name(bin_name);
-    help.print_long_help()
+    help.render_long_help().to_string()
 }
 
 fn help_command_for_path(cmd: &clap::Command, path: &[String]) -> Option<clap::Command> {
@@ -346,6 +375,60 @@ fn command_path_from_raw_help_request(cmd: &clap::Command, raw: &[String]) -> Op
     }
 
     (!path.is_empty()).then_some(path)
+}
+
+/// Render the help that `heddle <args>` would print, **in-process**, for the
+/// help-shaped argv forms — without spawning the binary.
+///
+/// `args` is the argv *after* the program name (e.g. `["clone", "--help"]`,
+/// `["help", "threads"]`, `["capture", "--help-agent"]`). Returns `Some(text)`
+/// with the exact bytes the binary writes to stdout for that request, or
+/// `None` when the argv is not a pure help request this renderer serves (the
+/// caller should fall back to spawning the binary).
+///
+/// This mirrors `main.rs`'s help-dispatch routing precisely: the bare-help
+/// intercept, the `heddle <path> --help` pre-parse, the `capture --help-agent`
+/// reveal, and the `heddle help <topics>` arm. Because the underlying printers
+/// are now `write_stdout(&render_*(..))` wrappers, the in-process text is
+/// byte-identical to the spawned binary's stdout — only the execution
+/// mechanism differs (HeddleCo/heddle#381). Help is repo-, cwd-, and
+/// env-independent, so this is safe to call from parallel tests.
+pub fn render_for_args(args: &[&str]) -> Option<String> {
+    use crate::cli::cli_args::{Cli, Commands};
+    use clap::{CommandFactory, Parser};
+
+    let command = Cli::command();
+    let raw: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+
+    // Bare-help shapes: `heddle`, `heddle help`. (`--help`/`-h` alone are
+    // clap-driven help that exits during parse; serve them too since they
+    // render the curated everyday surface.)
+    if raw.is_empty() || raw == ["--help"] || raw == ["-h"] || raw == ["help"] {
+        return Some(render_help(&command, &[]));
+    }
+
+    // `heddle <path> --help` pre-parse direct help (e.g. `clone --help`,
+    // `bridge git import --help`).
+    if let Some(rendered) = render_direct_help_for_raw(&command, &raw) {
+        return Some(rendered);
+    }
+
+    // `capture --help-agent` reveal: clap owns the parse, so every global
+    // spelling it accepts is handled natively.
+    if let Ok(cli) = Cli::try_parse_from(std::iter::once("heddle".to_string()).chain(raw.clone()))
+        && let Commands::Help { topics } = &cli.command
+    {
+        // `heddle help <topics>` — curated topic / advanced / command-path help.
+        return Some(render_help(&command, topics));
+    }
+    if let Ok(cli) = Cli::try_parse_from(std::iter::once("heddle".to_string()).chain(raw.clone()))
+        && let Commands::Capture(args) = &cli.command
+        && args.help_agent
+    {
+        return Some(render_capture_agent_help(&command));
+    }
+
+    None
 }
 
 /// Static per-topic help. Topics are addressed via `heddle help <topic>`.

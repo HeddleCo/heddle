@@ -5,12 +5,55 @@
 
 use super::*;
 
+/// Equivalence guard for the in-process help renderer (HeddleCo/heddle#381).
+///
+/// The help assertions in this suite call `heddle_help(..)` (in-process)
+/// instead of spawning the binary, on the premise that the two produce
+/// byte-identical stdout. This test pins that premise: for a representative
+/// spread of help-shaped argv — per-verb `--help`, nested-path `--help`, the
+/// `capture --help-agent` reveal, the curated bare/advanced surfaces, and a
+/// topic page — the in-process render must equal the spawned binary's stdout
+/// exactly. If a future change makes a `print_*` helper diverge from its
+/// `render_*` core, this fails before the substring assertions silently drift.
+#[test]
+fn help_render_matches_spawned_binary() {
+    for args in [
+        vec!["clone", "--help"],
+        vec!["capture", "--help"],
+        vec!["capture", "--help-agent"],
+        vec!["push", "--help"],
+        vec!["log", "--help"],
+        vec!["bridge", "git", "import", "--help"],
+        // Alias resolution: `import` is an alias that resolves to `adopt`.
+        vec!["import", "--help"],
+        // Curated topic page + `heddle help <verb>` clap fall-through.
+        vec!["help"],
+        vec!["help", "advanced"],
+        vec!["help", "threads"],
+        vec!["help", "git-overlay"],
+        vec!["help", "status"],
+        // Global-flag-prefixed capture reveal forms.
+        vec!["-vC", ".", "capture", "--help-agent"],
+        vec!["--output", "text", "capture", "--help-agent"],
+    ] {
+        let spawned = heddle(&args, None)
+            .unwrap_or_else(|err| panic!("spawned `heddle {}`: {err}", args.join(" ")));
+        let in_process = heddle_help(&args);
+        assert_eq!(
+            in_process,
+            spawned,
+            "in-process render of `heddle {}` must match the spawned binary's stdout byte-for-byte",
+            args.join(" ")
+        );
+    }
+}
+
 /// `heddle clone --help` must keep its Behavior stanza: the prose that
 /// answers Priya's "wait, where am I?" — default-thread resolution and
 /// what `--depth` actually materializes (heddle#257).
 #[test]
 fn clone_help_pins_behavior_stanza() {
-    let help = heddle(&["clone", "--help"], None).expect("clone help should render");
+    let help = heddle_help(&["clone", "--help"]);
 
     assert!(
         help.contains("Behavior:"),
@@ -97,18 +140,16 @@ fn capture_help_agent_reveals_hidden_flags_through_clap() {
         }
     };
 
-    let plain = heddle(&["capture", "--help-agent"], None).expect("capture --help-agent renders");
+    let plain = heddle_help(&["capture", "--help-agent"]);
     expect_revealed(&plain, "capture --help-agent");
 
     // Clustered short globals before the verb: `-v` then valued `-C <path>`.
     // clap parses the path natively; the verb is still `capture`.
-    let clustered = heddle(&["-vC", ".", "capture", "--help-agent"], None)
-        .expect("-vC <path> capture --help-agent renders");
+    let clustered = heddle_help(&["-vC", ".", "capture", "--help-agent"]);
     expect_revealed(&clustered, "-vC <path> capture --help-agent");
 
     // Long valued global before the verb.
-    let long_global = heddle(&["--output", "text", "capture", "--help-agent"], None)
-        .expect("--output text capture --help-agent renders");
+    let long_global = heddle_help(&["--output", "text", "capture", "--help-agent"]);
     expect_revealed(&long_global, "--output text capture --help-agent");
 }
 
@@ -119,7 +160,7 @@ fn capture_help_agent_reveals_hidden_flags_through_clap() {
 /// by seeing the flag in the human help.
 #[test]
 fn capture_help_keeps_help_agent_hidden_but_keeps_the_pointer() {
-    let help = heddle(&["capture", "--help"], None).expect("capture --help renders");
+    let help = heddle_help(&["capture", "--help"]);
     // The discovery pointer in after-help stays so agents can still find it.
     assert!(
         help.contains("heddle capture --help-agent"),

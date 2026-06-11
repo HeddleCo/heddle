@@ -199,6 +199,26 @@ fn heddle(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String
     }
 }
 
+/// Render the help that `heddle <args>` would print, **in-process**, without
+/// spawning the binary.
+///
+/// `heddle <verb> --help`, `heddle help <topic>`, and `heddle capture
+/// --help-agent` are pure presentation: they render text from the clap command
+/// tree + curated topic strings with no repo, cwd, or env dependence, and exit
+/// before any command body runs. So they don't need a real subprocess — calling
+/// `cli::cli::help::render_for_args` gives the byte-identical stdout the binary
+/// produces (the binary's `print_*` helpers are `write_stdout(&render_*(..))`
+/// wrappers; see `help_render_matches_spawned_binary` for the equivalence
+/// guard). This skips one process spawn per help assertion (HeddleCo/heddle#381).
+///
+/// Help output carries no ANSI styling here (matching the non-TTY piped
+/// subprocess the spawn helper used), so substring assertions transfer
+/// unchanged.
+fn heddle_help(args: &[&str]) -> String {
+    cli::cli::help::render_for_args(args)
+        .unwrap_or_else(|| panic!("`heddle {}` is not an in-process help request", args.join(" ")))
+}
+
 fn heddle_output(args: &[&str], cwd: Option<&std::path::Path>) -> Result<Output, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
     cmd.args(translate_legacy_args(args));

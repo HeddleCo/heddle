@@ -144,7 +144,7 @@ fn bridge_git_import_refuses_gitlink_by_default_and_lossy_summarizes() {
 
 #[test]
 fn bridge_git_import_help_documents_lossy_flag() {
-    let output = heddle(&["bridge", "git", "import", "--help"], None).expect("help");
+    let output = heddle_help(&["bridge", "git", "import", "--help"]);
 
     assert!(output.contains("--lossy"), "help should document --lossy");
 }
