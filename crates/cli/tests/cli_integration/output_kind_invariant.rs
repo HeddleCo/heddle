@@ -125,12 +125,10 @@ const SWEPT: &[&str] = &[
     "branch",
     "bridge git pull",
     "bridge git push",
-    "conflict show",
     "continue",
     "daemon stop",
     "doctor",
     "fetch",
-    "inspect",
     "land",
     "log",
     "maintenance gc",
@@ -186,6 +184,7 @@ const UNSWEPT_TODO: &[&str] = &[
     "bridge git reason",
     "collapse",
     "conflict list",
+    "conflict show",
     "daemon serve",
     "daemon status",
     "delegate",
@@ -196,6 +195,7 @@ const UNSWEPT_TODO: &[&str] = &[
     "hook install",
     "hook list",
     "hook uninstall",
+    "inspect",
     "integration doctor",
     "integration install",
     "integration list",
@@ -272,7 +272,6 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         // Git-compat verbs delegate to the thread family and emit the
         // delegate's kind.
         "branch" => Some("thread_list"),
-        "inspect" => Some("thread_show"),
         "start" => Some("thread_start"),
         "switch" => Some("thread_switch"),
         // `doctor` is implemented by the diagnose module.
@@ -697,7 +696,6 @@ fn runtime_invocation_args(display: &str) -> Option<(&'static [&'static str], bo
         "branch" => Some((&["branch"], true)),
         "continue" => Some((&["continue"], true)),
         "doctor" => Some((&["doctor"], true)),
-        "inspect" => Some((&["inspect", "main"], true)),
         "log" => Some((&["log"], true)),
         "maintenance gc" => Some((&["maintenance", "gc"], true)),
         "maintenance index" => Some((&["maintenance", "index"], true)),
@@ -993,6 +991,13 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             .expect("visibility set");
             (t, sv(&["visibility", "list"]))
         }
+        // heddle#641 — the newly-swept generic-schema verbs. Their opaque
+        // mirrors pin no fields, so the documented sample must be compared
+        // against the live payload here.
+        "gc" => (init_fixture(), sv(&["maintenance", "gc"])),
+        // Stopping a daemon that is not running still exits 0 with the
+        // full `daemon_stop` payload, so a bare init fixture suffices.
+        "daemon_stop" => (init_fixture(), sv(&["daemon", "stop"])),
         _ => return None,
     };
     Some(case)
@@ -1037,19 +1042,36 @@ fn doc_samples_match_runtime_for_every_catalog_discriminator() {
     // (b) fails for them and they are forced down path (a). A new generic-schema
     // verb documented without a runtime case here fails this test rather than
     // deferring to a later round.
+    //
+    // heddle#641: the loop is grouped per VALUE rather than per (display,
+    // value) row because one wire value can be advertised by several
+    // commands (`thread_list` by `thread list` AND its `branch` alias;
+    // `ready` by `ready` AND `agent ready`; `thread` by the drop/promote/
+    // refresh trio). `doc_sample_top_level_keys` resolves a value to ONE
+    // documented sample, so the sample is guarded once — by the runtime
+    // case, or by ANY advertising display whose schema pins every
+    // documented key. Requiring EVERY display to pin would force alias
+    // schemas (e.g. `branch`'s mutation mirror) to model their sibling's
+    // listing shape.
     let doc = read_json_schemas_doc();
 
     let mut failures = Vec::new();
     let mut covered_by_runtime = 0usize;
     let mut covered_by_schema = 0usize;
 
+    // value -> displays advertising it (schema-verb-backed rows only;
+    // transport-envelope discriminators like `clone_connection` have no
+    // schema verb and no documented sample — they are pinned separately).
+    let mut advertising: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for (display, value, has_schema_verb) in catalog_output_kind_discriminators() {
-        // Transport-envelope discriminators (e.g. `clone_connection`) have no
-        // schema verb and no documented sample; they are pinned separately.
-        if !has_schema_verb {
-            continue;
+        if has_schema_verb {
+            advertising.entry(value).or_default().push(display);
         }
-        let Some(doc_keys) = doc_sample_top_level_keys(&doc, &value) else {
+    }
+
+    for (value, displays) in &advertising {
+        let Some(doc_keys) = doc_sample_top_level_keys(&doc, value) else {
             // This value is not individually documented (it rides a grouped
             // sample under a representative sibling, e.g. `redo` under `undo`,
             // `purge list` under `purge_apply`) — nothing to compare here.
@@ -1062,12 +1084,12 @@ fn doc_samples_match_runtime_for_every_catalog_discriminator() {
         // the key is present by construction; assert it defensively.
         if !doc_keys.contains("output_kind") {
             failures.push(format!(
-                "{value} ({display}): documented sample is missing the `output_kind` key"
+                "{value} ({displays:?}): documented sample is missing the `output_kind` key"
             ));
             continue;
         }
 
-        if let Some((fixture, argv)) = runtime_doc_case(&value) {
+        if let Some((fixture, argv)) = runtime_doc_case(value) {
             let argv_refs: Vec<&str> = std::iter::once("--output")
                 .chain(std::iter::once("json"))
                 .chain(argv.iter().map(String::as_str))
@@ -1075,14 +1097,14 @@ fn doc_samples_match_runtime_for_every_catalog_discriminator() {
             let runtime_keys = runtime_top_level_keys(&argv_refs, fixture.path());
             if !runtime_keys.contains("output_kind") {
                 failures.push(format!(
-                    "{value} ({display}): runtime payload is missing `output_kind` (keys: {runtime_keys:?})"
+                    "{value} ({displays:?}): runtime payload is missing `output_kind` (keys: {runtime_keys:?})"
                 ));
             }
-            if doc_keys != runtime_keys {
+            if &doc_keys != &runtime_keys {
                 let doc_only: Vec<&String> = doc_keys.difference(&runtime_keys).collect();
                 let runtime_only: Vec<&String> = runtime_keys.difference(&doc_keys).collect();
                 failures.push(format!(
-                    "{value} ({display}): documented sample does not match the live \
+                    "{value} ({displays:?}): documented sample does not match the live \
                      `--output json` payload.\n      in doc only:     {doc_only:?}\n      \
                      in runtime only: {runtime_only:?}\n      doc keys:     {doc_keys:?}\n      \
                      runtime keys: {runtime_keys:?}"
@@ -1092,21 +1114,24 @@ fn doc_samples_match_runtime_for_every_catalog_discriminator() {
             continue;
         }
 
-        // No runtime case: the registered schema MUST pin every documented
-        // key, otherwise the sample is unguarded and could drift freely.
-        let schema_props = schema_property_names(&display);
-        let unpinned: Vec<&String> = doc_keys
-            .iter()
-            .filter(|k| k.as_str() != "output_kind")
-            .filter(|k| !schema_props.contains(*k))
-            .collect();
-        if unpinned.is_empty() {
+        // No runtime case: at least one advertising display's registered
+        // schema MUST pin every documented key, otherwise the sample is
+        // unguarded and could drift freely.
+        let pinned_by_some_display = displays.iter().any(|display| {
+            let schema_props = schema_property_names(display);
+            doc_keys
+                .iter()
+                .filter(|k| k.as_str() != "output_kind")
+                .all(|k| schema_props.contains(k))
+        });
+        if pinned_by_some_display {
             covered_by_schema += 1;
         } else {
             failures.push(format!(
-                "{value} ({display}): no runtime case AND its registered schema does not pin \
-                 documented keys {unpinned:?} (schema is generic). Add a `runtime_doc_case` arm \
-                 so the sample is checked against the live payload."
+                "{value} ({displays:?}): no runtime case AND no advertising display's \
+                 registered schema pins every documented key (schema is generic or models \
+                 a different shape). Add a `runtime_doc_case` arm so the sample is checked \
+                 against the live payload."
             ));
         }
     }
