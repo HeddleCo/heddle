@@ -272,18 +272,10 @@ in-progress operation.
   "execution_path": "/repo",
   "actor": {"provider": "anthropic", "model": "claude-opus-4-7"},
   "harness": "claude-code",
-  "thinking_level": null,
-  "usage_summary": null,
-  "last_progress_at": null,
-  "report_flush_state": null,
-  "attach_reason": null,
   "thread_mode": "lightweight",
   "thread_state": "active",
   "freshness": "current",
-  "target_thread": null,
-  "parent_thread": null,
   "child_threads": [],
-  "task": null,
   "promotion_suggested": false,
   "impact_categories": [],
   "heavy_impact_paths": [],
@@ -317,12 +309,16 @@ in-progress operation.
 | `thread` | string \| null | required | Current thread name; `null` for detached HEAD. |
 | `base_state`, `base_root` | string \| null | required | Thread base anchor change-ids. |
 | `current_state` | string \| null | required | Thread tip change-id. |
-| `path` | string \| null | required | Materialized worktree path. |
-| `execution_path` | string \| null | required | Effective execution root. |
-| `actor` | object \| null | required | `{provider, model}`. `null` when no agent is attached. |
+| `path` | string | optional | Materialized worktree path; omitted when no materialized/agent checkout context is recorded. |
+| `execution_path` | string | optional | Effective execution root; omitted when no materialized/agent checkout context is recorded. |
+| `session_id`, `heddle_session_id` | string | optional | Agent/session identifiers; omitted when no agent context is recorded. |
+| `actor` | object | optional | `{provider, model}`; omitted when no agent context is recorded. |
+| `harness`, `thinking_level`, `last_progress_at`, `report_flush_state`, `attach_reason` | string | optional | Agent execution metadata; omitted when no agent context is recorded. |
+| `usage_summary` | object | optional | Agent token/tool/cost summary; omitted when no agent context is recorded. |
 | `thread_mode` | enum \| null | required | `lightweight` / `materialized` / `virtualized`. |
 | `thread_state` | enum \| null | required | Thread lifecycle: `active` / `ready` / `blocked` / `merged` / `abandoned` / `promoted`. Same values and meaning as `thread list`; repository-health/verification blockers surface via `coordination_status`, not here. |
 | `freshness` | enum \| null | required | `current` / `stale` / `unknown`. |
+| `target_thread`, `parent_thread`, `task` | string | optional | Agent/thread relationship and task metadata; omitted when no agent context is recorded. |
 | `child_threads` | array<string> | required | Names; empty array if none. |
 | `impact_categories` | array<enum> | required | Empty array if none. |
 | `heavy_impact_paths` | array<string> | required | Empty array if none. |

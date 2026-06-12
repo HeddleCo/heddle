@@ -1090,7 +1090,9 @@ pub struct SwitchCheckoutSchema {
     pub name: Option<String>,
     pub message: String,
     pub thread: Option<ThreadSummarySchema>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_path: Option<String>,
     pub target: Option<String>,
     pub intent: Option<String>,
@@ -1922,19 +1924,29 @@ pub struct StatusSchema {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heddle_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<ActorInfoSchema>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_summary: OpaqueObject,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_progress_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_flush_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach_reason: Option<String>,
     pub thread_mode: Option<ThreadModeSchema>,
     pub thread_state: Option<ThreadStateSchema>,
     pub freshness: Option<ThreadFreshnessSchema>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_thread: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_thread: Option<String>,
     pub child_threads: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
     pub promotion_suggested: bool,
     pub impact_categories: Vec<ThreadImpactCategorySchema>,
@@ -3142,6 +3154,33 @@ mod tests {
             required.contains(&"recommended_action"),
             "status recommended_action should remain a stable emitted field: {schema}"
         );
+    }
+
+    #[test]
+    fn status_agent_context_fields_are_omittable() {
+        let schema = schema_for_verb("status").expect("status schema");
+        let required = required_fields(&schema);
+        for field in [
+            "path",
+            "execution_path",
+            "session_id",
+            "heddle_session_id",
+            "actor",
+            "harness",
+            "thinking_level",
+            "usage_summary",
+            "last_progress_at",
+            "report_flush_state",
+            "attach_reason",
+            "target_thread",
+            "parent_thread",
+            "task",
+        ] {
+            assert!(
+                !required.contains(&field),
+                "status `{field}` is omitted when no agent/materialized context is recorded: {schema}"
+            );
+        }
     }
 
     #[test]
