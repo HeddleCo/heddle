@@ -18,7 +18,7 @@ use objects::{
     object::{Blob, ConflictSide, ConflictSymbol, StructuredConflict, SymbolAnchor},
     store::ObjectStore,
 };
-use repo::Repository;
+use repo::{OutputFormat, RepoConfig, Repository};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -78,6 +78,78 @@ fn assert_not_output_kind(value: &Value, disallowed: &[&str]) {
         !disallowed.contains(&actual),
         "payload used disallowed output_kind={actual}: {value}"
     );
+}
+
+fn schema_ref<'a>(root: &'a Value, schema: &'a Value) -> &'a Value {
+    let Some(reference) = schema.get("$ref").and_then(|value| value.as_str()) else {
+        return schema;
+    };
+    reference
+        .strip_prefix("#/$defs/")
+        .or_else(|| reference.strip_prefix("#/definitions/"))
+        .and_then(|name| {
+            root.get("$defs")
+                .or_else(|| root.get("definitions"))
+                .and_then(|defs| defs.get(name))
+        })
+        .unwrap_or_else(|| panic!("schema reference {reference:?} resolves"))
+}
+
+fn schema_property_accepts(root: &Value, schema: &Value, value: &Value) -> Result<(), String> {
+    let schema = schema_ref(root, schema);
+    if let Some(enum_values) = schema.get("enum").and_then(|value| value.as_array())
+        && !enum_values.contains(value)
+    {
+        return Err(format!("value {value} is not in enum {enum_values:?}"));
+    }
+    if let Some(const_value) = schema.get("const")
+        && const_value != value
+    {
+        return Err(format!("value {value} does not match const {const_value}"));
+    }
+    Ok(())
+}
+
+fn schema_accepts_payload(root: &Value, schema: &Value, payload: &Value) -> Result<(), String> {
+    let schema = schema_ref(root, schema);
+    let payload_object = payload
+        .as_object()
+        .ok_or_else(|| format!("payload is not an object: {payload}"))?;
+
+    if let Some(required) = schema.get("required").and_then(|value| value.as_array()) {
+        for field in required.iter().filter_map(|value| value.as_str()) {
+            if !payload_object.contains_key(field) {
+                return Err(format!("payload is missing required field {field:?}"));
+            }
+        }
+    }
+
+    if let Some(properties) = schema.get("properties").and_then(|value| value.as_object()) {
+        for (field, property_schema) in properties {
+            if let Some(value) = payload_object.get(field) {
+                schema_property_accepts(root, property_schema, value)
+                    .map_err(|err| format!("property {field:?} rejected payload: {err}"))?;
+            }
+        }
+    }
+
+    if let Some(branches) = schema.get("anyOf").and_then(|value| value.as_array()) {
+        let mut errors = Vec::new();
+        for branch in branches {
+            match schema_accepts_payload(root, branch, payload) {
+                Ok(()) => return Ok(()),
+                Err(err) => errors.push(err),
+            }
+        }
+        return Err(format!("payload matched no anyOf branch: {errors:?}"));
+    }
+
+    Ok(())
+}
+
+fn assert_schema_accepts_payload(schema: &Value, payload: &Value) {
+    schema_accepts_payload(schema, schema, payload)
+        .unwrap_or_else(|err| panic!("published schema rejected payload: {err}\n{payload}"));
 }
 
 /// Detach HEAD onto the current state so `stack snapshot` follows the
@@ -312,7 +384,23 @@ fn show_and_inspect_state_emit_distinct_output_kinds() {
 }
 
 #[test]
-fn rebase_json_records_emit_progress_output_kind() {
+fn inspect_schema_accepts_state_and_thread_show_payloads() {
+    let temp = init_and_capture();
+    let schema: Value = serde_json::from_str(
+        &heddle(&["schemas", "inspect"], Some(temp.path())).expect("schemas inspect"),
+    )
+    .expect("schemas inspect emits JSON schema");
+
+    let inspect_state = heddle_json(&["inspect", "HEAD"], &temp);
+    assert_output_kind(&inspect_state, "inspect_state");
+    assert_schema_accepts_payload(&schema, &inspect_state);
+
+    let inspect_thread = heddle_json(&["inspect"], &temp);
+    assert_output_kind(&inspect_thread, "thread_show");
+    assert_schema_accepts_payload(&schema, &inspect_thread);
+}
+
+fn init_rebase_replay_fixture() -> TempDir {
     let temp = init_and_capture();
     heddle(&["thread", "create", "feature"], Some(temp.path())).expect("thread create feature");
     heddle(&["thread", "switch", "feature"], Some(temp.path())).expect("switch feature");
@@ -321,9 +409,22 @@ fn rebase_json_records_emit_progress_output_kind() {
     heddle(&["thread", "switch", "main"], Some(temp.path())).expect("switch main");
     fs::write(temp.path().join("main.txt"), "main work\n").expect("write main file");
     heddle(&["capture", "-m", "main"], Some(temp.path())).expect("main capture");
+    temp
+}
+
+fn set_repo_output_format_json(temp: &TempDir) {
+    let config_path = temp.path().join(".heddle").join("config.toml");
+    let mut config = RepoConfig::load(&config_path).expect("load repo config");
+    config.output.format = Some(OutputFormat::Json);
+    config.save(&config_path).expect("save repo config");
+}
+
+#[test]
+fn rebase_json_records_emit_progress_output_kind() {
+    let temp = init_rebase_replay_fixture();
 
     let output = heddle(
-        &["rebase", "feature", "--output", "json"],
+        &["--output", "json", "rebase", "feature"],
         Some(temp.path()),
     )
     .expect("rebase feature");
@@ -351,6 +452,27 @@ fn rebase_json_records_emit_progress_output_kind() {
         statuses,
         vec!["started", "applying", "completed"],
         "fixture must exercise replay JSONL, not the fast-forward path"
+    );
+}
+
+#[test]
+fn rebase_repo_json_config_without_output_flag_stays_text() {
+    let temp = init_rebase_replay_fixture();
+    set_repo_output_format_json(&temp);
+
+    let output = heddle(&["rebase", "feature"], Some(temp.path())).expect("rebase feature");
+    assert!(
+        output.contains("Rebasing ")
+            && output.contains("Applying ")
+            && output.contains("Rebase completed"),
+        "plain rebase under repo output.format=json should emit text, got: {output}"
+    );
+    assert!(
+        output
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .all(|line| serde_json::from_str::<Value>(line).is_err()),
+        "plain rebase under repo output.format=json must not emit JSONL: {output}"
     );
 }
 

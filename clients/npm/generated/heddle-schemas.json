@@ -14023,22 +14023,47 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "anyOf": [
         {
-          "$ref": "#/$defs/ShowSchema"
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowSchema"
+            },
+            {
+              "properties": {
+                "output_kind": {
+                  "enum": [
+                    "inspect_state"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "output_kind"
+              ],
+              "type": "object"
+            }
+          ]
         },
         {
-          "$ref": "#/$defs/ThreadShowSchema"
+          "allOf": [
+            {
+              "$ref": "#/$defs/ThreadShowSchema"
+            },
+            {
+              "properties": {
+                "output_kind": {
+                  "enum": [
+                    "thread_show"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "output_kind"
+              ],
+              "type": "object"
+            }
+          ]
         }
-      ],
-      "properties": {
-        "output_kind": {
-          "enum": [
-            "inspect_state"
-          ],
-          "type": "string"
-        }
-      },
-      "required": [
-        "output_kind"
       ],
       "title": "InspectSchema"
     },

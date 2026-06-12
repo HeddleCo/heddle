@@ -3732,9 +3732,18 @@ pub fn command_json_discriminators() -> Vec<CommandJsonDiscriminator> {
         .collect()
 }
 
+#[cfg(test)]
 pub fn command_json_discriminator_for_schema_verb(
     schema_verb: &str,
 ) -> Option<CommandJsonDiscriminator> {
+    command_json_discriminators_for_schema_verb(schema_verb)
+        .into_iter()
+        .next()
+}
+
+pub fn command_json_discriminators_for_schema_verb(
+    schema_verb: &str,
+) -> Vec<CommandJsonDiscriminator> {
     active_command_contract_entries()
         .iter()
         .copied()
@@ -3745,8 +3754,9 @@ pub fn command_json_discriminator_for_schema_verb(
                 .iter()
                 .map(move |discriminator| (entry.path, discriminator))
         })
-        .find(|(_, discriminator)| discriminator.schema_verb == Some(schema_verb))
+        .filter(|(_, discriminator)| discriminator.schema_verb == Some(schema_verb))
         .map(|(path, discriminator)| json_discriminator_metadata(path, discriminator))
+        .collect()
 }
 
 fn json_discriminators_for_path<'a>(
@@ -5904,6 +5914,62 @@ mod tests {
     #[test]
     fn schema_output_kind_discriminators_are_complete_and_consistent() {
         use crate::cli::commands::schema_for_verb;
+        use std::collections::BTreeSet;
+
+        fn resolve_schema_ref<'a>(
+            root: &'a serde_json::Value,
+            reference: &str,
+        ) -> &'a serde_json::Value {
+            reference
+                .strip_prefix("#/$defs/")
+                .or_else(|| reference.strip_prefix("#/definitions/"))
+                .and_then(|name| {
+                    root.get("$defs")
+                        .or_else(|| root.get("definitions"))
+                        .and_then(|defs| defs.get(name))
+                })
+                .unwrap_or_else(|| panic!("schema reference `{reference}` resolves"))
+        }
+
+        fn collect_output_kind_values<'a>(
+            root: &'a serde_json::Value,
+            schema: &'a serde_json::Value,
+            values: &mut BTreeSet<String>,
+        ) {
+            if let Some(reference) = schema.get("$ref").and_then(|value| value.as_str()) {
+                collect_output_kind_values(root, resolve_schema_ref(root, reference), values);
+                return;
+            }
+
+            if let Some(enum_values) = schema
+                .get("properties")
+                .and_then(|properties| properties.get("output_kind"))
+                .and_then(|property| property.get("enum"))
+                .and_then(|values| values.as_array())
+            {
+                values.extend(
+                    enum_values
+                        .iter()
+                        .filter_map(|value| value.as_str())
+                        .map(str::to_string),
+                );
+            } else if let Some(value) = schema
+                .get("properties")
+                .and_then(|properties| properties.get("output_kind"))
+                .and_then(|property| property.get("const"))
+                .and_then(|value| value.as_str())
+            {
+                values.insert(value.to_string());
+            }
+
+            for combinator in ["anyOf", "oneOf", "allOf"] {
+                if let Some(schemas) = schema.get(combinator).and_then(|value| value.as_array()) {
+                    for schema in schemas {
+                        collect_output_kind_values(root, schema, values);
+                    }
+                }
+            }
+        }
 
         let mut missing = Vec::new();
         let mut mismatched = Vec::new();
@@ -5913,10 +5979,9 @@ mod tests {
             let Some(schema) = schema_for_verb(verb) else {
                 panic!("catalog schema verb `{verb}` has no registered schema");
             };
-            let Some(property) = schema
-                .get("properties")
-                .and_then(|properties| properties.get("output_kind"))
-            else {
+            let mut actual = BTreeSet::new();
+            collect_output_kind_values(&schema, &schema, &mut actual);
+            if actual.is_empty() {
                 // The schema does not declare `output_kind` — the verb's
                 // runtime payload genuinely lacks the discriminator (the
                 // UNSWEPT_TODO rolldown in output_kind_invariant.rs).
@@ -5924,32 +5989,31 @@ mod tests {
             };
             checked += 1;
 
-            let Some(discriminator) = command_json_discriminator_for_schema_verb(verb) else {
+            let mut expected_discriminators = command_json_discriminators_for_schema_verb(verb);
+            if schema.get("anyOf").is_some() {
+                expected_discriminators.extend(command_json_discriminators().into_iter().filter(
+                    |discriminator| {
+                        discriminator.display == verb && discriminator.schema_verb.is_none()
+                    },
+                ));
+            }
+            let expected = expected_discriminators
+                .into_iter()
+                .filter(|discriminator| discriminator.field == "output_kind")
+                .map(|discriminator| discriminator.value)
+                .collect::<BTreeSet<_>>();
+            if expected.is_empty() {
                 missing.push(format!(
                     "`{verb}`: schema declares an `output_kind` property but the \
                      catalog advertises no json_discriminator for it"
                 ));
                 continue;
-            };
+            }
 
-            let const_value = property
-                .get("enum")
-                .and_then(|values| values.as_array())
-                .and_then(|values| values.first())
-                .and_then(|value| value.as_str())
-                .or_else(|| property.get("const").and_then(|value| value.as_str()));
-            match const_value {
-                None => missing.push(format!(
-                    "`{verb}`: schema declares `output_kind` without an enum/const \
-                     even though the catalog advertises `{}` — the discriminator \
-                     injection regressed",
-                    discriminator.value
-                )),
-                Some(value) if value != discriminator.value => mismatched.push(format!(
-                    "`{verb}`: schema const `{value}` != catalog discriminator `{}`",
-                    discriminator.value
-                )),
-                Some(_) => {}
+            if actual != expected {
+                mismatched.push(format!(
+                    "`{verb}`: schema output_kind values {actual:?} != catalog discriminators {expected:?}"
+                ));
             }
         }
 

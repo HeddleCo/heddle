@@ -1337,7 +1337,7 @@ export interface InitSchema {
   status: string;
 }
 
-export type InspectSchema = ShowSchema | ThreadShowSchema;
+export type InspectSchema = ShowSchema & { output_kind: "inspect_state"; } | ThreadShowSchema & { output_kind: "thread_show"; };
 
 export type IntegrationDoctorSchema = Record<string, unknown>;
 

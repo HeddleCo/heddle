@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use super::{
     action_line::print_next_step,
     advice::RecoveryAdvice,
+    command_runtime_contract,
     ff_record::record_ff_advance,
     git_overlay_health::{
         RepositoryVerificationState, action_template, build_repository_verification_state,
@@ -22,7 +23,7 @@ use super::{
     worktree_safety::ensure_worktree_clean,
 };
 use crate::{
-    cli::{Cli, should_output_json},
+    cli::{Cli, JsonOutputMode, json_output_mode_for_kind},
     config::UserConfig,
 };
 
@@ -50,7 +51,11 @@ pub(super) fn emit_rebase_progress(
     let Some(cli) = cli else {
         return Ok(false);
     };
-    if !should_output_json(cli, Some(repo.config())) {
+    let contract =
+        command_runtime_contract("rebase").expect("rebase command contract should be registered");
+    if json_output_mode_for_kind(cli, Some(repo.config()), contract.json_kind)
+        != JsonOutputMode::Jsonl
+    {
         return Ok(false);
     }
 
@@ -320,23 +325,23 @@ fn emit_up_to_date_blocked_by_trust(
     trust: RepositoryVerificationState,
 ) -> Result<()> {
     let recommended_action = repository_verification_primary_command(&trust);
-    if should_output_json(cli, Some(repo.config())) {
-        emit_rebase_progress(
-            repo,
-            Some(cli),
-            json!({
-                "status": "blocked",
-                "reason": "repository_verification",
-                "summary": trust.summary,
-                "recommended_action": recommended_action.clone(),
-                "recommended_action_template": action_template(&recommended_action),
-                "recovery_commands": trust.recovery_commands,
-            }),
-        )?;
-    } else {
+    let summary = trust.summary;
+    let recovery_commands = trust.recovery_commands;
+    if !emit_rebase_progress(
+        repo,
+        Some(cli),
+        json!({
+            "status": "blocked",
+            "reason": "repository_verification",
+            "summary": summary,
+            "recommended_action": recommended_action.clone(),
+            "recommended_action_template": action_template(&recommended_action),
+            "recovery_commands": recovery_commands,
+        }),
+    )? {
         println!(
             "Rebase is up to date, but repository verification is blocked: {}",
-            trust.summary
+            summary
         );
         print_next_step(&recommended_action);
     }

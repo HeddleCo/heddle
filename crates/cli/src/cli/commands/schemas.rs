@@ -16,13 +16,13 @@
 
 use std::{collections::BTreeMap, sync::OnceLock};
 
-use anyhow::{Result, anyhow};
-use schemars::{JsonSchema, schema_for};
+use anyhow::{anyhow, Result};
+use schemars::{schema_for, JsonSchema};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{CommandCatalogOutput, RecoveryAdvice, command_catalog, command_runtime_contract};
-use crate::cli::{Cli, should_output_json};
+use super::{command_catalog, command_runtime_contract, CommandCatalogOutput, RecoveryAdvice};
+use crate::cli::{should_output_json, Cli};
 
 static SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
 static DOCUMENTED_SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
@@ -283,10 +283,115 @@ fn add_op_id_replay_fields_if_supported(verb: &str, schema: &mut Value) {
 }
 
 fn add_json_discriminator_if_advertised(verb: &str, schema: &mut Value) {
-    let Some(discriminator) = command_catalog::command_json_discriminator_for_schema_verb(verb)
-    else {
+    let mut discriminators = command_catalog::command_json_discriminators_for_schema_verb(verb);
+    if schema.get("anyOf").is_some() {
+        for discriminator in command_catalog::command_json_discriminators()
+            .into_iter()
+            .filter(|discriminator| {
+                discriminator.display == verb && discriminator.schema_verb.is_none()
+            })
+        {
+            discriminators.push(discriminator);
+        }
+    }
+    discriminators.sort_by(|left, right| {
+        (&left.field, &left.value, &left.display).cmp(&(&right.field, &right.value, &right.display))
+    });
+    discriminators.dedup_by(|left, right| left.field == right.field && left.value == right.value);
+
+    if discriminators.is_empty() {
         return;
     };
+
+    if add_json_discriminators_to_union_branches(verb, schema, &discriminators) {
+        return;
+    }
+
+    let field = discriminators[0].field.as_str();
+    let values = discriminators
+        .iter()
+        .filter(|discriminator| discriminator.field == field)
+        .map(|discriminator| discriminator.value.as_str())
+        .collect::<Vec<_>>();
+    add_json_discriminator_to_schema_object(schema, field, &values);
+}
+
+fn add_json_discriminators_to_union_branches(
+    verb: &str,
+    schema: &mut Value,
+    discriminators: &[command_catalog::CommandJsonDiscriminator],
+) -> bool {
+    let Some(branches) = schema
+        .get_mut("anyOf")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return false;
+    };
+
+    let mut injected = 0usize;
+    for branch in branches {
+        let Some(branch_ref) = branch
+            .get("$ref")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let Some(discriminator) = discriminator_for_union_branch(verb, &branch_ref, discriminators)
+        else {
+            continue;
+        };
+        let original_branch = branch.clone();
+        let mut discriminator_schema = serde_json::json!({ "type": "object" });
+        add_json_discriminator_to_schema_object(
+            &mut discriminator_schema,
+            &discriminator.field,
+            &[&discriminator.value],
+        );
+        *branch = serde_json::json!({
+            "allOf": [original_branch, discriminator_schema],
+        });
+        injected += 1;
+    }
+
+    injected > 0
+}
+
+fn discriminator_for_union_branch<'a>(
+    verb: &str,
+    branch_ref: &str,
+    discriminators: &'a [command_catalog::CommandJsonDiscriminator],
+) -> Option<&'a command_catalog::CommandJsonDiscriminator> {
+    if discriminators.len() == 1 {
+        return discriminators.first();
+    }
+
+    let def_name = schema_ref_name(branch_ref)?;
+    if verb == "inspect" {
+        let value = match def_name {
+            "ShowSchema" => "inspect_state",
+            "ThreadShowSchema" => "thread_show",
+            _ => return None,
+        };
+        return discriminators
+            .iter()
+            .find(|discriminator| discriminator.value == value);
+    }
+
+    None
+}
+
+fn schema_ref_name(reference: &str) -> Option<&str> {
+    reference
+        .strip_prefix("#/$defs/")
+        .or_else(|| reference.strip_prefix("#/definitions/"))
+}
+
+fn add_json_discriminator_to_schema_object(schema: &mut Value, field: &str, values: &[&str]) {
+    let enum_values = values
+        .iter()
+        .map(|value| Value::String((*value).to_string()))
+        .collect::<Vec<_>>();
 
     let Some(object) = schema.as_object_mut() else {
         return;
@@ -298,10 +403,10 @@ fn add_json_discriminator_if_advertised(verb: &str, schema: &mut Value) {
         return;
     };
     properties.insert(
-        discriminator.field.clone(),
+        field.to_string(),
         serde_json::json!({
             "type": "string",
-            "enum": [discriminator.value],
+            "enum": enum_values,
         }),
     );
 
@@ -313,9 +418,9 @@ fn add_json_discriminator_if_advertised(verb: &str, schema: &mut Value) {
     };
     if !required
         .iter()
-        .any(|field| field.as_str() == Some(discriminator.field.as_str()))
+        .any(|required_field| required_field.as_str() == Some(field))
     {
-        required.push(Value::String(discriminator.field));
+        required.push(Value::String(field.to_string()));
     }
 }
 
@@ -2896,6 +3001,72 @@ mod tests {
         }
     }
 
+    fn collect_discriminator_values<'a>(
+        root: &'a Value,
+        schema: &'a Value,
+        field: &str,
+        values: &mut Vec<&'a str>,
+    ) {
+        if let Some(reference) = schema.get("$ref").and_then(|value| value.as_str()) {
+            collect_discriminator_values(root, resolve_schema_ref(root, reference), field, values);
+            return;
+        }
+
+        if let Some(property) = schema
+            .get("properties")
+            .and_then(|properties| properties.get(field))
+        {
+            collect_string_enums(root, property, values);
+        }
+
+        for combinator in ["anyOf", "oneOf", "allOf"] {
+            if let Some(schemas) = schema.get(combinator).and_then(|value| value.as_array()) {
+                for schema in schemas {
+                    collect_discriminator_values(root, schema, field, values);
+                }
+            }
+        }
+    }
+
+    fn schema_requires_discriminator(root: &Value, schema: &Value, field: &str) -> bool {
+        if let Some(reference) = schema.get("$ref").and_then(|value| value.as_str()) {
+            return schema_requires_discriminator(root, resolve_schema_ref(root, reference), field);
+        }
+
+        if schema
+            .get("properties")
+            .and_then(|properties| properties.get(field))
+            .is_some()
+        {
+            return schema
+                .get("required")
+                .and_then(|value| value.as_array())
+                .is_some_and(|required| {
+                    required
+                        .iter()
+                        .any(|required_field| required_field.as_str() == Some(field))
+                });
+        }
+
+        for combinator in ["anyOf", "oneOf"] {
+            if let Some(schemas) = schema.get(combinator).and_then(|value| value.as_array()) {
+                return !schemas.is_empty()
+                    && schemas
+                        .iter()
+                        .all(|schema| schema_requires_discriminator(root, schema, field));
+            }
+        }
+
+        schema
+            .get("allOf")
+            .and_then(|value| value.as_array())
+            .is_some_and(|schemas| {
+                schemas
+                    .iter()
+                    .any(|schema| schema_requires_discriminator(root, schema, field))
+            })
+    }
+
     /// Every schema verb advertised by the command contract table must
     /// produce a schema.
     /// Otherwise `heddle doctor schemas` would silently miss drift on
@@ -3298,44 +3469,67 @@ mod tests {
 
     #[test]
     fn advertised_json_discriminators_are_reflected_in_schemas() {
-        for discriminator in command_catalog::command_json_discriminators() {
-            let Some(schema_verb) = discriminator.schema_verb.as_deref() else {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        for schema_verb in schema_verbs() {
+            let mut discriminators =
+                command_catalog::command_json_discriminators_for_schema_verb(schema_verb);
+            if discriminators.is_empty() {
                 continue;
             };
             let schema =
                 schema_for_verb(schema_verb).unwrap_or_else(|| panic!("{schema_verb} schema"));
-            let properties = schema
-                .get("properties")
-                .and_then(|p| p.as_object())
-                .unwrap_or_else(|| panic!("{schema_verb} schema has properties"));
-            let property = properties.get(&discriminator.field).unwrap_or_else(|| {
-                panic!(
-                    "{schema_verb} schema missing discriminator field `{}`",
-                    discriminator.field
-                )
-            });
-            let enum_values = property
-                .get("enum")
-                .and_then(|value| value.as_array())
-                .map(Vec::as_slice);
-            assert_eq!(
-                enum_values,
-                Some([Value::String(discriminator.value.clone())].as_slice()),
-                "{schema_verb} schema must narrow `{}` to `{}`",
-                discriminator.field,
-                discriminator.value
-            );
+            if schema.get("anyOf").is_some() {
+                for discriminator in command_catalog::command_json_discriminators()
+                    .into_iter()
+                    .filter(|discriminator| {
+                        discriminator.display == *schema_verb && discriminator.schema_verb.is_none()
+                    })
+                {
+                    discriminators.push(discriminator);
+                }
+            }
 
-            let required = schema
-                .get("required")
-                .and_then(|value| value.as_array())
-                .unwrap_or_else(|| panic!("{schema_verb} schema has required fields"));
-            assert!(
-                required.contains(&Value::String(discriminator.field.clone())),
-                "{schema_verb} schema must require discriminator field `{}`",
-                discriminator.field
-            );
+            let mut expected_by_field = BTreeMap::<String, BTreeSet<String>>::new();
+            for discriminator in discriminators {
+                expected_by_field
+                    .entry(discriminator.field)
+                    .or_default()
+                    .insert(discriminator.value);
+            }
+
+            for (field, expected) in expected_by_field {
+                let mut actual = Vec::new();
+                collect_discriminator_values(&schema, &schema, &field, &mut actual);
+                let actual = actual
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<BTreeSet<_>>();
+                assert_eq!(
+                    actual, expected,
+                    "{schema_verb} schema must narrow `{field}` to every catalog-advertised value"
+                );
+                assert!(
+                    schema_requires_discriminator(&schema, &schema, &field),
+                    "{schema_verb} schema must require discriminator field `{field}`"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn inspect_schema_accepts_both_advertised_output_kinds() {
+        use std::collections::BTreeSet;
+
+        let schema = schema_for_verb("inspect").expect("inspect schema");
+        let mut values = Vec::new();
+        collect_discriminator_values(&schema, &schema, "output_kind", &mut values);
+        let values = values.into_iter().collect::<BTreeSet<_>>();
+        assert_eq!(
+            values,
+            BTreeSet::from(["inspect_state", "thread_show"]),
+            "inspect aliases state inspection and thread show, so both output kinds must be represented"
+        );
     }
 
     #[test]
