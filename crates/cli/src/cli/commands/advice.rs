@@ -1322,6 +1322,31 @@ impl RecoveryAdvice {
         )
     }
 
+    /// Stored repository state failed msgpack/serde decoding. Without
+    /// this mapping the user sees the raw decoder internals ("wrong
+    /// msgpack marker FixArray(0)") with no recovery path — and every
+    /// subsequent command, including `heddle status` (the natural
+    /// recovery probe), dead-ends on the same opaque error
+    /// (HeddleCo/heddle#642). The decoder detail is preserved in
+    /// `unsafe_condition` for diagnosis; the user-facing error names the
+    /// condition and the recovery tooling.
+    pub(crate) fn serialization_error(detail: impl fmt::Display) -> Self {
+        Self::safety_refusal(
+            "state_corrupted",
+            "Repository state is corrupted or unreadable",
+            "Diagnose with `heddle verify`, inspect store integrity with `heddle fsck --full`, then repair with `heddle fsck --repair`.",
+            format!("a stored repository object failed to decode: {detail}"),
+            "continuing would read or write through repository state Heddle cannot decode",
+            "the command stopped before mutating repository state; intact objects were left unchanged",
+            "heddle verify",
+            vec![
+                "heddle verify".to_string(),
+                "heddle fsck --full".to_string(),
+                "heddle fsck --repair".to_string(),
+            ],
+        )
+    }
+
     /// A thread command resolved a state spec or anchor and the
     /// referenced state was not in the object store. Distinct from
     /// `state_not_found` because the lookup happens inside thread
