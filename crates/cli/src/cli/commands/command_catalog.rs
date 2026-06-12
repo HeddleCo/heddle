@@ -3747,15 +3747,29 @@ pub fn command_json_discriminators_for_schema_verb(
     active_command_contract_entries()
         .iter()
         .copied()
-        .flat_map(|entry| {
+        .filter(|entry| {
             entry
                 .contract
                 .json_discriminators
                 .iter()
-                .map(move |discriminator| (entry.path, discriminator))
+                .any(|discriminator| discriminator.schema_verb == Some(schema_verb))
         })
-        .filter(|(_, discriminator)| discriminator.schema_verb == Some(schema_verb))
-        .map(|(path, discriminator)| json_discriminator_metadata(path, discriminator))
+        .flat_map(|entry| {
+            let include_same_command_siblings = entry.contract.schema_verbs.len() == 1
+                && entry.contract.schema_verbs[0] == schema_verb;
+            entry.contract.json_discriminators.iter().filter_map(
+                move |discriminator| {
+                    if discriminator.schema_verb == Some(schema_verb)
+                        || (include_same_command_siblings
+                            && discriminator.schema_verb.is_none())
+                    {
+                        Some(json_discriminator_metadata(entry.path, discriminator))
+                    } else {
+                        None
+                    }
+                },
+            )
+        })
         .collect()
 }
 

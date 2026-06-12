@@ -6129,7 +6129,10 @@
         },
         "output_kind": {
           "enum": [
-            "thread_list"
+            "thread_create",
+            "thread_drop",
+            "thread_list",
+            "thread_rename"
           ],
           "type": "string"
         },
@@ -8550,7 +8553,8 @@
         },
         "output_kind": {
           "enum": [
-            "clone"
+            "clone",
+            "clone_connection"
           ],
           "type": "string"
         },
@@ -21592,6 +21596,7 @@
         },
         "output_kind": {
           "enum": [
+            "goto",
             "thread_switch"
           ],
           "type": "string"

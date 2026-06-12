@@ -375,7 +375,7 @@ export interface BranchCompatSchema {
   name?: string | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "thread_list";
+  output_kind: "thread_create" | "thread_drop" | "thread_list" | "thread_rename";
   path?: string | null;
   recommended_action?: string | null;
   recovery_commands?: string[] | null;
@@ -625,7 +625,7 @@ export interface CloneSchema {
   objects?: number | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "clone";
+  output_kind: "clone" | "clone_connection";
   remote?: string | null;
   replayed?: boolean | null;
   repository_capability?: string | null;
@@ -2311,7 +2311,7 @@ export interface SwitchCheckoutSchema {
   name?: string | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "thread_switch";
+  output_kind: "goto" | "thread_switch";
   path?: string | null;
   replayed?: boolean | null;
   target?: string | null;
