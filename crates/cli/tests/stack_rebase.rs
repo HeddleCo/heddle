@@ -158,8 +158,12 @@ fn plan_rebase_emits_bfs_steps_against_real_thread_records() {
 
     std::fs::write(temp.path().join("file.txt"), "base").unwrap();
     let base = repo.snapshot(Some("base".to_string()), None).unwrap();
-    repo.refs().set_thread(&ThreadName::new("main"), &base.change_id).unwrap();
-    repo.refs().set_thread(&ThreadName::new("feat-a"), &base.change_id).unwrap();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &base.change_id)
+        .unwrap();
+    repo.refs()
+        .set_thread(&ThreadName::new("feat-a"), &base.change_id)
+        .unwrap();
 
     std::fs::write(temp.path().join("file.txt"), "feat-a content").unwrap();
     let feat_a_tip = repo.snapshot(Some("feat-a".to_string()), None).unwrap();
@@ -196,7 +200,9 @@ fn plan_rebase_emits_bfs_steps_against_real_thread_records() {
     // Move main forward so the planner has somewhere to rebase onto.
     std::fs::write(temp.path().join("main-only.txt"), "main work").unwrap();
     let new_main = repo.snapshot(Some("main moved".to_string()), None).unwrap();
-    repo.refs().set_thread(&ThreadName::new("main"), &new_main.change_id).unwrap();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &new_main.change_id)
+        .unwrap();
 
     let plan = repo
         .plan_thread_stack_rebase("feat-a", "main")

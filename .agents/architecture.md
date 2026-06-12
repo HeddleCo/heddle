@@ -151,7 +151,7 @@ When working on harness or orchestration features, use this model:
 Important current direction:
 
 - Heddle should follow harnesses ambiently instead of making users run tools through Heddle
-- `heddle harness-bridge` is an internal protocol surface, not the main product abstraction
+- `heddle integration relay` is internal plumbing, not the main product abstraction
 - strong harness-native keys should drive actor identity before path/thread heuristics
 - if Heddle is uncertain, prefer creating a new actor/session over ambiguous reuse
 

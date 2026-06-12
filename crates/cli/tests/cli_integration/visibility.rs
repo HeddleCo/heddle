@@ -73,7 +73,10 @@ fn show_json(temp: &Path, state: &str) -> Value {
 fn invariant_a_captured_tier_unchanged_when_default_drifts_public() {
     // Capture under a restrictive default…
     let (temp, _) = init_and_capture("secret");
-    set_repo_default_visibility(temp.path(), "{ Restricted = { scope_label = \"embargo\" } }");
+    set_repo_default_visibility(
+        temp.path(),
+        "{ Restricted = { scope_label = \"embargo\" } }",
+    );
     let state = capture_state(temp.path(), "captured under embargo");
 
     let before = show_json(temp.path(), &state);
@@ -132,7 +135,10 @@ fn cherry_pick_state_gets_default_visibility() {
 
     // Pin a restrictive default, then cherry-pick the earlier state. The new
     // snapshot it commits must inherit the restricted tier — not stay public.
-    set_repo_default_visibility(temp.path(), "{ Restricted = { scope_label = \"embargo\" } }");
+    set_repo_default_visibility(
+        temp.path(),
+        "{ Restricted = { scope_label = \"embargo\" } }",
+    );
     heddle(&["cherry-pick", &first], Some(temp.path())).expect("cherry-pick");
 
     let new_state = latest_state(temp.path());
@@ -270,7 +276,13 @@ fn visibility_set_then_show_reports_tier() {
 
     let raw = heddle(
         &[
-            "--output", "json", "visibility", "set", &state, "--tier", "internal",
+            "--output",
+            "json",
+            "visibility",
+            "set",
+            &state,
+            "--tier",
+            "internal",
         ],
         Some(temp.path()),
     )
@@ -291,7 +303,13 @@ fn visibility_promote_supersedes_to_less_restrictive() {
 
     heddle(
         &[
-            "visibility", "set", &state, "--tier", "restricted", "--label", "embargo",
+            "visibility",
+            "set",
+            &state,
+            "--tier",
+            "restricted",
+            "--label",
+            "embargo",
         ],
         Some(temp.path()),
     )
@@ -299,7 +317,13 @@ fn visibility_promote_supersedes_to_less_restrictive() {
 
     let raw = heddle(
         &[
-            "--output", "json", "visibility", "promote", &state, "--tier", "internal",
+            "--output",
+            "json",
+            "visibility",
+            "promote",
+            &state,
+            "--tier",
+            "internal",
         ],
         Some(temp.path()),
     )
@@ -309,7 +333,10 @@ fn visibility_promote_supersedes_to_less_restrictive() {
     assert_eq!(promote["tier"], "internal");
 
     let show = show_json(temp.path(), &state);
-    assert_eq!(show["tier"], "internal", "promotion should be the effective tier");
+    assert_eq!(
+        show["tier"], "internal",
+        "promotion should be the effective tier"
+    );
 }
 
 #[test]

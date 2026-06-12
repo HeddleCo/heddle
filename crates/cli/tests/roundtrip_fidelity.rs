@@ -223,9 +223,7 @@ fn roundtrip_octopus_merge() {
     // >2-parent (octopus) merge of three sibling branches.
     git(
         dir,
-        &[
-            "merge", "-q", "--no-ff", "-m", "octopus", "b1", "b2", "b3",
-        ],
+        &["merge", "-q", "--no-ff", "-m", "octopus", "b1", "b2", "b3"],
     );
     let parents = git(dir, &["rev-list", "--parents", "-n", "1", "HEAD"]);
     assert!(
@@ -245,10 +243,7 @@ fn roundtrip_annotated_and_lightweight_tags() {
     git(dir, &["tag", "v1.0-light"]);
     write_and_commit(dir, "f.txt", b"v2\n", "release follow-up");
     // Annotated tag (objectname == tag-object SHA; must round-trip verbatim).
-    git(
-        dir,
-        &["tag", "-a", "v2.0", "-m", "annotated release v2.0"],
-    );
+    git(dir, &["tag", "-a", "v2.0", "-m", "annotated release v2.0"]);
     assert_roundtrip_fidelity("tags", dir);
 }
 
@@ -336,10 +331,7 @@ fn roundtrip_notes() {
     let dir = tmp.path();
     init_repo(dir);
     write_and_commit(dir, "f.txt", b"noted\n", "commit with a note");
-    git(
-        dir,
-        &["notes", "add", "-m", "a code-review note", "HEAD"],
-    );
+    git(dir, &["notes", "add", "-m", "a code-review note", "HEAD"]);
     // Confirm the fixture actually created refs/notes/commits before relying
     // on it for the round-trip assertion.
     let refs = ref_map(dir);
@@ -409,7 +401,12 @@ fn roundtrip_unicode_paths() {
     // real check regardless of how git renders them.
     git(dir, &["config", "core.quotepath", "false"]);
     write_and_commit(dir, "café/résumé.txt", "naïve\n".as_bytes(), "unicode path");
-    write_and_commit(dir, "日本語/ファイル.txt", "こんにちは\n".as_bytes(), "cjk path");
+    write_and_commit(
+        dir,
+        "日本語/ファイル.txt",
+        "こんにちは\n".as_bytes(),
+        "cjk path",
+    );
     write_and_commit(dir, "emoji-🚀.txt", b"rocket\n", "emoji path");
     assert_roundtrip_fidelity("unicode-paths", dir);
 }
@@ -509,7 +506,14 @@ fn import_preserves_noncanonical_extension_header_order() {
 
     let sha = git_stdin(
         dir,
-        &["hash-object", "--literally", "-w", "-t", "commit", "--stdin"],
+        &[
+            "hash-object",
+            "--literally",
+            "-w",
+            "-t",
+            "commit",
+            "--stdin",
+        ],
         &content,
     );
     git(dir, &["update-ref", "refs/heads/crafted", &sha]);
@@ -582,7 +586,14 @@ fn roundtrip_non_utf8_author_identity() {
 
     let sha = git_stdin(
         dir,
-        &["hash-object", "--literally", "-w", "-t", "commit", "--stdin"],
+        &[
+            "hash-object",
+            "--literally",
+            "-w",
+            "-t",
+            "commit",
+            "--stdin",
+        ],
         &content,
     );
     git(dir, &["update-ref", "refs/heads/crafted", &sha]);
@@ -614,7 +625,14 @@ fn roundtrip_non_utf8_committer_identity() {
 
     let sha = git_stdin(
         dir,
-        &["hash-object", "--literally", "-w", "-t", "commit", "--stdin"],
+        &[
+            "hash-object",
+            "--literally",
+            "-w",
+            "-t",
+            "commit",
+            "--stdin",
+        ],
         &content,
     );
     git(dir, &["update-ref", "refs/heads/crafted", &sha]);

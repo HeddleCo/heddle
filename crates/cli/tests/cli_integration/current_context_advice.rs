@@ -94,38 +94,31 @@ fn ship_without_current_thread_uses_typed_advice() {
 }
 
 #[test]
-fn delegate_without_attached_parent_thread_uses_typed_advice() {
+fn removed_phase_2_roots_are_unknown_commands() {
     let temp = setup_detached_repo_without_current_thread();
-
-    let envelope = json_failure(&["--output", "json", "delegate", "probe"], temp.path());
-    assert_eq!(envelope["kind"], "no_attached_parent_thread");
-    assert_eq!(
-        envelope["primary_command"],
-        "heddle start <task> --parent-thread <THREAD>"
-    );
-    assert_eq!(envelope["primary_command_argv"], Value::Null);
-    assert_action_template(
-        &envelope["primary_command_template"],
-        "heddle start <task> --parent-thread <THREAD>",
-        heddle_argv_json(["start", "<task>", "--parent-thread", "<thread>"]),
-        &["thread", "task"],
-        false,
-    );
-    assert!(
-        envelope["recovery_action_templates"]
-            .as_array()
-            .is_some_and(|templates| templates
-                .iter()
-                .any(|template| template["action"]
-                    == "heddle start <task> --parent-thread <THREAD>")),
-        "delegate recovery commands should carry template metadata: {envelope}"
-    );
-    assert!(
-        envelope["hint"]
-            .as_str()
-            .is_some_and(|hint| hint.contains("--parent")),
-        "delegate advice should name the explicit parent selector: {envelope}"
-    );
+    for root in [
+        "attempt",
+        "branch",
+        "conflict",
+        "delegate",
+        "fork",
+        "goto",
+        "inspect",
+        "marker",
+        "stack",
+        "workspace",
+    ] {
+        let output = heddle_output(&[root], Some(temp.path())).expect("invoke removed root");
+        assert!(
+            !output.status.success(),
+            "{root} should fail as an unknown command"
+        );
+        let stderr = str::from_utf8(&output.stderr).expect("stderr should be utf8");
+        assert!(
+            stderr.contains("unrecognized subcommand"),
+            "{root} should be rejected by clap as unknown, got: {stderr}"
+        );
+    }
 }
 
 fn assert_action_template(

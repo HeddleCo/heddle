@@ -288,8 +288,8 @@ heddle redact apply <state> --path P --reason R [--all-states] [--sign-with PEM]
 heddle redact list
 heddle redact show <id>
 heddle redact trust add|list|remove        # fail-closed wire-trust list for signed redactions
-heddle purge  apply <state> --path P --force
-heddle purge  list
+heddle redact purge apply <state> --path P --force
+heddle redact purge list
 ```
 
 Key ergonomic properties to carry forward: one verb family, a signed

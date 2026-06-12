@@ -39,7 +39,7 @@ struct AgentInfo {
 }
 
 /// Split an `Attribution` into the structured `principal` / `agent`
-/// shape used by `log` and `show`, so `blame --output json` consumers
+/// shape used by `log` and `show`, so `query --attribution --output json` consumers
 /// never have to string-parse `"Name <email> (via provider/model)"`.
 fn attribution_parts(attribution: &Attribution) -> (PrincipalInfo, Option<AgentInfo>) {
     let principal = PrincipalInfo {
@@ -115,10 +115,6 @@ impl LineInfo {
             format!("{} +{}", self.attribution, self.extra_origins)
         }
     }
-}
-
-pub fn cmd_blame(cli: &Cli, file: String, state: Option<String>, show_context: bool) -> Result<()> {
-    cmd_blame_with_output_kind(cli, file, state, show_context, "blame")
 }
 
 pub fn cmd_query_attribution(
@@ -354,7 +350,7 @@ fn blame_file_not_found_advice(file: &Path) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "blame_file_not_found",
         format!("File '{}' not found in state", file.display()),
-        "Inspect the state with `heddle show`, then retry `heddle blame <path>` with a tracked file.",
+        "Inspect the state with `heddle show`, then retry `heddle query --attribution <path>` with a tracked file.",
         format!(
             "requested blame path '{}' does not exist in the selected Heddle state",
             file.display()

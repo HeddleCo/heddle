@@ -14,41 +14,37 @@ import { HeddleError, HeddleStreamingVerbError } from "./errors.js";
 /**
  * Verbs that ALWAYS emit JSONL — one JSON object per line — instead of a
  * single JSON payload. These carry `json_kind: "jsonl"` in the CLI command
- * catalog (`heddle watch` streams live oplog activity; `harness-bridge`
- * relays an event stream). A single `JSON.parse` of their stdout is always
+ * catalog (`heddle watch` streams live oplog activity; . A single `JSON.parse` of their stdout is always
  * wrong, so {@link Heddle.run} refuses them outright — callers iterate
  * {@link Heddle.stream}.
  */
 export type HeddleStreamingVerb = Extract<
   HeddleSchemaVerb,
-  "watch" | "harness-bridge"
+  "watch"
 >;
 
 /** Runtime mirror of {@link HeddleStreamingVerb} for value-level checks. */
 export const HEDDLE_STREAMING_VERBS: readonly HeddleStreamingVerb[] = [
   "watch",
-  "harness-bridge",
 ];
 
 /**
  * Verbs that emit a single JSON payload by default but switch to a JSONL
  * stream under a `--watch`-style flag. These carry `json_kind:
- * "json_or_jsonl"` in the CLI command catalog (`status`, `thread show`,
- * `workspace show` all gain a `--watch` live-refresh mode that prints one
+ * "json_or_jsonl"` in the CLI command catalog (`status` and `thread show` all gain a `--watch` live-refresh mode that prints one
  * JSON snapshot per tick). {@link Heddle.run} accepts them in their default
  * single-payload mode but refuses them when a watch flag is present, since
  * the output then streams; {@link Heddle.stream} iterates the snapshots.
  */
 export type HeddleWatchModeVerb = Extract<
   HeddleSchemaVerb,
-  "status" | "thread show" | "workspace show"
+  "status" | "thread show"
 >;
 
 /** Runtime mirror of {@link HeddleWatchModeVerb} for value-level checks. */
 export const HEDDLE_WATCH_MODE_VERBS: readonly HeddleWatchModeVerb[] = [
   "status",
   "thread show",
-  "workspace show",
 ];
 
 /** Flags that flip a {@link HeddleWatchModeVerb} into a JSONL stream. */

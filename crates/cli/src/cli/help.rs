@@ -365,7 +365,8 @@ fn global_option_takes_value(command: &clap::Command, token: &str) -> Option<boo
     command
         .get_arguments()
         .find(|arg| {
-            arg.get_long().is_some_and(|long| token == format!("--{long}"))
+            arg.get_long()
+                .is_some_and(|long| token == format!("--{long}"))
                 || arg
                     .get_short()
                     .is_some_and(|short| token == format!("-{short}"))
@@ -524,7 +525,7 @@ until a flag says otherwise.
 `--output json` emits the full machine contract: a stable `output_kind`
 discriminator, exit codes, and recovery templates. Schemas per verb:
 `heddle schemas <verb>`; the catalog of which commands emit what:
-`heddle commands --output json`.
+`heddle help --output json`.
 
 `--output json-compact` emits only the decision-surface fields —
 `output_kind`, `status`/`coordination_status`, `blockers`, `next_action`,
@@ -767,7 +768,7 @@ See also: `heddle help advanced` for the full operational surface,\n\
 
 const OPERATION_IDS_TOPIC: &str = "Idempotency — machine retries for supported mutating commands.\n\
 \n\
-Commands that advertise `supports_op_id: true` in `heddle commands --output json`\n\
+Commands that advertise `supports_op_id: true` in `heddle help --output json`\n\
 accept `--op-id <UUID>` or `HEDDLE_OPERATION_ID`. Replaying the same id\n\
 with the same body returns the recorded outcome; with a different body it\n\
 returns a typed conflict.\n\
@@ -781,7 +782,7 @@ The dedup store is file-backed locally (`.heddle/state/operation_dedup.bin`,\n\
 rmp-serde, 7-day default retention) and Postgres-backed in hosted deployments.\n\
 \n\
 Without an id, dedup is bypassed and the call executes normally. For the\n\
-authoritative per-command contract, use `heddle commands --output json`.\n";
+authoritative per-command contract, use `heddle help --output json`.\n";
 
 const REMOTES_TOPIC: &str = "Remotes — local, Git-overlay, and hosted destinations.\n\
 \n\
@@ -824,7 +825,7 @@ Unsupported native Git-overlay capabilities, such as filtered/lazy Git clones,\n
 fail closed with recovery advice instead of silently invoking a `git` binary.\n\
 `merge --git-commit` writes Git objects and refs natively.\n\
 \n\
-Run `heddle commands --output json` to inspect the public command surface, and\n\
+Run `heddle help --output json` to inspect the public command surface, and\n\
 `heddle doctor` / `heddle fsck --full` when a repository reports integrity or\n\
 bridge-state problems.\n";
 
@@ -1062,8 +1063,8 @@ mod tests {
     fn everyday_verbs_surface_the_core_loop() {
         let everyday: std::collections::HashSet<&str> = everyday_verbs().into_iter().collect();
         for verb in [
-            "init", "clone", "status", "start", "commit", "ready", "diff", "land",
-            "resolve", "undo", "log", "show", "pull", "push", "doctor", "verify",
+            "init", "clone", "status", "start", "commit", "ready", "diff", "land", "resolve",
+            "undo", "log", "show", "pull", "push", "doctor", "verify",
         ] {
             assert!(
                 everyday.contains(verb),
@@ -1132,7 +1133,10 @@ mod tests {
                 .get_arguments()
                 .find(|arg| arg.get_id().as_str() == *id)
                 .expect("revealed arg present");
-            assert!(!arg.is_hide_set(), "`{id}` should be revealed by --help-agent");
+            assert!(
+                !arg.is_hide_set(),
+                "`{id}` should be revealed by --help-agent"
+            );
         }
     }
 

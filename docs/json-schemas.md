@@ -198,61 +198,61 @@ in-progress operation.
       "status": "available",
       "verified_scope": "everyday_and_agent",
       "advanced_scope": "advanced_internal_admin",
-      "summary": "181 command(s), 154 JSON command(s), 96 mutating command(s), 95 mutating JSON command(s); verified everyday/agent machine surface has 38 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 49 accepted opaque schema(s) outside clean verification",
-      "catalog_commands_total": 181,
-      "catalog_mutating_commands_total": 96,
-      "json_commands_total": 154,
-      "json_mutating_commands_total": 95,
-      "json_commands_with_schema": 105,
-      "json_commands_with_accepted_opaque_schema": 49,
+      "summary": "185 command(s), 158 JSON command(s), 98 mutating command(s), 97 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 50 accepted opaque schema(s) outside clean verification",
+      "catalog_commands_total": 185,
+      "catalog_mutating_commands_total": 98,
+      "json_commands_total": 158,
+      "json_mutating_commands_total": 97,
+      "json_commands_with_schema": 108,
+      "json_commands_with_accepted_opaque_schema": 50,
       "json_commands_without_schema": 0,
-      "verified_scope_json_commands_total": 38,
-      "verified_scope_json_commands_with_schema": 38,
+      "verified_scope_json_commands_total": 37,
+      "verified_scope_json_commands_with_schema": 37,
       "verified_scope_json_commands_with_accepted_opaque_schema": 0,
       "verified_scope_json_commands_without_schema": 0,
-      "advanced_scope_json_commands_total": 116,
-      "advanced_scope_json_commands_with_accepted_opaque_schema": 49,
-      "mutating_commands_total": 95,
-      "mutating_commands_with_schema": 67,
+      "advanced_scope_json_commands_total": 121,
+      "advanced_scope_json_commands_with_accepted_opaque_schema": 50,
+      "mutating_commands_total": 97,
+      "mutating_commands_with_schema": 69,
       "mutating_commands_with_accepted_opaque_schema": 28,
       "mutating_commands_without_schema": 0,
       "verified_scope_mutating_commands_total": 23,
       "verified_scope_mutating_commands_with_schema": 23,
       "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
       "verified_scope_mutating_commands_without_schema": 0,
-      "advanced_scope_mutating_commands_total": 72,
+      "advanced_scope_mutating_commands_total": 74,
       "advanced_scope_mutating_commands_with_accepted_opaque_schema": 28,
-      "schema_verbs_total": 159,
-      "documented_schema_verbs_total": 159,
+      "schema_verbs_total": 163,
+      "documented_schema_verbs_total": 163,
       "undocumented_schema_verbs_total": 0,
-      "opaque_schema_verbs_total": 49,
-      "accepted_opaque_schema_verbs_total": 49,
+      "opaque_schema_verbs_total": 50,
+      "accepted_opaque_schema_verbs_total": 50,
       "unaccepted_opaque_schema_verbs_total": 0,
-      "supports_op_id_total": 91,
+      "supports_op_id_total": 93,
       "jsonl_commands_total": 4,
       "missing_schema_examples": [],
       "missing_mutating_schema_examples": [],
       "verified_scope_missing_schema_examples": [],
       "verified_scope_accepted_opaque_schema_examples": [],
       "advanced_scope_accepted_opaque_schema_examples": [
+        "help",
         "transaction begin",
         "transaction abort",
         "transaction status",
         "redact apply",
         "redact list",
         "redact show",
-        "redact trust add",
-        "redact trust list"
+        "redact trust add"
       ],
       "accepted_opaque_schema_examples": [
+        "help",
         "transaction begin",
         "transaction abort",
         "transaction status",
         "redact apply",
         "redact list",
         "redact show",
-        "redact trust add",
-        "redact trust list"
+        "redact trust add"
       ],
       "unaccepted_opaque_schema_examples": [],
       "undocumented_schema_examples": []
@@ -452,7 +452,7 @@ standard recovery fields plus nested verification proof:
 ## Core loop mutation schemas
 
 These verbs are the everyday loop agents use after discovery through
-`heddle commands --output json`: capture state, save it as a
+`heddle help --output json`: capture state, save it as a
 Git-compatible commit when needed, undo/redo the last logical
 operation, and ask whether a thread is ready. The lower-level
 `checkpoint` command is documented here as an explicit Git-adapter
@@ -1103,6 +1103,55 @@ verification.
 | `next_action`, `recommended_action_template`, `next_action_template` | mixed | required | Machine-readable action metadata; templates carry `argv_template`/`required_inputs`/`agent_may_fill` and are `null` when no action is needed. |
 | `verification` | object | required | Full repository verification proof for this checkout. |
 | `recovery_commands` | array<string> | required | Recovery commands from verification/advice. Empty when verified. |
+
+---
+
+## `heddle thread marker list --output json`
+
+```json
+{
+  "output_kind": "thread_marker_list",
+  "markers": [
+    {
+      "name": "verified-parser",
+      "change_id": "hd-def456"
+    }
+  ]
+}
+```
+
+## `heddle thread marker create --output json`
+
+```json
+{
+  "output_kind": "thread_marker_create",
+  "name": "verified-parser",
+  "change_id": "hd-def456",
+  "message": "Created marker 'verified-parser' at hd-def456"
+}
+```
+
+## `heddle thread marker delete --output json`
+
+```json
+{
+  "output_kind": "thread_marker_delete",
+  "name": "verified-parser",
+  "change_id": null,
+  "message": "Deleted marker 'verified-parser'"
+}
+```
+
+## `heddle thread marker show --output json`
+
+```json
+{
+  "output_kind": "thread_marker_show",
+  "name": "verified-parser",
+  "change_id": "hd-def456",
+  "message": "Marker 'verified-parser' -> hd-def456"
+}
+```
 
 ---
 
@@ -1907,27 +1956,22 @@ for the field-level definition. Notable invariants:
 
 ---
 
-## `heddle commands --output json`
+## `heddle help --output json`
 
 Public command catalog for agents, shell integrations, and generated docs.
-Use `heddle commands --output json` in automation. The catalog includes
+Use `heddle help --output json` in automation. The catalog includes
 native commands first and lower-level Git-adapter actions only where a
 command explicitly belongs to that surface.
 
 Agents can bound the response before parsing it:
 
 ```bash
-heddle commands --output json --command commit
-heddle commands --output json --command thread
-heddle commands --output json --tier everyday
-heddle commands --output json --mutating --supports-op-id
+heddle help --output json
 ```
 
-`--command <COMMAND>` matches an exact display path or a command-family
-prefix, so `--command thread` returns `thread` and its public
-subcommands. Repeat `--command` or `--tier` to include multiple slices.
-`--mutating` keeps commands with `mutates: true`; `--supports-op-id`
-keeps commands that accept caller-supplied replay ids.
+The catalog is intentionally complete. Agents that need a smaller working
+set should filter the returned `commands` array by `display`, `tier`,
+`mutates`, or `supports_op_id` after parsing the JSON.
 
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
@@ -2004,7 +2048,7 @@ than the command provides:
 advertises `supports_op_id: true`; inspect each command's `op_id_behavior`
 instead of treating it as a global catalog option.
 
-`heddle commands --output json` emits:
+`heddle help --output json` emits:
 
 ```json
 {
@@ -2368,7 +2412,7 @@ catalog-wide schema coverage.
   "output_kind": "doctor_schemas",
   "status": "available",
   "verified": true,
-  "summary": "181 command(s), 154 JSON command(s), 96 mutating command(s), 95 mutating JSON command(s); verified everyday/agent machine surface has 38 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 49 accepted opaque schema(s) outside clean verification",
+  "summary": "185 command(s), 158 JSON command(s), 98 mutating command(s), 97 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 50 accepted opaque schema(s) outside clean verification",
   "recommended_action": null,
   "recovery_commands": [],
   "registered_verbs": ["status", "verify", "try"],
@@ -2381,57 +2425,57 @@ catalog-wide schema coverage.
     "status": "available",
     "verified_scope": "everyday_and_agent",
     "advanced_scope": "advanced_internal_admin",
-    "summary": "181 command(s), 154 JSON command(s), 96 mutating command(s), 95 mutating JSON command(s); verified everyday/agent machine surface has 38 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 49 accepted opaque schema(s) outside clean verification",
-    "catalog_commands_total": 181,
-    "catalog_mutating_commands_total": 96,
-    "json_commands_total": 154,
-    "json_mutating_commands_total": 95,
-    "json_commands_with_schema": 105,
-    "json_commands_with_accepted_opaque_schema": 49,
+    "summary": "185 command(s), 158 JSON command(s), 98 mutating command(s), 97 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 50 accepted opaque schema(s) outside clean verification",
+    "catalog_commands_total": 185,
+    "catalog_mutating_commands_total": 98,
+    "json_commands_total": 158,
+    "json_mutating_commands_total": 97,
+    "json_commands_with_schema": 108,
+    "json_commands_with_accepted_opaque_schema": 50,
     "json_commands_without_schema": 0,
-    "verified_scope_json_commands_total": 38,
-    "verified_scope_json_commands_with_schema": 38,
+    "verified_scope_json_commands_total": 37,
+    "verified_scope_json_commands_with_schema": 37,
     "verified_scope_json_commands_with_accepted_opaque_schema": 0,
     "verified_scope_json_commands_without_schema": 0,
-    "advanced_scope_json_commands_total": 116,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 49,
-    "mutating_commands_total": 95,
-    "mutating_commands_with_schema": 67,
+    "advanced_scope_json_commands_total": 121,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 50,
+    "mutating_commands_total": 97,
+    "mutating_commands_with_schema": 69,
     "mutating_commands_with_accepted_opaque_schema": 28,
     "mutating_commands_without_schema": 0,
     "verified_scope_mutating_commands_total": 23,
     "verified_scope_mutating_commands_with_schema": 23,
     "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
     "verified_scope_mutating_commands_without_schema": 0,
-    "advanced_scope_mutating_commands_total": 72,
+    "advanced_scope_mutating_commands_total": 74,
     "advanced_scope_mutating_commands_with_accepted_opaque_schema": 28,
     "undocumented_schema_verbs_total": 0,
-    "opaque_schema_verbs_total": 49,
-    "accepted_opaque_schema_verbs_total": 49,
+    "opaque_schema_verbs_total": 50,
+    "accepted_opaque_schema_verbs_total": 50,
     "unaccepted_opaque_schema_verbs_total": 0,
     "missing_schema_examples": [],
     "missing_mutating_schema_examples": [],
     "verified_scope_missing_schema_examples": [],
     "verified_scope_accepted_opaque_schema_examples": [],
     "advanced_scope_accepted_opaque_schema_examples": [
+      "help",
       "transaction begin",
       "transaction abort",
       "transaction status",
       "redact apply",
       "redact list",
       "redact show",
-      "redact trust add",
-      "redact trust list"
+      "redact trust add"
     ],
     "accepted_opaque_schema_examples": [
+      "help",
       "transaction begin",
       "transaction abort",
       "transaction status",
       "redact apply",
       "redact list",
       "redact show",
-      "redact trust add",
-      "redact trust list"
+      "redact trust add"
     ],
     "unaccepted_opaque_schema_examples": [],
     "undocumented_schema_examples": []
@@ -2572,11 +2616,17 @@ shape when the target resolves as a state rather than a thread.
 ```json
 {
   "output_kind": "thread_switch",
+  "status": "completed",
+  "action": "thread_switch",
   "name": "feature/parser",
   "message": "Switched to thread 'feature/parser'",
   "thread": null,
   "path": null,
-  "execution_path": null
+  "execution_path": null,
+  "next_action": null,
+  "next_action_template": null,
+  "recommended_action": null,
+  "recommended_action_template": null
 }
 ```
 

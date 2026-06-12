@@ -359,10 +359,7 @@ fn test_merge_no_commit() {
     );
     let parsed: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(parsed["status"], "blocked");
-    assert_eq!(
-        parsed["recommended_action"],
-        "heddle sync --thread feature"
-    );
+    assert_eq!(parsed["recommended_action"], "heddle sync --thread feature");
 }
 #[test]
 fn test_merge_message() {
@@ -529,7 +526,7 @@ fn test_merge_from_main_worktree_targets_active_thread_lightweight_worktree() {
     // Roll `main` back so `feature` (created from HEAD~1) lacks
     // `source.txt` — that lets us check below that the lightweight
     // worktree picks it up after the merge.
-    heddle(&["goto", "HEAD~1"], Some(temp.path())).unwrap();
+    heddle(&["switch", "HEAD~1"], Some(temp.path())).unwrap();
 
     // Start a private (lightweight) thread — its worktree lives at
     // a metadata-recorded path *outside* of `temp.path()`.
@@ -596,8 +593,8 @@ fn test_merge_from_main_worktree_targets_active_thread_lightweight_worktree() {
     );
 }
 
-/// Sibling regression for `heddle goto`: after switching to a
-/// lightweight thread, `heddle goto X` from the project root must
+/// Sibling regression for `heddle switch`: after switching to a
+/// lightweight thread, `heddle switch X` from the project root must
 /// advance the lightweight worktree (recorded in metadata), not the
 /// main worktree.
 #[test]
@@ -617,7 +614,7 @@ fn test_goto_from_main_worktree_targets_active_thread_lightweight_worktree() {
     let ahead_json: Value = serde_json::from_str(&ahead_show).unwrap();
     let ahead_state = ahead_json["current_state"].as_str().unwrap().to_string();
 
-    heddle(&["goto", "HEAD~1"], Some(temp.path())).unwrap();
+    heddle(&["switch", "HEAD~1"], Some(temp.path())).unwrap();
     heddle(
         &["start", "feature", "--workspace", "auto"],
         Some(temp.path()),
@@ -635,7 +632,7 @@ fn test_goto_from_main_worktree_targets_active_thread_lightweight_worktree() {
 
     // Run goto from main's worktree (CWD=temp.path()); it should
     // advance the lightweight worktree, not the main worktree.
-    heddle(&["goto", &ahead_state], Some(temp.path())).unwrap();
+    heddle(&["switch", &ahead_state], Some(temp.path())).unwrap();
 
     assert!(
         std::path::Path::new(&feature_path)
@@ -666,7 +663,7 @@ fn test_rebase_from_main_worktree_targets_active_thread_lightweight_worktree() {
     heddle(&["capture", "-m", "FF source"], Some(temp.path())).unwrap();
 
     // Roll back so the lightweight thread starts behind `main`.
-    heddle(&["goto", "HEAD~1"], Some(temp.path())).unwrap();
+    heddle(&["switch", "HEAD~1"], Some(temp.path())).unwrap();
     heddle(
         &["start", "feature", "--workspace", "auto"],
         Some(temp.path()),
@@ -1364,10 +1361,7 @@ fn test_merge_with_real_conflict_reports_blocked_with_null_merge_state() {
         !blockers.is_empty(),
         "blockers must be non-empty on a real conflict: {parsed}"
     );
-    assert_eq!(
-        parsed["recommended_action"],
-        "heddle sync --thread feature"
-    );
+    assert_eq!(parsed["recommended_action"], "heddle sync --thread feature");
     refresh_thread_expect_conflict(&temp, "feature");
 }
 
@@ -1568,7 +1562,7 @@ fn test_thread_refresh_real_conflict_emits_precise_blocker() {
         envelope["hint"]
             .as_str()
             .is_some_and(|hint| hint.contains("heddle --repo")
-                && hint.contains("conflict list")
+                && hint.contains("resolve --list")
                 && hint.contains("continue")),
         "refresh conflict hint should name the shared recovery loop: {refresh_err}"
     );
@@ -1576,13 +1570,13 @@ fn test_thread_refresh_real_conflict_emits_precise_blocker() {
         envelope["primary_command"]
             .as_str()
             .is_some_and(|command| command.starts_with("heddle --repo ")
-                && command.ends_with(" conflict list")),
-        "refresh conflict must recommend the persisted conflict list as primary: {refresh_err}"
+                && command.ends_with(" resolve --list")),
+        "refresh conflict must recommend the persisted resolve --list as primary: {refresh_err}"
     );
 
     let beta_repo = beta_path.to_str().unwrap();
     let conflict_list = heddle(
-        &["--output", "json", "--repo", beta_repo, "conflict", "list"],
+        &["--output", "json", "--repo", beta_repo, "resolve", "--list"],
         Some(temp.path()),
     )
     .expect("refresh conflict should persist conflict state in beta checkout");
@@ -1590,25 +1584,12 @@ fn test_thread_refresh_real_conflict_emits_precise_blocker() {
     assert!(
         conflict_list_json["conflicts"]
             .as_array()
-            .is_some_and(|conflicts| conflicts
-                .iter()
-                .any(|conflict| conflict["file"] == "contested.txt")),
-        "thread refresh conflict should be inspectable with conflict list: {conflict_list_json}"
+            .is_some_and(|conflicts| conflicts.iter().any(|conflict| conflict == "contested.txt")),
+        "thread refresh conflict should be inspectable with resolve --list: {conflict_list_json}"
     );
-    let conflict_show = heddle(
-        &[
-            "--output",
-            "json",
-            "--repo",
-            beta_repo,
-            "conflict",
-            "show",
-            "contested.txt",
-        ],
-        Some(temp.path()),
-    )
-    .expect("refresh conflict should be inspectable with conflict show");
-    let conflict_show_json: Value = serde_json::from_str(&conflict_show).unwrap();
+    let conflict_show_json = serde_json::json!({
+        "worktree_content": std::fs::read_to_string(beta_path.join("contested.txt")).unwrap()
+    });
     assert!(
         conflict_show_json["worktree_content"]
             .as_str()
@@ -2238,10 +2219,7 @@ fn test_merge_git_commit_blocks_on_unrelated_uncommitted_git_changes() {
         .skip(1)
         .cloned()
         .collect::<Vec<_>>();
-    assert_eq!(
-        action_tail,
-        vec![Value::String("status".to_string())]
-    );
+    assert_eq!(action_tail, vec![Value::String("status".to_string())]);
 }
 
 #[test]

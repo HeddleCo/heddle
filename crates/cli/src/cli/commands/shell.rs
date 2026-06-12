@@ -25,8 +25,8 @@
 
 use anyhow::Result;
 
-use crate::cli::{ShellCommands, ShellKind};
 use super::cmd_completion;
+use crate::cli::{ShellCommands, ShellKind};
 
 pub fn cmd_shell(command: ShellCommands) -> Result<()> {
     match command {

@@ -444,7 +444,7 @@ impl ThreadManager {
     }
 
     /// Decode a `Thread` record from rmp-serde bytes produced by
-    /// `snapshot_thread_record`. Used by `heddle redo` of a
+    /// `snapshot_thread_record`. Used by `heddle undo --redo` of a
     /// `ThreadCreate` to reconstruct the record body that undo destroyed
     /// (heddle#23 r2 Codex P1, mirroring the FastForward pattern from
     /// heddle#99 r2 — record what redo needs).

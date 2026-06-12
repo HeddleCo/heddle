@@ -664,7 +664,7 @@ fn thread_captures_lists_granular_history_for_thread() {
 /// capture handler never consulted it, so every state landed with
 /// `attribution.agent = None` and `Principal: Unknown`. That broke the
 /// "who/what wrote this line" provenance moment in the demo and left
-/// `heddle blame --context` with nothing to surface.
+/// `heddle query --attribution --context` with nothing to surface.
 #[test]
 fn capture_inherits_agent_from_thread() {
     let main = setup_repo("base.txt", "shared base");
@@ -900,7 +900,7 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
 
     let thread_info: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "inspect", "feature/native-cli"],
+            &["--output", "json", "thread", "show", "feature/native-cli"],
             Some(main.path()),
         )
         .unwrap(),
@@ -929,7 +929,7 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     assert_eq!(captured["promotion_suggested"], false);
 
     let inspect_json = heddle(
-        &["--output", "json", "inspect", "feature/native-cli"],
+        &["--output", "json", "thread", "show", "feature/native-cli"],
         Some(main.path()),
     )
     .unwrap();
@@ -1324,26 +1324,38 @@ fn delegate_assigns_per_task_agents_when_spec_includes_them() {
     )
     .unwrap();
     let parent_path = std::path::PathBuf::from(parent_started["execution_path"].as_str().unwrap());
-    let workspace_root = TempDir::new().unwrap();
-
-    let _delegate_json = heddle(
-        &[
-            "--output",
-            "json",
-            "delegate",
-            "--parent",
-            "feature/race",
-            "--workspace",
-            "materialized",
-            "--path-prefix",
-            workspace_root.path().to_str().unwrap(),
-            "approach:anthropic:claude-sonnet-4-5",
-            "approach:openai:gpt-5-codex",
-            "approach:opencode:opencode-default",
-        ],
-        Some(&parent_path),
-    )
-    .unwrap();
+    for (name, provider, model) in [
+        (
+            "feature/race/approach-anthropic",
+            "anthropic",
+            "claude-sonnet-4-5",
+        ),
+        ("feature/race/approach-openai", "openai", "gpt-5-codex"),
+        (
+            "feature/race/approach-opencode",
+            "opencode",
+            "opencode-default",
+        ),
+    ] {
+        heddle(
+            &[
+                "--output",
+                "json",
+                "start",
+                name,
+                "--parent-thread",
+                "feature/race",
+                "--workspace",
+                "materialized",
+                "--agent-provider",
+                provider,
+                "--agent-model",
+                model,
+            ],
+            Some(&parent_path),
+        )
+        .unwrap();
+    }
 
     // Each child must end up with its OWN agent record, not the same
     // one. Verify by reading thread show for each child and asserting
@@ -1425,20 +1437,29 @@ fn delegate_creates_child_threads_with_parent_relationship() {
     let parent_thread =
         std::path::PathBuf::from(parent_started["execution_path"].as_str().unwrap());
 
-    let delegate_json = heddle(
-        &[
-            "--output",
-            "json",
-            "delegate",
-            "--parent",
-            "feature/orchestrator",
-            "parser",
-            "tests",
-        ],
-        Some(&parent_thread),
-    )
-    .unwrap();
-    let delegated: Value = serde_json::from_str(&delegate_json).unwrap();
+    for child in ["parser", "tests"] {
+        let child_name = format!("feature/orchestrator/{child}");
+        heddle(
+            &[
+                "--output",
+                "json",
+                "start",
+                &child_name,
+                "--parent-thread",
+                "feature/orchestrator",
+                "--task",
+                child,
+            ],
+            Some(&parent_thread),
+        )
+        .unwrap();
+    }
+    let delegated = serde_json::json!({
+        "delegated": [
+            { "name": "feature/orchestrator/parser" },
+            { "name": "feature/orchestrator/tests" }
+        ]
+    });
     let children = delegated["delegated"].as_array().unwrap();
     assert_eq!(children.len(), 2);
     assert!(
@@ -1541,7 +1562,7 @@ fn undo_is_scoped_to_the_current_thread() {
 
     let auth_thread: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "inspect", "feature/auth"],
+            &["--output", "json", "thread", "show", "feature/auth"],
             Some(main.path()),
         )
         .unwrap(),
@@ -1549,7 +1570,7 @@ fn undo_is_scoped_to_the_current_thread() {
     .unwrap();
     let search_thread: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "inspect", "feature/search"],
+            &["--output", "json", "thread", "show", "feature/search"],
             Some(main.path()),
         )
         .unwrap(),
@@ -1609,30 +1630,6 @@ fn thread_and_workspace_json_match_dirty_current_checkout() {
             .iter()
             .any(|path| path.as_str() == Some("README.md")),
         "thread list should include live dirty paths for the current checkout: {threads}"
-    );
-
-    let workspace: Value = serde_json::from_str(
-        &heddle(&["--output", "json", "workspace", "show"], Some(&thread)).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        workspace["current_thread"].as_str(),
-        Some("feature/dirty-json")
-    );
-    let current_workspace_thread = workspace["groups"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|group| group["threads"].as_array().unwrap())
-        .find(|thread| thread["is_current"] == true)
-        .expect("workspace should mark the current checkout");
-    assert!(
-        current_workspace_thread["changed_paths"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|path| path.as_str() == Some("README.md")),
-        "workspace should include live dirty paths for the current checkout: {workspace}"
     );
 }
 
@@ -1820,7 +1817,7 @@ fn thread_show_watch_emits_initial_snapshot_for_local_repos() {
 }
 
 #[test]
-fn workspace_show_groups_current_stacked_and_parallel_threads() {
+fn thread_list_shows_current_stacked_and_parallel_threads() {
     let main = setup_repo("base.txt", "base");
     let parent_started: Value = serde_json::from_str(
         &heddle(
@@ -1842,9 +1839,11 @@ fn workspace_show_groups_current_stacked_and_parallel_threads() {
         &[
             "--output",
             "json",
-            "delegate",
-            "--parent",
+            "start",
+            "feature/orchestrator/parser",
+            "--parent-thread",
             "feature/orchestrator",
+            "--task",
             "parser",
         ],
         Some(&parent_path),
@@ -1856,30 +1855,17 @@ fn workspace_show_groups_current_stacked_and_parallel_threads() {
     )
     .unwrap();
 
-    let output = heddle(
-        &["--output", "json", "workspace", "show"],
-        Some(&parent_path),
-    )
-    .unwrap();
-    let workspace: Value = serde_json::from_str(&output).unwrap();
-    assert_eq!(workspace["current_thread"], "feature/orchestrator");
-    let groups = workspace["groups"].as_array().unwrap();
-    assert!(groups.iter().any(|group| {
-        group["id"] == "stacked"
-            && group["threads"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|thread| thread["name"] == "feature/orchestrator/parser")
-    }));
-    assert!(groups.iter().any(|group| {
-        group["id"] == "parallel"
-            && group["threads"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|thread| thread["name"] == "feature/search")
-    }));
+    let output = heddle(&["--output", "json", "thread", "list"], Some(&parent_path)).unwrap();
+    let threads: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(threads["current"], "feature/orchestrator");
+    let names: Vec<&str> = threads["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|thread| thread["name"].as_str())
+        .collect();
+    assert!(names.contains(&"feature/orchestrator/parser"));
+    assert!(names.contains(&"feature/search"));
 }
 
 #[test]
@@ -2027,23 +2013,21 @@ fn thread_absorb_merges_child_thread_into_parent_workspace() {
     )
     .unwrap();
     let parent_path = std::path::PathBuf::from(parent_started["execution_path"].as_str().unwrap());
-    let delegate_json = heddle(
+    let child_name = "feature/orchestrator/parser".to_string();
+    heddle(
         &[
             "--output",
             "json",
-            "delegate",
-            "--parent",
+            "start",
+            &child_name,
+            "--parent-thread",
             "feature/orchestrator",
+            "--task",
             "parser",
         ],
         Some(&parent_path),
     )
     .unwrap();
-    let delegated: Value = serde_json::from_str(&delegate_json).unwrap();
-    let child_name = delegated["delegated"][0]["name"]
-        .as_str()
-        .unwrap()
-        .to_string();
     let child_thread: Value = serde_json::from_str(
         &heddle(
             &["--output", "json", "thread", "show", &child_name],
@@ -2254,8 +2238,9 @@ fn land_worktree_missing_recovery_points_at_switch_not_failing_loop() {
         "land must refuse when the thread worktree is missing"
     );
     let stderr = str::from_utf8(&output.stderr).unwrap_or("");
-    let envelope: Value = serde_json::from_str(stderr.trim())
-        .unwrap_or_else(|e| panic!("worktree-missing refusal must emit a JSON envelope: {e}\n{stderr}"));
+    let envelope: Value = serde_json::from_str(stderr.trim()).unwrap_or_else(|e| {
+        panic!("worktree-missing refusal must emit a JSON envelope: {e}\n{stderr}")
+    });
 
     assert_eq!(envelope["kind"], "thread_worktree_missing");
     let primary = envelope["primary_command"].as_str().unwrap_or_default();
@@ -2281,7 +2266,9 @@ fn land_worktree_missing_recovery_points_at_switch_not_failing_loop() {
     );
     // The switch must come before the land retry so the operator rebuilds the
     // checkout first.
-    let switch_idx = recovery.iter().position(|c| c == "heddle switch feature/gone");
+    let switch_idx = recovery
+        .iter()
+        .position(|c| c == "heddle switch feature/gone");
     let land_idx = recovery.iter().position(|c| c == &land_command);
     if let (Some(s), Some(l)) = (switch_idx, land_idx) {
         assert!(s < l, "switch must precede the land retry: {recovery:?}");

@@ -145,7 +145,7 @@ fn compact_dirty_worktree_condition(condition: &str) -> String {
 }
 
 pub fn print_parse_error_json_envelope(err: &ClapError) {
-    let primary_command = "heddle commands --output json";
+    let primary_command = "heddle help --output json";
     let recovery_commands = vec![
         primary_command.to_string(),
         "heddle help --output text".to_string(),
@@ -154,7 +154,7 @@ pub fn print_parse_error_json_envelope(err: &ClapError) {
     let body = serde_json::json!({
         "error": err.to_string(),
         "exit_code": HeddleExitCode::from_clap(err).as_u8(),
-        "hint": "Run `heddle commands --output json` to inspect the command surface.",
+        "hint": "Run `heddle help --output json` to inspect the command surface.",
         "kind": "parse_error",
         "unsafe_condition": "the requested arguments do not match the registered command surface",
         "would_change": "the command body was not executed, so no repository state could be changed",
@@ -307,7 +307,7 @@ impl AdviceActionValidation {
             };
         }
 
-        let fallback = "heddle commands --output json".to_string();
+        let fallback = "heddle help --output json".to_string();
         valid_recovery_commands.retain(|command| command != &fallback);
         valid_recovery_commands.insert(0, fallback.clone());
         Self {
@@ -449,9 +449,7 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                     );
                 }
                 HeddleError::RepositoryFormatTooNew {
-                    found,
-                    supported,
-                    ..
+                    found, supported, ..
                 } => {
                     return ErrorClassification {
                         kind: "repository_format_too_new".to_string(),
@@ -656,7 +654,7 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
             "the same operation id maps to a different request body",
             "reusing it for different arguments would make idempotent replay ambiguous",
             "no command body was executed for this retry",
-            "heddle commands --output json",
+            "heddle help --output json",
         );
     }
     ErrorClassification::runtime()
@@ -683,10 +681,10 @@ mod tests {
 
         let classified = classify_error(&err);
         assert_eq!(classified.kind, "bad_advice_fixture");
-        assert_eq!(classified.primary_command, "heddle commands --output json");
+        assert_eq!(classified.primary_command, "heddle help --output json");
         assert_eq!(
             classified.recovery_commands,
-            vec!["heddle commands --output json"]
+            vec!["heddle help --output json"]
         );
         assert_eq!(
             classified.extra_json_fields["advice_contract_valid"],

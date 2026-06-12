@@ -10,7 +10,7 @@ use objects::object::{
     parse_commit_extension_headers,
 };
 use refs::{Head, RefExpectation};
-use repo::{ResignOutcome, Repository as HeddleRepository, ThreadId};
+use repo::{Repository as HeddleRepository, ResignOutcome, ThreadId};
 use tracing::warn;
 
 pub use super::git_import_tree::{GitTreeImporter, import_git_tree};
@@ -533,7 +533,13 @@ pub fn import_all_with_progress(
     git_path: Option<&Path>,
     progress: Option<&mut dyn FnMut(usize)>,
 ) -> GitResult<ImportStats> {
-    import_with_ref_filter(bridge, git_path, None, GitImportOptions::default(), progress)
+    import_with_ref_filter(
+        bridge,
+        git_path,
+        None,
+        GitImportOptions::default(),
+        progress,
+    )
 }
 
 pub fn import_selected_refs(
@@ -854,19 +860,21 @@ fn import_with_ref_filter(
         .join("bridge-import")
         .join("staging");
     let pack_sink = PackImportSink::new(&staging_dir)?;
-    let mut tree_importer = GitTreeImporter::with_options_packed(
-        bridge.heddle_repo,
-        &repo,
-        options.clone(),
-        pack_sink,
-    );
+    let mut tree_importer =
+        GitTreeImporter::with_options_packed(bridge.heddle_repo, &repo, options.clone(), pack_sink);
     let mut noop_progress = |_: usize| {};
     let progress_cb: &mut dyn FnMut(usize) = match progress {
         Some(callback) => callback,
         None => &mut noop_progress,
     };
-    let import_result =
-        walk_plans_into_states(bridge, &repo, &mut tree_importer, &plans, &mut stats, progress_cb);
+    let import_result = walk_plans_into_states(
+        bridge,
+        &repo,
+        &mut tree_importer,
+        &plans,
+        &mut stats,
+        progress_cb,
+    );
     match import_result {
         Ok(()) => {
             stats
@@ -1214,8 +1222,7 @@ fn import_commit_ancestry(
                 };
                 if needs_state {
                     let before_lossy = tree_importer.lossy_entries().len();
-                    let change_id =
-                        import_commit(&mut bridge.mapping, repo, tree_importer, oid)?;
+                    let change_id = import_commit(&mut bridge.mapping, repo, tree_importer, oid)?;
                     bridge.mapping.insert(change_id, oid);
                     let commit_lossy_entries =
                         tree_importer.lossy_entries()[before_lossy..].to_vec();

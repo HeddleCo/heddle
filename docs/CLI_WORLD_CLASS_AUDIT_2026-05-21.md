@@ -38,7 +38,7 @@ extract time.
 | `thread list --output json` | Same real-world fixture test | Pass | JSON parses and exposes imported threads with `PATH=""`. |
 | `status --output json` | `git_replacement_matrix_fresh_git_read_commands_without_git_on_path`; manual `git-shaped` dirty long-path probe | Pass | Fresh Git worktree without Heddle state reports `git-overlay`, current thread, and dirty path with `PATH=""`; large fixture probe detected `untracked dirty file.txt` under a long path with spaces. |
 | `diagnose --output json` | `git_replacement_matrix_fresh_git_read_commands_without_git_on_path`; manual `tapestry` clone audit; manual `git-shaped` dirty long-path probe | Pass | No longer fails when upstream drift probing cannot spawn `git`; large dirty-worktree probe parsed cleanly with `PATH=""`. |
-| `workspace show --output json` | `git_replacement_matrix_fresh_git_read_commands_without_git_on_path`; manual `tapestry` clone audit | Pass | No longer fails when upstream drift probing cannot spawn `git`. |
+| `status --output json` | `git_replacement_matrix_fresh_git_read_commands_without_git_on_path`; manual `tapestry` clone audit | Pass | No longer fails when upstream drift probing cannot spawn `git`. |
 | `ready --output json` | `git_replacement_matrix_fresh_git_read_commands_without_git_on_path`; manual `tapestry` clone audit | Pass | Emits parseable JSON and exits 0 with `PATH=""`. |
 | `help status` | Manual `tapestry` audit | Pass | Purpose, usage, flags, examples; stdout only. |
 | everyday help entrypoints | `everyday_commands_have_all_required_help_entrypoints` | Pass | Rubric everyday commands support `heddle help <cmd>`, `<cmd> --help`, and `<cmd> -h`. |
@@ -53,7 +53,7 @@ extract time.
 | `version --repo <path> --verbose --output json` | `version_verbose_honors_explicit_repo_path` | Pass after fix | Verbose bug-context JSON reports the explicitly requested repository root, not the process cwd. |
 | `resolve` outside a merge | `resolve_without_merge_emits_actionable_json_error` | Pass after fix | JSON and text failures use `kind=operation_not_in_progress` / `Error: No merge in progress`, hint at `heddle status`, keep stdout empty, and avoid the old `object not found` wrapper. |
 | corrupt repository ref recovery | `fsck_on_corrupt_ref_emits_integrity_hint_in_text_and_json` | Pass after fix | Corrupt thread ref fails non-zero with stdout clean; JSON stderr has `kind=repository_integrity_error`, preserves the invalid-object error, and hints `heddle fsck --full`; text mode mirrors the recovery hint. |
-| global quiet/color/narrow text behavior | `quiet_no_color_and_narrow_text_outputs_preserve_global_contract`; `narrow_no_color_text_outputs_cover_everyday_read_surfaces` | Pass after fix | `--quiet` suppresses capture/log tips; `NO_COLOR=1` wins over forced color; `COLUMNS=28/30` text succeeds across status, diagnose, doctor, diff, log, show, thread list, workspace show, bridge status, fsck, and ready with primary labels intact. |
+| global quiet/color/narrow text behavior | `quiet_no_color_and_narrow_text_outputs_preserve_global_contract`; `narrow_no_color_text_outputs_cover_everyday_read_surfaces` | Pass after fix | `--quiet` suppresses capture/log tips; `NO_COLOR=1` wins over forced color; `COLUMNS=28/30` text succeeds across status, diagnose, doctor, diff, log, show, thread list, status, bridge status, fsck, and ready with primary labels intact. |
 | default auto-output contract | `default_auto_output_is_json_when_stdout_is_piped_and_text_when_forced`; `tty_auto_mode_renders_text_and_explicit_json_stays_json` | Pass | Confirms piped stdout uses parseable JSON in `auto` mode; TTY stdout uses human text for `status` and rich guidance for `start`; `--output text` and `--output json` override auto regardless of stream. |
 | exit-code and failure-stream taxonomy | `global_exit_codes_and_failure_streams_are_predictable` | Pass | Help exits 0 on stdout; clap parse errors exit 2 on stderr with suggestions; environment failures exit 1 with clean stdout and JSON error envelope when requested. |
 | `ready` text/no-op output | `ready_text_names_ready_and_already_ready_noop_states` | Pass | Text mode names ready vs already-ready no-op states, includes readiness detail and next action, and keeps stderr empty. |
@@ -73,7 +73,7 @@ extract time.
   executable is absent instead of failing read commands.
 - Expanded `git_replacement_matrix` to cover a fresh Git worktree with no
   Heddle state under `PATH=""` for `status`, `diagnose`, `thread list`,
-  `workspace show`, and `ready`.
+  `status`, and `ready`.
 - Updated real-world fixture tests so `fsck --bridge --output json` and
   `thread list --output json` run under `PATH=""` rather than borrowing host Git.
 - Classified missing path IO errors as `path_not_found` in JSON-mode error
@@ -131,15 +131,15 @@ extract time.
   drift, schema drift, no-`git` overlay workflows, public help reachability,
   auto-output, TTY output, corrupt-repo recovery, exit-code taxonomy,
   destructive safety, and runtime `git` process lint checks.
-- Promoted `workspace` onto the curated core-loop help surface, aligned default
-  `heddle help` around setup/orient/work/check/inspect/integrate/recover/doctor,
+- Promoted the thread/status workspace view onto the curated core-loop help surface,
+  aligned default `heddle help` around setup/orient/work/check/inspect/integrate/recover/doctor,
   and moved `review`, `discuss`, `context`, and `goto` behind advanced/topic
   help.
-- Made bare `heddle workspace` default to the control-tower view while keeping
-  `heddle workspace show` as the explicit scriptable form.
+- Kept `heddle status` as the explicit scriptable workspace summary and
+  `heddle thread list` as the grouped current/stacked/parallel thread view.
 - Strengthened `status` text output so the next-action section names the command,
   why it is the right move, and the follow-up where one is useful.
-- Added `heddle commands` as a public text/JSON command catalog for agents,
+- Added `heddle help` as a public text/JSON command catalog for agents,
   shell integrations, and generated docs; registered the JSON schema and
   documented the output contract.
 - Added `heddle help git-dependencies` to spell out which Git-overlay workflows
@@ -270,7 +270,7 @@ printf audit-dirty > /tmp/<audit>/tapestry/'audit dirty file.txt'
 env PATH= heddle --repo /tmp/<audit>/tapestry status
 env PATH= heddle --repo /tmp/<audit>/tapestry --output json status
 env PATH= heddle --repo /tmp/<audit>/tapestry --output json diagnose
-env PATH= heddle --repo /tmp/<audit>/tapestry --output json workspace show
+env PATH= heddle --repo /tmp/<audit>/tapestry --output json status
 env PATH= heddle --repo /tmp/<audit>/tapestry --output json ready
 env PATH= NO_COLOR=1 heddle --repo /tmp/<audit>/no-such --output json status
 heddle help status
@@ -301,7 +301,7 @@ C-or-lower or hard-gate findings remain open.
 | `clone` | A | no-git real fixtures pass; local/bare clone path with `PATH=""` pass; unsupported lazy/depth/filter/file-url flags reject cleanly; text completion names next step | Remote-network progress remains an optional long-running polish area. |
 | `fsck` | A | `fsck --bridge --output json` no-git real fixtures pass; narrow/no-color text pass; corrupt ref recovery passes in JSON and text | Low residual risk. |
 | `ready` | A | no-git JSON pass; clean machine-stream regression pass; text ready/already-ready no-op pass; stale/heavy-impact coverage exists in multi-agent tests | Low residual risk. |
-| `workspace` | A | no-git JSON pass; grouped current/stacked/parallel threads covered; promoted to the curated core-loop surface; bare `heddle workspace` defaults to the control-tower view | Low residual risk on very large thread lists. |
+| `status` / `thread list` workspace view | A | no-git JSON pass; grouped current/stacked/parallel threads covered; promoted to the curated core-loop surface through canonical commands | Low residual risk on very large thread lists. |
 | `doctor` | A | `doctor docs` and `doctor schemas` gates clean; narrow/no-color text pass; text/json recovery sampled; docs-doctor unknown flags and unreadable paths pass | Low residual risk. |
 | `init` | A | `--repo` path handling fixed and tested; JSON/text init sampled; existing repo/conflicting path failures covered | Low residual risk. |
 | `capture` | A | text and JSON sampled; no-git JSON stream regression pass; `--quiet` tip suppression pass; large-deletion destructive safety pass | Low residual risk on platform-specific filesystem errors. |

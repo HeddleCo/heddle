@@ -11,8 +11,8 @@
 //! pass. We report the pinned count so the audit trail in `heddle maintenance gc`
 //! output makes the invariant visible to operators.
 
-use objects::store::ObjectStore;
 use anyhow::Result;
+use objects::store::ObjectStore;
 use serde::Serialize;
 
 #[cfg(feature = "git-overlay")]

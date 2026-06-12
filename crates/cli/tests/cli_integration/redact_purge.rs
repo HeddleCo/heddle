@@ -372,6 +372,42 @@ fn purge_apply_with_force_records_and_marks_redaction_purged() {
 }
 
 #[test]
+fn purge_alias_routes_to_redact_purge_apply_output() {
+    let (temp, state) = setup_repo_with_secret();
+    heddle(
+        &[
+            "redact",
+            "apply",
+            &state,
+            "--path",
+            "config/secrets.toml",
+            "--reason",
+            "leaked credential",
+        ],
+        Some(temp.path()),
+    )
+    .unwrap();
+
+    let raw = heddle(
+        &[
+            "--output",
+            "json",
+            "purge",
+            "apply",
+            &state,
+            "--path",
+            "config/secrets.toml",
+            "--force",
+        ],
+        Some(temp.path()),
+    )
+    .expect("purge alias should route through redact purge apply");
+    let value: Value = serde_json::from_str(&raw).expect("purge alias should emit JSON");
+    assert_eq!(value["output_kind"], "purge_apply");
+    assert_eq!(value["redactions_marked"].as_u64().unwrap(), 1);
+}
+
+#[test]
 fn redact_apply_with_sign_with_records_signature_verifiable_on_show() {
     // Critical acceptance criterion (build brief item 3): redactions
     // are signed (Ed25519) and `heddle redact show` displays

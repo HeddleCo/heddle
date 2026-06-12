@@ -21,7 +21,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{CommandCatalogOutput, RecoveryAdvice, command_catalog, command_runtime_contract};
+use super::{RecoveryAdvice, command_catalog, command_runtime_contract};
 use crate::cli::{Cli, should_output_json};
 
 static SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
@@ -87,6 +87,8 @@ schema_registry! {
     (&["thread revoke-approval"], ThreadRevokeApprovalSchema),
     (&["thread check-merge"], ThreadMergeEligibilitySchema),
     (&["thread cleanup"], ThreadCleanupSchema),
+    (&["thread marker list"], ThreadMarkerListSchema),
+    (&["thread marker create", "thread marker delete", "thread marker show"], ThreadMarkerOpSchema),
     (&["thread show"], ThreadShowSchema),
     (&["clone"], CloneSchema),
     (&["remote list"], RemoteListSchema),
@@ -100,7 +102,6 @@ schema_registry! {
     (&["log --reflog"], LogReflogSchema),
     (&["show"], ShowSchema),
     (&["thread list"], ThreadListSchema),
-    (&["commands"], CommandCatalogOutput),
     (&["schemas"], SchemasListSchema),
     (&["review show"], ReviewShowSchema),
     (&["review sign"], ReviewSignSchema),
@@ -461,7 +462,7 @@ fn schema_not_registered_advice(verb: &str, known_verbs: &[&str]) -> RecoveryAdv
         .map(|matched| format!("heddle schemas {matched}"))
         .unwrap_or_else(|| "heddle schemas".to_string());
     let hint = if matches.is_empty() {
-        "Run `heddle schemas` to list schema-backed verbs, or inspect the command catalog with `heddle commands --output json`.".to_string()
+        "Run `heddle schemas` to list schema-backed verbs, or inspect the command catalog with `heddle help --output json`.".to_string()
     } else {
         format!(
             "`{verb}` is not exact; available schema verb{}: {}.",
@@ -478,7 +479,7 @@ fn schema_not_registered_advice(verb: &str, known_verbs: &[&str]) -> RecoveryAdv
     push_unique_command(&mut recovery_commands, "heddle schemas".to_string());
     push_unique_command(
         &mut recovery_commands,
-        "heddle commands --output json".to_string(),
+        "heddle help --output json".to_string(),
     );
     for matched in matches.iter().skip(1) {
         push_unique_command(&mut recovery_commands, format!("heddle schemas {matched}"));
@@ -1150,6 +1151,8 @@ pub struct DiffStatsSchema {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SwitchCheckoutSchema {
     pub output_kind: Option<String>,
+    pub status: Option<String>,
+    pub action: Option<String>,
     pub name: Option<String>,
     pub message: String,
     pub thread: Option<ThreadSummarySchema>,
@@ -1157,6 +1160,10 @@ pub struct SwitchCheckoutSchema {
     pub execution_path: Option<String>,
     pub target: Option<String>,
     pub intent: Option<String>,
+    pub next_action: Option<String>,
+    pub next_action_template: Option<ActionTemplateSchema>,
+    pub recommended_action: Option<String>,
+    pub recommended_action_template: Option<ActionTemplateSchema>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1400,6 +1407,28 @@ pub struct ThreadCleanupSkippedSchema {
     pub id: String,
     pub reason: String,
     pub note: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ThreadMarkerListSchema {
+    pub output_kind: String,
+    pub markers: Vec<ThreadMarkerEntrySchema>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ThreadMarkerEntrySchema {
+    pub name: String,
+    pub change_id: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ThreadMarkerOpSchema {
+    pub output_kind: String,
+    pub name: Option<String>,
+    pub change_id: Option<String>,
+    pub deleted: Option<Vec<ThreadMarkerEntrySchema>>,
+    pub count: Option<usize>,
+    pub message: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -3048,7 +3077,7 @@ mod tests {
 
         assert_eq!(
             catalog_verbs, listed_verbs,
-            "`heddle commands --output json` command schema verbs must match `heddle schemas` except for the cross-cutting JSON error envelope"
+            "`heddle help --output json` command schema verbs must match `heddle schemas` except for the cross-cutting JSON error envelope"
         );
     }
 
@@ -3338,10 +3367,9 @@ mod tests {
                 // set must include the siblings (e.g. inspect's union carries
                 // the `thread show` branch's thread_show).
                 for sibling in command_catalog::sibling_documented_schema_verbs(schema_verb) {
-                    discriminators
-                        .extend(command_catalog::command_json_discriminators_for_schema_verb(
-                            sibling,
-                        ));
+                    discriminators.extend(
+                        command_catalog::command_json_discriminators_for_schema_verb(sibling),
+                    );
                 }
                 for discriminator in command_catalog::command_json_discriminators()
                     .into_iter()

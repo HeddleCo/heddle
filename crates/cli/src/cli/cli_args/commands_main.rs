@@ -8,17 +8,15 @@ use super::BridgeCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
-    AgentCommands, CheckpointArgs, ConflictCommands, ContextCommands, DiscussCommands,
-    HookCommands, IntegrationCommands, MarkerCommands, PurgeCommands, QueryArgs, RedactCommands,
-    RemoteCommands, ReviewCommands, ShellCommands, StackArgs, StashCommands, ThreadCommands,
-    TransactionCommands, VisibilityCommands, WorkspaceCommands,
+    AgentCommands, CheckpointArgs, ContextCommands, DiscussCommands, HookCommands,
+    IntegrationCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands, ShellCommands,
+    StashCommands, ThreadCommands, TransactionCommands, VisibilityCommands,
     commands_args::{
         ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AdoptArgs,
-        AttemptArgs, BranchArgs, CloneArgs, CollapseArgs, CommandCatalogArgs, CommitArgs,
-        DelegateArgs, DiffArgs, DoctorArgs, InitArgs, LandArgs, LogArgs, MergeArgs, PullArgs,
-        PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionEndArgs,
-        SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, SnapshotArgs,
-        SwitchArgs, SyncArgs, ThreadStartArgs, TryArgs, UndoArgs, WatchArgs,
+        CloneArgs, CollapseArgs, CommitArgs, DiffArgs, DoctorArgs, InitArgs, LandArgs, LogArgs,
+        MergeArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs,
+        SessionEndArgs, SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs,
+        SnapshotArgs, SwitchArgs, SyncArgs, ThreadStartArgs, TryArgs, UndoArgs, WatchArgs,
     },
 };
 #[cfg(feature = "client")]
@@ -134,10 +132,6 @@ Examples:
         verb: Vec<String>,
     },
 
-    /// Print the public command and flag catalog.
-    #[command(hide = true, visible_aliases = ["command-catalog", "catalog"])]
-    Commands(CommandCatalogArgs),
-
     /// Create or resume an isolated thread for focused work.
     Start(ThreadStartArgs),
 
@@ -155,25 +149,13 @@ Examples:
     /// rollback).
     Try(TryArgs),
 
-    /// Run a command in N parallel sandboxed ephemeral threads and
-    /// rank the results.
-    ///
-    /// Best-of-N parallelism: each attempt gets its own ephemeral
-    /// thread + isolated checkout, runs `<cmd>` inside it, and the
-    /// results are ranked (primary exit code → optional `--evaluate`
-    /// exit → diff size → duration). Failed attempts are dropped
-    /// automatically; successful ones stay around for the user to
-    /// merge or drop. Implements item 3.2 from the heddle 6→8 plan.
-    #[command(hide = true)]
-    Attempt(AttemptArgs),
-
     /// Automation/workflow command: run a command inside an existing
     /// thread's execution root.
     ///
     /// `run` is the **existing-thread** sibling to `try`. It looks up
     /// the named (or current) thread, sets the child's cwd to that
-    /// thread's checkout, exports `HEDDLE_THREAD_*` and harness-bridge
-    /// env, and runs `<cmd>`. It does NOT create a thread, capture
+    /// thread's checkout, exports `HEDDLE_THREAD_*`, and runs `<cmd>`.
+    /// It does NOT create a thread, capture
     /// state on success, or roll back on failure — those are `try`'s
     /// job. Reach for `try` when you want the sandbox lifecycle; reach
     /// for `run` when you already have a thread and just need to exec
@@ -197,20 +179,6 @@ Examples:
     /// conflicts or other blockers exist. Pair it with `ready` when you
     /// want the verdict and next action before landing anything.
     Land(LandArgs),
-
-    /// Automation/workflow command: fan a parent thread into one or
-    /// more delegated child threads.
-    ///
-    /// `delegate <task>...` is the multi-task fan-out wrapper around
-    /// `start`. Each `<task>` is either `task` or `task:provider:model`,
-    /// so you can race different agents on the same prompt in one
-    /// command. It pre-warms the canonical store before materializing N
-    /// child checkouts (relevant for the multi-task case), and stamps
-    /// the spawned threads with `--parent-thread <current>`. For a
-    /// single child with no per-task agent override, `heddle start
-    /// <name>` is the lower-level path.
-    #[command(hide = true)]
-    Delegate(DelegateArgs),
 
     /// Prepare this thread for review or merge.
     ///
@@ -254,24 +222,6 @@ Examples:
     /// the reconstruct-from-`heddle log` boilerplate.
     Retro(RetroArgs),
 
-    /// Inspect a state or thread (default: current thread).
-    #[command(hide = true)]
-    Inspect {
-        /// State ID or thread name.
-        target: Option<String>,
-    },
-
-    /// Move worktree to a state.
-    #[command(hide = true)]
-    Goto {
-        /// Target state.
-        target: String,
-
-        /// Discard unsnapped local changes.
-        #[arg(short, long)]
-        force: bool,
-    },
-
     /// Remove untracked files from worktree.
     Clean {
         /// Actually remove files (required for safety).
@@ -285,10 +235,6 @@ Examples:
 
     /// Show what changed in the worktree, a thread, or two states.
     Diff(DiffArgs),
-
-    /// Git-compatible alias for the Heddle thread command family.
-    #[command(hide = true)]
-    Branch(BranchArgs),
 
     /// Git-compatible alias for `heddle thread switch`.
     Switch(SwitchArgs),
@@ -327,14 +273,6 @@ Examples:
         command: TransactionCommands,
     },
 
-    /// Structured conflicts. List, show, resolve conflicts as
-    /// data — agents resolve programmatically without parsing markers.
-    #[command(hide = true)]
-    Conflict {
-        #[command(subcommand)]
-        command: ConflictCommands,
-    },
-
     /// Review a state — render the payload, sign, see signal health.
     ///
     /// `heddle review show` renders the review payload (summary,
@@ -367,14 +305,6 @@ Examples:
         command: RedactCommands,
     },
 
-    /// Physically remove the bytes referenced by an existing redaction.
-    /// Irreversible; refuses without `--force`.
-    #[command(hide = true)]
-    Purge {
-        #[command(subcommand)]
-        command: PurgeCommands,
-    },
-
     /// Declare and inspect a state's audience visibility tier.
     ///
     /// `heddle visibility set` binds a tier to a state; `promote` lifts it to
@@ -393,27 +323,8 @@ Examples:
     /// Undo the last Heddle operation.
     Undo(UndoArgs),
 
-    /// Fork an exploration thread from a state.
-    #[command(hide = true)]
-    Fork {
-        /// Name for the fork (creates thread).
-        #[arg(long)]
-        name: Option<String>,
-
-        /// State to fork from (default: HEAD).
-        #[arg(long)]
-        from: Option<String>,
-    },
-
     /// Collapse (squash) multiple states into one.
     Collapse(CollapseArgs),
-
-    /// Manage markers.
-    #[command(hide = true)]
-    Marker {
-        #[command(subcommand)]
-        command: MarkerCommands,
-    },
 
     /// Manage threads.
     Thread {
@@ -426,37 +337,6 @@ Examples:
         #[command(subcommand)]
         command: ShellCommands,
     },
-
-    /// Show repo-wide thread and checkout state.
-    #[command(after_help = "\
-Examples:
-  heddle workspace                         # repo-wide thread state
-  heddle workspace show --watch            # continuously refresh thread state
-  heddle workspace show --output json      # stable groups for scripts and agents
-")]
-    #[command(hide = true)]
-    Workspace {
-        #[command(subcommand)]
-        command: Option<WorkspaceCommands>,
-    },
-
-    /// Describe, ready-check, or snapshot the stack of related threads
-    /// that the current thread participates in.
-    ///
-    /// `heddle stack` (no subcommand) renders the stack containing the
-    /// current thread. `heddle stack ready` surfaces the next-action
-    /// verdict (`ready` / `blocked` / `waiting-on-review`). `heddle
-    /// stack snapshot` emits the JSON `RepositorySnapshot` projection
-    /// for agentic tooling.
-    #[command(after_help = "\
-Examples:
-  heddle stack                                   # describe the current thread's stack
-  heddle stack --thread feature-b                # describe the stack containing feature-b
-  heddle stack ready                             # next-action verdict for the current stack
-  heddle stack snapshot --output json            # serialize the stack as RepositorySnapshot
-")]
-    #[command(hide = true)]
-    Stack(StackArgs),
 
     /// Preview or land a thread into the current thread.
     Merge(MergeArgs),
@@ -607,21 +487,6 @@ Examples:
     Maintenance {
         #[command(subcommand)]
         command: MaintenanceCommands,
-    },
-
-    /// Show line-by-line attribution for a file.
-    #[command(hide = true)]
-    Blame {
-        /// File to blame.
-        file: String,
-
-        /// State to blame from (default: HEAD).
-        #[arg(long)]
-        state: Option<String>,
-
-        /// Show concise applicable context before blame output.
-        #[arg(long)]
-        context: bool,
     },
 
     /// Apply specific commits.

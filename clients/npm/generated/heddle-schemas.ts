@@ -22,13 +22,6 @@ export interface AbortSchema {
   warnings: string[];
 }
 
-export interface ActionTemplate {
-  action: string;
-  agent_may_fill: boolean;
-  argv_template: string[];
-  required_inputs: string[];
-}
-
 export interface ActionTemplateSchema {
   action: string;
   agent_may_fill: boolean;
@@ -481,15 +474,6 @@ export interface BridgeSyncSchema {
   threads_synced: number;
 }
 
-export interface CanonicalAction {
-  argv?: string[] | null;
-  command: string;
-  executable: boolean;
-  kind: string;
-  note: string;
-  template?: ActionTemplate | null;
-}
-
 export interface CaptureSchema {
   action: string;
   agent?: CommitAgentSchema | null;
@@ -588,98 +572,6 @@ export interface CollapseSchema {
   [key: string]: unknown;
 }
 
-export interface CommandAction {
-  action: string;
-  argv?: string[] | null;
-  executable: boolean;
-  template?: ActionTemplate | null;
-}
-
-export interface CommandCatalogArgument {
-  help?: string | null;
-  id: string;
-  required: boolean;
-  value_names: string[];
-}
-
-export interface CommandCatalogEntry {
-  aliases: string[];
-  arguments: CommandCatalogArgument[];
-  canonical_action?: CanonicalAction | null;
-  canonical_command?: string | null;
-  command_action?: CommandAction | null;
-  daemon_process: boolean;
-  destructive_data: boolean;
-  destructive_requires_force: boolean;
-  display: string;
-  documented_schema_verbs: string[];
-  /** Sysexits-style codes this command may legitimately return, with a one-line agent-facing reason. Empty for commands not yet swept. See `docs/exit-codes.md` for the full taxonomy. */
-  exit_codes: CommandCatalogExitCode[];
-  external_command: boolean;
-  first_run_behavior: string;
-  has_subcommands: boolean;
-  help_rank: number;
-  help_visibility: string;
-  json_discriminators: CommandJsonDiscriminator[];
-  json_kind: string;
-  may_import_git: boolean;
-  may_initialize: boolean;
-  may_move_ref: boolean;
-  may_write_worktree: boolean;
-  mutates: boolean;
-  network_io: boolean;
-  object_gc: boolean;
-  observe_only: boolean;
-  op_id_behavior: string;
-  op_id_store_scope: string;
-  options: CommandCatalogOption[];
-  path: string[];
-  persists_op_id: boolean;
-  requires_git_executable: boolean;
-  schema_verbs: string[];
-  side_effect_class: string;
-  side_effects: string[];
-  summary: string;
-  supports_json: boolean;
-  supports_op_id: boolean;
-  surface: string;
-  tier: string;
-  writes_config: boolean;
-  writes_git_refs: boolean;
-  writes_heddle_refs: boolean;
-  writes_hooks: boolean;
-  writes_worktree: boolean;
-}
-
-export interface CommandCatalogExitCode {
-  code: number;
-  reason: string;
-}
-
-export interface CommandCatalogOption {
-  aliases: string[];
-  default_values: string[];
-  global: boolean;
-  help?: string | null;
-  id: string;
-  long?: string | null;
-  possible_values: string[];
-  required: boolean;
-  short?: string | null;
-  value_kind: string;
-  value_names: string[];
-}
-
-export interface CommandCatalogOutput {
-  commands: CommandCatalogEntry[];
-  executable_path: string;
-  global_options: CommandCatalogOption[];
-  json_discriminators: CommandJsonDiscriminator[];
-  kind: "command_catalog";
-  recommended_action_placeholders: string[];
-  recommended_action_templates: ActionTemplate[];
-}
-
 export interface CommandContractSchemaCoverageSchema {
   accepted_opaque_schema_examples: string[];
   accepted_opaque_schema_verbs_total: number;
@@ -720,15 +612,6 @@ export interface CommandContractSchemaCoverageSchema {
   verified_scope_mutating_commands_with_accepted_opaque_schema: number;
   verified_scope_mutating_commands_with_schema: number;
   verified_scope_mutating_commands_without_schema: number;
-}
-
-export interface CommandJsonDiscriminator {
-  display: string;
-  field: string;
-  no_schema_reason?: string | null;
-  path: string[];
-  schema_verb?: string | null;
-  value: string;
 }
 
 export interface CommitAgentSchema {
@@ -1170,6 +1053,11 @@ export interface GitRemoteConfiguredSchema {
 export interface GitUpstreamConfiguredSchema {
   branch: string;
   remote: string;
+}
+
+export interface HelpSchema {
+  kind: "command_catalog";
+  [key: string]: unknown;
 }
 
 export type HookEventsSchema = Record<string, unknown>;
@@ -2102,16 +1990,22 @@ export interface StatusSchema {
 }
 
 export interface SwitchCheckoutSchema {
+  action?: string | null;
   execution_path?: string | null;
   idempotency_status?: string | null;
   intent?: string | null;
   message: string;
   name?: string | null;
+  next_action?: string | null;
+  next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "goto" | "thread_switch";
+  output_kind: "thread_switch";
   path?: string | null;
+  recommended_action?: string | null;
+  recommended_action_template?: ActionTemplateSchema | null;
   replayed?: boolean | null;
+  status?: string | null;
   target?: string | null;
   thread?: ThreadSummarySchema | null;
 }
@@ -2294,6 +2188,51 @@ export interface ThreadListSchema {
   storage_model: string;
   threads: ThreadSummarySchema[];
   verification: RepositoryVerificationStateSchema;
+}
+
+export interface ThreadMarkerCreateSchema {
+  change_id?: string | null;
+  count?: number | null;
+  deleted?: ThreadMarkerEntrySchema[] | null;
+  idempotency_status?: string | null;
+  message: string;
+  name?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "thread_marker_create";
+  replayed?: boolean | null;
+}
+
+export interface ThreadMarkerDeleteSchema {
+  change_id?: string | null;
+  count?: number | null;
+  deleted?: ThreadMarkerEntrySchema[] | null;
+  idempotency_status?: string | null;
+  message: string;
+  name?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "thread_marker_delete";
+  replayed?: boolean | null;
+}
+
+export interface ThreadMarkerEntrySchema {
+  change_id: string;
+  name: string;
+}
+
+export interface ThreadMarkerListSchema {
+  markers: ThreadMarkerEntrySchema[];
+  output_kind: "thread_marker_list";
+}
+
+export interface ThreadMarkerShowSchema {
+  change_id?: string | null;
+  count?: number | null;
+  deleted?: ThreadMarkerEntrySchema[] | null;
+  message: string;
+  name?: string | null;
+  output_kind: "thread_marker_show";
 }
 
 export interface ThreadMergeEligibilitySchema {
@@ -2762,7 +2701,6 @@ export interface HeddleVerbOutputs {
   clean: CleanSchema;
   clone: CloneSchema;
   collapse: CollapseSchema;
-  commands: CommandCatalogOutput;
   commit: CommitSchema;
   "context audit": ContextAuditSchema;
   "context check": ContextCheckSchema;
@@ -2791,6 +2729,7 @@ export interface HeddleVerbOutputs {
   fetch: FetchSchema;
   fsck: FsckSchema;
   "git-overlay": GitOverlayGuideSchema;
+  help: HelpSchema;
   "hook events": HookEventsSchema;
   "hook install": HookInstallSchema;
   "hook list": HookListSchema;
@@ -2866,6 +2805,10 @@ export interface HeddleVerbOutputs {
   "thread current": ThreadCurrentSchema;
   "thread drop": ThreadDropSchema;
   "thread list": ThreadListSchema;
+  "thread marker create": ThreadMarkerCreateSchema;
+  "thread marker delete": ThreadMarkerDeleteSchema;
+  "thread marker list": ThreadMarkerListSchema;
+  "thread marker show": ThreadMarkerShowSchema;
   "thread move": ThreadMoveSchema;
   "thread promote": ThreadPromoteSchema;
   "thread refresh": ThreadRefreshSchema;
@@ -2927,7 +2870,6 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "clean",
   "clone",
   "collapse",
-  "commands",
   "commit",
   "context audit",
   "context check",
@@ -2956,6 +2898,7 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "fetch",
   "fsck",
   "git-overlay",
+  "help",
   "hook events",
   "hook install",
   "hook list",
@@ -3031,6 +2974,10 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "thread current",
   "thread drop",
   "thread list",
+  "thread marker create",
+  "thread marker delete",
+  "thread marker list",
+  "thread marker show",
   "thread move",
   "thread promote",
   "thread refresh",

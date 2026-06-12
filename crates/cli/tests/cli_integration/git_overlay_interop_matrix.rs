@@ -48,13 +48,7 @@ fn git_overlay_interop_bridge_shorthand_imports_current_branch() {
 
     let import = heddle(
         &[
-            "--output",
-            "json",
-            "bridge",
-            "git",
-            "import",
-            "--ref",
-            "main",
+            "--output", "json", "bridge", "git", "import", "--ref", "main",
         ],
         Some(temp.path()),
     )

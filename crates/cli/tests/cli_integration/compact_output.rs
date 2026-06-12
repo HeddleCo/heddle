@@ -50,10 +50,12 @@ fn compact_json(args: &[&str], temp: &TempDir) -> Value {
     let out =
         heddle_output(&argv, Some(temp.path())).unwrap_or_else(|err| panic!("spawn failed: {err}"));
     let stdout = str::from_utf8(&out.stdout).expect("stdout utf8");
-    let line = stdout
-        .lines()
-        .next()
-        .unwrap_or_else(|| panic!("heddle {argv:?} produced no stdout; stderr={}", String::from_utf8_lossy(&out.stderr)));
+    let line = stdout.lines().next().unwrap_or_else(|| {
+        panic!(
+            "heddle {argv:?} produced no stdout; stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
     serde_json::from_str(line)
         .unwrap_or_else(|err| panic!("heddle {argv:?} stdout not JSON: {err}\n  line: {line}"))
 }
@@ -107,7 +109,8 @@ fn assert_compact_op_id_error_envelope(args: &[&str], temp: &TempDir, context: &
 fn full_json(args: &[&str], temp: &TempDir) -> Value {
     let mut argv: Vec<&str> = vec!["--output", "json"];
     argv.extend(args.iter().copied());
-    let stdout = heddle(&argv, Some(temp.path())).unwrap_or_else(|err| panic!("heddle {argv:?} failed: {err}"));
+    let stdout = heddle(&argv, Some(temp.path()))
+        .unwrap_or_else(|err| panic!("heddle {argv:?} failed: {err}"));
     let line = stdout.lines().next().expect("full json stdout");
     serde_json::from_str(line).expect("full json parses")
 }
@@ -245,7 +248,8 @@ fn continue_compact_drops_operator_metadata() {
     let full = full_json(&["continue"], &temp);
     assert!(full.get("message").is_some() && full.get("action").is_some());
     assert!(
-        compact.get("message").is_none() && compact.get("action").is_none()
+        compact.get("message").is_none()
+            && compact.get("action").is_none()
             && compact.get("recommended_action").is_none(),
         "compact continue must drop message/action/recommended_action: {compact}"
     );
@@ -255,8 +259,8 @@ fn continue_compact_drops_operator_metadata() {
 fn json_compact_is_a_valid_output_value() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).expect("init");
-    let out = heddle_output(&["--output", "json-compact", "status"], Some(temp.path()))
-        .expect("spawn");
+    let out =
+        heddle_output(&["--output", "json-compact", "status"], Some(temp.path())).expect("spawn");
     assert!(
         out.status.success(),
         "--output json-compact must parse and run: stderr={}",
@@ -269,8 +273,8 @@ fn json_compact_rejects_commands_without_projection() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).expect("init");
 
-    let out = heddle_output(&["--output", "json-compact", "commands"], Some(temp.path()))
-        .expect("spawn");
+    let out =
+        heddle_output(&["--output", "json-compact", "help"], Some(temp.path())).expect("spawn");
     assert!(
         !out.status.success(),
         "compact-less command must reject json-compact"

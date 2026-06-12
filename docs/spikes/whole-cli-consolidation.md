@@ -57,15 +57,15 @@ Grouped by family. Each survives because it is the one irreducible path; justifi
 |---|---|---|---|---|
 | Save & snapshot | commit, capture, checkpoint, ready | commit, ready | capture->advanced, checkpoint->advanced (folded into commit) | #461 spike; `snapshot.rs:393` all funnel to create_snapshot |
 | Land & rewrite-history | ship, merge, resolve, continue, abort, rebase, cherry-pick, revert, collapse, undo, redo | land, undo, resolve, continue, abort | ship->land; merge/rebase/cherry-pick/revert/collapse->advanced; redo->undo --redo; conflict->resolve | `workflow.rs:188`; per-verb --continue/--abort -> top-level continue/abort |
-| Thread & isolation | start, fork, branch, switch, checkout, goto, workspace, stack, try, attempt, run, delegate (+thread group) | start, switch, try, run, thread(group) | branch->thread; checkout/goto->switch; workspace/stack->status; attempt->try; delegate/fork->start | `main.rs:512` switch|checkout shared arm; `git_compat.rs:1294` switch->cmd_goto |
+| Thread & isolation | start, fork, branch, switch, checkout, goto, workspace, stack, try, attempt, run, delegate (+thread group) | start, switch, try, run, thread(group) | branch->thread; checkout/goto->switch; workspace/stack->status; attempt->try; delegate/fork->start | `main.rs:512` switch|checkout shared arm; `git_compat.rs:1294` switch->cmd_switch_state_checkout |
 | Remote & publish | push, pull, fetch, clone, remote, presence | push, pull, clone, remote | fetch->advanced; presence->agent | `remote/mod.rs:229` push->bridge.push |
 | Inspect & diff | log, show, inspect, diff, compare, status, blame, retro, query, conflict, schemas, diagnose, doctor, verify, semantic | log, show, diff, status, blame, query, doctor, verify | inspect->show; compare->diff; diagnose->doctor; schemas/verify-render->doctor; retro/semantic->query; conflict->resolve | `main.rs:293` diagnose==doctor None |
 | Recovery loop | continue, abort, resolve, conflict, goto, switch, checkout, transaction | continue, abort, resolve | conflict->resolve; goto->switch; checkout->switch alias; transaction stays hidden | `operator_core.rs:203/264` |
-| Agent & harness | try, attempt, run, delegate, agent, actor, session, presence, monitor, watch, daemon, harness-bridge, store warm, fork | try, run, agent(group), watch | attempt->try; delegate/fork->start; actor/session/presence->agent; monitor->maintenance; daemon->admin; harness-bridge removed; store warm->maintenance | `actor_cmd.rs` vs `agent_cmd.rs` share AgentRegistry |
+| Agent & harness | try, attempt, run, delegate, agent, actor, session, presence, monitor, watch, daemon, harness bridge, store warm, fork | try, run, agent(group), watch | attempt->try; delegate/fork->start; actor/session/presence->agent; monitor->maintenance; daemon->admin; harness bridge removed; store warm->maintenance | `actor_cmd.rs` vs `agent_cmd.rs` share AgentRegistry |
 | Bridge & init | init, adopt, import(alias), clone, git-overlay, index, store, bridge(+10 leaves) | init, adopt, clone, bridge(group) | git-overlay->help; index/store->maintenance; bridge git push/pull/import->push/pull/adopt | `commands_main.rs:605` index hidden alias |
-| Collaboration & context | context, discuss, review, marker, redact, purge | context, review, redact | discuss->context; marker->advanced; purge->redact | `commands_redact.rs:1` redact->purge one lifecycle |
+| Collaboration & context | context, discuss, review, marker, redact, purge | context, review, redact | discuss->context; marker->thread; purge->redact purge | `commands_redact.rs:1` redact owns purge lifecycle |
 | Health & maintenance | doctor, diagnose, verify, fsck, gc, clean, purge, maintenance, store, bisect, index, monitor | doctor, verify, clean, maintenance(group) | diagnose->doctor; gc/index/monitor->maintenance(hidden aliases deleted); fsck->maintenance; store->maintenance warm; bisect REMOVED (stub); purge->redact | `bisect.rs:56` writes "{}\n", no binary search |
-| Infra & meta | help, version, commands, schemas, completion, shell, semantic, integration, hook, transaction, daemon, agent-ctl, monitor, support, auth, harness-bridge, presence | help, shell, integration, auth, doctor, verify | version->--version; commands->help --output json; schemas->doctor schemas; completion->shell; hook->integration; support/presence->auth; daemon->admin; transaction/harness-bridge hidden | `commands_main.rs:613` monitor hidden alias |
+| Infra & meta | help, version, commands, schemas, completion, shell, semantic, integration, hook, transaction, daemon, agent-ctl, monitor, support, auth, harness bridge, presence | help, shell, integration, auth, doctor, verify | version->--version; commands->help --output json; schemas->doctor schemas; completion->shell; hook->integration; support/presence->auth; daemon->admin; transaction/harness bridge hidden | `commands_main.rs:613` monitor hidden alias |
 
 ## The advanced namespace (demoted plumbing — reachable, off everyday help)
 
@@ -98,7 +98,7 @@ Grouped by family. Each survives because it is the one irreducible path; justifi
 
 Per the standing no-backcompat stance: delete + replace, no aliases/flags/phased deprecation unless explicitly retained for muscle-memory.
 
-- **Hard removals (no alias):** bisect (stub), harness-bridge (internal), the hidden gc/index/monitor compat aliases, bridge git push/pull/import/init/sync, version (->--version), commands, git-overlay, store group, completion group.
+- **Hard removals (no alias):** bisect (stub), harness bridge (internal), the hidden gc/index/monitor compat aliases, bridge git push/pull/import/init/sync, version (->--version), commands, git-overlay, store group, completion group.
 - **Renames:** ship -> land (#461/#464 in flight).
 - **Merges that change invocation:** `attempt X` -> `try --parallel N X`; `delegate a b c` -> `start --task a --task b --task c`; `fork --name n --from s` -> `start n --from s`; `goto S` / `checkout S` -> `switch S`; `compare a b` -> `diff a b`; `redo` -> `undo --redo`; `conflict list` -> `resolve --list`; `purge apply` -> `redact purge apply`; `workspace` -> `status --all`; `stack ready` -> `ready --stack`.
 - **Kept as single git-compat survivor:** `switch` (thread + state, refuses -c -> start --path). Max-aggression option demotes it too (see open questions).
@@ -108,7 +108,7 @@ Per the standing no-backcompat stance: delete + replace, no aliases/flags/phased
 
 **Phase 0 — settled baseline (in flight).** #461 (ship->land, capture/checkpoint demote), #466 (start --path; demote thread create/promote), #467 (semantic default, drop --semantic). Land these first; they anchor the save/land + isolation cores.
 
-**Phase 1 — free deletions (no capability loss, mostly mechanical).** Delete bisect (stub), harness-bridge, hidden gc/index/monitor aliases, bridge git push/pull/import/init/sync, version->--version, commands->help, git-overlay->help. Each is a provably-redundant or non-functional removal citable to file:line. Smallest blast radius; do first to shrink the surface and the catalog.
+**Phase 1 — free deletions (no capability loss, mostly mechanical).** Delete bisect (stub), harness bridge, hidden gc/index/monitor aliases, bridge git push/pull/import/init/sync, version->--version, commands->help, git-overlay->help. Each is a provably-redundant or non-functional removal citable to file:line. Smallest blast radius; do first to shrink the surface and the catalog.
 
 **Phase 2 — synonym/router collapses.** diagnose->doctor, checkout+goto->switch, inspect->show, compare->diff, redo->undo, completion->shell, schemas->doctor schemas. These share handlers already; the work is enum/dispatch cleanup + catalog.
 
@@ -122,8 +122,8 @@ Per the standing no-backcompat stance: delete + replace, no aliases/flags/phased
 
 - `crates/cli/src/main.rs:512` — `Commands::Switch(args) | Commands::Checkout(args)` share one arm (checkout removal is free).
 - `crates/cli/src/main.rs:293-299` — `Doctor{None}` calls `cmd_diagnose` with identical args (diagnose==doctor).
-- `crates/cli/src/cli/commands/git_compat.rs:1294` — `switch <state>` delegates to `cmd_goto` (goto->switch).
+- `crates/cli/src/cli/commands/git_compat.rs:1294` — `switch <state>` delegates to `cmd_switch_state_checkout` (goto->switch).
 - `crates/cli/src/cli/commands/remote/mod.rs:229` — top-level push routes git-overlay through `bridge.push` (bridge git push redundant).
 - `crates/cli/src/cli/commands/bisect.rs:56` — `start` writes `"{}\n"`, good/bad echo only (no binary search; remove).
 - `crates/cli/src/cli/commands/actor_cmd.rs` + `agent_cmd.rs` — share `.heddle/agents` AgentRegistry (unify under agent).
-- `crates/cli/src/cli/cli_args/commands_main.rs:589/605/613` — gc/index/monitor are `#[command(hide=true)]` compat aliases for maintenance (delete).
+- `crates/cli/src/cli/cli_args/commands_main.rs:589/605/613` — gc/index/monitor are hidden compat aliases for maintenance (delete).

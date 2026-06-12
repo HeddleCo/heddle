@@ -27,7 +27,7 @@ fn test_fsck_orphaned_objects() {
 
     fs::write(temp.path().join("orphan.txt"), "orphan content").unwrap();
     heddle(&["capture", "-m", "Orphan"], Some(temp.path())).unwrap();
-    heddle(&["goto", "HEAD~1"], Some(temp.path())).unwrap();
+    heddle(&["switch", "HEAD~1"], Some(temp.path())).unwrap();
 
     let result = heddle(&["fsck", "--full"], Some(temp.path()));
     assert!(result.is_ok(), "fsck should complete: {:?}", result.err());

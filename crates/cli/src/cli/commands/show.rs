@@ -77,10 +77,6 @@ pub fn cmd_show(cli: &Cli, state_spec: Option<String>) -> Result<()> {
     cmd_show_with_output_kind(cli, state_spec, "show")
 }
 
-pub fn cmd_inspect_state(cli: &Cli, state_spec: Option<String>) -> Result<()> {
-    cmd_show_with_output_kind(cli, state_spec, "inspect_state")
-}
-
 fn cmd_show_with_output_kind(
     cli: &Cli,
     state_spec: Option<String>,

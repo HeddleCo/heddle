@@ -546,7 +546,7 @@ fn test_undo_captures_pre_undo_state_into_recovery_marker() {
 }
 
 /// The recovery marker makes the pre-undo content recoverable by name,
-/// independent of the (fragile) redo stack: after undo, `heddle goto
+/// independent of the (fragile) redo stack: after undo, `heddle switch
 /// undo-recovery` restores the pre-undo worktree even once a divergent capture
 /// has been layered on top of the reverted state. This is the data-safety
 /// guarantee — nothing absorbed by the undone capture is lost.
@@ -578,7 +578,7 @@ fn test_undo_recovery_marker_survives_divergent_capture() {
     assert_eq!(recovery.short(), friction_state);
 
     // Recover the pre-undo content via the well-known handle.
-    heddle_must_succeed(&["goto", ".undo-recovery"], temp.path());
+    heddle_must_succeed(&["switch", ".undo-recovery"], temp.path());
     assert_eq!(
         std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
         "FRICTION ONE\nFRICTION TWO\n",
@@ -610,7 +610,7 @@ fn test_undo_recovery_lives_outside_user_marker_namespace() {
 
     // (a) recovery must NOT pollute the user marker namespace.
     let markers: Value = serde_json::from_str(&heddle_must_succeed(
-        &["--output", "json", "marker", "list"],
+        &["--output", "json", "thread", "marker", "list"],
         temp.path(),
     ))
     .unwrap();
@@ -639,7 +639,7 @@ fn test_undo_recovery_lives_outside_user_marker_namespace() {
 
     // (c) the recovery UX is preserved: `goto .undo-recovery` resolves the
     // internal ref and restores the pre-undo content.
-    heddle_must_succeed(&["goto", ".undo-recovery"], temp.path());
+    heddle_must_succeed(&["switch", ".undo-recovery"], temp.path());
     assert_eq!(
         std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
         "FRICTION\n",
@@ -650,8 +650,14 @@ fn test_undo_recovery_lives_outside_user_marker_namespace() {
     // marker named `undo-recovery` without colliding with — or disturbing —
     // the internal recovery pointer. This is the closed class: the two
     // namespaces are independent.
-    heddle_must_succeed(&["marker", "create", "undo-recovery"], temp.path());
-    heddle_must_succeed(&["marker", "delete", "undo-recovery"], temp.path());
+    heddle_must_succeed(
+        &["thread", "marker", "create", "undo-recovery"],
+        temp.path(),
+    );
+    heddle_must_succeed(
+        &["thread", "marker", "delete", "undo-recovery"],
+        temp.path(),
+    );
     let repo = Repository::open(temp.path()).unwrap();
     assert_eq!(
         repo.refs()
@@ -680,7 +686,10 @@ fn test_recovery_handle_unshadowable_by_user_marker() {
     let base_state = head_short(temp.path());
 
     // The user owns a marker named `undo-recovery`, pinning the BASE state.
-    heddle_must_succeed(&["marker", "create", "undo-recovery"], temp.path());
+    heddle_must_succeed(
+        &["thread", "marker", "create", "undo-recovery"],
+        temp.path(),
+    );
 
     std::fs::write(temp.path().join("notes.md"), "FRICTION\n").unwrap();
     heddle_must_succeed(&["capture", "-m", "friction"], temp.path());
@@ -698,7 +707,7 @@ fn test_recovery_handle_unshadowable_by_user_marker() {
 
     // The advertised handle must resolve to the INTERNAL pre-undo (friction)
     // state, NOT the user's same-named marker (which pins base).
-    heddle_must_succeed(&["goto", advertised], temp.path());
+    heddle_must_succeed(&["switch", advertised], temp.path());
     assert_eq!(
         std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
         "FRICTION\n",
@@ -1507,7 +1516,7 @@ fn test_undo_redact_refuses_when_blob_already_purged() {
 #[test]
 fn test_redo_of_undone_redact_refuses() {
     // Counterpart to the undo test: once a `Redact` batch has been
-    // undone with `--allow-redact-undo`, `heddle redo` refuses to
+    // undone with `--allow-redact-undo`, `heddle undo --redo` refuses to
     // re-apply it. The OpRecord doesn't preserve the full `Redaction`
     // (reason, redactor, signature) needed for a faithful re-apply,
     // so we surface a clear error instead of silently no-op'ing.
@@ -1533,8 +1542,8 @@ fn test_redo_of_undone_redact_refuses() {
 
     // Redo refuses with a message that names Redact + points the user
     // at re-running `heddle redact apply`.
-    let err =
-        heddle(&["undo", "--redo"], Some(temp.path())).expect_err("redo of an undone Redact must refuse");
+    let err = heddle(&["undo", "--redo"], Some(temp.path()))
+        .expect_err("redo of an undone Redact must refuse");
     let lower = err.to_lowercase();
     assert!(
         lower.contains("redact"),
@@ -1787,7 +1796,7 @@ fn test_undo_preview_refuses_redact_when_blob_already_purged() {
 #[test]
 fn test_redo_preview_refuses_redact_chain() {
     // Mirror of the undo `--preview` honesty rule on the redo side:
-    // `heddle redo --preview` against a previously-undone Redact must
+    // `heddle undo --redo --preview` against a previously-undone Redact must
     // surface the same "no re-apply path" refusal the real `redo`
     // would surface, not advertise "Would redo …".
     let (temp, state) = setup_repo_with_secret();

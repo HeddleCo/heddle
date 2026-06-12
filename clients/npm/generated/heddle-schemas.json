@@ -7234,553 +7234,6 @@
       "title": "GenericJsonObjectSchema",
       "type": "object"
     },
-    "commands": {
-      "$defs": {
-        "ActionTemplate": {
-          "properties": {
-            "action": {
-              "type": "string"
-            },
-            "agent_may_fill": {
-              "type": "boolean"
-            },
-            "argv_template": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "required_inputs": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            }
-          },
-          "required": [
-            "action",
-            "argv_template",
-            "required_inputs",
-            "agent_may_fill"
-          ],
-          "type": "object"
-        },
-        "CanonicalAction": {
-          "properties": {
-            "argv": {
-              "items": {
-                "type": "string"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "command": {
-              "type": "string"
-            },
-            "executable": {
-              "type": "boolean"
-            },
-            "kind": {
-              "type": "string"
-            },
-            "note": {
-              "type": "string"
-            },
-            "template": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/ActionTemplate"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "command",
-            "kind",
-            "executable",
-            "note"
-          ],
-          "type": "object"
-        },
-        "CommandAction": {
-          "properties": {
-            "action": {
-              "type": "string"
-            },
-            "argv": {
-              "items": {
-                "type": "string"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "executable": {
-              "type": "boolean"
-            },
-            "template": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/ActionTemplate"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "action",
-            "executable"
-          ],
-          "type": "object"
-        },
-        "CommandCatalogArgument": {
-          "properties": {
-            "help": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "id": {
-              "type": "string"
-            },
-            "required": {
-              "type": "boolean"
-            },
-            "value_names": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            }
-          },
-          "required": [
-            "id",
-            "value_names",
-            "required"
-          ],
-          "type": "object"
-        },
-        "CommandCatalogEntry": {
-          "properties": {
-            "aliases": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "arguments": {
-              "items": {
-                "$ref": "#/$defs/CommandCatalogArgument"
-              },
-              "type": "array"
-            },
-            "canonical_action": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/CanonicalAction"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "canonical_command": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "command_action": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/CommandAction"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "daemon_process": {
-              "type": "boolean"
-            },
-            "destructive_data": {
-              "type": "boolean"
-            },
-            "destructive_requires_force": {
-              "type": "boolean"
-            },
-            "display": {
-              "type": "string"
-            },
-            "documented_schema_verbs": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "exit_codes": {
-              "description": "Sysexits-style codes this command may legitimately return, with a\none-line agent-facing reason. Empty for commands not yet swept. See\n`docs/exit-codes.md` for the full taxonomy.",
-              "items": {
-                "$ref": "#/$defs/CommandCatalogExitCode"
-              },
-              "type": "array"
-            },
-            "external_command": {
-              "type": "boolean"
-            },
-            "first_run_behavior": {
-              "type": "string"
-            },
-            "has_subcommands": {
-              "type": "boolean"
-            },
-            "help_rank": {
-              "format": "uint16",
-              "maximum": 65535,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "help_visibility": {
-              "type": "string"
-            },
-            "json_discriminators": {
-              "items": {
-                "$ref": "#/$defs/CommandJsonDiscriminator"
-              },
-              "type": "array"
-            },
-            "json_kind": {
-              "type": "string"
-            },
-            "may_import_git": {
-              "type": "boolean"
-            },
-            "may_initialize": {
-              "type": "boolean"
-            },
-            "may_move_ref": {
-              "type": "boolean"
-            },
-            "may_write_worktree": {
-              "type": "boolean"
-            },
-            "mutates": {
-              "type": "boolean"
-            },
-            "network_io": {
-              "type": "boolean"
-            },
-            "object_gc": {
-              "type": "boolean"
-            },
-            "observe_only": {
-              "type": "boolean"
-            },
-            "op_id_behavior": {
-              "type": "string"
-            },
-            "op_id_store_scope": {
-              "type": "string"
-            },
-            "options": {
-              "items": {
-                "$ref": "#/$defs/CommandCatalogOption"
-              },
-              "type": "array"
-            },
-            "path": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "persists_op_id": {
-              "type": "boolean"
-            },
-            "requires_git_executable": {
-              "type": "boolean"
-            },
-            "schema_verbs": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "side_effect_class": {
-              "type": "string"
-            },
-            "side_effects": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "summary": {
-              "type": "string"
-            },
-            "supports_json": {
-              "type": "boolean"
-            },
-            "supports_op_id": {
-              "type": "boolean"
-            },
-            "surface": {
-              "type": "string"
-            },
-            "tier": {
-              "type": "string"
-            },
-            "writes_config": {
-              "type": "boolean"
-            },
-            "writes_git_refs": {
-              "type": "boolean"
-            },
-            "writes_heddle_refs": {
-              "type": "boolean"
-            },
-            "writes_hooks": {
-              "type": "boolean"
-            },
-            "writes_worktree": {
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "path",
-            "display",
-            "aliases",
-            "tier",
-            "surface",
-            "help_visibility",
-            "help_rank",
-            "summary",
-            "has_subcommands",
-            "supports_json",
-            "mutates",
-            "supports_op_id",
-            "persists_op_id",
-            "op_id_behavior",
-            "op_id_store_scope",
-            "observe_only",
-            "may_initialize",
-            "may_import_git",
-            "may_write_worktree",
-            "may_move_ref",
-            "destructive_requires_force",
-            "writes_heddle_refs",
-            "writes_git_refs",
-            "writes_worktree",
-            "writes_config",
-            "writes_hooks",
-            "network_io",
-            "daemon_process",
-            "object_gc",
-            "external_command",
-            "requires_git_executable",
-            "destructive_data",
-            "side_effects",
-            "side_effect_class",
-            "first_run_behavior",
-            "json_kind",
-            "json_discriminators",
-            "schema_verbs",
-            "documented_schema_verbs",
-            "options",
-            "arguments",
-            "exit_codes"
-          ],
-          "type": "object"
-        },
-        "CommandCatalogExitCode": {
-          "properties": {
-            "code": {
-              "format": "uint8",
-              "maximum": 255,
-              "minimum": 0,
-              "type": "integer"
-            },
-            "reason": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "code",
-            "reason"
-          ],
-          "type": "object"
-        },
-        "CommandCatalogOption": {
-          "properties": {
-            "aliases": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "default_values": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "global": {
-              "type": "boolean"
-            },
-            "help": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "id": {
-              "type": "string"
-            },
-            "long": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "possible_values": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "required": {
-              "type": "boolean"
-            },
-            "short": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "value_kind": {
-              "type": "string"
-            },
-            "value_names": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            }
-          },
-          "required": [
-            "id",
-            "aliases",
-            "value_names",
-            "value_kind",
-            "default_values",
-            "possible_values",
-            "required",
-            "global"
-          ],
-          "type": "object"
-        },
-        "CommandJsonDiscriminator": {
-          "properties": {
-            "display": {
-              "type": "string"
-            },
-            "field": {
-              "type": "string"
-            },
-            "no_schema_reason": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "path": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "schema_verb": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "value": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "path",
-            "display",
-            "field",
-            "value"
-          ],
-          "type": "object"
-        }
-      },
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "properties": {
-        "commands": {
-          "items": {
-            "$ref": "#/$defs/CommandCatalogEntry"
-          },
-          "type": "array"
-        },
-        "executable_path": {
-          "type": "string"
-        },
-        "global_options": {
-          "items": {
-            "$ref": "#/$defs/CommandCatalogOption"
-          },
-          "type": "array"
-        },
-        "json_discriminators": {
-          "items": {
-            "$ref": "#/$defs/CommandJsonDiscriminator"
-          },
-          "type": "array"
-        },
-        "kind": {
-          "enum": [
-            "command_catalog"
-          ],
-          "type": "string"
-        },
-        "recommended_action_placeholders": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "recommended_action_templates": {
-          "items": {
-            "$ref": "#/$defs/ActionTemplate"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "kind",
-        "executable_path",
-        "commands",
-        "global_options",
-        "json_discriminators",
-        "recommended_action_placeholders",
-        "recommended_action_templates"
-      ],
-      "title": "CommandCatalogOutput",
-      "type": "object"
-    },
     "commit": {
       "$defs": {
         "ActionTemplateSchema": {
@@ -10973,6 +10426,23 @@
         "steps"
       ],
       "title": "GitOverlayGuideSchema",
+      "type": "object"
+    },
+    "help": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "kind": {
+          "enum": [
+            "command_catalog"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "GenericJsonObjectSchema",
       "type": "object"
     },
     "hook events": {
@@ -18408,6 +17878,12 @@
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
+        "action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "execution_path": {
           "type": [
             "string",
@@ -18433,6 +17909,22 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "next_action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "next_action_template": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActionTemplateSchema"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "op_id": {
@@ -18473,7 +17965,6 @@
         },
         "output_kind": {
           "enum": [
-            "goto",
             "thread_switch"
           ],
           "type": "string"
@@ -18484,9 +17975,31 @@
             "null"
           ]
         },
+        "recommended_action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recommended_action_template": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActionTemplateSchema"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "replayed": {
           "type": [
             "boolean",
+            "null"
+          ]
+        },
+        "status": {
+          "type": [
+            "string",
             "null"
           ]
         },
@@ -21438,6 +20951,340 @@
         "output_kind"
       ],
       "title": "ThreadListSchema",
+      "type": "object"
+    },
+    "thread marker create": {
+      "$defs": {
+        "ThreadMarkerEntrySchema": {
+          "properties": {
+            "change_id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "change_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "change_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "deleted": {
+          "items": {
+            "$ref": "#/$defs/ThreadMarkerEntrySchema"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "idempotency_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "op_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_record": {
+          "anyOf": [
+            {
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "idempotency_status": {
+                  "type": "string"
+                },
+                "op_id": {
+                  "type": "string"
+                },
+                "replayed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command",
+                "idempotency_status",
+                "op_id",
+                "replayed"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_kind": {
+          "enum": [
+            "thread_marker_create"
+          ],
+          "type": "string"
+        },
+        "replayed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "output_kind",
+        "message"
+      ],
+      "title": "ThreadMarkerOpSchema",
+      "type": "object"
+    },
+    "thread marker delete": {
+      "$defs": {
+        "ThreadMarkerEntrySchema": {
+          "properties": {
+            "change_id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "change_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "change_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "deleted": {
+          "items": {
+            "$ref": "#/$defs/ThreadMarkerEntrySchema"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "idempotency_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "op_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_record": {
+          "anyOf": [
+            {
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "idempotency_status": {
+                  "type": "string"
+                },
+                "op_id": {
+                  "type": "string"
+                },
+                "replayed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command",
+                "idempotency_status",
+                "op_id",
+                "replayed"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_kind": {
+          "enum": [
+            "thread_marker_delete"
+          ],
+          "type": "string"
+        },
+        "replayed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "output_kind",
+        "message"
+      ],
+      "title": "ThreadMarkerOpSchema",
+      "type": "object"
+    },
+    "thread marker list": {
+      "$defs": {
+        "ThreadMarkerEntrySchema": {
+          "properties": {
+            "change_id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "change_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "markers": {
+          "items": {
+            "$ref": "#/$defs/ThreadMarkerEntrySchema"
+          },
+          "type": "array"
+        },
+        "output_kind": {
+          "enum": [
+            "thread_marker_list"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "markers"
+      ],
+      "title": "ThreadMarkerListSchema",
+      "type": "object"
+    },
+    "thread marker show": {
+      "$defs": {
+        "ThreadMarkerEntrySchema": {
+          "properties": {
+            "change_id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "change_id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "change_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "deleted": {
+          "items": {
+            "$ref": "#/$defs/ThreadMarkerEntrySchema"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output_kind": {
+          "enum": [
+            "thread_marker_show"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "message"
+      ],
+      "title": "ThreadMarkerOpSchema",
       "type": "object"
     },
     "thread move": {

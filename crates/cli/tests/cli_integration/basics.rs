@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use cli::config::UserConfig;
 use objects::object::ThreadName;
+use objects::store::ObjectStore;
 
 use super::*;
 
@@ -811,15 +811,11 @@ fn test_cli_workspace_in_plain_git_repo_respects_detached_head() {
     git_commit_all(temp.path(), "seed branch");
     git(&["checkout", "--detach", "HEAD"], temp.path());
 
-    let output = heddle(
-        &["workspace", "show", "--output", "json"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    let output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert!(
-        parsed["current_thread"].is_null(),
-        "workspace should not claim a current thread in detached HEAD: {parsed}"
+        parsed["thread"].is_null(),
+        "status should not claim a current thread in detached HEAD: {parsed}"
     );
 }
 
@@ -1100,11 +1096,7 @@ fn test_cli_diff_head_to_worktree_in_plain_git_repo_uses_git_overlay_baseline() 
 
     std::fs::write(temp.path().join("tracked.txt"), "tracked but modified").unwrap();
 
-    let output = heddle(
-        &["--output", "json", "diff", "HEAD"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    let output = heddle(&["--output", "json", "diff", "HEAD"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
     assert!(
         !temp.path().join(".heddle").exists(),
@@ -1262,13 +1254,9 @@ fn test_cli_workspace_tracks_git_branch_switch_after_bootstrap() {
     let _ = heddle(&["init"], Some(temp.path())).unwrap();
     git(&["checkout", "support/workspace-switch"], temp.path());
 
-    let output = heddle(
-        &["workspace", "show", "--output", "json"],
-        Some(temp.path()),
-    )
-    .unwrap();
+    let output = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
     let parsed: Value = serde_json::from_str(&output).unwrap();
-    assert_eq!(parsed["current_thread"], "support/workspace-switch");
+    assert_eq!(parsed["thread"], "support/workspace-switch");
 }
 
 #[test]
@@ -1560,15 +1548,7 @@ fn test_cli_bridge_git_import_ref_imports_only_selected_tag() {
 
     let import_output = heddle(
         &[
-            "--output",
-            "json",
-            "bridge",
-            "git",
-            "import",
-            "--path",
-            ".",
-            "--ref",
-            "v1.0.0",
+            "--output", "json", "bridge", "git", "import", "--path", ".", "--ref", "v1.0.0",
         ],
         Some(temp.path()),
     )
@@ -1744,7 +1724,7 @@ fn test_cli_workspace_surfaces_git_import_hint_in_text_output() {
     assert!(status.success());
     let _ = heddle(&["init"], Some(temp.path())).unwrap();
 
-    let output = heddle(&["workspace", "show"], Some(temp.path())).unwrap();
+    let output = heddle(&["thread", "list"], Some(temp.path())).unwrap();
     assert!(
         output.contains("support/import-me"),
         "missing branch hint: {output}"
@@ -2073,7 +2053,11 @@ fn test_cli_marker_create_bootstraps_current_state_in_plain_git_repo() {
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("marker.txt"), "mark me").unwrap();
 
-    let output = heddle(&["marker", "create", "bootstrap-marker"], Some(temp.path())).unwrap();
+    let output = heddle(
+        &["thread", "marker", "create", "bootstrap-marker"],
+        Some(temp.path()),
+    )
+    .unwrap();
     assert!(output.contains("bootstrap-marker"));
 
     let status: Value =
@@ -2244,7 +2228,7 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
 
     let auth_thread: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "inspect", "feature/auth"],
+            &["--output", "json", "thread", "show", "feature/auth"],
             Some(temp.path()),
         )
         .unwrap(),
@@ -2252,7 +2236,7 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
     .unwrap();
     let search_thread: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "inspect", "feature/search"],
+            &["--output", "json", "thread", "show", "feature/search"],
             Some(temp.path()),
         )
         .unwrap(),
@@ -2734,7 +2718,11 @@ fn test_cli_log_since_marker_excludes_marker_and_walks_back() {
     }
 
     // Drop the marker at the current HEAD.
-    heddle(&["marker", "create", "checkpoint"], Some(temp.path())).unwrap();
+    heddle(
+        &["thread", "marker", "create", "checkpoint"],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     // Capture two post-marker states.
     for i in 1..=2 {
@@ -2794,7 +2782,7 @@ fn test_cli_log_since_with_limit_applies_bound_then_trims() {
     std::fs::write(temp.path().join("base.txt"), "base").unwrap();
     heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
 
-    heddle(&["marker", "create", "start"], Some(temp.path())).unwrap();
+    heddle(&["thread", "marker", "create", "start"], Some(temp.path())).unwrap();
 
     for i in 1..=4 {
         std::fs::write(
@@ -3011,7 +2999,7 @@ fn test_cli_goto_changes_worktree() {
     let content = std::fs::read_to_string(temp.path().join("version.txt")).unwrap();
     assert_eq!(content, "v2");
 
-    assert!(heddle(&["goto", "HEAD~1"], Some(temp.path())).is_ok());
+    assert!(heddle(&["switch", "HEAD~1"], Some(temp.path())).is_ok());
     let content = std::fs::read_to_string(temp.path().join("version.txt")).unwrap();
     assert_eq!(content, "v1", "File should be restored to v1");
 }
@@ -4095,7 +4083,11 @@ fn test_cli_diff_patch_nested_deleted_file_round_trips() {
     let apply_dir = TempDir::new().unwrap();
     init_git_repo(apply_dir.path());
     std::fs::create_dir_all(apply_dir.path().join("src/nested")).unwrap();
-    std::fs::write(apply_dir.path().join("src/nested/file.txt"), "alpha\nbeta\n").unwrap();
+    std::fs::write(
+        apply_dir.path().join("src/nested/file.txt"),
+        "alpha\nbeta\n",
+    )
+    .unwrap();
     std::fs::write(apply_dir.path().join("keep.txt"), "keep\n").unwrap();
     git_commit_all(apply_dir.path(), "seed");
     git_apply(apply_dir.path(), &patch);
@@ -4310,8 +4302,7 @@ fn test_cli_diff_patch_plain_git_delete_executable_and_symlink_modes() {
     git_commit_all(apply_dir.path(), "seed");
     git_apply(apply_dir.path(), &patch);
     assert!(
-        !apply_dir.path().join("oldlink").exists()
-            && !apply_dir.path().join("old.sh").exists(),
+        !apply_dir.path().join("oldlink").exists() && !apply_dir.path().join("old.sh").exists(),
         "applying the delete patch must unlink both special files:\n{patch}"
     );
 }
@@ -4344,8 +4335,11 @@ fn start_rejects_thread_name_with_space_in_text_and_json() {
     );
 
     // JSON mode: still rejected with the same kind, no panic.
-    let json_out =
-        heddle_output(&["start", "my feature", "--output", "json"], Some(temp.path())).unwrap();
+    let json_out = heddle_output(
+        &["start", "my feature", "--output", "json"],
+        Some(temp.path()),
+    )
+    .unwrap();
     assert!(
         !json_out.status.success(),
         "an invalid thread name must be rejected in JSON mode too"
@@ -4436,8 +4430,7 @@ fn actor_spawn_rejects_unsafe_thread_name() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    let out =
-        heddle_output(&["actor", "spawn", "--thread", "bad;id"], Some(temp.path())).unwrap();
+    let out = heddle_output(&["actor", "spawn", "--thread", "bad;id"], Some(temp.path())).unwrap();
     assert!(
         !out.status.success(),
         "actor spawn with an unsafe thread name must be rejected: stdout={}",
@@ -4463,8 +4456,11 @@ fn agent_reserve_rejects_thread_name_with_metachar() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    let out =
-        heddle_output(&["agent", "reserve", "--thread", "bad;id"], Some(temp.path())).unwrap();
+    let out = heddle_output(
+        &["agent", "reserve", "--thread", "bad;id"],
+        Some(temp.path()),
+    )
+    .unwrap();
     assert!(
         !out.status.success(),
         "agent reserve must reject an unsafe name: stdout={}",

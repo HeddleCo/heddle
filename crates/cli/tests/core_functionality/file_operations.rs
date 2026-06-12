@@ -44,7 +44,7 @@ fn test_binary_file_handling() {
     assert_eq!(retrieved, binary_content);
     std::fs::write(temp.path().join("binary.bin"), vec![255u8, 254, 253]).unwrap();
     heddle_must_succeed(&["capture", "-m", "Modify binary"], temp.path());
-    heddle_must_succeed(&["goto", "HEAD~1"], temp.path());
+    heddle_must_succeed(&["switch", "HEAD~1"], temp.path());
     let retrieved = std::fs::read(temp.path().join("binary.bin")).unwrap();
     assert_eq!(retrieved, binary_content);
 }
@@ -143,7 +143,10 @@ fn test_nested_tracked_heddle_paths_are_not_ignored_by_status_or_snapshot() {
     let head = repo.current_state().unwrap().unwrap();
     let parent = head.parents[0];
     drop(repo);
-    heddle_must_succeed(&["goto", &parent.to_string_full(), "--force"], temp.path());
+    heddle_must_succeed(
+        &["switch", &parent.to_string_full(), "--force"],
+        temp.path(),
+    );
     let restored =
         std::fs::read_to_string(temp.path().join("examples/calculator/.heddle/HEAD")).unwrap();
     assert_eq!(restored, "hd-examplehead-v1\n");

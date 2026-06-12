@@ -44,14 +44,9 @@ pub fn cmd_run(cli: &Cli, thread: Option<String>, command: Vec<String>) -> Resul
         .envs(sanitized_child_env())
         .env("HEDDLE_THREAD_ID", &thread.id)
         .env("HEDDLE_THREAD_NAME", &thread.thread)
-        .env("HEDDLE_HARNESS_BRIDGE_REPO", repo.root())
-        .env("HEDDLE_HARNESS_BRIDGE_SUBCOMMAND", "harness-bridge")
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    if let Ok(path) = std::env::current_exe() {
-        child.env("HEDDLE_HARNESS_BRIDGE_BIN", path);
-    }
     if let Ok(Some(session)) = SessionManager::new(repo.root()).get_current_session_id() {
         child.env("HEDDLE_SESSION_ID", session);
     }

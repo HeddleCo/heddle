@@ -3,7 +3,6 @@
 
 use std::sync::OnceLock;
 
-use anyhow::Result;
 use clap::{ArgAction, CommandFactory};
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -12,12 +11,11 @@ use serde::Serialize;
 use crate::cli::SemanticCommands;
 use crate::cli::{
     ActorCommands, AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands,
-    HookCommands, IntegrationCommands, MaintenanceCommands, MarkerCommands, PurgeCommands,
-    RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands, ShellCommands,
-    StackCommands, StashCommands, ThreadCommands, VisibilityCommands,
-    cli_args::{CommandCatalogArgs, DiscussCommands, ReviewCommands, TransactionCommands},
-    render::{shell_quote, write_json_stdout, write_stdout},
-    should_output_json, style,
+    HookCommands, IntegrationCommands, MaintenanceCommands, PurgeCommands, RedactCommands,
+    RedactTrustCommands, RemoteCommands, SessionCommands, ShellCommands, StashCommands,
+    ThreadCommands, ThreadMarkerCommands, VisibilityCommands,
+    cli_args::{DiscussCommands, ReviewCommands, TransactionCommands},
+    render::shell_quote,
 };
 #[cfg(feature = "client")]
 use crate::cli::{AuthCommands, PresenceCommands, SupportCommands};
@@ -1500,20 +1498,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["commands"],
-        surface(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["commands"]),
-                &[json_discriminator(
-                    Some("commands"),
-                    "kind",
-                    "command_catalog",
-                )],
-            ),
-            "automation",
-        ),
-    ),
-    entry(
         &["continue"],
         category(
             json_discriminators(
@@ -1790,7 +1774,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["git-overlay"],
         category(documented_schemas(READ_JSON, &["git-overlay"]), "repo"),
     ),
-    entry(&["help"], category(READ_TEXT, "repo")),
+    entry(
+        &["help"],
+        category(
+            json_discriminators(
+                opaque_schemas(READ_JSON, &["help"]),
+                &[json_discriminator(Some("help"), "kind", "command_catalog")],
+            ),
+            "repo",
+        ),
+    ),
     entry(&["hook"], surface(GROUP, "automation")),
     entry(
         &["hook", "list"],
@@ -2490,23 +2483,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
         git_adapter_alias(
             json_discriminators(
                 documented_schemas(WORKTREE_MUTATION, &["switch"]),
-                &[
-                    // Thread targets delegate to `thread switch` and emit
-                    // its record; this is the shape the registered
-                    // `switch` schema mirrors.
-                    json_discriminator(Some("switch"), "output_kind", "thread_switch"),
-                    // State targets fall through to the state-checkout
-                    // (`goto`) shape — advertised without a schema verb,
-                    // mirroring the `branch` / hosted-`clone` precedent.
-                    json_discriminator_no_schema(
-                        "switch falls through to the state-checkout (goto) \
-                         shape when the target resolves as a state; the \
-                         registered `switch` schema mirrors only the thread \
-                         path",
-                        "output_kind",
-                        "goto",
-                    ),
-                ],
+                &[json_discriminator(
+                    Some("switch"),
+                    "output_kind",
+                    "thread_switch",
+                )],
             ),
             "thread switch",
         ),
@@ -2672,6 +2653,51 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
+    entry(&["thread", "marker"], GROUP),
+    entry(
+        &["thread", "marker", "list"],
+        json_discriminators(
+            documented_schemas(READ_JSON, &["thread marker list"]),
+            &[json_discriminator(
+                Some("thread marker list"),
+                "output_kind",
+                "thread_marker_list",
+            )],
+        ),
+    ),
+    entry(
+        &["thread", "marker", "create"],
+        json_discriminators(
+            documented_schemas(MUTATING, &["thread marker create"]),
+            &[json_discriminator(
+                Some("thread marker create"),
+                "output_kind",
+                "thread_marker_create",
+            )],
+        ),
+    ),
+    entry(
+        &["thread", "marker", "delete"],
+        json_discriminators(
+            documented_schemas(DESTRUCTIVE_DATA_MUTATION, &["thread marker delete"]),
+            &[json_discriminator(
+                Some("thread marker delete"),
+                "output_kind",
+                "thread_marker_delete",
+            )],
+        ),
+    ),
+    entry(
+        &["thread", "marker", "show"],
+        json_discriminators(
+            documented_schemas(READ_JSON, &["thread marker show"]),
+            &[json_discriminator(
+                Some("thread marker show"),
+                "output_kind",
+                "thread_marker_show",
+            )],
+        ),
+    ),
     entry(&["transaction"], hidden(GROUP)),
     entry(
         &["transaction", "begin"],
@@ -2765,7 +2791,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 // `undo` keeps its own `--list` history view and owns
                 // redo-mode after the top-level `redo` deletion.
                 // Every kind the handler can emit must be advertised or an agent
-                // validating responses via `heddle commands --output json` rejects
+                // validating responses via `heddle help --output json` rejects
                 // the off-contract record. `undo --list` has its own
                 // `UndoListSchema`.
                 documented_schemas(WORKTREE_MUTATION, &["undo", "undo --list", "undo --redo"]),
@@ -2789,101 +2815,6 @@ static ACTIVE_COMMAND_CONTRACT_ENTRIES: OnceLock<Vec<&'static CommandContractEnt
 
 const fn entry(path: &'static [&'static str], contract: CommandContract) -> CommandContractEntry {
     CommandContractEntry { path, contract }
-}
-
-pub fn cmd_commands(cli: &Cli, args: &CommandCatalogArgs) -> Result<()> {
-    let mut output = build_command_catalog();
-    apply_command_catalog_filters(&mut output, args);
-    if should_output_json(cli, None) {
-        write_json_stdout(&output)?;
-        return Ok(());
-    }
-
-    let mut rendered = String::new();
-    rendered.push_str(&format!("{}\n", style::bold("Command catalog")));
-    rendered.push_str(
-        "Use `heddle commands --output json` for flags, arguments, side effects, schemas, and canonical command mappings.\n\n",
-    );
-    for title in [
-        "Native loop",
-        "Power surfaces",
-        "Git interop",
-        "Automation and admin",
-    ] {
-        rendered.push_str(&format!("{}:\n", style::bold(title)));
-        let mut section_commands = output
-            .commands
-            .iter()
-            .filter(|command| command_in_text_section(command, title))
-            .collect::<Vec<_>>();
-        section_commands.sort_by_key(|command| (command.help_rank, command.display.as_str()));
-        for command in section_commands {
-            let canonical = command
-                .canonical_action
-                .as_ref()
-                .map_or_else(String::new, canonical_action_text_suffix);
-            rendered.push_str(&format!(
-                "  {:<14}  {}{}\n",
-                command.display, command.summary, canonical
-            ));
-        }
-        rendered.push('\n');
-    }
-    write_stdout(&rendered)?;
-    Ok(())
-}
-
-fn apply_command_catalog_filters(output: &mut CommandCatalogOutput, args: &CommandCatalogArgs) {
-    if args.commands.is_empty() && args.tier.is_empty() && !args.mutating && !args.supports_op_id {
-        return;
-    }
-
-    let command_filters = args
-        .commands
-        .iter()
-        .map(|command| normalize_command_filter(command))
-        .filter(|command| !command.is_empty())
-        .collect::<Vec<_>>();
-    let tier_filters = args
-        .tier
-        .iter()
-        .map(|tier| tier.as_str())
-        .collect::<Vec<_>>();
-
-    output.commands.retain(|command| {
-        (command_filters.is_empty()
-            || command_filters
-                .iter()
-                .any(|filter| command_matches_filter(command, filter)))
-            && (tier_filters.is_empty() || tier_filters.contains(&command.tier.as_str()))
-            && (!args.mutating || command.mutates)
-            && (!args.supports_op_id || command.supports_op_id)
-    });
-}
-
-fn normalize_command_filter(command: &str) -> Vec<String> {
-    command
-        .split_whitespace()
-        .map(|part| part.trim().to_string())
-        .filter(|part| !part.is_empty())
-        .collect()
-}
-
-fn command_matches_filter(command: &CommandCatalogEntry, filter: &[String]) -> bool {
-    command.path == filter || command.path.starts_with(filter)
-}
-
-fn command_in_text_section(command: &CommandCatalogEntry, title: &str) -> bool {
-    if command.path.len() != 1 {
-        return false;
-    }
-    match title {
-        "Native loop" => command.help_visibility == "everyday",
-        "Power surfaces" => command.help_visibility == "advanced" && command.surface == "native",
-        "Git interop" => command.surface == "git_adapter",
-        "Automation and admin" => matches!(command.surface.as_str(), "automation" | "admin"),
-        _ => false,
-    }
 }
 
 pub fn build_command_catalog() -> CommandCatalogOutput {
@@ -3277,17 +3208,6 @@ fn action_template_from_owned(
     }
 }
 
-fn canonical_action_text_suffix(action: &CanonicalAction) -> String {
-    let verb = match action.kind.as_str() {
-        "direct_command" => "use",
-        "command_family" => "see",
-        "workflow" => "start with",
-        "conceptual_home" => "see",
-        _ => "see",
-    };
-    format!(" ({verb} `{}`)", action.command)
-}
-
 fn clean_catalog_summary(summary: String) -> String {
     let stripped = summary
         .trim_start_matches("Automation/workflow command:")
@@ -3624,18 +3544,19 @@ pub fn command_json_discriminators_for_schema_verb(
         .flat_map(|entry| {
             let include_same_command_siblings = entry.contract.schema_verbs.len() == 1
                 && entry.contract.schema_verbs[0] == schema_verb;
-            entry.contract.json_discriminators.iter().filter_map(
-                move |discriminator| {
+            entry
+                .contract
+                .json_discriminators
+                .iter()
+                .filter_map(move |discriminator| {
                     if discriminator.schema_verb == Some(schema_verb)
-                        || (include_same_command_siblings
-                            && discriminator.schema_verb.is_none())
+                        || (include_same_command_siblings && discriminator.schema_verb.is_none())
                     {
                         Some(json_discriminator_metadata(entry.path, discriminator))
                     } else {
                         None
                     }
-                },
-            )
+                })
         })
         .collect()
 }
@@ -4255,16 +4176,13 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         #[cfg(feature = "git-overlay")]
         Commands::GitOverlay => vec!["git-overlay"],
         Commands::Schemas { .. } => vec!["schemas"],
-        Commands::Commands(_) => vec!["commands"],
         Commands::Start(_) => vec!["start"],
         Commands::Try(_) => vec!["try"],
-        Commands::Attempt(_) => vec!["try"],
         Commands::Run(_) => vec!["run"],
         Commands::Sync(_) => vec!["sync"],
         Commands::Continue => vec!["continue"],
         Commands::Abort => vec!["abort"],
         Commands::Land(_) => vec!["land"],
-        Commands::Delegate(_) => vec!["start"],
         Commands::Ready(_) => vec!["ready"],
         Commands::Capture(_) => vec!["capture"],
         Commands::Commit(_) => vec!["commit"],
@@ -4272,31 +4190,8 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Log(_) => vec!["log"],
         Commands::Show { .. } => vec!["show"],
         Commands::Retro(_) => vec!["retro"],
-        Commands::Inspect { target } => {
-            if target.is_some() {
-                vec!["show"]
-            } else {
-                vec!["thread", "show"]
-            }
-        }
-        Commands::Goto { .. } => vec!["switch"],
         Commands::Clean { .. } => vec!["clean"],
         Commands::Diff(_) => vec!["diff"],
-        Commands::Branch(args) => {
-            let delete = args.delete || args.force_delete;
-            match (
-                args.name.as_ref(),
-                args.new_name.as_ref(),
-                delete,
-                args.move_branch,
-            ) {
-                (None, None, false, false) => vec!["thread", "list"],
-                (Some(_), None, true, false) => vec!["thread", "drop"],
-                (Some(_), Some(_), false, true) => vec!["thread", "rename"],
-                (Some(_), None, false, false) => vec!["thread", "create"],
-                _ => vec!["thread", "list"],
-            }
-        }
         Commands::Switch(_) => vec!["switch"],
         Commands::Discuss { command } => match command {
             DiscussCommands::Open(_) => vec!["discuss", "open"],
@@ -4312,7 +4207,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             TransactionCommands::Abort(_) => vec!["transaction", "abort"],
             TransactionCommands::Status(_) => vec!["transaction", "status"],
         },
-        Commands::Conflict { .. } => vec!["resolve"],
         Commands::Review { command } => match command {
             ReviewCommands::Show(_) => vec!["review", "show"],
             ReviewCommands::Sign(_) => vec!["review", "sign"],
@@ -4333,10 +4227,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 PurgeCommands::List(_) => vec!["redact", "purge", "list"],
             },
         },
-        Commands::Purge { command } => match command {
-            PurgeCommands::Apply(_) => vec!["redact", "purge", "apply"],
-            PurgeCommands::List(_) => vec!["redact", "purge", "list"],
-        },
         Commands::Visibility { command } => match command {
             VisibilityCommands::Set(_) => vec!["visibility", "set"],
             VisibilityCommands::Promote(_) => vec!["visibility", "promote"],
@@ -4345,14 +4235,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         },
         Commands::Revert(_) => vec!["revert"],
         Commands::Undo(_) => vec!["undo"],
-        Commands::Fork { .. } => vec!["start"],
         Commands::Collapse(_) => vec!["collapse"],
-        Commands::Marker { command } => match command {
-            MarkerCommands::List { .. } => vec!["thread", "list"],
-            MarkerCommands::Create { .. } => vec!["thread", "create"],
-            MarkerCommands::Delete { .. } => vec!["thread", "drop"],
-            MarkerCommands::Show { .. } => vec!["thread", "show"],
-        },
         Commands::Thread { command } => match command {
             ThreadCommands::Create { .. } => vec!["thread", "create"],
             ThreadCommands::Current => vec!["thread", "current"],
@@ -4373,17 +4256,22 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             ThreadCommands::RevokeApproval(_) => vec!["thread", "revoke-approval"],
             ThreadCommands::CheckMerge(_) => vec!["thread", "check-merge"],
             ThreadCommands::Cleanup(_) => vec!["thread", "cleanup"],
+            ThreadCommands::Marker { command } => match command {
+                ThreadMarkerCommands::List { .. } => vec!["thread", "marker", "list"],
+                ThreadMarkerCommands::Create { .. } => {
+                    vec!["thread", "marker", "create"]
+                }
+                ThreadMarkerCommands::Delete { .. } => {
+                    vec!["thread", "marker", "delete"]
+                }
+                ThreadMarkerCommands::Show { .. } => vec!["thread", "marker", "show"],
+            },
         },
         Commands::Shell { command } => match command {
             ShellCommands::Init { .. } => vec!["shell", "init"],
             ShellCommands::Completion { .. } => vec!["shell", "completion"],
         },
-        Commands::Workspace { .. } => vec!["status"],
         Commands::Merge(_) => vec!["merge"],
-        Commands::Stack(args) => match &args.command {
-            Some(StackCommands::Ready { .. }) => vec!["ready"],
-            None | Some(StackCommands::Snapshot { .. }) => vec!["status"],
-        },
         Commands::Resolve(_) => vec!["resolve"],
         Commands::Fsck { .. } => vec!["fsck"],
         Commands::Fetch { .. } => vec!["fetch"],
@@ -4483,7 +4371,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             MaintenanceCommands::Index { .. } => vec!["maintenance", "index"],
             MaintenanceCommands::Monitor { .. } => vec!["maintenance", "monitor"],
         },
-        Commands::Blame { .. } => vec!["query"],
         Commands::CherryPick { .. } => vec!["cherry-pick"],
         Commands::Clone(_) => vec!["clone"],
         Commands::Rebase { .. } => vec!["rebase"],
@@ -4615,7 +4502,6 @@ mod tests {
             &["collapse", "s1", "s2", "--into", "squashed"],
         ),
         sample(&["commit"], &["commit"]),
-        sample(&["commands"], &["commands"]),
         sample(&["continue"], &["continue"]),
         sample(
             &["context", "set"],
@@ -4856,6 +4742,19 @@ mod tests {
             &["thread", "check-merge", "source", "target"],
         ),
         sample(&["thread", "cleanup"], &["thread", "cleanup", "--merged"]),
+        sample(&["thread", "marker", "list"], &["thread", "marker", "list"]),
+        sample(
+            &["thread", "marker", "create"],
+            &["thread", "marker", "create", "checkpoint"],
+        ),
+        sample(
+            &["thread", "marker", "delete"],
+            &["thread", "marker", "delete", "checkpoint"],
+        ),
+        sample(
+            &["thread", "marker", "show"],
+            &["thread", "marker", "show", "checkpoint"],
+        ),
         sample(&["transaction", "begin"], &["transaction", "begin"]),
         sample(
             &["transaction", "commit"],
@@ -5341,7 +5240,7 @@ mod tests {
             "every JSON-output command must either project json-compact or reject it before execution"
         );
         assert!(
-            compact_rejections.contains("commands"),
+            compact_rejections.contains("query"),
             "the harness must include commands that accept --output json but reject json-compact"
         );
 
@@ -5684,7 +5583,6 @@ mod tests {
                 "clone",
                 "clone",
                 "commit",
-                "commands",
                 "continue",
                 "context set",
                 "context get",
@@ -5707,6 +5605,7 @@ mod tests {
                 "doctor docs",
                 "doctor schemas",
                 "fetch",
+                "help",
                 "init",
                 // `log` appears twice: the entry advertises both `log` and the
                 // `log --reflog` variant (`log_reflog`), mirroring `undo`/`clone`.
@@ -5747,7 +5646,6 @@ mod tests {
                 "stash show",
                 "status",
                 "switch",
-                "switch",
                 "sync",
                 "thread create",
                 "thread switch",
@@ -5760,6 +5658,10 @@ mod tests {
                 "thread drop",
                 "thread revoke-approval",
                 "thread cleanup",
+                "thread marker list",
+                "thread marker create",
+                "thread marker delete",
+                "thread marker show",
                 "verify",
                 "visibility set",
                 "visibility promote",
@@ -6226,7 +6128,7 @@ mod tests {
     fn parsed_command_json_support_reads_contract_table() {
         for (argv, expected) in [
             (vec!["heddle", "status"], true),
-            (vec!["heddle", "commands"], true),
+            (vec!["heddle", "help"], true),
             (vec!["heddle", "shell", "completion", "bash"], false),
             (vec!["heddle", "thread", "cd", "feature"], false),
         ] {

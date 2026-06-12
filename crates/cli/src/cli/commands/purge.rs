@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `heddle purge` — physically remove the bytes referenced by an
+//! `heddle redact purge` — physically remove the bytes referenced by an
 //! existing redaction. Irreversible by design.
 //!
 //! Workspace-owner capability is a documented constraint in the build

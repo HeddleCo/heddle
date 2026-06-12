@@ -12,9 +12,9 @@
 //! to match main's `pub use checkpoint::run as cmd_checkpoint;`
 //! convention.
 
-use objects::store::ObjectStore;
 use anyhow::{Result, anyhow};
 use objects::object::ThreadName;
+use objects::store::ObjectStore;
 use oplog::{OpLogBackend, OpRecord};
 use repo::{CommitGraphIndex, GitCheckpointRecord, Repository, RepositoryCapability};
 use serde::Serialize;
