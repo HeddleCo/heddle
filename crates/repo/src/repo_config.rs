@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use super::Result;
 use crate::FsMonitorConfig;
 
+pub(crate) const SUPPORTED_REPO_FORMAT: u32 = 1;
+
 /// Repository configuration stored in `.heddle/config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepoConfig {
@@ -426,7 +428,9 @@ impl Default for DisplayConfig {
 impl Default for RepoConfig {
     fn default() -> Self {
         Self {
-            repository: RepositoryConfig { version: 1 },
+            repository: RepositoryConfig {
+                version: SUPPORTED_REPO_FORMAT,
+            },
             principal: None,
             agent: AgentConfig::default(),
             worktree: WorktreeConfig::default(),

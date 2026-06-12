@@ -16,6 +16,14 @@ pub enum HeddleError {
     RepositoryNotFound(std::path::PathBuf),
     #[error("repository already exists at {0}")]
     RepositoryExists(std::path::PathBuf),
+    #[error(
+        "repository config at {path} uses repository format {found} but this binary supports {supported}; upgrade heddle or run `heddle migrate`"
+    )]
+    RepositoryFormatTooNew {
+        path: std::path::PathBuf,
+        found: u32,
+        supported: u32,
+    },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error("serialization error: {0}")]

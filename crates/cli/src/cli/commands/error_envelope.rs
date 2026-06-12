@@ -441,6 +441,31 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                         command,
                     );
                 }
+                HeddleError::RepositoryFormatTooNew {
+                    found,
+                    supported,
+                    ..
+                } => {
+                    return ErrorClassification {
+                        kind: "repository_format_too_new".to_string(),
+                        human_error: Some(heddle_err.to_string()),
+                        hint:
+                            "Upgrade heddle to a binary that supports this repository format, or run the repository migration command with a compatible binary."
+                                .to_string(),
+                        unsafe_condition: format!(
+                            "repository format {found} is newer than this binary's supported format {supported}"
+                        ),
+                        would_change:
+                            "opening a newer-format repository could misread unstamped on-disk data"
+                                .to_string(),
+                        preserved:
+                            "no repository objects, refs, metadata, or worktree files were changed"
+                                .to_string(),
+                        primary_command: "heddle status".to_string(),
+                        recovery_commands: vec!["heddle status".to_string()],
+                        extra_json_fields: serde_json::Map::new(),
+                    };
+                }
                 HeddleError::RepositoryExists(_) => {
                     return ErrorClassification::known(
                         "repository_exists",

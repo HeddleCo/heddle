@@ -378,6 +378,19 @@ pub(crate) fn compute_op_scope(root: &Path) -> String {
     format!("wt-{}", &digest.to_hex().as_str()[..16])
 }
 
+fn ensure_supported_repo_format(config_path: &Path, config: &RepoConfig) -> Result<()> {
+    let found = config.repository.version;
+    let supported = repo_config::SUPPORTED_REPO_FORMAT;
+    if found > supported {
+        return Err(HeddleError::RepositoryFormatTooNew {
+            path: config_path.to_path_buf(),
+            found,
+            supported,
+        });
+    }
+    Ok(())
+}
+
 impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
     fn open_raw(
         root: PathBuf,
@@ -430,7 +443,9 @@ impl<S: ObjectStore> Repository<RefManager, OpLog, S> {
                 ))
             })?
             .to_path_buf();
-        let config = RepoConfig::load(&heddle_dir.join("config.toml"))?;
+        let config_path = heddle_dir.join("config.toml");
+        let config = RepoConfig::load(&config_path)?;
+        ensure_supported_repo_format(&config_path, &config)?;
         let refs = RefManager::new(&heddle_dir);
         Self::open_raw(root, heddle_dir, store, config, refs)
     }
@@ -729,7 +744,9 @@ impl Repository {
                         )));
                     }
 
-                    let config = RepoConfig::load(&shared_galeed_dir.join("config.toml"))?;
+                    let config_path = shared_galeed_dir.join("config.toml");
+                    let config = RepoConfig::load(&config_path)?;
+                    ensure_supported_repo_format(&config_path, &config)?;
                     let store = Self::build_store(&config, &shared_galeed_dir)?;
                     let local_head_path = heddle_path.join("HEAD");
                     let refs = RefManager::new(&shared_galeed_dir).with_local_head(local_head_path);
@@ -741,7 +758,9 @@ impl Repository {
 
                 if objects_dir.is_dir() {
                     // Main repo mode.
-                    let config = RepoConfig::load(&heddle_path.join("config.toml"))?;
+                    let config_path = heddle_path.join("config.toml");
+                    let config = RepoConfig::load(&config_path)?;
+                    ensure_supported_repo_format(&config_path, &config)?;
                     let store = Self::build_store(&config, &heddle_path)?;
                     let refs = RefManager::new(&heddle_path);
                     let repo = Self::open_raw(dir.to_path_buf(), heddle_path, store, config, refs)?;
