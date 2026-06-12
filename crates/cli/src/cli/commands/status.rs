@@ -222,6 +222,7 @@ struct PlainGitStatusOutput {
     git_overlay_health: GitOverlayHealth,
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
+    #[serde(serialize_with = "serialize_empty_action_as_null")]
     recommended_action: String,
     recommended_action_template: Option<super::command_catalog::ActionTemplate>,
     recovery_commands: Vec<String>,
@@ -2449,7 +2450,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        CoordinationStatus, MaterializedThreadInfo, assess_materialized_threads,
+        ChangesInfo, CoordinationStatus, GitOverlayHealth, MaterializedThreadInfo,
+        PlainGitStatusOutput, RepositoryVerificationState, assess_materialized_threads,
         combined_verdict_axes, coordination_axis_clean, coordination_label,
         render_status_materialized, resolve_coordination_with_trust,
     };
@@ -2811,5 +2813,79 @@ mod tests {
             resolve_coordination_with_trust(CoordinationStatus::Clean, true, true);
         assert!(matches!(coordination, CoordinationStatus::Clean), "no override → axis stays clean");
         assert!(!blocked_by_trust_only);
+    }
+
+    /// Action-field presence contract (HeddleCo/heddle#645): an empty
+    /// `recommended_action` must serialize as `null`, never `""` — the
+    /// serialization-boundary walker hard-fails the whole command on a
+    /// raw empty. `PlainGitStatusOutput.recommended_action` is cloned
+    /// from `trust.recommended_action`, which CAN legitimately be empty;
+    /// this pins the safe-by-construction wire shape.
+    #[test]
+    fn plain_git_status_serializes_empty_recommended_action_as_null() {
+        let machine_contract_coverage =
+            crate::cli::commands::git_overlay_health::machine_contract_coverage();
+        let trust = RepositoryVerificationState {
+            verified: true,
+            status: "verified".to_string(),
+            repository_mode: "plain-git".to_string(),
+            heddle_initialized: false,
+            git_branch: Some("main".to_string()),
+            heddle_thread: None,
+            worktree_dirty: false,
+            worktree_state: "clean".to_string(),
+            import_state: "not_applicable".to_string(),
+            mapping_state: "not_applicable".to_string(),
+            remote_drift: "clean".to_string(),
+            active_operation: None,
+            default_remote: None,
+            clone_verification: "not_applicable".to_string(),
+            machine_contract: crate::cli::commands::git_overlay_health::machine_contract_status(
+                &machine_contract_coverage,
+            )
+            .to_string(),
+            machine_contract_coverage,
+            workflow_status: "clean".to_string(),
+            workflow_summary: "no ready threads are waiting to land".to_string(),
+            summary: "plain Git repository".to_string(),
+            recommended_action: String::new(),
+            recommended_action_template: None,
+            recovery_commands: Vec::new(),
+            recovery_action_templates: Vec::new(),
+            checks: Vec::new(),
+        };
+        let output = PlainGitStatusOutput {
+            output_kind: "status",
+            repository_capability: "plain-git".to_string(),
+            repository_label: crate::cli::render::repository_mode_label("plain-git", "git-only"),
+            storage_model: "git-only".to_string(),
+            heddle_initialized: false,
+            git_branch: Some("main".to_string()),
+            path: "/tmp/repo".to_string(),
+            git_overlay_health: GitOverlayHealth {
+                status: "healthy".to_string(),
+                clean: true,
+                summary: "plain Git repository".to_string(),
+                recovery_commands: Vec::new(),
+                checks: Vec::new(),
+            },
+            recommended_action: trust.recommended_action.clone(),
+            recommended_action_template: trust.recommended_action_template.clone(),
+            recovery_commands: trust.recovery_commands.clone(),
+            recovery_action_templates: trust.recovery_action_templates.clone(),
+            thread_health: trust.status.clone(),
+            changed_path_count: 0,
+            changes: ChangesInfo {
+                modified: Vec::new(),
+                added: Vec::new(),
+                deleted: Vec::new(),
+            },
+            git_index: None,
+            trust,
+        };
+
+        let value = serde_json::to_value(&output).unwrap();
+        assert!(value["recommended_action"].is_null());
+        assert!(value["verification"]["recommended_action"].is_null());
     }
 }

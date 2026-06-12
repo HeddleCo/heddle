@@ -1032,7 +1032,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["abort"],
         category(
-            documented_schemas(compact_json(MUTATING), &["abort"]),
+            json_discriminators(
+                documented_schemas(compact_json(MUTATING), &["abort"]),
+                &[json_discriminator(Some("abort"), "output_kind", "abort")],
+            ),
             "recovery",
         ),
     ),
@@ -1040,7 +1043,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["adopt"],
         front_door(
             advertised_action(
-                documented_schemas(ADOPT, &["adopt"]),
+                json_discriminators(
+                    documented_schemas(ADOPT, &["adopt"]),
+                    &[json_discriminator(Some("adopt"), "output_kind", "adopt")],
+                ),
                 "heddle adopt --ref <branch>",
                 &["heddle", "adopt", "--ref", "<branch>"],
                 &["branch"],
@@ -1078,21 +1084,30 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["agent", "serve"],
         surface(
-            documented_schemas(DAEMON_MUTATION, &["agent serve"]),
+            json_discriminators(
+                documented_schemas(DAEMON_MUTATION, &["agent serve"]),
+                &[json_discriminator(Some("agent serve"), "output_kind", "agent_serve")],
+            ),
             "automation",
         ),
     ),
     entry(
         &["agent", "status"],
         surface(
-            documented_schemas(READ_JSON, &["agent status"]),
+            json_discriminators(
+                documented_schemas(READ_JSON, &["agent status"]),
+                &[json_discriminator(Some("agent status"), "output_kind", "agent_status")],
+            ),
             "automation",
         ),
     ),
     entry(
         &["agent", "stop"],
         surface(
-            documented_schemas(DAEMON_MUTATION, &["agent stop"]),
+            json_discriminators(
+                documented_schemas(DAEMON_MUTATION, &["agent stop"]),
+                &[json_discriminator(Some("agent stop"), "output_kind", "agent_stop")],
+            ),
             "automation",
         ),
     ),
@@ -1113,13 +1128,22 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["agent", "capture"],
         surface(
-            documented_schemas(CAPTURE, &["agent capture"]),
+            json_discriminators(
+                documented_schemas(CAPTURE, &["agent capture"]),
+                &[json_discriminator(Some("agent capture"), "output_kind", "capture")],
+            ),
             "automation",
         ),
     ),
     entry(
         &["agent", "ready"],
-        surface(documented_schemas(CAPTURE, &["agent ready"]), "automation"),
+        surface(
+            json_discriminators(
+                documented_schemas(CAPTURE, &["agent ready"]),
+                &[json_discriminator(Some("agent ready"), "output_kind", "ready")],
+            ),
+            "automation",
+        ),
     ),
     entry(
         &["agent", "release"],
@@ -1158,14 +1182,37 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["blame"],
         category(
-            documented_schemas(READ_JSON, &["blame"]),
+            json_discriminators(
+                documented_schemas(READ_JSON, &["blame"]),
+                &[json_discriminator(Some("blame"), "output_kind", "blame")],
+            ),
             "states",
         ),
     ),
     entry(
         &["branch"],
         git_adapter_action(
-            documented_schemas(MUTATING, &["branch"]),
+            json_discriminators(
+                documented_schemas(MUTATING, &["branch"]),
+                &[
+                    // No-arg `branch` emits the thread-list contract; this
+                    // is the shape the registered `branch` schema mirrors.
+                    json_discriminator(Some("branch"), "output_kind", "thread_list"),
+                    // `branch <name>` (create/rename/delete) delegates to
+                    // the thread family and emits the delegate's record
+                    // (e.g. `thread_create`). Advertised without a schema
+                    // verb — only the listing shape is schema-backed —
+                    // mirroring how hosted `clone` advertises its
+                    // preliminary `clone_connection` envelope.
+                    json_discriminator_no_schema(
+                        "branch mutations delegate to the thread family; the \
+                         registered `branch` schema mirrors only the no-arg \
+                         listing shape",
+                        "output_kind",
+                        "thread_create",
+                    ),
+                ],
+            ),
             "thread",
             "command_family",
             "Use the thread command family for branch listing, creation, rename, and deletion.",
@@ -1275,14 +1322,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["bridge", "git", "push"],
         git_adapter_alias(
-            documented_schemas(
-                CommandContract {
-                    writes_heddle_refs: false,
-                    writes_git_refs: true,
-                    network_io: true,
-                    ..MUTATING
-                },
-                &["bridge git push"],
+            json_discriminators(
+                documented_schemas(
+                    CommandContract {
+                        writes_heddle_refs: false,
+                        writes_git_refs: true,
+                        network_io: true,
+                        ..MUTATING
+                    },
+                    &["bridge git push"],
+                ),
+                &[json_discriminator(Some("bridge git push"), "output_kind", "bridge_git_push")],
             ),
             "push",
         ),
@@ -1290,13 +1340,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["bridge", "git", "pull"],
         git_adapter_alias(
-            documented_schemas(
-                CommandContract {
-                    writes_git_refs: true,
-                    network_io: true,
-                    ..WORKTREE_MUTATION
-                },
-                &["bridge git pull"],
+            json_discriminators(
+                documented_schemas(
+                    CommandContract {
+                        writes_git_refs: true,
+                        network_io: true,
+                        ..WORKTREE_MUTATION
+                    },
+                    &["bridge git pull"],
+                ),
+                &[json_discriminator(Some("bridge git pull"), "output_kind", "bridge_git_pull")],
             ),
             "pull",
         ),
@@ -1494,7 +1547,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["continue"],
         category(
-            documented_schemas(compact_json(MUTATING), &["continue"]),
+            json_discriminators(
+                documented_schemas(compact_json(MUTATING), &["continue"]),
+                &[json_discriminator(Some("continue"), "output_kind", "continue")],
+            ),
             "recovery",
         ),
     ),
@@ -1626,7 +1682,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["daemon", "stop"],
-        surface(opaque_schemas(DAEMON_MUTATION, &["daemon stop"]), "admin"),
+        surface(
+            json_discriminators(
+                opaque_schemas(DAEMON_MUTATION, &["daemon stop"]),
+                &[json_discriminator(
+                    Some("daemon stop"),
+                    "output_kind",
+                    "daemon_stop",
+                )],
+            ),
+            "admin",
+        ),
     ),
     entry(
         &["delegate"],
@@ -1709,7 +1775,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["doctor"],
-        front_door(documented_schemas(READ_JSON, &["doctor"]), 120),
+        front_door(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["doctor"]),
+                &[json_discriminator(Some("doctor"), "output_kind", "diagnose")],
+            ),
+            120,
+        ),
     ),
     entry(
         &["doctor", "docs"],
@@ -1736,13 +1808,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["fetch"],
         git_adapter_action(
-            documented_schemas(
-                CommandContract {
-                    writes_git_refs: true,
-                    network_io: true,
-                    ..MUTATING
-                },
-                &["fetch"],
+            json_discriminators(
+                documented_schemas(
+                    CommandContract {
+                        writes_git_refs: true,
+                        network_io: true,
+                        ..MUTATING
+                    },
+                    &["fetch"],
+                ),
+                &[json_discriminator(Some("fetch"), "output_kind", "fetch")],
             ),
             "pull",
             "workflow",
@@ -1874,7 +1949,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["log"],
-        front_door(documented_schemas(READ_JSON, &["log", "log --reflog"]), 130),
+        front_door(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["log", "log --reflog"]),
+                &[
+                    json_discriminator(Some("log"), "output_kind", "log"),
+                    json_discriminator(Some("log --reflog"), "output_kind", "log_reflog"),
+                ],
+            ),
+            130,
+        ),
     ),
     entry(&["maintenance"], surface(GROUP, "admin")),
     entry(
@@ -1887,12 +1971,21 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["maintenance", "gc"],
-        surface(opaque_schemas(GC_MUTATION, &["maintenance gc"]), "admin"),
+        surface(
+            json_discriminators(
+                opaque_schemas(GC_MUTATION, &["maintenance gc"]),
+                &[json_discriminator(Some("maintenance gc"), "output_kind", "gc")],
+            ),
+            "admin",
+        ),
     ),
     entry(
         &["maintenance", "index"],
         surface(
-            documented_schemas(READ_JSON, &["maintenance index"]),
+            json_discriminators(
+                documented_schemas(READ_JSON, &["maintenance index"]),
+                &[json_discriminator(Some("maintenance index"), "output_kind", "index")],
+            ),
             "admin",
         ),
     ),
@@ -1929,7 +2022,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
             exits(
                 surface(
                     advertised_action(
-                        documented_schemas(compact_json(WORKTREE_MUTATION), &["merge --preview"]),
+                        json_discriminators(
+                            documented_schemas(compact_json(WORKTREE_MUTATION), &["merge --preview"]),
+                            &[json_discriminator(Some("merge --preview"), "output_kind", "merge")],
+                        ),
                         "heddle merge <thread> --preview",
                         &["heddle", "merge", "<thread>", "--preview"],
                         &["thread"],
@@ -1991,13 +2087,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["pull"],
         exits(
             front_door(
-                documented_schemas(
-                    CommandContract {
-                        writes_git_refs: true,
-                        network_io: true,
-                        ..WORKTREE_MUTATION
-                    },
-                    &["pull"],
+                json_discriminators(
+                    documented_schemas(
+                        CommandContract {
+                            writes_git_refs: true,
+                            network_io: true,
+                            ..WORKTREE_MUTATION
+                        },
+                        &["pull"],
+                    ),
+                    &[json_discriminator(Some("pull"), "output_kind", "pull")],
                 ),
                 90,
             ),
@@ -2049,13 +2148,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
         exits(
             front_door(
                 advertised_action(
-                    documented_schemas(
-                        CommandContract {
-                            writes_git_refs: true,
-                            network_io: true,
-                            ..MUTATING
-                        },
-                        &["push"],
+                    json_discriminators(
+                        documented_schemas(
+                            CommandContract {
+                                writes_git_refs: true,
+                                network_io: true,
+                                ..MUTATING
+                            },
+                            &["push"],
+                        ),
+                        &[json_discriminator(Some("push"), "output_kind", "push")],
                     ),
                     "heddle push",
                     &["heddle", "push"],
@@ -2079,13 +2181,22 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["query"],
         category(
-            documented_schemas(READ_JSON, &["query"]),
+            json_discriminators(
+                documented_schemas(READ_JSON, &["query"]),
+                &[json_discriminator(Some("query"), "output_kind", "query")],
+            ),
             "states",
         ),
     ),
     entry(
         &["ready"],
-        front_door(documented_schemas(compact_json(CAPTURE), &["ready"]), 50),
+        front_door(
+            json_discriminators(
+                documented_schemas(compact_json(CAPTURE), &["ready"]),
+                &[json_discriminator(Some("ready"), "output_kind", "ready")],
+            ),
+            50,
+        ),
     ),
     entry(
         &["rebase"],
@@ -2191,23 +2302,38 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["remote", "list"],
-        documented_schemas(READ_JSON, &["remote list"]),
+        json_discriminators(
+            documented_schemas(READ_JSON, &["remote list"]),
+            &[json_discriminator(Some("remote list"), "output_kind", "remote_list")],
+        ),
     ),
     entry(
         &["remote", "add"],
-        documented_schemas(CONFIG_MUTATION, &["remote add"]),
+        json_discriminators(
+            documented_schemas(CONFIG_MUTATION, &["remote add"]),
+            &[json_discriminator(Some("remote add"), "output_kind", "remote_add")],
+        ),
     ),
     entry(
         &["remote", "remove"],
-        documented_schemas(CONFIG_MUTATION, &["remote remove"]),
+        json_discriminators(
+            documented_schemas(CONFIG_MUTATION, &["remote remove"]),
+            &[json_discriminator(Some("remote remove"), "output_kind", "remote_remove")],
+        ),
     ),
     entry(
         &["remote", "set-default"],
-        documented_schemas(CONFIG_MUTATION, &["remote set-default"]),
+        json_discriminators(
+            documented_schemas(CONFIG_MUTATION, &["remote set-default"]),
+            &[json_discriminator(Some("remote set-default"), "output_kind", "remote_set_default")],
+        ),
     ),
     entry(
         &["remote", "show"],
-        documented_schemas(READ_JSON, &["remote show"]),
+        json_discriminators(
+            documented_schemas(READ_JSON, &["remote show"]),
+            &[json_discriminator(Some("remote show"), "output_kind", "remote_show")],
+        ),
     ),
     entry(
         &["resolve"],
@@ -2352,13 +2478,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["land"],
         front_door(
-            documented_schemas(
-                CommandContract {
-                    writes_git_refs: true,
-                    network_io: true,
-                    ..compact_json(MUTATING)
-                },
-                &["land"],
+            json_discriminators(
+                documented_schemas(
+                    CommandContract {
+                        writes_git_refs: true,
+                        network_io: true,
+                        ..compact_json(MUTATING)
+                    },
+                    &["land"],
+                ),
+                &[json_discriminator(Some("land"), "output_kind", "land")],
             ),
             70,
         ),
@@ -2369,7 +2498,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["start"],
-        front_door(documented_schemas(WORKTREE_MUTATION, &["start"]), 40),
+        front_door(
+            json_discriminators(
+                documented_schemas(WORKTREE_MUTATION, &["start"]),
+                &[json_discriminator(
+                    Some("start"),
+                    "output_kind",
+                    "thread_start",
+                )],
+            ),
+            40,
+        ),
     ),
     entry(
         &["stash"],
@@ -2493,14 +2632,36 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["switch"],
         git_adapter_alias(
-            documented_schemas(WORKTREE_MUTATION, &["switch"]),
+            json_discriminators(
+                documented_schemas(WORKTREE_MUTATION, &["switch"]),
+                &[
+                    // Thread targets delegate to `thread switch` and emit
+                    // its record; this is the shape the registered
+                    // `switch` schema mirrors.
+                    json_discriminator(Some("switch"), "output_kind", "thread_switch"),
+                    // State targets fall through to the state-checkout
+                    // (`goto`) shape — advertised without a schema verb,
+                    // mirroring the `branch` / hosted-`clone` precedent.
+                    json_discriminator_no_schema(
+                        "switch falls through to the state-checkout (goto) \
+                         shape when the target resolves as a state; the \
+                         registered `switch` schema mirrors only the thread \
+                         path",
+                        "output_kind",
+                        "goto",
+                    ),
+                ],
+            ),
             "thread switch",
         ),
     ),
     entry(
         &["sync"],
         category(
-            documented_schemas(compact_json(MUTATING), &["sync"]),
+            json_discriminators(
+                documented_schemas(compact_json(MUTATING), &["sync"]),
+                &[json_discriminator(Some("sync"), "output_kind", "sync")],
+            ),
             "threads",
         ),
     ),
@@ -2513,7 +2674,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["thread", "create"],
-        documented_schemas(MUTATING, &["thread create"]),
+        json_discriminators(
+            documented_schemas(MUTATING, &["thread create"]),
+            &[json_discriminator(Some("thread create"), "output_kind", "thread_create")],
+        ),
     ),
     entry(
         &["thread", "current"],
@@ -2521,7 +2685,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["thread", "switch"],
-        documented_schemas(WORKTREE_MUTATION, &["thread switch"]),
+        json_discriminators(
+            documented_schemas(WORKTREE_MUTATION, &["thread switch"]),
+            &[json_discriminator(Some("thread switch"), "output_kind", "thread_switch")],
+        ),
     ),
     entry(&["thread", "cd"], READ_TEXT),
     entry(
@@ -2552,11 +2719,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["thread", "rename"],
-        documented_schemas(MUTATING, &["thread rename"]),
+        json_discriminators(
+            documented_schemas(MUTATING, &["thread rename"]),
+            &[json_discriminator(Some("thread rename"), "output_kind", "thread_rename")],
+        ),
     ),
     entry(
         &["thread", "refresh"],
-        documented_schemas(WORKTREE_MUTATION, &["thread refresh"]),
+        json_discriminators(
+            documented_schemas(WORKTREE_MUTATION, &["thread refresh"]),
+            &[json_discriminator(Some("thread refresh"), "output_kind", "thread")],
+        ),
     ),
     entry(
         &["thread", "move"],
@@ -2568,15 +2741,24 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["thread", "resolve"],
-        documented_schemas(MUTATING, &["thread resolve"]),
+        json_discriminators(
+            documented_schemas(MUTATING, &["thread resolve"]),
+            &[json_discriminator(Some("thread resolve"), "output_kind", "resolve")],
+        ),
     ),
     entry(
         &["thread", "promote"],
-        documented_schemas(WORKTREE_MUTATION, &["thread promote"]),
+        json_discriminators(
+            documented_schemas(WORKTREE_MUTATION, &["thread promote"]),
+            &[json_discriminator(Some("thread promote"), "output_kind", "thread")],
+        ),
     ),
     entry(
         &["thread", "drop"],
-        documented_schemas(DESTRUCTIVE_WORKTREE_MUTATION, &["thread drop"]),
+        json_discriminators(
+            documented_schemas(DESTRUCTIVE_WORKTREE_MUTATION, &["thread drop"]),
+            &[json_discriminator(Some("thread drop"), "output_kind", "thread")],
+        ),
     ),
     entry(
         &["thread", "approve"],
@@ -2588,7 +2770,14 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["thread", "revoke-approval"],
-        documented_schemas(MUTATING, &["thread revoke-approval"]),
+        json_discriminators(
+            documented_schemas(MUTATING, &["thread revoke-approval"]),
+            &[json_discriminator(
+                Some("thread revoke-approval"),
+                "output_kind",
+                "thread_revoke_approval",
+            )],
+        ),
     ),
     entry(
         &["thread", "check-merge"],
@@ -2596,7 +2785,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["thread", "cleanup"],
-        documented_schemas(DESTRUCTIVE_WORKTREE_MUTATION, &["thread cleanup"]),
+        json_discriminators(
+            documented_schemas(DESTRUCTIVE_WORKTREE_MUTATION, &["thread cleanup"]),
+            &[json_discriminator(Some("thread cleanup"), "output_kind", "thread.cleanup")],
+        ),
     ),
     entry(&["transaction"], hidden(GROUP)),
     entry(
@@ -5496,8 +5688,14 @@ mod tests {
         // Wire-format-stable list. PR #251 instrumented the initial set;
         // heddle#272 swept the named-by-persona verbs (stack, goto, fork,
         // revert, purge, redact, stash, clean, discuss, context, review,
-        // cherry-pick, bisect). Any further sweep MUST extend this list
-        // and document the addition.
+        // cherry-pick, bisect); heddle#641 swept the remaining verbs whose
+        // runtime JSON already emits `output_kind` (abort, adopt, the agent
+        // session verbs, blame, branch, bridge git push/pull, conflict show,
+        // continue, daemon stop, doctor, fetch, inspect, land, log,
+        // maintenance gc/index, merge --preview, pull, push, query, ready,
+        // the remote family, start, switch, sync, and the thread lifecycle
+        // verbs). Any further sweep MUST extend this list and document the
+        // addition.
         //
         // `clone` appears twice because hosted `clone --output json`
         // emits two JSON records per invocation (a preliminary
@@ -5511,10 +5709,27 @@ mod tests {
         assert_eq!(
             displays,
             vec![
+                // heddle#641 swept every remaining verb whose runtime JSON
+                // already carries `output_kind` (probed live + verified against
+                // the emitting structs). The values are the RUNTIME truths, not
+                // snake-cased display paths — see the overrides documented in
+                // tests/cli_integration/output_kind_invariant.rs.
+                "abort",
+                "adopt",
+                "agent serve",
+                "agent status",
+                "agent stop",
+                "agent capture",
+                "agent ready",
+                "blame",
+                "branch",
+                "branch",
                 "bridge git status",
                 "bridge git import",
                 "bridge git sync",
                 "bridge git reconcile",
+                "bridge git push",
+                "bridge git pull",
                 "bridge backfill-fidelity",
                 "capture",
                 "checkpoint",
@@ -5524,6 +5739,7 @@ mod tests {
                 "clone",
                 "commit",
                 "commands",
+                "continue",
                 "context set",
                 "context get",
                 "context list",
@@ -5534,22 +5750,36 @@ mod tests {
                 "context check",
                 "context suggest",
                 "context audit",
+                "daemon stop",
                 "diff",
                 "discuss open",
                 "discuss append",
                 "discuss resolve",
                 "discuss list",
                 "discuss show",
+                "doctor",
                 "doctor docs",
                 "doctor schemas",
+                "fetch",
                 "fork",
                 "goto",
                 "init",
+                // `log` appears twice: the entry advertises both `log` and the
+                // `log --reflog` variant (`log_reflog`), mirroring `undo`/`clone`.
+                "log",
+                "log",
+                "maintenance gc",
+                "maintenance index",
+                "merge",
                 "stack",
                 "stack ready",
                 "stack snapshot",
+                "pull",
                 "purge apply",
                 "purge list",
+                "push",
+                "query",
+                "ready",
                 "redact apply",
                 "redact list",
                 "redact show",
@@ -5557,34 +5787,131 @@ mod tests {
                 "redact trust list",
                 "redact trust remove",
                 "redo",
+                "remote list",
+                "remote add",
+                "remote remove",
+                "remote set-default",
+                "remote show",
                 "revert",
                 "review show",
                 "review sign",
                 "review next",
                 "review health",
                 "schemas",
+                "land",
+                "start",
                 "stash list",
                 "stash show",
                 "status",
+                "switch",
+                "switch",
+                "sync",
+                "thread create",
+                "thread switch",
                 "thread list",
                 "thread show",
+                "thread rename",
+                "thread refresh",
+                "thread resolve",
+                "thread promote",
+                "thread drop",
+                "thread revoke-approval",
+                "thread cleanup",
                 "verify",
-                // heddle#317 added the `visibility` verb family; each leaf
-                // advertises a JSON discriminator, so the wire-format-stable
-                // list is extended here per the documentation rule above.
                 "visibility set",
                 "visibility promote",
                 "visibility show",
                 "visibility list",
-                // `undo` advertises two output_kinds on one command path —
-                // `undo` and `undo_list` (`--list`) — so its path appears twice,
-                // mirroring how `clone` appears twice above. The former `redo`
-                // verb is its own top-level entry again (`redo`, above). See
-                // heddle#473.
                 "undo",
                 "undo",
                 "workspace show",
             ]
+        );
+    }
+
+    /// heddle#641 close-the-class conformance: every schema verb whose
+    /// JSON schema declares an `output_kind` property MUST have a
+    /// catalog discriminator whose value matches the schema's const.
+    ///
+    /// Why this closes the gap: `schema_for_verb` only injects the
+    /// `output_kind` enum-const into a schema when the catalog
+    /// advertises a discriminator for that verb. A verb whose mirror
+    /// struct declares `output_kind` (because the runtime payload
+    /// emits it) but whose catalog entry lacks the discriminator
+    /// therefore surfaces here as a *const-less* `output_kind`
+    /// property — exactly the advertise-nothing gap that left ~111
+    /// schema-bearing commands with `json_discriminators: []`. A new
+    /// command that emits `output_kind` without registering its
+    /// discriminator fails this test; one that registers a
+    /// discriminator that diverges from the schema const fails the
+    /// mismatch arm. Runtime-vs-catalog equality is enforced
+    /// separately by `tests/cli_integration/output_kind_invariant.rs`.
+    #[test]
+    fn schema_output_kind_discriminators_are_complete_and_consistent() {
+        use crate::cli::commands::schema_for_verb;
+
+        let mut missing = Vec::new();
+        let mut mismatched = Vec::new();
+        let mut checked = 0usize;
+
+        for verb in schema_verbs() {
+            let Some(schema) = schema_for_verb(verb) else {
+                panic!("catalog schema verb `{verb}` has no registered schema");
+            };
+            let Some(property) = schema
+                .get("properties")
+                .and_then(|properties| properties.get("output_kind"))
+            else {
+                // The schema does not declare `output_kind` — the verb's
+                // runtime payload genuinely lacks the discriminator (the
+                // UNSWEPT_TODO rolldown in output_kind_invariant.rs).
+                continue;
+            };
+            checked += 1;
+
+            let Some(discriminator) = command_json_discriminator_for_schema_verb(verb) else {
+                missing.push(format!(
+                    "`{verb}`: schema declares an `output_kind` property but the \
+                     catalog advertises no json_discriminator for it"
+                ));
+                continue;
+            };
+
+            let const_value = property
+                .get("enum")
+                .and_then(|values| values.as_array())
+                .and_then(|values| values.first())
+                .and_then(|value| value.as_str())
+                .or_else(|| property.get("const").and_then(|value| value.as_str()));
+            match const_value {
+                None => missing.push(format!(
+                    "`{verb}`: schema declares `output_kind` without an enum/const \
+                     even though the catalog advertises `{}` — the discriminator \
+                     injection regressed",
+                    discriminator.value
+                )),
+                Some(value) if value != discriminator.value => mismatched.push(format!(
+                    "`{verb}`: schema const `{value}` != catalog discriminator `{}`",
+                    discriminator.value
+                )),
+                Some(_) => {}
+            }
+        }
+
+        assert!(
+            missing.is_empty() && mismatched.is_empty(),
+            "Catalog json_discriminators drift from the schema `output_kind` contract. \
+             Register the discriminator with `json_discriminator(Some(\"<verb>\"), \
+             \"output_kind\", \"<runtime value>\")` on the command's catalog entry \
+             (the value must match what the command actually emits).\n\nMissing:\n  - {}\n\nMismatched:\n  - {}",
+            missing.join("\n  - "),
+            mismatched.join("\n  - ")
+        );
+        assert!(
+            checked >= 100,
+            "expected the conformance sweep to inspect the full discriminator \
+             surface (~107 schema verbs declare `output_kind`); only {checked} \
+             were checked — the schema injection or verb collection likely regressed"
         );
     }
 

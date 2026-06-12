@@ -759,24 +759,36 @@ impl<'a> GitBridge<'a> {
         import_all(self, git_path)
     }
 
-    /// Push to a Git remote.
-    pub fn push(&mut self, remote_name: &str) -> GitResult<()> {
+    /// Push to a Git remote. Returns the full names of the refs written
+    /// at the destination this invocation (see [`Self::push_with_scope_force`]).
+    pub fn push(&mut self, remote_name: &str) -> GitResult<Vec<String>> {
         self.push_with_scope(remote_name, GitPushScope::AllThreads)
     }
 
-    /// Push to a Git remote with an explicit ref scope.
-    pub fn push_with_scope(&mut self, remote_name: &str, scope: GitPushScope) -> GitResult<()> {
+    /// Push to a Git remote with an explicit ref scope. Returns the full
+    /// names of the refs written at the destination this invocation.
+    pub fn push_with_scope(
+        &mut self,
+        remote_name: &str,
+        scope: GitPushScope,
+    ) -> GitResult<Vec<String>> {
         self.push_with_scope_force(remote_name, scope, false)
     }
 
     /// Push to a Git remote with an explicit ref scope and optional
     /// non-fast-forward ref movement.
+    ///
+    /// Returns the full names (e.g. `refs/heads/<thread>`,
+    /// `refs/notes/heddle`, `refs/tags/<tag>`) of the refs WRITTEN at the
+    /// destination this invocation — creations, fast-forwards, and forced
+    /// rewinds — sorted for deterministic output. A no-op push returns an
+    /// empty list. Retraction deletes are not included.
     pub fn push_with_scope_force(
         &mut self,
         remote_name: &str,
         scope: GitPushScope,
         force: bool,
-    ) -> GitResult<()> {
+    ) -> GitResult<Vec<String>> {
         self.init_mirror()?;
         let current_branch = match scope {
             GitPushScope::CurrentThread => Some(self.current_attached_thread_for_push()?),
@@ -864,6 +876,8 @@ impl<'a> GitBridge<'a> {
     /// as a bare repo when it does not exist. `scope`/`current_branch` gate only
     /// MATERIALIZATION (a scoped push never publishes a brand-new sibling); `force`
     /// authorizes retracting an out-of-band destination tip and forcing a true fork.
+    ///
+    /// Returns the sorted full names of the refs written at the destination.
     fn copy_mirror_to_path(
         &mut self,
         target_path: &Path,
@@ -872,7 +886,7 @@ impl<'a> GitBridge<'a> {
         scope: GitPushScope,
         current_branch: Option<&str>,
         force: bool,
-    ) -> GitResult<()> {
+    ) -> GitResult<Vec<String>> {
         let mirror_repo = self.open_git_repo()?;
         let target_repo = if target_path.exists() {
             open_repo(target_path)?
@@ -942,7 +956,7 @@ impl<'a> GitBridge<'a> {
             delete_reference_if_present(&target_repo, &delete.full_name)?;
         }
         write_exported_refs(&target_repo, &plan.new_manifest)?;
-        Ok(())
+        Ok(planned_write_names(&plan))
     }
 
     /// Fetch Git refs and objects into the internal mirror without moving
@@ -2999,6 +3013,22 @@ pub(crate) struct DestinationReconcilePlan {
     pub(crate) new_manifest: HashMap<String, ObjectId>,
 }
 
+/// The sorted full names of the refs a destination reconcile plan WRITES —
+/// creations, fast-forwards, and forced embargo rewinds. This is the
+/// `refs_written` surface `heddle push` reports so a git veteran (or agent)
+/// can verify the round-trip with `git ls-remote`. Retraction deletes are
+/// not included. Sorted because the plan's write order derives from hash-map
+/// iteration and the reported list must be deterministic.
+pub(crate) fn planned_write_names(plan: &DestinationReconcilePlan) -> Vec<String> {
+    let mut names: Vec<String> = plan
+        .writes
+        .iter()
+        .map(|write| write.full_name.clone())
+        .collect();
+    names.sort_unstable();
+    names
+}
+
 /// The full ref names a push may MATERIALIZE (create fresh) at a destination — the
 /// `creatable_names` gate for [`plan_destination_reconcile`]. `None` for an
 /// all-thread push (every served ref is creatable, so the gate never fires);
@@ -3597,6 +3627,8 @@ fn fetch_network_remote(
     Ok(())
 }
 
+/// Push the served frontier to a URL/network remote. Returns the sorted
+/// full names of the refs written on the wire (see [`planned_write_names`]).
 fn push_network_remote(
     mirror_repo: &gix::Repository,
     heddle_dir: &Path,
@@ -3604,7 +3636,7 @@ fn push_network_remote(
     scope: GitPushScope,
     current_branch: Option<&str>,
     force: bool,
-) -> GitResult<()> {
+) -> GitResult<Vec<String>> {
     // The network destination's exported-refs record lives in heddle's own dir,
     // keyed by the remote URL (the remote has no local git dir to host the
     // sidecar). Read it BEFORE the empty-frontier fast-path: a retraction lands
@@ -3624,7 +3656,7 @@ fn push_network_remote(
     let managed_record = read_mirror_managed_refs(mirror_repo)?;
     let served_frontier = collect_managed_ref_updates(mirror_repo, &managed_record)?;
     if served_frontier.is_empty() && previously_exported.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let mut transport = gix_transport::client::blocking_io::connect::connect(
@@ -3680,7 +3712,7 @@ fn push_network_remote(
         // Nothing to move on the wire, but the record may still need to drop a
         // ref that was already absent at the remote.
         write_exported_refs_at(&manifest_path, &plan.new_manifest)?;
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     // Pack only the SURVIVORS' new objects — a delete carries no new object.
@@ -3711,7 +3743,7 @@ fn push_network_remote(
     // Only persist the record once the remote has acknowledged every command, so
     // a failed push never leaves a ref recorded as exported that did not land.
     write_exported_refs_at(&manifest_path, &plan.new_manifest)?;
-    Ok(())
+    Ok(planned_write_names(&plan))
 }
 
 fn remote_refs_from_receive_pack_handshake(

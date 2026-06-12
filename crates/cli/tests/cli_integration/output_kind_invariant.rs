@@ -108,6 +108,53 @@ const SWEPT: &[&str] = &[
     "review next",
     "review health",
     "cherry-pick",
+    // heddle#641 — swept the remaining verbs whose runtime JSON already
+    // emits `output_kind`. Every value below was probed live against the
+    // built binary (or read off the emitting struct for the daemon-style
+    // verbs that can't run in a synthetic fixture); several carry
+    // wire-frozen values that differ from the snake-cased display path —
+    // see `output_kind_override`.
+    "abort",
+    "adopt",
+    "agent capture",
+    "agent ready",
+    "agent serve",
+    "agent status",
+    "agent stop",
+    "blame",
+    "branch",
+    "bridge git pull",
+    "bridge git push",
+    "continue",
+    "daemon stop",
+    "doctor",
+    "fetch",
+    "land",
+    "log",
+    "maintenance gc",
+    "maintenance index",
+    "merge",
+    "pull",
+    "push",
+    "query",
+    "ready",
+    "remote add",
+    "remote list",
+    "remote remove",
+    "remote set-default",
+    "remote show",
+    "start",
+    "switch",
+    "sync",
+    "thread cleanup",
+    "thread create",
+    "thread drop",
+    "thread promote",
+    "thread refresh",
+    "thread rename",
+    "thread resolve",
+    "thread revoke-approval",
+    "thread switch",
 ];
 
 /// The catalog itself advertises its container kind as `"kind":
@@ -121,41 +168,26 @@ const KIND_FIELD_EXCEPTIONS: &[&str] = &["commands"];
 /// up the sweep instead. This list is the rolldown surface for
 /// follow-up work tracked separately from #272.
 const UNSWEPT_TODO: &[&str] = &[
-    "abort",
-    "adopt",
     "actor done",
     "actor explain",
     "actor list",
     "actor show",
     "actor spawn",
-    "agent capture",
     "agent heartbeat",
     "agent list",
-    "agent ready",
     "agent release",
     "agent reserve",
-    "agent serve",
-    "agent status",
-    "agent stop",
     "attempt",
-    "blame",
-    "branch",
     "bridge git export",
     "bridge git ingest",
     "bridge git init",
-    "bridge git pull",
-    "bridge git push",
     "bridge git reason",
     "collapse",
     "conflict list",
     "conflict show",
-    "continue",
     "daemon serve",
     "daemon status",
-    "daemon stop",
     "delegate",
-    "doctor",
-    "fetch",
     "fsck",
     "git-overlay",
     "harness-bridge",
@@ -170,9 +202,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "integration relay",
     "integration uninstall",
     "integration upgrade",
-    "log",
-    "maintenance gc",
-    "maintenance index",
     "maintenance inspect",
     "maintenance monitor",
     "maintenance run",
@@ -180,17 +209,7 @@ const UNSWEPT_TODO: &[&str] = &[
     "marker delete",
     "marker list",
     "marker show",
-    "merge",
-    "pull",
-    "push",
-    "query",
     "rebase",
-    "ready",
-    "remote add",
-    "remote list",
-    "remote remove",
-    "remote set-default",
-    "remote show",
     "resolve",
     "retro",
     "semantic hot",
@@ -199,32 +218,19 @@ const UNSWEPT_TODO: &[&str] = &[
     "session segment",
     "session show",
     "session start",
-    "land",
     "show",
     "stash apply",
     "stash clear",
     "stash drop",
     "stash pop",
     "stash push",
-    "start",
-    "switch",
-    "sync",
     "thread absorb",
     "thread approvals",
     "thread approve",
     "thread captures",
     "thread check-merge",
-    "thread cleanup",
-    "thread create",
     "thread current",
-    "thread drop",
     "thread move",
-    "thread promote",
-    "thread refresh",
-    "thread rename",
-    "thread resolve",
-    "thread revoke-approval",
-    "thread switch",
     "transaction abort",
     "transaction begin",
     "transaction commit",
@@ -252,6 +258,38 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         // `workspace_summary` (the underlying struct's semantic name)
         // rather than the snake-cased path. Wire-format-stable.
         "workspace show" => Some("workspace_summary"),
+        // heddle#641 — runtime-probed wire values that pre-date the
+        // snake-cased-path rule. The catalog advertises what the
+        // commands actually emit TODAY; renaming any of these is a
+        // wire-format break that must update the emitting struct, the
+        // catalog discriminator, and this override in lockstep.
+        //
+        // `agent capture` / `agent ready` are session-validated
+        // aliases that delegate to `cmd_snapshot` / `cmd_ready`, so
+        // they emit the delegate's kind.
+        "agent capture" => Some("capture"),
+        "agent ready" => Some("ready"),
+        // Git-compat verbs delegate to the thread family and emit the
+        // delegate's kind.
+        "branch" => Some("thread_list"),
+        "start" => Some("thread_start"),
+        "switch" => Some("thread_switch"),
+        // `doctor` is implemented by the diagnose module.
+        "doctor" => Some("diagnose"),
+        // The maintenance wrappers emit their inner tool's kind.
+        "maintenance gc" => Some("gc"),
+        "maintenance index" => Some("index"),
+        // The thread lifecycle verbs that route through the shared
+        // operator envelope emit the generic `thread` (drop / promote /
+        // refresh), `resolve`, or the dotted `thread.cleanup` action
+        // name. Flagged as struct-level inconsistencies for a follow-up
+        // sweep; until the structs change, the catalog must advertise
+        // the live values.
+        "thread cleanup" => Some("thread.cleanup"),
+        "thread drop" => Some("thread"),
+        "thread promote" => Some("thread"),
+        "thread refresh" => Some("thread"),
+        "thread resolve" => Some("resolve"),
         _ => None,
     }
 }
@@ -643,6 +681,26 @@ fn runtime_invocation_args(display: &str) -> Option<(&'static [&'static str], bo
         "review health" => Some((&["review", "health"], true)),
         // `fork` succeeds in an init'd repo (forks the empty initial state).
         "fork" => Some((&["fork"], true)),
+        // heddle#641 — the swept verbs that run clean (exit 0, full JSON
+        // payload) in the shared init'd fixture, verified live before
+        // being added here. Each pins runtime emission against the
+        // catalog value, including the override-table verbs (`branch` →
+        // `thread_list`, `doctor` → `diagnose`, `inspect` →
+        // `thread_show`, `maintenance gc`/`index` → `gc`/`index`).
+        // `inspect` names `main` explicitly because the earlier `fork`
+        // invocation leaves the shared fixture without a current
+        // thread; `ready` (which rejects imported-Git-ref targets and
+        // has no equivalent escape hatch here) is runtime-covered by
+        // its `agent ready` delegation probe instead.
+        "abort" => Some((&["abort"], true)),
+        "branch" => Some((&["branch"], true)),
+        "continue" => Some((&["continue"], true)),
+        "doctor" => Some((&["doctor"], true)),
+        "log" => Some((&["log"], true)),
+        "maintenance gc" => Some((&["maintenance", "gc"], true)),
+        "maintenance index" => Some((&["maintenance", "index"], true)),
+        "query" => Some((&["query"], true)),
+        "remote list" => Some((&["remote", "list"], true)),
         _ => None,
     }
 }
@@ -933,6 +991,13 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             .expect("visibility set");
             (t, sv(&["visibility", "list"]))
         }
+        // heddle#641 — the newly-swept generic-schema verbs. Their opaque
+        // mirrors pin no fields, so the documented sample must be compared
+        // against the live payload here.
+        "gc" => (init_fixture(), sv(&["maintenance", "gc"])),
+        // Stopping a daemon that is not running still exits 0 with the
+        // full `daemon_stop` payload, so a bare init fixture suffices.
+        "daemon_stop" => (init_fixture(), sv(&["daemon", "stop"])),
         _ => return None,
     };
     Some(case)
@@ -977,19 +1042,36 @@ fn doc_samples_match_runtime_for_every_catalog_discriminator() {
     // (b) fails for them and they are forced down path (a). A new generic-schema
     // verb documented without a runtime case here fails this test rather than
     // deferring to a later round.
+    //
+    // heddle#641: the loop is grouped per VALUE rather than per (display,
+    // value) row because one wire value can be advertised by several
+    // commands (`thread_list` by `thread list` AND its `branch` alias;
+    // `ready` by `ready` AND `agent ready`; `thread` by the drop/promote/
+    // refresh trio). `doc_sample_top_level_keys` resolves a value to ONE
+    // documented sample, so the sample is guarded once — by the runtime
+    // case, or by ANY advertising display whose schema pins every
+    // documented key. Requiring EVERY display to pin would force alias
+    // schemas (e.g. `branch`'s mutation mirror) to model their sibling's
+    // listing shape.
     let doc = read_json_schemas_doc();
 
     let mut failures = Vec::new();
     let mut covered_by_runtime = 0usize;
     let mut covered_by_schema = 0usize;
 
+    // value -> displays advertising it (schema-verb-backed rows only;
+    // transport-envelope discriminators like `clone_connection` have no
+    // schema verb and no documented sample — they are pinned separately).
+    let mut advertising: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
     for (display, value, has_schema_verb) in catalog_output_kind_discriminators() {
-        // Transport-envelope discriminators (e.g. `clone_connection`) have no
-        // schema verb and no documented sample; they are pinned separately.
-        if !has_schema_verb {
-            continue;
+        if has_schema_verb {
+            advertising.entry(value).or_default().push(display);
         }
-        let Some(doc_keys) = doc_sample_top_level_keys(&doc, &value) else {
+    }
+
+    for (value, displays) in &advertising {
+        let Some(doc_keys) = doc_sample_top_level_keys(&doc, value) else {
             // This value is not individually documented (it rides a grouped
             // sample under a representative sibling, e.g. `redo` under `undo`,
             // `purge list` under `purge_apply`) — nothing to compare here.
@@ -1002,12 +1084,12 @@ fn doc_samples_match_runtime_for_every_catalog_discriminator() {
         // the key is present by construction; assert it defensively.
         if !doc_keys.contains("output_kind") {
             failures.push(format!(
-                "{value} ({display}): documented sample is missing the `output_kind` key"
+                "{value} ({displays:?}): documented sample is missing the `output_kind` key"
             ));
             continue;
         }
 
-        if let Some((fixture, argv)) = runtime_doc_case(&value) {
+        if let Some((fixture, argv)) = runtime_doc_case(value) {
             let argv_refs: Vec<&str> = std::iter::once("--output")
                 .chain(std::iter::once("json"))
                 .chain(argv.iter().map(String::as_str))
@@ -1015,14 +1097,14 @@ fn doc_samples_match_runtime_for_every_catalog_discriminator() {
             let runtime_keys = runtime_top_level_keys(&argv_refs, fixture.path());
             if !runtime_keys.contains("output_kind") {
                 failures.push(format!(
-                    "{value} ({display}): runtime payload is missing `output_kind` (keys: {runtime_keys:?})"
+                    "{value} ({displays:?}): runtime payload is missing `output_kind` (keys: {runtime_keys:?})"
                 ));
             }
             if doc_keys != runtime_keys {
                 let doc_only: Vec<&String> = doc_keys.difference(&runtime_keys).collect();
                 let runtime_only: Vec<&String> = runtime_keys.difference(&doc_keys).collect();
                 failures.push(format!(
-                    "{value} ({display}): documented sample does not match the live \
+                    "{value} ({displays:?}): documented sample does not match the live \
                      `--output json` payload.\n      in doc only:     {doc_only:?}\n      \
                      in runtime only: {runtime_only:?}\n      doc keys:     {doc_keys:?}\n      \
                      runtime keys: {runtime_keys:?}"
@@ -1032,21 +1114,24 @@ fn doc_samples_match_runtime_for_every_catalog_discriminator() {
             continue;
         }
 
-        // No runtime case: the registered schema MUST pin every documented
-        // key, otherwise the sample is unguarded and could drift freely.
-        let schema_props = schema_property_names(&display);
-        let unpinned: Vec<&String> = doc_keys
-            .iter()
-            .filter(|k| k.as_str() != "output_kind")
-            .filter(|k| !schema_props.contains(*k))
-            .collect();
-        if unpinned.is_empty() {
+        // No runtime case: at least one advertising display's registered
+        // schema MUST pin every documented key, otherwise the sample is
+        // unguarded and could drift freely.
+        let pinned_by_some_display = displays.iter().any(|display| {
+            let schema_props = schema_property_names(display);
+            doc_keys
+                .iter()
+                .filter(|k| k.as_str() != "output_kind")
+                .all(|k| schema_props.contains(k))
+        });
+        if pinned_by_some_display {
             covered_by_schema += 1;
         } else {
             failures.push(format!(
-                "{value} ({display}): no runtime case AND its registered schema does not pin \
-                 documented keys {unpinned:?} (schema is generic). Add a `runtime_doc_case` arm \
-                 so the sample is checked against the live payload."
+                "{value} ({displays:?}): no runtime case AND no advertising display's \
+                 registered schema pins every documented key (schema is generic or models \
+                 a different shape). Add a `runtime_doc_case` arm so the sample is checked \
+                 against the live payload."
             ));
         }
     }

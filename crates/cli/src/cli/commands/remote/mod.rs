@@ -53,6 +53,7 @@ pub(crate) fn push_git_overlay_refs(
     GitPushScope,
     Option<String>,
     Option<GitOverlayTrackingRefresh>,
+    Vec<String>,
     super::git_overlay_health::RepositoryVerificationState,
 )> {
     let remote_name = resolve_default_remote_name(repo, remote)?;
@@ -70,10 +71,17 @@ pub(crate) fn push_git_overlay_refs(
         None
     };
     let mut bridge = GitBridge::new(repo);
-    bridge.push_with_scope_force(&remote_name, scope, force)?;
+    let refs_written = bridge.push_with_scope_force(&remote_name, scope, force)?;
     let tracking_refresh = refresh_git_tracking_after_overlay_push(repo, &remote_name)?;
     let trust = build_repository_verification_state(repo);
-    Ok((remote_name, scope, current_thread, tracking_refresh, trust))
+    Ok((
+        remote_name,
+        scope,
+        current_thread,
+        tracking_refresh,
+        refs_written,
+        trust,
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +114,14 @@ struct PushOutput {
     ref_scope: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     git_notes_ref: Option<&'static str>,
+    /// The full ref names this push actually wrote at the destination —
+    /// `refs/heads/<thread>`, `refs/notes/heddle`, `refs/tags/<tag>` —
+    /// sorted, empty for a no-op push. Present on the Git-overlay refs
+    /// path (`transport: "git"`); omitted on the native Heddle transport,
+    /// which writes Heddle thread refs, not Git refs. Verifiable with
+    /// `git ls-remote <remote>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refs_written: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     git_notes_visibility_warning: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -252,7 +268,7 @@ pub async fn cmd_push(
                 ));
             }
         }
-        let (remote_name, scope, current_thread, tracking_refresh, trust) =
+        let (remote_name, scope, current_thread, tracking_refresh, refs_written, trust) =
             push_git_overlay_refs(&repo, remote.as_deref(), all_threads, force)?;
         if should_output_json(cli, Some(repo.config())) {
             let output = git_overlay_push_output(
@@ -260,6 +276,7 @@ pub async fn cmd_push(
                 scope,
                 current_thread,
                 tracking_refresh,
+                refs_written,
                 force,
                 trust,
             );
@@ -452,11 +469,11 @@ fn render_mirror_outcome(
     cli: &Cli,
     repo: &Repository,
     mirror_remote: &str,
-    outcome: crate::bridge::GitResult<()>,
+    outcome: crate::bridge::GitResult<Vec<String>>,
 ) {
     let json = should_output_json(cli, Some(repo.config()));
     match outcome {
-        Ok(()) => {
+        Ok(_) => {
             if json {
                 // Stderr (not stdout): the primary push already wrote
                 // the documented single JSON object to stdout. Emitting
@@ -501,6 +518,7 @@ fn git_overlay_push_output(
     scope: GitPushScope,
     current_thread: Option<String>,
     tracking_refresh: Option<GitOverlayTrackingRefresh>,
+    refs_written: Vec<String>,
     force: bool,
     trust: RepositoryVerificationState,
 ) -> PushOutput {
@@ -542,6 +560,7 @@ fn git_overlay_push_output(
             GitPushScope::AllThreads => "all_threads_tags_and_heddle_notes",
         }),
         git_notes_ref: Some("refs/notes/heddle"),
+        refs_written: Some(refs_written),
         git_notes_visibility_warning: Some(
             "ordinary `git log --all` may show Heddle metadata commits from refs/notes/heddle",
         ),
@@ -582,6 +601,7 @@ fn heddle_push_output(
         push_scope: None,
         ref_scope: None,
         git_notes_ref: None,
+        refs_written: None,
         git_notes_visibility_warning: None,
         git_tracking_remote: None,
         git_remote_configured: None,

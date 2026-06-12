@@ -1086,6 +1086,7 @@ pub struct BranchCompatSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SwitchCheckoutSchema {
+    pub output_kind: Option<String>,
     pub name: Option<String>,
     pub message: String,
     pub thread: Option<ThreadSummarySchema>,
@@ -1188,6 +1189,7 @@ pub struct SyncSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct LandSchema {
+    pub output_kind: Option<String>,
     pub status: String,
     pub action: String,
     pub message: String,
@@ -1332,6 +1334,7 @@ pub struct ThreadApprovalListSchema(pub Vec<ThreadApprovalSchema>);
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ThreadRevokeApprovalSchema {
+    pub output_kind: String,
     pub deleted: bool,
     pub id: String,
 }
@@ -1829,6 +1832,11 @@ pub struct PushSchema {
     pub ref_scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_notes_ref: Option<String>,
+    /// Full ref names this push wrote at the destination (sorted; empty
+    /// for a no-op push). Present on the Git-overlay refs path; omitted
+    /// on the native Heddle transport. Verify with `git ls-remote`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refs_written: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_notes_visibility_warning: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

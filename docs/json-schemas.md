@@ -559,6 +559,7 @@ saves a Heddle state without recommending a Git checkpoint.
 
 ```json
 {
+  "output_kind": "ready",
   "status": "completed",
   "action": "ready",
   "message": "Thread 'feature/parser' is ready to integrate",
@@ -577,6 +578,7 @@ saves a Heddle state without recommending a Git checkpoint.
 
 ```json
 {
+  "output_kind": "land",
   "status": "landed",
   "action": "land",
   "message": "Landed thread 'feature/parser'",
@@ -756,6 +758,7 @@ available, checkout paths, and post-command verification.
 
 ```json
 {
+  "output_kind": "thread_create",
   "name": "feature/parser",
   "message": "Created thread 'feature/parser' at hd-sqr398dvx9ay",
   "thread": null,
@@ -809,7 +812,7 @@ List recent saved states on a thread.
 
 ```json
 {
-  "output_kind": "thread_drop",
+  "output_kind": "thread",
   "status": "completed",
   "action": "thread drop",
   "name": "feature/parser",
@@ -866,6 +869,7 @@ Report manual follow-up after a blocked or refreshed thread.
 
 ```json
 {
+  "output_kind": "resolve",
   "status": "completed",
   "action": "resolve",
   "message": "Thread requires a manual follow-up",
@@ -925,6 +929,7 @@ emits an array of the same object.
 
 ```json
 {
+  "output_kind": "thread_revoke_approval",
   "deleted": true,
   "id": "apr_123"
 }
@@ -957,6 +962,7 @@ emits an array of the same object.
 
 ```json
 {
+  "output_kind": "thread.cleanup",
   "status": "completed",
   "action": "thread.cleanup",
   "message": "would drop 1 merged thread(s) (would reclaim 12.0 KB)",
@@ -1279,6 +1285,7 @@ Background startup refusals use the shared error envelope.
 
 ```json
 {
+  "output_kind": "agent_serve",
   "status": "stopped",
   "socket_path": "/work/project/.heddle/sockets/grpc.sock",
   "pid_path": "/work/project/.heddle/sockets/grpc.pid"
@@ -1291,6 +1298,7 @@ Background startup refusals use the shared error envelope.
 
 ```json
 {
+  "output_kind": "agent_status",
   "running": false,
   "pid": null,
   "socket_path": "/work/project/.heddle/sockets/grpc.sock",
@@ -1324,6 +1332,7 @@ Background startup refusals use the shared error envelope.
 
 ```json
 {
+  "output_kind": "agent_stop",
   "stopped": false,
   "swept_stale": false,
   "pid": null,
@@ -1367,6 +1376,7 @@ shape is the same capture envelope.
 
 ```json
 {
+  "output_kind": "capture",
   "status": "captured",
   "action": "capture",
   "change_id": "hd-sqr398dvx9ay",
@@ -1388,6 +1398,7 @@ the same ready envelope.
 
 ```json
 {
+  "output_kind": "ready",
   "status": "completed",
   "action": "ready",
   "message": "Thread is ready.",
@@ -1511,6 +1522,7 @@ the same ready envelope.
 
 ```json
 {
+  "output_kind": "fetch",
   "remote": "origin",
   "refs_fetched": 1,
   "objects_fetched": 2
@@ -1561,6 +1573,7 @@ the same ready envelope.
   "push_scope": "current_thread",
   "ref_scope": "branch_and_heddle_notes",
   "git_notes_ref": "refs/notes/heddle",
+  "refs_written": ["refs/heads/main", "refs/notes/heddle"],
   "git_notes_visibility_warning": "ordinary `git log --all` may show Heddle metadata commits from refs/notes/heddle",
   "git_tracking_remote": "origin",
   "git_remote_configured": {
@@ -1599,6 +1612,7 @@ the same ready envelope.
 | `push_scope`, `ref_scope`, `tags_included`, `thread` | string/bool \| null | Git-overlay push only | Whether the push published only the current thread or all threads, the concrete Git ref scope, whether tags were included, and the thread whose branch was pushed. |
 | `force`, `force_discard_warning` | bool/string \| null | Git-overlay push only | Present for Git-overlay push. `force_discard_warning` is non-null when `--force` may move remote refs backward or discard remote-only commits. |
 | `git_notes_ref`, `git_notes_visibility_warning` | string \| null | Git-overlay push only | Heddle metadata notes ref carried with the push and the human-visible Git disclosure for that ref. |
+| `refs_written` | array<string> \| null | push | The fully-qualified Git refs this invocation actually wrote (e.g. `refs/heads/<thread>`, `refs/notes/heddle`); empty when the push was a no-op. Lets callers verify the round-trip with `git ls-remote`. |
 | `git_tracking_remote`, `git_remote_configured`, `git_upstream_configured` | mixed | Git-overlay push only | Git config side effects when Heddle configures a remote or branch upstream during push. |
 | `next_action`, `recommended_action`, `next_action_template`, `recommended_action_template` | mixed | required for push | Post-push action metadata promoted from verification; all are `null` when the push closes the remote loop. |
 | `verification` | object | required for pull/push | Post-transfer verification proof. |
@@ -1614,6 +1628,7 @@ imports the requested Git refs, and returns the post-adoption verification proof
 
 ```json
 {
+  "output_kind": "adopt",
   "adopted": true,
   "initialized": true,
   "path": "/repo/.heddle",
@@ -1712,6 +1727,7 @@ State history walking from a given starting state.
 
 ```json
 {
+  "output_kind": "log",
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
   "states": [
@@ -2399,6 +2415,7 @@ is to surface every relevant signal for the operator.
 
 ```json
 {
+  "output_kind": "diagnose",
   "repository": "/work/project",
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
@@ -2647,6 +2664,7 @@ Operator recovery commands share one command-result envelope.
 
 ```json
 {
+  "output_kind": "continue",
   "status": "continued",
   "action": "continue",
   "message": "Operation continued",
@@ -2665,6 +2683,7 @@ Refresh the active or named thread, or report the verification/action blocker.
 
 ```json
 {
+  "output_kind": "sync",
   "status": "refreshed",
   "action": "sync",
   "message": "Refreshed thread 'feature/parser'",
@@ -2738,6 +2757,7 @@ name, delete, or rename it emits a thread operation result.
 
 ```json
 {
+  "output_kind": "thread_create",
   "name": "feature/parser",
   "message": "Created thread 'feature/parser' at hd-sqr398dvx9ay",
   "thread": {
@@ -2800,6 +2820,7 @@ shape when the target resolves as a state rather than a thread.
 
 ```json
 {
+  "output_kind": "thread_switch",
   "name": "feature/parser",
   "message": "Switched to thread 'feature/parser'",
   "thread": null,
@@ -2931,7 +2952,7 @@ a structured object (`provider`, `model`, optional `session_id` /
 required:
 
 ```json
-{"file": "src/lib.rs", "context": [], "lines": [{"line_number": 1, "content": "pub fn run() {}", "change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z", "origins": [{"change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z"}]}]}
+{"output_kind": "blame", "file": "src/lib.rs", "context": [], "lines": [{"line_number": 1, "content": "pub fn run() {}", "change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z", "origins": [{"change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z"}]}]}
 ```
 
 `heddle bridge git ingest|reason --output json` emit:
@@ -2978,10 +2999,18 @@ true` and `status` is `"applied"`:
 {"output_kind": "context_list", "items": [{"target_kind": "file", "target": "src/lib.rs", "annotations": [{"annotation_id": "hd-hy06md66hab4qb5ctkwphyc22r", "attribution": "A. Engineer <a@example.com>", "content": "returns false on timing mismatch", "created_at": 1767225600, "kind": "rationale", "revision_count": 1, "scope": "file", "status": "active", "supersedes_annotation_id": null, "supersedes_rewrite_pct": null, "tags": []}]}]}
 ```
 
-`heddle daemon serve|status|stop --output json` emit:
+`heddle daemon serve|status --output json` emit:
 
 ```json
 {"running": true, "pid": 4242, "endpoint": "/work/project/.heddle/daemon.sock", "mounts": 1, "stopped": false}
+```
+
+`heddle daemon stop --output json` emits its own envelope (`status` is
+`"stopped"` after a live daemon shuts down, `"not_running"` when there was
+nothing to stop — both exit 0):
+
+```json
+{"output_kind": "daemon_stop", "action": "daemon stop", "status": "not_running"}
 ```
 
 `heddle discuss open|append|resolve|show --output json` emit (each carries
@@ -3029,10 +3058,18 @@ names a new thread for the fork):
 {"integrations": [{"name": "github", "installed": true, "version": "1"}], "installed": true, "uninstalled": false, "upgraded": false, "issues": []}
 ```
 
-`heddle maintenance inspect|run|gc|monitor --output json` emit:
+`heddle maintenance inspect|run|monitor --output json` emit:
 
 ```json
 {"ok": true, "tasks": [{"name": "gc", "status": "skipped"}], "objects_removed": 0, "index_updated": true, "monitoring": false}
+```
+
+`heddle maintenance gc --output json` emits the pack/prune report (counts
+are zero on a fresh repository; `pinned_redactions` / `preserved_redactions`
+report redacted blobs the collector refused to touch):
+
+```json
+{"output_kind": "gc", "action": "gc", "status": "ok", "dry_run": false, "prune": false, "packed_count": 1, "bytes_saved": 0, "pruned_loose": 0, "bytes_freed": 0, "pinned_redactions": 0, "preserved_redactions": 0, "pruned_git_mapping_entries": 0}
 ```
 
 `heddle purge apply|list --output json` emit (each carries `output_kind`
@@ -3047,7 +3084,7 @@ set to the snake-cased subcommand, e.g. `purge_apply`, `purge_list`).
 `heddle query --output json` emits:
 
 ```json
-{"hits": [{"seq": 1, "timestamp_secs": 1767225600, "verb": "capture", "actor_email": "a@example.com", "operation_id": "op-123", "thread": "main", "symbols": ["verify"], "signal_kinds": ["test_passed"], "change_id": "hd-sqr398dvx9ay"}]}
+{"output_kind": "query", "hits": [{"seq": 1, "timestamp_secs": 1767225600, "verb": "capture", "actor_email": "a@example.com", "operation_id": "op-123", "thread": "main", "symbols": ["verify"], "signal_kinds": ["test_passed"], "change_id": "hd-sqr398dvx9ay"}]}
 ```
 
 `heddle rebase --output json` emits:
