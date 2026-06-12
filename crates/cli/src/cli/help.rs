@@ -515,63 +515,65 @@ need them.\n";
 // one-paragraph version on the top-level `heddle help`). The global
 // `--output` flag's own help is one line pointing here, so the contract
 // is not restated on every command's --help (heddle#652).
-const OUTPUT_FORMATS_TOPIC: &str = "Output formats — `--output text | json | json-compact`.\n\
-\n\
-`text` is the default, always. There is no TTY/pipe auto-detection — the\n\
-default never switches under you, so scripts and humans see the same thing\n\
-until a flag says otherwise.\n\
-\n\
-`--output json` emits the full machine contract: a stable `output_kind`\n\
-discriminator, exit codes, and recovery templates. Schemas per verb:\n\
-`heddle schemas <verb>`; the catalog of which commands emit what:\n\
-`heddle commands --output json`.\n\
-\n\
-`--output json-compact` emits only the decision-surface fields —\n\
-`output_kind`, `status`/`coordination_status`, `blockers`, `next_action`,\n\
-`changed_paths`, `conflicts` — fewer tokens, same `output_kind`, so callers\n\
-can still dispatch on it. Commands advertise `supports_json_compact` in the\n\
-command catalog.\n\
-\n\
-Related: `heddle help operation-ids` for idempotent retries, `heddle help\n\
-agent-flags` for capture attribution overrides.\n";
+const OUTPUT_FORMATS_TOPIC: &str = r#"Output formats — `--output text | json | json-compact`.
+
+`text` is the default, always. There is no TTY/pipe auto-detection — the
+default never switches under you, so scripts and humans see the same thing
+until a flag says otherwise.
+
+`--output json` emits the full machine contract: a stable `output_kind`
+discriminator, exit codes, and recovery templates. Schemas per verb:
+`heddle schemas <verb>`; the catalog of which commands emit what:
+`heddle commands --output json`.
+
+`--output json-compact` emits only the decision-surface fields —
+`output_kind`, `status`/`coordination_status`, `blockers`, `next_action`,
+`changed_paths`, `conflicts` — fewer tokens, same `output_kind`, so callers
+can still dispatch on it. Commands advertise `supports_json_compact` in the
+command catalog.
+
+Related: `heddle help operation-ids` for idempotent retries, `heddle help
+agent-flags` for capture attribution overrides.
+"#;
 
 // `heddle clone --help` keeps the signature + flags + a one-screen
 // summary; this topic carries the full default-thread fallback chain and
 // --depth exposition that used to bloat the after-help (heddle#652).
-const CLONE_TOPIC: &str = "Cloning — Git repositories and Heddle remotes.\n\
-\n\
-    heddle clone <remote> <dir> [--thread <name>] [--depth <n>]\n\
-\n\
-Run `heddle clone --help` for the flag list.\n\
-\n\
-# Which thread the clone lands on (no --thread)\n\
-\n\
-- Git-overlay clones (cloning a Git repository) land on the remote's\n\
-  advertised default branch (its Git HEAD); if the remote advertises\n\
-  none, they fall back to a thread named `main`, then to the\n\
-  alphabetically first imported thread.\n\
-- Native-local and hosted Heddle clones target `main` directly with no\n\
-  fallback chain; if the remote has no `main` thread the clone fails —\n\
-  pass `--thread <name>` to select one.\n\
-- Clone never prompts.\n\
-\n\
-# Shallow clones (--depth, Heddle remotes only)\n\
-\n\
-`--depth 0` (the default) clones full history. `--depth N` fetches only\n\
-the tip plus N generations of ancestry, so `heddle log` stops at the\n\
-depth boundary; history older than that is not present locally —\n\
-re-clone at a greater `--depth` (or `--depth 0`) to obtain it.\n\
-Git-overlay clones reject a nonzero `--depth`; `--depth 0` is accepted\n\
-and clones full history.\n\
-\n\
-Depth controls history extent only — how many states the clone fetches —\n\
-and says nothing about object contents. Whether a state's blobs are\n\
-present locally or fetched lazily is a separate concern that `--depth`\n\
-never governs (see the hidden `--lazy` / `--filter blob:none` flags in\n\
-`heddle clone --help`; hosted/network Heddle remotes only).\n\
-\n\
-See `heddle help threads` for the thread model and `heddle help remotes`\n\
-for remote management.\n";
+const CLONE_TOPIC: &str = r#"Cloning — Git repositories and Heddle remotes.
+
+    heddle clone <remote> <dir> [--thread <name>] [--depth <n>]
+
+Run `heddle clone --help` for the flag list.
+
+# Which thread the clone lands on (no --thread)
+
+- Git-overlay clones (cloning a Git repository) land on the remote's
+  advertised default branch (its Git HEAD); if the remote advertises
+  none, they fall back to a thread named `main`, then to the
+  alphabetically first imported thread.
+- Native-local and hosted Heddle clones target `main` directly with no
+  fallback chain; if the remote has no `main` thread the clone fails —
+  pass `--thread <name>` to select one.
+- Clone never prompts.
+
+# Shallow clones (--depth, Heddle remotes only)
+
+--depth 0 (the default) clones full history. --depth N fetches only the
+tip plus N generations of ancestry (--depth 1: the tip plus its immediate parents),
+so `heddle log` stops at the depth boundary; history older than that is
+not present locally — re-clone at a greater --depth (or --depth 0) to
+obtain it. Git-overlay clones reject a nonzero --depth; --depth 0 is accepted
+and clones full history.
+
+Depth controls history extent only — how many states the clone fetches —
+and says nothing about object contents. Whether a state's blobs are
+present locally or fetched lazily is a separate concern that `--depth`
+never governs (see the hidden `--lazy` / `--filter blob:none` flags in
+`heddle clone --help`; hosted/network Heddle remotes only).
+
+See `heddle help threads` for the thread model and `heddle help remotes`
+for remote management.
+"#;
 
 const AGENT_FLAGS_TOPIC: &str = r#"Agent automation flags for `heddle capture`.
 
