@@ -13,6 +13,7 @@ use objects::{
 
 use super::oplog_types::{
     ConditionalCommitOutcome, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
+    ThreadUpdateSnapshots,
 };
 
 /// Before/after snapshots of a per-state visibility sidecar, captured around a
@@ -242,8 +243,10 @@ pub trait OpLogBackend: Send + Sync {
                 name: name.to_string(),
                 old_state: *old_state,
                 new_state: *new_state,
-                old_manager_snapshot,
-                new_manager_snapshot,
+                manager_snapshots: ThreadUpdateSnapshots::from_parts(
+                    old_manager_snapshot,
+                    new_manager_snapshot,
+                ),
             }],
             scope,
         )?;

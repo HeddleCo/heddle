@@ -415,9 +415,8 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
     }
     if blockers.is_empty() {
         let manager = super::thread_cmd::thread_manager(&repo);
-        let old_state = current_thread_ref_state(&repo, &thread)?;
+        let thread_state = current_thread_ref_state(&repo, &thread)?;
         let old_manager_snapshot = manager.snapshot_thread_record(&thread.thread)?;
-        let new_state = current_thread_ref_state(&repo, &thread)?;
         thread.integration_policy_result.status = Some("manual_resolved".to_string());
         thread.integration_policy_result.reason =
             Some("manual integration resolution captured".to_string());
@@ -429,8 +428,8 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
             &repo,
             &manager,
             &thread,
-            old_state,
-            new_state,
+            thread_state,
+            thread_state,
             old_manager_snapshot,
         )?;
     }

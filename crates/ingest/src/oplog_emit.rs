@@ -214,8 +214,7 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
                             name: short_name.to_string(),
                             old_state: old_cid,
                             new_state: new_cid,
-                            old_manager_snapshot: None,
-                            new_manager_snapshot: None,
+                            manager_snapshots: None,
                         }],
                         scope,
                     )

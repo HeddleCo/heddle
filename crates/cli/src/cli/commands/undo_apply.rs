@@ -661,11 +661,14 @@ fn apply_undo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         OpRecord::ThreadUpdate {
             name,
             old_state,
-            old_manager_snapshot,
+            manager_snapshots,
             ..
         } => {
             steps.set_thread(name.as_str(), *old_state)?;
-            if let Some(bytes) = old_manager_snapshot {
+            if let Some(bytes) = manager_snapshots
+                .as_ref()
+                .and_then(|snapshots| snapshots.old.as_ref())
+            {
                 steps.restore_thread_record(name, bytes, "ThreadUpdate")?;
             }
         }
@@ -842,11 +845,14 @@ fn apply_redo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         OpRecord::ThreadUpdate {
             name,
             new_state,
-            new_manager_snapshot,
+            manager_snapshots,
             ..
         } => {
             steps.set_thread(name.as_str(), *new_state)?;
-            if let Some(bytes) = new_manager_snapshot {
+            if let Some(bytes) = manager_snapshots
+                .as_ref()
+                .and_then(|snapshots| snapshots.new.as_ref())
+            {
                 steps.restore_thread_record(name, bytes, "ThreadUpdate")?;
             }
         }
@@ -2438,8 +2444,7 @@ mod atomic_tests {
                         name: "main".to_string(),
                         old_state: main_state,
                         new_state: main_state,
-                        old_manager_snapshot: None,
-                        new_manager_snapshot: None,
+                        manager_snapshots: None,
                     },
                     OpRecord::MarkerCreate {
                         name: "mc".to_string(),
@@ -2499,8 +2504,7 @@ mod atomic_tests {
                         name: "main".to_string(),
                         old_state: main_state,
                         new_state: main_state,
-                        old_manager_snapshot: None,
-                        new_manager_snapshot: None,
+                        manager_snapshots: None,
                     },
                     OpRecord::ThreadCreate {
                         name: "old".to_string(),
@@ -3366,8 +3370,7 @@ mod atomic_tests {
                     name: "main".to_string(),
                     old_state: main_state,
                     new_state: main_state,
-                    old_manager_snapshot: None,
-                    new_manager_snapshot: None,
+                    manager_snapshots: None,
                 }],
                 Some(&scope),
             )

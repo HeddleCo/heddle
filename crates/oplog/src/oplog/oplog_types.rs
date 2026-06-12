@@ -94,14 +94,14 @@ pub enum OpRecord {
         name: String,
         old_state: ChangeId,
         new_state: ChangeId,
-        /// rmp-serde-encoded `Thread` record body before the update, or
-        /// `None` when the forward path only moved the ref.
-        #[serde(default)]
-        old_manager_snapshot: Option<Vec<u8>>,
-        /// rmp-serde-encoded `Thread` record body after the update, or
-        /// `None` when the forward path only moved the ref.
-        #[serde(default)]
-        new_manager_snapshot: Option<Vec<u8>>,
+        /// rmp-serde-encoded `Thread` record bodies around the update.
+        ///
+        /// This is intentionally one sparse tail field rather than two
+        /// independently-skipped fields: rmp-serde encodes enum variant fields
+        /// positionally, so skipping only the old slot would shift the new
+        /// snapshot into the old position for older readers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        manager_snapshots: Option<ThreadUpdateSnapshots>,
     },
     /// Fork operation.
     ///
@@ -323,6 +323,27 @@ pub enum OpRecord {
         #[serde(default)]
         new_sidecar: Option<Vec<u8>>,
     },
+}
+
+/// Optional ThreadManager record snapshots captured around a [`ThreadUpdate`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadUpdateSnapshots {
+    /// rmp-serde-encoded `Thread` record body before the update, or `None`
+    /// when no record existed before the forward path.
+    pub old: Option<Vec<u8>>,
+    /// rmp-serde-encoded `Thread` record body after the update, or `None`
+    /// when the forward path only moved the ref.
+    pub new: Option<Vec<u8>>,
+}
+
+impl ThreadUpdateSnapshots {
+    pub fn from_parts(old: Option<Vec<u8>>, new: Option<Vec<u8>>) -> Option<Self> {
+        if old.is_none() && new.is_none() {
+            None
+        } else {
+            Some(Self { old, new })
+        }
+    }
 }
 
 /// The logical isolation keys touched by one committed record.
@@ -969,8 +990,7 @@ mod verb_catalog_tests {
                 name: "t".into(),
                 old_state: cid(),
                 new_state: cid(),
-                old_manager_snapshot: None,
-                new_manager_snapshot: None,
+                manager_snapshots: None,
             },
             OpRecord::Fork {
                 from: cid(),

@@ -538,8 +538,7 @@ fn op_record_variants_roundtrip_and_describe() {
             name: "feat".into(),
             old_state: st2,
             new_state: st,
-            old_manager_snapshot: None,
-            new_manager_snapshot: None,
+            manager_snapshots: None,
         },
         // Fork retrofit: both published-ref shapes (attached thread / detached head).
         OpRecord::Fork {
