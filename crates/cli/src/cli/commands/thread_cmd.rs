@@ -9,7 +9,12 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use objects::{fs_ops::remove_path_recursively, object::ThreadName, store::AgentRegistry};
+use objects::{
+    fs_ops::remove_path_recursively,
+    object::{ChangeId, ThreadName},
+    store::AgentRegistry,
+};
+use oplog::OpLogBackend;
 use refs::Head;
 use repo::{
     Repository, Thread, ThreadFreshness, ThreadManager, ThreadMode, ThreadState,
@@ -47,6 +52,43 @@ struct ThreadOutput {
 
 pub(crate) fn thread_manager(repo: &Repository) -> ThreadManager {
     ThreadManager::new(repo.heddle_dir())
+}
+
+pub(crate) fn current_thread_ref_state(repo: &Repository, thread: &Thread) -> Result<ChangeId> {
+    if let Some(state) = repo.refs().get_thread(&ThreadName::new(&thread.thread))? {
+        return Ok(state);
+    }
+    if let Some(current_state) = thread.current_state.as_deref() {
+        return ChangeId::parse(current_state).map_err(|err| {
+            anyhow!(
+                "invalid current state for thread '{}': {}",
+                thread.thread,
+                err
+            )
+        });
+    }
+    ChangeId::parse(&thread.base_state)
+        .map_err(|err| anyhow!("invalid base state for thread '{}': {}", thread.thread, err))
+}
+
+pub(crate) fn save_thread_update_with_oplog(
+    repo: &Repository,
+    manager: &ThreadManager,
+    thread: &Thread,
+    old_state: ChangeId,
+    new_state: ChangeId,
+    old_manager_snapshot: Option<Vec<u8>>,
+) -> Result<()> {
+    let new_manager_snapshot = Some(manager.encode_thread_record_snapshot(thread)?);
+    repo.oplog().record_thread_update(
+        &ThreadName::new(&thread.thread),
+        &old_state,
+        &new_state,
+        old_manager_snapshot,
+        new_manager_snapshot,
+        Some(&repo.op_scope()),
+    )?;
+    Ok(manager.save(thread)?)
 }
 
 /// Resolve an optional positional thread identifier to a concrete
@@ -439,6 +481,8 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
             thread_repo.root(),
         )));
     }
+    let old_state = current_thread_ref_state(repo, &thread)?;
+    let old_manager_snapshot = manager.snapshot_thread_record(&thread.thread)?;
     let rebase_state_path = thread_repo.heddle_dir().join("REBASE_STATE");
     if rebase_state_path.exists() {
         super::rebase::cmd_rebase_silent(thread_repo, None, false, true)?;
@@ -533,7 +577,14 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
     thread.integration_policy_result.manual_resolution_state = Some(current_state.short());
     thread.updated_at = Utc::now();
     thread.freshness = ThreadFreshness::Current;
-    manager.save(&thread)?;
+    save_thread_update_with_oplog(
+        repo,
+        &manager,
+        &thread,
+        old_state,
+        current_state,
+        old_manager_snapshot,
+    )?;
     Ok(thread)
 }
 

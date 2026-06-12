@@ -94,6 +94,14 @@ pub enum OpRecord {
         name: String,
         old_state: ChangeId,
         new_state: ChangeId,
+        /// rmp-serde-encoded `Thread` record body before the update, or
+        /// `None` when the forward path only moved the ref.
+        #[serde(default)]
+        old_manager_snapshot: Option<Vec<u8>>,
+        /// rmp-serde-encoded `Thread` record body after the update, or
+        /// `None` when the forward path only moved the ref.
+        #[serde(default)]
+        new_manager_snapshot: Option<Vec<u8>>,
     },
     /// Fork operation.
     ///
@@ -961,6 +969,8 @@ mod verb_catalog_tests {
                 name: "t".into(),
                 old_state: cid(),
                 new_state: cid(),
+                old_manager_snapshot: None,
+                new_manager_snapshot: None,
             },
             OpRecord::Fork {
                 from: cid(),

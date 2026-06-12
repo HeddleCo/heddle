@@ -187,6 +187,10 @@ enum StrictCurrentOpRecord {
         name: String,
         old_state: ChangeId,
         new_state: ChangeId,
+        #[serde(default)]
+        old_manager_snapshot: Option<Vec<u8>>,
+        #[serde(default)]
+        new_manager_snapshot: Option<Vec<u8>>,
     },
     Fork {
         from: ChangeId,
@@ -321,10 +325,14 @@ impl StrictCurrentOpRecord {
                 name,
                 old_state,
                 new_state,
+                old_manager_snapshot,
+                new_manager_snapshot,
             } => OpRecord::ThreadUpdate {
                 name,
                 old_state,
                 new_state,
+                old_manager_snapshot,
+                new_manager_snapshot,
             },
             Self::Fork {
                 from,
@@ -594,6 +602,8 @@ impl PreAtomicOpRecord {
                 name,
                 old_state,
                 new_state,
+                old_manager_snapshot: None,
+                new_manager_snapshot: None,
             },
             Self::Fork { from, new_state } => {
                 // The pre-Atomic CLI was the only caller and recorded these two
@@ -828,6 +838,8 @@ impl AtomicNoHeadOpRecord {
                 name,
                 old_state,
                 new_state,
+                old_manager_snapshot: None,
+                new_manager_snapshot: None,
             },
             Self::Fork {
                 from,
@@ -993,6 +1005,8 @@ mod tests {
                 name: "main".into(),
                 old_state: cid(6),
                 new_state: cid(7),
+                old_manager_snapshot: None,
+                new_manager_snapshot: None,
             },
             OpRecord::Fork {
                 from: cid(8),
@@ -1316,6 +1330,22 @@ mod tests {
     }
 
     #[test]
+    fn current_schema_round_trips_thread_update_manager_snapshots() {
+        let expected = OpRecord::ThreadUpdate {
+            name: "main".into(),
+            old_state: cid(6),
+            new_state: cid(7),
+            old_manager_snapshot: Some(vec![6]),
+            new_manager_snapshot: Some(vec![7]),
+        };
+        let bytes = encode_latest_record(&expected).unwrap();
+        let decoded = CurrentOpRecordSchema::decode(&bytes).unwrap();
+        assert_same_record(&decoded, &expected);
+        let decoded = decode_versioned_record(&bytes, OpRecordSchemaVersion::Current).unwrap();
+        assert_same_record(&decoded, &expected);
+    }
+
+    #[test]
     fn current_schema_round_trips_through_versioned_decoder() {
         for expected in atomic_no_head_records() {
             let bytes = encode_latest_record(&expected).unwrap();
@@ -1377,6 +1407,7 @@ pub(crate) mod tests_support {
                     name,
                     old_state,
                     new_state,
+                    ..
                 } => Self::ThreadUpdate {
                     name: name.clone(),
                     old_state: *old_state,
@@ -1527,6 +1558,7 @@ pub(crate) mod tests_support {
                     name,
                     old_state,
                     new_state,
+                    ..
                 } => Self::ThreadUpdate {
                     name: name.clone(),
                     old_state: *old_state,

@@ -228,6 +228,28 @@ pub trait OpLogBackend: Send + Sync {
         Ok(ids[0])
     }
 
+    fn record_thread_update(
+        &self,
+        name: &ThreadName,
+        old_state: &ChangeId,
+        new_state: &ChangeId,
+        old_manager_snapshot: Option<Vec<u8>>,
+        new_manager_snapshot: Option<Vec<u8>>,
+        scope: Option<&str>,
+    ) -> Result<u64> {
+        let ids = self.record_batch_scoped(
+            vec![OpRecord::ThreadUpdate {
+                name: name.to_string(),
+                old_state: *old_state,
+                new_state: *new_state,
+                old_manager_snapshot,
+                new_manager_snapshot,
+            }],
+            scope,
+        )?;
+        Ok(ids[0])
+    }
+
     fn record_thread_rename(
         &self,
         old_name: &ThreadName,

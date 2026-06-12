@@ -1220,6 +1220,8 @@ fn reconcile_folds_every_record_shape() {
         name: "t_v1".to_string(),
         old_state: v1,
         new_state: v1b,
+        old_manager_snapshot: None,
+        new_manager_snapshot: None,
     }])
     .unwrap();
     // V2 create + a delete (folds to None).
@@ -2809,6 +2811,8 @@ fn non_atomic_delete_is_not_clobbered_by_a_committed_record() {
             name: "x".to_string(),
             old_state: v_old,
             new_state: v_new,
+            old_manager_snapshot: None,
+            new_manager_snapshot: None,
         }])
         .unwrap();
 

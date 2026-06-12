@@ -434,13 +434,18 @@ impl ThreadManager {
         let Some(thread) = self.find_by_thread(thread_name)? else {
             return Ok(None);
         };
-        let bytes = rmp_serde::to_vec_named(&thread).map_err(|e| {
+        self.encode_thread_record_snapshot(&thread).map(Some)
+    }
+
+    /// Encode a concrete `Thread` record using the same opaque snapshot format
+    /// as [`snapshot_thread_record`](Self::snapshot_thread_record).
+    pub fn encode_thread_record_snapshot(&self, thread: &Thread) -> Result<Vec<u8>> {
+        rmp_serde::to_vec_named(thread).map_err(|e| {
             HeddleError::Serialization(format!(
                 "encode thread record snapshot for '{}': {}",
-                thread_name, e
+                thread.thread, e
             ))
-        })?;
-        Ok(Some(bytes))
+        })
     }
 
     /// Decode a `Thread` record from rmp-serde bytes produced by

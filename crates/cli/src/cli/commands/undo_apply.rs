@@ -437,7 +437,12 @@ impl<'a> EntrySteps<'_, 'a> {
     /// a non-fatal warning that writes nothing — the on-disk set stays the
     /// captured prior set (a no-op converge), preserving the pre-migration
     /// ref-only fallback.
-    fn restore_thread_record(&mut self, name: &str, bytes: &[u8]) -> HeddleResult<()> {
+    fn restore_thread_record(
+        &mut self,
+        name: &str,
+        bytes: &[u8],
+        op_label: &'static str,
+    ) -> HeddleResult<()> {
         let repo = self.repo();
         let forward_name = name.to_string();
         let restore_name = name.to_string();
@@ -457,11 +462,11 @@ impl<'a> EntrySteps<'_, 'a> {
                     }
                     Err(e) => {
                         eprintln!(
-                            "warning: redo of `ThreadCreate` for '{}' restored the ref but failed \
+                            "warning: replay of `{}` for '{}' restored the ref but failed \
                              to decode the ThreadManager record snapshot ({}). Record-backed \
                              commands (`thread cd`, delegate) may degrade on this thread — run \
                              `heddle thread start {}` to recreate the record.",
-                            warn_name, e, warn_name
+                            op_label, warn_name, e, warn_name
                         );
                         // Write nothing: the on-disk set is unchanged (== the
                         // captured prior set), i.e. a no-op converge.
@@ -654,9 +659,15 @@ fn apply_undo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
             steps.set_thread(name.as_str(), *state)?;
         }
         OpRecord::ThreadUpdate {
-            name, old_state, ..
+            name,
+            old_state,
+            old_manager_snapshot,
+            ..
         } => {
             steps.set_thread(name.as_str(), *old_state)?;
+            if let Some(bytes) = old_manager_snapshot {
+                steps.restore_thread_record(name, bytes, "ThreadUpdate")?;
+            }
         }
         OpRecord::MarkerCreate { name, .. } => {
             steps.delete_marker(name.as_str())?;
@@ -822,16 +833,22 @@ fn apply_redo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         } => {
             steps.set_thread(name.as_str(), *state)?;
             if let Some(bytes) = manager_snapshot {
-                steps.restore_thread_record(name, bytes)?;
+                steps.restore_thread_record(name, bytes, "ThreadCreate")?;
             }
         }
         OpRecord::ThreadDelete { name, .. } => {
             delete_thread_safely(steps, &ThreadName::new(name.as_str()))?;
         }
         OpRecord::ThreadUpdate {
-            name, new_state, ..
+            name,
+            new_state,
+            new_manager_snapshot,
+            ..
         } => {
             steps.set_thread(name.as_str(), *new_state)?;
+            if let Some(bytes) = new_manager_snapshot {
+                steps.restore_thread_record(name, bytes, "ThreadUpdate")?;
+            }
         }
         OpRecord::MarkerCreate { name, state } => {
             steps.create_marker(name.as_str(), *state)?;
@@ -2421,6 +2438,8 @@ mod atomic_tests {
                         name: "main".to_string(),
                         old_state: main_state,
                         new_state: main_state,
+                        old_manager_snapshot: None,
+                        new_manager_snapshot: None,
                     },
                     OpRecord::MarkerCreate {
                         name: "mc".to_string(),
@@ -2480,6 +2499,8 @@ mod atomic_tests {
                         name: "main".to_string(),
                         old_state: main_state,
                         new_state: main_state,
+                        old_manager_snapshot: None,
+                        new_manager_snapshot: None,
                     },
                     OpRecord::ThreadCreate {
                         name: "old".to_string(),
@@ -3018,7 +3039,7 @@ mod atomic_tests {
 
         fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<()>> {
             let mut steps = EntrySteps::new(tx);
-            steps.restore_thread_record(&self.name, &self.bytes)?;
+            steps.restore_thread_record(&self.name, &self.bytes, "ThreadCreate")?;
             Ok(StagedCommit::pure(()))
         }
     }
@@ -3345,6 +3366,8 @@ mod atomic_tests {
                     name: "main".to_string(),
                     old_state: main_state,
                     new_state: main_state,
+                    old_manager_snapshot: None,
+                    new_manager_snapshot: None,
                 }],
                 Some(&scope),
             )
