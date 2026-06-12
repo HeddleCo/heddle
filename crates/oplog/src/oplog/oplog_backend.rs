@@ -191,9 +191,9 @@ pub trait OpLogBackend: Send + Sync {
     /// alongside the create (rename batch's new-name arm, ingest,
     /// harness/agent stubs that write the record later or not at all).
     ///
-    /// Always emits `OpRecord::ThreadCreate`. V1
-    /// (`OpRecord::ThreadCreate`) is retained as read-back-only for
-    /// legacy oplog entries written before heddle#23 r2.
+    /// Always emits `OpRecord::ThreadCreate` (the collapsed canonical
+    /// shape — the V1/V2 split was removed in #352 under the
+    /// no-production-oplogs premise).
     fn record_thread_create(
         &self,
         name: &ThreadName,

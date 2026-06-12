@@ -16,6 +16,13 @@
 //! `decode_unversioned` path exists only for pre-versioned v2/v3 oplogs and
 //! tries frozen schemas explicitly; new formats must never blind-deserialize a
 //! payload without a schema version.
+//!
+//! Documented exception (#352, pre-v0.3.0): the V2 OpRecord variant collapse
+//! rewrote the legacy schema mirrors to the collapsed shapes instead of
+//! keeping frozen V1/V2 arms — accepted under the no-production-oplogs
+//! premise. Old dev oplogs containing thread-create/fast-forward records do
+//! not decode past this point. This exception must not be repeated once
+//! public binaries exist.
 
 use objects::{
     error::{HeddleError, Result},
