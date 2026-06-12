@@ -130,6 +130,7 @@ the new behavior.
 | Active-branch import blocks mutating readiness | `git_overlay_matrix_ready_blocks_when_repository_verification_needs_import`; `git_overlay_matrix_commit_noop_fails_closed_when_verification_blocked` |
 | Side-branch import hints are informational | `git_overlay_matrix_auto_adopts_local_branch_tips_without_full_import`; `git_overlay_matrix_reopen_from_different_cwds_preserves_state_and_git_only_aliases`; `git_overlay_matrix_side_only_import_is_available_not_next_action` |
 | Imported branch drift reappears as import work | `git_overlay_matrix_imported_branch_evolution_after_bridge_import`; `git_overlay_matrix_imported_branch_git_only_advance_reappears_in_import_hint`; `git_overlay_matrix_imported_branch_merge_commit_drift_reappears_in_hint` |
+| Out-of-band advancement reports its commit count and reconciles round-trip | `git_overlay_matrix_manual_git_commit_after_bootstrap_commands`; `git_overlay_matrix_manual_git_commits_reconcile_round_trip` |
 | Detached HEAD blocks Git-overlay mutation | `git_overlay_matrix_detached_head_sequence_commands`; `git_overlay_matrix_commit_refuses_detached_head_without_advancing_branch` |
 | Tag import and marker disagreement block verification | `git_overlay_matrix_verify_reports_git_tags_created_after_adoption`; `git_overlay_matrix_verify_reports_moved_git_tag_before_adoption`; `git_overlay_matrix_selective_branch_adopt_surfaces_remaining_tag_import` |
 | Dirty worktree paths block unsafe movement | `git_overlay_matrix_dirty_branch_switch_when_git_allows_carryover`; `git_overlay_matrix_subdirectory_dirty_commands`; `git_overlay_matrix_undo_preview_refuses_dirty_worktree_like_real_undo` |
@@ -161,6 +162,15 @@ the new behavior.
   recommended action points to land the waiting work.
 - `import.status: available` is an informational side-branch hint. It must not
   block verification for the active checkout.
+- Out-of-band Git movement is reconciled explicitly, never implicitly. When the
+  active Git branch advances outside Heddle (`git_branch_advanced`), the report
+  states how far it moved ("N out-of-band git commits detected", with an
+  `out_of_band_commit_count` detail) and the recovery is the one-line manual
+  `heddle adopt --ref <branch>`. Auto-reconcile-on-read is deliberately not
+  implemented: observe-only read paths (`status`, `verify`, `doctor`,
+  `bridge git status`) must not mutate repository state, and the explicit
+  reconcile keeps an auditable record of when external Git history entered
+  Heddle. Decision recorded 2026-06-12 (HeddleCo/heddle#534).
 - Every concrete `recommended_action` emitted by verification must parse through
   the command catalog. Display-only placeholders must carry explicit template or
   argv metadata so machines can distinguish them from runnable commands.
