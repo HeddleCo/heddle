@@ -12,9 +12,10 @@ use objects::object::ThreadName;
 use objects::worktree::WorktreeStatus;
 use refs::Head;
 use repo::{
-    CommitGraphIndex, GitOverlayBranchTip, GitOverlayImportHint, GitRemoteTrackingStatus,
-    OperationKind, OperationScope, Repository, ThreadManager, ThreadState, describe_thread_advice,
-    git_worktree_status::GitWorktreeEntryState, refresh_thread_freshness,
+    CommitGraphIndex, GitOverlayBranchTip, GitOverlayImportHint, GitOverlayOutOfBandCommits,
+    GitRemoteTrackingStatus, OperationKind, OperationScope, Repository, ThreadManager,
+    ThreadState, describe_thread_advice, git_worktree_status::GitWorktreeEntryState,
+    refresh_thread_freshness,
 };
 use schemars::JsonSchema;
 use serde::{Serialize, Serializer};
@@ -2671,15 +2672,32 @@ fn build_git_overlay_health_inner(
                     .as_ref()
                     .is_some_and(import_hint_includes_active_branch) =>
         {
+            let out_of_band = repo
+                .git_overlay_out_of_band_commits(&tip.git_commit)
+                .ok()
+                .flatten();
+            let out_of_band_clause = out_of_band_commit_clause(out_of_band.as_ref());
             let mut details = BTreeMap::new();
             details.insert("git_branch".to_string(), tip.branch.clone());
             details.insert("git_commit".to_string(), tip.git_commit.clone());
+            if let Some(out_of_band) = &out_of_band {
+                details.insert(
+                    "out_of_band_commit_count".to_string(),
+                    out_of_band.count.to_string(),
+                );
+                if out_of_band.truncated {
+                    details.insert(
+                        "out_of_band_commit_count_truncated".to_string(),
+                        "true".to_string(),
+                    );
+                }
+            }
             checks.push(GitOverlayHealthCheck {
                 name: "head_mapping".to_string(),
                 status: "git_branch_advanced".to_string(),
                 summary: format!(
-                    "Git branch '{}' advanced to commit {} outside Heddle",
-                    tip.branch, tip.git_commit
+                    "Git branch '{}' advanced to commit {} outside Heddle{}",
+                    tip.branch, tip.git_commit, out_of_band_clause
                 ),
                 details,
             });
@@ -2700,8 +2718,8 @@ fn build_git_overlay_health_inner(
                 status: "git_branch_advanced".to_string(),
                 clean: false,
                 summary: format!(
-                    "Git branch '{}' advanced outside Heddle; import the new Git tip to restore the mapping",
-                    tip.branch
+                    "Git branch '{}' advanced outside Heddle{}; import the new Git tip to restore the mapping",
+                    tip.branch, out_of_band_clause
                 ),
                 recovery_commands: vec![canonical_adopt_ref_command(&tip.branch)],
                 checks,
@@ -3297,6 +3315,26 @@ pub(crate) fn import_hint_includes_active_branch(hint: &GitOverlayImportHint) ->
     hint.missing_branches
         .iter()
         .any(|branch| branch == &hint.current_branch)
+}
+
+/// Render the "(N out-of-band git commits detected)" clause for the
+/// `git_branch_advanced` report. Empty when the count is unavailable so the
+/// report degrades to the countless wording instead of failing.
+fn out_of_band_commit_clause(out_of_band: Option<&GitOverlayOutOfBandCommits>) -> String {
+    match out_of_band {
+        Some(out_of_band) if out_of_band.truncated => format!(
+            " ({}+ out-of-band git commits detected)",
+            out_of_band.count
+        ),
+        Some(out_of_band) if out_of_band.count == 1 => {
+            " (1 out-of-band git commit detected)".to_string()
+        }
+        Some(out_of_band) => format!(
+            " ({} out-of-band git commits detected)",
+            out_of_band.count
+        ),
+        None => String::new(),
+    }
 }
 
 fn remote_drift(
