@@ -3047,7 +3047,7 @@ fn test_cli_undo_redo() {
     assert_eq!(head_after_undo["thread"].as_str().unwrap_or(""), "main");
     assert_eq!(undo_id, first_id, "Undo should move to previous state");
 
-    assert!(heddle(&["redo"], Some(temp.path())).is_ok());
+    assert!(heddle(&["undo", "--redo"], Some(temp.path())).is_ok());
     let head_after_redo = status_json(temp.path());
     let redo_id = head_after_redo["state"]["change_id"]
         .as_str()

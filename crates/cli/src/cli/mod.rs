@@ -21,7 +21,7 @@ pub use cli_args::{
     IntegrationRelayArgs, IntegrationTargetArgs, LogArgs, MaintenanceCommands, MarkerCommands,
     MergeArgs, OutputMode, PullArgs, PurgeApplyArgs, PurgeCommands, PurgeListArgs, PushArgs,
     ReadyArgs, RedactApplyArgs, RedactCommands, RedactListArgs, RedactShowArgs, RedactTrustAddArgs,
-    RedactTrustCommands, RedactTrustListArgs, RedactTrustRemoveArgs, RedoArgs, RemoteCommands,
+    RedactTrustCommands, RedactTrustListArgs, RedactTrustRemoveArgs, RemoteCommands,
     ResolveArgs,
     RetroArgs, RevertArgs, RunArgs, SessionCommands, SessionEndArgs, SessionListArgs,
     SessionSegmentArgs, SessionShowArgs, SessionStartArgs, ShellCommands, ShellKind, SnapshotArgs,

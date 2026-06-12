@@ -341,7 +341,7 @@ fn undo_visibility_set_restores_prior_sidecar() {
     );
     assert_eq!(after_undo["tier"], "public");
 
-    heddle(&["redo"], Some(temp.path())).expect("redo visibility set");
+    heddle(&["undo", "--redo"], Some(temp.path())).expect("redo visibility set");
     let after_redo = show_json(temp.path(), &state);
     assert_eq!(
         after_redo["tier"], "internal",
@@ -426,7 +426,7 @@ fn undo_visibility_promote_reverts_tier() {
     );
     assert_eq!(after_undo["label"], "embargo");
 
-    heddle(&["redo"], Some(temp.path())).expect("redo promote");
+    heddle(&["undo", "--redo"], Some(temp.path())).expect("redo promote");
     assert_eq!(
         show_json(temp.path(), &state)["tier"],
         "internal",

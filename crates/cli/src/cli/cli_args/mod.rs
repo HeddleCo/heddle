@@ -38,7 +38,7 @@ pub use commands_args::{
     AgentReleaseStatusArg, AgentReserveArgs, AttemptArgs, BranchArgs, CloneArgs, CollapseArgs,
     CommandCatalogArgs, CommandCatalogTier, CommitArgs, DelegateArgs, DelegatedTaskSpec,
     DiagnoseArgs, DiffArgs, DoctorArgs, DoctorCommands, DoctorDocsArgs, InitArgs, LogArgs,
-    MergeArgs, PullArgs, PushArgs, ReadyArgs, RedoArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs,
+    MergeArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs,
     SessionEndArgs, SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs,
     LandArgs, SnapshotArgs, SwitchArgs, SyncArgs, ThreadAbsorbArgs, ThreadApprovalsArgs,
     ThreadApproveArgs, ThreadCapturesArgs, ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs,

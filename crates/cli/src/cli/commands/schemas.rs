@@ -64,13 +64,7 @@ schema_registry! {
     (&["capture"], CaptureSchema),
     (&["commit"], CommitSchema),
     (&["checkpoint"], CheckpointSchema),
-    (&["undo"], UndoSchema),
-    // heddle#473 phase 1: `redo` is its own top-level verb again (re-split from
-    // the brief `undo --redo` fold), and `undo --list` is undo's history view.
-    // Both emit their own `output_kind`, so both need a schema mirror. `redo`
-    // shares `undo`'s payload (`UndoSchema`); the `--list` view has its own
-    // list-shaped schema.
-    (&["redo"], UndoSchema),
+    (&["undo", "undo --redo"], UndoSchema),
     (&["undo --list"], UndoListSchema),
     (&["clean"], CleanSchema),
     (&["diff"], DiffSchema),

@@ -16,7 +16,7 @@ use super::{
         ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AdoptArgs,
         AttemptArgs, BranchArgs, CloneArgs, CollapseArgs, CommandCatalogArgs, CommitArgs,
         DelegateArgs, DiffArgs, DoctorArgs, InitArgs, LogArgs, MergeArgs, PullArgs,
-        PushArgs, ReadyArgs, RedoArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionEndArgs,
+        PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionEndArgs,
         SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, LandArgs,
         SnapshotArgs, SwitchArgs, SyncArgs, ThreadStartArgs, TryArgs, UndoArgs, WatchArgs,
     },
@@ -135,7 +135,7 @@ Examples:
     },
 
     /// Print the public command and flag catalog.
-    #[command(visible_aliases = ["command-catalog", "catalog"])]
+    #[command(hide = true, visible_aliases = ["command-catalog", "catalog"])]
     Commands(CommandCatalogArgs),
 
     /// Create or resume an isolated thread for focused work.
@@ -385,9 +385,6 @@ Examples:
 
     /// Undo the last Heddle operation.
     Undo(UndoArgs),
-
-    /// Redo a previously undone operation.
-    Redo(RedoArgs),
 
     /// Fork an exploration thread from a state.
     Fork {
@@ -659,16 +656,6 @@ Examples:
         #[command(subcommand)]
         command: HookCommands,
     },
-
-    /// JSONL bridge for harness session reporting.
-    ///
-    /// Internal plumbing — invoked by `heddle run` and integration
-    /// adapters via `HEDDLE_HARNESS_BRIDGE_*` env vars. Hidden from
-    /// `heddle --help` and `heddle help advanced` because it isn't a
-    /// user-facing verb. The verb itself still works and is documented
-    /// in `docs/HARNESS_ACTOR_INTEGRATION.md`.
-    #[command(hide = true)]
-    HarnessBridge,
 
     /// Advanced debugging/provenance commands for Heddle actors attached to threads.
     Actor {

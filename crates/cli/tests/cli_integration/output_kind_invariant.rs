@@ -190,7 +190,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "delegate",
     "fsck",
     "git-overlay",
-    "harness-bridge",
     "hook events",
     "hook install",
     "hook list",
@@ -1261,9 +1260,8 @@ fn emitted_output_kind(argv: &[&str], dir: &std::path::Path) -> String {
 /// set, or an agent that validates responses against `heddle commands --output
 /// json` rejects the off-contract record.
 ///
-/// `redo` is its own top-level verb again (re-split from the brief `undo --redo`
-/// fold), so it owns the `redo` output_kind 1:1 — driven here too so a future
-/// re-fold that forgets to register a kind fails CI.
+/// `redo` is folded into `undo --redo`, so the `undo` catalog entry owns the
+/// `redo` output_kind too.
 ///
 /// The static catalog tests above only confirm the *first* `output_kind`
 /// discriminator matches the display path; they cannot see the alternate kinds
@@ -1278,13 +1276,9 @@ fn folded_verb_flag_variants_emit_only_advertised_output_kinds() {
         undo_advertised.is_superset(&BTreeSet::from([
             "undo".to_string(),
             "undo_list".to_string(),
+            "redo".to_string(),
         ])),
-        "catalog must advertise both undo output_kinds; advertised: {undo_advertised:?}"
-    );
-    let redo_advertised = advertised_output_kinds("redo");
-    assert!(
-        redo_advertised.is_superset(&BTreeSet::from(["redo".to_string()])),
-        "catalog must advertise the redo output_kind; advertised: {redo_advertised:?}"
+        "catalog must advertise all undo-mode output_kinds; advertised: {undo_advertised:?}"
     );
 
     // Fixture with redo-able history: two commits, so an `undo` leaves exactly
@@ -1297,12 +1291,12 @@ fn folded_verb_flag_variants_emit_only_advertised_output_kinds() {
 
     // Drive each JSON-emitting variant, in an order that keeps the repo
     // consistent: undo --list (read-only) → undo (rewinds, making a redo
-    // available) → redo (re-applies). Each case names the command display whose
+    // available) → undo --redo (re-applies). Each case names the command display whose
     // advertised set must contain the emitted kind.
     let cases: &[(&[&str], &str, &str)] = &[
         (&["--output", "json", "undo", "--list"], "undo_list", "undo"),
         (&["--output", "json", "undo"], "undo", "undo"),
-        (&["--output", "json", "redo"], "redo", "redo"),
+        (&["--output", "json", "undo", "--redo"], "redo", "undo"),
     ];
 
     let mut failures = Vec::new();

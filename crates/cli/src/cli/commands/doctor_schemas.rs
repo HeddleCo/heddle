@@ -786,7 +786,7 @@ fn extract_samples(doc: &str) -> Vec<DocSample> {
 /// for a catalog-advertised discriminator verb carries the right
 /// discriminator. Returning the full bound-verb set (not one verb at a
 /// time) lets the invariant accept a grouped sample, e.g. the single
-/// `heddle undo|redo` sample binds to both `undo` and `redo` and may
+/// `heddle undo|undo --redo` sample binds to both undo modes and may
 /// legitimately show either variant's discriminator. Sharing the binding
 /// keeps the invariant and the production drift gate agreeing on which
 /// sample documents which verb.

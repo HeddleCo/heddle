@@ -1859,10 +1859,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["harness-bridge"],
-        hidden(opaque_schemas(READ_JSONL, &["harness-bridge"])),
-    ),
-    entry(
         &["help"],
         category(
             READ_TEXT,
@@ -2277,20 +2273,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 "output_kind",
                 "redact_trust_remove",
             )],
-        ),
-    ),
-    entry(
-        // `redo` is the symmetric inverse of `undo`, a standalone top-level verb
-        // again after the heddle#473 phase-1 re-split. It emits exactly one
-        // output_kind — `redo` — schema-backed by `UndoSchema` (shared payload
-        // shape with `undo`).
-        &["redo"],
-        category(
-            json_discriminators(
-                documented_schemas(WORKTREE_MUTATION, &["redo"]),
-                &[json_discriminator(Some("redo"), "output_kind", "redo")],
-            ),
-            "recovery",
         ),
     ),
     entry(
@@ -2886,19 +2868,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["undo"],
         front_door(
             json_discriminators(
-                // `undo` keeps its own `--list` history view, so this one command
-                // path emits TWO output_kinds: `undo` (the default rewind /
-                // `--preview`) and `undo_list` (`--list`). The former `redo` verb
-                // is its own top-level command again (heddle#473 phase 1 re-split),
-                // so `redo` is advertised on the `redo` entry below, not here.
+                // `undo` keeps its own `--list` history view and owns
+                // redo-mode after the top-level `redo` deletion.
                 // Every kind the handler can emit must be advertised or an agent
                 // validating responses via `heddle commands --output json` rejects
                 // the off-contract record. `undo --list` has its own
                 // `UndoListSchema`.
-                documented_schemas(WORKTREE_MUTATION, &["undo", "undo --list"]),
+                documented_schemas(WORKTREE_MUTATION, &["undo", "undo --list", "undo --redo"]),
                 &[
                     json_discriminator(Some("undo"), "output_kind", "undo"),
                     json_discriminator(Some("undo --list"), "output_kind", "undo_list"),
+                    json_discriminator(Some("undo --redo"), "output_kind", "redo"),
                 ],
             ),
             100,
@@ -4381,7 +4361,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         },
         Commands::Revert(_) => vec!["revert"],
         Commands::Undo(_) => vec!["undo"],
-        Commands::Redo(_) => vec!["redo"],
         Commands::Fork { .. } => vec!["fork"],
         Commands::Collapse(_) => vec!["collapse"],
         Commands::Marker { command } => match command {
@@ -4534,7 +4513,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             HookCommands::Uninstall { .. } => vec!["hook", "uninstall"],
             HookCommands::Events { .. } => vec!["hook", "events"],
         },
-        Commands::HarnessBridge => vec!["harness-bridge"],
         Commands::Actor { command } => match command {
             ActorCommands::Spawn(_) => vec!["actor", "spawn"],
             ActorCommands::List(_) => vec!["actor", "list"],
@@ -4714,7 +4692,6 @@ mod tests {
         #[cfg(feature = "git-overlay")]
         sample(&["git-overlay"], &["git-overlay"]),
         sample(&["goto"], &["goto", "HEAD"]),
-        sample(&["harness-bridge"], &["harness-bridge"]),
         sample(&["help"], &["help"]),
         sample(&["hook", "list"], &["hook", "list"]),
         sample(&["hook", "install"], &["hook", "install", "pre-snapshot"]),
@@ -4789,7 +4766,6 @@ mod tests {
             &["redact", "trust", "remove"],
             &["redact", "trust", "remove", "abcd"],
         ),
-        sample(&["redo"], &["redo"]),
         sample(&["remote", "list"], &["remote", "list"]),
         sample(
             &["remote", "add"],
@@ -5786,7 +5762,6 @@ mod tests {
                 "redact trust add",
                 "redact trust list",
                 "redact trust remove",
-                "redo",
                 "remote list",
                 "remote add",
                 "remote remove",
@@ -5822,6 +5797,7 @@ mod tests {
                 "visibility promote",
                 "visibility show",
                 "visibility list",
+                "undo",
                 "undo",
                 "undo",
                 "workspace show",

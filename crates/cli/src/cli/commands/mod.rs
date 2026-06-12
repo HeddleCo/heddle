@@ -37,7 +37,6 @@ mod gc;
 mod git_compat;
 mod git_overlay_health;
 mod goto;
-mod harness_bridge;
 pub(crate) mod heddleignore_defaults;
 mod history_target;
 mod hook;
@@ -155,7 +154,6 @@ pub use fsck::cmd_fsck;
 pub use gc::cmd_gc;
 pub use git_compat::{cmd_branch_compat, cmd_commit_compat, cmd_switch_compat};
 pub use goto::cmd_goto;
-pub use harness_bridge::cmd_harness_bridge;
 #[cfg(feature = "client")]
 pub use heddle_client::cmd_auth;
 #[cfg(feature = "client")]

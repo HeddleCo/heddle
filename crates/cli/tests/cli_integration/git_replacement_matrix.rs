@@ -953,7 +953,7 @@ fn git_replacement_matrix_undo_preserves_recovery_marker_for_absorbed_edit() {
     );
 
     // And `redo` round-trips the absorbed content back into the worktree.
-    let redo = assert_clean_json_without_git(&["--output", "json", "redo"], &work);
+    let redo = assert_clean_json_without_git(&["--output", "json", "undo", "--redo"], &work);
     assert_eq!(redo["action"], "redo");
     assert_eq!(
         std::fs::read_to_string(work.join("story.txt")).unwrap(),

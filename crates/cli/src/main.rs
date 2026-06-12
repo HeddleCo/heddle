@@ -16,7 +16,7 @@ use cli::{
     cli::{
         ActorCommands, AgentCommands, Cli, CloneArgs, CollapseArgs, Commands, ContextCommands,
         DaemonCommands, DiagnoseArgs, DiffArgs, LogArgs, MergeArgs, ResolveArgs, RetroArgs,
-        RedoArgs, RevertArgs, RunArgs, SessionCommands, SessionEndArgs, SessionListArgs,
+        RevertArgs, RunArgs, SessionCommands, SessionEndArgs, SessionListArgs,
         SessionSegmentArgs, SessionShowArgs, SessionStartArgs, UndoArgs,
         cli_args::{DelegateArgs, LandArgs, SyncArgs},
         commands::{
@@ -30,7 +30,7 @@ use cli::{
             cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
             cmd_daemon_status, cmd_daemon_stop, cmd_delegate, cmd_diagnose, cmd_diff, cmd_discuss,
             cmd_doctor_docs, cmd_doctor_schemas, cmd_fetch, cmd_fork, cmd_fsck, cmd_goto,
-            cmd_harness_bridge, cmd_hook, cmd_init, cmd_integration, cmd_log,
+            cmd_hook, cmd_init, cmd_integration, cmd_log,
             cmd_maintenance, cmd_marker, cmd_merge, cmd_pull, cmd_push, cmd_query,
             cmd_ready, cmd_rebase, cmd_redo, cmd_remote, cmd_resolve, cmd_retro, cmd_revert,
             cmd_review, cmd_run, cmd_schemas, cmd_session_end, cmd_session_list,
@@ -287,8 +287,13 @@ async fn async_main() -> Result<()> {
 
         Commands::Help { topics } => {
             // Curated help printer. No op-id (read-only), no
-            // structured output (help is human-shaped).
-            cli::cli::help::print_help(&Cli::command(), topics).map_err(Into::into)
+            // structured output unless explicitly asked to print the
+            // command catalog.
+            if explicit_json_requested(&cli) {
+                write_json_stdout(&build_command_catalog())
+            } else {
+                cli::cli::help::print_help(&Cli::command(), topics).map_err(Into::into)
+            }
         }
 
         Commands::Status {
@@ -532,10 +537,15 @@ async fn async_main() -> Result<()> {
             list,
             depth,
             preview,
+            redo,
             allow_redact_undo,
-        }) => cmd_undo(&cli, *steps, *list, *depth, *preview, *allow_redact_undo),
-
-        Commands::Redo(RedoArgs { steps, preview }) => cmd_redo(&cli, *steps, *preview),
+        }) => {
+            if *redo {
+                cmd_redo(&cli, *steps, *preview)
+            } else {
+                cmd_undo(&cli, *steps, *list, *depth, *preview, *allow_redact_undo)
+            }
+        }
 
         Commands::Fetch { remote, all } => cmd_fetch(&cli, remote.clone(), *all).await,
 
@@ -813,8 +823,6 @@ async fn async_main() -> Result<()> {
         } => cmd_rebase(&cli, thread.as_deref(), *abort, *cont, *force),
 
         Commands::Hook { command } => cmd_hook(&cli, command.clone()),
-
-        Commands::HarnessBridge => cmd_harness_bridge(&cli),
 
         Commands::Actor { command } => match command {
             ActorCommands::Spawn(args) => {

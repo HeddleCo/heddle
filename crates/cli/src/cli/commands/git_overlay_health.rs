@@ -2446,7 +2446,7 @@ pub(crate) fn remote_drift_decision(
             primary_action: Some(heddle_action(["push", "--force"])),
             recovery_commands: vec![
                 heddle_action(["push", "--force"]),
-                "heddle redo".to_string(),
+                heddle_action(["undo", "--redo"]),
             ],
             requires_clean_worktree: true,
         },
