@@ -15861,6 +15861,16 @@
             "null"
           ]
         },
+        "refs_written": {
+          "description": "Full ref names this push wrote at the destination (sorted; empty\nfor a no-op push). Present on the Git-overlay refs path; omitted\non the native Heddle transport. Verify with `git ls-remote`.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "remote": {
           "type": [
             "string",
