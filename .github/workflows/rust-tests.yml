@@ -829,6 +829,11 @@ jobs:
     name: FSKit compile check (macOS)
     runs-on: macos-14
     timeout-minutes: 30
+    env:
+      # The workflow-level RUSTC_WRAPPER points at sccache, which only the
+      # main job installs; without this override cargo dies at startup.
+      RUSTC_WRAPPER: ""
+      SCCACHE_GHA_ENABLED: "false"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
