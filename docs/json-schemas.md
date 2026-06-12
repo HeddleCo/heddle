@@ -808,9 +808,9 @@ List recent saved states on a thread.
 
 ```json
 {
-  "output_kind": "thread",
+  "output_kind": "thread_drop",
   "status": "completed",
-  "action": "thread drop",
+  "action": "thread_drop",
   "name": "feature/parser",
   "message": "Dropped thread 'feature/parser'",
   "next_action": null,
@@ -865,9 +865,9 @@ Report manual follow-up after a blocked or refreshed thread.
 
 ```json
 {
-  "output_kind": "resolve",
+  "output_kind": "thread_resolve",
   "status": "completed",
-  "action": "resolve",
+  "action": "thread_resolve",
   "message": "Thread requires a manual follow-up",
   "blockers": [],
   "warnings": [],
@@ -958,9 +958,9 @@ emits an array of the same object.
 
 ```json
 {
-  "output_kind": "thread.cleanup",
+  "output_kind": "thread_cleanup",
   "status": "completed",
-  "action": "thread.cleanup",
+  "action": "thread_cleanup",
   "message": "would drop 1 merged thread(s) (would reclaim 12.0 KB)",
   "blockers": [],
   "warnings": [],

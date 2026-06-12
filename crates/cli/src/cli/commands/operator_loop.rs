@@ -9,7 +9,7 @@ use super::{
         NextActionInput, NextActionValidationContext, effective_next_action, write_command_json,
     },
     operator_core::{
-        OperatorCommandOutput, abort_operator, exit_if_blocked_operator_status,
+        OperatorAction, OperatorCommandOutput, abort_operator, exit_if_blocked_operator_status,
         open_operator_repo_from_path, recommend_next_action,
     },
     remote::resolve_default_remote_name,
@@ -50,7 +50,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
             &repo,
             OperatorCommandOutput {
                 status: "blocked".to_string(),
-                action: "sync".to_string(),
+                action: OperatorAction::Sync,
                 message: "Finish the in-progress operation before syncing".to_string(),
                 blockers: Vec::new(),
                 warnings: Vec::new(),
@@ -73,7 +73,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
                 &repo,
                 OperatorCommandOutput {
                     status: "blocked".to_string(),
-                    action: "sync".to_string(),
+                    action: OperatorAction::Sync,
                     message: remote.message,
                     blockers: vec![
                         "Git branch and upstream both contain commits the other side lacks"
@@ -100,7 +100,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
                 &repo,
                 OperatorCommandOutput {
                     status: "synced".to_string(),
-                    action: "sync".to_string(),
+                    action: OperatorAction::Sync,
                     message: format!(
                         "Synced branch '{}' with remote '{}' ({} commit(s) seen, {} state(s) imported)",
                         remote.branch, remote_name, outcome.commits_seen, outcome.states_created,
@@ -119,7 +119,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
                 &repo,
                 OperatorCommandOutput {
                     status: "ahead".to_string(),
-                    action: "sync".to_string(),
+                    action: OperatorAction::Sync,
                     message: remote.message,
                     blockers: Vec::new(),
                     warnings: Vec::new(),
@@ -136,7 +136,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
 
 fn sync_blocked_by_trust(trust: RepositoryVerificationState) -> OperatorCommandOutput {
     OperatorCommandOutput::blocked_by_repository_verification(
-        "sync",
+        OperatorAction::Sync,
         format!(
             "Sync changed the checkout, but repository verification is still blocked: {}",
             trust.summary

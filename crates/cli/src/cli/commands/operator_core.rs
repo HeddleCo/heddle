@@ -7,31 +7,99 @@ use chrono::Utc;
 use gix::bstr::ByteSlice;
 use objects::object::ThreadName;
 use repo::{
-    shell_quote, update_thread_state_from_state, GitOverlayImportHint, GitRemoteTrackingStatus,
-    OperationKind, OperationScope, Repository, RepositoryOperationStatus, ThreadFreshness,
-    ThreadIntegrationPolicy, ThreadManager, ThreadState,
+    GitOverlayImportHint, GitRemoteTrackingStatus, OperationKind, OperationScope, Repository,
+    RepositoryOperationStatus, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
+    ThreadState, shell_quote, update_thread_state_from_state,
 };
-use serde::{ser::SerializeStruct, Serialize, Serializer};
+use serde::{Serialize, Serializer, ser::SerializeStruct};
 
 use super::{
     git_overlay_health::{
-        action_template, repository_verification_blockers,
-        repository_verification_primary_command, RepositoryVerificationState,
+        RepositoryVerificationState, action_template, repository_verification_blockers,
+        repository_verification_primary_command,
     },
-    next_action::{effective_next_action, NextActionInput},
+    next_action::{NextActionInput, effective_next_action},
     rebase::{
-        cmd_rebase_silent, continue_rebase_for_operator, has_persisted_rebase_state,
-        OperatorContinueStatus,
+        OperatorContinueStatus, cmd_rebase_silent, continue_rebase_for_operator,
+        has_persisted_rebase_state,
     },
     resolve::abort_merge_state,
-    snapshot::{create_snapshot, SnapshotAgentOverrides},
+    snapshot::{SnapshotAgentOverrides, create_snapshot},
 };
 use crate::config::UserConfig;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OperatorAction {
+    Abort,
+    Bisect,
+    CherryPick,
+    Continue,
+    Land,
+    Merge,
+    Ready,
+    Rebase,
+    Revert,
+    Sync,
+    ThreadCleanup,
+    ThreadDrop,
+    ThreadPromote,
+    ThreadRefresh,
+    ThreadResolve,
+}
+
+impl OperatorAction {
+    const fn wire_value(self) -> &'static str {
+        match self {
+            Self::Abort => "abort",
+            Self::Bisect => "bisect",
+            Self::CherryPick => "cherry-pick",
+            Self::Continue => "continue",
+            Self::Land => "land",
+            Self::Merge => "merge",
+            Self::Ready => "ready",
+            Self::Rebase => "rebase",
+            Self::Revert => "revert",
+            Self::Sync => "sync",
+            Self::ThreadCleanup => "thread_cleanup",
+            Self::ThreadDrop => "thread_drop",
+            Self::ThreadPromote => "thread_promote",
+            Self::ThreadRefresh => "thread_refresh",
+            Self::ThreadResolve => "thread_resolve",
+        }
+    }
+}
+
+impl Default for OperatorAction {
+    fn default() -> Self {
+        Self::Continue
+    }
+}
+
+impl Serialize for OperatorAction {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.wire_value())
+    }
+}
+
+impl From<&OperationKind> for OperatorAction {
+    fn from(kind: &OperationKind) -> Self {
+        match kind {
+            OperationKind::Merge => Self::Merge,
+            OperationKind::Rebase => Self::Rebase,
+            OperationKind::CherryPick => Self::CherryPick,
+            OperationKind::Revert => Self::Revert,
+            OperationKind::Bisect => Self::Bisect,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct OperatorCommandOutput {
     pub status: String,
-    pub action: String,
+    pub action: OperatorAction,
     pub message: String,
     /// Reasons the operation could not advance state. Only populated
     /// when `status == "blocked"` or `status == "failed"`. When the
@@ -48,14 +116,14 @@ pub(crate) struct OperatorCommandOutput {
 
 impl OperatorCommandOutput {
     pub(crate) fn blocked_by_repository_verification(
-        action: impl Into<String>,
+        action: OperatorAction,
         message: impl Into<String>,
         trust: &RepositoryVerificationState,
     ) -> Self {
         let recommended_action = repository_verification_primary_command(trust);
         Self {
             status: "blocked".to_string(),
-            action: action.into(),
+            action,
             message: message.into(),
             blockers: repository_verification_blockers(trust),
             warnings: Vec::new(),
@@ -74,7 +142,7 @@ impl OperatorCommandOutput {
             return;
         }
         *self = Self::blocked_by_repository_verification(
-            self.action.clone(),
+            self.action,
             format!(
                 "{} reached local checks, but repository verification is blocked: {}",
                 local_context.into(),
@@ -116,7 +184,7 @@ fn repository_verification_allows_success_claim(
         return true;
     }
     if policy.allow_land_publish_followup
-        && output.action == "land"
+        && output.action == OperatorAction::Land
         && output.status == "landed"
         && trust.recommended_action == "heddle push"
         && matches!(
@@ -167,7 +235,7 @@ impl Serialize for OperatorCommandOutput {
         }
 
         let mut state = serializer.serialize_struct("OperatorCommandOutput", len)?;
-        state.serialize_field("output_kind", &self.action)?;
+        state.serialize_field("output_kind", &self.action.wire_value())?;
         state.serialize_field("status", &self.status)?;
         state.serialize_field("action", &self.action)?;
         state.serialize_field("message", &self.message)?;
@@ -202,7 +270,7 @@ impl super::compact::CompactProjection for OperatorCommandOutput {
         // full envelope — compact emits exactly one, as `next_action`.
         let action = normalized_action(self.recommended_action.as_deref())
             .or_else(|| normalized_action(self.next_action.as_deref()));
-        let mut compact = super::compact::CompactOutput::new(self.action.clone());
+        let mut compact = super::compact::CompactOutput::new(self.action.wire_value());
         compact.status = Some(self.status.clone());
         compact.blockers = self.blockers.clone();
         compact.next_action = action.map(str::to_string);
@@ -232,7 +300,7 @@ pub(crate) fn continue_operator(repo: &Repository) -> Result<OperatorCommandOutp
             let recommended_action = format!("heddle resolve {}", shell_quote(&unresolved[0]));
             return Ok(OperatorCommandOutput {
                 status: "blocked".to_string(),
-                action: "continue".to_string(),
+                action: OperatorAction::Continue,
                 message: format!(
                     "Merge still has unresolved conflicts: {}. After removing conflict markers, mark each file resolved with `heddle resolve <path>`.",
                     unresolved.join(", ")
@@ -262,7 +330,7 @@ pub(crate) fn continue_operator(repo: &Repository) -> Result<OperatorCommandOutp
         let next_action = complete_current_thread_manual_resolution(repo)?;
         return Ok(OperatorCommandOutput {
             status: "continued".to_string(),
-            action: "merge".to_string(),
+            action: OperatorAction::Merge,
             message: "Completed the in-progress Heddle merge".to_string(),
             blockers: Vec::new(),
             warnings: Vec::new(),
@@ -277,7 +345,7 @@ pub(crate) fn continue_operator(repo: &Repository) -> Result<OperatorCommandOutp
 
     Ok(OperatorCommandOutput {
         status: "noop".to_string(),
-        action: "continue".to_string(),
+        action: OperatorAction::Continue,
         message: "No in-progress operation needs continuing".to_string(),
         blockers: Vec::new(),
         warnings: Vec::new(),
@@ -291,7 +359,7 @@ pub(crate) fn abort_operator(repo: &Repository) -> Result<OperatorCommandOutput>
         abort_merge_state(repo, &repo.merge_state_manager())?;
         return Ok(OperatorCommandOutput {
             status: "aborted".to_string(),
-            action: "merge".to_string(),
+            action: OperatorAction::Merge,
             message: "Aborted the in-progress Heddle merge".to_string(),
             blockers: Vec::new(),
             warnings: Vec::new(),
@@ -304,7 +372,7 @@ pub(crate) fn abort_operator(repo: &Repository) -> Result<OperatorCommandOutput>
         cmd_rebase_silent(repo, None, true, false)?;
         return Ok(OperatorCommandOutput {
             status: "aborted".to_string(),
-            action: "rebase".to_string(),
+            action: OperatorAction::Rebase,
             message: "Aborted the in-progress Heddle rebase".to_string(),
             blockers: Vec::new(),
             warnings: Vec::new(),
@@ -319,7 +387,7 @@ pub(crate) fn abort_operator(repo: &Repository) -> Result<OperatorCommandOutput>
 
     Ok(OperatorCommandOutput {
         status: "noop".to_string(),
-        action: "abort".to_string(),
+        action: OperatorAction::Abort,
         message: "No in-progress operation can be aborted".to_string(),
         blockers: Vec::new(),
         warnings: Vec::new(),
@@ -386,7 +454,7 @@ fn continue_from_operation(
             Ok(match continue_rebase_for_operator(repo)? {
                 OperatorContinueStatus::Blocked => OperatorCommandOutput {
                     status: "blocked".to_string(),
-                    action: "rebase".to_string(),
+                    action: OperatorAction::Rebase,
                     message:
                         "Rebase still needs a captured manual resolution before it can continue"
                             .to_string(),
@@ -397,7 +465,7 @@ fn continue_from_operation(
                 },
                 OperatorContinueStatus::Continued => OperatorCommandOutput {
                     status: "continued".to_string(),
-                    action: "rebase".to_string(),
+                    action: OperatorAction::Rebase,
                     message: "Continued the in-progress Heddle rebase".to_string(),
                     blockers: Vec::new(),
                     warnings: Vec::new(),
@@ -406,7 +474,7 @@ fn continue_from_operation(
                 },
                 OperatorContinueStatus::Completed => OperatorCommandOutput {
                     status: "completed".to_string(),
-                    action: "rebase".to_string(),
+                    action: OperatorAction::Rebase,
                     message: "Completed the in-progress Heddle rebase".to_string(),
                     blockers: Vec::new(),
                     warnings: Vec::new(),
@@ -417,7 +485,7 @@ fn continue_from_operation(
         }
         (OperationScope::Heddle, OperationKind::Bisect) => Ok(OperatorCommandOutput {
             status: "blocked".to_string(),
-            action: "bisect".to_string(),
+            action: OperatorAction::Bisect,
             message: "A stale bisect state from an older Heddle version is present; \
                       the bisect command has been removed. Abort to clear it."
                 .to_string(),
@@ -448,7 +516,7 @@ fn continue_from_operation(
         (OperationScope::Heddle, OperationKind::Merge) => unreachable!(),
         _ => Ok(OperatorCommandOutput {
             status: "noop".to_string(),
-            action: "continue".to_string(),
+            action: OperatorAction::Continue,
             message: "No in-progress operation needs continuing".to_string(),
             blockers: Vec::new(),
             warnings: Vec::new(),
@@ -483,7 +551,7 @@ fn abort_from_operation(
 
     Ok(OperatorCommandOutput {
         status: "aborted".to_string(),
-        action: operation.kind.to_string(),
+        action: OperatorAction::from(&operation.kind),
         message: format!(
             "Aborted the in-progress {} {}",
             operation.scope, operation.kind
@@ -514,7 +582,7 @@ fn raw_git_operation_handoff(
     let recovery_text = raw_git_operation_recovery_text(&operation.kind, &primary);
     OperatorCommandOutput {
         status: "blocked".to_string(),
-        action: operation.kind.to_string(),
+        action: OperatorAction::from(&operation.kind),
         message: format!(
             "Cannot {attempted_action} the active raw Git {} inside Heddle's no-git runtime. Heddle did not start this Git sequencer operation, so it left Git metadata, refs, index, and worktree files unchanged.{unresolved_summary} {recovery_text}",
             operation.kind
@@ -573,7 +641,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::cli::commands::git_overlay_health::{machine_contract_coverage, VerificationCheck};
+    use crate::cli::commands::git_overlay_health::{VerificationCheck, machine_contract_coverage};
 
     // heddle#464 close-the-class (paths): a conflict path can contain spaces.
     // `continue` builds `recommended_action = heddle resolve <path>`, a VALIDATED
@@ -583,7 +651,7 @@ mod tests {
     #[test]
     fn validated_resolve_action_with_spaced_path_passes_only_when_quoted() {
         use crate::cli::commands::next_action::{
-            validated_json_string, NextActionValidationContext,
+            NextActionValidationContext, validated_json_string,
         };
         use repo::shell_quote;
 
@@ -592,7 +660,7 @@ mod tests {
 
         let quoted = OperatorCommandOutput {
             status: "blocked".to_string(),
-            action: "continue".to_string(),
+            action: OperatorAction::Continue,
             message: "conflicts remain".to_string(),
             blockers: vec![path.to_string()],
             warnings: Vec::new(),
@@ -632,7 +700,7 @@ mod tests {
     #[test]
     fn blocked_land_with_unvalidated_thread_id_passes_only_when_quoted() {
         use crate::cli::commands::next_action::{
-            validated_json_string, NextActionValidationContext,
+            NextActionValidationContext, validated_json_string,
         };
         use repo::shell_quote;
 
@@ -643,7 +711,7 @@ mod tests {
 
         let quoted = OperatorCommandOutput {
             status: "blocked".to_string(),
-            action: "land".to_string(),
+            action: OperatorAction::Land,
             message: format!("Thread '{unsafe_id}' must be synced manually"),
             blockers: vec!["thread is stale".to_string()],
             warnings: Vec::new(),
@@ -691,14 +759,18 @@ mod tests {
         );
         assert!(output.message.contains("no-git runtime"));
         assert!(output.message.contains("conflict.txt"));
-        assert!(output
-            .blockers
-            .iter()
-            .any(|path| path == "unresolved: conflict.txt"));
-        assert!(!output
-            .recommended_action
-            .as_deref()
-            .is_some_and(|action| action.starts_with("git ")));
+        assert!(
+            output
+                .blockers
+                .iter()
+                .any(|path| path == "unresolved: conflict.txt")
+        );
+        assert!(
+            !output
+                .recommended_action
+                .as_deref()
+                .is_some_and(|action| action.starts_with("git "))
+        );
     }
 
     #[test]
@@ -706,7 +778,7 @@ mod tests {
         let trust = verification_state(false, "needs_checkpoint", "heddle commit -m \"...\"");
         let mut output = OperatorCommandOutput {
             status: "synced".to_string(),
-            action: "sync".to_string(),
+            action: OperatorAction::Sync,
             message: "Thread is already current".to_string(),
             blockers: Vec::new(),
             warnings: Vec::new(),
@@ -725,9 +797,11 @@ mod tests {
             output.recommended_action.as_deref(),
             Some("heddle commit -m \"...\"")
         );
-        assert!(output
-            .message
-            .contains("repository verification is blocked"));
+        assert!(
+            output
+                .message
+                .contains("repository verification is blocked")
+        );
     }
 
     #[test]
@@ -735,7 +809,7 @@ mod tests {
         let trust = verification_state(false, "remote_ahead", "heddle push");
         let landed = || OperatorCommandOutput {
             status: "landed".to_string(),
-            action: "land".to_string(),
+            action: OperatorAction::Land,
             message: "Landed thread 'feature'".to_string(),
             blockers: Vec::new(),
             warnings: Vec::new(),

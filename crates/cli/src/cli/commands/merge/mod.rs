@@ -24,11 +24,11 @@ use super::{
     diff::{DiffOutput, SemanticChangeEntry, compute_state_diff, compute_tree_diff},
     git_overlay_health::{
         RepositoryVerificationState, action_template, build_repository_verification_state,
-        override_trust_recommended_action,
-        repository_verification_blocked_advice, serialize_empty_action_as_null,
+        override_trust_recommended_action, repository_verification_blocked_advice,
+        serialize_empty_action_as_null,
     },
     next_action::{NextActionValidationContext, write_command_json},
-    operator_core::{OperatorCommandOutput, blocked_operator_exit_code},
+    operator_core::{OperatorAction, OperatorCommandOutput, blocked_operator_exit_code},
     ready_cmd::{worktree_dirty, worktree_dirty_paths},
     snapshot::ensure_current_state,
     thread_cmd::{refresh_thread_freshness, thread_not_found_advice},
@@ -741,7 +741,7 @@ pub(crate) fn merge_thread_into_current(
         return Ok(MergeOutput {
             operator: OperatorCommandOutput {
                 status: if preview { "preview" } else { "completed" }.to_string(),
-                action: "merge".to_string(),
+                action: OperatorAction::Merge,
                 message: match (preview, git_commit, repo.head_ref()?) {
                     (true, true, Head::Attached { thread }) => {
                         format!(
@@ -900,9 +900,10 @@ pub(crate) fn merge_thread_into_current(
             && thread
                 .as_ref()
                 .is_some_and(|thread| thread.state == ThreadState::Ready)
-            && let Some(thread) = thread.as_ref() {
-                mark_merge_previewed(repo, &thread.id)?;
-            }
+            && let Some(thread) = thread.as_ref()
+        {
+            mark_merge_previewed(repo, &thread.id)?;
+        }
         return Ok(merge_output_from_report(MergeOutputInput {
             repo,
             thread: &thread,
@@ -1870,7 +1871,10 @@ fn build_thread_preview_report_with_graph(
         advice.thread_health = "clean".to_string();
     }
 
-    let thread_tip = repo.refs().get_thread(&ThreadName::new(&thread.thread))?.map(|id| id.short());
+    let thread_tip = repo
+        .refs()
+        .get_thread(&ThreadName::new(&thread.thread))?
+        .map(|id| id.short());
     let manual_resolution_current = thread
         .integration_policy_result
         .manual_resolution_state
@@ -1979,7 +1983,10 @@ fn merge_output_from_report(input: MergeOutputInput<'_>) -> MergeOutput {
     let stale_refresh_action = input.preview_report.and_then(|report| {
         (report.freshness == ThreadFreshness::Stale.to_string()).then(|| {
             if report.recommended_action.trim().is_empty() {
-                format!("heddle sync --thread {}", recommended_action_quote(&report.thread))
+                format!(
+                    "heddle sync --thread {}",
+                    recommended_action_quote(&report.thread)
+                )
             } else {
                 report.recommended_action.clone()
             }
@@ -2034,7 +2041,7 @@ fn merge_output_from_report(input: MergeOutputInput<'_>) -> MergeOutput {
     MergeOutput {
         operator: OperatorCommandOutput {
             status: status.to_string(),
-            action: "merge".to_string(),
+            action: OperatorAction::Merge,
             message: input.message,
             blockers: real_blockers,
             warnings: preview_warnings,
@@ -2269,7 +2276,7 @@ fn merge_blocked_by_trust_output(
 ) -> MergeOutput {
     MergeOutput {
         operator: OperatorCommandOutput::blocked_by_repository_verification(
-            "merge",
+            OperatorAction::Merge,
             trust_blocked_merge_message(&trust, preview_only),
             &trust,
         ),
@@ -2332,7 +2339,10 @@ fn stale_thread_merge_blocked_output(
     preview_only: bool,
 ) -> MergeOutput {
     let recommended_action = if preview_report.recommended_action.trim().is_empty() {
-        format!("heddle sync --thread {}", recommended_action_quote(&preview_report.thread))
+        format!(
+            "heddle sync --thread {}",
+            recommended_action_quote(&preview_report.thread)
+        )
     } else {
         preview_report.recommended_action.clone()
     };
@@ -2360,7 +2370,7 @@ fn stale_thread_merge_blocked_output(
     MergeOutput {
         operator: OperatorCommandOutput {
             status: "blocked".to_string(),
-            action: "merge".to_string(),
+            action: OperatorAction::Merge,
             message: format!(
                 "Thread '{}' is stale{}; merge {}did not run",
                 preview_report.thread,

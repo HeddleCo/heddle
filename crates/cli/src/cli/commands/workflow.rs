@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use anyhow::{Context, Result, anyhow};
 use objects::object::{ChangeId, ThreadName};
+use objects::store::ObjectStore;
 use oplog::{OpBatch, OpLogBackend, OpRecord};
 use repo::{Repository, Thread, ThreadIntegrationPolicy, thread_flag};
 use serde::Serialize;
@@ -12,8 +12,10 @@ use super::{
     checkpoint::create_git_checkpoint,
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     merge::{build_thread_preview_report, merge_thread_into_current},
+    next_action::{NextActionValidationContext, write_command_json, write_full_command_json},
     operator_core::{
-        OperatorCommandOutput, VerificationClaimPolicy, exit_if_blocked_operator_status,
+        OperatorAction, OperatorCommandOutput, VerificationClaimPolicy,
+        exit_if_blocked_operator_status,
     },
     operator_loop::primary_next_action,
     ready_cmd::worktree_dirty,
@@ -22,7 +24,6 @@ use super::{
     thread_cmd::{
         current_thread, load_thread, refresh_thread, thread_manager, thread_not_found_advice,
     },
-    next_action::{NextActionValidationContext, write_command_json, write_full_command_json},
     thread_landing::{land_local_command, switch_thread_command},
 };
 use crate::{
@@ -107,7 +108,7 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
         SyncOutput {
             operator: OperatorCommandOutput {
                 status: "current".to_string(),
-                action: "sync".to_string(),
+                action: OperatorAction::Sync,
                 message: format!("Thread '{}' is already current", thread.id),
                 blockers: vec![],
                 warnings: Vec::new(),
@@ -149,7 +150,7 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
         SyncOutput {
             operator: OperatorCommandOutput {
                 status: "blocked".to_string(),
-                action: "sync".to_string(),
+                action: OperatorAction::Sync,
                 message: format!("Thread '{}' needs manual sync", thread.id),
                 blockers: stale_report.blockers.clone(),
                 warnings: Vec::new(),
@@ -190,7 +191,7 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
                 SyncOutput {
                     operator: OperatorCommandOutput {
                         status: "refreshed".to_string(),
-                        action: "sync".to_string(),
+                        action: OperatorAction::Sync,
                         message: format!("Refreshed thread '{}'", refreshed.id),
                         blockers: vec![],
                         warnings: Vec::new(),
@@ -221,7 +222,7 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
                 SyncOutput {
                     operator: OperatorCommandOutput {
                         status: "blocked".to_string(),
-                        action: "sync".to_string(),
+                        action: OperatorAction::Sync,
                         message: format!("Thread '{}' has merge conflicts to resolve", thread.id),
                         blockers: stale_report.blockers.clone(),
                         warnings: Vec::new(),
@@ -387,7 +388,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 &LandOutput {
                     operator: OperatorCommandOutput {
                         status: "blocked".to_string(),
-                        action: "land".to_string(),
+                        action: OperatorAction::Land,
                         message: format!(
                             "Thread '{}' must be synced manually",
                             refreshed_thread.id
@@ -496,7 +497,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         let post_land_action = integrated_land_next_action(true, pushed, &trust);
         let mut operator = OperatorCommandOutput {
             status: "landed".to_string(),
-            action: "land".to_string(),
+            action: OperatorAction::Land,
             message: format!(
                 "Landed thread '{}' from a manually resolved integration state",
                 merge_thread.id
@@ -552,9 +553,11 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         // operator through `sync`, which materializes and resolves a genuine
         // conflict before a land retry. (heddle#464 close-the-class.)
         let recovery_scope = recovery_scope_checkout(&merge_thread, repo.root());
-        let recommended_action =
-            integration_blocker_recommended_action(&integration_blockers, recovery_scope.as_deref())
-                .unwrap_or_else(|| format!("heddle sync {}", thread_flag(&merge_thread.id)));
+        let recommended_action = integration_blocker_recommended_action(
+            &integration_blockers,
+            recovery_scope.as_deref(),
+        )
+        .unwrap_or_else(|| format!("heddle sync {}", thread_flag(&merge_thread.id)));
         update_integration_policy(&repo, &merge_thread.id, "blocked", &reason)?;
         return write_land_output(
             cli,
@@ -562,7 +565,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             &LandOutput {
                 operator: OperatorCommandOutput {
                     status: "blocked".to_string(),
-                    action: "land".to_string(),
+                    action: OperatorAction::Land,
                     message: format!("Thread '{}' is not eligible for auto-land", merge_thread.id),
                     blockers: land_blockers_for_preview(&preview, &integration_blockers),
                     warnings: Vec::new(),
@@ -670,7 +673,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     let integrated_next_action = integrated_land_next_action(integrated, pushed, &trust);
     let mut operator = OperatorCommandOutput {
         status: if integrated { "landed" } else { "blocked" }.to_string(),
-        action: "land".to_string(),
+        action: OperatorAction::Land,
         message: if integrated {
             format!("Landed thread '{}'", merge_thread.id)
         } else {
@@ -769,7 +772,8 @@ fn land_performed_steps(
         (pushed, "push"),
     ]
     .into_iter()
-    .filter(|&(done, _step)| done).map(|(_done, step)| step.to_string())
+    .filter(|&(done, _step)| done)
+    .map(|(_done, step)| step.to_string())
     .collect()
 }
 
@@ -790,7 +794,8 @@ fn land_skipped_steps(
         (!pushed && !integrated, "push(not reached)"),
     ]
     .into_iter()
-    .filter(|&(skipped, _step)| skipped).map(|(_skipped, step)| step.to_string())
+    .filter(|&(skipped, _step)| skipped)
+    .map(|(_skipped, step)| step.to_string())
     .collect()
 }
 
@@ -1261,12 +1266,15 @@ fn adopt_manual_resolution(repo: &Repository, thread_id: &str) -> Result<String>
             "adopt manual resolution"
         ))
     })?;
-    let target = repo.refs().get_thread(&ThreadName::new(&thread.thread))?.ok_or_else(|| {
-        anyhow!(
-            "Thread '{}' has no current state to integrate",
-            thread.thread
-        )
-    })?;
+    let target = repo
+        .refs()
+        .get_thread(&ThreadName::new(&thread.thread))?
+        .ok_or_else(|| {
+            anyhow!(
+                "Thread '{}' has no current state to integrate",
+                thread.thread
+            )
+        })?;
     super::ff_record::record_ff_advance(repo, &thread.thread, &target)?;
     thread.state = repo::ThreadState::Merged;
     thread.merged_state = Some(target.short());
@@ -1301,13 +1309,13 @@ pub(crate) fn auto_land_policy_blockers(repo: &Repository, thread: &Thread) -> V
     let agent_authored = thread_is_agent_authored(repo, thread);
     if agent_authored
         && let Some(confidence) = thread.confidence_summary.value
-            && confidence < AUTO_LAND_CONFIDENCE_THRESHOLD
-        {
-            blockers.push(format!(
-                "confidence {:.2} is below the auto-land threshold of 0.75",
-                confidence
-            ));
-        }
+        && confidence < AUTO_LAND_CONFIDENCE_THRESHOLD
+    {
+        blockers.push(format!(
+            "confidence {:.2} is below the auto-land threshold of 0.75",
+            confidence
+        ));
+    }
     if matches!(thread.verification_summary.tests_passed, Some(false)) {
         blockers.push("verification summary reports failing tests".to_string());
     }
@@ -1361,7 +1369,8 @@ pub(crate) fn recovery_scope_checkout(
     if execution_path.as_os_str().is_empty() {
         return None;
     }
-    let canonical = |path: &std::path::Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let canonical =
+        |path: &std::path::Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     (canonical(execution_path) != canonical(current_checkout)).then(|| execution_path.clone())
 }
 
@@ -1408,7 +1417,12 @@ fn thread_is_agent_authored(repo: &Repository, thread: &Thread) -> bool {
         .current_state
         .as_deref()
         .and_then(|state| repo.resolve_state(state).ok().flatten())
-        .or_else(|| repo.refs().get_thread(&ThreadName::new(&thread.thread)).ok().flatten());
+        .or_else(|| {
+            repo.refs()
+                .get_thread(&ThreadName::new(&thread.thread))
+                .ok()
+                .flatten()
+        });
     current_state
         .and_then(|id| repo.store().get_state(&id).ok().flatten())
         .map(|state| state.attribution.agent.is_some())

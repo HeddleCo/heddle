@@ -30,8 +30,11 @@ fn init_and_capture() -> TempDir {
 
 /// Capture a second state on top of the seeded one so `HEAD~1` resolves.
 fn capture_second(temp: &TempDir) {
-    fs::write(temp.path().join("main.rs"), "fn main() { println!(\"hi\"); }\n")
-        .expect("modify main.rs");
+    fs::write(
+        temp.path().join("main.rs"),
+        "fn main() { println!(\"hi\"); }\n",
+    )
+    .expect("modify main.rs");
     heddle(&["capture", "-m", "second"], Some(temp.path())).expect("second capture");
 }
 
@@ -55,6 +58,17 @@ fn assert_output_kind(value: &Value, expected: &str) {
         value.get("output_kind").and_then(|v| v.as_str()),
         Some(expected),
         "expected output_kind={expected}, got payload: {value}"
+    );
+}
+
+fn assert_not_output_kind(value: &Value, disallowed: &[&str]) {
+    let actual = value
+        .get("output_kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<missing>");
+    assert!(
+        !disallowed.contains(&actual),
+        "payload used disallowed output_kind={actual}: {value}"
     );
 }
 
@@ -169,9 +183,9 @@ fn clean_dry_run_emits_output_kind() {
         value
             .get("removed")
             .and_then(|v| v.as_array())
-            .is_some_and(|arr| arr.iter().any(|entry| entry
-                .as_str()
-                .is_some_and(|s| s.contains("stray.txt")))),
+            .is_some_and(|arr| arr
+                .iter()
+                .any(|entry| entry.as_str().is_some_and(|s| s.contains("stray.txt")))),
         "clean --dry-run must list the would-remove paths: {value}"
     );
 }
@@ -226,6 +240,54 @@ fn cherry_pick_commit_emits_output_kind_with_new_commit() {
     );
 }
 
+#[test]
+fn thread_operator_envelopes_emit_approved_thread_kinds() {
+    let temp = init_and_capture();
+    heddle(&["thread", "create", "side"], Some(temp.path())).expect("thread create side");
+
+    let refresh = heddle_json(&["thread", "refresh", "side"], &temp);
+    assert_output_kind(&refresh, "thread_refresh");
+    assert_not_output_kind(&refresh, &["thread"]);
+    assert_eq!(refresh["action"].as_str(), Some("thread_refresh"));
+
+    let resolve = heddle_json(&["thread", "resolve", "side"], &temp);
+    assert_output_kind(&resolve, "thread_resolve");
+    assert_not_output_kind(&resolve, &["resolve"]);
+    assert_eq!(resolve["action"].as_str(), Some("thread_resolve"));
+
+    let drop = heddle_json(&["thread", "drop", "side"], &temp);
+    assert_output_kind(&drop, "thread_drop");
+    assert_not_output_kind(&drop, &["thread"]);
+    assert_eq!(drop["action"].as_str(), Some("thread_drop"));
+}
+
+#[test]
+fn thread_promote_and_cleanup_emit_approved_thread_kinds() {
+    let temp = init_and_capture();
+    heddle(&["start", "promo"], Some(temp.path())).expect("start promo thread");
+
+    let promote = heddle_json(&["thread", "promote", "promo"], &temp);
+    assert_output_kind(&promote, "thread_promote");
+    assert_not_output_kind(&promote, &["thread"]);
+    assert_eq!(promote["action"].as_str(), Some("thread_promote"));
+
+    let cleanup = heddle_json(&["thread", "cleanup", "--merged", "--dry-run"], &temp);
+    assert_output_kind(&cleanup, "thread_cleanup");
+    assert_not_output_kind(&cleanup, &["thread.cleanup"]);
+    assert_eq!(cleanup["action"].as_str(), Some("thread_cleanup"));
+}
+
+#[test]
+fn branch_rename_and_delete_advertised_thread_kinds_are_runtime_truths() {
+    let temp = init_and_capture();
+    heddle(&["branch", "side"], Some(temp.path())).expect("branch side");
+
+    let rename = heddle_json(&["branch", "-m", "side", "renamed"], &temp);
+    assert_output_kind(&rename, "thread_rename");
+
+    let delete = heddle_json(&["branch", "-d", "renamed"], &temp);
+    assert_output_kind(&delete, "thread_drop");
+}
 
 #[test]
 fn stash_show_emits_output_kind() {
@@ -327,9 +389,7 @@ fn purge_apply_emits_output_kind() {
     .expect("redact apply");
 
     let value = heddle_json(
-        &[
-            "purge", "apply", &state, "--path", "main.rs", "--force",
-        ],
+        &["purge", "apply", &state, "--path", "main.rs", "--force"],
         &temp,
     );
     assert_output_kind(&value, "purge_apply");
@@ -428,10 +488,7 @@ fn context_set_get_history_audit_check_emit_output_kind() {
         "context suggest envelope must carry an `items` array: {suggest}"
     );
 
-    let rm = heddle_json(
-        &["context", "rm", "--path", "main.rs", "--all"],
-        &temp,
-    );
+    let rm = heddle_json(&["context", "rm", "--path", "main.rs", "--all"], &temp);
     assert_output_kind(&rm, "context_rm");
     assert_eq!(rm["removed"].as_bool(), Some(true));
 }
@@ -454,8 +511,16 @@ fn context_list_envelope_wraps_items_for_empty_and_populated() {
     let populated_temp = init_and_capture();
     heddle(
         &[
-            "context", "set", "--path", "main.rs", "--scope", "file", "--kind",
-            "rationale", "-m", "entry point",
+            "context",
+            "set",
+            "--path",
+            "main.rs",
+            "--scope",
+            "file",
+            "--kind",
+            "rationale",
+            "-m",
+            "entry point",
         ],
         Some(populated_temp.path()),
     )
@@ -484,7 +549,10 @@ fn context_list_envelope_wraps_items_for_empty_and_populated() {
         "context list row must keep its `target`: {populated}"
     );
     assert!(
-        items[0].get("annotations").and_then(|v| v.as_array()).is_some(),
+        items[0]
+            .get("annotations")
+            .and_then(|v| v.as_array())
+            .is_some(),
         "context list row must keep its `annotations` array: {populated}"
     );
 }
@@ -493,16 +561,7 @@ fn context_list_envelope_wraps_items_for_empty_and_populated() {
 fn discuss_open_show_append_emit_output_kind() {
     let temp = init_and_capture();
 
-    let open = heddle_json(
-        &[
-            "discuss",
-            "open",
-            "main.rs",
-            "main",
-            "first turn",
-        ],
-        &temp,
-    );
+    let open = heddle_json(&["discuss", "open", "main.rs", "main", "first turn"], &temp);
     assert_output_kind(&open, "discuss_open");
     let discussion_id = open["id"]
         .as_str()
@@ -522,10 +581,7 @@ fn discuss_open_show_append_emit_output_kind() {
     // Flattened `turns` field must surface both turns at the top
     // level — the envelope must not nest the discussion payload.
     assert_eq!(
-        show["turns"]
-            .as_array()
-            .map(|arr| arr.len())
-            .unwrap_or(0),
+        show["turns"].as_array().map(|arr| arr.len()).unwrap_or(0),
         2,
         "discuss show must flatten `turns` at the top level: {show}"
     );
@@ -589,9 +645,7 @@ fn purge_list_envelope_includes_recent_apply() {
     )
     .expect("redact apply");
     heddle(
-        &[
-            "purge", "apply", &state, "--path", "main.rs", "--force",
-        ],
+        &["purge", "apply", &state, "--path", "main.rs", "--force"],
         Some(temp.path()),
     )
     .expect("purge apply");
@@ -612,8 +666,11 @@ fn stack_snapshot_text_mode_still_emits_envelope_with_output_kind() {
     // sessions can still route on it.
     let temp = init_and_capture();
     detach_head(&temp);
-    let output = heddle_output(&["--output", "text", "stack", "snapshot"], Some(temp.path()))
-        .expect("invoke stack snapshot text");
+    let output = heddle_output(
+        &["--output", "text", "stack", "snapshot"],
+        Some(temp.path()),
+    )
+    .expect("invoke stack snapshot text");
     assert!(
         output.status.success(),
         "stack snapshot text must succeed: stderr={}",
