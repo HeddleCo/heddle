@@ -11,6 +11,7 @@ use refs::Head;
 use serde_json::json;
 use tempfile::TempDir;
 
+use super::repo_config::SUPPORTED_REPO_FORMAT;
 use super::repository_snapshot::{with_snapshot_fault, SnapshotFault};
 use crate::{
     ChangedPathFilters, HeddleError, HistoryQuery, RepoConfig, Repository, RepositoryCapability,
@@ -71,6 +72,61 @@ fn test_open_with_store_threads_a_custom_object_store() {
         repo.store().get_blob(&hash).unwrap().unwrap().content(),
         blob.content()
     );
+}
+
+#[test]
+fn open_refuses_newer_repository_format_with_recovery_advice() {
+    let temp_dir = TempDir::new().unwrap();
+    Repository::init_default(temp_dir.path()).unwrap();
+
+    let config_path = temp_dir.path().join(".heddle/config.toml");
+    fs::write(&config_path, "[repository]\nversion = 99\n").unwrap();
+
+    let err = match Repository::open(temp_dir.path()) {
+        Ok(_) => panic!("newer repo format must refuse"),
+        Err(err) => err,
+    };
+    match &err {
+        HeddleError::RepositoryFormatTooNew {
+            path,
+            found,
+            supported,
+        } => {
+            assert_eq!(path, &config_path);
+            assert_eq!(*found, 99);
+            assert_eq!(*supported, SUPPORTED_REPO_FORMAT);
+        }
+        other => panic!("expected RepositoryFormatTooNew, got {other:?}"),
+    }
+
+    let message = err.to_string();
+    assert!(
+        message.contains("repository format 99"),
+        "error should name found format: {message}"
+    );
+    assert!(
+        message.contains(&format!("this binary supports {SUPPORTED_REPO_FORMAT}")),
+        "error should name supported format: {message}"
+    );
+    assert!(
+        message.contains("upgrade heddle or run `heddle migrate`"),
+        "error should include recovery advice: {message}"
+    );
+}
+
+#[test]
+fn open_accepts_supported_repository_format() {
+    let temp_dir = TempDir::new().unwrap();
+    Repository::init_default(temp_dir.path()).unwrap();
+
+    let config_path = temp_dir.path().join(".heddle/config.toml");
+    fs::write(
+        &config_path,
+        format!("[repository]\nversion = {SUPPORTED_REPO_FORMAT}\n"),
+    )
+    .unwrap();
+
+    Repository::open(temp_dir.path()).expect("supported repo format should open");
 }
 
 #[test]

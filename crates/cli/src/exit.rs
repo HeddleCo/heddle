@@ -98,6 +98,9 @@ impl HeddleExitCode {
                     // A missing repository is a missing precondition
                     // (initialize/point at one), not an IO failure.
                     objects::error::HeddleError::RepositoryNotFound(_) => return Self::Config,
+                    objects::error::HeddleError::RepositoryFormatTooNew { .. } => {
+                        return Self::DataErr;
+                    }
                     // Stored state that fails msgpack decoding is corrupted
                     // data, not a transient IO problem — same class as the
                     // serde_json/toml parse failures below.
