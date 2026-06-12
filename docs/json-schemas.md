@@ -231,7 +231,6 @@ in-progress operation.
       "accepted_opaque_schema_verbs_total": 56,
       "unaccepted_opaque_schema_verbs_total": 0,
       "supports_op_id_total": 99,
-      "jsonl_commands_total": 5,
       "missing_schema_examples": [],
       "missing_mutating_schema_examples": [],
       "verified_scope_missing_schema_examples": [],
