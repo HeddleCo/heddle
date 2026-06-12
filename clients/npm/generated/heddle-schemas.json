@@ -20650,32 +20650,6 @@
           ],
           "type": "object"
         },
-        "SubmoduleInfoSchema": {
-          "properties": {
-            "commit": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "commit"
-          ],
-          "type": "object"
-        },
-        "SubmoduleStatusEntrySchema": {
-          "properties": {
-            "path": {
-              "type": "string"
-            },
-            "submodule": {
-              "$ref": "#/$defs/SubmoduleInfoSchema"
-            }
-          },
-          "required": [
-            "path",
-            "submodule"
-          ],
-          "type": "object"
-        },
         "ThreadFreshnessSchema": {
           "enum": [
             "current",
@@ -21004,12 +20978,6 @@
         "storage_model": {
           "type": "string"
         },
-        "submodules": {
-          "items": {
-            "$ref": "#/$defs/SubmoduleStatusEntrySchema"
-          },
-          "type": "array"
-        },
         "target_thread": {
           "type": [
             "string",
@@ -21095,7 +21063,6 @@
         "is_isolated",
         "parallel_threads",
         "changes",
-        "submodules",
         "output_kind"
       ],
       "title": "StatusSchema",

@@ -572,17 +572,6 @@ pub struct ChangesInfoSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct SubmoduleStatusEntrySchema {
-    pub path: String,
-    pub submodule: SubmoduleInfoSchema,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SubmoduleInfoSchema {
-    pub commit: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub struct GitIndexInfoSchema {
     pub commit_mode: String,
     pub has_staged_changes: bool,
@@ -1975,7 +1964,6 @@ pub struct StatusSchema {
     pub state: Option<StateInfoSchema>,
     pub git_checkpoint: Option<GitCheckpointInfoSchema>,
     pub changes: ChangesInfoSchema,
-    pub submodules: Vec<SubmoduleStatusEntrySchema>,
     pub git_index: Option<GitIndexInfoSchema>,
 }
 
