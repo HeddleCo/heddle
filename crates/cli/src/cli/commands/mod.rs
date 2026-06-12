@@ -126,11 +126,11 @@ pub use clone::{
 pub use collapse::cmd_collapse;
 pub use command_catalog::{
     CommandCatalogOutput, advanced_help_groups, build_command_catalog, cmd_commands,
-    command_canonical_command,
-    command_contract_root_commands, command_help_tier, command_help_visibility, command_path,
-    command_persists_op_id, command_runtime_contract, command_runtime_contract_for_command,
-    command_supports_json_for_command, command_supports_op_id, command_supports_op_id_for_command,
-    command_surface, command_uses_bootstrap_op_id_store, observe_only_root_commands,
+    command_canonical_command, command_contract_root_commands, command_help_tier,
+    command_help_visibility, command_path, command_persists_op_id, command_runtime_contract,
+    command_runtime_contract_for_command, command_supports_json_for_command,
+    command_supports_op_id, command_supports_op_id_for_command, command_surface,
+    command_uses_bootstrap_op_id_store, observe_only_root_commands, operator_envelope_verbs,
     root_commands_for_advanced_help, root_commands_for_help_visibility,
 };
 pub use completion::cmd_completion;
@@ -147,7 +147,9 @@ pub use diff::cmd_diff;
 pub use discuss::run as cmd_discuss;
 pub use doctor_docs::cmd_doctor_docs;
 pub use doctor_schemas::{cmd_doctor_schemas, documented_samples_with_bound_verbs};
-pub use error_envelope::{print_error_with_hint, print_parse_error_json_envelope};
+pub use error_envelope::{
+    print_error_with_hint, print_error_with_hint_with_config, print_parse_error_json_envelope,
+};
 pub use fetch::cmd_fetch;
 pub use fork::cmd_fork;
 pub use fsck::cmd_fsck;
@@ -174,6 +176,7 @@ pub use marker::cmd_marker;
 pub use merge::cmd_merge;
 pub(crate) use merge::{bench_detect_renames, bench_find_merge_base, bench_three_way_merge};
 pub use monitor::cmd_monitor;
+pub use operator_core::operator_emission_output_kinds;
 pub use operator_loop::{cmd_abort, cmd_continue, cmd_sync_smart};
 #[cfg(feature = "git-overlay")]
 pub use oss::cmd_git_overlay_guide;
@@ -182,7 +185,6 @@ pub use query::run as cmd_query;
 pub use ready_cmd::cmd_ready;
 pub use rebase::cmd_rebase;
 pub use redact::cmd_redact;
-pub use visibility::cmd_visibility;
 pub use remote::{cmd_pull, cmd_push, cmd_remote};
 pub use resolve::cmd_resolve;
 pub use retro::{RetroCommandOptions, cmd_retro};
@@ -196,7 +198,7 @@ pub use session::{
     cmd_session_end, cmd_session_list, cmd_session_segment, cmd_session_show, cmd_session_start,
 };
 pub use shell::cmd_shell;
-pub use show::cmd_show;
+pub use show::{cmd_inspect_state, cmd_show};
 pub use snapshot::{SnapshotAgentOverrides, cmd_snapshot};
 pub use stack::cmd_stack;
 pub use stash::cmd_stash;
@@ -210,6 +212,7 @@ pub use transaction::run as cmd_transaction;
 pub use try_cmd::cmd_try;
 pub use undo::{cmd_redo, cmd_undo};
 pub use verify::cmd_verify;
+pub use visibility::cmd_visibility;
 pub use watch::cmd_watch;
 pub use workflow::{cmd_delegate, cmd_land, cmd_sync};
 pub use workspace::{cmd_workspace, cmd_workspace_show};

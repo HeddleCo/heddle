@@ -30,11 +30,11 @@ use cli::{
             cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
             cmd_daemon_status, cmd_daemon_stop, cmd_delegate, cmd_diagnose, cmd_diff, cmd_discuss,
             cmd_doctor_docs, cmd_doctor_schemas, cmd_fetch, cmd_fork, cmd_fsck, cmd_goto,
-            cmd_hook, cmd_init, cmd_integration, cmd_log,
-            cmd_maintenance, cmd_marker, cmd_merge, cmd_pull, cmd_push, cmd_query,
+            cmd_hook, cmd_init, cmd_inspect_state, cmd_integration, cmd_land,
+            cmd_log, cmd_maintenance, cmd_marker, cmd_merge, cmd_pull, cmd_push, cmd_query,
             cmd_ready, cmd_rebase, cmd_redo, cmd_remote, cmd_resolve, cmd_retro, cmd_revert,
             cmd_review, cmd_run, cmd_schemas, cmd_session_end, cmd_session_list,
-            cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell, cmd_land,
+            cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell,
             cmd_show, cmd_snapshot, cmd_stack, cmd_start, cmd_stash, cmd_status,
             cmd_switch_compat, cmd_sync_smart, cmd_thread, cmd_thread_show, cmd_transaction,
             cmd_try, cmd_undo, cmd_verify, cmd_watch, cmd_workspace,
@@ -485,14 +485,14 @@ async fn async_main() -> Result<()> {
             if let Some(state) = target
                 && is_plain_git_without_heddle(start)
             {
-                return cmd_show(&cli, Some(state.clone()));
+                return cmd_inspect_state(&cli, Some(state.clone()));
             }
             let repo = repo::Repository::open(start)?;
             match target {
                 Some(name) if repo.refs().get_thread(&objects::object::ThreadName::new(name.as_str()))?.is_some() => {
                     cmd_thread_show(&cli, &repo, Some(name.clone()))
                 }
-                Some(state) => cmd_show(&cli, Some(state.clone())),
+                Some(state) => cmd_inspect_state(&cli, Some(state.clone())),
                 None => cmd_thread_show(&cli, &repo, None),
             }
         }

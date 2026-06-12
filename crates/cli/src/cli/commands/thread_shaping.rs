@@ -5,7 +5,10 @@ use objects::store::ObjectStore;
 use std::{fs, path::Path};
 
 use anyhow::{Result, anyhow};
-use objects::{fs_ops::remove_path_recursively, object::{ChangeId, ThreadName}};
+use objects::{
+    fs_ops::remove_path_recursively,
+    object::{ChangeId, ThreadName},
+};
 use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus};
 use serde::Serialize;
 
@@ -14,9 +17,9 @@ use super::{
     advice::RecoveryAdvice,
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     merge::merge_thread_into_current,
-    operator_core::OperatorCommandOutput,
-    operator_loop::primary_next_action,
     next_action::{NextActionValidationContext, write_command_json},
+    operator_core::{OperatorAction, OperatorCommandOutput},
+    operator_loop::primary_next_action,
     ready_cmd::worktree_dirty,
     snapshot::{SnapshotAgentOverrides, create_snapshot},
     thread_cmd::{load_thread, refresh_thread, refresh_thread_freshness, thread_not_found_advice},
@@ -401,8 +404,10 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
         thread.integration_policy_result.status = Some("manual_resolved".to_string());
         thread.integration_policy_result.reason =
             Some("manual integration resolution captured".to_string());
-        thread.integration_policy_result.manual_resolution_state =
-            repo.refs().get_thread(&ThreadName::new(&thread.thread))?.map(|id| id.short());
+        thread.integration_policy_result.manual_resolution_state = repo
+            .refs()
+            .get_thread(&ThreadName::new(&thread.thread))?
+            .map(|id| id.short());
         manager.save(&thread)?;
     }
     let recommended_action = if blockers.is_empty() {
@@ -434,7 +439,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                 } else {
                     "blocked".to_string()
                 },
-                action: "resolve".to_string(),
+                action: OperatorAction::ThreadResolve,
                 message: if blockers.is_empty() {
                     if warnings.is_empty() {
                         "Thread manual resolution recorded".to_string()
@@ -487,7 +492,8 @@ fn thread_resolve_rebase_followup_operator(
     let next_action = "heddle continue".to_string();
     let mut blockers = Vec::new();
     if rebase_state
-        .pre_conflict_head.is_none_or(|head| head == current_state.change_id)
+        .pre_conflict_head
+        .is_none_or(|head| head == current_state.change_id)
     {
         blockers.push(
             "refresh has a rebase in progress; capture a manual resolution in the thread checkout, then run `heddle rebase --continue`".to_string(),
@@ -500,7 +506,7 @@ fn thread_resolve_rebase_followup_operator(
         } else {
             "blocked".to_string()
         },
-        action: "resolve".to_string(),
+        action: OperatorAction::ThreadResolve,
         message: if blockers.is_empty() {
             "Thread manual resolution recorded; continue the rebase".to_string()
         } else {
@@ -537,7 +543,7 @@ fn thread_resolve_conflict_recovery_operator(
     };
     Ok(Some(OperatorCommandOutput {
         status: "blocked".to_string(),
-        action: "resolve".to_string(),
+        action: OperatorAction::ThreadResolve,
         message: format!(
             "Thread '{thread_id}' has conflict markers in its checkout; resolve them there, then continue"
         ),
@@ -556,7 +562,7 @@ fn thread_resolve_refresh_operator(
     if trust.verified {
         return OperatorCommandOutput {
             status: "synced".to_string(),
-            action: "resolve".to_string(),
+            action: OperatorAction::ThreadResolve,
             message: "Thread refreshed cleanly".to_string(),
             blockers: Vec::new(),
             warnings: Vec::new(),
@@ -566,7 +572,7 @@ fn thread_resolve_refresh_operator(
     }
 
     OperatorCommandOutput::blocked_by_repository_verification(
-        "resolve",
+        OperatorAction::ThreadResolve,
         format!(
             "Thread refreshed cleanly, but repository verification is blocked: {}",
             trust.summary
@@ -765,11 +771,7 @@ fn emit<T: Serialize>(cli: &Cli, output: &T) -> Result<()> {
     Ok(())
 }
 
-fn emit_thread_resolve(
-    cli: &Cli,
-    repo: &Repository,
-    output: &ThreadResolveOutput,
-) -> Result<()> {
+fn emit_thread_resolve(cli: &Cli, repo: &Repository, output: &ThreadResolveOutput) -> Result<()> {
     if should_output_json(cli, None) {
         write_command_json(
             output,

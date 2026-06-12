@@ -7475,7 +7475,7 @@ fn git_overlay_matrix_stale_ship_manual_resolution_then_retry_ships() {
     heddle(&["resolve", "conflict.txt"], Some(&thread_path)).unwrap();
     let continued = json(&thread_path, &["--output", "json", "continue"]);
     assert_eq!(continued["status"], "continued");
-    assert_operator_json_contract(&continued, "merge");
+    assert_operator_json_contract(&continued, "continue");
     assert!(
         continued["recommended_action"]
             .as_str()
@@ -7621,7 +7621,7 @@ fn git_overlay_matrix_stale_ship_manual_resolution_pushes_when_requested() {
     heddle(&["resolve", "conflict.txt"], Some(&thread_path)).unwrap();
     let continued = json(&thread_path, &["--output", "json", "continue"]);
     assert_eq!(continued["status"], "continued");
-    assert_operator_json_contract(&continued, "merge");
+    assert_operator_json_contract(&continued, "continue");
     heddle(
         &["thread", "resolve", "feature/manual-push"],
         Some(temp.path()),
@@ -8564,7 +8564,7 @@ fn git_overlay_matrix_continue_retry_loops_block_then_succeed_after_resolution()
     heddle(&["resolve", "--all", "--ours"], Some(heddle_merge.path())).unwrap();
     let continued = json(heddle_merge.path(), &["--output", "json", "continue"]);
     assert_eq!(continued["status"], "continued");
-    assert_operator_json_contract(&continued, "merge");
+    assert_operator_json_contract(&continued, "continue");
 
     let git_merge = TempDir::new().unwrap();
     init_git_repo_with_branch(git_merge.path(), "feature/drop-in");
@@ -8600,7 +8600,7 @@ fn git_overlay_matrix_continue_retry_loops_block_then_succeed_after_resolution()
             .is_some_and(|message| message.contains("no-git runtime")),
         "raw Git continue should explain the native no-git boundary: {continued_git}"
     );
-    assert_operator_json_contract(&continued_git, "merge");
+    assert_operator_json_contract(&continued_git, "continue");
 }
 
 // ---------------------------------------------------------------------------

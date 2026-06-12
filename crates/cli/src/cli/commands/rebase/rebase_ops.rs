@@ -12,9 +12,10 @@ use repo::Repository;
 
 use super::{
     super::{advice::RecoveryAdvice, ff_record::ff_advance_deferred},
+    emit_rebase_progress,
     rebase_state::{load_rebase_state, save_rebase_state},
 };
-use crate::cli::{Cli, should_output_json};
+use crate::cli::Cli;
 
 /// Synthetic `source_thread` for `OpRecord::FastForward` entries
 /// emitted during a rebase replay. Each replayed commit becomes its
@@ -78,14 +79,15 @@ fn replay_commits_internal(
             ))
         })?;
 
-        if let Some(cli) = cli
-            && should_output_json(cli, Some(repo.config()))
+        if !emit_rebase_progress(
+            repo,
+            cli,
+            serde_json::json!({
+                "status": "applying",
+                "commit": commit_id.short(),
+            }),
+        )? && cli.is_some()
         {
-            println!(
-                "{{\"status\": \"applying\", \"commit\": \"{}\"}}",
-                commit_id.short()
-            );
-        } else if cli.is_some() {
             println!("Applying {}...", commit_id.short());
         }
 
@@ -104,14 +106,15 @@ fn replay_commits_internal(
                 state.pending_manual_resolution = Some(commit_id);
                 state.pre_conflict_head = Some(current_head);
                 save_rebase_state(rebase_state_path, &state)?;
-                if let Some(cli) = cli
-                    && should_output_json(cli, Some(repo.config()))
+                if !emit_rebase_progress(
+                    repo,
+                    cli,
+                    serde_json::json!({
+                        "status": "conflict",
+                        "commit": commit_id.short(),
+                    }),
+                )? && cli.is_some()
                 {
-                    println!(
-                        "{{\"status\": \"conflict\", \"commit\": \"{}\"}}",
-                        commit_id.short()
-                    );
-                } else if cli.is_some() {
                     println!(
                         "Conflict applying {}. Fix conflicts and run 'heddle rebase --continue'",
                         commit_id.short()
@@ -136,14 +139,15 @@ fn replay_commits_internal(
 
     fs::remove_file(rebase_state_path)?;
 
-    if let Some(cli) = cli
-        && should_output_json(cli, Some(repo.config()))
+    if !emit_rebase_progress(
+        repo,
+        cli,
+        serde_json::json!({
+            "status": "completed",
+            "onto": state.onto.to_string(),
+        }),
+    )? && cli.is_some()
     {
-        println!(
-            "{{\"status\": \"completed\", \"onto\": \"{}\"}}",
-            state.onto
-        );
-    } else if cli.is_some() {
         println!("Rebase completed");
     }
 
@@ -227,14 +231,15 @@ fn resume_manual_resolution_if_present(
     })?;
 
     if current_state.change_id == pre_conflict_head || current_state.change_id == pending_commit {
-        if let Some(cli) = cli
-            && should_output_json(cli, Some(repo.config()))
+        if !emit_rebase_progress(
+            repo,
+            cli,
+            serde_json::json!({
+                "status": "conflict",
+                "commit": pending_commit.short(),
+            }),
+        )? && cli.is_some()
         {
-            println!(
-                "{{\"status\": \"conflict\", \"commit\": \"{}\"}}",
-                pending_commit.short()
-            );
-        } else if cli.is_some() {
             println!(
                 "Conflict applying {}. Capture a manual resolution, then run 'heddle rebase --continue'",
                 pending_commit.short()
@@ -273,15 +278,16 @@ fn resume_manual_resolution_if_present(
     state.pre_conflict_head = None;
     save_rebase_state(rebase_state_path, state)?;
 
-    if let Some(cli) = cli
-        && should_output_json(cli, Some(repo.config()))
+    if !emit_rebase_progress(
+        repo,
+        cli,
+        serde_json::json!({
+            "status": "manual-resolution-accepted",
+            "commit": pending_commit.short(),
+            "resolved_as": current_state.change_id.short(),
+        }),
+    )? && cli.is_some()
     {
-        println!(
-            "{{\"status\": \"manual-resolution-accepted\", \"commit\": \"{}\", \"resolved_as\": \"{}\"}}",
-            pending_commit.short(),
-            current_state.change_id.short()
-        );
-    } else if cli.is_some() {
         println!(
             "Accepted manual resolution for {} as {}",
             pending_commit.short(),

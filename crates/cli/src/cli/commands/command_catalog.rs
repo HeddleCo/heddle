@@ -283,6 +283,7 @@ struct CommandContract {
     external_command: bool,
     requires_git_executable: bool,
     destructive_data: bool,
+    operator_envelope: bool,
     json_kind: &'static str,
     json_discriminators: &'static [CommandJsonDiscriminatorSpec],
     schema_verbs: &'static [&'static str],
@@ -696,6 +697,7 @@ const READ_JSON: CommandContract = CommandContract {
     external_command: false,
     requires_git_executable: false,
     destructive_data: false,
+    operator_envelope: false,
     json_kind: "json",
     json_discriminators: &[],
     schema_verbs: &[],
@@ -773,10 +775,22 @@ const fn compact_json(contract: CommandContract) -> CommandContract {
     }
 }
 
+const fn operator_envelope(contract: CommandContract) -> CommandContract {
+    CommandContract {
+        operator_envelope: true,
+        ..contract
+    }
+}
+
 const WORKTREE_MUTATION: CommandContract = CommandContract {
     may_write_worktree: true,
     writes_worktree: true,
     ..MUTATING
+};
+
+const WORKTREE_MUTATION_JSONL: CommandContract = CommandContract {
+    json_kind: "jsonl",
+    ..WORKTREE_MUTATION
 };
 
 const WORKTREE_ONLY_MUTATION: CommandContract = CommandContract {
@@ -1032,7 +1046,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["abort"],
         category(
             json_discriminators(
-                documented_schemas(compact_json(MUTATING), &["abort"]),
+                documented_schemas(operator_envelope(compact_json(MUTATING)), &["abort"]),
                 &[json_discriminator(Some("abort"), "output_kind", "abort")],
             ),
             "recovery",
@@ -1223,6 +1237,18 @@ const CONTRACTS: &[CommandContractEntry] = &[
                          listing shape",
                         "output_kind",
                         "thread_create",
+                    ),
+                    json_discriminator_no_schema(
+                        "branch -m delegates to `thread rename`; the registered \
+                         `branch` schema mirrors only the no-arg listing shape",
+                        "output_kind",
+                        "thread_rename",
+                    ),
+                    json_discriminator_no_schema(
+                        "branch -d delegates to `thread drop`; the registered \
+                         `branch` schema mirrors only the no-arg listing shape",
+                        "output_kind",
+                        "thread_drop",
                     ),
                 ],
             ),
@@ -1554,13 +1580,20 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["conflict", "show"],
-        opaque_schemas(READ_JSON, &["conflict show"]),
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["conflict show"]),
+            &[json_discriminator(
+                Some("conflict show"),
+                "output_kind",
+                "conflict_show",
+            )],
+        ),
     ),
     entry(
         &["continue"],
         category(
             json_discriminators(
-                documented_schemas(compact_json(MUTATING), &["continue"]),
+                documented_schemas(operator_envelope(compact_json(MUTATING)), &["continue"]),
                 &[json_discriminator(
                     Some("continue"),
                     "output_kind",
@@ -1903,7 +1936,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["inspect"],
-        category(documented_schemas(READ_JSON, &["inspect"]), "states"),
+        category(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["inspect", "thread show"]),
+                &[
+                    json_discriminator(Some("inspect"), "output_kind", "inspect_state"),
+                    json_discriminator(Some("thread show"), "output_kind", "thread_show"),
+                ],
+            ),
+            "states",
+        ),
     ),
     entry(&["integration"], surface(GROUP, "admin")),
     entry(
@@ -2167,7 +2209,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["rebase"],
-        category(opaque_schemas(WORKTREE_MUTATION, &["rebase"]), "threads"),
+        category(
+            json_discriminators(
+                opaque_schemas(WORKTREE_MUTATION_JSONL, &["rebase"]),
+                &[json_discriminator(
+                    Some("rebase"),
+                    "output_kind",
+                    "rebase_progress",
+                )],
+            ),
+            "threads",
+        ),
     ),
     entry(&["redact"], category(GROUP, "recovery")),
     entry(
@@ -2460,7 +2512,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["show"],
-        front_door(documented_schemas(READ_JSON, &["show"]), 140),
+        front_door(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["show"]),
+                &[json_discriminator(Some("show"), "output_kind", "show")],
+            ),
+            140,
+        ),
     ),
     entry(
         &["start"],
@@ -2622,7 +2680,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["sync"],
         category(
             json_discriminators(
-                documented_schemas(compact_json(MUTATING), &["sync"]),
+                documented_schemas(operator_envelope(compact_json(MUTATING)), &["sync"]),
                 &[json_discriminator(Some("sync"), "output_kind", "sync")],
             ),
             "threads",
@@ -2700,7 +2758,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             &[json_discriminator(
                 Some("thread refresh"),
                 "output_kind",
-                "thread",
+                "thread_refresh",
             )],
         ),
     ),
@@ -2719,7 +2777,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             &[json_discriminator(
                 Some("thread resolve"),
                 "output_kind",
-                "resolve",
+                "thread_resolve",
             )],
         ),
     ),
@@ -2730,7 +2788,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             &[json_discriminator(
                 Some("thread promote"),
                 "output_kind",
-                "thread",
+                "thread_promote",
             )],
         ),
     ),
@@ -2741,7 +2799,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             &[json_discriminator(
                 Some("thread drop"),
                 "output_kind",
-                "thread",
+                "thread_drop",
             )],
         ),
     ),
@@ -2775,7 +2833,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             &[json_discriminator(
                 Some("thread cleanup"),
                 "output_kind",
-                "thread.cleanup",
+                "thread_cleanup",
             )],
         ),
     ),
@@ -3655,6 +3713,21 @@ fn raw_command_contract_for_path<'a>(
         .map(|entry| entry.contract)
 }
 
+#[cfg(test)]
+pub(crate) fn sibling_documented_schema_verbs(schema_verb: &str) -> Vec<&'static str> {
+    active_command_contract_entries()
+        .iter()
+        .filter(|entry| {
+            entry
+                .contract
+                .documented_schema_verbs
+                .contains(&schema_verb)
+        })
+        .flat_map(|entry| entry.contract.documented_schema_verbs.iter().copied())
+        .filter(|documented| *documented != schema_verb)
+        .collect()
+}
+
 fn active_command_contract_entries() -> &'static [&'static CommandContractEntry] {
     ACTIVE_COMMAND_CONTRACT_ENTRIES
         .get_or_init(|| {
@@ -3696,22 +3769,54 @@ pub fn command_json_discriminators() -> Vec<CommandJsonDiscriminator> {
         .collect()
 }
 
-pub fn command_json_discriminator_for_schema_verb(
-    schema_verb: &str,
-) -> Option<CommandJsonDiscriminator> {
+pub fn operator_envelope_verbs() -> Vec<String> {
     active_command_contract_entries()
         .iter()
         .copied()
-        .filter(|entry| !removed_phase_1_2_contract_path(entry.path))
-        .flat_map(|entry| {
+        .filter(|entry| entry.contract.operator_envelope)
+        .map(|entry| entry.path.join(" "))
+        .collect()
+}
+
+#[cfg(test)]
+pub fn command_json_discriminator_for_schema_verb(
+    schema_verb: &str,
+) -> Option<CommandJsonDiscriminator> {
+    command_json_discriminators_for_schema_verb(schema_verb)
+        .into_iter()
+        .next()
+}
+
+pub fn command_json_discriminators_for_schema_verb(
+    schema_verb: &str,
+) -> Vec<CommandJsonDiscriminator> {
+    active_command_contract_entries()
+        .iter()
+        .copied()
+        .filter(|entry| {
             entry
                 .contract
                 .json_discriminators
                 .iter()
-                .map(move |discriminator| (entry.path, discriminator))
+                .any(|discriminator| discriminator.schema_verb == Some(schema_verb))
         })
-        .find(|(_, discriminator)| discriminator.schema_verb == Some(schema_verb))
-        .map(|(path, discriminator)| json_discriminator_metadata(path, discriminator))
+        .flat_map(|entry| {
+            let include_same_command_siblings = entry.contract.schema_verbs.len() == 1
+                && entry.contract.schema_verbs[0] == schema_verb;
+            entry.contract.json_discriminators.iter().filter_map(
+                move |discriminator| {
+                    if discriminator.schema_verb == Some(schema_verb)
+                        || (include_same_command_siblings
+                            && discriminator.schema_verb.is_none())
+                    {
+                        Some(json_discriminator_metadata(entry.path, discriminator))
+                    } else {
+                        None
+                    }
+                },
+            )
+        })
+        .collect()
 }
 
 fn json_discriminators_for_path<'a>(
@@ -5695,6 +5800,7 @@ mod tests {
         let catalog = build_command_catalog();
         for (display, kind) in [
             ("watch", "jsonl"),
+            ("rebase", "jsonl"),
             ("status", "json_or_jsonl"),
             ("thread show", "json_or_jsonl"),
         ] {
@@ -5751,6 +5857,8 @@ mod tests {
                 "blame",
                 "branch",
                 "branch",
+                "branch",
+                "branch",
                 "bridge git status",
                 "bridge git import",
                 "bridge git sync",
@@ -5766,6 +5874,7 @@ mod tests {
                 "clone",
                 "commit",
                 "commands",
+                "conflict show",
                 "continue",
                 "context set",
                 "context get",
@@ -5791,6 +5900,8 @@ mod tests {
                 "fork",
                 "goto",
                 "init",
+                "inspect",
+                "inspect",
                 // `log` appears twice: the entry advertises both `log` and the
                 // `log --reflog` variant (`log_reflog`), mirroring `undo`/`clone`.
                 "log",
@@ -5806,6 +5917,7 @@ mod tests {
                 "query",
                 "query",
                 "ready",
+                "rebase",
                 "redact apply",
                 "redact list",
                 "redact show",
@@ -5826,6 +5938,7 @@ mod tests {
                 "review health",
                 "schemas",
                 "land",
+                "show",
                 "start",
                 "stash list",
                 "stash show",
@@ -5877,6 +5990,62 @@ mod tests {
     #[test]
     fn schema_output_kind_discriminators_are_complete_and_consistent() {
         use crate::cli::commands::schema_for_verb;
+        use std::collections::BTreeSet;
+
+        fn resolve_schema_ref<'a>(
+            root: &'a serde_json::Value,
+            reference: &str,
+        ) -> &'a serde_json::Value {
+            reference
+                .strip_prefix("#/$defs/")
+                .or_else(|| reference.strip_prefix("#/definitions/"))
+                .and_then(|name| {
+                    root.get("$defs")
+                        .or_else(|| root.get("definitions"))
+                        .and_then(|defs| defs.get(name))
+                })
+                .unwrap_or_else(|| panic!("schema reference `{reference}` resolves"))
+        }
+
+        fn collect_output_kind_values<'a>(
+            root: &'a serde_json::Value,
+            schema: &'a serde_json::Value,
+            values: &mut BTreeSet<String>,
+        ) {
+            if let Some(reference) = schema.get("$ref").and_then(|value| value.as_str()) {
+                collect_output_kind_values(root, resolve_schema_ref(root, reference), values);
+                return;
+            }
+
+            if let Some(enum_values) = schema
+                .get("properties")
+                .and_then(|properties| properties.get("output_kind"))
+                .and_then(|property| property.get("enum"))
+                .and_then(|values| values.as_array())
+            {
+                values.extend(
+                    enum_values
+                        .iter()
+                        .filter_map(|value| value.as_str())
+                        .map(str::to_string),
+                );
+            } else if let Some(value) = schema
+                .get("properties")
+                .and_then(|properties| properties.get("output_kind"))
+                .and_then(|property| property.get("const"))
+                .and_then(|value| value.as_str())
+            {
+                values.insert(value.to_string());
+            }
+
+            for combinator in ["anyOf", "oneOf", "allOf"] {
+                if let Some(schemas) = schema.get(combinator).and_then(|value| value.as_array()) {
+                    for schema in schemas {
+                        collect_output_kind_values(root, schema, values);
+                    }
+                }
+            }
+        }
 
         let mut missing = Vec::new();
         let mut mismatched = Vec::new();
@@ -5886,10 +6055,9 @@ mod tests {
             let Some(schema) = schema_for_verb(verb) else {
                 panic!("catalog schema verb `{verb}` has no registered schema");
             };
-            let Some(property) = schema
-                .get("properties")
-                .and_then(|properties| properties.get("output_kind"))
-            else {
+            let mut actual = BTreeSet::new();
+            collect_output_kind_values(&schema, &schema, &mut actual);
+            if actual.is_empty() {
                 // The schema does not declare `output_kind` — the verb's
                 // runtime payload genuinely lacks the discriminator (the
                 // UNSWEPT_TODO rolldown in output_kind_invariant.rs).
@@ -5897,32 +6065,32 @@ mod tests {
             };
             checked += 1;
 
-            let Some(discriminator) = command_json_discriminator_for_schema_verb(verb) else {
+            let mut expected_discriminators = command_json_discriminators_for_schema_verb(verb);
+            if schema.get("anyOf").is_some() {
+                expected_discriminators.extend(command_json_discriminators().into_iter().filter(
+                    |discriminator| {
+                        discriminator.display == verb
+                            && discriminator.schema_verb.as_deref() != Some(verb)
+                    },
+                ));
+            }
+            let expected = expected_discriminators
+                .into_iter()
+                .filter(|discriminator| discriminator.field == "output_kind")
+                .map(|discriminator| discriminator.value)
+                .collect::<BTreeSet<_>>();
+            if expected.is_empty() {
                 missing.push(format!(
                     "`{verb}`: schema declares an `output_kind` property but the \
                      catalog advertises no json_discriminator for it"
                 ));
                 continue;
-            };
+            }
 
-            let const_value = property
-                .get("enum")
-                .and_then(|values| values.as_array())
-                .and_then(|values| values.first())
-                .and_then(|value| value.as_str())
-                .or_else(|| property.get("const").and_then(|value| value.as_str()));
-            match const_value {
-                None => missing.push(format!(
-                    "`{verb}`: schema declares `output_kind` without an enum/const \
-                     even though the catalog advertises `{}` — the discriminator \
-                     injection regressed",
-                    discriminator.value
-                )),
-                Some(value) if value != discriminator.value => mismatched.push(format!(
-                    "`{verb}`: schema const `{value}` != catalog discriminator `{}`",
-                    discriminator.value
-                )),
-                Some(_) => {}
+            if actual != expected {
+                mismatched.push(format!(
+                    "`{verb}`: schema output_kind values {actual:?} != catalog discriminators {expected:?}"
+                ));
             }
         }
 
@@ -5963,7 +6131,7 @@ mod tests {
             "JSON discriminator table contains duplicate (path, value) pairs"
         );
 
-        let mut schema_verbs = BTreeSet::new();
+        let mut schema_verb_values = std::collections::BTreeMap::new();
         for (path, discriminator) in raw_discriminators {
             let display = path.join(" ");
             let contract = raw_command_contract_for_path(path.iter().copied())
@@ -5984,10 +6152,14 @@ mod tests {
             );
 
             if let Some(schema_verb) = discriminator.schema_verb {
-                assert!(
-                    schema_verbs.insert(schema_verb),
-                    "JSON discriminator schema verb `{schema_verb}` is registered more than once"
-                );
+                let schema_value = (discriminator.field, discriminator.value);
+                if let Some(previous) = schema_verb_values.insert(schema_verb, schema_value) {
+                    assert_eq!(
+                        previous, schema_value,
+                        "JSON discriminator schema verb `{schema_verb}` is registered with \
+                         conflicting discriminator values"
+                    );
+                }
                 assert!(
                     contract.schema_verbs.contains(&schema_verb),
                     "`{display}` advertises discriminator schema verb `{schema_verb}` not present in its command contract"

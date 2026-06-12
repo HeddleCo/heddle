@@ -14,8 +14,15 @@
 
 use std::fs;
 
+use objects::{
+    object::{Blob, ConflictSide, ConflictSymbol, StructuredConflict, SymbolAnchor},
+    store::ObjectStore,
+};
+use repo::{OutputFormat, RepoConfig, Repository};
 use serde_json::Value;
 use tempfile::TempDir;
+
+use cli::cli::commands::{build_command_catalog, operator_envelope_verbs};
 
 use super::{heddle, heddle_output};
 
@@ -30,8 +37,11 @@ fn init_and_capture() -> TempDir {
 
 /// Capture a second state on top of the seeded one so `HEAD~1` resolves.
 fn capture_second(temp: &TempDir) {
-    fs::write(temp.path().join("main.rs"), "fn main() { println!(\"hi\"); }\n")
-        .expect("modify main.rs");
+    fs::write(
+        temp.path().join("main.rs"),
+        "fn main() { println!(\"hi\"); }\n",
+    )
+    .expect("modify main.rs");
     heddle(&["capture", "-m", "second"], Some(temp.path())).expect("second capture");
 }
 
@@ -42,6 +52,9 @@ fn heddle_json(args: &[&str], temp: &TempDir) -> Value {
     let stdout = heddle(&argv, Some(temp.path())).unwrap_or_else(|err| {
         panic!("heddle {argv:?} failed: {err}");
     });
+    if let Ok(value) = serde_json::from_str(stdout.trim()) {
+        return value;
+    }
     let line = stdout
         .lines()
         .next()
@@ -50,12 +63,144 @@ fn heddle_json(args: &[&str], temp: &TempDir) -> Value {
         .unwrap_or_else(|err| panic!("heddle {argv:?} stdout not JSON: {err}\n  line: {line}"))
 }
 
+fn heddle_stdout_json_allow_failure(args: &[&str], temp: &TempDir) -> Value {
+    let mut argv: Vec<&str> = vec!["--output", "json"];
+    argv.extend(args.iter().copied());
+    let output = heddle_output(&argv, Some(temp.path()))
+        .unwrap_or_else(|err| panic!("heddle {argv:?} failed to run: {err}"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_else(|| {
+            panic!(
+                "heddle {argv:?} produced no JSON stdout: status={:?} stderr={}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+    serde_json::from_str(line)
+        .unwrap_or_else(|err| panic!("heddle {argv:?} stdout line not JSON: {err}\n  line: {line}"))
+}
+
+fn heddle_stderr_json_allow_failure(args: &[&str], temp: &TempDir) -> Value {
+    let output = heddle_output(args, Some(temp.path()))
+        .unwrap_or_else(|err| panic!("heddle {args:?} failed to run: {err}"));
+    assert!(
+        !output.status.success(),
+        "heddle {args:?} should fail for this recovery-envelope fixture"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "error envelopes should stay on stderr, stdout={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|err| panic!("heddle {args:?} stderr not JSON: {err}\n{stderr}"))
+}
+
 fn assert_output_kind(value: &Value, expected: &str) {
     assert_eq!(
         value.get("output_kind").and_then(|v| v.as_str()),
         Some(expected),
         "expected output_kind={expected}, got payload: {value}"
     );
+}
+
+fn assert_not_output_kind(value: &Value, disallowed: &[&str]) {
+    let actual = value
+        .get("output_kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<missing>");
+    assert!(
+        !disallowed.contains(&actual),
+        "payload used disallowed output_kind={actual}: {value}"
+    );
+}
+
+fn schema_ref<'a>(root: &'a Value, schema: &'a Value) -> &'a Value {
+    let Some(reference) = schema.get("$ref").and_then(|value| value.as_str()) else {
+        return schema;
+    };
+    reference
+        .strip_prefix("#/$defs/")
+        .or_else(|| reference.strip_prefix("#/definitions/"))
+        .and_then(|name| {
+            root.get("$defs")
+                .or_else(|| root.get("definitions"))
+                .and_then(|defs| defs.get(name))
+        })
+        .unwrap_or_else(|| panic!("schema reference {reference:?} resolves"))
+}
+
+fn schema_property_accepts(root: &Value, schema: &Value, value: &Value) -> Result<(), String> {
+    let schema = schema_ref(root, schema);
+    if let Some(enum_values) = schema.get("enum").and_then(|value| value.as_array())
+        && !enum_values.contains(value)
+    {
+        return Err(format!("value {value} is not in enum {enum_values:?}"));
+    }
+    if let Some(const_value) = schema.get("const")
+        && const_value != value
+    {
+        return Err(format!("value {value} does not match const {const_value}"));
+    }
+    Ok(())
+}
+
+fn schema_accepts_payload(root: &Value, schema: &Value, payload: &Value) -> Result<(), String> {
+    let schema = schema_ref(root, schema);
+    let payload_object = payload
+        .as_object()
+        .ok_or_else(|| format!("payload is not an object: {payload}"))?;
+
+    if let Some(required) = schema.get("required").and_then(|value| value.as_array()) {
+        for field in required.iter().filter_map(|value| value.as_str()) {
+            if !payload_object.contains_key(field) {
+                return Err(format!("payload is missing required field {field:?}"));
+            }
+        }
+    }
+
+    if let Some(properties) = schema.get("properties").and_then(|value| value.as_object()) {
+        for (field, property_schema) in properties {
+            if let Some(value) = payload_object.get(field) {
+                schema_property_accepts(root, property_schema, value)
+                    .map_err(|err| format!("property {field:?} rejected payload: {err}"))?;
+            }
+        }
+    }
+
+    if let Some(branches) = schema.get("anyOf").and_then(|value| value.as_array()) {
+        let mut errors = Vec::new();
+        for branch in branches {
+            match schema_accepts_payload(root, branch, payload) {
+                Ok(()) => return Ok(()),
+                Err(err) => errors.push(err),
+            }
+        }
+        return Err(format!("payload matched no anyOf branch: {errors:?}"));
+    }
+
+    if let Some(subschemas) = schema.get("allOf").and_then(|value| value.as_array()) {
+        let mut errors = Vec::new();
+        for subschema in subschemas {
+            if let Err(err) = schema_accepts_payload(root, subschema, payload) {
+                errors.push(err);
+            }
+        }
+        if !errors.is_empty() {
+            return Err(format!("payload failed allOf subschema(s): {errors:?}"));
+        }
+    }
+
+    Ok(())
+}
+
+fn assert_schema_accepts_payload(schema: &Value, payload: &Value) {
+    schema_accepts_payload(schema, schema, payload)
+        .unwrap_or_else(|err| panic!("published schema rejected payload: {err}\n{payload}"));
 }
 
 /// Detach HEAD onto the current state so `stack snapshot` follows the
@@ -169,9 +314,9 @@ fn clean_dry_run_emits_output_kind() {
         value
             .get("removed")
             .and_then(|v| v.as_array())
-            .is_some_and(|arr| arr.iter().any(|entry| entry
-                .as_str()
-                .is_some_and(|s| s.contains("stray.txt")))),
+            .is_some_and(|arr| arr
+                .iter()
+                .any(|entry| entry.as_str().is_some_and(|s| s.contains("stray.txt")))),
         "clean --dry-run must list the would-remove paths: {value}"
     );
 }
@@ -226,6 +371,345 @@ fn cherry_pick_commit_emits_output_kind_with_new_commit() {
     );
 }
 
+#[test]
+fn thread_operator_envelopes_emit_approved_thread_kinds() {
+    let temp = init_and_capture();
+    heddle(&["thread", "create", "side"], Some(temp.path())).expect("thread create side");
+
+    let refresh = heddle_json(&["thread", "refresh", "side"], &temp);
+    assert_output_kind(&refresh, "thread_refresh");
+    assert_not_output_kind(&refresh, &["thread"]);
+    assert_eq!(refresh["action"].as_str(), Some("thread_refresh"));
+
+    let resolve = heddle_json(&["thread", "resolve", "side"], &temp);
+    assert_output_kind(&resolve, "thread_resolve");
+    assert_not_output_kind(&resolve, &["resolve"]);
+    assert_eq!(resolve["action"].as_str(), Some("thread_resolve"));
+
+    let drop = heddle_json(&["thread", "drop", "side"], &temp);
+    assert_output_kind(&drop, "thread_drop");
+    assert_not_output_kind(&drop, &["thread"]);
+    assert_eq!(drop["action"].as_str(), Some("thread_drop"));
+}
+
+#[test]
+fn thread_promote_and_cleanup_emit_approved_thread_kinds() {
+    let temp = init_and_capture();
+    heddle(&["start", "promo"], Some(temp.path())).expect("start promo thread");
+
+    let promote = heddle_json(&["thread", "promote", "promo"], &temp);
+    assert_output_kind(&promote, "thread_promote");
+    assert_not_output_kind(&promote, &["thread"]);
+    assert_eq!(promote["action"].as_str(), Some("thread_promote"));
+
+    let cleanup = heddle_json(&["thread", "cleanup", "--merged", "--dry-run"], &temp);
+    assert_output_kind(&cleanup, "thread_cleanup");
+    assert_not_output_kind(&cleanup, &["thread.cleanup"]);
+    assert_eq!(cleanup["action"].as_str(), Some("thread_cleanup"));
+}
+
+#[test]
+fn branch_rename_and_delete_advertised_thread_kinds_are_runtime_truths() {
+    let temp = init_and_capture();
+    heddle(&["branch", "side"], Some(temp.path())).expect("branch side");
+
+    let rename = heddle_json(&["branch", "-m", "side", "renamed"], &temp);
+    assert_output_kind(&rename, "thread_rename");
+
+    let delete = heddle_json(&["branch", "-d", "renamed"], &temp);
+    assert_output_kind(&delete, "thread_drop");
+}
+
+#[test]
+fn show_and_inspect_state_emit_distinct_output_kinds() {
+    let temp = init_and_capture();
+
+    let show = heddle_json(&["show", "HEAD"], &temp);
+    assert_output_kind(&show, "show");
+
+    let inspect_state = heddle_json(&["inspect", "HEAD"], &temp);
+    assert_output_kind(&inspect_state, "inspect_state");
+
+    let inspect_thread = heddle_json(&["inspect"], &temp);
+    assert_output_kind(&inspect_thread, "thread_show");
+}
+
+#[test]
+fn inspect_schema_accepts_state_and_thread_show_payloads() {
+    let temp = init_and_capture();
+    let schema: Value = serde_json::from_str(
+        &heddle(&["schemas", "inspect"], Some(temp.path())).expect("schemas inspect"),
+    )
+    .expect("schemas inspect emits JSON schema");
+
+    let inspect_state = heddle_json(&["inspect", "HEAD"], &temp);
+    assert_output_kind(&inspect_state, "inspect_state");
+    assert_schema_accepts_payload(&schema, &inspect_state);
+
+    let inspect_thread = heddle_json(&["inspect"], &temp);
+    assert_output_kind(&inspect_thread, "thread_show");
+    assert_schema_accepts_payload(&schema, &inspect_thread);
+}
+
+fn init_rebase_replay_fixture() -> TempDir {
+    let temp = init_and_capture();
+    heddle(&["thread", "create", "feature"], Some(temp.path())).expect("thread create feature");
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).expect("switch feature");
+    fs::write(temp.path().join("feat.txt"), "feature work\n").expect("write feature file");
+    heddle(&["capture", "-m", "feature"], Some(temp.path())).expect("feature capture");
+    heddle(&["thread", "switch", "main"], Some(temp.path())).expect("switch main");
+    fs::write(temp.path().join("main.txt"), "main work\n").expect("write main file");
+    heddle(&["capture", "-m", "main"], Some(temp.path())).expect("main capture");
+    temp
+}
+
+fn set_repo_output_format_json(temp: &TempDir) {
+    let config_path = temp.path().join(".heddle").join("config.toml");
+    let mut config = RepoConfig::load(&config_path).expect("load repo config");
+    config.output.format = Some(OutputFormat::Json);
+    config.save(&config_path).expect("save repo config");
+}
+
+fn init_active_merge_fixture() -> TempDir {
+    let temp = init_and_capture();
+    heddle(&["thread", "create", "feature"], Some(temp.path())).expect("thread create feature");
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).expect("switch feature");
+    fs::write(temp.path().join("main.rs"), "fn main() { feature(); }\n")
+        .expect("write feature conflict");
+    heddle(&["capture", "-m", "feature"], Some(temp.path())).expect("feature capture");
+    heddle(&["thread", "switch", "main"], Some(temp.path())).expect("switch main");
+    fs::write(temp.path().join("main.rs"), "fn main() { mainline(); }\n")
+        .expect("write main conflict");
+    heddle(&["capture", "-m", "main"], Some(temp.path())).expect("main capture");
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).expect("switch feature again");
+
+    let output =
+        heddle_output(&["merge", "main"], Some(temp.path())).expect("conflicted merge runs");
+    assert!(
+        temp.path().join(".heddle").join("MERGE_STATE").exists(),
+        "merge fixture must leave active MERGE_STATE: status={:?} stdout={} stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    temp
+}
+
+fn init_active_rebase_fixture() -> TempDir {
+    let temp = TempDir::new().expect("tempdir");
+    heddle(&["init"], Some(temp.path())).expect("heddle init");
+    fs::write(temp.path().join("conflict.txt"), "base\n").expect("write base");
+    heddle(&["capture", "-m", "base"], Some(temp.path())).expect("base capture");
+
+    heddle(&["thread", "create", "feature"], Some(temp.path())).expect("thread create feature");
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).expect("switch feature");
+    fs::write(temp.path().join("conflict.txt"), "feature\n").expect("write feature");
+    heddle(&["capture", "-m", "feature"], Some(temp.path())).expect("feature capture");
+
+    heddle(&["thread", "switch", "main"], Some(temp.path())).expect("switch main");
+    fs::write(temp.path().join("conflict.txt"), "main\n").expect("write main");
+    heddle(&["capture", "-m", "main"], Some(temp.path())).expect("main capture");
+
+    let output =
+        heddle_output(&["rebase", "feature"], Some(temp.path())).expect("conflicted rebase runs");
+    assert!(
+        temp.path().join(".heddle").join("REBASE_STATE").exists(),
+        "rebase fixture must leave active REBASE_STATE: status={:?} stdout={} stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    temp
+}
+
+#[derive(Clone, Copy)]
+enum RecoveryFixture {
+    Idle,
+    ActiveMerge,
+    ActiveRebase,
+}
+
+impl RecoveryFixture {
+    fn init(self) -> TempDir {
+        match self {
+            Self::Idle => init_and_capture(),
+            Self::ActiveMerge => init_active_merge_fixture(),
+            Self::ActiveRebase => init_active_rebase_fixture(),
+        }
+    }
+
+    fn expected_action(self, verb: &str) -> &str {
+        match (self, verb) {
+            (Self::Idle, _) | (_, "sync") => verb,
+            (Self::ActiveMerge, _) => "merge",
+            (Self::ActiveRebase, _) => "rebase",
+        }
+    }
+}
+
+fn catalog_operator_envelope_output_kinds() -> Vec<(String, String)> {
+    let catalog = build_command_catalog();
+    operator_envelope_verbs()
+        .into_iter()
+        .map(|display| {
+            let entry = catalog
+                .commands
+                .iter()
+                .find(|entry| entry.display == display)
+                .unwrap_or_else(|| panic!("operator envelope verb `{display}` is cataloged"));
+            let output_kind = entry
+                .json_discriminators
+                .iter()
+                .find(|discriminator| discriminator.field == "output_kind")
+                .unwrap_or_else(|| {
+                    panic!("operator envelope verb `{display}` declares output_kind")
+                })
+                .value
+                .clone();
+            (display, output_kind)
+        })
+        .collect()
+}
+
+#[test]
+fn recovery_path_family_output_kind_matches_invoked_verb() {
+    let operator_verbs = catalog_operator_envelope_output_kinds();
+    assert!(
+        operator_verbs.iter().any(|(display, _)| display == "sync"),
+        "catalog-driven operator envelope sweep must include `sync`: {operator_verbs:?}"
+    );
+
+    for fixture in [
+        RecoveryFixture::Idle,
+        RecoveryFixture::ActiveMerge,
+        RecoveryFixture::ActiveRebase,
+    ] {
+        for (verb, output_kind) in &operator_verbs {
+            if matches!(fixture, RecoveryFixture::Idle) && verb == "sync" {
+                continue;
+            }
+            let temp = fixture.init();
+            let args = verb.split_whitespace().collect::<Vec<_>>();
+            let value = heddle_stdout_json_allow_failure(&args, &temp);
+            assert_output_kind(&value, output_kind);
+            assert_eq!(
+                value["action"].as_str(),
+                Some(fixture.expected_action(verb)),
+                "{verb} should keep the operation action while output_kind stays tied to the invoked command: {value}"
+            );
+            if !matches!(fixture, RecoveryFixture::Idle) {
+                assert_not_output_kind(&value, &["merge", "rebase"]);
+            }
+        }
+    }
+}
+
+#[test]
+fn conflict_not_found_honors_repo_json_config_for_stored_and_active_merge() {
+    let stored = init_and_capture();
+    set_repo_output_format_json(&stored);
+    let stored_error = heddle_stderr_json_allow_failure(&["conflict", "show", "missing"], &stored);
+    assert_eq!(stored_error["kind"].as_str(), Some("conflict_not_found"));
+    assert_eq!(stored_error["exit_code"].as_u64(), Some(65));
+
+    let active_merge = init_active_merge_fixture();
+    set_repo_output_format_json(&active_merge);
+    let active_error =
+        heddle_stderr_json_allow_failure(&["conflict", "show", "missing"], &active_merge);
+    assert_eq!(active_error["kind"].as_str(), Some("conflict_not_found"));
+    assert_eq!(active_error["exit_code"].as_u64(), Some(65));
+}
+
+#[test]
+fn rebase_json_records_emit_progress_output_kind() {
+    let temp = init_rebase_replay_fixture();
+
+    let output = heddle(
+        &["--output", "json", "rebase", "feature"],
+        Some(temp.path()),
+    )
+    .expect("rebase feature");
+    let lines = output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert!(
+        !lines.is_empty(),
+        "rebase JSON output should emit at least one record"
+    );
+    let mut statuses = Vec::new();
+    for line in lines {
+        let value: Value = serde_json::from_str(line)
+            .unwrap_or_else(|err| panic!("rebase line not JSON: {err}\n  line: {line}"));
+        assert_output_kind(&value, "rebase_progress");
+        statuses.push(
+            value["status"]
+                .as_str()
+                .unwrap_or_else(|| panic!("rebase line missing status: {value}"))
+                .to_string(),
+        );
+    }
+    assert_eq!(
+        statuses,
+        vec!["started", "applying", "completed"],
+        "fixture must exercise replay JSONL, not the fast-forward path"
+    );
+}
+
+#[test]
+fn rebase_repo_json_config_without_output_flag_stays_text() {
+    let temp = init_rebase_replay_fixture();
+    set_repo_output_format_json(&temp);
+
+    let output = heddle(&["rebase", "feature"], Some(temp.path())).expect("rebase feature");
+    assert!(
+        output.contains("Rebasing ")
+            && output.contains("Applying ")
+            && output.contains("Rebase completed"),
+        "plain rebase under repo output.format=json should emit text, got: {output}"
+    );
+    assert!(
+        output
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .all(|line| serde_json::from_str::<Value>(line).is_err()),
+        "plain rebase under repo output.format=json must not emit JSONL: {output}"
+    );
+}
+
+#[test]
+fn conflict_show_stored_conflict_emits_output_kind() {
+    let temp = init_and_capture();
+    let repo = Repository::open(temp.path()).expect("open repo");
+    let head = repo
+        .current_state()
+        .expect("read current state")
+        .expect("current state exists");
+
+    let conflict = ConflictSymbol {
+        id: "stored-1".to_string(),
+        anchor: SymbolAnchor::new("main.rs", "main"),
+        base: ConflictSide::from_body(Some(head.change_id), "fn main() {}\n"),
+        ours: ConflictSide::from_body(Some(head.change_id), "fn main() { ours(); }\n"),
+        theirs: ConflictSide::from_body(Some(head.change_id), "fn main() { theirs(); }\n"),
+        candidate_resolutions: Vec::new(),
+    };
+    let structured = StructuredConflict::new(vec![conflict]);
+    let blob_hash = repo
+        .store()
+        .put_blob(&Blob::new(structured.encode().expect("encode conflict")))
+        .expect("store structured conflict blob");
+    let updated = head.with_structured_conflicts(blob_hash);
+    repo.store()
+        .put_state(&updated)
+        .expect("overwrite head state");
+
+    let value = heddle_json(&["conflict", "show", "stored-1"], &temp);
+    assert_output_kind(&value, "conflict_show");
+    assert_eq!(value["kind"].as_str(), Some("stored_structured_conflict"));
+    assert_eq!(value["id"].as_str(), Some("stored-1"));
+    assert_eq!(value["anchor"]["file"].as_str(), Some("main.rs"));
+}
 
 #[test]
 fn stash_show_emits_output_kind() {
@@ -327,9 +811,7 @@ fn purge_apply_emits_output_kind() {
     .expect("redact apply");
 
     let value = heddle_json(
-        &[
-            "purge", "apply", &state, "--path", "main.rs", "--force",
-        ],
+        &["purge", "apply", &state, "--path", "main.rs", "--force"],
         &temp,
     );
     assert_output_kind(&value, "purge_apply");
@@ -428,10 +910,7 @@ fn context_set_get_history_audit_check_emit_output_kind() {
         "context suggest envelope must carry an `items` array: {suggest}"
     );
 
-    let rm = heddle_json(
-        &["context", "rm", "--path", "main.rs", "--all"],
-        &temp,
-    );
+    let rm = heddle_json(&["context", "rm", "--path", "main.rs", "--all"], &temp);
     assert_output_kind(&rm, "context_rm");
     assert_eq!(rm["removed"].as_bool(), Some(true));
 }
@@ -454,8 +933,16 @@ fn context_list_envelope_wraps_items_for_empty_and_populated() {
     let populated_temp = init_and_capture();
     heddle(
         &[
-            "context", "set", "--path", "main.rs", "--scope", "file", "--kind",
-            "rationale", "-m", "entry point",
+            "context",
+            "set",
+            "--path",
+            "main.rs",
+            "--scope",
+            "file",
+            "--kind",
+            "rationale",
+            "-m",
+            "entry point",
         ],
         Some(populated_temp.path()),
     )
@@ -484,7 +971,10 @@ fn context_list_envelope_wraps_items_for_empty_and_populated() {
         "context list row must keep its `target`: {populated}"
     );
     assert!(
-        items[0].get("annotations").and_then(|v| v.as_array()).is_some(),
+        items[0]
+            .get("annotations")
+            .and_then(|v| v.as_array())
+            .is_some(),
         "context list row must keep its `annotations` array: {populated}"
     );
 }
@@ -493,16 +983,7 @@ fn context_list_envelope_wraps_items_for_empty_and_populated() {
 fn discuss_open_show_append_emit_output_kind() {
     let temp = init_and_capture();
 
-    let open = heddle_json(
-        &[
-            "discuss",
-            "open",
-            "main.rs",
-            "main",
-            "first turn",
-        ],
-        &temp,
-    );
+    let open = heddle_json(&["discuss", "open", "main.rs", "main", "first turn"], &temp);
     assert_output_kind(&open, "discuss_open");
     let discussion_id = open["id"]
         .as_str()
@@ -522,10 +1003,7 @@ fn discuss_open_show_append_emit_output_kind() {
     // Flattened `turns` field must surface both turns at the top
     // level — the envelope must not nest the discussion payload.
     assert_eq!(
-        show["turns"]
-            .as_array()
-            .map(|arr| arr.len())
-            .unwrap_or(0),
+        show["turns"].as_array().map(|arr| arr.len()).unwrap_or(0),
         2,
         "discuss show must flatten `turns` at the top level: {show}"
     );
@@ -589,9 +1067,7 @@ fn purge_list_envelope_includes_recent_apply() {
     )
     .expect("redact apply");
     heddle(
-        &[
-            "purge", "apply", &state, "--path", "main.rs", "--force",
-        ],
+        &["purge", "apply", &state, "--path", "main.rs", "--force"],
         Some(temp.path()),
     )
     .expect("purge apply");
@@ -612,8 +1088,11 @@ fn stack_snapshot_text_mode_still_emits_envelope_with_output_kind() {
     // sessions can still route on it.
     let temp = init_and_capture();
     detach_head(&temp);
-    let output = heddle_output(&["--output", "text", "stack", "snapshot"], Some(temp.path()))
-        .expect("invoke stack snapshot text");
+    let output = heddle_output(
+        &["--output", "text", "stack", "snapshot"],
+        Some(temp.path()),
+    )
+    .expect("invoke stack snapshot text");
     assert!(
         output.status.success(),
         "stack snapshot text must succeed: stderr={}",

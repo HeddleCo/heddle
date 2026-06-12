@@ -14,7 +14,8 @@ use super::{
     merge::{build_thread_preview_report, merge_thread_into_current},
     next_action::{NextActionValidationContext, write_command_json, write_full_command_json},
     operator_core::{
-        OperatorCommandOutput, VerificationClaimPolicy, exit_if_blocked_operator_status,
+        OperatorAction, OperatorCommandOutput, VerificationClaimPolicy,
+        exit_if_blocked_operator_status,
     },
     operator_loop::primary_next_action,
     ready_cmd::worktree_dirty,
@@ -107,7 +108,7 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
         SyncOutput {
             operator: OperatorCommandOutput {
                 status: "current".to_string(),
-                action: "sync".to_string(),
+                action: OperatorAction::Sync,
                 message: format!("Thread '{}' is already current", thread.id),
                 blockers: vec![],
                 warnings: Vec::new(),
@@ -149,7 +150,7 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
         SyncOutput {
             operator: OperatorCommandOutput {
                 status: "blocked".to_string(),
-                action: "sync".to_string(),
+                action: OperatorAction::Sync,
                 message: format!("Thread '{}' needs manual sync", thread.id),
                 blockers: stale_report.blockers.clone(),
                 warnings: Vec::new(),
@@ -190,7 +191,7 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
                 SyncOutput {
                     operator: OperatorCommandOutput {
                         status: "refreshed".to_string(),
-                        action: "sync".to_string(),
+                        action: OperatorAction::Sync,
                         message: format!("Refreshed thread '{}'", refreshed.id),
                         blockers: vec![],
                         warnings: Vec::new(),
@@ -221,7 +222,7 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
                 SyncOutput {
                     operator: OperatorCommandOutput {
                         status: "blocked".to_string(),
-                        action: "sync".to_string(),
+                        action: OperatorAction::Sync,
                         message: format!("Thread '{}' has merge conflicts to resolve", thread.id),
                         blockers: stale_report.blockers.clone(),
                         warnings: Vec::new(),
@@ -387,7 +388,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 &LandOutput {
                     operator: OperatorCommandOutput {
                         status: "blocked".to_string(),
-                        action: "land".to_string(),
+                        action: OperatorAction::Land,
                         message: format!(
                             "Thread '{}' must be synced manually",
                             refreshed_thread.id
@@ -496,7 +497,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         let post_land_action = integrated_land_next_action(true, pushed, &trust);
         let mut operator = OperatorCommandOutput {
             status: "landed".to_string(),
-            action: "land".to_string(),
+            action: OperatorAction::Land,
             message: format!(
                 "Landed thread '{}' from a manually resolved integration state",
                 merge_thread.id
@@ -564,7 +565,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             &LandOutput {
                 operator: OperatorCommandOutput {
                     status: "blocked".to_string(),
-                    action: "land".to_string(),
+                    action: OperatorAction::Land,
                     message: format!("Thread '{}' is not eligible for auto-land", merge_thread.id),
                     blockers: land_blockers_for_preview(&preview, &integration_blockers),
                     warnings: Vec::new(),
@@ -672,7 +673,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     let integrated_next_action = integrated_land_next_action(integrated, pushed, &trust);
     let mut operator = OperatorCommandOutput {
         status: if integrated { "landed" } else { "blocked" }.to_string(),
-        action: "land".to_string(),
+        action: OperatorAction::Land,
         message: if integrated {
             format!("Landed thread '{}'", merge_thread.id)
         } else {

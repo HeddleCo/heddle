@@ -569,7 +569,7 @@ export interface CloneSchema {
   objects?: number | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "clone";
+  output_kind: "clone" | "clone_connection";
   remote?: string | null;
   replayed?: boolean | null;
   repository_capability?: string | null;
@@ -1547,6 +1547,7 @@ export interface RebaseSchema {
   idempotency_status?: string | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "rebase_progress";
   replayed?: boolean | null;
   [key: string]: unknown;
 }
@@ -1936,6 +1937,7 @@ export interface ShowSchema {
   created_at: string;
   git_checkpoint?: string | null;
   intent?: string | null;
+  output_kind: "show";
   parents: string[];
   principal: ShowPrincipalSchema;
   repository_capability: string;
@@ -2107,7 +2109,7 @@ export interface SwitchCheckoutSchema {
   name?: string | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "thread_switch";
+  output_kind: "goto" | "thread_switch";
   path?: string | null;
   replayed?: boolean | null;
   target?: string | null;
@@ -2204,7 +2206,7 @@ export interface ThreadCleanupSchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "thread.cleanup";
+  output_kind: "thread_cleanup";
   reclaimed_bytes: number;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
@@ -2255,7 +2257,7 @@ export interface ThreadDropSchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "thread";
+  output_kind: "thread_drop";
   path?: string | null;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
@@ -2334,7 +2336,7 @@ export interface ThreadPromoteSchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "thread";
+  output_kind: "thread_promote";
   path?: string | null;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
@@ -2353,7 +2355,7 @@ export interface ThreadRefreshSchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "thread";
+  output_kind: "thread_refresh";
   path?: string | null;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
@@ -2390,7 +2392,7 @@ export interface ThreadResolveSchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "resolve";
+  output_kind: "thread_resolve";
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   replayed?: boolean | null;
