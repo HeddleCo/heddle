@@ -59,7 +59,8 @@ fn fskit_mount_serves_blob_content() {
     // `mount(at:)` returns ENOSYS — the assertion below pins
     // the contract: construct + mount returns the documented
     // not-implemented errno, drop cleans up.
-    match FSKitShell::new(mount).mount_background(mountpoint.path()) {
+    let shell = FSKitShell::new(mount).expect("construct FSKit session");
+    match shell.mount_background(mountpoint.path()) {
         Ok(session) => {
             // Future-proof: once the System Extension lands, the
             // mount succeeds and the read assertion below pins

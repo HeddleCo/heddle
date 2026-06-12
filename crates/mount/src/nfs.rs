@@ -693,6 +693,10 @@ fn mount_err_to_nfs(err: &MountError) -> nfsstat3 {
         MountError::IsADirectory(_) => nfsstat3::NFS3ERR_ISDIR,
         MountError::NotEmpty(_) => nfsstat3::NFS3ERR_NOTEMPTY,
         MountError::InvalidArgument(_) => nfsstat3::NFS3ERR_INVAL,
+        // Session construction happens before the NFS server ever
+        // dispatches a request, so this can't surface mid-protocol;
+        // map it like any other infrastructure failure.
+        MountError::SessionInit(_) => nfsstat3::NFS3ERR_IO,
         MountError::Store(_) => nfsstat3::NFS3ERR_IO,
     }
 }
