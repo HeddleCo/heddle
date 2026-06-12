@@ -176,5 +176,28 @@ mod tests {
             err,
             SignerError::InsecureKeyPermissions { mode: 0o644, .. }
         ));
+        // The refusal must be actionable: name the offending path, the
+        // observed + required modes, and the exact chmod to run.
+        let msg = err.to_string();
+        assert!(msg.contains(&key_path.display().to_string()), "{msg}");
+        assert!(msg.contains("0644"), "{msg}");
+        assert!(msg.contains("0600"), "{msg}");
+        assert!(msg.contains("chmod 600"), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_signer_accepts_owner_only_private_key() {
+        let temp = TempDir::new().expect("create temp dir");
+        let key_path = temp.path().join("test_ed25519.pem");
+
+        let signer = Ed25519Signer::generate().expect("generate key");
+        let pem = signer.to_pem().expect("export to PEM");
+        write_file_atomic_secret(&key_path, pem.as_bytes()).expect("write key file");
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+            .expect("set owner-only mode");
+
+        let loaded = load_signer(&key_path, Some("ed25519")).expect("0600 key must load");
+        assert_eq!(loaded.public_key(), signer.public_key());
     }
 }
