@@ -1121,7 +1121,7 @@ pub struct MergePreviewSchema {
     pub impact_categories: Option<Vec<String>>,
     pub promotion_suggested: Option<bool>,
     pub heavy_impact_paths: Option<Vec<String>>,
-    pub semantic_result: Option<String>,
+    pub merge_relation: Option<String>,
     pub conflict_count: Option<usize>,
     pub thread_health: Option<String>,
     pub diff: Option<Value>,

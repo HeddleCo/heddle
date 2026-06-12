@@ -2389,12 +2389,10 @@ fn test_merge_conflict_markers_well_formed_across_newline_shapes() {
 
 #[test]
 fn test_merge_semantic_resolves_disjoint_function_edits_clean() {
-    // heddle#68: with `--semantic`, two branches editing DIFFERENT functions
+    // heddle#68/#467: by default, two branches editing DIFFERENT functions
     // in the same file should merge cleanly with zero conflict markers.
-    // Without `--semantic` the default text engine surfaces a hunk conflict
-    // around the rewritten regions because both sides modified the same
-    // file. The two outcomes encode the contract the trip report
-    // (heddle#54) asked for.
+    // `--no-semantic` remains the hunk-only escape hatch for callers that
+    // need the older line-oriented behavior.
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     let src = temp.path().join("lib.rs");
@@ -2425,13 +2423,13 @@ fn test_merge_semantic_resolves_disjoint_function_edits_clean() {
     heddle(&["thread", "switch", "edit_alpha"], Some(temp.path())).unwrap();
     heddle(&["thread", "refresh", "edit_alpha"], Some(temp.path())).unwrap();
     heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
-    let result = heddle(&["merge", "edit_alpha", "--semantic"], Some(temp.path()));
-    assert!(result.is_ok(), "semantic merge should succeed");
+    let result = heddle(&["merge", "edit_alpha"], Some(temp.path()));
+    assert!(result.is_ok(), "default semantic merge should succeed");
 
     let merged = fs::read_to_string(&src).unwrap();
     assert!(
         !merged.contains("<<<<<<<"),
-        "disjoint function edits must not leave conflict markers under --semantic: {merged}"
+        "disjoint function edits must not leave conflict markers under default semantic merge: {merged}"
     );
     assert!(
         merged.contains("fn alpha() -> u32 { 11 }"),
@@ -2467,7 +2465,7 @@ fn test_merge_semantic_falls_through_on_text_file() {
     let merged = fs::read_to_string(&f).unwrap();
     assert!(
         merged.contains("<<<<<<< CURRENT"),
-        "same-line conflict on a non-language file must still produce markers under --semantic: {merged}"
+        "same-line conflict on a non-language file must still produce markers under default semantic merge: {merged}"
     );
 }
 
@@ -2476,14 +2474,14 @@ fn test_merge_semantic_falls_through_on_text_file() {
 /// where the text engine surfaces conflicts but the semantic engine is
 /// clean prints contradictory preview lines (`blocked` / `conflicts:` in
 /// `preview_summary`) even though the actual merge plan and `conflicts`
-/// payload — both built with the real `--semantic` strategy — are clean.
+/// payload — both built with the semantic strategy — are clean.
 ///
 /// Fixture shape mirrors the semantic crate's
 /// `semantic_beats_text_merge_on_structural_reshape` unit test, which
 /// asserts directly that `text_hunk_merge` surfaces ≥1 conflict on this
 /// exact base/ours/theirs trio. The CLI-level invariant under test: the
-/// preview summary must agree with the real merge result when
-/// `--semantic` is engaged.
+/// preview summary must agree with the real merge result when the
+/// default semantic strategy is engaged.
 #[test]
 fn test_merge_semantic_preview_summary_matches_semantic_plan_on_structural_reshape() {
     let temp = TempDir::new().unwrap();
@@ -2522,14 +2520,7 @@ fn test_merge_semantic_preview_summary_matches_semantic_plan_on_structural_resha
     heddle(&["capture", "-m", "main: edit d"], Some(temp.path())).unwrap();
 
     let preview_output = heddle_output(
-        &[
-            "--output",
-            "json",
-            "merge",
-            "feature",
-            "--semantic",
-            "--preview",
-        ],
+        &["--output", "json", "merge", "feature", "--preview"],
         Some(temp.path()),
     )
     .expect("preview should emit a process output");
@@ -2557,7 +2548,7 @@ fn test_merge_semantic_preview_summary_matches_semantic_plan_on_structural_resha
 /// hardcoded `MergeStrategy::HunkOnly`, so a structural-reshape on the
 /// thread side combined with a disjoint edit on the target side made
 /// `heddle thread refresh` fail with "could not be refreshed cleanly"
-/// even though `heddle merge --semantic` resolves the same trio cleanly.
+/// even though the default `heddle merge` strategy resolves the same trio cleanly.
 ///
 /// Fixture mirrors `test_merge_semantic_preview_summary_matches_semantic_plan_on_structural_reshape`:
 /// `lib.rs` with four trivial fns; thread reorders + edits one fn; main
@@ -2644,15 +2635,15 @@ fn test_thread_refresh_routes_through_semantic_driver_on_structural_reshape() {
 /// fast-forward) while the actual merge_plan and apply path computed
 /// `A → B`. The two halves of the preview output disagreed:
 /// `preview_summary` line `merge type: <inner-result>` said one
-/// thing while the top-level `semantic_result` / `conflicts` said
+/// thing while the top-level `merge_relation` / `conflicts` said
 /// another. Worst case the inner-side claim of "clean / fast_forward"
 /// led an operator to expect a successful merge that then surfaced
 /// path conflicts at apply time.
 ///
 /// The invariant under test: within a single `--preview` run, the
 /// `preview_summary` semantic-preview line MUST agree with the
-/// top-level `semantic_result`. And running the same merge for real
-/// must produce the same `semantic_result` the preview reported.
+/// top-level `merge_relation`. And running the same merge for real
+/// must produce the same `merge_relation` the preview reported.
 #[test]
 fn test_merge_preview_agrees_with_real_merge_when_run_from_non_target_thread() {
     let temp = TempDir::new().unwrap();
@@ -2694,20 +2685,12 @@ fn test_merge_preview_agrees_with_real_merge_when_run_from_non_target_thread() {
 
     // Preview the merge from B.
     let preview_out = heddle(
-        &[
-            "--output",
-            "json",
-            "merge",
-            "A",
-            "--preview",
-            "--semantic",
-            "--with-diff",
-        ],
+        &["--output", "json", "merge", "A", "--preview", "--with-diff"],
         Some(temp.path()),
     )
     .unwrap();
     let preview: Value = serde_json::from_str(&preview_out).expect("preview must emit JSON");
-    let preview_semantic = preview["semantic_result"].as_str().unwrap_or("");
+    let preview_relation = preview["merge_relation"].as_str().unwrap_or("");
     let preview_summary: Vec<&str> = preview["preview_summary"]
         .as_array()
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
@@ -2719,43 +2702,35 @@ fn test_merge_preview_agrees_with_real_merge_when_run_from_non_target_thread() {
     let normalized_merge_type = merge_type_line.replace('-', "_");
 
     // Invariant #1 (internal consistency): the `merge type: X` line
-    // emitted by the preview MUST match the top-level `semantic_result`
+    // emitted by the preview MUST match the top-level `merge_relation`
     // on the same preview. Pre-fix this fails: the inner report keys off
     // `thread.target_thread` (main) so it says `fast_forward` while the
     // outer plan correctly says `path_conflicts` (or vice versa).
     assert_eq!(
-        normalized_merge_type, preview_semantic,
-        "preview_summary's merge-type line must agree with top-level semantic_result; \
-         got summary line {merge_type_line:?} but top-level {preview_semantic:?}. \
+        normalized_merge_type, preview_relation,
+        "preview_summary's merge-type line must agree with top-level merge_relation; \
+         got summary line {merge_type_line:?} but top-level {preview_relation:?}. \
          Full preview: {preview}"
     );
 
     // Invariant #2 (preview vs reality): the real merge run on the same
-    // inputs must produce the same `semantic_result` the preview reported.
+    // inputs must produce the same `merge_relation` the preview reported.
     let real_output = heddle_output(
-        &[
-            "--output",
-            "json",
-            "merge",
-            "A",
-            "--semantic",
-            "-m",
-            "merge",
-        ],
+        &["--output", "json", "merge", "A", "-m", "merge"],
         Some(temp.path()),
     )
     .expect("real merge should emit a process output");
     let real_stdout = str::from_utf8(&real_output.stdout).unwrap_or("");
     let real: Value = serde_json::from_str(real_stdout).expect("real merge must emit JSON");
     assert_eq!(
-        preview["semantic_result"], real["semantic_result"],
-        "preview's semantic_result must equal the real merge's semantic_result on identical inputs. \
+        preview["merge_relation"], real["merge_relation"],
+        "preview's merge_relation must equal the real merge's merge_relation on identical inputs. \
          preview={}, real={}",
-        preview["semantic_result"], real["semantic_result"]
+        preview["merge_relation"], real["merge_relation"]
     );
 }
 
-/// heddle#153: `merge --preview --with-diff --semantic --output json` must
+/// heddle#153/#467: `merge --preview --with-diff --output json` must
 /// surface symbol-level deltas at a discoverable location, not bury them
 /// inside `diff` where agents consuming the JSON miss them.
 ///
@@ -2765,7 +2740,7 @@ fn test_merge_preview_agrees_with_real_merge_when_run_from_non_target_thread() {
 /// emitted only inside `diff.semantic_changes`, which is easy to overlook
 /// — and absent from the JSON entirely when `--with-diff` isn't passed.
 ///
-/// Contract under test: with `--semantic` set, the merge output JSON
+/// Contract under test: with semantic merge active by default, the merge output JSON
 /// includes a top-level `semantic_changes` array carrying the per-symbol
 /// delta entries, populated even when `--with-diff` isn't requested.
 #[test]
@@ -2795,15 +2770,7 @@ fn test_merge_semantic_surfaces_top_level_symbol_deltas_on_rename() {
     heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
 
     let out = heddle(
-        &[
-            "--output",
-            "json",
-            "merge",
-            "A",
-            "--preview",
-            "--with-diff",
-            "--semantic",
-        ],
+        &["--output", "json", "merge", "A", "--preview", "--with-diff"],
         Some(temp.path()),
     )
     .unwrap();
@@ -2816,7 +2783,9 @@ fn test_merge_semantic_surfaces_top_level_symbol_deltas_on_rename() {
         .get("semantic_changes")
         .and_then(|v| v.as_array())
         .unwrap_or_else(|| {
-            panic!("--semantic merge must surface top-level `semantic_changes` array: {parsed}")
+            panic!(
+                "default semantic merge must surface top-level `semantic_changes` array: {parsed}"
+            )
         });
     let rename = semantic_changes
         .iter()
@@ -2840,12 +2809,12 @@ fn test_merge_semantic_surfaces_top_level_symbol_deltas_on_rename() {
     );
 }
 
-/// heddle#153: when `--semantic` is NOT set, the top-level
+/// heddle#153/#467: when `--no-semantic` is set, the top-level
 /// `semantic_changes` field must be absent (not `null`, not `[]`). That's
 /// the unambiguous "semantic mode was not honored" signal — consumers
 /// can branch on field presence alone.
 #[test]
-fn test_merge_without_semantic_omits_top_level_symbol_deltas() {
+fn test_merge_no_semantic_omits_top_level_symbol_deltas() {
     let temp = TempDir::new().unwrap();
     create_simple_feature_thread(&temp);
 
@@ -2857,6 +2826,7 @@ fn test_merge_without_semantic_omits_top_level_symbol_deltas() {
             "feature",
             "--preview",
             "--with-diff",
+            "--no-semantic",
         ],
         Some(temp.path()),
     )
@@ -2865,6 +2835,6 @@ fn test_merge_without_semantic_omits_top_level_symbol_deltas() {
 
     assert!(
         parsed.get("semantic_changes").is_none(),
-        "top-level `semantic_changes` must be absent when --semantic is not set: {parsed}"
+        "top-level `semantic_changes` must be absent when --no-semantic is set: {parsed}"
     );
 }

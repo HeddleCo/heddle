@@ -242,6 +242,30 @@ fn diff_help_warns_patch_compat_is_best_effort() {
     );
 }
 
+/// heddle#467. Semantic merge is the default strategy when compiled in; the
+/// merge help must expose only the hunk-only escape hatch and must not repeat
+/// the old false feature-gate claim.
+#[test]
+fn merge_help_pins_semantic_default_and_opt_out() {
+    let help = heddle_help(&["merge", "--help"]);
+    assert!(
+        help.contains("--no-semantic"),
+        "merge help should expose the hunk-only opt-out: {help}"
+    );
+    assert!(
+        help.contains("Semantic merge is the default"),
+        "merge help should state that semantic merge is the default: {help}"
+    );
+    assert!(
+        !help.contains("--semantic"),
+        "merge help must not advertise the removed --semantic opt-in: {help}"
+    );
+    assert!(
+        !help.contains("Requires building heddle with `--features semantic`"),
+        "merge help must not claim the default feature requires an explicit build flag: {help}"
+    );
+}
+
 /// heddle#655. `[aliases: --intent]` on commit's `-m` reads as a typo
 /// without an explanation; the help text must say why the alias exists.
 #[test]

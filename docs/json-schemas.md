@@ -694,7 +694,7 @@ Preview a merge without changing the worktree.
   "impact_categories": [],
   "promotion_suggested": false,
   "heavy_impact_paths": [],
-  "semantic_result": "fast_forward",
+  "merge_relation": "fast_forward",
   "conflict_count": 0,
   "thread_health": "ready",
   "blockers": [],
@@ -713,6 +713,7 @@ Preview a merge without changing the worktree.
 | `would_merge` | bool | required | Whether the preview believes the merge can proceed. |
 | `blockers` | array<string> \| null | required | Reasons merge should not proceed. |
 | `recommended_action`, `recommended_action_template` | string \| null, object \| null | required | Primary next command and its fillable template when one exists. |
+| `merge_relation` | string \| null | required | Structural relationship between the current state and incoming thread, such as `already_up_to_date`, `fast_forward`, `clean_apply`, or `path_conflicts`. |
 | `diff` | object \| null | required | Preview diff payload. |
 | `verification` | object \| null | required | Repository verification state after the preview. Preview mode does not mutate refs or the worktree, so this proves the decision surface was computed from a verified repository state. |
 

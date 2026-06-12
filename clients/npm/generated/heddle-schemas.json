@@ -15253,6 +15253,12 @@
             "null"
           ]
         },
+        "merge_relation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "merge_state": {
           "type": [
             "string",
@@ -15363,12 +15369,6 @@
         "replayed": {
           "type": [
             "boolean",
-            "null"
-          ]
-        },
-        "semantic_result": {
-          "type": [
-            "string",
             "null"
           ]
         },
