@@ -907,6 +907,10 @@ pub struct LandArgs {
     #[arg(short = 'm', long)]
     pub message: Option<String>,
 
+    /// Preserve per-State Git export instead of squashing the landed thread.
+    #[arg(long)]
+    pub no_squash: bool,
+
     /// Push after integration completes.
     #[arg(long)]
     pub push: bool,

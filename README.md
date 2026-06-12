@@ -131,6 +131,8 @@ heddle blame path/to/file.rs
 
 `heddle status` reports the current branch or thread, what is dirty, whether another operation is in progress, and the recommended next command. The same `recommended_action` field is carried through `heddle doctor`, `heddle thread show`, and `heddle workspace show` for programmatic use.
 
+In Git-overlay repositories, `heddle land` projects a landed thread as one atomic Git commit by default. The original per-State captures remain in Heddle history. Use `heddle land --no-squash` for a single invocation that should export one Git commit per State.
+
 ## Core concepts
 
 | Concept | Description |
@@ -184,6 +186,8 @@ Heddle uses three local config scopes:
 - `UserConfig` (`~/.config/heddle/config.toml`) — user identity, agent defaults, output preferences, hosted-client credentials
 - `RepoConfig` (`.heddle/config.toml`) — repository-local behavior, ignore defaults, storage coordinates, remote aliases, repository format version
 - `WorktreeState` — per-checkout runtime state (current session, segment) tracked separately from repo config
+
+Set `[land] squash = false` in user config to make `heddle land` preserve per-State Git export by default. The command-line `--no-squash` flag provides the same opt-out for one land operation.
 
 Precedence: CLI flags override the relevant config scope; env vars override file-backed config where supported; repo config stays repo-local; worktree state stays checkout-local.
 

@@ -353,6 +353,7 @@ async fn async_main() -> Result<()> {
         Commands::Land(LandArgs {
             thread,
             message,
+            no_squash,
             push,
             no_push,
             remote,
@@ -362,6 +363,7 @@ async fn async_main() -> Result<()> {
                 LandArgs {
                     thread: thread.clone(),
                     message: message.clone(),
+                    no_squash: *no_squash,
                     push: *push,
                     no_push: *no_push,
                     remote: remote.clone(),

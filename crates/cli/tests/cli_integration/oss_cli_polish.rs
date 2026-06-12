@@ -8863,6 +8863,23 @@ fn command_catalog_exposes_public_surface_for_agents() {
         merge["command_action"]["template"]["argv_template"],
         heddle_argv_json(["merge", "<thread>", "--preview"])
     );
+    let land = commands
+        .iter()
+        .find(|entry| entry["display"] == "land")
+        .expect("land command should be cataloged");
+    assert!(
+        land["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option["long"] == "no-squash"),
+        "land catalog entry should advertise the per-invocation squash override: {land}"
+    );
+    let land_help = heddle_help(&["land", "--help"]);
+    assert!(
+        land_help.contains("--no-squash") && land_help.contains("Preserve per-State Git export"),
+        "land help should make the squash override discoverable: {land_help}"
+    );
     let checkpoint = commands
         .iter()
         .find(|entry| entry["display"] == "checkpoint")
