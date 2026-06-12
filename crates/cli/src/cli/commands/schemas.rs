@@ -1086,6 +1086,7 @@ pub struct BranchCompatSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SwitchCheckoutSchema {
+    pub output_kind: Option<String>,
     pub name: Option<String>,
     pub message: String,
     pub thread: Option<ThreadSummarySchema>,
@@ -1188,6 +1189,7 @@ pub struct SyncSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct LandSchema {
+    pub output_kind: Option<String>,
     pub status: String,
     pub action: String,
     pub message: String,
@@ -1332,6 +1334,7 @@ pub struct ThreadApprovalListSchema(pub Vec<ThreadApprovalSchema>);
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ThreadRevokeApprovalSchema {
+    pub output_kind: String,
     pub deleted: bool,
     pub id: String,
 }

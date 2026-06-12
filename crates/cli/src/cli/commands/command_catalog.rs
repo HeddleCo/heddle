@@ -2449,7 +2449,23 @@ const CONTRACTS: &[CommandContractEntry] = &[
         git_adapter_alias(
             json_discriminators(
                 documented_schemas(WORKTREE_MUTATION, &["switch"]),
-                &[json_discriminator(Some("switch"), "output_kind", "thread_switch")],
+                &[
+                    // Thread targets delegate to `thread switch` and emit
+                    // its record; this is the shape the registered
+                    // `switch` schema mirrors.
+                    json_discriminator(Some("switch"), "output_kind", "thread_switch"),
+                    // State targets fall through to the state-checkout
+                    // (`goto`) shape — advertised without a schema verb,
+                    // mirroring the `branch` / hosted-`clone` precedent.
+                    json_discriminator_no_schema(
+                        "switch falls through to the state-checkout (goto) \
+                         shape when the target resolves as a state; the \
+                         registered `switch` schema mirrors only the thread \
+                         path",
+                        "output_kind",
+                        "goto",
+                    ),
+                ],
             ),
             "thread switch",
         ),
@@ -5524,6 +5540,7 @@ mod tests {
                 "stash list",
                 "stash show",
                 "status",
+                "switch",
                 "switch",
                 "sync",
                 "thread create",
