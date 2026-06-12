@@ -28,7 +28,7 @@ use super::{
         serialize_empty_action_as_null,
     },
     next_action::{NextActionValidationContext, write_command_json},
-    operator_core::{OperatorCommandOutput, blocked_operator_exit_code},
+    operator_core::{OperatorAction, OperatorCommandOutput, blocked_operator_exit_code},
     ready_cmd::{worktree_dirty, worktree_dirty_paths},
     snapshot::ensure_current_state,
     thread_cmd::{refresh_thread_freshness, thread_not_found_advice},
@@ -745,7 +745,7 @@ pub(crate) fn merge_thread_into_current(
         return Ok(MergeOutput {
             operator: OperatorCommandOutput {
                 status: if preview { "preview" } else { "completed" }.to_string(),
-                action: "merge".to_string(),
+                action: OperatorAction::Merge,
                 message: match (preview, git_commit, repo.head_ref()?) {
                     (true, true, Head::Attached { thread }) => {
                         format!(
@@ -2043,7 +2043,7 @@ fn merge_output_from_report(input: MergeOutputInput<'_>) -> MergeOutput {
     MergeOutput {
         operator: OperatorCommandOutput {
             status: status.to_string(),
-            action: "merge".to_string(),
+            action: OperatorAction::Merge,
             message: input.message,
             blockers: real_blockers,
             warnings: preview_warnings,
@@ -2278,7 +2278,7 @@ fn merge_blocked_by_trust_output(
 ) -> MergeOutput {
     MergeOutput {
         operator: OperatorCommandOutput::blocked_by_repository_verification(
-            "merge",
+            OperatorAction::Merge,
             trust_blocked_merge_message(&trust, preview_only),
             &trust,
         ),
@@ -2372,7 +2372,7 @@ fn stale_thread_merge_blocked_output(
     MergeOutput {
         operator: OperatorCommandOutput {
             status: "blocked".to_string(),
-            action: "merge".to_string(),
+            action: OperatorAction::Merge,
             message: format!(
                 "Thread '{}' is stale{}; merge {}did not run",
                 preview_report.thread,

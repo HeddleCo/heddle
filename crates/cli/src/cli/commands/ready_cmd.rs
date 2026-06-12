@@ -23,7 +23,8 @@ use super::{
         normalized_action, write_command_json,
     },
     operator_core::{
-        OperatorCommandOutput, VerificationClaimPolicy, exit_if_blocked_operator_status,
+        OperatorAction, OperatorCommandOutput, VerificationClaimPolicy,
+        exit_if_blocked_operator_status,
     },
     snapshot::{SnapshotAgentOverrides, create_snapshot, ensure_current_state},
     thread::contextual_thread_action,
@@ -135,7 +136,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
         let output = ReadyOutput {
             operator: OperatorCommandOutput {
                 status: "blocked".to_string(),
-                action: "ready".to_string(),
+                action: OperatorAction::Ready,
                 message: message.clone(),
                 blockers: trust_blockers,
                 warnings: Vec::new(),
@@ -201,8 +202,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
                     report.blockers.push(blocker);
                 }
             }
-            let recovery_scope =
-                super::workflow::recovery_scope_checkout(&thread, repo.root());
+            let recovery_scope = super::workflow::recovery_scope_checkout(&thread, repo.root());
             if let Some(action) = super::workflow::integration_blocker_recommended_action(
                 &report.blockers,
                 recovery_scope.as_deref(),
@@ -298,7 +298,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     };
     let mut operator = OperatorCommandOutput {
         status: status.to_string(),
-        action: "ready".to_string(),
+        action: OperatorAction::Ready,
         message: message.clone(),
         blockers: report.blockers.clone(),
         warnings: Vec::new(),
@@ -458,8 +458,11 @@ fn trust_blocked_ready_output(
         "Thread '{thread}' cannot run readiness checks until repository verification is restored: {}",
         trust.summary
     );
-    let operator =
-        OperatorCommandOutput::blocked_by_repository_verification("ready", message, &trust);
+    let operator = OperatorCommandOutput::blocked_by_repository_verification(
+        OperatorAction::Ready,
+        message,
+        &trust,
+    );
     let recommended_action = operator
         .recommended_action
         .clone()
@@ -551,7 +554,7 @@ fn missing_ready_capture_intent_output(
     Ok(ReadyOutput {
         operator: OperatorCommandOutput {
             status: "blocked".to_string(),
-            action: "ready".to_string(),
+            action: OperatorAction::Ready,
             message: format!(
                 "Thread '{thread}' has uncaptured work; provide an intent before readiness checks"
             ),
@@ -589,7 +592,9 @@ fn missing_ready_capture_intent_report_for(
         merge_relation: "not_checked".to_string(),
         conflicts: Vec::new(),
         conflict_count: 0,
-        blockers: vec!["commit the work with -m/--message/--intent before readiness checks".to_string()],
+        blockers: vec![
+            "commit the work with -m/--message/--intent before readiness checks".to_string(),
+        ],
         recommended_action: recommended_action.to_string(),
         recommended_action_template: super::git_overlay_health::action_template(recommended_action),
         thread_health: "blocked".to_string(),

@@ -73,6 +73,7 @@ impl HeddleExitCode {
             | "reconcile_direction_required"
             | "dirty_worktree"
             | "state_corrupted"
+            | "conflict_not_found"
             | "json_unsupported"
             | "json_compact_unsupported" => Some(Self::DataErr),
             _ => None,
@@ -331,6 +332,7 @@ mod tests {
             ("reconcile_direction_required", HeddleExitCode::DataErr),
             ("dirty_worktree", HeddleExitCode::DataErr),
             ("state_corrupted", HeddleExitCode::DataErr),
+            ("conflict_not_found", HeddleExitCode::DataErr),
             ("json_unsupported", HeddleExitCode::DataErr),
             ("json_compact_unsupported", HeddleExitCode::DataErr),
         ] {

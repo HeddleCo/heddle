@@ -6129,7 +6129,10 @@
         },
         "output_kind": {
           "enum": [
-            "thread_list"
+            "thread_create",
+            "thread_drop",
+            "thread_list",
+            "thread_rename"
           ],
           "type": "string"
         },
@@ -8550,7 +8553,8 @@
         },
         "output_kind": {
           "enum": [
-            "clone"
+            "clone",
+            "clone_connection"
           ],
           "type": "string"
         },
@@ -9516,6 +9520,17 @@
     "conflict show": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": true,
+      "properties": {
+        "output_kind": {
+          "enum": [
+            "conflict_show"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind"
+      ],
       "title": "GenericJsonObjectSchema",
       "type": "object"
     },
@@ -13529,6 +13544,9 @@
                 "null"
               ]
             },
+            "output_kind": {
+              "type": "string"
+            },
             "parents": {
               "items": {
                 "type": "string"
@@ -13553,6 +13571,7 @@
             "verification": true
           },
           "required": [
+            "output_kind",
             "repository_capability",
             "storage_model",
             "change_id",
@@ -14008,10 +14027,46 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "anyOf": [
         {
-          "$ref": "#/$defs/ShowSchema"
+          "allOf": [
+            {
+              "$ref": "#/$defs/ShowSchema"
+            },
+            {
+              "properties": {
+                "output_kind": {
+                  "enum": [
+                    "inspect_state"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "output_kind"
+              ],
+              "type": "object"
+            }
+          ]
         },
         {
-          "$ref": "#/$defs/ThreadShowSchema"
+          "allOf": [
+            {
+              "$ref": "#/$defs/ThreadShowSchema"
+            },
+            {
+              "properties": {
+                "output_kind": {
+                  "enum": [
+                    "thread_show"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "output_kind"
+              ],
+              "type": "object"
+            }
+          ]
         }
       ],
       "title": "InspectSchema"
@@ -16292,6 +16347,12 @@
             }
           ]
         },
+        "output_kind": {
+          "enum": [
+            "rebase_progress"
+          ],
+          "type": "string"
+        },
         "replayed": {
           "type": [
             "boolean",
@@ -16299,6 +16360,9 @@
           ]
         }
       },
+      "required": [
+        "output_kind"
+      ],
       "title": "GenericJsonObjectSchema",
       "type": "object"
     },
@@ -18921,6 +18985,12 @@
             "null"
           ]
         },
+        "output_kind": {
+          "enum": [
+            "show"
+          ],
+          "type": "string"
+        },
         "parents": {
           "items": {
             "type": "string"
@@ -18945,6 +19015,7 @@
         "verification": true
       },
       "required": [
+        "output_kind",
         "repository_capability",
         "storage_model",
         "change_id",
@@ -21525,6 +21596,7 @@
         },
         "output_kind": {
           "enum": [
+            "goto",
             "thread_switch"
           ],
           "type": "string"
@@ -22356,7 +22428,7 @@
         },
         "output_kind": {
           "enum": [
-            "thread.cleanup"
+            "thread_cleanup"
           ],
           "type": "string"
         },
@@ -23431,7 +23503,7 @@
         },
         "output_kind": {
           "enum": [
-            "thread"
+            "thread_drop"
           ],
           "type": "string"
         },
@@ -25044,7 +25116,7 @@
         },
         "output_kind": {
           "enum": [
-            "thread"
+            "thread_promote"
           ],
           "type": "string"
         },
@@ -25567,7 +25639,7 @@
         },
         "output_kind": {
           "enum": [
-            "thread"
+            "thread_refresh"
           ],
           "type": "string"
         },
@@ -26256,7 +26328,7 @@
         },
         "output_kind": {
           "enum": [
-            "resolve"
+            "thread_resolve"
           ],
           "type": "string"
         },

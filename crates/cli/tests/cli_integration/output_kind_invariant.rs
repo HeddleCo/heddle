@@ -32,7 +32,8 @@ use tempfile::TempDir;
 
 use cli::cli::commands::{
     CLONE_CONNECTION_OUTPUT_KIND, CLONE_OUTPUT_KIND, build_command_catalog,
-    documented_samples_with_bound_verbs, schema_for_verb,
+    documented_samples_with_bound_verbs, operator_emission_output_kinds, operator_envelope_verbs,
+    schema_for_verb,
 };
 
 use super::{heddle, heddle_output};
@@ -108,6 +109,12 @@ const SWEPT: &[&str] = &[
     "review next",
     "review health",
     "cherry-pick",
+    // heddle#662 — additive discriminator paths for state inspection,
+    // rebase progress JSONL, and conflict show success.
+    "conflict show",
+    "inspect",
+    "rebase",
+    "show",
     // heddle#641 — swept the remaining verbs whose runtime JSON already
     // emits `output_kind`. Every value below was probed live against the
     // built binary (or read off the emitting struct for the daemon-style
@@ -184,7 +191,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "bridge git reason",
     "collapse",
     "conflict list",
-    "conflict show",
     "daemon serve",
     "daemon status",
     "delegate",
@@ -195,7 +201,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "hook install",
     "hook list",
     "hook uninstall",
-    "inspect",
     "integration doctor",
     "integration install",
     "integration list",
@@ -209,7 +214,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "marker delete",
     "marker list",
     "marker show",
-    "rebase",
     "resolve",
     "retro",
     "semantic hot",
@@ -218,7 +222,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "session segment",
     "session show",
     "session start",
-    "show",
     "stash apply",
     "stash clear",
     "stash drop",
@@ -279,17 +282,12 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         // The maintenance wrappers emit their inner tool's kind.
         "maintenance gc" => Some("gc"),
         "maintenance index" => Some("index"),
-        // The thread lifecycle verbs that route through the shared
-        // operator envelope emit the generic `thread` (drop / promote /
-        // refresh), `resolve`, or the dotted `thread.cleanup` action
-        // name. Flagged as struct-level inconsistencies for a follow-up
-        // sweep; until the structs change, the catalog must advertise
-        // the live values.
-        "thread cleanup" => Some("thread.cleanup"),
-        "thread drop" => Some("thread"),
-        "thread promote" => Some("thread"),
-        "thread refresh" => Some("thread"),
-        "thread resolve" => Some("resolve"),
+        // `inspect` defaults to `thread show`, but the registered
+        // state-inspection schema is discriminated as `inspect_state`.
+        "inspect" => Some("inspect_state"),
+        // Rebase emits JSONL progress records rather than a single
+        // command-shaped object.
+        "rebase" => Some("rebase_progress"),
         _ => None,
     }
 }
@@ -413,6 +411,66 @@ fn swept_verbs_declare_output_kind_in_catalog() {
 }
 
 #[test]
+fn operator_envelope_verbs_have_declared_emissions() {
+    let catalog_verbs: BTreeSet<String> = operator_envelope_verbs().into_iter().collect();
+    let emissions: BTreeSet<String> = operator_emission_output_kinds()
+        .into_iter()
+        .map(|(display, _)| display)
+        .collect();
+    let missing: Vec<&str> = catalog_verbs
+        .difference(&emissions)
+        .map(String::as_str)
+        .collect();
+    let stale: Vec<&str> = emissions
+        .difference(&catalog_verbs)
+        .map(String::as_str)
+        .collect();
+
+    assert!(
+        missing.is_empty() && stale.is_empty(),
+        "Operator envelope verbs must be registered in the catalog and in the \
+         closed emission table. A missing emission would otherwise allow the \
+         output_kind source to drift back toward the live operation action.\n\
+         Missing emission declaration(s): {missing:?}\n\
+         Stale emission declaration(s): {stale:?}"
+    );
+}
+
+#[test]
+fn operator_emissions_match_catalog_discriminators() {
+    let catalog = build_command_catalog();
+    let mut failures = Vec::new();
+
+    for (display, output_kind) in operator_emission_output_kinds() {
+        let Some(entry) = catalog
+            .commands
+            .iter()
+            .find(|entry| entry.display == display)
+        else {
+            failures.push(format!("{display}: not present in command catalog"));
+            continue;
+        };
+        let advertised: BTreeSet<&str> = entry
+            .json_discriminators
+            .iter()
+            .filter(|discriminator| discriminator.field == "output_kind")
+            .map(|discriminator| discriminator.value.as_str())
+            .collect();
+        if !advertised.contains(output_kind.as_str()) {
+            failures.push(format!(
+                "{display}: emission declares output_kind=`{output_kind}` but catalog advertises {advertised:?}"
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "Operator emission declarations drifted from the catalog:\n  - {}",
+        failures.join("\n  - ")
+    );
+}
+
+#[test]
 fn kind_field_exceptions_use_kind_intentionally() {
     let catalog = build_command_catalog();
     for &display in KIND_FIELD_EXCEPTIONS {
@@ -420,11 +478,10 @@ fn kind_field_exceptions_use_kind_intentionally() {
             .commands
             .iter()
             .find(|c| c.display == display)
-            .unwrap_or_else(|| panic!("`{display}` listed in KIND_FIELD_EXCEPTIONS is not in the catalog"));
-        let has_kind = entry
-            .json_discriminators
-            .iter()
-            .any(|d| d.field == "kind");
+            .unwrap_or_else(|| {
+                panic!("`{display}` listed in KIND_FIELD_EXCEPTIONS is not in the catalog")
+            });
+        let has_kind = entry.json_discriminators.iter().any(|d| d.field == "kind");
         assert!(
             has_kind,
             "`{display}` is documented as a `kind`-rather-than-output_kind exception but the catalog declares no `kind` discriminator. Update the catalog or drop the exception."
@@ -663,11 +720,47 @@ fn init_fixture() -> TempDir {
     temp
 }
 
+fn init_conflicted_merge_fixture() -> TempDir {
+    let temp = init_fixture();
+    std::fs::write(temp.path().join("conflict.txt"), "base\n").unwrap();
+    heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
+    heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("conflict.txt"), "feature version\n").unwrap();
+    heddle(&["capture", "-m", "Feature change"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("conflict.txt"), "main version\n").unwrap();
+    heddle(&["capture", "-m", "Main change"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
+
+    let merge = heddle_output(&["merge", "main"], Some(temp.path()))
+        .expect("heddle merge should run and report conflict state");
+    assert!(
+        !merge.status.success(),
+        "conflicted merge should exit nonzero: stdout={} stderr={}",
+        String::from_utf8_lossy(&merge.stdout),
+        String::from_utf8_lossy(&merge.stderr)
+    );
+    temp
+}
+
+fn init_rebase_fast_forward_fixture() -> TempDir {
+    let temp = init_fixture();
+    heddle(&["thread", "create", "feature"], Some(temp.path())).expect("thread create feature");
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).expect("switch feature");
+    std::fs::write(temp.path().join("feat.txt"), "feature work\n").expect("write feature file");
+    heddle(&["capture", "-m", "feature"], Some(temp.path())).expect("feature capture");
+    heddle(&["thread", "switch", "main"], Some(temp.path())).expect("switch main");
+    temp
+}
+
 /// Invocations for swept verbs we exercise at runtime. Per-verb argv +
 /// whether the verb is expected to exit zero. Some named verbs need a
 /// non-trivial fixture (e.g. `revert` requires a state to revert); we
 /// skip those here and rely on dedicated tests elsewhere.
-fn runtime_invocation_args(display: &str) -> Option<(&'static [&'static str], bool /* expect_ok */)> {
+fn runtime_invocation_args(
+    display: &str,
+) -> Option<(&'static [&'static str], bool /* expect_ok */)> {
     match display {
         "stack" => Some((&["stack"], true)),
         "stack ready" => Some((&["stack", "ready"], true)),
@@ -737,8 +830,7 @@ fn runtime_init_emits_output_kind() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let first_line = stdout.lines().next().unwrap_or("").trim();
-    let parsed: Value =
-        serde_json::from_str(first_line).expect("init stdout is parseable JSON");
+    let parsed: Value = serde_json::from_str(first_line).expect("init stdout is parseable JSON");
     assert_eq!(
         parsed.get("output_kind").and_then(|v| v.as_str()),
         Some("init"),
@@ -750,8 +842,8 @@ fn runtime_init_emits_output_kind() {
 /// `dir`. Panics with the captured output on failure so doc-vs-runtime
 /// mismatches surface a readable diff.
 fn runtime_top_level_keys(argv: &[&str], dir: &std::path::Path) -> BTreeSet<String> {
-    let output = heddle_output(argv, Some(dir))
-        .unwrap_or_else(|err| panic!("spawn {argv:?}: {err}"));
+    let output =
+        heddle_output(argv, Some(dir)).unwrap_or_else(|err| panic!("spawn {argv:?}: {err}"));
     assert!(
         output.status.success(),
         "{argv:?} exited non-zero: stdout={} stderr={}",
@@ -760,8 +852,13 @@ fn runtime_top_level_keys(argv: &[&str], dir: &std::path::Path) -> BTreeSet<Stri
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let first_line = stdout.lines().next().unwrap_or("").trim();
-    let parsed: Value = serde_json::from_str(first_line)
-        .unwrap_or_else(|err| panic!("{argv:?} stdout not JSON: {err}\n  line: {first_line}"));
+    let parsed: Value = serde_json::from_str(first_line).unwrap_or_else(|line_err| {
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|full_err| {
+            panic!(
+                "{argv:?} stdout not JSON: first line error: {line_err}; full stdout error: {full_err}\n  stdout: {stdout}"
+            )
+        })
+    });
     parsed
         .as_object()
         .unwrap_or_else(|| panic!("{argv:?} top-level JSON is not an object: {first_line}"))
@@ -853,6 +950,12 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
             (t, sv(&["goto", "main"]))
         }
+        "inspect_state" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("a.txt"), "base").unwrap();
+            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            (t, sv(&["inspect", "HEAD"]))
+        }
         "revert" => {
             let t = init_fixture();
             std::fs::write(t.path().join("a.txt"), "base").unwrap();
@@ -865,8 +968,11 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
         "stack_ready" => (init_fixture(), sv(&["stack", "ready"])),
         "stack_snapshot" => {
             let t = init_fixture();
-            heddle(&["start", "feature-x", "--workspace", "solid"], Some(t.path()))
-                .expect("start feature-x");
+            heddle(
+                &["start", "feature-x", "--workspace", "solid"],
+                Some(t.path()),
+            )
+            .expect("start feature-x");
             (t, sv(&["stack", "snapshot", "--thread", "feature-x"]))
         }
         "stash_list" => (init_fixture(), sv(&["stash", "list"])),
@@ -896,7 +1002,15 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
             (
                 t,
-                sv(&["redact", "apply", "HEAD", "--path", "secrets.env", "--reason", "credential"]),
+                sv(&[
+                    "redact",
+                    "apply",
+                    "HEAD",
+                    "--path",
+                    "secrets.env",
+                    "--reason",
+                    "credential",
+                ]),
             )
         }
         "purge_apply" => {
@@ -904,7 +1018,15 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             std::fs::write(t.path().join("secrets.env"), "TOKEN=abc").unwrap();
             heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
             heddle(
-                &["redact", "apply", "HEAD", "--path", "secrets.env", "--reason", "credential"],
+                &[
+                    "redact",
+                    "apply",
+                    "HEAD",
+                    "--path",
+                    "secrets.env",
+                    "--reason",
+                    "credential",
+                ],
                 Some(t.path()),
             )
             .expect("redact apply");
@@ -916,15 +1038,25 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
         "redact_trust_add" => (
             init_fixture(),
             sv(&[
-                "redact", "trust", "add", "--public-key", "abc123def456", "--algorithm", "ed25519",
-                "--label", "security",
+                "redact",
+                "trust",
+                "add",
+                "--public-key",
+                "abc123def456",
+                "--algorithm",
+                "ed25519",
+                "--label",
+                "security",
             ]),
         ),
         "discuss_open" => {
             let t = init_fixture();
             std::fs::write(t.path().join("a.txt"), "fn verify(){}").unwrap();
             heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
-            (t, sv(&["discuss", "open", "a.txt", "verify", "check edge case"]))
+            (
+                t,
+                sv(&["discuss", "open", "a.txt", "verify", "check edge case"]),
+            )
         }
         "discuss_list" => (init_fixture(), sv(&["discuss", "list"])),
         "context_set" => {
@@ -933,7 +1065,16 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
             (
                 t,
-                sv(&["context", "set", "--path", "a.txt", "--scope", "file", "-m", "owner note"]),
+                sv(&[
+                    "context",
+                    "set",
+                    "--path",
+                    "a.txt",
+                    "--scope",
+                    "file",
+                    "-m",
+                    "owner note",
+                ]),
             )
         }
         "context_list" => (init_fixture(), sv(&["context", "list"])),
@@ -963,11 +1104,22 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             std::fs::write(t.path().join("a.txt"), "base").unwrap();
             heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
             heddle(
-                &["visibility", "set", "HEAD", "--tier", "restricted", "--label", "secret"],
+                &[
+                    "visibility",
+                    "set",
+                    "HEAD",
+                    "--tier",
+                    "restricted",
+                    "--label",
+                    "secret",
+                ],
                 Some(t.path()),
             )
             .expect("visibility set");
-            (t, sv(&["visibility", "promote", "HEAD", "--tier", "internal"]))
+            (
+                t,
+                sv(&["visibility", "promote", "HEAD", "--tier", "internal"]),
+            )
         }
         "visibility_show" => {
             let t = init_fixture();
@@ -994,6 +1146,14 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
         // heddle#641 — the newly-swept generic-schema verbs. Their opaque
         // mirrors pin no fields, so the documented sample must be compared
         // against the live payload here.
+        "conflict_show" => (
+            init_conflicted_merge_fixture(),
+            sv(&["conflict", "show", "conflict.txt"]),
+        ),
+        "rebase_progress" => (
+            init_rebase_fast_forward_fixture(),
+            sv(&["rebase", "feature"]),
+        ),
         "gc" => (init_fixture(), sv(&["maintenance", "gc"])),
         // Stopping a daemon that is not running still exits 0 with the
         // full `daemon_stop` payload, so a bare init fixture suffices.

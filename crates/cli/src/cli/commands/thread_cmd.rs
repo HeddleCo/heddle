@@ -23,8 +23,8 @@ use super::{
     advice::RecoveryAdvice,
     git_overlay_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
     mount_lifecycle,
-    operator_core::OperatorCommandOutput,
     next_action::normalized_action,
+    operator_core::{OperatorAction, OperatorCommandOutput},
     operator_loop::primary_next_action,
     thread::{
         cmd_thread_cd, cmd_thread_create, cmd_thread_current, cmd_thread_delete, cmd_thread_list,
@@ -142,9 +142,15 @@ pub(crate) fn current_thread(repo: &Repository) -> Result<Option<Thread>> {
 pub(crate) fn load_thread(repo: &Repository, thread_id: &str) -> Result<Thread> {
     match thread_manager(repo).load(thread_id)? {
         Some(thread) => Ok(thread),
-        None if repo.refs().get_thread(&ThreadName::new(thread_id))?.is_some() => Err(anyhow!(
-            imported_git_ref_not_managed_thread_advice(thread_id)
-        )),
+        None if repo
+            .refs()
+            .get_thread(&ThreadName::new(thread_id))?
+            .is_some() =>
+        {
+            Err(anyhow!(imported_git_ref_not_managed_thread_advice(
+                thread_id
+            )))
+        }
         None => Err(anyhow!(thread_not_found_advice(thread_id, "load thread"))),
     }
 }
@@ -374,6 +380,7 @@ fn cmd_thread_refresh(cli: &Cli, repo: &Repository, thread_id: &str) -> Result<(
     print_thread_output(
         cli,
         repo,
+        OperatorAction::ThreadRefresh,
         thread,
         format!("Refreshed thread '{}'", thread_id),
     )
@@ -384,10 +391,12 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
     let mut thread = manager
         .load(thread_id)?
         .ok_or_else(|| anyhow!(thread_not_found_advice(thread_id, "refresh thread")))?;
-    let target_thread = thread
-        .target_thread
-        .clone()
-        .ok_or_else(|| anyhow!(RecoveryAdvice::missing_target_thread(thread_id, "refresh thread")))?;
+    let target_thread = thread.target_thread.clone().ok_or_else(|| {
+        anyhow!(RecoveryAdvice::missing_target_thread(
+            thread_id,
+            "refresh thread"
+        ))
+    })?;
 
     refresh_thread_freshness(repo, &mut thread)?;
     if thread.freshness == ThreadFreshness::Current {
@@ -813,11 +822,8 @@ fn imported_git_ref_not_managed_thread_advice(thread_id: &str) -> RecoveryAdvice
 }
 
 fn current_thread_drop_advice(repo: &Repository, thread_id: &str) -> RecoveryAdvice {
-    let (primary, recovery, hint) = super::thread::current_thread_drop_recovery(
-        repo,
-        thread_id,
-        super::thread::DropMode::Drop,
-    );
+    let (primary, recovery, hint) =
+        super::thread::current_thread_drop_recovery(repo, thread_id, super::thread::DropMode::Drop);
     RecoveryAdvice::safety_refusal(
         "current_thread_not_droppable",
         format!("Thread '{thread_id}' is the current checkout thread and cannot be dropped"),
@@ -1031,7 +1037,9 @@ fn try_three_way_merge_refresh(
             // Thread is strictly behind target — fast-forward the
             // thread ref. We do this against the parent repo so the
             // ref move is visible to the caller's bookkeeping.
-            parent_repo.refs().set_thread(&ThreadName::new(&thread.thread), &target)?;
+            parent_repo
+                .refs()
+                .set_thread(&ThreadName::new(&thread.thread), &target)?;
             // Materialize the target tree to the thread's worktree.
             // Without this, HEAD metadata advances while the files on
             // disk stay stale and subsequent operations run against a
@@ -1095,12 +1103,15 @@ fn cmd_thread_promote(
     let mut thread = manager
         .load(thread_id)?
         .ok_or_else(|| anyhow!(thread_not_found_advice(thread_id, "promote thread")))?;
-    let state_id = repo.refs().get_thread(&ThreadName::new(&thread.thread))?.ok_or_else(|| {
-        anyhow!(
-            "managed thread '{}' is missing its ref during promote",
-            thread.thread
-        )
-    })?;
+    let state_id = repo
+        .refs()
+        .get_thread(&ThreadName::new(&thread.thread))?
+        .ok_or_else(|| {
+            anyhow!(
+                "managed thread '{}' is missing its ref during promote",
+                thread.thread
+            )
+        })?;
     if !force {
         if thread.execution_path.exists()
             && thread.execution_path != *repo.root()
@@ -1176,6 +1187,7 @@ fn cmd_thread_promote(
     print_thread_output(
         cli,
         repo,
+        OperatorAction::ThreadPromote,
         thread,
         format!(
             "Promoted thread '{}' to '{}'",
@@ -1197,6 +1209,7 @@ pub(crate) fn cmd_thread_drop(
         DropOutcome::Dropped(thread) => print_thread_output(
             cli,
             repo,
+            OperatorAction::ThreadDrop,
             *thread,
             format!("Dropped thread '{}'", thread_id),
         ),
@@ -1308,6 +1321,7 @@ pub(crate) fn drop_thread_silent(
 fn print_thread_output(
     cli: &Cli,
     repo: &Repository,
+    action: OperatorAction,
     mut thread: Thread,
     message: String,
 ) -> Result<()> {
@@ -1333,7 +1347,7 @@ fn print_thread_output(
             serde_json::to_string(&ThreadOutput {
                 operator: OperatorCommandOutput {
                     status: "completed".to_string(),
-                    action: "thread".to_string(),
+                    action,
                     message,
                     blockers: advice.blockers.clone(),
                     warnings: Vec::new(),
@@ -1736,7 +1750,7 @@ fn cmd_thread_cleanup(cli: &Cli, repo: &Repository, args: ThreadCleanupArgs) -> 
     let output = ThreadCleanupOutput {
         operator: OperatorCommandOutput {
             status: "completed".to_string(),
-            action: "thread.cleanup".to_string(),
+            action: OperatorAction::ThreadCleanup,
             message: summary_message.clone(),
             blockers: Vec::new(),
             warnings: Vec::new(),
@@ -1845,8 +1859,7 @@ mod cleanup_tests {
         let repo = Repository::init_default(dir.path()).unwrap();
         for id in ["foo", "foo/bar", "team@scope", "feature/foo"] {
             let promote = default_materialized_thread_path(&repo, id);
-            let canonical =
-                repo::thread_manifest::thread_dir(repo.heddle_dir(), id).join("root");
+            let canonical = repo::thread_manifest::thread_dir(repo.heddle_dir(), id).join("root");
             assert_eq!(
                 promote, canonical,
                 "promote default must match the canonical thread_dir for {id:?}"

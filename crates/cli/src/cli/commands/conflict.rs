@@ -10,7 +10,7 @@
 use objects::store::ObjectStore;
 use std::fs;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use objects::object::{ConflictSymbol, StructuredConflict};
 use repo::{MergeState, Repository};
 use serde::Serialize;
@@ -20,9 +20,11 @@ use crate::cli::{
     commands::{
         command_catalog::{ActionTemplate, recommended_action_template},
         git_overlay_health::serialize_empty_action_as_null,
+        print_error_with_hint_with_config,
     },
     should_output_json,
 };
+use crate::exit::HeddleExitCode;
 
 #[derive(Serialize)]
 struct ConflictListOutput {
@@ -54,6 +56,14 @@ struct ActiveMergeConflictShowOutput {
     #[serde(serialize_with = "serialize_empty_action_as_null")]
     next_action: String,
     next_action_template: Option<ActionTemplate>,
+}
+
+#[derive(Serialize)]
+struct StructuredConflictShowOutput<'a> {
+    output_kind: &'static str,
+    kind: &'static str,
+    #[serde(flatten)]
+    conflict: &'a ConflictSymbol,
 }
 
 pub async fn run(cli: &Cli, command: &ConflictCommands) -> Result<()> {
@@ -146,17 +156,8 @@ async fn run_show(cli: &Cli, args: &ConflictShowArgs) -> Result<()> {
         .find(|c| c.id == args.conflict_id);
     let Some(conflict) = conflict else {
         render_conflict_not_found(cli, &repo, &args.conflict_id);
-        return Ok(());
     };
     render_structured_conflict(cli, &repo, conflict)
-}
-
-fn render_conflict_not_found(cli: &Cli, repo: &Repository, conflict_id: &str) {
-    if should_output_json(cli, Some(repo.config())) {
-        println!("null");
-    } else {
-        println!("conflict {conflict_id} not found");
-    }
 }
 
 fn render_structured_conflict(
@@ -165,9 +166,14 @@ fn render_structured_conflict(
     conflict: &ConflictSymbol,
 ) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
+        let view = StructuredConflictShowOutput {
+            output_kind: "conflict_show",
+            kind: "stored_structured_conflict",
+            conflict,
+        };
         println!(
             "{}",
-            serde_json::to_string(conflict).context("serialize conflict")?
+            serde_json::to_string(&view).context("serialize conflict")?
         );
     } else {
         println!("conflict {}", conflict.id);
@@ -200,7 +206,6 @@ fn render_active_merge_conflict(
         .find(|path| path.as_str() == args.conflict_id)
     else {
         render_conflict_not_found(cli, repo, &args.conflict_id);
-        return Ok(());
     };
     let resolved = merge_state.resolved.iter().any(|resolved| resolved == path);
     let worktree_content = fs::read_to_string(repo.root().join(path)).ok();
@@ -251,6 +256,26 @@ fn render_active_merge_conflict(
         println!("  next: {}", view.next_action);
     }
     Ok(())
+}
+
+fn render_conflict_not_found(cli: &Cli, repo: &Repository, conflict_id: &str) -> ! {
+    let err = anyhow!(conflict_not_found_advice(conflict_id));
+    let code = HeddleExitCode::from_error(&err);
+    print_error_with_hint_with_config(cli, &err, repo.config());
+    std::process::exit(code.into());
+}
+
+fn conflict_not_found_advice(conflict_id: &str) -> crate::cli::commands::RecoveryAdvice {
+    crate::cli::commands::RecoveryAdvice::safety_refusal(
+        "conflict_not_found",
+        format!("Conflict '{conflict_id}' not found"),
+        "Run `heddle conflict list` to inspect available conflicts, then retry with an id from the list.",
+        format!("conflict show was requested for missing conflict id '{conflict_id}'"),
+        "showing a nonexistent conflict would give automation an ambiguous empty payload",
+        "no conflict state, refs, or worktree files were changed",
+        "heddle conflict list",
+        vec!["heddle conflict list".to_string()],
+    )
 }
 
 fn load_head_conflicts(repo: &Repository) -> Result<StructuredConflict> {
