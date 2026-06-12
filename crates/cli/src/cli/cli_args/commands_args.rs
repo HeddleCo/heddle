@@ -1327,22 +1327,23 @@ pub struct PullArgs {
 }
 
 /// Arguments for the `clone` command.
+///
+/// Help style budget (heddle#652): `--help` carries the signature, flags,
+/// a one-screen Behavior summary, and the hidden-flag breadcrumb
+/// (heddle#646). The full default-thread fallback chain and --depth
+/// exposition moved to `heddle help clone` (help.rs CLONE_TOPIC); keep
+/// flag docs single-line so clap renders the compact help layout.
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Behavior:
-  Default thread (no --thread): Git-overlay clones (cloning a Git repository) land on the remote's advertised default branch (its Git HEAD); if the remote advertises none, they fall back to a thread named `main`, then to the alphabetically first imported thread. Native-local and hosted Heddle clones instead target `main` directly with no fallback chain; if the remote has no `main` thread, the clone fails — pass `--thread <name>` to select one. It never prompts.
-  Depth (Heddle remotes only): --depth 0 (the default) clones full history. --depth N fetches only the tip plus N generations of ancestry, so `heddle log` stops at the depth boundary; history older than that is not present locally — re-clone at a greater --depth (or --depth 0) to obtain it. Git-overlay clones reject a nonzero --depth; --depth 0 is accepted and clones full history (the default).
-  Depth controls history extent only — how many states the clone fetches — and says nothing about object contents. Whether a state's blobs are present locally or fetched lazily is a separate, independent concern that --depth never governs.
-
-  See `heddle help threads` for the thread model and `heddle help advanced` for power surfaces.
+  Git-overlay clones land on the remote's default branch; Heddle remotes check out `main` (pass --thread to pick another). --depth N limits history on Heddle remotes only. Never prompts. Full details: `heddle help clone`.
 
 Advanced (hidden) flags:
   --lazy and --filter blob:none skip blob content and hydrate it on demand. Hosted/network Heddle remotes only; Git-overlay clones (plain `https://…/repo.git` URLs and local-path clones) reject them today — lazy hydration over the Git transport is planned for v0.3.1.
 
 Examples:
   heddle clone https://example.com/repo.git ./clone   # Git repo: lands on the remote's default branch
-  heddle clone ./repo ./clone --thread main           # check out a named thread after cloning
-  heddle clone heddle://host/repo ./clone --depth 1   # shallow Heddle clone: keep the tip plus its immediate parents
+  heddle clone heddle://host/repo ./clone --depth 1   # shallow Heddle clone: tip plus immediate parents
 ")]
 pub struct CloneArgs {
     /// Remote repository path.
@@ -1359,20 +1360,20 @@ pub struct CloneArgs {
     #[arg(long)]
     pub depth: Option<u32>,
 
+    // Hosted/network remotes only; Git-overlay clones reject it today —
+    // lazy hydration over the Git transport is planned for v0.3.1. The
+    // user-facing exposition lives in the after-help breadcrumb above and
+    // `heddle help clone`.
     /// Leave blob content absent by design and hydrate it explicitly later.
-    /// Supported for hosted/network remotes only; Git-overlay clones
-    /// (plain `https://…/repo.git` URLs and local-path clones) reject
-    /// this flag today and report a clear error — lazy hydration over
-    /// the Git transport is planned for v0.3.1.
     #[arg(long, hide = true)]
     pub lazy: bool,
 
-    /// Partial-clone filter spec. Only `blob:none` is accepted; other
-    /// git-style filters such as `tree:0` or `blob:limit=…` are
-    /// rejected at parse time. On hosted/network remotes `blob:none`
-    /// is a synonym for `--lazy` (skip blob content; hydrate on
-    /// demand). Git-overlay clones reject the flag at runtime; this
-    /// is planned for v0.3.1.
+    // Only `blob:none` is accepted (a synonym for --lazy on hosted
+    // remotes); git-style filters such as `tree:0` or `blob:limit=…` are
+    // rejected at parse time, and Git-overlay clones reject the flag at
+    // runtime until v0.3.1. See the after-help breadcrumb and
+    // `heddle help clone`.
+    /// Partial-clone filter spec (`blob:none` only).
     #[arg(long, hide = true, value_name = "SPEC", value_parser = parse_clone_filter_spec)]
     pub filter: Option<String>,
 }

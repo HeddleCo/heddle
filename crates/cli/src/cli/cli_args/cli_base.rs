@@ -47,13 +47,13 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Output format. Default is `text`. Pass `--output json` for the
-    /// full machine contract (stable `output_kind`, exit codes, recovery
-    /// templates), or `--output json-compact` for the decision surface
-    /// only (`output_kind`, `status`/`coordination_status`, `blockers`,
-    /// `next_action`, `changed_paths`, `conflicts`) — fewer tokens, same
-    /// `output_kind` so callers can still dispatch. No TTY/pipe
-    /// auto-detection — the default never switches under you.
+    // This is a `global = true` arg, so clap stamps its help onto every
+    // subcommand's --help. Keep it to ONE line; the full contract
+    // (json vs json-compact fields, no-TTY-autodetect guarantee) lives in
+    // `heddle help output-formats` (help.rs OUTPUT_FORMATS_TOPIC) and the
+    // top-level `heddle help` Output paragraph, stated exactly once each
+    // (heddle#652).
+    /// Output format: `text` (default), `json`, or `json-compact`. See `heddle help output-formats`
     #[arg(long, global = true, value_enum)]
     pub output: Option<OutputMode>,
 
@@ -73,15 +73,12 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub quiet: bool,
 
-    /// Client-supplied operation id (UUID v4) for idempotent retries.
-    ///
-    /// Commands that advertise `supports_op_id: true` in
-    /// `heddle commands --output json` return the original outcome on
-    /// replay. Unset by default; agents supply one explicitly. Also
-    /// reads `HEDDLE_OPERATION_ID` from the environment.
-    ///
-    /// Hidden from default `--help` to keep the human surface uncluttered;
-    /// see `heddle help operation-ids` for the full agent-facing contract.
+    // Global like --output, and revealed on every `supports_op_id`
+    // command's help — keep it to one line (heddle#652). Replay semantics
+    // (`supports_op_id` advertisement, same-body replay, typed conflicts)
+    // live in `heddle help operation-ids`. Hidden from default `--help` to
+    // keep the human surface uncluttered.
+    /// Operation id (UUID v4) for idempotent retries. See `heddle help operation-ids`
     #[arg(long, global = true, env = "HEDDLE_OPERATION_ID", hide = true)]
     pub op_id: Option<String>,
 }
@@ -107,8 +104,12 @@ impl Cli {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum OutputMode {
     Json,
-    /// JSON, but only the decision-surface fields (heddle#470). Renders
-    /// as `--output json-compact` on the CLI.
+    // JSON, but only the decision-surface fields (heddle#470). Renders as
+    // `--output json-compact` on the CLI. Deliberately NOT a doc comment:
+    // a per-value help string forces clap's spaced long-help layout onto
+    // every command (the value list is rendered with the global --output
+    // arg), re-bloating all 100+ helps; the format semantics live in
+    // `heddle help output-formats` instead (heddle#652).
     JsonCompact,
     Text,
 }

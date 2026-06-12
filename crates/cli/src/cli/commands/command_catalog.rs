@@ -292,6 +292,15 @@ struct CommandContract {
     surface: &'static str,
     help_visibility: &'static str,
     help_rank: u16,
+    /// Area grouping for the `heddle help advanced` listing (heddle#652).
+    /// Only meaningful on native-surface root commands with an advanced
+    /// help visibility; commands on the `automation` / `admin` /
+    /// `git_adapter` surfaces derive their group from the surface itself
+    /// (see [`advanced_help_groups`]). The
+    /// `advanced_help_groups_cover_every_advanced_verb` test forces
+    /// every advanced native root command to pick one, so the grouped
+    /// help can never silently grow an uncategorized verb.
+    help_category: Option<&'static str>,
     canonical_command: Option<&'static str>,
     canonical_kind: Option<&'static str>,
     canonical_note: Option<&'static str>,
@@ -696,6 +705,7 @@ const READ_JSON: CommandContract = CommandContract {
     surface: "native",
     help_visibility: "advanced",
     help_rank: 1000,
+    help_category: None,
     canonical_command: None,
     canonical_kind: None,
     canonical_note: None,
@@ -943,6 +953,16 @@ const fn surface(contract: CommandContract, surface: &'static str) -> CommandCon
     }
 }
 
+/// Assign the `heddle help advanced` area group for a native-surface
+/// advanced root command (heddle#652). See [`advanced_help_groups`] for
+/// the recognized ids and their display titles.
+const fn category(contract: CommandContract, help_category: &'static str) -> CommandContract {
+    CommandContract {
+        help_category: Some(help_category),
+        ..contract
+    }
+}
+
 const fn feature_gated(contract: CommandContract, feature_gate: &'static str) -> CommandContract {
     CommandContract {
         feature_gate: Some(feature_gate),
@@ -1011,9 +1031,12 @@ const fn advertised_action(
 const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["abort"],
-        json_discriminators(
-            documented_schemas(compact_json(MUTATING), &["abort"]),
-            &[json_discriminator(Some("abort"), "output_kind", "abort")],
+        category(
+            json_discriminators(
+                documented_schemas(compact_json(MUTATING), &["abort"]),
+                &[json_discriminator(Some("abort"), "output_kind", "abort")],
+            ),
+            "recovery",
         ),
     ),
     entry(
@@ -1135,10 +1158,19 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["attempt"],
-        documented_schemas(EXTERNAL_WORKTREE_MUTATION, &["attempt"]),
+        category(
+            documented_schemas(EXTERNAL_WORKTREE_MUTATION, &["attempt"]),
+            "threads",
+        ),
     ),
     #[cfg(feature = "client")]
-    entry(&["auth"], GROUP),
+    entry(
+        &["auth"],
+        category(
+            GROUP,
+            "repo",
+        ),
+    ),
     #[cfg(feature = "client")]
     entry(&["auth", "login"], MUTATING_TEXT),
     #[cfg(feature = "client")]
@@ -1149,9 +1181,12 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["auth", "create-service-token"], MUTATING_NO_OP_ID),
     entry(
         &["blame"],
-        json_discriminators(
-            documented_schemas(READ_JSON, &["blame"]),
-            &[json_discriminator(Some("blame"), "output_kind", "blame")],
+        category(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["blame"]),
+                &[json_discriminator(Some("blame"), "output_kind", "blame")],
+            ),
+            "states",
         ),
     ),
     entry(
@@ -1349,48 +1384,60 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["capture"],
-        json_discriminators(
-            documented_schemas(compact_json(CAPTURE), &["capture"]),
-            &[json_discriminator(
-                Some("capture"),
-                "output_kind",
-                "capture",
-            )],
+        category(
+            json_discriminators(
+                documented_schemas(compact_json(CAPTURE), &["capture"]),
+                &[json_discriminator(
+                    Some("capture"),
+                    "output_kind",
+                    "capture",
+                )],
+            ),
+            "states",
         ),
     ),
     entry(
         &["checkpoint"],
-        json_discriminators(
-            documented_schemas(
-                CommandContract {
-                    writes_git_refs: true,
-                    ..CAPTURE
-                },
-                &["checkpoint"],
+        category(
+            json_discriminators(
+                documented_schemas(
+                    CommandContract {
+                        writes_git_refs: true,
+                        ..CAPTURE
+                    },
+                    &["checkpoint"],
+                ),
+                &[json_discriminator(
+                    Some("checkpoint"),
+                    "output_kind",
+                    "checkpoint",
+                )],
             ),
-            &[json_discriminator(
-                Some("checkpoint"),
-                "output_kind",
-                "checkpoint",
-            )],
+            "states",
         ),
     ),
     entry(
         &["cherry-pick"],
-        json_discriminators(
-            opaque_schemas(WORKTREE_MUTATION, &["cherry-pick"]),
-            &[json_discriminator(
-                Some("cherry-pick"),
-                "output_kind",
-                "cherry_pick",
-            )],
+        category(
+            json_discriminators(
+                opaque_schemas(WORKTREE_MUTATION, &["cherry-pick"]),
+                &[json_discriminator(
+                    Some("cherry-pick"),
+                    "output_kind",
+                    "cherry_pick",
+                )],
+            ),
+            "states",
         ),
     ),
     entry(
         &["clean"],
-        json_discriminators(
-            documented_schemas(DESTRUCTIVE_WORKTREE_ONLY_MUTATION, &["clean"]),
-            &[json_discriminator(Some("clean"), "output_kind", "clean")],
+        category(
+            json_discriminators(
+                documented_schemas(DESTRUCTIVE_WORKTREE_ONLY_MUTATION, &["clean"]),
+                &[json_discriminator(Some("clean"), "output_kind", "clean")],
+            ),
+            "recovery",
         ),
     ),
     entry(
@@ -1431,7 +1478,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
             220,
         ),
     ),
-    entry(&["collapse"], opaque_schemas(MUTATING, &["collapse"])),
+    entry(
+        &["collapse"],
+        category(
+            opaque_schemas(MUTATING, &["collapse"]),
+            "states",
+        ),
+    ),
     entry(
         &["commit"],
         exits(
@@ -1476,7 +1529,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "automation",
         ),
     ),
-    entry(&["conflict"], GROUP),
+    entry(
+        &["conflict"],
+        category(
+            GROUP,
+            "recovery",
+        ),
+    ),
     entry(
         &["conflict", "list"],
         opaque_schemas(READ_JSON, &["conflict list"]),
@@ -1487,12 +1546,21 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["continue"],
-        json_discriminators(
-            documented_schemas(compact_json(MUTATING), &["continue"]),
-            &[json_discriminator(Some("continue"), "output_kind", "continue")],
+        category(
+            json_discriminators(
+                documented_schemas(compact_json(MUTATING), &["continue"]),
+                &[json_discriminator(Some("continue"), "output_kind", "continue")],
+            ),
+            "recovery",
         ),
     ),
-    entry(&["context"], GROUP),
+    entry(
+        &["context"],
+        category(
+            GROUP,
+            "collab",
+        ),
+    ),
     entry(
         &["context", "set"],
         json_discriminators(
@@ -1628,7 +1696,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["delegate"],
-        documented_schemas(WORKTREE_MUTATION, &["delegate"]),
+        category(
+            documented_schemas(WORKTREE_MUTATION, &["delegate"]),
+            "threads",
+        ),
     ),
     entry(
         &["diff"],
@@ -1640,7 +1711,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
             20,
         ),
     ),
-    entry(&["discuss"], GROUP),
+    entry(
+        &["discuss"],
+        category(
+            GROUP,
+            "collab",
+        ),
+    ),
     entry(
         &["discuss", "open"],
         json_discriminators(
@@ -1749,28 +1826,49 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["fork"],
-        json_discriminators(
-            opaque_schemas(MUTATING, &["fork"]),
-            &[json_discriminator(Some("fork"), "output_kind", "fork")],
+        category(
+            json_discriminators(
+                opaque_schemas(MUTATING, &["fork"]),
+                &[json_discriminator(Some("fork"), "output_kind", "fork")],
+            ),
+            "threads",
         ),
     ),
-    entry(&["fsck"], documented_schemas(MUTATING, &["fsck"])),
+    entry(
+        &["fsck"],
+        category(
+            documented_schemas(MUTATING, &["fsck"]),
+            "recovery",
+        ),
+    ),
     entry(
         &["git-overlay"],
-        documented_schemas(READ_JSON, &["git-overlay"]),
+        category(
+            documented_schemas(READ_JSON, &["git-overlay"]),
+            "repo",
+        ),
     ),
     entry(
         &["goto"],
-        json_discriminators(
-            documented_schemas(WORKTREE_MUTATION, &["goto"]),
-            &[json_discriminator(Some("goto"), "output_kind", "goto")],
+        category(
+            json_discriminators(
+                documented_schemas(WORKTREE_MUTATION, &["goto"]),
+                &[json_discriminator(Some("goto"), "output_kind", "goto")],
+            ),
+            "threads",
         ),
     ),
     entry(
         &["harness-bridge"],
         hidden(opaque_schemas(READ_JSONL, &["harness-bridge"])),
     ),
-    entry(&["help"], READ_TEXT),
+    entry(
+        &["help"],
+        category(
+            READ_TEXT,
+            "repo",
+        ),
+    ),
     entry(&["hook"], surface(GROUP, "automation")),
     entry(
         &["hook", "list"],
@@ -1811,7 +1909,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ],
         ),
     ),
-    entry(&["inspect"], documented_schemas(READ_JSON, &["inspect"])),
+    entry(
+        &["inspect"],
+        category(
+            documented_schemas(READ_JSON, &["inspect"]),
+            "states",
+        ),
+    ),
     entry(&["integration"], surface(GROUP, "admin")),
     entry(
         &["integration", "list"],
@@ -1889,7 +1993,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["maintenance", "monitor"],
         surface(opaque_schemas(READ_JSON, &["maintenance monitor"]), "admin"),
     ),
-    entry(&["marker"], GROUP),
+    entry(
+        &["marker"],
+        category(
+            GROUP,
+            "collab",
+        ),
+    ),
     entry(
         &["marker", "list"],
         documented_schemas(READ_JSON, &["marker list"]),
@@ -1908,33 +2018,39 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["merge"],
-        exits(
-            surface(
-                advertised_action(
-                    json_discriminators(
-                        documented_schemas(compact_json(WORKTREE_MUTATION), &["merge --preview"]),
-                        &[json_discriminator(Some("merge --preview"), "output_kind", "merge")],
+        category(
+            exits(
+                surface(
+                    advertised_action(
+                        json_discriminators(
+                            documented_schemas(compact_json(WORKTREE_MUTATION), &["merge --preview"]),
+                            &[json_discriminator(Some("merge --preview"), "output_kind", "merge")],
+                        ),
+                        "heddle merge <thread> --preview",
+                        &["heddle", "merge", "<thread>", "--preview"],
+                        &["thread"],
+                        true,
+                        false,
                     ),
-                    "heddle merge <thread> --preview",
-                    &["heddle", "merge", "<thread>", "--preview"],
-                    &["thread"],
-                    true,
-                    false,
+                    "native",
                 ),
-                "native",
+                &[
+                    (0, "ok"),
+                    (65, "conflict requires manual resolution"),
+                    (74, "io while writing state"),
+                ],
             ),
-            &[
-                (0, "ok"),
-                (65, "conflict requires manual resolution"),
-                (74, "io while writing state"),
-            ],
+            "threads",
         ),
     ),
     entry(
         &["stack"],
-        json_discriminators(
-            opaque_schemas(READ_JSON, &["stack"]),
-            &[json_discriminator(Some("stack"), "output_kind", "stack")],
+        category(
+            json_discriminators(
+                opaque_schemas(READ_JSON, &["stack"]),
+                &[json_discriminator(Some("stack"), "output_kind", "stack")],
+            ),
+            "threads",
         ),
     ),
     entry(
@@ -1959,7 +2075,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
-    entry(&["presence"], feature_gated(READ_JSON, "client")),
+    entry(
+        &["presence"],
+        category(
+            feature_gated(READ_JSON, "client"),
+            "collab",
+        ),
+    ),
     entry(&["presence", "publish"], feature_gated(READ_JSON, "client")),
     entry(
         &["pull"],
@@ -1986,7 +2108,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ],
         ),
     ),
-    entry(&["purge"], GROUP),
+    entry(
+        &["purge"],
+        category(
+            GROUP,
+            "recovery",
+        ),
+    ),
     entry(
         &["purge", "apply"],
         json_discriminators(
@@ -2052,9 +2180,12 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["query"],
-        json_discriminators(
-            documented_schemas(READ_JSON, &["query"]),
-            &[json_discriminator(Some("query"), "output_kind", "query")],
+        category(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["query"]),
+                &[json_discriminator(Some("query"), "output_kind", "query")],
+            ),
+            "states",
         ),
     ),
     entry(
@@ -2067,8 +2198,20 @@ const CONTRACTS: &[CommandContractEntry] = &[
             50,
         ),
     ),
-    entry(&["rebase"], opaque_schemas(WORKTREE_MUTATION, &["rebase"])),
-    entry(&["redact"], GROUP),
+    entry(
+        &["rebase"],
+        category(
+            opaque_schemas(WORKTREE_MUTATION, &["rebase"]),
+            "threads",
+        ),
+    ),
+    entry(
+        &["redact"],
+        category(
+            GROUP,
+            "recovery",
+        ),
+    ),
     entry(
         &["redact", "apply"],
         json_discriminators(
@@ -2142,12 +2285,21 @@ const CONTRACTS: &[CommandContractEntry] = &[
         // output_kind — `redo` — schema-backed by `UndoSchema` (shared payload
         // shape with `undo`).
         &["redo"],
-        json_discriminators(
-            documented_schemas(WORKTREE_MUTATION, &["redo"]),
-            &[json_discriminator(Some("redo"), "output_kind", "redo")],
+        category(
+            json_discriminators(
+                documented_schemas(WORKTREE_MUTATION, &["redo"]),
+                &[json_discriminator(Some("redo"), "output_kind", "redo")],
+            ),
+            "recovery",
         ),
     ),
-    entry(&["remote"], surface(GROUP, "native")),
+    entry(
+        &["remote"],
+        category(
+            surface(GROUP, "native"),
+            "repo",
+        ),
+    ),
     entry(
         &["remote", "list"],
         json_discriminators(
@@ -2187,15 +2339,30 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["resolve"],
         front_door(documented_schemas(MUTATING, &["resolve"]), 300),
     ),
-    entry(&["retro"], documented_schemas(READ_JSON, &["retro"])),
     entry(
-        &["revert"],
-        json_discriminators(
-            documented_schemas(WORKTREE_MUTATION, &["revert"]),
-            &[json_discriminator(Some("revert"), "output_kind", "revert")],
+        &["retro"],
+        category(
+            documented_schemas(READ_JSON, &["retro"]),
+            "states",
         ),
     ),
-    entry(&["review"], GROUP),
+    entry(
+        &["revert"],
+        category(
+            json_discriminators(
+                documented_schemas(WORKTREE_MUTATION, &["revert"]),
+                &[json_discriminator(Some("revert"), "output_kind", "revert")],
+            ),
+            "states",
+        ),
+    ),
+    entry(
+        &["review"],
+        category(
+            GROUP,
+            "collab",
+        ),
+    ),
     entry(
         &["review", "show"],
         json_discriminators(
@@ -2255,7 +2422,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "automation",
         ),
     ),
-    entry(&["semantic"], GROUP),
+    entry(
+        &["semantic"],
+        category(
+            GROUP,
+            "states",
+        ),
+    ),
     entry(
         &["semantic", "hot"],
         opaque_schemas(READ_JSON, &["semantic hot"]),
@@ -2293,7 +2466,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "automation",
         ),
     ),
-    entry(&["shell"], READ_TEXT),
+    entry(
+        &["shell"],
+        category(
+            READ_TEXT,
+            "repo",
+        ),
+    ),
     entry(&["shell", "init"], READ_TEXT),
     entry(&["shell", "completion"], READ_TEXT),
     entry(
@@ -2434,7 +2613,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
             &[(0, "ok"), (74, "io reading workspace state")],
         ),
     ),
-    entry(&["support"], feature_gated(MUTATING, "client")),
+    entry(
+        &["support"],
+        category(
+            feature_gated(MUTATING, "client"),
+            "repo",
+        ),
+    ),
     entry(
         &["support", "grant"],
         feature_gated(MUTATING_NO_OP_ID, "client"),
@@ -2472,12 +2657,21 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["sync"],
-        json_discriminators(
-            documented_schemas(compact_json(MUTATING), &["sync"]),
-            &[json_discriminator(Some("sync"), "output_kind", "sync")],
+        category(
+            json_discriminators(
+                documented_schemas(compact_json(MUTATING), &["sync"]),
+                &[json_discriminator(Some("sync"), "output_kind", "sync")],
+            ),
+            "threads",
         ),
     ),
-    entry(&["thread"], surface(GROUP, "native")),
+    entry(
+        &["thread"],
+        category(
+            surface(GROUP, "native"),
+            "threads",
+        ),
+    ),
     entry(
         &["thread", "create"],
         json_discriminators(
@@ -2630,7 +2824,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ],
         ),
     ),
-    entry(&["visibility"], GROUP),
+    entry(
+        &["visibility"],
+        category(
+            GROUP,
+            "collab",
+        ),
+    ),
     entry(
         &["visibility", "set"],
         json_discriminators(
@@ -2677,7 +2877,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["try"],
-        documented_schemas(EXTERNAL_WORKTREE_MUTATION, &["try"]),
+        category(
+            documented_schemas(EXTERNAL_WORKTREE_MUTATION, &["try"]),
+            "threads",
+        ),
     ),
     entry(
         &["undo"],
@@ -2707,7 +2910,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["workspace"],
-        documented_schemas(READ_JSON, &["workspace show"]),
+        category(
+            documented_schemas(READ_JSON, &["workspace show"]),
+            "threads",
+        ),
     ),
     entry(
         &["workspace", "show"],
@@ -3638,16 +3844,73 @@ pub fn root_commands_for_help_visibility(visibility: &str) -> Vec<&'static str> 
 }
 
 pub fn root_commands_for_advanced_help() -> Vec<&'static str> {
-    let mut entries = active_command_contract_entries()
+    let mut entries = advanced_help_root_entries();
+    entries.sort_by_key(|entry| (entry.contract.help_rank, entry.path[0]));
+    entries.into_iter().map(|entry| entry.path[0]).collect()
+}
+
+/// Root commands on the advanced help surface, unsorted.
+fn advanced_help_root_entries() -> Vec<&'static CommandContractEntry> {
+    active_command_contract_entries()
         .iter()
         .copied()
         .filter(|entry| {
             entry.path.len() == 1
                 && !matches!(entry.contract.help_visibility, "everyday" | "hidden")
         })
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+/// Area groups for the `heddle help advanced` listing, in render order,
+/// as `(display title, verbs)` pairs (heddle#652). The grouping is
+/// contract-table data, not a hand-maintained help string: native
+/// advanced commands carry an explicit `help_category` on their
+/// registration, while `automation` / `admin` / `git_adapter` commands
+/// derive their group from the surface they already declare. Verbs keep
+/// contract order (help_rank, then name) within each group — the same
+/// ordering the flat list used. Feature-gated verbs absent from the
+/// current build simply don't appear; a group may come back empty.
+pub fn advanced_help_groups() -> Vec<(&'static str, Vec<&'static str>)> {
+    const GROUPS: &[(&str, &str)] = &[
+        ("threads", "Threads and integration"),
+        ("states", "States and history"),
+        ("collab", "Collaboration and review"),
+        ("recovery", "Recovery and integrity"),
+        ("repo", "Repo and environment"),
+        ("automation", "Agents and automation"),
+        ("git-interop", "Git interop"),
+        ("admin", "Admin and maintenance"),
+    ];
+    let mut entries = advanced_help_root_entries();
     entries.sort_by_key(|entry| (entry.contract.help_rank, entry.path[0]));
-    entries.into_iter().map(|entry| entry.path[0]).collect()
+    GROUPS
+        .iter()
+        .map(|(id, title)| {
+            (
+                *title,
+                entries
+                    .iter()
+                    .filter(|entry| advanced_help_group_id(&entry.contract) == *id)
+                    .map(|entry| entry.path[0])
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// Resolve which advanced-help group a root command belongs to. The
+/// non-native surfaces are themselves the grouping; native commands use
+/// the `help_category` set at registration. An unset category on a
+/// native advanced command maps to "" (member of no group) — the
+/// `advanced_help_groups_cover_every_advanced_verb` test turns that into
+/// a build failure rather than a silently missing help line.
+fn advanced_help_group_id(contract: &CommandContract) -> &'static str {
+    match contract.surface {
+        "automation" => "automation",
+        "admin" => "admin",
+        "git_adapter" => "git-interop",
+        _ => contract.help_category.unwrap_or(""),
+    }
 }
 
 pub(crate) fn recommended_action_template(action: &str) -> Option<ActionTemplate> {
