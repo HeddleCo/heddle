@@ -437,7 +437,23 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     let preview = build_thread_preview_report(&repo, &mut merge_thread, true)?;
     let integration_blockers = integration_blockers(&repo, &merge_thread, &preview);
     let manual_resolution_current = manual_resolution_current(&repo, &merge_thread);
+    let squash_land = should_squash_land(&args, &user_config);
     if manual_resolution_current {
+        let land_collapse_state = if squash_land
+            && repo.capability() == repo::RepositoryCapability::GitOverlay
+        {
+            collapse_thread_for_land(&repo, &user_config, &merge_thread, args.message.as_deref())?
+        } else {
+            None
+        };
+        if land_collapse_state.is_some() {
+            merge_thread = resolve_thread(
+                &repo,
+                Some(&merge_thread.id),
+                "land",
+                "heddle land --thread <name>",
+            )?;
+        }
         let merge_state = adopt_manual_resolution(&repo, &merge_thread.id)?;
         let mut checkpointed = false;
         let mut git_commit = None;
@@ -469,7 +485,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             &repo,
             Some(&merge_state),
             git_commit.as_deref(),
-            None,
+            land_collapse_state.as_ref(),
         )
         .context(
             "land completed but failed to record manual integration and Git checkpoint as one undo batch",
@@ -593,7 +609,6 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         );
     }
 
-    let squash_land = should_squash_land(&args, &user_config);
     let land_collapse_state =
         if squash_land && repo.capability() == repo::RepositoryCapability::GitOverlay {
             collapse_thread_for_land(&repo, &user_config, &merge_thread, args.message.as_deref())?

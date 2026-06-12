@@ -198,6 +198,7 @@ enum StrictCurrentOpRecord {
         sources: Vec<ChangeId>,
         result: ChangeId,
         thread: Option<String>,
+        pre_thread_state: Option<ChangeId>,
     },
     MarkerCreate {
         name: String,
@@ -341,10 +342,12 @@ impl StrictCurrentOpRecord {
                 sources,
                 result,
                 thread,
+                pre_thread_state,
             } => OpRecord::Collapse {
                 sources,
                 result,
                 thread,
+                pre_thread_state,
             },
             Self::MarkerCreate { name, state } => OpRecord::MarkerCreate { name, state },
             Self::MarkerDelete { name, state } => OpRecord::MarkerDelete { name, state },
@@ -609,6 +612,7 @@ impl PreAtomicOpRecord {
                 sources,
                 result,
                 thread: None,
+                pre_thread_state: None,
             },
             Self::MarkerCreate { name, state } => OpRecord::MarkerCreate { name, state },
             Self::MarkerDelete { name, state } => OpRecord::MarkerDelete { name, state },
@@ -848,6 +852,7 @@ impl AtomicNoHeadOpRecord {
                 sources,
                 result,
                 thread,
+                pre_thread_state: None,
             },
             Self::MarkerCreate { name, state } => OpRecord::MarkerCreate { name, state },
             Self::MarkerDelete { name, state } => OpRecord::MarkerDelete { name, state },
@@ -1004,6 +1009,7 @@ mod tests {
                 sources: vec![cid(8), cid(9)],
                 result: cid(10),
                 thread: None,
+                pre_thread_state: None,
             },
             OpRecord::MarkerCreate {
                 name: "release".into(),
@@ -1071,6 +1077,7 @@ mod tests {
             sources: vec![cid(22)],
             result: cid(23),
             thread: Some("main".into()),
+            pre_thread_state: None,
         });
         records.push(OpRecord::RemoteThreadUpdate {
             remote: "origin".into(),
@@ -1161,6 +1168,7 @@ mod tests {
                 sources: vec![cid(4), cid(5)],
                 result: cid(6),
                 thread: None,
+                pre_thread_state: None,
             },
         ];
         for legacy in pre_atomic_reshaped {
@@ -1212,6 +1220,7 @@ mod tests {
                 sources: vec![cid(1), cid(2)],
                 result: cid(3),
                 thread: None,
+                pre_thread_state: None,
             },
         ];
 
@@ -1243,6 +1252,7 @@ mod tests {
                 sources: vec![cid(10), cid(11)],
                 result: cid(14),
                 thread: Some("main".into()),
+                pre_thread_state: None,
             },
             OpRecord::RemoteThreadUpdate {
                 remote: "origin".into(),
@@ -1547,6 +1557,7 @@ pub(crate) mod tests_support {
                     sources,
                     result,
                     thread,
+                    pre_thread_state: _,
                 } => Self::Collapse {
                     sources: sources.clone(),
                     result: *result,

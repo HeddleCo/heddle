@@ -6245,6 +6245,7 @@ fn collapse_records(path: &std::path::Path) -> Vec<(Vec<String>, String, Option<
                 sources,
                 result,
                 thread,
+                ..
             } => Some((
                 sources.into_iter().map(|id| id.short()).collect(),
                 result.short(),
@@ -6253,6 +6254,64 @@ fn collapse_records(path: &std::path::Path) -> Vec<(Vec<String>, String, Option<
             _ => None,
         })
         .collect()
+}
+
+fn thread_tip(path: &std::path::Path, thread: &str) -> String {
+    let repo = Repository::open(path).expect("repo should open");
+    repo.refs()
+        .get_thread(&objects::object::ThreadName::new(thread))
+        .expect("thread ref lookup should succeed")
+        .unwrap_or_else(|| panic!("thread {thread} should exist"))
+        .short()
+}
+
+fn assert_latest_undo_batch_has_land_squash_ops(path: &std::path::Path) {
+    let undo_list = json(
+        path,
+        &["--output", "json", "undo", "--list", "--depth", "1"],
+    );
+    let batches = undo_list["batches"]
+        .as_array()
+        .expect("undo list should expose batches");
+    assert_eq!(
+        batches.len(),
+        1,
+        "land should expose one latest undo batch: {undo_list}"
+    );
+    let operations = batches[0]["operations"]
+        .as_array()
+        .expect("undo list should expose operations");
+    let logical_operations: Vec<_> = operations
+        .iter()
+        .filter(|op| {
+            !op["description"]
+                .as_str()
+                .is_some_and(|description| description.starts_with("transaction commit "))
+        })
+        .collect();
+    assert_eq!(
+        logical_operations.len(),
+        3,
+        "squashed land should coalesce collapse + integration + Git checkpoint: {undo_list}"
+    );
+    assert!(
+        logical_operations.iter().any(|op| op["description"]
+            .as_str()
+            .is_some_and(|description| description.starts_with("collapse "))),
+        "squashed land undo batch should include the source collapse: {undo_list}"
+    );
+    assert!(
+        logical_operations.iter().any(|op| op["description"]
+            .as_str()
+            .is_some_and(|description| description.starts_with("fast-forward "))),
+        "squashed land undo batch should include the target integration: {undo_list}"
+    );
+    assert!(
+        logical_operations.iter().any(|op| op["description"]
+            .as_str()
+            .is_some_and(|description| description.starts_with("git checkpoint "))),
+        "squashed land undo batch should include the Git checkpoint: {undo_list}"
+    );
 }
 
 #[test]
@@ -6294,6 +6353,115 @@ fn git_overlay_matrix_land_squashes_thread_to_one_git_commit_by_default() {
         2,
         "collapse record should retain the full ordered source list"
     );
+}
+
+#[test]
+fn git_overlay_matrix_squashed_land_undo_restores_git_target_and_source_thread() {
+    let temp = TempDir::new().unwrap();
+    let (_checkout, base_git) = setup_two_capture_land_thread(&temp, "feature/squash-undo");
+    let source_tip_before = thread_tip(temp.path(), "feature/squash-undo");
+    let target_tip_before = thread_tip(temp.path(), "main");
+
+    let land = json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/squash-undo",
+            "--no-push",
+        ],
+    );
+    assert_eq!(land["status"], "landed");
+    assert_eq!(
+        git_stdout(
+            temp.path(),
+            &["rev-list", "--count", &format!("{base_git}..HEAD")]
+        ),
+        "1",
+        "default land should project the multi-state source as one Git commit"
+    );
+    assert_ne!(
+        thread_tip(temp.path(), "feature/squash-undo"),
+        source_tip_before,
+        "land squash should move the source thread to the synthetic collapse state"
+    );
+    assert_ne!(thread_tip(temp.path(), "main"), target_tip_before);
+
+    assert_latest_undo_batch_has_land_squash_ops(temp.path());
+    let undo = json(temp.path(), &["--output", "json", "undo"]);
+    assert_eq!(undo["status"], "completed", "{undo}");
+    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), base_git);
+    assert_eq!(thread_tip(temp.path(), "main"), target_tip_before);
+    assert_eq!(
+        thread_tip(temp.path(), "feature/squash-undo"),
+        source_tip_before,
+        "undo must restore the source thread to its pre-collapse tip"
+    );
+    assert_eq!(git_status_short(temp.path()), "");
+}
+
+#[test]
+fn git_overlay_matrix_manual_resolution_land_squashes_and_undo_restores_source_thread() {
+    let temp = TempDir::new().unwrap();
+    let (_checkout, _base_git) = setup_two_capture_land_thread(&temp, "feature/manual-squash");
+
+    std::fs::write(temp.path().join("main-only.txt"), "main\n").unwrap();
+    let main_commit = json(
+        temp.path(),
+        &["--output", "json", "commit", "-m", "main advance"],
+    );
+    assert_eq!(main_commit["output_kind"], "commit", "{main_commit}");
+    let pre_land_git = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
+    let target_tip_before = thread_tip(temp.path(), "main");
+
+    let refresh = json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "thread",
+            "refresh",
+            "feature/manual-squash",
+        ],
+    );
+    assert_eq!(refresh["status"], "completed", "{refresh}");
+    let source_tip_before_land = thread_tip(temp.path(), "feature/manual-squash");
+
+    let land = json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/manual-squash",
+            "--no-push",
+        ],
+    );
+    assert_eq!(land["status"], "landed", "{land}");
+    assert_eq!(land["checkpointed"], true);
+    assert_eq!(
+        git_stdout(
+            temp.path(),
+            &["rev-list", "--count", &format!("{pre_land_git}..HEAD")]
+        ),
+        "1",
+        "manual-resolution land should squash the refreshed multi-state thread by default"
+    );
+
+    assert_latest_undo_batch_has_land_squash_ops(temp.path());
+    let undo = json(temp.path(), &["--output", "json", "undo"]);
+    assert_eq!(undo["status"], "completed", "{undo}");
+    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), pre_land_git);
+    assert_eq!(thread_tip(temp.path(), "main"), target_tip_before);
+    assert_eq!(
+        thread_tip(temp.path(), "feature/manual-squash"),
+        source_tip_before_land,
+        "undo must restore the refreshed source thread tip that existed before land"
+    );
+    assert_eq!(git_status_short(temp.path()), "");
 }
 
 #[test]

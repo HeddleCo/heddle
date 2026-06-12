@@ -151,15 +151,23 @@ pub(crate) fn collapse_resolved_states(
     // materialization, replacing the prior publish-then-record order. The
     // `Collapse` record names the published ref (a thread when HEAD was
     // attached, or a detached HEAD at the collapse result).
-    let (ref_updates, published_thread): (Vec<RefUpdate>, Option<String>) = match published_ref {
-        CollapsePublishedRef::Thread(thread) => (
-            vec![RefUpdate::Thread {
-                name: thread.clone(),
-                expected: RefExpectation::Any,
-                new: Some(new_state.change_id),
-            }],
-            Some(thread.to_string()),
-        ),
+    let (ref_updates, published_thread, pre_thread_state): (
+        Vec<RefUpdate>,
+        Option<String>,
+        Option<ChangeId>,
+    ) = match published_ref {
+        CollapsePublishedRef::Thread(thread) => {
+            let previous = repo.refs().get_thread(&thread)?;
+            (
+                vec![RefUpdate::Thread {
+                    name: thread.clone(),
+                    expected: RefExpectation::Any,
+                    new: Some(new_state.change_id),
+                }],
+                Some(thread.to_string()),
+                previous,
+            )
+        }
         CollapsePublishedRef::DetachedHead => (
             vec![RefUpdate::Head {
                 expected: RefExpectation::Any,
@@ -167,6 +175,7 @@ pub(crate) fn collapse_resolved_states(
                     state: new_state.change_id,
                 },
             }],
+            None,
             None,
         ),
     };
@@ -176,6 +185,7 @@ pub(crate) fn collapse_resolved_states(
         sources: source_ids,
         result: new_state.change_id,
         thread: published_thread,
+        pre_thread_state,
     };
     repo.commit_and_publish(vec![collapse_record], &ref_updates)?;
 

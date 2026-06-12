@@ -664,6 +664,15 @@ fn apply_undo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         OpRecord::MarkerDelete { name, state } => {
             steps.create_marker(name.as_str(), *state)?;
         }
+        OpRecord::Collapse {
+            thread: Some(thread),
+            pre_thread_state: Some(pre_thread_state),
+            ..
+        } => {
+            steps.set_thread(thread.as_str(), *pre_thread_state)?;
+            sync_thread_record_state(steps, thread, *pre_thread_state)?;
+        }
+        OpRecord::Collapse { .. } => {}
         // Redaction inverse: drop the specific redaction record so
         // subsequent materialize calls restore the original blob
         // bytes. The opt-in flag + purged-bytes check are enforced in
@@ -745,8 +754,8 @@ fn apply_undo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         // oplog replay. Enumerated explicitly (no wildcard) so a new
         // `OpRecord` variant is a COMPILE error here until its undo behavior
         // is decided (heddle#354 r9):
-        //   - Fork / Collapse: structural ops; HEAD/thread restoration is
-        //     driven by the surrounding records in the same batch.
+        //   - Fork: structural op; HEAD/thread restoration is driven by
+        //     surrounding records in the same batch.
         //   - Checkpoint: addressable save, goto-reachable; nothing to invert.
         //   - TransactionAbort / TransactionCommit / ConflictResolved: forensic
         //     / audit records, no ref to restore.
@@ -757,7 +766,6 @@ fn apply_undo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         //   - RemoteThreadUpdate / RemoteThreadDelete / UndoRecoveryUpdate:
         //     reconcile-class bookkeeping refs, outside the user undo chain.
         OpRecord::Fork { .. }
-        | OpRecord::Collapse { .. }
         | OpRecord::Checkpoint { .. }
         | OpRecord::TransactionAbort { .. }
         | OpRecord::TransactionCommit { .. }
@@ -839,6 +847,16 @@ fn apply_redo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         OpRecord::MarkerDelete { name, .. } => {
             steps.delete_marker(name.as_str())?;
         }
+        OpRecord::Collapse {
+            thread: Some(thread),
+            result,
+            pre_thread_state: Some(_),
+            ..
+        } => {
+            steps.set_thread(thread.as_str(), *result)?;
+            sync_thread_record_state(steps, thread, *result)?;
+        }
+        OpRecord::Collapse { .. } => {}
         // FF merge redo: replay the *recorded* FF target. We do
         // not re-read `source_thread` — the recorded `post_target_id`
         // is the exact state the target advanced to at the original
@@ -900,7 +918,6 @@ fn apply_redo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
             steps.restore_visibility_sidecar(*state, prior_sidecar.clone(), new_sidecar.clone())?;
         }
         OpRecord::Fork { .. }
-        | OpRecord::Collapse { .. }
         | OpRecord::Checkpoint { .. }
         | OpRecord::TransactionAbort { .. }
         | OpRecord::TransactionCommit { .. }

@@ -1237,6 +1237,7 @@ fn reconcile_folds_every_record_shape() {
         sources: vec![v1],
         result: coll,
         thread: None,
+        pre_thread_state: None,
     }])
     .unwrap();
     // Checkpoint with a thread, and one without (thread = None arm).
