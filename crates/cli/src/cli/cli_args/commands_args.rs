@@ -285,7 +285,9 @@ Examples:
   heddle commit --all -m 'save everything'  # include unstaged/untracked paths even when the Git index is staged
 ")]
 pub struct CommitArgs {
-    /// Commit/capture message.
+    /// Commit/capture message. `--intent` is a deliberate alias: agents
+    /// (and humans) may prefer it to record WHY the change was made, not
+    /// just what changed — intent is first-class in Heddle's state model.
     #[arg(short = 'm', long = "message", visible_alias = "intent")]
     pub message: Option<String>,
 
@@ -448,6 +450,10 @@ pub struct RetroArgs {
 
 /// Arguments for the `diff` command.
 #[derive(Clone, Debug, clap::Args)]
+#[command(after_help = "\
+Patch compatibility:
+  --patch output targets a clean `git apply` round-trip; patch(1) support is best-effort — use `git apply` for git extended headers (type changes, mode bits, empty add/delete hunks).
+")]
 pub struct DiffArgs {
     /// Base state (default: HEAD).
     pub from: Option<String>,
@@ -606,6 +612,9 @@ Examples:
   heddle start fix-flake --task 'fix CI flake'    # attach a task description
 
 Isolated checkouts are Heddle-managed working directories. They do not contain a .git directory; use Heddle commands inside them, and run raw Git commands from the parent Git-overlay repo when needed.
+
+Advanced (hidden) flags:
+  --agent-provider/--agent-model (agent attribution for the registered thread), --parent-thread (delegated child work), --print-cd-path (print only the checkout path for shell wrappers), --daemon/--no-daemon (virtualized-mount ownership), --shared-target (workspace-shared cargo target dir). All are accepted here; they stay out of the flag list to keep everyday help terse.
 ")]
 pub struct ThreadStartArgs {
     /// Thread name to create or resume.
@@ -712,7 +721,7 @@ Examples:
   heddle merge feature/auth --preview         # structured blockers + recommendation
   heddle merge feature/auth -m 'land auth'    # integrate with a commit message
   heddle merge feature/auth --with-diff       # preview with the resulting diff
-  heddle merge feature/auth --semantic        # use semantic merge for code edits
+  heddle merge feature/auth --no-semantic     # opt out to hunk-only merge
 ")]
 pub struct MergeArgs {
     /// Thread to merge.
@@ -736,11 +745,11 @@ pub struct MergeArgs {
     #[arg(long = "with-diff")]
     pub with_diff: bool,
 
-    /// When combined with `--with-diff`, return a semantic-aware diff
-    /// (function/class-level changes) in addition to line hunks.
-    /// Requires building heddle with `--features semantic`.
-    #[arg(long)]
-    pub semantic: bool,
+    /// Use the hunk-only merge strategy instead of the semantic merge
+    /// engine. Semantic merge is the default when the `semantic` cargo
+    /// feature is compiled in.
+    #[arg(long = "no-semantic")]
+    pub no_semantic: bool,
 
     /// After a successful (non-preview) merge, also write a git commit
     /// staging the paths the merge introduced. Fails if the worktree
@@ -1300,6 +1309,10 @@ impl PushArgs {
 
 /// Arguments for the `pull` command.
 #[derive(Clone, Debug, clap::Args)]
+#[command(after_help = "\
+Advanced (hidden) flags:
+  --lazy leaves blob content absent by design and hydrates it explicitly later. Hosted/network Heddle remotes only; Git-overlay pulls reject it today — lazy hydration over the Git transport is planned for v0.3.1.
+")]
 pub struct PullArgs {
     #[command(flatten)]
     pub remote_op: RemoteOperationArgs,
@@ -1314,19 +1327,23 @@ pub struct PullArgs {
 }
 
 /// Arguments for the `clone` command.
+///
+/// Help style budget (heddle#652): `--help` carries the signature, flags,
+/// a one-screen Behavior summary, and the hidden-flag breadcrumb
+/// (heddle#646). The full default-thread fallback chain and --depth
+/// exposition moved to `heddle help clone` (help.rs CLONE_TOPIC); keep
+/// flag docs single-line so clap renders the compact help layout.
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Behavior:
-  Default thread (no --thread): Git-overlay clones (cloning a Git repository) land on the remote's advertised default branch (its Git HEAD); if the remote advertises none, they fall back to a thread named `main`, then to the alphabetically first imported thread. Native-local and hosted Heddle clones instead target `main` directly with no fallback chain; if the remote has no `main` thread, the clone fails — pass `--thread <name>` to select one. It never prompts.
-  Depth (Heddle remotes only): --depth 0 (the default) clones full history. --depth N fetches only the tip plus N generations of ancestry, so `heddle log` stops at the depth boundary; history older than that is not present locally — re-clone at a greater --depth (or --depth 0) to obtain it. Git-overlay clones reject a nonzero --depth; --depth 0 is accepted and clones full history (the default).
-  Depth controls history extent only — how many states the clone fetches — and says nothing about object contents. Whether a state's blobs are present locally or fetched lazily is a separate, independent concern that --depth never governs.
+  Git-overlay clones land on the remote's default branch; Heddle remotes check out `main` (pass --thread to pick another). --depth N limits history on Heddle remotes only. Never prompts. Full details: `heddle help clone`.
 
-  See `heddle help threads` for the thread model and `heddle help advanced` for power surfaces.
+Advanced (hidden) flags:
+  --lazy and --filter blob:none skip blob content and hydrate it on demand. Hosted/network Heddle remotes only; Git-overlay clones (plain `https://…/repo.git` URLs and local-path clones) reject them today — lazy hydration over the Git transport is planned for v0.3.1.
 
 Examples:
   heddle clone https://example.com/repo.git ./clone   # Git repo: lands on the remote's default branch
-  heddle clone ./repo ./clone --thread main           # check out a named thread after cloning
-  heddle clone heddle://host/repo ./clone --depth 1   # shallow Heddle clone: keep the tip plus its immediate parents
+  heddle clone heddle://host/repo ./clone --depth 1   # shallow Heddle clone: tip plus immediate parents
 ")]
 pub struct CloneArgs {
     /// Remote repository path.
@@ -1343,20 +1360,20 @@ pub struct CloneArgs {
     #[arg(long)]
     pub depth: Option<u32>,
 
+    // Hosted/network remotes only; Git-overlay clones reject it today —
+    // lazy hydration over the Git transport is planned for v0.3.1. The
+    // user-facing exposition lives in the after-help breadcrumb above and
+    // `heddle help clone`.
     /// Leave blob content absent by design and hydrate it explicitly later.
-    /// Supported for hosted/network remotes only; Git-overlay clones
-    /// (plain `https://…/repo.git` URLs and local-path clones) reject
-    /// this flag today and report a clear error — lazy hydration over
-    /// the Git transport is planned for v0.3.1.
     #[arg(long, hide = true)]
     pub lazy: bool,
 
-    /// Partial-clone filter spec. Only `blob:none` is accepted; other
-    /// git-style filters such as `tree:0` or `blob:limit=…` are
-    /// rejected at parse time. On hosted/network remotes `blob:none`
-    /// is a synonym for `--lazy` (skip blob content; hydrate on
-    /// demand). Git-overlay clones reject the flag at runtime; this
-    /// is planned for v0.3.1.
+    // Only `blob:none` is accepted (a synonym for --lazy on hosted
+    // remotes); git-style filters such as `tree:0` or `blob:limit=…` are
+    // rejected at parse time, and Git-overlay clones reject the flag at
+    // runtime until v0.3.1. See the after-help breadcrumb and
+    // `heddle help clone`.
+    /// Partial-clone filter spec (`blob:none` only).
     #[arg(long, hide = true, value_name = "SPEC", value_parser = parse_clone_filter_spec)]
     pub filter: Option<String>,
 }

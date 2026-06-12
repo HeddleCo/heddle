@@ -24,6 +24,7 @@ use super::{
     git_overlay_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
     mount_lifecycle,
     operator_core::OperatorCommandOutput,
+    next_action::normalized_action,
     operator_loop::primary_next_action,
     thread::{
         cmd_thread_cd, cmd_thread_create, cmd_thread_current, cmd_thread_delete, cmd_thread_list,
@@ -1325,7 +1326,7 @@ fn print_thread_output(
         import_hint.as_ref(),
         Some(&advice.recommended_action),
     );
-    let recommended_action = (!recommended_action.trim().is_empty()).then_some(recommended_action);
+    let recommended_action = normalized_action(recommended_action);
     if should_output_json(cli, Some(repo.config())) {
         println!(
             "{}",

@@ -418,7 +418,7 @@ impl ThreadManager {
     }
 
     /// Encode the `Thread` record matching `thread_name` to opaque
-    /// rmp-serde bytes for inclusion in `OpRecord::ThreadCreateV2`'s
+    /// rmp-serde bytes for inclusion in `OpRecord::ThreadCreate`'s
     /// `manager_snapshot` field. Returns `Ok(None)` when no record
     /// exists for that thread (the caller doesn't have a record to
     /// snapshot — e.g. `cmd_start --path` writes the record only after
@@ -445,8 +445,8 @@ impl ThreadManager {
 
     /// Decode a `Thread` record from rmp-serde bytes produced by
     /// `snapshot_thread_record`. Used by `heddle redo` of a
-    /// `ThreadCreateV2` to reconstruct the record body that undo destroyed
-    /// (heddle#23 r2 Codex P1, mirroring the FastForwardV2 pattern from
+    /// `ThreadCreate` to reconstruct the record body that undo destroyed
+    /// (heddle#23 r2 Codex P1, mirroring the FastForward pattern from
     /// heddle#99 r2 — record what redo needs).
     ///
     /// Decode ONLY — it does NOT persist. The redo applier converges the
@@ -597,7 +597,9 @@ mod tests {
             "precondition: newer leaked record shadows prev"
         );
 
-        manager.converge_records(name, std::slice::from_ref(&prev)).unwrap();
+        manager
+            .converge_records(name, std::slice::from_ref(&prev))
+            .unwrap();
 
         assert_eq!(
             manager.find_by_thread(name).unwrap().unwrap().id,
@@ -653,7 +655,9 @@ mod tests {
             "precondition: the newer same-name record shadows the target"
         );
 
-        manager.converge_records(name, std::slice::from_ref(&target)).unwrap();
+        manager
+            .converge_records(name, std::slice::from_ref(&target))
+            .unwrap();
 
         let under_name: Vec<_> = manager
             .list()
@@ -661,7 +665,11 @@ mod tests {
             .into_iter()
             .filter(|t| t.thread == name)
             .collect();
-        assert_eq!(under_name.len(), 1, "exactly the target remains under the name");
+        assert_eq!(
+            under_name.len(),
+            1,
+            "exactly the target remains under the name"
+        );
         assert_eq!(under_name[0].id, "rec-target");
         assert_eq!(
             manager.find_by_thread(name).unwrap().unwrap().id,
@@ -712,7 +720,12 @@ mod tests {
         drop_c.updated_at = keep_a.updated_at + chrono::Duration::seconds(10);
         manager.save(&drop_c).unwrap();
         assert_eq!(
-            manager.list().unwrap().iter().filter(|t| t.thread == name).count(),
+            manager
+                .list()
+                .unwrap()
+                .iter()
+                .filter(|t| t.thread == name)
+                .count(),
             3,
             "precondition: three records under the name"
         );
@@ -790,7 +803,9 @@ mod tests {
         rec.thread = name.to_string();
         manager.save(&rec).unwrap();
 
-        manager.converge_records(name, std::slice::from_ref(&rec)).unwrap();
+        manager
+            .converge_records(name, std::slice::from_ref(&rec))
+            .unwrap();
 
         assert_eq!(
             manager.find_by_thread(name).unwrap().unwrap().id,

@@ -51,6 +51,34 @@ impl HeddleExitCode {
         }
     }
 
+    /// Exit code for a typed `RecoveryAdvice` kind whose documented code
+    /// differs from the `IoErr` catch-all. This table — not the
+    /// user-visible message — is the classification contract: rewording
+    /// advice copy can never regress an exit code, and every entry here is
+    /// pinned by a per-kind regression test below.
+    fn for_advice_kind(kind: &str) -> Option<Self> {
+        match kind {
+            // Missing precondition (no default remote for push/pull), not
+            // an IO failure.
+            "remote_not_configured" => Some(Self::Config),
+            // Well-formed input the command semantically rejects:
+            // - nothing staged / no changes to capture
+            // - a reconcile that needs a `--prefer` side
+            // - unsaved worktree changes blocking a tree write
+            // - repository state that fails msgpack/serde decoding
+            // - `--output json`/`json-compact` against a command without
+            //   that output contract (the invocation parses fine; the
+            //   command rejects the requested projection)
+            "nothing_to_commit"
+            | "reconcile_direction_required"
+            | "dirty_worktree"
+            | "state_corrupted"
+            | "json_unsupported"
+            | "json_compact_unsupported" => Some(Self::DataErr),
+            _ => None,
+        }
+    }
+
     /// Map an anyhow error chain to an exit code. Walks the chain and uses
     /// the first downcast match; falls back to `IoErr` so callers always
     /// get a code more informative than the bare `1` shell convention.
@@ -60,15 +88,20 @@ impl HeddleExitCode {
             // ones whose documented code differs from the `IoErr` catch-all.
             // Keyed on `kind` (not the user-visible message) so rewording the
             // error text can't silently regress the contract.
-            if let Some(advice) = cause.downcast_ref::<crate::cli::commands::RecoveryAdvice>() {
-                match advice.kind {
-                    // No default remote configured (push/pull): a missing
-                    // precondition, not an IO failure.
-                    "remote_not_configured" => return Self::Config,
-                    // Nothing staged / no changes to capture, and a reconcile
-                    // that needs a `--prefer` side: well-formed input the
-                    // command semantically rejects.
-                    "nothing_to_commit" | "reconcile_direction_required" => return Self::DataErr,
+            if let Some(advice) = cause.downcast_ref::<crate::cli::commands::RecoveryAdvice>()
+                && let Some(code) = Self::for_advice_kind(advice.kind)
+            {
+                return code;
+            }
+            if let Some(heddle_err) = cause.downcast_ref::<objects::error::HeddleError>() {
+                match heddle_err {
+                    // A missing repository is a missing precondition
+                    // (initialize/point at one), not an IO failure.
+                    objects::error::HeddleError::RepositoryNotFound(_) => return Self::Config,
+                    // Stored state that fails msgpack decoding is corrupted
+                    // data, not a transient IO problem — same class as the
+                    // serde_json/toml parse failures below.
+                    objects::error::HeddleError::Serialization(_) => return Self::DataErr,
                     _ => {}
                 }
             }
@@ -103,10 +136,14 @@ impl HeddleExitCode {
             }
         }
 
-        // Heddle-specific string sentinels — match the user-visible phrasing
-        // produced by RecoveryAdvice. Cheap to scan; only runs on the error
-        // path. Keep these short and exact so they don't false-positive on
-        // unrelated messages that happen to mention "no upstream".
+        // Legacy string sentinels — LAST RESORT for raw-string error paths
+        // that carry no typed `RecoveryAdvice` or `HeddleError` (e.g. the
+        // stringified `RemoteError::NotFound` display from `resolve_remote`,
+        // or upstream messages flattened through `anyhow::Error::msg`).
+        // Any error that has a typed kind MUST be classified above via
+        // `for_advice_kind` / the `HeddleError` match — never add a sentinel
+        // here for a message a typed constructor produces. Keep these short
+        // and exact so they don't false-positive on unrelated messages.
         let msg = format!("{err:#}");
         if msg.contains("no upstream configured")
             || msg.contains("no remote configured")
@@ -241,6 +278,124 @@ mod tests {
     fn missing_repo_string_sentinel_is_config() {
         let err = anyhow::anyhow!("repository not found at /tmp/whatever");
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::Config);
+    }
+
+    #[test]
+    fn repository_not_found_typed_variant_is_config() {
+        // The typed `HeddleError::RepositoryNotFound` must classify without
+        // relying on its Display text surviving a rewording.
+        let err: anyhow::Error = objects::error::HeddleError::RepositoryNotFound(
+            std::path::PathBuf::from("/tmp/whatever"),
+        )
+        .into();
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::Config);
+    }
+
+    #[test]
+    fn serialization_error_typed_variant_is_data_err() {
+        // Corrupted msgpack state (HeddleCo/heddle#642): decode failures
+        // are data corruption, not the IoErr catch-all.
+        let err: anyhow::Error = objects::error::HeddleError::Serialization(
+            "wrong msgpack marker FixArray(0)".to_string(),
+        )
+        .into();
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    /// Build a `RecoveryAdvice` with the given kind and deliberately
+    /// unrelated copy, proving classification reads `kind`, never the
+    /// user-visible message (HeddleCo/heddle#640).
+    fn advice_with_kind(kind: &'static str) -> anyhow::Error {
+        anyhow::anyhow!(crate::cli::commands::RecoveryAdvice::safety_refusal(
+            kind,
+            "reworded copy that matches no sentinel",
+            "hint",
+            "unsafe",
+            "would change",
+            "preserved",
+            "heddle status",
+            vec!["heddle status".to_string()],
+        ))
+    }
+
+    #[test]
+    fn every_classified_advice_kind_maps_to_its_documented_exit_code() {
+        // Per-kind regression matrix: copy edits that orphan a string
+        // sentinel can no longer regress these to the IoErr catch-all.
+        for (kind, expected) in [
+            ("remote_not_configured", HeddleExitCode::Config),
+            ("nothing_to_commit", HeddleExitCode::DataErr),
+            ("reconcile_direction_required", HeddleExitCode::DataErr),
+            ("dirty_worktree", HeddleExitCode::DataErr),
+            ("state_corrupted", HeddleExitCode::DataErr),
+            ("json_unsupported", HeddleExitCode::DataErr),
+            ("json_compact_unsupported", HeddleExitCode::DataErr),
+        ] {
+            assert_eq!(
+                HeddleExitCode::from_error(&advice_with_kind(kind)),
+                expected,
+                "advice kind `{kind}` must classify by kind, not message text"
+            );
+        }
+    }
+
+    #[test]
+    fn dirty_worktree_advice_constructor_is_data_err() {
+        // The real constructor's Display does not contain the legacy
+        // "dirty worktree" sentinel, so only the typed kind can classify it.
+        let err = anyhow::anyhow!(crate::cli::commands::RecoveryAdvice::dirty_worktree(
+            "merge",
+            vec!["src/lib.rs".to_string()],
+            "repository state was left unchanged",
+        ));
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
+    fn dirty_worktree_string_sentinel_is_data_err() {
+        // Raw-string path (e.g. repository_worktree_apply's refusal) that
+        // carries no typed advice still classifies via the legacy sentinel.
+        let err = anyhow::anyhow!(
+            "dirty worktree would be overwritten by full rematerialize (switch)"
+        );
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
+    fn unsupported_output_advice_is_data_err() {
+        // HeddleCo/heddle#648: `--output json[-compact]` against a command
+        // without that contract is semantic rejection of well-formed input
+        // (DataErr 65), not a malformed invocation (Usage 64).
+        let json = anyhow::anyhow!(crate::cli::commands::RecoveryAdvice::json_unsupported(
+            "shell completion"
+        ));
+        assert_eq!(HeddleExitCode::from_error(&json), HeddleExitCode::DataErr);
+
+        let compact = anyhow::anyhow!(
+            crate::cli::commands::RecoveryAdvice::json_compact_unsupported("log")
+        );
+        assert_eq!(
+            HeddleExitCode::from_error(&compact),
+            HeddleExitCode::DataErr
+        );
+    }
+
+    #[test]
+    fn state_corrupted_advice_is_data_err() {
+        let err = anyhow::anyhow!(crate::cli::commands::RecoveryAdvice::serialization_error(
+            "wrong msgpack marker FixArray(0)"
+        ));
+        assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
+    }
+
+    #[test]
+    fn unclassified_advice_kind_falls_back_to_io_err() {
+        // Kinds without a documented divergent code keep the catch-all, so
+        // adding a new advice kind never silently changes an exit code.
+        assert_eq!(
+            HeddleExitCode::from_error(&advice_with_kind("hook_veto")),
+            HeddleExitCode::IoErr
+        );
     }
 
     #[test]

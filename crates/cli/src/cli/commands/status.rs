@@ -34,9 +34,8 @@ use super::{
     git_overlay_health::{
         GitOverlayHealth, RepositoryVerificationState,
         build_git_overlay_health_with_worktree_status, build_plain_git_verification_probe,
-        override_trust_recommended_action,
-        remote_tracking_with_verification_action, repository_setup_guidance,
-        serialize_empty_action_as_null,
+        override_trust_recommended_action, remote_tracking_with_verification_action,
+        repository_setup_guidance, serialize_empty_action_as_null,
     },
     next_action::{NextActionValidationContext, write_command_json},
     operator_loop::primary_next_action_with_verification,
@@ -83,25 +82,37 @@ pub(crate) struct StatusOutput {
     base_state: Option<String>,
     base_root: Option<String>,
     current_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     execution_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     heddle_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     actor: Option<ActorInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     thinking_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     usage_summary: Option<AgentUsageSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     last_progress_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     report_flush_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     attach_reason: Option<String>,
     thread_mode: Option<ThreadMode>,
     thread_state: Option<ThreadState>,
     freshness: Option<ThreadFreshness>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     target_thread: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     parent_thread: Option<String>,
     child_threads: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     task: Option<String>,
     promotion_suggested: bool,
     impact_categories: Vec<ThreadImpactCategory>,
@@ -222,6 +233,7 @@ struct PlainGitStatusOutput {
     git_overlay_health: GitOverlayHealth,
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
+    #[serde(serialize_with = "serialize_empty_action_as_null")]
     recommended_action: String,
     recommended_action_template: Option<super::command_catalog::ActionTemplate>,
     recovery_commands: Vec<String>,
@@ -232,13 +244,16 @@ struct PlainGitStatusOutput {
     git_index: Option<GitIndexPlan>,
 }
 
-/// Recommend the one-command first run when a native Heddle repository
-/// has been initialized but has no user-visible history yet (the log
-/// shows only the filtered synthetic root) and the worktree is clean —
-/// i.e. there is genuinely nothing to act on yet. A dirty worktree
-/// already has its own advice (`heddle commit`), and Git-overlay repos
-/// have their own onboarding (import/adopt), so both are left alone.
-fn quickstart_init_recommendation(
+/// Recommend the first save when a native Heddle repository has been
+/// initialized but has no user-visible history yet (the log shows only
+/// the filtered synthetic root) and the worktree is clean — i.e. there
+/// is genuinely nothing to act on yet. The repo is already initialized,
+/// so recommending `heddle init --quickstart` here read as "you
+/// initialized wrong" (heddle#644); point at the first commit instead.
+/// A dirty worktree already has its own advice (`heddle commit`), and
+/// Git-overlay repos have their own onboarding (import/adopt), so both
+/// are left alone.
+fn first_save_recommendation(
     repo: &Repository,
     current_state: Option<&objects::object::State>,
     worktree_clean: bool,
@@ -247,11 +262,7 @@ fn quickstart_init_recommendation(
         return None;
     }
     let empty_log = current_state.map(is_synthetic_root).unwrap_or(true);
-    // The repo already has `.heddle/` (it has been init'd to reach this
-    // branch), so a bare `heddle init --quickstart` hits the confirmation
-    // gate and is refused non-interactively. Recommend the runnable form —
-    // `--yes` clears the gate — so an agent/script can run it verbatim.
-    empty_log.then(|| "heddle init --quickstart --yes".to_string())
+    empty_log.then(|| "heddle commit -m \"...\"".to_string())
 }
 
 fn changes_from_status(status: &WorktreeStatus) -> ChangesInfo {
@@ -528,7 +539,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
             && changes.added.is_empty()
             && changes.deleted.is_empty();
         let recommended_action =
-            quickstart_init_recommendation(&repo, current_state.as_ref(), worktree_clean)
+            first_save_recommendation(&repo, current_state.as_ref(), worktree_clean)
                 .unwrap_or(recommended_action);
         debug!(
             repo_open_ms,
@@ -979,10 +990,9 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     }
     // A freshly-`init`'d native repo whose log is still empty (only the
     // synthetic root) and whose worktree is clean has nothing to act on
-    // yet — point the user at the one-command first run.
-    let recommended_action =
-        quickstart_init_recommendation(&repo, current_state.as_ref(), !has_changes)
-            .unwrap_or(recommended_action);
+    // yet — point the user at the first save.
+    let recommended_action = first_save_recommendation(&repo, current_state.as_ref(), !has_changes)
+        .unwrap_or(recommended_action);
     let recommended_action_fields = ActionFields::from_action(&recommended_action);
     let thread_health = if trust.verified {
         advice
@@ -2041,16 +2051,17 @@ fn render_status_changes(output: &StatusOutput) {
         for path in &output.changes.deleted {
             println!("  {}:  {}", style::error("deleted"), path);
         }
-    } else if output.trust.verified {
+    }
+    if !has_changes && output.trust.verified {
         println!("{}", style::dim("No unsaved changes, worktree clean"));
-    } else if output.trust.worktree_state == "not_checked" {
+    } else if !has_changes && output.trust.worktree_state == "not_checked" {
         let message = if output.trust.status == "git_branch_advanced" {
             "No unsaved worktree changes detected; import the external Git branch tip before comparing Heddle state"
         } else {
             "No unsaved worktree changes detected; finish setup before comparing Heddle state"
         };
         println!("{}", style::dim(message));
-    } else if output.trust.worktree_state == "clean" {
+    } else if !has_changes && output.trust.worktree_state == "clean" {
         println!(
             "{}",
             style::dim(&format!(
@@ -2058,7 +2069,7 @@ fn render_status_changes(output: &StatusOutput) {
                 output.trust.status
             ))
         );
-    } else {
+    } else if !has_changes {
         println!("{}", style::dim("No unsaved worktree changes detected"));
     }
 }
@@ -2447,14 +2458,52 @@ fn normalize_presence_ws_url(upstream: &str) -> Result<String> {
 mod tests {
     use std::fs;
 
+    use clap::Parser as _;
+    use repo::AgentUsageSummary;
     use repo::Repository;
+    use serde_json::Value;
     use tempfile::TempDir;
 
     use super::{
-        CoordinationStatus, MaterializedThreadInfo, assess_materialized_threads,
-        combined_verdict_axes, coordination_axis_clean, coordination_label,
+        ActorInfo, ChangesInfo, CoordinationStatus, GitOverlayHealth, MaterializedThreadInfo,
+        PlainGitStatusOutput, RepositoryVerificationState, assess_materialized_threads,
+        build_status_output, combined_verdict_axes, coordination_axis_clean, coordination_label,
         render_status_materialized, resolve_coordination_with_trust,
     };
+
+    const AGENT_CONTEXT_STATUS_KEYS: &[&str] = &[
+        "path",
+        "execution_path",
+        "session_id",
+        "heddle_session_id",
+        "actor",
+        "harness",
+        "thinking_level",
+        "usage_summary",
+        "last_progress_at",
+        "report_flush_state",
+        "attach_reason",
+        "target_thread",
+        "parent_thread",
+        "task",
+    ];
+
+    fn status_cli(repo_dir: &std::path::Path) -> crate::cli::Cli {
+        crate::cli::Cli::parse_from([
+            "heddle",
+            "--repo",
+            repo_dir.to_str().expect("utf-8 temp path"),
+            "--output",
+            "json",
+            "status",
+        ])
+    }
+
+    fn status_json(repo_dir: &std::path::Path) -> Value {
+        let cli = status_cli(repo_dir);
+        let output = build_status_output(&cli, false).expect("build status output");
+        serde_json::to_value(&output).expect("serialize status")
+    }
 
     fn init_repo_with_materialized_thread(content: &[u8]) -> (TempDir, TempDir, Repository) {
         let repo_dir = TempDir::new().unwrap();
@@ -2473,6 +2522,68 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let repo = Repository::init_default(dir.path()).unwrap();
         assert!(assess_materialized_threads(&repo).is_empty());
+    }
+
+    #[test]
+    fn status_omits_agent_context_fields_when_unset() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("hello.txt"), b"hello\n").unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+
+        let json = status_json(repo_dir.path());
+        for key in AGENT_CONTEXT_STATUS_KEYS {
+            assert!(
+                json.get(*key).is_none(),
+                "status must omit unset agent-context key `{key}`: {json}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn status_serializes_agent_context_fields_when_set() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("hello.txt"), b"hello\n").unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+
+        let cli = status_cli(repo_dir.path());
+        super::super::actor_cmd::cmd_actor_spawn(
+            &cli,
+            None,
+            true,
+            Some("codex".to_string()),
+            Some("gpt-5".to_string()),
+        )
+        .await
+        .expect("spawn attached actor");
+
+        let mut output = build_status_output(&cli, false).expect("build status output");
+        output.path = Some(repo_dir.path().display().to_string());
+        output.execution_path = Some(repo_dir.path().display().to_string());
+        output.heddle_session_id = Some("heddle-session-1".to_string());
+        output.actor = Some(ActorInfo {
+            provider: Some("codex".to_string()),
+            model: Some("gpt-5".to_string()),
+        });
+        output.harness = Some("codex-cli".to_string());
+        output.thinking_level = Some("high".to_string());
+        output.usage_summary = Some(AgentUsageSummary::default());
+        output.last_progress_at = Some("2026-06-12T00:00:00Z".to_string());
+        output.report_flush_state = Some("flushed".to_string());
+        output.target_thread = Some("main".to_string());
+        output.parent_thread = Some("main".to_string());
+        output.task = Some("status surface".to_string());
+
+        let json = serde_json::to_value(&output).expect("serialize status");
+        for key in AGENT_CONTEXT_STATUS_KEYS {
+            assert!(
+                json.get(*key).is_some(),
+                "status must serialize set agent-context key `{key}`: {json}"
+            );
+        }
+        assert_eq!(json["actor"]["provider"], "codex");
+        assert_eq!(json["actor"]["model"], "gpt-5");
     }
 
     #[test]
@@ -2813,5 +2924,79 @@ mod tests {
             resolve_coordination_with_trust(CoordinationStatus::Clean, true, true);
         assert!(matches!(coordination, CoordinationStatus::Clean), "no override → axis stays clean");
         assert!(!blocked_by_trust_only);
+    }
+
+    /// Action-field presence contract (HeddleCo/heddle#645): an empty
+    /// `recommended_action` must serialize as `null`, never `""` — the
+    /// serialization-boundary walker hard-fails the whole command on a
+    /// raw empty. `PlainGitStatusOutput.recommended_action` is cloned
+    /// from `trust.recommended_action`, which CAN legitimately be empty;
+    /// this pins the safe-by-construction wire shape.
+    #[test]
+    fn plain_git_status_serializes_empty_recommended_action_as_null() {
+        let machine_contract_coverage =
+            crate::cli::commands::git_overlay_health::machine_contract_coverage();
+        let trust = RepositoryVerificationState {
+            verified: true,
+            status: "verified".to_string(),
+            repository_mode: "plain-git".to_string(),
+            heddle_initialized: false,
+            git_branch: Some("main".to_string()),
+            heddle_thread: None,
+            worktree_dirty: false,
+            worktree_state: "clean".to_string(),
+            import_state: "not_applicable".to_string(),
+            mapping_state: "not_applicable".to_string(),
+            remote_drift: "clean".to_string(),
+            active_operation: None,
+            default_remote: None,
+            clone_verification: "not_applicable".to_string(),
+            machine_contract: crate::cli::commands::git_overlay_health::machine_contract_status(
+                &machine_contract_coverage,
+            )
+            .to_string(),
+            machine_contract_coverage,
+            workflow_status: "clean".to_string(),
+            workflow_summary: "no ready threads are waiting to land".to_string(),
+            summary: "plain Git repository".to_string(),
+            recommended_action: String::new(),
+            recommended_action_template: None,
+            recovery_commands: Vec::new(),
+            recovery_action_templates: Vec::new(),
+            checks: Vec::new(),
+        };
+        let output = PlainGitStatusOutput {
+            output_kind: "status",
+            repository_capability: "plain-git".to_string(),
+            repository_label: crate::cli::render::repository_mode_label("plain-git", "git-only"),
+            storage_model: "git-only".to_string(),
+            heddle_initialized: false,
+            git_branch: Some("main".to_string()),
+            path: "/tmp/repo".to_string(),
+            git_overlay_health: GitOverlayHealth {
+                status: "healthy".to_string(),
+                clean: true,
+                summary: "plain Git repository".to_string(),
+                recovery_commands: Vec::new(),
+                checks: Vec::new(),
+            },
+            recommended_action: trust.recommended_action.clone(),
+            recommended_action_template: trust.recommended_action_template.clone(),
+            recovery_commands: trust.recovery_commands.clone(),
+            recovery_action_templates: trust.recovery_action_templates.clone(),
+            thread_health: trust.status.clone(),
+            changed_path_count: 0,
+            changes: ChangesInfo {
+                modified: Vec::new(),
+                added: Vec::new(),
+                deleted: Vec::new(),
+            },
+            git_index: None,
+            trust,
+        };
+
+        let value = serde_json::to_value(&output).unwrap();
+        assert!(value["recommended_action"].is_null());
+        assert!(value["verification"]["recommended_action"].is_null());
     }
 }

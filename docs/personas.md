@@ -46,7 +46,7 @@ The three personas are NOT the only people who use heddle. They're chosen becaus
 - Exit codes — every documented exit value is correct + every error path maps to one.
 - `output_kind` / dispatch discriminators — agents route on field, not output text.
 - Dedup / op-id — agents retry; safety depends on heddle's cross-process correctness.
-- Error envelopes — `kind` / `code` / `recommended_action` are machine-readable.
+- Error envelopes — `kind` / `recommended_action` are machine-readable.
 - Token economy — JSON payloads should not bloat. Agents pay per token.
 - ContentService RPC surface — for FS-less invocation (see [#267](https://github.com/HeddleCo/heddle/issues/267)).
 

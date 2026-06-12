@@ -2309,7 +2309,7 @@ mod tests {
         entries.push(collapse);
 
         let mut thread_create = make_batch_entry(6, 6, 0, Some("lane"));
-        thread_create.operation = OpRecord::ThreadCreateV2 {
+        thread_create.operation = OpRecord::ThreadCreate {
             name: "main".to_string(),
             state: thread_state,
             manager_snapshot: Some(vec![1, 2, 3]),

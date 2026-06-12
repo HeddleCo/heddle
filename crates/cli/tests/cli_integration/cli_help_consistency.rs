@@ -48,27 +48,49 @@ fn help_render_matches_spawned_binary() {
     }
 }
 
-/// `heddle clone --help` must keep its Behavior stanza: the prose that
-/// answers Priya's "wait, where am I?" — default-thread resolution and
-/// what `--depth` actually materializes (heddle#257).
+/// The clone behavior prose must keep answering Priya's "wait, where am
+/// I?" — default-thread resolution and what `--depth` actually
+/// materializes (heddle#257). The full exposition lives on the
+/// `heddle help clone` topic page since the heddle#652 help-budget pass;
+/// `clone --help` keeps a one-screen Behavior summary plus the breadcrumb
+/// to the topic. Both surfaces are pinned: the summary so the first
+/// screen still orients, the topic so the moved prose keeps every
+/// accuracy fix the old in-help stanza accumulated.
 #[test]
 fn clone_help_pins_behavior_stanza() {
-    let help = heddle_help(&["clone", "--help"]);
+    let summary = heddle_help(&["clone", "--help"]);
 
     assert!(
-        help.contains("Behavior:"),
-        "clone help should include a Behavior stanza: {help}"
+        summary.contains("Behavior:"),
+        "clone help should include a Behavior stanza: {summary}"
     );
+    // The one-screen summary still answers the headline questions —
+    // where an unhinted clone lands per remote kind — and points at the
+    // topic page for the rest.
+    assert!(
+        summary.contains("default branch") && summary.contains("`main`"),
+        "clone help summary should say where clones land: {summary}"
+    );
+    assert!(
+        summary.contains("--thread"),
+        "clone help summary should name the escape hatch: {summary}"
+    );
+    assert!(
+        summary.contains("heddle help clone"),
+        "clone help should breadcrumb to the full clone topic: {summary}"
+    );
+
+    let help = heddle_help(&["help", "clone"]);
     // Default-thread resolution for Git-overlay clones: lands on the
     // remote's advertised default branch (its Git HEAD).
     assert!(
         help.contains("no --thread") && help.contains("default branch"),
-        "clone help should explain where an unhinted clone lands: {help}"
+        "clone topic should explain where an unhinted clone lands: {help}"
     );
     // The Git-overlay fallback chain (main, then first imported thread).
     assert!(
         help.contains("`main`") && help.contains("alphabetically first"),
-        "clone help should name the default-thread fallback chain: {help}"
+        "clone topic should name the default-thread fallback chain: {help}"
     );
     // The transport distinction: native-local and hosted Heddle clones target
     // `main` directly (no Git-HEAD fallback chain) — the inaccuracy this stanza
@@ -76,22 +98,22 @@ fn clone_help_pins_behavior_stanza() {
     assert!(
         help.contains("Native-local and hosted Heddle clones")
             && help.contains("target `main` directly"),
-        "clone help should distinguish the Heddle-remote default from the Git-overlay chain: {help}"
+        "clone topic should distinguish the Heddle-remote default from the Git-overlay chain: {help}"
     );
     // The failure mode: an unhinted native/hosted clone fails when the remote
     // has no `main` thread, and the user must pass `--thread <name>`.
     assert!(
         help.contains("the clone fails") && help.contains("--thread <name>"),
-        "clone help should document that an unhinted native/hosted clone fails when the remote has no `main` thread: {help}"
+        "clone topic should document that an unhinted native/hosted clone fails when the remote has no `main` thread: {help}"
     );
     // Depth semantics: 0 means full history, N keeps the tip plus N ancestry levels.
     assert!(
         help.contains("--depth 0") && help.contains("full history"),
-        "clone help should explain that --depth 0 is full history: {help}"
+        "clone topic should explain that --depth 0 is full history: {help}"
     );
     assert!(
         help.contains("depth boundary") && help.contains("re-clone at a greater --depth"),
-        "clone help should explain that history past the depth boundary is absent and recovered by re-cloning at a greater depth: {help}"
+        "clone topic should explain that history past the depth boundary is absent and recovered by re-cloning at a greater depth: {help}"
     );
     // Depth on Git-overlay clones: nonzero is rejected, --depth 0 is accepted
     // (= the full-clone default, since cmd_clone normalizes 0 to None before
@@ -99,17 +121,17 @@ fn clone_help_pins_behavior_stanza() {
     assert!(
         help.contains("Git-overlay clones reject a nonzero --depth")
             && help.contains("--depth 0 is accepted"),
-        "clone help should distinguish nonzero --depth (rejected) from --depth 0 (accepted) for Git-overlay clones: {help}"
+        "clone topic should distinguish nonzero --depth (rejected) from --depth 0 (accepted) for Git-overlay clones: {help}"
     );
     // Depth-1 materializes the tip plus its immediate parents, not just the tip.
     assert!(
         help.contains("tip plus its immediate parents"),
-        "clone help should explain that --depth 1 keeps the tip plus immediate parents: {help}"
+        "clone topic should explain that --depth 1 keeps the tip plus immediate parents: {help}"
     );
     // Cross-reference to the thread model topic.
     assert!(
         help.contains("heddle help threads"),
-        "clone help should point at the threads topic: {help}"
+        "clone topic should point at the threads topic: {help}"
     );
 }
 
@@ -172,5 +194,107 @@ fn capture_help_keeps_help_agent_hidden_but_keeps_the_pointer() {
         help.matches("--help-agent").count(),
         1,
         "`capture --help` must not list the hidden `--help-agent` flag (only the after-help pointer): {help}"
+    );
+}
+
+/// heddle#646. The hidden `--lazy`/`--filter` clone flags need a discovery
+/// affordance: a git veteran who knows `git clone --filter` must be able to
+/// learn from `clone --help` that the flags exist, where they work today
+/// (hosted/network remotes), and the Git-transport timeline (v0.3.1) —
+/// before a failure teaches them.
+#[test]
+fn clone_help_carries_hidden_flag_breadcrumb() {
+    let help = heddle_help(&["clone", "--help"]);
+    assert!(
+        help.contains("--lazy") && help.contains("--filter blob:none"),
+        "clone help should name the hidden lazy/filter flags: {help}"
+    );
+    assert!(
+        help.contains("planned for v0.3.1"),
+        "clone help should state the Git-transport timeline for lazy clones: {help}"
+    );
+}
+
+/// heddle#646 (same class, pull surface). `pull --lazy` is hidden too; the
+/// breadcrumb keeps it discoverable.
+#[test]
+fn pull_help_carries_hidden_flag_breadcrumb() {
+    let help = heddle_help(&["pull", "--help"]);
+    assert!(
+        help.contains("--lazy") && help.contains("planned for v0.3.1"),
+        "pull help should name the hidden --lazy flag and its timeline: {help}"
+    );
+}
+
+/// heddle#646 (same class, start surface). The hidden automation/power
+/// flags on `start` are named in an advanced-flags stanza so agents and
+/// power users can discover them without reading the source.
+#[test]
+fn start_help_carries_hidden_flag_breadcrumb() {
+    let help = heddle_help(&["start", "--help"]);
+    for flag in [
+        "--agent-provider",
+        "--agent-model",
+        "--parent-thread",
+        "--print-cd-path",
+        "--daemon",
+        "--no-daemon",
+        "--shared-target",
+    ] {
+        assert!(
+            help.contains(flag),
+            "start help should name the hidden `{flag}` flag in its advanced stanza: {help}"
+        );
+    }
+}
+
+/// heddle#654. A user piping `heddle diff --patch | patch -p1` must learn
+/// from `--help` — not from a silent failure — that patch(1) compatibility
+/// is best-effort and `git apply` is the canonical consumer.
+#[test]
+fn diff_help_warns_patch_compat_is_best_effort() {
+    let help = heddle_help(&["diff", "--help"]);
+    assert!(
+        help.contains("git apply") && help.contains("patch(1)") && help.contains("best-effort"),
+        "diff help should state that patch(1) support is best-effort and git apply is canonical: {help}"
+    );
+    assert!(
+        help.contains("type changes") && help.contains("mode bits"),
+        "diff help should name the git-extended-header cases that need git apply: {help}"
+    );
+}
+
+/// heddle#467. Semantic merge is the default strategy when compiled in; the
+/// merge help must expose only the hunk-only escape hatch and must not repeat
+/// the old false feature-gate claim.
+#[test]
+fn merge_help_pins_semantic_default_and_opt_out() {
+    let help = heddle_help(&["merge", "--help"]);
+    assert!(
+        help.contains("--no-semantic"),
+        "merge help should expose the hunk-only opt-out: {help}"
+    );
+    assert!(
+        help.contains("Semantic merge is the default"),
+        "merge help should state that semantic merge is the default: {help}"
+    );
+    assert!(
+        !help.contains("--semantic"),
+        "merge help must not advertise the removed --semantic opt-in: {help}"
+    );
+    assert!(
+        !help.contains("Requires building heddle with `--features semantic`"),
+        "merge help must not claim the default feature requires an explicit build flag: {help}"
+    );
+}
+
+/// heddle#655. `[aliases: --intent]` on commit's `-m` reads as a typo
+/// without an explanation; the help text must say why the alias exists.
+#[test]
+fn commit_help_explains_intent_alias() {
+    let help = heddle_help(&["commit", "--help"]);
+    assert!(
+        help.contains("--intent") && help.contains("WHY"),
+        "commit help should explain the deliberate --intent alias: {help}"
     );
 }

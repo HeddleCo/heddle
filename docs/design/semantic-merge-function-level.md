@@ -1,9 +1,11 @@
 # Semantic merge — function-level resolution
 
-This doc covers what `heddle merge --semantic` does on a file-by-file basis: how
-it decomposes a parseable source file into AST-defined items, merges each item
-independently against base / ours / theirs, and falls back to the hunk-level
-[`heddle-merge`](../../crates/merge) engine when AST decomposition declines.
+This doc covers what `heddle merge` does by default, when built with the
+`semantic` cargo feature: how it decomposes a parseable source file into
+AST-defined items, merges each item independently against base / ours / theirs,
+and falls back to the hunk-level [`heddle-merge`](../../crates/merge) engine
+when AST decomposition declines. `--no-semantic` opts out to the hunk-only
+strategy.
 
 It builds on the hunk-level merge engine shipped under
 [heddle#79 / PR #84](https://github.com/HeddleCo/heddle/pull/84) (`heddle-merge`)
@@ -28,10 +30,10 @@ until it spans most of the file, and the operator sees a single conflict block
 that contains the entire body of both sides — *the* "whole-file collision"
 shape the trip report identified.
 
-The pre-fix `--semantic` flag did not gate any merge logic — it was wired only
-to the post-merge **diff visualization** path (see
-`crates/cli/src/cli/commands/merge/mod.rs:308`). The merge algorithm itself
-ran the same `heddle-merge` pipeline whether `--semantic` was set or not.
+Before semantic merge became the default, the old `--semantic` flag was easy to
+miss and the plain merge path stayed hunk-only. That made the differentiating
+AST-aware behavior opt-in even though the `semantic` cargo feature ships in the
+default feature set.
 
 ## Contract
 

@@ -17,7 +17,10 @@ use serde::Serialize;
 
 use crate::cli::{
     cli_args::{Cli, ConflictCommands, ConflictShowArgs},
-    commands::command_catalog::{ActionTemplate, recommended_action_template},
+    commands::{
+        command_catalog::{ActionTemplate, recommended_action_template},
+        git_overlay_health::serialize_empty_action_as_null,
+    },
     should_output_json,
 };
 
@@ -45,8 +48,10 @@ struct ActiveMergeConflictShowOutput {
     theirs_state: String,
     base_state: Option<String>,
     worktree_content: Option<String>,
+    #[serde(serialize_with = "serialize_empty_action_as_null")]
     recommended_action: String,
     recommended_action_template: Option<ActionTemplate>,
+    #[serde(serialize_with = "serialize_empty_action_as_null")]
     next_action: String,
     next_action_template: Option<ActionTemplate>,
 }
@@ -278,5 +283,39 @@ fn short_body(s: &str) -> String {
         format!("{}…", &first[..60])
     } else {
         first.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ActiveMergeConflictShowOutput;
+
+    /// Action-field presence contract (HeddleCo/heddle#645): empty
+    /// `recommended_action`/`next_action` must serialize as `null`, never
+    /// `""` — the serialization-boundary walker hard-fails the whole
+    /// command on a raw empty. Both fields are non-empty literals by
+    /// construction today; this pins the safe-by-construction wire shape
+    /// regardless.
+    #[test]
+    fn active_merge_conflict_show_serializes_empty_actions_as_null() {
+        let value = serde_json::to_value(ActiveMergeConflictShowOutput {
+            output_kind: "conflict_show",
+            kind: "active_merge_conflict",
+            id: "src/lib.rs".to_string(),
+            file: "src/lib.rs".to_string(),
+            symbol: "text_merge".to_string(),
+            resolved: false,
+            ours_state: "abc1234".to_string(),
+            theirs_state: "def5678".to_string(),
+            base_state: None,
+            worktree_content: None,
+            recommended_action: String::new(),
+            recommended_action_template: None,
+            next_action: String::new(),
+            next_action_template: None,
+        })
+        .unwrap();
+        assert!(value["recommended_action"].is_null());
+        assert!(value["next_action"].is_null());
     }
 }

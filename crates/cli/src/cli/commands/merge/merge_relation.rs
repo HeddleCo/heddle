@@ -46,7 +46,7 @@ impl MergeRelation {
         self.conflict_count
     }
 
-    pub(crate) fn semantic_result(&self) -> &'static str {
+    pub(crate) fn as_json_value(&self) -> &'static str {
         match self.kind {
             MergeRelationKind::AlreadyUpToDate => "already_up_to_date",
             MergeRelationKind::FastForward => "fast_forward",

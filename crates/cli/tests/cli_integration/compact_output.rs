@@ -93,7 +93,9 @@ fn assert_compact_op_id_error_envelope(args: &[&str], temp: &TempDir, context: &
     let stderr = str::from_utf8(&out.stderr).expect("stderr utf8");
     let envelope: Value = serde_json::from_str(stderr.trim())
         .unwrap_or_else(|err| panic!("{context}: stderr not JSON: {err}\n  stderr: {stderr}"));
-    for key in ["code", "error", "exit_code", "hint"] {
+    // `kind` (not the dropped `code` duplicate) is the envelope's
+    // discriminator (HeddleCo/heddle#647).
+    for key in ["kind", "error", "exit_code", "hint"] {
         assert!(
             envelope.get(key).is_some(),
             "{context}: compact op-id failure stripped `{key}` from error envelope: {envelope}"

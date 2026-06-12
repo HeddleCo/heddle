@@ -1086,6 +1086,7 @@ pub struct BranchCompatSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SwitchCheckoutSchema {
+    pub output_kind: Option<String>,
     pub name: Option<String>,
     pub message: String,
     pub thread: Option<ThreadSummarySchema>,
@@ -1120,7 +1121,7 @@ pub struct MergePreviewSchema {
     pub impact_categories: Option<Vec<String>>,
     pub promotion_suggested: Option<bool>,
     pub heavy_impact_paths: Option<Vec<String>>,
-    pub semantic_result: Option<String>,
+    pub merge_relation: Option<String>,
     pub conflict_count: Option<usize>,
     pub thread_health: Option<String>,
     pub diff: Option<Value>,
@@ -1188,6 +1189,7 @@ pub struct SyncSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct LandSchema {
+    pub output_kind: Option<String>,
     pub status: String,
     pub action: String,
     pub message: String,
@@ -1332,6 +1334,7 @@ pub struct ThreadApprovalListSchema(pub Vec<ThreadApprovalSchema>);
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ThreadRevokeApprovalSchema {
+    pub output_kind: String,
     pub deleted: bool,
     pub id: String,
 }
@@ -1453,7 +1456,10 @@ pub struct ThreadSummarySchema {
     pub is_isolated: bool,
     pub thread_health: String,
     pub blockers: Vec<String>,
-    pub recommended_action: String,
+    // Runtime `ThreadSummary.recommended_action` is a `String` serialized
+    // through `serialize_empty_action_as_null`, so the wire value is
+    // `string | null` (HeddleCo/heddle#645 presence contract).
+    pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub git_branch_tip: Option<String>,
     pub history_imported: bool,
@@ -1826,6 +1832,11 @@ pub struct PushSchema {
     pub ref_scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_notes_ref: Option<String>,
+    /// Full ref names this push wrote at the destination (sorted; empty
+    /// for a no-op push). Present on the Git-overlay refs path; omitted
+    /// on the native Heddle transport. Verify with `git ls-remote`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refs_written: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_notes_visibility_warning: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1844,14 +1855,14 @@ pub struct PushSchema {
     pub thread: Option<String>,
     pub state: Option<String>,
     pub objects: Option<usize>,
-    #[schemars(required)]
-    pub next_action: Option<String>,
-    #[schemars(required)]
-    pub next_action_template: Option<ActionTemplateSchema>,
-    #[schemars(required)]
-    pub recommended_action: Option<String>,
-    #[schemars(required)]
-    pub recommended_action_template: Option<ActionTemplateSchema>,
+    // Required AND nullable (the `#[schemars(required)]` shorthand strips
+    // the null variant from `Option<T>`, mis-declaring the wire contract —
+    // HeddleCo/heddle#645 conformance): push always emits these fields,
+    // serializing null for the no-action case.
+    pub next_action: NullableStringSchema,
+    pub next_action_template: NullableActionTemplateSchema,
+    pub recommended_action: NullableStringSchema,
+    pub recommended_action_template: NullableActionTemplateSchema,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1911,19 +1922,29 @@ pub struct StatusSchema {
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heddle_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<ActorInfoSchema>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_summary: OpaqueObject,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_progress_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_flush_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach_reason: Option<String>,
     pub thread_mode: Option<ThreadModeSchema>,
     pub thread_state: Option<ThreadStateSchema>,
     pub freshness: Option<ThreadFreshnessSchema>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_thread: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_thread: Option<String>,
     pub child_threads: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
     pub promotion_suggested: bool,
     pub impact_categories: Vec<ThreadImpactCategorySchema>,
@@ -2078,7 +2099,7 @@ pub struct BridgeGitStatusSchema {
     pub mirror_initialized: bool,
     pub git_overlay_import_hint: Option<GitOverlayImportHintSchema>,
     pub git_overlay_health: GitOverlayHealthSchema,
-    pub recommended_action: String,
+    pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
     #[serde(rename = "verification")]
@@ -2232,7 +2253,7 @@ pub struct ThreadListSchema {
     pub current: Option<String>,
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationStateSchema,
-    pub recommended_action: String,
+    pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
     pub recovery_action_templates: Vec<ActionTemplateSchema>,
@@ -2242,7 +2263,7 @@ pub struct ThreadListSchema {
 pub struct AvailableGitRefSchema {
     pub name: String,
     pub git_commit: String,
-    pub recommended_action: String,
+    pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
 }
 
@@ -2261,7 +2282,7 @@ pub struct WorkspaceShowSchema {
     pub remote_tracking: OpaqueObject,
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationStateSchema,
-    pub recommended_action: String,
+    pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub current_thread: Option<String>,
     pub groups: Vec<WorkspaceGroupSchema>,
@@ -2681,7 +2702,7 @@ pub struct DiagnoseSchema {
     pub changes: Value,
     pub workspace: Value,
     pub health: Value,
-    pub recommended_action: String,
+    pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
     pub recovery_commands: Vec<String>,
     pub profile: Option<Value>,
@@ -2722,7 +2743,6 @@ pub struct DiagnoseSchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ErrorEnvelopeSchema {
-    pub code: String,
     pub error: String,
     pub exit_code: u8,
     pub hint: String,
@@ -3058,6 +3078,66 @@ mod tests {
         }
     }
 
+    /// HeddleCo/heddle#645 conformance: the action-field presence contract.
+    ///
+    /// `next_action` / `recommended_action` encode "no action needed" as
+    /// `null` and "not applicable to this output shape" as an absent
+    /// field — never as `""` (the runtime maps empty selections to `None`
+    /// via `next_action::normalized_action` /
+    /// `serialize_empty_action_as_null`, and the serialization walker in
+    /// `validate_next_actions_at_path` rejects any empty string that
+    /// slips past). At the schema level that means: wherever one of these
+    /// properties is *required*, its schema must allow `null` — a
+    /// non-nullable required action field would force emitters to leak
+    /// `""` for the no-action case.
+    #[test]
+    fn action_fields_follow_presence_contract_in_every_schema() {
+        fn walk(root: &Value, schema: &Value, verb: &str, path: &str) {
+            match schema {
+                Value::Object(object) => {
+                    if let Some(properties) =
+                        object.get("properties").and_then(|p| p.as_object())
+                    {
+                        let required: Vec<&str> = object
+                            .get("required")
+                            .and_then(|value| value.as_array())
+                            .map(|fields| {
+                                fields.iter().filter_map(|field| field.as_str()).collect()
+                            })
+                            .unwrap_or_default();
+                        for (name, child) in properties {
+                            if matches!(name.as_str(), "next_action" | "recommended_action")
+                                && required.contains(&name.as_str())
+                            {
+                                assert!(
+                                    schema_allows_null(root, child),
+                                    "`{verb}` schema requires `{path}.{name}` without allowing \
+                                     null; the action contract is null = no action, absent = \
+                                     not applicable, never \"\": {child}"
+                                );
+                            }
+                        }
+                    }
+                    for (key, child) in object {
+                        walk(root, child, verb, &format!("{path}.{key}"));
+                    }
+                }
+                Value::Array(items) => {
+                    for (index, child) in items.iter().enumerate() {
+                        walk(root, child, verb, &format!("{path}[{index}]"));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for verb in schema_verbs() {
+            let schema =
+                schema_for_verb(verb).unwrap_or_else(|| panic!("schema registered for `{verb}`"));
+            walk(&schema, &schema, verb, "$");
+        }
+    }
+
     #[test]
     fn status_schema_allows_null_recommended_action() {
         let schema = schema_for_verb("status").expect("status schema");
@@ -3072,6 +3152,33 @@ mod tests {
             required.contains(&"recommended_action"),
             "status recommended_action should remain a stable emitted field: {schema}"
         );
+    }
+
+    #[test]
+    fn status_agent_context_fields_are_omittable() {
+        let schema = schema_for_verb("status").expect("status schema");
+        let required = required_fields(&schema);
+        for field in [
+            "path",
+            "execution_path",
+            "session_id",
+            "heddle_session_id",
+            "actor",
+            "harness",
+            "thinking_level",
+            "usage_summary",
+            "last_progress_at",
+            "report_flush_state",
+            "attach_reason",
+            "target_thread",
+            "parent_thread",
+            "task",
+        ] {
+            assert!(
+                !required.contains(&field),
+                "status `{field}` is omitted when no agent/materialized context is recorded: {schema}"
+            );
+        }
     }
 
     #[test]

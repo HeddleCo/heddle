@@ -184,7 +184,7 @@ The mapper should be explicit and shared by tests. Examples:
   `ThreadCreate* { name: t, .. }`, `ThreadDelete { name: t, .. }`,
   `ThreadUpdate { name: t, .. }`, `EphemeralThreadCollapse { thread: t, .. }`
   touch `Thread(t)`.
-- `FastForwardV2 { target_thread, source_thread, .. }` touches both: target is
+- `FastForward { target_thread, source_thread, .. }` touches both: target is
   written, source was read to define the operation.
 - `RemoteThreadUpdate/Delete { thread, .. }` touch `Thread(thread)`.
 - `Snapshot { thread: None, .. }`, `Goto`, and local undo-recovery movement

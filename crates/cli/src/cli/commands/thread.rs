@@ -158,6 +158,7 @@ pub struct ThreadSummary {
 pub struct AvailableGitRef {
     pub name: String,
     pub git_commit: String,
+    #[serde(serialize_with = "serialize_empty_action_as_null")]
     pub recommended_action: String,
     pub recommended_action_template: Option<ActionTemplate>,
 }
@@ -1916,7 +1917,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // — runs as ONE atomic transaction on the heddle#330 primitive (impl-c). A
     // failure anywhere mid-materialize rewinds every applied effect, with
     // precise directory + symlink rewind, back to the exact pre-start state;
-    // the oplog `ThreadCreateV2` is the staged commit record appended once at
+    // the oplog `ThreadCreate` is the staged commit record appended once at
     // the single commit point. See `start_atomic::StartThread`.
     let mount_ownership =
         mount_lifecycle::MountOwnership::from_flags(args.daemon, args.no_daemon);
@@ -2430,7 +2431,7 @@ pub(crate) fn cmd_thread_create(
     // can recreate it after `heddle undo` destroys it. Without this,
     // redo restores only the ref and record-backed commands (`thread
     // cd`, delegate, integration policy) silently degrade. heddle#23 r2
-    // Codex P1 (mirrors the heddle#99 r2 FastForwardV2 pattern — record
+    // Codex P1 (mirrors the heddle#99 r2 FastForward pattern — record
     // what redo needs).
     //
     // Snapshot failure is fatal here: we just wrote the record, so a
@@ -3603,5 +3604,23 @@ mod tests {
         // Distinct slashed/dashed ids no longer collide.
         let other = default_thread_checkout_path(&repo, "foo-bar");
         assert_ne!(checkout, other);
+    }
+
+    /// Action-field presence contract (HeddleCo/heddle#645): an empty
+    /// `recommended_action` must serialize as `null`, never `""` — the
+    /// serialization-boundary walker hard-fails the whole command on a
+    /// raw empty. `AvailableGitRef` is non-empty by construction today
+    /// (available refs always get `canonical_adopt_ref_command`); this
+    /// pins the safe-by-construction wire shape regardless.
+    #[test]
+    fn available_git_ref_serializes_empty_recommended_action_as_null() {
+        let value = serde_json::to_value(AvailableGitRef {
+            name: "main".to_string(),
+            git_commit: "0123456789abcdef".to_string(),
+            recommended_action: String::new(),
+            recommended_action_template: None,
+        })
+        .unwrap();
+        assert!(value["recommended_action"].is_null());
     }
 }

@@ -967,7 +967,7 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     .unwrap();
     let ready: Value = serde_json::from_str(&ready_json).unwrap();
     assert_eq!(ready["thread_state"], "ready");
-    assert_eq!(ready["report"]["semantic_result"], "fast_forward");
+    assert_eq!(ready["report"]["merge_relation"], "fast_forward");
     assert_eq!(
         ready["report"]["recommended_action"],
         "heddle land --thread feature/native-cli --no-push"
@@ -1058,10 +1058,9 @@ fn ready_blocks_stale_or_heavy_impact_threads_and_status_reports_next_step() {
     );
     let ready: Value = serde_json::from_slice(&ready_output.stdout).unwrap();
     assert_eq!(ready["thread_state"], "blocked");
-    assert_eq!(
-        ready["report"]["recommended_action"].as_str(),
-        Some("")
-    );
+    // No selected action serializes as null, never "" (HeddleCo/heddle#645
+    // action-field contract).
+    assert!(ready["report"]["recommended_action"].is_null());
     assert!(ready["recommended_action"].is_null());
 
     let reviewed: Value = serde_json::from_str(

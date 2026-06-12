@@ -44,7 +44,7 @@ than HEAD's? Does today's inverse correctly restore it?
 | `Snapshot` | No — snapshot is on HEAD's thread by construction | ✅ | Single-thread by definition |
 | `Goto` | No — only moves HEAD | ✅ | Single-thread by definition |
 | `ThreadCreate` (V1, legacy read-only) | **Yes** — creates a ref for a thread the user is not (necessarily) on; also writes a ThreadManager record | Undo: delete ref + delete record. Redo: ref-only + stderr warning (V1 doesn't carry a snapshot for redo to read back). | V1 records age out as the live oplog window slides forward |
-| `ThreadCreateV2` | **Yes** — same as V1; carries `manager_snapshot` for symmetric undo/redo | ✅ — undo deletes ref + record; redo restores both from `manager_snapshot` | heddle#23 r2 Codex P1 fix; same shape as `FastForwardV2` |
+| `ThreadCreate` | **Yes** — same as V1; carries `manager_snapshot` for symmetric undo/redo | ✅ — undo deletes ref + record; redo restores both from `manager_snapshot` | heddle#23 r2 Codex P1 fix; same shape as `FastForward` |
 | `ThreadDelete` | **Yes** when emitted — but the user-facing `heddle thread drop --delete-thread` path does *not* record this variant (drop tears the worktree down through `drop_thread_silent` in thread_cmd.rs:562 without touching the oplog); it is emitted only by the `rename` batch and a legacy `cmd_thread_delete` helper no longer wired to the CLI verb | Ref-only restore via `set_thread`. Sufficient for the rename round-trip path; no record-cleanup work is reachable here because `cmd_thread_rename` doesn't write a record under the new name | See "Out of scope" |
 | `ThreadUpdate` | Defined but never emitted today | n/a | Inverse code path exists; unused |
 | `Fork`, `Collapse` | n/a — never emitted today | n/a | Reserved for future thread-graph ops |
@@ -52,12 +52,12 @@ than HEAD's? Does today's inverse correctly restore it?
 | `Checkpoint` | No (single-thread, agent-frequent-save) | n/a — no inverse arm yet | Tracked separately; see docs/undo.md |
 | `Redact`, `Purge` | No — sidecar mutation on a specific (blob, state, path) | ✅ (`Redact` with `--allow-redact-undo`; `Purge` irreversible) | Documented in heddle#98 |
 | `FastForward` (V1, legacy read-only) | **Yes** — advances target_thread ref | ✅ — inverse restores both HEAD and target_thread to `pre_target_id` | heddle#99 r1 fix |
-| `FastForwardV2` | **Yes** — same as V1; carries `post_target_id` for deterministic redo | ✅ | heddle#99 r2 fix |
+| `FastForward` | **Yes** — same as V1; carries `post_target_id` for deterministic redo | ✅ | heddle#99 r2 fix |
 | `EphemeralThreadCollapse` | Touches a thread but only to retire its pointer | n/a — no inverse arm | Out of scope; thread auto-expired |
 | `TransactionAbort`, `TransactionCommit`, `ConflictResolved` | No ref mutation | n/a — no inverse arm | Forensic-only records |
 
 The two **already-correct** cross-thread cases are `FastForward` and
-`FastForwardV2`. Their inverses restore HEAD *and* the target thread ref. They
+`FastForward`. Their inverses restore HEAD *and* the target thread ref. They
 work because both variants carry the thread name and the pre-state explicitly;
 the inverse has everything it needs.
 
@@ -83,7 +83,7 @@ by integration tests in `crates/cli/tests/core_functionality/undo_and_special.rs
    when HEAD is not on that thread.
 2. **HEAD only moves when the recorded op moved it.** A cross-thread inverse
    does not detach, re-attach, or otherwise touch HEAD unless the original op
-   did. (`FastForward[V2]` is the only cross-thread variant that recorded a
+   did. (`FastForward` is the only cross-thread variant that recorded a
    HEAD move; its inverse correctly restores HEAD too.)
 3. **No worktree file rewrites in another checkout.** The originating
    worktree's files may be rewritten when HEAD moves; another worktree's
@@ -226,12 +226,12 @@ The change is concentrated in `crates/cli/src/cli/commands/undo_apply.rs` and
   `materialized_path = Some(path)` where `path` still exists on disk.
   Called from `cmd_undo` before the worktree-clean check and before the
   `--preview` short-circuit so preview output stays honest.
-- `apply_undo_entry`'s `ThreadCreate`/`ThreadCreateV2` arms share a
+- `apply_undo_entry`'s `ThreadCreate`/`ThreadCreate` arms share a
   single body: delete the ref via `delete_thread_safely`, then delete
   the matching ThreadManager record (best-effort — a missing record is
   not an error). V2 is fine to destroy alongside the live record because
   the OpRecord retains `manager_snapshot` for redo (see below).
-- `apply_redo_entry`'s `ThreadCreateV2` arm restores **both** the ref
+- `apply_redo_entry`'s `ThreadCreate` arm restores **both** the ref
   and the ThreadManager record from `manager_snapshot`. Without the
   record body restored, record-backed commands (`thread cd`, delegate,
   integration policy) silently degrade after an undo→redo round-trip —
@@ -243,7 +243,7 @@ The change is concentrated in `crates/cli/src/cli/commands/undo_apply.rs` and
   `heddle start <name>` to re-establish the record. V1 records
   age out as the live oplog window slides forward.
 
-**New `OpRecord` variant**: `ThreadCreateV2 { name, state,
+**New `OpRecord` variant**: `ThreadCreate { name, state,
 manager_snapshot: Option<Vec<u8>> }`. The snapshot is opaque rmp-serde
 bytes of the `Thread` record body — kept opaque so the `oplog` crate
 stays independent of `repo`-level types. The `repo` crate owns the
@@ -281,7 +281,7 @@ red-commit-first.
 
 After heddle#23 r2 closed the second instance of "undo destroys state
 that redo can't reconstruct from the OpRecord alone" (the first was
-heddle#99 r2's FastForward → FastForwardV2 fix), we walked every
+heddle#99 r2's FastForward → FastForward fix), we walked every
 `OpRecord` arm in `apply_undo_entry` / `apply_redo_entry` and asked: does
 undo destroy state that redo re-derives by *name* (which can change), or
 which isn't reconstructible from the OpRecord fields?
@@ -291,33 +291,33 @@ which isn't reconstructible from the OpRecord fields?
 | `Snapshot { prev_head: Some, … }` | HEAD position, thread ref | `new_state` field | No | OK |
 | `Goto { prev_head: Some, … }` | HEAD position | `target` field | No | OK |
 | `ThreadCreate` (V1) | ref + record body | ref-only + warning | **Latent** | V1 read-back-only; ages out. New ops emit V2. |
-| `ThreadCreateV2` | ref + record body | `manager_snapshot` bytes | No | **Fixed this PR** |
+| `ThreadCreate` | ref + record body | `manager_snapshot` bytes | No | **Fixed this PR** |
 | `ThreadDelete` | ref | `state` field (ref restored); record body **not** restored | **Latent** | No forward callsite exercises the hazard today: the user-facing delete (`thread drop --delete-thread`) records no oplog entry, and the rename batch's `ThreadDelete` half deletes the old name under which no record exists anyway (the forward rename doesn't re-key the record). Becomes load-bearing if a future forward path records `ThreadDelete` against a thread with a live record. Tracked alongside `cmd_thread_rename`'s pre-existing forward-path bug. |
 | `ThreadUpdate` | thread ref | `new_state`/`old_state` | No | Not emitted today; symmetric on paper. |
 | `MarkerCreate` / `MarkerDelete` | marker ref | recorded `state` | No | OK — markers have no record-store sidecar. |
 | `Redact` | redaction sidecar entry | redo refuses (no `Redaction` snapshot in OpRecord — reason, redactor, signature missing) | **Yes — loud refusal** | Documented under heddle#98. A future `RedactV2` carrying the full `Redaction` snapshot would close it; today the loud refusal is the contract. |
 | `Purge` | blob bytes | irreversible by design | n/a | Intentional; `cmd_undo` refuses pre-mutation. |
-| `FastForward` (V1) | HEAD + target ref | re-resolves `source_thread → tip` (non-deterministic) | **Latent** | V1 read-back-only; FastForwardV2 fixes. heddle#99 r2. |
-| `FastForwardV2` | HEAD + target ref | `post_target_id` field | No | OK. |
+| `FastForward` (V1) | HEAD + target ref | re-resolves `source_thread → tip` (non-deterministic) | **Latent** | V1 read-back-only; FastForward fixes. heddle#99 r2. |
+| `FastForward` | HEAD + target ref | `post_target_id` field | No | OK. |
 | `Fork` / `Collapse` / `Checkpoint` / `TransactionAbort` / `TransactionCommit` / `EphemeralThreadCollapse` / `ConflictResolved` | (no inverse arm) | n/a | n/a | Forensic-only or not yet wired. |
 
-Net: two fixed instances of the hazard class (`FastForwardV2`,
-`ThreadCreateV2`), one loud-refusal'd (`Redact`), and one dormant-by-
+Net: two fixed instances of the hazard class (`FastForward`,
+`ThreadCreate`), one loud-refusal'd (`Redact`), and one dormant-by-
 construction (`ThreadDelete`). No silent corruption paths remain across
 the implemented inverses. If a future forward path lights up the
 `ThreadDelete` hazard, the same V2-snapshot pattern applies — file a
 `ThreadDeleteV2` with the record snapshot.
 
-### `FastForwardV2` emission sites (heddle#110)
+### `FastForward` emission sites (heddle#110)
 
 heddle#99 originally migrated *only* `cmd_merge`'s FF path to record
-`FastForwardV2`. The Rule-7 sweep filed under heddle#110 extended the
+`FastForward`. The Rule-7 sweep filed under heddle#110 extended the
 same migration to the remaining `Repository::fast_forward_attached`
 callers — each of which previously recorded the implicit
 `OpRecord::Goto` (whose inverse only rewinds HEAD) and so silently
 stranded the attached thread ref at the post-FF target on undo.
 
-Today's call sites that emit `FastForwardV2` (via the shared
+Today's call sites that emit `FastForward` (via the shared
 `commands::ff_record::record_ff_advance` helper, which falls back to
 `Goto` on detached HEAD):
 

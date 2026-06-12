@@ -9,19 +9,26 @@ The canonical mapping lives in
 command's catalogued codes live on its `CommandContract.exit_codes` entry in
 [`crates/cli/src/cli/commands/command_catalog.rs`](../crates/cli/src/cli/commands/command_catalog.rs).
 
+Classification is keyed on typed error kinds — the `RecoveryAdvice.kind`
+discriminator and `HeddleError` variants — never on user-visible message
+text, so rewording an error can't silently change its exit code. A small
+set of legacy string sentinels remains only for raw-string error paths
+that carry no typed kind; each typed kind→code pair is pinned by a
+regression test in `exit.rs`.
+
 ## Codes
 
 | Code | Symbol      | Meaning                                                                 |
 | ---: | ---         | ---                                                                     |
 |   0  | `Ok`        | Success.                                                                |
 |  64  | `Usage`     | Invalid CLI args, unknown subcommand, malformed flag (`EX_USAGE`).      |
-|  65  | `DataErr`   | Well-formed input, semantically rejected (`EX_DATAERR`).                |
+|  65  | `DataErr`   | Well-formed input, semantically rejected (`EX_DATAERR`). Includes corrupted/undecodable repository state and `--output json`/`json-compact` against a command without that output contract. |
 |  73  | `CantCreat` | Output file refused — exists, unwritable, or state dir uncreatable.     |
 |  74  | `IoErr`     | Generic IO failure during read/write (`EX_IOERR`). Default fallback.    |
 |  75  | `TempFail`  | Transient failure; safe to retry with the same args (`EX_TEMPFAIL`).    |
 |  76  | `Protocol`  | Remote rejected the payload; retrying without changing inputs will fail the same way (`EX_PROTOCOL`). |
 |  77  | `NoPerm`    | Operation refused for permission reasons (`EX_NOPERM`).                 |
-|  78  | `Config`    | Configuration missing, ambiguous, or invalid (no upstream, no remote, conflicting identity). |
+|  78  | `Config`    | Configuration or a required precondition is missing, ambiguous, or invalid — not just config-*file* errors. Covers unconfigured remotes/upstreams, a missing repository, and conflicting identity. |
 
 `2` is reserved for `set -e` / unhandled panic and is never emitted
 intentionally — let it surface naturally.
@@ -36,12 +43,17 @@ intentionally — let it surface naturally.
   Don't loop. Surface to the human or change strategy.
 - **`78` (Config) is the right code when a precondition is missing**
   (no upstream, no remote configured, no default remote for `push`/`pull`,
-  ambiguous identity). Agents should print the missing setting rather than
-  retry.
+  no repository at the requested path, ambiguous identity) — it is not
+  limited to config-file parse errors. Agents should print the missing
+  setting rather than retry.
 - **`65` (DataErr) covers semantic rejection of well-formed input**
   (e.g. `commit` with nothing to capture, `merge` with unresolvable
-  conflict, `bridge git reconcile` that needs a `--prefer` side chosen).
-  Agents must surface the condition; no retry will help.
+  conflict, `bridge git reconcile` that needs a `--prefer` side chosen,
+  repository state that fails decoding — `state_corrupted` — and
+  `--output json`/`json-compact` requested from a command without that
+  output contract). Agents must surface the condition (for unsupported
+  output, fall back to a supported `--output` mode); no retry with the
+  same inputs will help.
 - **`74` (IoErr) is the catch-all.** When a command's contract does not
   declare a more specific code, treat a non-zero exit as `IoErr` and surface
   the stderr envelope.

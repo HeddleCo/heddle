@@ -943,7 +943,6 @@ fn json_mode_parse_errors_emit_error_envelope() {
     let parsed: Value = serde_json::from_str(stderr)
         .unwrap_or_else(|err| panic!("stderr should be JSON: {err}: {stderr}"));
     assert_eq!(parsed["kind"], "parse_error");
-    assert_eq!(parsed["code"], "parse_error");
     // EX_USAGE (sysexits) — unknown subcommand. The taxonomy in
     // `crates/cli/src/exit.rs` reserves `2` for unhandled errors /
     // panics, never intentional emission.
@@ -993,7 +992,6 @@ fn confidence_parse_errors_fail_loudly_in_json_mode() {
         let parsed: Value = serde_json::from_str(stderr)
             .unwrap_or_else(|err| panic!("stderr should be JSON: {err}: {stderr}"));
         assert_eq!(parsed["kind"], "parse_error");
-        assert_eq!(parsed["code"], "parse_error");
         assert_eq!(
             parsed["primary_command_template"]["argv_template"],
             heddle_argv_json(["commands", "--output", "json"])
@@ -8145,7 +8143,14 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
         );
     }
 
+    // heddle#646: hidden flags stay out of the options list, but a single
+    // after-help "Advanced (hidden) flags" breadcrumb names them so they
+    // remain discoverable. The first-run surface (everything before the
+    // breadcrumb) stays free of the advanced machinery.
     let start_help = heddle_help(&["start", "--help"]);
+    let (start_first_run, start_breadcrumb) = start_help
+        .split_once("Advanced (hidden) flags:")
+        .expect("start help carries the advanced-flags breadcrumb (heddle#646)");
     for hidden in [
         "--agent-provider",
         "--agent-model",
@@ -8153,12 +8158,20 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
         "--daemon",
         "--no-daemon",
         "--shared-target",
-        "FUSE",
-        "heddled",
     ] {
         assert!(
-            !start_help.contains(hidden),
+            !start_first_run.contains(hidden),
             "start help should keep advanced checkout machinery out of the first-run surface: {start_help}"
+        );
+        assert!(
+            start_breadcrumb.contains(hidden),
+            "start help's advanced-flags breadcrumb should name `{hidden}`: {start_help}"
+        );
+    }
+    for jargon in ["FUSE", "heddled"] {
+        assert!(
+            !start_help.contains(jargon),
+            "start help should avoid mount-internals jargon everywhere: {start_help}"
         );
     }
     assert!(
@@ -8168,10 +8181,17 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
     );
 
     let clone_help = heddle_help(&["clone", "--help"]);
+    let (clone_first_run, clone_breadcrumb) = clone_help
+        .split_once("Advanced (hidden) flags:")
+        .expect("clone help carries the advanced-flags breadcrumb (heddle#646)");
     for hidden in ["--lazy", "--filter", "v0.3.1", "blob:none"] {
         assert!(
-            !clone_help.contains(hidden),
+            !clone_first_run.contains(hidden),
             "clone help should not lead with planned partial-clone machinery: {clone_help}"
+        );
+        assert!(
+            clone_breadcrumb.contains(hidden),
+            "clone help's advanced-flags breadcrumb should name `{hidden}`: {clone_help}"
         );
     }
 
@@ -10948,7 +10968,6 @@ fn error_envelope_schema_is_registered_and_matches_runtime_shape() {
         .as_object()
         .expect("schema has properties");
     for field in [
-        "code",
         "error",
         "exit_code",
         "hint",
@@ -10976,7 +10995,6 @@ fn error_envelope_schema_is_registered_and_matches_runtime_shape() {
         .filter_map(|v| v.as_str())
         .collect();
     for field in [
-        "code",
         "error",
         "exit_code",
         "hint",
@@ -11005,7 +11023,6 @@ fn error_envelope_schema_is_registered_and_matches_runtime_shape() {
     let envelope: serde_json::Value =
         serde_json::from_str(stderr.trim()).expect("stderr is a JSON object");
     for field in [
-        "code",
         "error",
         "exit_code",
         "hint",
@@ -11024,7 +11041,13 @@ fn error_envelope_schema_is_registered_and_matches_runtime_shape() {
         );
     }
     assert_eq!(envelope["kind"], "repository_not_found");
-    assert_eq!(envelope["code"], "repository_not_found");
+    // `kind` is the envelope's single discriminator. The redundant `code`
+    // duplicate (always identical) was dropped pre-1.0 so consumers can't
+    // pick the wrong field (HeddleCo/heddle#647).
+    assert!(
+        envelope.get("code").is_none(),
+        "envelope must not re-grow the dropped `code` duplicate: {stderr}"
+    );
     // EX_CONFIG (sysexits) — repository config missing. Matches the
     // taxonomy in `crates/cli/src/exit.rs`.
     assert_eq!(envelope["exit_code"], 78);
@@ -11381,6 +11404,15 @@ fn push_without_default_remote_uses_typed_json_recovery() {
                 && hint.contains("heddle remote set-default <name>")),
         "push remote setup hint should be specific and actionable: {envelope}"
     );
+    // heddle#653: the hint must say whether ad-hoc (git `push <url>`
+    // style) targets work, not leave veterans to discover it by trial.
+    assert!(
+        envelope["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("heddle push <remote>")
+                && hint.contains("positionally")),
+        "push no-remote hint should state that ad-hoc positional targets are supported: {envelope}"
+    );
     assert_eq!(
         envelope["primary_command"],
         "heddle remote add <name> <url>"
@@ -11489,7 +11521,6 @@ fn doctor_schemas_json_failure_uses_recovery_envelope() {
         panic!("schema failure should emit one JSON envelope: {err}: {stderr}")
     });
     assert_eq!(envelope["kind"], "machine_contract_drift");
-    assert_eq!(envelope["code"], "machine_contract_drift");
     assert_eq!(
         envelope["primary_command"],
         "heddle doctor schemas --output json"
@@ -12147,7 +12178,6 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
         .unwrap_or_else(|err| panic!("stderr should be one JSON envelope: {err}: {stderr}"));
     assert_json_recovery_advice_fields(&envelope, stderr);
     assert_eq!(envelope["kind"], "git_heddle_thread_diverged");
-    assert_eq!(envelope["code"], "git_heddle_thread_diverged");
     assert_eq!(
         envelope["primary_command"],
         "heddle bridge git reconcile --ref main --preview"

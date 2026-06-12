@@ -41,7 +41,9 @@ impl std::fmt::Display for SignerError {
             SignerError::KeyNotFound(path) => write!(f, "key file not found: {}", path.display()),
             SignerError::InsecureKeyPermissions { path, mode } => write!(
                 f,
-                "private key file {} is group/world-accessible ({mode:o}); set permissions to 0600",
+                "private key file {} is group/world-accessible (mode {mode:04o}, required 0600 \
+                 or stricter); fix with: chmod 600 {}",
+                path.display(),
                 path.display()
             ),
             SignerError::VerificationFailed => write!(f, "signature verification failed"),

@@ -191,9 +191,9 @@ pub trait OpLogBackend: Send + Sync {
     /// alongside the create (rename batch's new-name arm, ingest,
     /// harness/agent stubs that write the record later or not at all).
     ///
-    /// Always emits `OpRecord::ThreadCreateV2`. V1
-    /// (`OpRecord::ThreadCreate`) is retained as read-back-only for
-    /// legacy oplog entries written before heddle#23 r2.
+    /// Always emits `OpRecord::ThreadCreate` (the collapsed canonical
+    /// shape — the V1/V2 split was removed in #352 under the
+    /// no-production-oplogs premise).
     fn record_thread_create(
         &self,
         name: &ThreadName,
@@ -202,7 +202,7 @@ pub trait OpLogBackend: Send + Sync {
         scope: Option<&str>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
-            vec![OpRecord::ThreadCreateV2 {
+            vec![OpRecord::ThreadCreate {
                 name: name.to_string(),
                 state: *state,
                 manager_snapshot,
@@ -237,7 +237,7 @@ pub trait OpLogBackend: Send + Sync {
     ) -> Result<Vec<u64>> {
         self.record_batch_scoped(
             vec![
-                OpRecord::ThreadCreateV2 {
+                OpRecord::ThreadCreate {
                     name: new_name.to_string(),
                     state: *state,
                     manager_snapshot: None,
@@ -479,8 +479,8 @@ pub trait OpLogBackend: Send + Sync {
     /// time — closes heddle#99 r1 (stranded ref on undo) and r2 (redo
     /// non-determinism).
     ///
-    /// Always emits the V2 variant. V1 (`OpRecord::FastForward`) is
-    /// retained as read-back-only.
+    /// Emits the canonical `OpRecord::FastForward` shape with both pre- and
+    /// post-target ids.
     fn record_fast_forward(
         &self,
         source_thread: &ThreadName,
@@ -490,7 +490,7 @@ pub trait OpLogBackend: Send + Sync {
         scope: Option<&str>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
-            vec![OpRecord::FastForwardV2 {
+            vec![OpRecord::FastForward {
                 source_thread: source_thread.to_string(),
                 target_thread: target_thread.to_string(),
                 pre_target_id: *pre_target_id,

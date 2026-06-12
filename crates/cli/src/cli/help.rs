@@ -129,12 +129,17 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
                 "Start here: `heddle init`, `heddle adopt`, or `heddle clone`."
             );
             let _ = writeln!(out);
+            // The ONE place the --output machine-contract blurb is stated
+            // in full on a help screen; per-command --help carries only the
+            // one-line global flag plus the `heddle help output-formats`
+            // breadcrumb (heddle#652).
             let _ = writeln!(
                 out,
                 "Output: text is the default; pass `--output json` for the \
                  full machine contract (stable `output_kind`, exit codes, recovery \
                  templates), or `--output json-compact` for the decision surface \
-                 only (fewer tokens, same `output_kind`). No TTY/pipe auto-detection."
+                 only (fewer tokens, same `output_kind`). No TTY/pipe auto-detection. \
+                 Details: `heddle help output-formats`."
             );
             let _ = writeln!(out);
             let _ = writeln!(
@@ -143,29 +148,38 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
                  `heddle help advanced` for power surfaces, automation, and Git interop, \
                  or `heddle help <topic>` for a topic page (e.g. `git-overlay`, \
                  `threads`, `daemon`, `signals`, `bridge`, `operation-ids`, \
-                 `remotes`, `git-dependencies`)."
+                 `remotes`, `output-formats`, `git-dependencies`)."
             );
         }
         [name] if name == "advanced" => {
             let catalog = crate::cli::commands::build_command_catalog();
             let _ = writeln!(out, "{}", ADVANCED_HELP);
-            let _ = writeln!(out, "Advanced commands:");
-            for name in advanced_verbs() {
-                let blurb = catalog_summary(&catalog, name);
-                if blurb.is_empty() {
+            // Grouped by area from the command contract table — the
+            // group is registration data (`help_category` / surface),
+            // not a hand-maintained help string (heddle#652). The group
+            // header replaces the old per-line `[advanced]`-style
+            // surface label; only the `use <canonical>` redirect for
+            // Git-shaped aliases stays on the line.
+            for (title, verbs) in crate::cli::commands::advanced_help_groups() {
+                let mut lines = Vec::new();
+                for name in verbs {
+                    let blurb = catalog_summary(&catalog, name);
+                    if blurb.is_empty() {
+                        continue;
+                    }
+                    let canonical = crate::cli::commands::command_canonical_command(name)
+                        .map(|canonical| format!(" [use `{canonical}`]"))
+                        .unwrap_or_default();
+                    lines.push(format!("  {name:<14}  {blurb}{canonical}"));
+                }
+                if lines.is_empty() {
                     continue;
                 }
-                let visibility = crate::cli::commands::command_help_visibility(name);
-                let surface = crate::cli::commands::command_surface(name);
-                let label = if visibility == "git_adapter" || surface != "native" {
-                    surface
-                } else {
-                    visibility
-                };
-                let canonical = crate::cli::commands::command_canonical_command(name)
-                    .map(|canonical| format!("; use `{canonical}`"))
-                    .unwrap_or_default();
-                let _ = writeln!(out, "  {:<14}  {} [{}{}]", name, blurb, label, canonical);
+                let _ = writeln!(out, "{title}:");
+                for line in lines {
+                    let _ = writeln!(out, "{line}");
+                }
+                let _ = writeln!(out);
             }
         }
         [name] if topic_text(name).is_some() => {
@@ -209,9 +223,40 @@ pub fn print_direct_help_for_raw(
 pub fn render_direct_help_for_raw(cmd: &clap::Command, raw: &[String]) -> Option<String> {
     let path = command_path_from_raw_help_request(cmd, raw)?;
     Some(match help_command_for_path(cmd, &path) {
-        Some(mut subcommand) => subcommand.render_long_help().to_string(),
+        Some(mut subcommand) => {
+            // clap's long renderer unconditionally uses the spaced
+            // next-line layout (one blank line per flag), tripling the
+            // height of helps whose flags are all one-liners. Render the
+            // compact layout whenever the long layout would add no
+            // information; commands with real long-form flag docs keep
+            // the spaced layout so their exposition stays readable
+            // (heddle#652).
+            if command_has_long_help_content(&subcommand) {
+                subcommand.render_long_help().to_string()
+            } else {
+                subcommand.render_help().to_string()
+            }
+        }
         None => render_help(cmd, &path),
     })
+}
+
+/// Whether `command`'s help carries long-form content that clap's compact
+/// (`-h`-style) renderer would drop: a long about, a long after-help, or
+/// a visible argument with a multi-paragraph long help or per-value docs.
+/// When this is false the compact and spaced layouts carry identical
+/// information, so [`render_direct_help_for_raw`] picks the compact one.
+fn command_has_long_help_content(command: &clap::Command) -> bool {
+    command.get_long_about().is_some()
+        || command.get_after_long_help().is_some()
+        || command.get_arguments().any(|arg| {
+            !arg.is_hide_set()
+                && (arg.get_long_help().is_some()
+                    || arg
+                        .get_possible_values()
+                        .iter()
+                        .any(|value| value.get_help().is_some()))
+        })
 }
 
 /// Clap arg ids of the agent-automation flags on `capture` that are
@@ -437,6 +482,8 @@ pub fn topic_text(topic: &str) -> Option<&'static str> {
         "advanced" => ADVANCED_HELP,
         "agent-flags" => AGENT_FLAGS_TOPIC,
         "agent" | "daemon" => DAEMON_TOPIC,
+        "output-formats" | "output-format" | "output" => OUTPUT_FORMATS_TOPIC,
+        "clone" => CLONE_TOPIC,
         "git-overlay" => GIT_OVERLAY_TOPIC,
         "model" | "mental-model" | "concepts" => MODEL_TOPIC,
         "threads" => THREADS_TOPIC,
@@ -463,6 +510,70 @@ docs.\n\
 This is intentional. The everyday surface stays minimal so first-time users aren't\n\
 overwhelmed; agents and power users reach for the advanced affordances when they\n\
 need them.\n";
+
+// The single full statement of the --output machine contract (plus the
+// one-paragraph version on the top-level `heddle help`). The global
+// `--output` flag's own help is one line pointing here, so the contract
+// is not restated on every command's --help (heddle#652).
+const OUTPUT_FORMATS_TOPIC: &str = r#"Output formats — `--output text | json | json-compact`.
+
+`text` is the default, always. There is no TTY/pipe auto-detection — the
+default never switches under you, so scripts and humans see the same thing
+until a flag says otherwise.
+
+`--output json` emits the full machine contract: a stable `output_kind`
+discriminator, exit codes, and recovery templates. Schemas per verb:
+`heddle schemas <verb>`; the catalog of which commands emit what:
+`heddle commands --output json`.
+
+`--output json-compact` emits only the decision-surface fields —
+`output_kind`, `status`/`coordination_status`, `blockers`, `next_action`,
+`changed_paths`, `conflicts` — fewer tokens, same `output_kind`, so callers
+can still dispatch on it. Commands advertise `supports_json_compact` in the
+command catalog.
+
+Related: `heddle help operation-ids` for idempotent retries, `heddle help
+agent-flags` for capture attribution overrides.
+"#;
+
+// `heddle clone --help` keeps the signature + flags + a one-screen
+// summary; this topic carries the full default-thread fallback chain and
+// --depth exposition that used to bloat the after-help (heddle#652).
+const CLONE_TOPIC: &str = r#"Cloning — Git repositories and Heddle remotes.
+
+    heddle clone <remote> <dir> [--thread <name>] [--depth <n>]
+
+Run `heddle clone --help` for the flag list.
+
+# Which thread the clone lands on (no --thread)
+
+- Git-overlay clones (cloning a Git repository) land on the remote's
+  advertised default branch (its Git HEAD); if the remote advertises
+  none, they fall back to a thread named `main`, then to the
+  alphabetically first imported thread.
+- Native-local and hosted Heddle clones target `main` directly with no
+  fallback chain; if the remote has no `main` thread the clone fails —
+  pass `--thread <name>` to select one.
+- Clone never prompts.
+
+# Shallow clones (--depth, Heddle remotes only)
+
+--depth 0 (the default) clones full history. --depth N fetches only the
+tip plus N generations of ancestry (--depth 1: the tip plus its immediate parents),
+so `heddle log` stops at the depth boundary; history older than that is
+not present locally — re-clone at a greater --depth (or --depth 0) to
+obtain it. Git-overlay clones reject a nonzero --depth; --depth 0 is accepted
+and clones full history.
+
+Depth controls history extent only — how many states the clone fetches —
+and says nothing about object contents. Whether a state's blobs are
+present locally or fetched lazily is a separate concern that `--depth`
+never governs (see the hidden `--lazy` / `--filter blob:none` flags in
+`heddle clone --help`; hosted/network Heddle remotes only).
+
+See `heddle help threads` for the thread model and `heddle help remotes`
+for remote management.
+"#;
 
 const AGENT_FLAGS_TOPIC: &str = r#"Agent automation flags for `heddle capture`.
 
@@ -900,6 +1011,10 @@ mod tests {
             "notes",
             "signals",
             "risk-signals",
+            "output-formats",
+            "output-format",
+            "output",
+            "clone",
         ] {
             assert!(topic_text(topic).is_some(), "{topic}");
         }
@@ -1128,6 +1243,133 @@ mod tests {
         );
     }
 
+    /// heddle#652. The `--output` machine-contract blurb (json vs
+    /// json-compact fields, recovery templates) is stated in full exactly
+    /// once on the top-level help — plus the dedicated `output-formats`
+    /// topic — instead of being stamped by the global arg onto every
+    /// command's --help. Per-command help carries only the one-line flag
+    /// summary with the topic breadcrumb.
+    #[test]
+    fn output_blurb_stated_once_not_per_command() {
+        let marker = "full machine contract";
+        let top = render_for_args(&["--help"]).expect("top-level help renders");
+        assert_eq!(
+            top.matches(marker).count(),
+            1,
+            "top-level help should state the --output contract exactly once: {top}"
+        );
+        assert!(
+            topic_text("output-formats")
+                .expect("output-formats topic exists")
+                .contains(marker),
+            "the output-formats topic carries the full contract"
+        );
+        for argv in [
+            &["clone", "--help"][..],
+            &["status", "--help"][..],
+            &["commit", "--help"][..],
+            &["thread", "--help"][..],
+            &["push", "--help"][..],
+        ] {
+            let help = render_for_args(argv).expect("command help renders");
+            assert!(
+                !help.contains(marker),
+                "`{argv:?}` should not restate the --output machine contract: {help}"
+            );
+            assert!(
+                help.contains("heddle help output-formats"),
+                "`{argv:?}` should breadcrumb to the output-formats topic: {help}"
+            );
+        }
+    }
+
+    /// heddle#652. `clone --help` stays within one screen: signature,
+    /// flags, a short Behavior summary, the hidden-flags breadcrumb
+    /// (heddle#646), and examples. The full default-thread / --depth
+    /// exposition lives in `heddle help clone`.
+    #[test]
+    fn clone_help_fits_one_screen() {
+        let help = render_for_args(&["clone", "--help"]).expect("clone help renders");
+        let lines = help.lines().count();
+        assert!(
+            lines <= 40,
+            "clone --help should fit one screen (<= 40 lines), got {lines}:\n{help}"
+        );
+        // The trim must not cost discoverability: the hidden-flag
+        // affordance and the deep-dive breadcrumb both survive.
+        assert!(
+            help.contains("Advanced (hidden) flags:"),
+            "clone --help keeps the hidden-flags affordance: {help}"
+        );
+        assert!(
+            help.contains("heddle help clone"),
+            "clone --help points at the clone topic for the full behavior: {help}"
+        );
+    }
+
+    /// heddle#652. `heddle help advanced` renders area groups instead of
+    /// one flat alphabetical wall of commands.
+    #[test]
+    fn advanced_help_renders_area_groups() {
+        use clap::CommandFactory;
+        let cmd = crate::cli::cli_args::Cli::command();
+        let advanced = render_help(&cmd, &["advanced".to_string()]);
+        for header in [
+            "Threads and integration:",
+            "States and history:",
+            "Recovery and integrity:",
+            "Repo and environment:",
+            "Agents and automation:",
+            "Git interop:",
+            "Admin and maintenance:",
+        ] {
+            assert!(
+                advanced.contains(&format!("\n{header}\n")),
+                "advanced help should render the `{header}` group: {advanced}"
+            );
+        }
+        assert!(
+            !advanced.contains("Advanced commands:"),
+            "the flat list header is replaced by area groups: {advanced}"
+        );
+    }
+
+    /// heddle#652. The grouped advanced surface is exhaustive and
+    /// non-overlapping: every advanced verb appears in exactly one group.
+    /// Because native commands group by the `help_category` on their
+    /// contract registration, a new advanced native root command that
+    /// forgets to pick a category fails here instead of silently
+    /// vanishing from `heddle help advanced`.
+    #[test]
+    fn advanced_help_groups_cover_every_advanced_verb() {
+        let grouped: Vec<&str> = crate::cli::commands::advanced_help_groups()
+            .into_iter()
+            .flat_map(|(_, verbs)| verbs)
+            .collect();
+        let mut deduped = grouped.clone();
+        deduped.sort_unstable();
+        deduped.dedup();
+        assert_eq!(
+            deduped.len(),
+            grouped.len(),
+            "no verb may appear in two advanced-help groups: {grouped:?}"
+        );
+        let grouped: std::collections::HashSet<&str> = grouped.into_iter().collect();
+        let flat: std::collections::HashSet<&str> = advanced_verbs().into_iter().collect();
+        let missing: Vec<&&str> = flat.difference(&grouped).collect();
+        assert!(
+            missing.is_empty(),
+            "advanced verbs missing from every group — native advanced root \
+             commands must register a help_category in the command contract \
+             table: {missing:?}"
+        );
+        let extra: Vec<&&str> = grouped.difference(&flat).collect();
+        assert!(
+            extra.is_empty(),
+            "grouped verbs not on the advanced surface: {extra:?}"
+        );
+    }
+
     /// Build-break property: every verb listed in `everyday_verbs` and
     /// `advanced_verbs` that's compiled into the current build MUST
     /// resolve to a command catalog entry with a non-empty summary. Verbs
@@ -1152,5 +1394,89 @@ mod tests {
                  The curated help printer needs a non-empty catalog summary."
             );
         }
+    }
+
+    /// heddle#646. Close-the-class: every `hide = true` flag on a visible
+    /// command must carry a discovery affordance, so no flag is learnable
+    /// only by reading the source (the clone `--lazy`/`--filter` gap).
+    /// Two affordances are recognized:
+    ///
+    /// (a) internal plumbing — the flag's own help text starts with
+    ///     "Internal", declaring it not-for-users (test helpers, hints
+    ///     automation sets on the user's behalf); or
+    /// (b) a help breadcrumb — the command's after-help carries an
+    ///     advanced/hidden-flags note (mentions "hidden" or "advanced
+    ///     flag") that either names the flag (`--<long>`) inline or
+    ///     points at a reveal surface (`heddle help <topic>` /
+    ///     `--help-agent`).
+    ///
+    /// Hidden commands (debug surfaces like `index`/`monitor`) are
+    /// skipped wholesale — their entire surface is intentionally
+    /// unadvertised. Global args are skipped (`--op-id` has its own
+    /// contract-driven reveal in `help_command_for_path` plus the
+    /// `operation-ids` topic).
+    #[test]
+    fn hidden_flags_carry_discovery_affordances() {
+        use clap::CommandFactory;
+
+        fn walk(cmd: &clap::Command, path: &str, violations: &mut Vec<String>) {
+            let after_help = [
+                cmd.get_after_help().map(ToString::to_string),
+                cmd.get_after_long_help().map(ToString::to_string),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n");
+            let after_lower = after_help.to_lowercase();
+            let breadcrumb_marker =
+                after_lower.contains("hidden") || after_lower.contains("advanced flag");
+            let points_at_reveal =
+                after_help.contains("heddle help ") || after_help.contains("--help-agent");
+
+            for arg in cmd.get_arguments() {
+                if !arg.is_hide_set() || arg.is_global_set() {
+                    continue;
+                }
+                let flag_help = arg
+                    .get_long_help()
+                    .or_else(|| arg.get_help())
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                if flag_help.starts_with("Internal") {
+                    continue;
+                }
+                let named_inline = arg
+                    .get_long()
+                    .is_some_and(|long| after_help.contains(&format!("--{long}")));
+                if breadcrumb_marker && (points_at_reveal || named_inline) {
+                    continue;
+                }
+                let name = arg
+                    .get_long()
+                    .map(|long| format!("--{long}"))
+                    .unwrap_or_else(|| arg.get_id().to_string());
+                violations.push(format!("`{path}` hides `{name}`"));
+            }
+
+            for sub in cmd.get_subcommands() {
+                if sub.is_hide_set() {
+                    continue;
+                }
+                walk(sub, &format!("{path} {}", sub.get_name()), violations);
+            }
+        }
+
+        let cmd = crate::cli::cli_args::Cli::command();
+        let mut violations = Vec::new();
+        walk(&cmd, cmd.get_name(), &mut violations);
+        assert!(
+            violations.is_empty(),
+            "hidden flags without a discovery affordance (heddle#646): either \
+             prefix the flag's help with `Internal` (plumbing, not for users) \
+             or add an after-help breadcrumb that mentions the hidden/advanced \
+             flags and names the flag or a reveal surface:\n  {}",
+            violations.join("\n  ")
+        );
     }
 }

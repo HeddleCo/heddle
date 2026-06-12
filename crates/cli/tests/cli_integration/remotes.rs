@@ -462,12 +462,22 @@ fn test_cli_pull_local_dirty_refusal_leaves_thread_ref_unchanged() {
     );
 }
 
+/// heddle#646: the planned lazy/partial-clone flags stay `hide = true`
+/// (out of the options list) but are named once in the after-help
+/// "Advanced (hidden) flags" breadcrumb so they're discoverable.
 #[test]
-fn test_cli_clone_help_hides_planned_lazy_flag() {
+fn test_cli_clone_help_keeps_planned_lazy_flag_to_breadcrumb() {
     let output = heddle_help(&["clone", "--help"]);
+    let (first_run, breadcrumb) = output
+        .split_once("Advanced (hidden) flags:")
+        .expect("clone help carries the advanced-flags breadcrumb (heddle#646)");
     assert!(
-        !output.contains("--lazy") && !output.contains("--filter"),
+        !first_run.contains("--lazy") && !first_run.contains("--filter"),
         "clone help should keep planned lazy/partial clone flags out of first-run help: {output}"
+    );
+    assert!(
+        breadcrumb.contains("--lazy") && breadcrumb.contains("--filter"),
+        "clone help's breadcrumb should name the hidden lazy/filter flags: {output}"
     );
 }
 
@@ -634,12 +644,22 @@ fn test_cli_pull_local_detached_head_materializes_then_publishes_thread() {
     );
 }
 
+/// heddle#646: `pull --lazy` stays `hide = true` (out of the options
+/// list) but is named once in the after-help "Advanced (hidden) flags"
+/// breadcrumb so it's discoverable.
 #[test]
-fn test_cli_pull_help_hides_planned_lazy_flag() {
+fn test_cli_pull_help_keeps_planned_lazy_flag_to_breadcrumb() {
     let output = heddle_help(&["pull", "--help"]);
+    let (first_run, breadcrumb) = output
+        .split_once("Advanced (hidden) flags:")
+        .expect("pull help carries the advanced-flags breadcrumb (heddle#646)");
     assert!(
-        !output.contains("--lazy"),
+        !first_run.contains("--lazy"),
         "pull help should keep planned lazy pull out of first-run help: {output}"
+    );
+    assert!(
+        breadcrumb.contains("--lazy"),
+        "pull help's breadcrumb should name the hidden --lazy flag: {output}"
     );
 }
 
@@ -651,6 +671,104 @@ fn git_overlay_push_help_names_git_tag_scope_explicitly() {
             && help.contains("skips Git tags")
             && !help.contains("including tags"),
         "push help should make default/all-threads tag behavior concrete: {help}"
+    );
+}
+
+#[test]
+fn push_help_documents_written_refs_namespace() {
+    let help = heddle_help(&["push", "--help"]);
+    assert!(
+        help.contains("refs/heads/<thread>")
+            && help.contains("refs/notes/heddle")
+            && help.contains("refs/tags/<tag>")
+            && help.contains("git ls-remote")
+            && help.contains("refs_written"),
+        "push help should document exactly which Git refs a push writes and how to verify them: {help}"
+    );
+}
+
+/// Every full ref name under `refs/` at the remote, sorted — the
+/// `git ls-remote` view (minus HEAD) the `refs_written` round-trip
+/// contract is asserted against.
+fn remote_ref_names(remote_repo: &gix::Repository) -> Vec<String> {
+    let mut names: Vec<String> = remote_repo
+        .references()
+        .expect("remote refs platform")
+        .all()
+        .expect("iterate remote refs")
+        .filter_map(Result::ok)
+        .map(|reference| reference.name().as_bstr().to_string())
+        .filter(|name| name.starts_with("refs/"))
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+#[test]
+fn git_overlay_push_reports_refs_written_matching_ls_remote() {
+    let (work, _remote, remote_repo) = setup_git_overlay_push_fixture();
+
+    let output = heddle(&["--output", "json", "push", "origin"], Some(work.path())).unwrap();
+    let parsed: Value = serde_json::from_str(&output).expect("push JSON should parse");
+    assert_eq!(
+        parsed["refs_written"],
+        serde_json::json!(["refs/heads/main", "refs/notes/heddle"]),
+        "current-thread push should report exactly the branch + notes refs it wrote: {parsed}"
+    );
+
+    // Round-trip: the destination's refs are exactly the refs the push
+    // reported — a git veteran running `git ls-remote` sees the same set.
+    let reported: Vec<String> = parsed["refs_written"]
+        .as_array()
+        .expect("refs_written should be an array")
+        .iter()
+        .map(|name| name.as_str().expect("ref name is a string").to_string())
+        .collect();
+    assert_eq!(
+        remote_ref_names(&remote_repo),
+        reported,
+        "refs at the remote should be exactly the refs the push output reported"
+    );
+
+    // A no-op repeat push writes nothing and says so.
+    let output = heddle(&["--output", "json", "push", "origin"], Some(work.path())).unwrap();
+    let parsed: Value = serde_json::from_str(&output).expect("no-op push JSON should parse");
+    assert_eq!(
+        parsed["refs_written"],
+        serde_json::json!([]),
+        "a no-op push should report an empty refs_written array: {parsed}"
+    );
+}
+
+#[test]
+fn git_overlay_push_all_threads_reports_tag_and_sibling_refs_written() {
+    let (work, _remote, remote_repo) = setup_git_overlay_push_fixture();
+
+    let output = heddle(
+        &["--output", "json", "push", "origin", "--all-threads"],
+        Some(work.path()),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&output).expect("push JSON should parse");
+    assert_eq!(
+        parsed["refs_written"],
+        serde_json::json!([
+            "refs/heads/main",
+            "refs/heads/side",
+            "refs/notes/heddle",
+            "refs/tags/v1.0"
+        ]),
+        "all-threads push should report every branch, tag, and notes ref it wrote: {parsed}"
+    );
+    assert_eq!(
+        remote_ref_names(&remote_repo),
+        vec![
+            "refs/heads/main".to_string(),
+            "refs/heads/side".to_string(),
+            "refs/notes/heddle".to_string(),
+            "refs/tags/v1.0".to_string(),
+        ],
+        "refs at the remote should be exactly the refs the push output reported"
     );
 }
 

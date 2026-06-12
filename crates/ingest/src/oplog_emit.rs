@@ -51,7 +51,7 @@ use objects::object::{MarkerName, ThreadName};
 use oplog::oplog::OpLogBackend;
 use tracing::warn;
 
-use crate::{git_walk::ReflogEntry, sha_map::ShaMap, IngestError};
+use crate::{IngestError, git_walk::ReflogEntry, sha_map::ShaMap};
 
 /// Rolling tally returned by [`OplogEmitter::emit`].
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -177,7 +177,7 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
                 // Git-history ingest does not write a ThreadManager
                 // record — those exist for native heddle threads. Pass
                 // `None` for the snapshot; the recorded
-                // `ThreadCreateV2` carries no record body to restore
+                // `ThreadCreate` carries no record body to restore
                 // on redo. heddle#23 r2.
                 let thread_name = ThreadName::from(short_name);
                 self.oplog
@@ -390,7 +390,7 @@ mod tests {
         let ops = all_ops(&log);
         assert_eq!(ops.len(), 3);
         assert!(
-            matches!(ops[0], OpRecord::ThreadCreateV2 { ref name, state, manager_snapshot: None } if name == "main" && state == cid_a)
+            matches!(ops[0], OpRecord::ThreadCreate { ref name, state, manager_snapshot: None } if name == "main" && state == cid_a)
         );
         assert!(matches!(
             &ops[1],
@@ -421,7 +421,7 @@ mod tests {
         let ops = all_ops(&log);
         assert!(matches!(
             &ops[0],
-            OpRecord::ThreadCreateV2 { name, .. } if name == "feature/ingest"
+            OpRecord::ThreadCreate { name, .. } if name == "feature/ingest"
         ));
     }
 

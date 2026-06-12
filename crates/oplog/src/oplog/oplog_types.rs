@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum IsolationKey {
     Thread(String),
-    LocalHead { scope: String },
+    LocalHead {
+        scope: String,
+    },
     /// Per-state visibility key (heddle#317). Every `StateVisibilitySet` /
     /// `StateVisibilityPromote` record on a state contributes this key, so a
     /// visibility mutation on state `S` conflicts with an in-flight undo/redo of
@@ -70,7 +72,21 @@ pub enum OpRecord {
         head: ChangeId,
     },
     /// Thread creation.
-    ThreadCreate { name: String, state: ChangeId },
+    ///
+    /// `manager_snapshot` is opaque rmp-serde bytes of the `Thread`
+    /// record body. Opaque to keep the `oplog` crate independent of
+    /// `repo`-level types; the `repo` crate owns the encoding via
+    /// `ThreadManager::snapshot_thread_record` /
+    /// `ThreadManager::decode_thread_record_snapshot`. `None` for
+    /// callsites that don't write a ThreadManager record alongside the
+    /// op (rename batch's new-name arm, ingest, harness/agent stubs).
+    ThreadCreate {
+        name: String,
+        state: ChangeId,
+        /// rmp-serde-encoded `Thread` record body, or `None` when no
+        /// record was written by the forward path.
+        manager_snapshot: Option<Vec<u8>>,
+    },
     /// Thread deletion.
     ThreadDelete { name: String, state: ChangeId },
     /// Thread update.
@@ -191,27 +207,6 @@ pub enum OpRecord {
         /// Blob hash whose bytes were physically removed.
         blob: ContentHash,
     },
-    /// Fast-forward merge — **legacy V1, read-only.** Predates the
-    /// heddle#99 r2 redo-determinism fix and is no longer emitted; new
-    /// recordings use [`FastForwardV2`].
-    ///
-    /// Lacks `post_target_id`, so a redo of this variant has to
-    /// re-resolve `source_thread → tip` at apply time — non-deterministic
-    /// if the source thread advanced or was deleted between undo and
-    /// redo. The undo direction is fine (uses `pre_target_id` directly).
-    /// Records of this shape age out as the live oplog window slides
-    /// forward.
-    FastForward {
-        /// The thread that was merged in. Its ref never moves during
-        /// an FF merge — recorded only for forensic context.
-        source_thread: String,
-        /// The thread that fast-forwarded. Undo restores this ref to
-        /// `pre_target_id`.
-        target_thread: String,
-        /// `target_thread`'s tip before the FF. Undo restores both
-        /// HEAD and the target thread ref to this state.
-        pre_target_id: ChangeId,
-    },
     /// Fast-forward merge: `target_thread` advanced from `pre_target_id`
     /// to `post_target_id` (the source's tip at the time of the FF)
     /// without writing a synthetic merge state. `source_thread` is
@@ -222,16 +217,11 @@ pub enum OpRecord {
     /// stranded the merged-into thread ref at the FF target — the bug
     /// closed by heddle#99 r1.
     ///
-    /// V2 (heddle#99 r2) adds `post_target_id` so redo replays the
-    /// recorded operation byte-for-byte instead of re-resolving
-    /// `source_thread → tip` at apply time. The r1 redo was
-    /// non-deterministic: if the source thread had advanced after
-    /// undo, redo silently pulled in commits that were never part of
-    /// the original merge; if the source thread had been deleted,
-    /// redo errored even though the merged state is recoverable from
-    /// the recorded SHA. `source_thread` is kept for forensic context
-    /// only — neither inverse reads it.
-    FastForwardV2 {
+    /// `post_target_id` makes redo deterministic: it replays the recorded
+    /// operation byte-for-byte instead of re-resolving `source_thread → tip`
+    /// at apply time. `source_thread` is kept for forensic context only —
+    /// neither inverse reads it.
+    FastForward {
         /// The thread that was merged in. Forensic-only — neither
         /// undo nor redo reads it.
         source_thread: String,
@@ -245,44 +235,6 @@ pub enum OpRecord {
         /// deterministic regardless of what `source_thread` does
         /// later.
         post_target_id: ChangeId,
-    },
-    /// Thread creation — V2 with a ThreadManager record snapshot so redo
-    /// can recreate the record body after undo destroyed it.
-    ///
-    /// V1 (`ThreadCreate`) carried only `(name, state)`. The undo inverse
-    /// added under heddle#23 r1 also deletes the matching ThreadManager
-    /// record so refs and record-store state stay in lockstep (contract
-    /// rule 4). That left redo broken: `apply_redo_entry` could only
-    /// restore the ref via `set_thread` — the record body (mode,
-    /// execution_path, materialized_path, base_state, base_root, …) was
-    /// gone and not reconstructible from V1's `(name, state)`. Record-
-    /// backed commands (`thread cd`, delegate, integration policy) then
-    /// silently degraded after an undo→redo round-trip. heddle#23 r2
-    /// Codex P1 (PR #112, thread 3254698975).
-    ///
-    /// Same hazard shape as heddle#99 r2 (FastForward → FastForwardV2
-    /// with `post_target_id`): undo destroys state that redo cannot
-    /// reconstruct from the OpRecord alone. The fix is the same — record
-    /// what redo needs.
-    ///
-    /// `manager_snapshot` is opaque rmp-serde bytes of the `Thread`
-    /// record body. Opaque to keep the `oplog` crate independent of
-    /// `repo`-level types; the `repo` crate owns the encoding via
-    /// `ThreadManager::snapshot_thread_record` /
-    /// `ThreadManager::decode_thread_record_snapshot`. `None` for
-    /// callsites that don't write a ThreadManager record alongside the
-    /// op (rename batch's new-name arm, ingest, harness/agent stubs).
-    ///
-    /// V1 records remain readable: `apply_undo_entry` keeps its V1 arm,
-    /// and `apply_redo_entry` falls back to ref-only restore with a
-    /// stderr warning so legacy oplog entries don't error — they
-    /// degrade gracefully as the live window slides forward.
-    ThreadCreateV2 {
-        name: String,
-        state: ChangeId,
-        /// rmp-serde-encoded `Thread` record body, or `None` when no
-        /// record was written by the forward path.
-        manager_snapshot: Option<Vec<u8>>,
     },
     /// Git-overlay checkpoint written to the real Git checkout.
     GitCheckpoint {
@@ -384,7 +336,6 @@ pub fn isolation_keys_for_record(record: &OpRecord, scope: Option<&str>) -> BTre
         | OpRecord::ThreadDelete { name: thread, .. }
         | OpRecord::ThreadUpdate { name: thread, .. }
         | OpRecord::EphemeralThreadCollapse { thread, .. }
-        | OpRecord::ThreadCreateV2 { name: thread, .. }
         | OpRecord::GitCheckpoint { branch: thread, .. }
         | OpRecord::RemoteThreadUpdate { thread, .. }
         | OpRecord::RemoteThreadDelete { thread, .. } => {
@@ -401,11 +352,6 @@ pub fn isolation_keys_for_record(record: &OpRecord, scope: Option<&str>) -> BTre
             }
         }
         OpRecord::FastForward {
-            source_thread,
-            target_thread,
-            ..
-        }
-        | OpRecord::FastForwardV2 {
             source_thread,
             target_thread,
             ..
@@ -540,18 +486,6 @@ impl OpRecord {
                 source_thread,
                 target_thread,
                 pre_target_id,
-            } => {
-                format!(
-                    "fast-forward {} into {} (was at {})",
-                    source_thread,
-                    target_thread,
-                    pre_target_id.short()
-                )
-            }
-            OpRecord::FastForwardV2 {
-                source_thread,
-                target_thread,
-                pre_target_id,
                 post_target_id,
             } => {
                 format!(
@@ -561,9 +495,6 @@ impl OpRecord {
                     pre_target_id.short(),
                     post_target_id.short()
                 )
-            }
-            OpRecord::ThreadCreateV2 { name, .. } => {
-                format!("create thread {}", name)
             }
             OpRecord::GitCheckpoint {
                 branch,
@@ -624,7 +555,7 @@ macro_rules! op_verb_catalog {
             /// The stable snake-case verb for this record's variant. Exhaustive
             /// match — a new `OpRecord` variant fails to compile until it has a
             /// verb here. Verbs are shared across variants that fold to one
-            /// concept (e.g. `ThreadCreate`/`ThreadCreateV2` → `thread_create`).
+            /// concept.
             pub fn verb(&self) -> &'static str {
                 match self {
                     $( OpRecord::$variant { .. } => $verb, )+
@@ -669,8 +600,6 @@ op_verb_catalog! {
     Redact => ("redact", checkpoint = false),
     Purge => ("purge", checkpoint = false),
     FastForward => ("fast_forward", checkpoint = false),
-    FastForwardV2 => ("fast_forward", checkpoint = false),
-    ThreadCreateV2 => ("thread_create", checkpoint = false),
     GitCheckpoint => ("git_checkpoint", checkpoint = false),
     RemoteThreadUpdate => ("remote_thread_update", checkpoint = false),
     RemoteThreadDelete => ("remote_thread_delete", checkpoint = false),
@@ -745,11 +674,13 @@ impl OpRecord {
             OpRecord::ThreadUpdate { old_state, .. } => vec![*old_state],
             OpRecord::MarkerDelete { state, .. } => vec![*state],
             OpRecord::FastForward { pre_target_id, .. } => vec![*pre_target_id],
-            OpRecord::FastForwardV2 { pre_target_id, .. } => vec![*pre_target_id],
-            OpRecord::Snapshot { prev_head: None, .. }
-            | OpRecord::Goto { prev_head: None, .. }
+            OpRecord::Snapshot {
+                prev_head: None, ..
+            }
+            | OpRecord::Goto {
+                prev_head: None, ..
+            }
             | OpRecord::ThreadCreate { .. }
-            | OpRecord::ThreadCreateV2 { .. }
             | OpRecord::Fork { .. }
             | OpRecord::Collapse { .. }
             | OpRecord::MarkerCreate { .. }
@@ -770,19 +701,17 @@ impl OpRecord {
     }
 
     /// State IDs the *redo* replay must load from the object store. Variants
-    /// whose redo is a no-op, deletes a ref, touches only sidecars/Git OIDs,
-    /// or (legacy V1 `FastForward`) re-resolves `source_thread → tip` through
-    /// its own error path return an empty list. Enumerated explicitly so a new
-    /// state-carrying variant must declare its redo target (heddle#354 r9).
+    /// whose redo is a no-op, deletes a ref, or touches only sidecars/Git OIDs
+    /// return an empty list. Enumerated explicitly so a new state-carrying
+    /// variant must declare its redo target (heddle#354 r9).
     pub fn states_required_for_redo(&self) -> Vec<ChangeId> {
         match self {
             OpRecord::Snapshot { new_state, .. } => vec![*new_state],
             OpRecord::Goto { target, .. } => vec![*target],
             OpRecord::ThreadCreate { state, .. } => vec![*state],
-            OpRecord::ThreadCreateV2 { state, .. } => vec![*state],
             OpRecord::ThreadUpdate { new_state, .. } => vec![*new_state],
             OpRecord::MarkerCreate { state, .. } => vec![*state],
-            OpRecord::FastForwardV2 { post_target_id, .. } => vec![*post_target_id],
+            OpRecord::FastForward { post_target_id, .. } => vec![*post_target_id],
             OpRecord::ThreadDelete { .. }
             | OpRecord::MarkerDelete { .. }
             | OpRecord::Fork { .. }
@@ -794,7 +723,6 @@ impl OpRecord {
             | OpRecord::TransactionCommit { .. }
             | OpRecord::Redact { .. }
             | OpRecord::Purge { .. }
-            | OpRecord::FastForward { .. }
             | OpRecord::GitCheckpoint { .. }
             | OpRecord::RemoteThreadUpdate { .. }
             | OpRecord::RemoteThreadDelete { .. }
@@ -816,7 +744,6 @@ impl OpRecord {
             OpRecord::Snapshot { .. }
             | OpRecord::Goto { .. }
             | OpRecord::ThreadCreate { .. }
-            | OpRecord::ThreadCreateV2 { .. }
             | OpRecord::ThreadDelete { .. }
             | OpRecord::ThreadUpdate { .. }
             | OpRecord::Fork { .. }
@@ -829,7 +756,6 @@ impl OpRecord {
             | OpRecord::ConflictResolved { .. }
             | OpRecord::TransactionCommit { .. }
             | OpRecord::FastForward { .. }
-            | OpRecord::FastForwardV2 { .. }
             | OpRecord::GitCheckpoint { .. }
             | OpRecord::RemoteThreadUpdate { .. }
             | OpRecord::RemoteThreadDelete { .. }
@@ -851,7 +777,6 @@ impl OpRecord {
             OpRecord::Snapshot { .. }
             | OpRecord::Goto { .. }
             | OpRecord::ThreadCreate { .. }
-            | OpRecord::ThreadCreateV2 { .. }
             | OpRecord::ThreadDelete { .. }
             | OpRecord::ThreadUpdate { .. }
             | OpRecord::Fork { .. }
@@ -864,7 +789,6 @@ impl OpRecord {
             | OpRecord::ConflictResolved { .. }
             | OpRecord::TransactionCommit { .. }
             | OpRecord::FastForward { .. }
-            | OpRecord::FastForwardV2 { .. }
             | OpRecord::GitCheckpoint { .. }
             | OpRecord::RemoteThreadUpdate { .. }
             | OpRecord::RemoteThreadDelete { .. }
@@ -875,15 +799,13 @@ impl OpRecord {
     }
 
     /// The thread name if undoing this record carries the worktree-orphan
-    /// hazard — i.e. a thread-create (V1 or V2) whose inverse only removes the
-    /// ref, leaving any materialized worktree orphaned. `None` for every other
+    /// hazard — i.e. a thread-create whose inverse removes the ref, leaving
+    /// any materialized worktree orphaned. `None` for every other
     /// record. Enumerated explicitly so a future worktree-creating variant
     /// must be classified here (heddle#354 r9).
     pub fn thread_worktree_undo_hazard_name(&self) -> Option<&str> {
         match self {
-            OpRecord::ThreadCreate { name, .. } | OpRecord::ThreadCreateV2 { name, .. } => {
-                Some(name)
-            }
+            OpRecord::ThreadCreate { name, .. } => Some(name),
             OpRecord::Snapshot { .. }
             | OpRecord::Goto { .. }
             | OpRecord::ThreadDelete { .. }
@@ -900,7 +822,6 @@ impl OpRecord {
             | OpRecord::Redact { .. }
             | OpRecord::Purge { .. }
             | OpRecord::FastForward { .. }
-            | OpRecord::FastForwardV2 { .. }
             | OpRecord::GitCheckpoint { .. }
             | OpRecord::RemoteThreadUpdate { .. }
             | OpRecord::RemoteThreadDelete { .. }
@@ -1013,8 +934,6 @@ mod verb_catalog_tests {
             | OpRecord::Redact { .. }
             | OpRecord::Purge { .. }
             | OpRecord::FastForward { .. }
-            | OpRecord::FastForwardV2 { .. }
-            | OpRecord::ThreadCreateV2 { .. }
             | OpRecord::GitCheckpoint { .. }
             | OpRecord::RemoteThreadUpdate { .. }
             | OpRecord::RemoteThreadDelete { .. }
@@ -1032,6 +951,7 @@ mod verb_catalog_tests {
             OpRecord::ThreadCreate {
                 name: "t".into(),
                 state: cid(),
+                manager_snapshot: None,
             },
             OpRecord::ThreadDelete {
                 name: "t".into(),
@@ -1096,14 +1016,9 @@ mod verb_catalog_tests {
                 source_thread: "s".into(),
                 target_thread: "t".into(),
                 pre_target_id: cid(),
-            },
-            OpRecord::FastForwardV2 {
-                source_thread: "s".into(),
-                target_thread: "t".into(),
-                pre_target_id: cid(),
                 post_target_id: cid(),
             },
-            OpRecord::ThreadCreateV2 {
+            OpRecord::ThreadCreate {
                 name: "t".into(),
                 state: cid(),
                 manager_snapshot: None,
