@@ -289,7 +289,10 @@ in-progress operation.
   "parallel_threads": [],
   "state": {"change_id": "hd-def456", "content_hash": "deadbeef", "intent": null},
   "git_checkpoint": null,
-  "changes": {"modified": [], "added": [], "deleted": []}
+  "changes": {"modified": [], "added": [], "deleted": []},
+  "submodules": [
+    {"path": "vendor/lib", "submodule": {"commit": "0505050505050505050505050505050505050505"}}
+  ]
 }
 ```
 
@@ -330,6 +333,7 @@ in-progress operation.
 | `state` | object \| null | required | Current state summary. |
 | `git_checkpoint` | object \| null | required | Latest git checkpoint, when configured. |
 | `changes` | object | required | Worktree status: `{modified: [], added: [], deleted: []}`. |
+| `submodules` | array<object> | required | Heddle-submodule gitlink inventory from the current state; empty array if none. Each entry is `{path, submodule: {commit}}`. Status never descends into the submodule repository or reports submodule worktree dirtiness. |
 
 **Note:** Bridge import-hint information is not part of this output.
 Use `heddle bridge git status --output json`.

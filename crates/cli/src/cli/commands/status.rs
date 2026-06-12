@@ -10,6 +10,7 @@ use std::{
 use anyhow::Result;
 #[cfg(feature = "client")]
 use futures::{SinkExt, StreamExt};
+use objects::{object::Tree, store::ObjectStore};
 use objects::worktree::WorktreeStatus;
 use repo::{
     AgentUsageSummary, GitRemoteTrackingStatus, Repository, RepositoryCapability,
@@ -26,6 +27,8 @@ use tokio_tungstenite::{
     tungstenite::{client::IntoClientRequest, http::header::AUTHORIZATION, protocol::Message},
 };
 use tracing::debug;
+
+const SUBMODULE_PREFIX: &str = "heddle-submodule:";
 
 use super::{
     action_line::print_command,
@@ -151,6 +154,7 @@ pub(crate) struct StatusOutput {
     state: Option<StateInfo>,
     git_checkpoint: Option<GitCheckpointInfo>,
     changes: ChangesInfo,
+    submodules: Vec<SubmoduleStatusEntry>,
     /// Inventory of clonefile-backed thread worktrees discovered on
     /// disk. Read-only diagnostic. Included in JSON always (as `[]`
     /// when no threads are materialized — the JSON contract is "the
@@ -212,6 +216,17 @@ struct ChangesInfo {
     modified: Vec<String>,
     added: Vec<String>,
     deleted: Vec<String>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+struct SubmoduleStatusEntry {
+    path: String,
+    submodule: SubmoduleInfo,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+struct SubmoduleInfo {
+    commit: String,
 }
 
 #[derive(Serialize)]
@@ -283,6 +298,58 @@ fn changes_from_status(status: &WorktreeStatus) -> ChangesInfo {
             .map(|p| p.display().to_string())
             .collect(),
     }
+}
+
+fn submodule_commit_from_blob(content: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(content).ok()?;
+    let commit = text.trim().strip_prefix(SUBMODULE_PREFIX)?.trim();
+    let oid: gix::hash::ObjectId = commit.parse().ok()?;
+    Some(oid.to_string())
+}
+
+fn collect_status_submodules(
+    repo: &Repository,
+    current_state: Option<&objects::object::State>,
+) -> Result<Vec<SubmoduleStatusEntry>> {
+    let Some(state) = current_state else {
+        return Ok(Vec::new());
+    };
+    let Some(tree) = repo.store().get_tree(&state.tree)? else {
+        return Ok(Vec::new());
+    };
+
+    let mut submodules = Vec::new();
+    collect_submodules_from_tree(repo, &tree, "", &mut submodules)?;
+    Ok(submodules)
+}
+
+fn collect_submodules_from_tree(
+    repo: &Repository,
+    tree: &Tree,
+    prefix: &str,
+    submodules: &mut Vec<SubmoduleStatusEntry>,
+) -> Result<()> {
+    for entry in tree.entries() {
+        let path = if prefix.is_empty() {
+            entry.name.clone()
+        } else {
+            format!("{prefix}/{}", entry.name)
+        };
+        if entry.is_tree() {
+            if let Some(subtree) = repo.store().get_tree(&entry.hash)? {
+                collect_submodules_from_tree(repo, &subtree, &path, submodules)?;
+            }
+        } else if entry.is_blob()
+            && let Some(blob) = repo.store().get_blob(&entry.hash)?
+            && let Some(commit) = submodule_commit_from_blob(blob.content())
+        {
+            submodules.push(SubmoduleStatusEntry {
+                path,
+                submodule: SubmoduleInfo { commit },
+            });
+        }
+    }
+    Ok(())
 }
 
 fn emit_status_worktree_profile(profile: Option<&WorktreeCompareProfile>) {
@@ -451,6 +518,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     let current_state_start = Instant::now();
     let current_state = repo.current_state()?;
     let current_state_ms = current_state_start.elapsed().as_millis();
+    let submodules = collect_status_submodules(&repo, current_state.as_ref())?;
 
     let operation_start = Instant::now();
     let operation = repo.operation_status()?;
@@ -649,6 +717,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
             state: None,
             git_checkpoint: None,
             changes,
+            submodules,
             // Short text still renders the materialized-thread advisory
             // (see `render_short_status` → `render_materialized_advisory`).
             // The check is cheap (one ref lookup per manifest), so keep
@@ -878,6 +947,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
         state: state_info,
         git_checkpoint,
         changes,
+        submodules,
         materialized_threads,
     };
     let late_state_ms = late_state_start.elapsed().as_millis();
@@ -1236,9 +1306,24 @@ fn render_short_changes(changes: &ChangesInfo) {
     }
 }
 
+fn submodule_status_line(entry: &SubmoduleStatusEntry) -> String {
+    format!(
+        "submodule {} @ {}",
+        entry.path,
+        short_submodule_commit(&entry.submodule.commit)
+    )
+}
+
+fn short_submodule_commit(commit: &str) -> &str {
+    &commit[..std::cmp::min(12, commit.len())]
+}
+
 fn render_short_status(output: &StatusOutput) {
     render_short_changes(&output.changes);
-    if output.changes.is_empty() {
+    for submodule in &output.submodules {
+        println!("{}", submodule_status_line(submodule));
+    }
+    if output.changes.is_empty() && output.submodules.is_empty() {
         println!(
             "{} {}",
             style::bold(short_status_subject(output)),
@@ -2051,16 +2136,24 @@ fn render_status_changes(output: &StatusOutput) {
         for path in &output.changes.deleted {
             println!("  {}:  {}", style::error("deleted"), path);
         }
-    } else if output.trust.verified {
+    }
+    if !output.submodules.is_empty() {
+        if has_changes {
+            println!();
+        }
+        for submodule in &output.submodules {
+            println!("{}", submodule_status_line(submodule));
+        }
+    } else if !has_changes && output.trust.verified {
         println!("{}", style::dim("No unsaved changes, worktree clean"));
-    } else if output.trust.worktree_state == "not_checked" {
+    } else if !has_changes && output.trust.worktree_state == "not_checked" {
         let message = if output.trust.status == "git_branch_advanced" {
             "No unsaved worktree changes detected; import the external Git branch tip before comparing Heddle state"
         } else {
             "No unsaved worktree changes detected; finish setup before comparing Heddle state"
         };
         println!("{}", style::dim(message));
-    } else if output.trust.worktree_state == "clean" {
+    } else if !has_changes && output.trust.worktree_state == "clean" {
         println!(
             "{}",
             style::dim(&format!(
@@ -2068,7 +2161,7 @@ fn render_status_changes(output: &StatusOutput) {
                 output.trust.status
             ))
         );
-    } else {
+    } else if !has_changes {
         println!("{}", style::dim("No unsaved worktree changes detected"));
     }
 }
@@ -2458,6 +2551,10 @@ mod tests {
     use std::fs;
 
     use clap::Parser as _;
+    use objects::{
+        object::{Attribution, Blob, Principal, State, ThreadName, Tree, TreeEntry},
+        store::ObjectStore,
+    };
     use repo::AgentUsageSummary;
     use repo::Repository;
     use serde_json::Value;
@@ -2466,7 +2563,7 @@ mod tests {
     use super::{
         ActorInfo, CoordinationStatus, MaterializedThreadInfo, assess_materialized_threads,
         build_status_output, combined_verdict_axes, coordination_axis_clean, coordination_label,
-        render_status_materialized, resolve_coordination_with_trust,
+        render_status_materialized, resolve_coordination_with_trust, submodule_status_line,
     };
 
     const AGENT_CONTEXT_STATUS_KEYS: &[&str] = &[
@@ -2501,6 +2598,29 @@ mod tests {
         let cli = status_cli(repo_dir);
         let output = build_status_output(&cli, false).expect("build status output");
         serde_json::to_value(&output).expect("serialize status")
+    }
+
+    fn install_submodule_state(repo: &Repository, entries: &[(&str, &str)]) -> State {
+        let tree_entries = entries
+            .iter()
+            .map(|(path, commit)| {
+                let blob = Blob::new(format!("heddle-submodule: {commit}").into_bytes());
+                let hash = repo.store().put_blob(&blob).expect("put submodule blob");
+                TreeEntry::file(*path, hash, false).expect("submodule tree entry")
+            })
+            .collect();
+        let tree = Tree::from_entries(tree_entries);
+        let tree_hash = repo.store().put_tree(&tree).expect("put tree");
+        let state = State::new_snapshot(
+            tree_hash,
+            vec![],
+            Attribution::human(Principal::new("Status Test", "status@example.com")),
+        );
+        repo.store().put_state(&state).expect("put state");
+        repo.refs()
+            .set_thread(&ThreadName::new("main"), &state.change_id)
+            .expect("set main");
+        state
     }
 
     fn init_repo_with_materialized_thread(content: &[u8]) -> (TempDir, TempDir, Repository) {
@@ -2600,6 +2720,56 @@ mod tests {
             "tree_hash_short caps at 12 chars: got {}",
             info.tree_hash_short
         );
+    }
+
+    #[test]
+    fn status_reports_no_submodules_for_regular_tree() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("hello.txt"), b"hello\n").unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+
+        let json = status_json(repo_dir.path());
+        assert_eq!(json["submodules"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn status_reports_single_submodule_in_text_line_and_json() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let commit = "0505050505050505050505050505050505050505";
+        install_submodule_state(&repo, &[("vendor", commit)]);
+
+        let cli = status_cli(repo_dir.path());
+        let output = build_status_output(&cli, false).expect("build status output");
+        assert_eq!(output.submodules.len(), 1);
+        assert_eq!(submodule_status_line(&output.submodules[0]), "submodule vendor @ 050505050505");
+
+        let json = serde_json::to_value(&output).expect("serialize status");
+        assert_eq!(json["submodules"][0]["path"], "vendor");
+        assert_eq!(json["submodules"][0]["submodule"]["commit"], commit);
+    }
+
+    #[test]
+    fn status_reports_multiple_submodules_without_recursing() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::create_dir_all(repo_dir.path().join("vendor/.git")).unwrap();
+        fs::write(repo_dir.path().join("vendor/.git/HEAD"), b"not a repository\n").unwrap();
+        fs::write(repo_dir.path().join("vendor/dirty.txt"), b"ignored by submodule scan\n").unwrap();
+
+        let vendor = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let third_party = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        install_submodule_state(&repo, &[("third_party", third_party), ("vendor", vendor)]);
+
+        let cli = status_cli(repo_dir.path());
+        let output = build_status_output(&cli, false).expect("build status output");
+        let submodules = output
+            .submodules
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry.submodule.commit.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(submodules, vec![("third_party", third_party), ("vendor", vendor)]);
     }
 
     #[test]
