@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Stable JSON-first agent reservation API.
 
-use objects::store::ObjectStore;
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use objects::object::ThreadName;
+use objects::store::ObjectStore;
 use objects::store::{
     AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ReserveOutcome, current_boot_id,
 };
@@ -222,9 +222,15 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
     let reservation_path = existing_thread_execution_path(&repo, &thread_name)?;
     let probe = crate::harness::probe_current_process_harness(
         &repo,
-        std::env::var("HEDDLE_AGENT_PROVIDER").ok().and_then(crate::attribution::clean_attribution_value),
-        std::env::var("HEDDLE_AGENT_MODEL").ok().and_then(crate::attribution::clean_attribution_value),
-        std::env::var("HEDDLE_AGENT_POLICY").ok().and_then(crate::attribution::clean_attribution_value),
+        std::env::var("HEDDLE_AGENT_PROVIDER")
+            .ok()
+            .and_then(crate::attribution::clean_attribution_value),
+        std::env::var("HEDDLE_AGENT_MODEL")
+            .ok()
+            .and_then(crate::attribution::clean_attribution_value),
+        std::env::var("HEDDLE_AGENT_POLICY")
+            .ok()
+            .and_then(crate::attribution::clean_attribution_value),
     )?;
     // `--hold-for-pid PID` binds the reservation to an external
     // process (typically the orchestrator that wraps the heddle
@@ -320,16 +326,12 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
             // Agent-reservation flow writes the ThreadManager record via
             // `ensure_thread_record` below, after this op is recorded —
             // so there's no record to snapshot at recording time. Pass
-            // `None`; the op records as `ThreadCreateV2` with no
+            // `None`; the op records as `ThreadCreate` with no
             // manager snapshot. Reservations are an agent-internal API
             // that aren't expected to participate in human undo/redo
             // flows in 0.3. heddle#23 r2.
-            repo.oplog().record_thread_create(
-                &tn,
-                &anchor,
-                None,
-                Some(&repo.op_scope()),
-            )?;
+            repo.oplog()
+                .record_thread_create(&tn, &anchor, None, Some(&repo.op_scope()))?;
         }
 
         // Ensure a Thread record exists so downstream commands

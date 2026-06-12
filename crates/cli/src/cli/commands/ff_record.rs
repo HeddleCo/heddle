@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared helper for fast-forward call sites that need to record an
-//! `OpRecord::FastForwardV2` instead of the implicit `OpRecord::Goto`.
+//! `OpRecord::FastForward` instead of the implicit `OpRecord::Goto`.
 //!
 //! See heddle#99 (merge FF) and heddle#110 (rebase / land /
 //! merge-abort): recording a thread-advancing fast-forward as a plain
 //! `OpRecord::Goto` strands the target thread ref on undo, because the
 //! `Goto` inverse only rewinds HEAD. The fix is to perform the FF
 //! without recording the implicit `Goto`, then explicitly emit an
-//! `OpRecord::FastForwardV2` carrying both `pre_target_id` (undo
+//! `OpRecord::FastForward` carrying both `pre_target_id` (undo
 //! target) and `post_target_id` (redo target — heddle#99 r2's
 //! deterministic-redo contract).
 //!
@@ -119,7 +119,7 @@ pub(super) fn ff_advance_deferred(
         repo.fast_forward_attached_without_record(post_target_id)?;
     }
     Ok(match head_before {
-        Head::Attached { thread } => OpRecord::FastForwardV2 {
+        Head::Attached { thread } => OpRecord::FastForward {
             source_thread: source_thread.to_string(),
             target_thread: thread.to_string(),
             pre_target_id,
@@ -248,7 +248,7 @@ mod tests {
                 .flat_map(|batch| &batch.entries)
                 .any(|entry| matches!(
                     &entry.operation,
-                    oplog::OpRecord::FastForwardV2 {
+                    oplog::OpRecord::FastForward {
                         source_thread,
                         target_thread,
                         pre_target_id,

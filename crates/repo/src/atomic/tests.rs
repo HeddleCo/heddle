@@ -712,7 +712,7 @@ fn write_chokepoint_records_before_publishing() {
     let state = ChangeId::generate();
     {
         let repo = Repository::init_default(temp.path()).unwrap();
-        let record = OpRecord::ThreadCreateV2 {
+        let record = OpRecord::ThreadCreate {
             name: "feature".to_string(),
             state,
             manager_snapshot: None,
@@ -736,7 +736,7 @@ fn write_chokepoint_records_before_publishing() {
     assert!(
         recent.iter().any(|e| matches!(
             &e.operation,
-            OpRecord::ThreadCreateV2 { name, .. } if name == "feature"
+            OpRecord::ThreadCreate { name, .. } if name == "feature"
         )),
         "every published ref must have a preceding ref-carrying record"
     );
@@ -1167,7 +1167,7 @@ fn staged_record_keys_are_covered_by_declared_root_keys() {
     });
     let records = vec![
         snapshot_on("main"),
-        OpRecord::FastForwardV2 {
+        OpRecord::FastForward {
             source_thread: "feature".to_string(),
             target_thread: "main".to_string(),
             pre_target_id: ChangeId::generate(),
@@ -1209,10 +1209,11 @@ fn reconcile_folds_every_record_shape() {
     let remote = ChangeId::generate();
     let undo = ChangeId::generate();
 
-    // Legacy read-back-only variants (V1 create + update).
+    // Thread create + update records.
     op.record_batch(vec![OpRecord::ThreadCreate {
         name: "t_v1".to_string(),
         state: v1,
+        manager_snapshot: None,
     }])
     .unwrap();
     op.record_batch(vec![OpRecord::ThreadUpdate {
@@ -1615,7 +1616,7 @@ fn validation_failure_appends_no_record() {
 
     // Publish "dup" with a backing record through the chokepoint.
     repo.commit_and_publish(
-        vec![OpRecord::ThreadCreateV2 {
+        vec![OpRecord::ThreadCreate {
             name: "dup".to_string(),
             state: existing,
             manager_snapshot: None,
@@ -1964,9 +1965,9 @@ fn fork_then_goto_reconcile_yields_goto_target_not_stale_fork() {
 }
 
 /// FastForward-after-Fork: a fast-forward re-attaches HEAD and writes it
-/// directly before recording `FastForwardV2`. The reconcile must defer to the
+/// directly before recording `FastForward`. The reconcile must defer to the
 /// re-attached canonical HEAD, not the stale fork. (This is the exact
-/// stale-HEAD clobber a Fork/Collapse-only allowlist re-opens: `FastForwardV2`
+/// stale-HEAD clobber a Fork/Collapse-only allowlist re-opens: `FastForward`
 /// is publish-first, so the fork's reconstruction must be masked.)
 #[test]
 fn fast_forward_after_fork_reconcile_defers_to_reattached_head() {
@@ -1997,7 +1998,7 @@ fn fast_forward_after_fork_reconcile_defers_to_reattached_head() {
 
     // A fast-forward advances "main" to ff_target and re-attaches HEAD
     // (`fast_forward_attached`): canonical HEAD = Attached{main}, written
-    // directly before the FastForwardV2 record.
+    // directly before the FastForward record.
     let ff_target = ChangeId::generate();
     repo.refs()
         .set_thread(&ThreadName::new("main"), &ff_target)
@@ -2626,7 +2627,7 @@ fn persisted_watermark_does_not_resurrect_unrecorded_delete() {
         let repo = Repository::init_default(temp.path()).unwrap();
         // Create through the chokepoint (records + publishes).
         repo.commit_and_publish(
-            vec![OpRecord::ThreadCreateV2 {
+            vec![OpRecord::ThreadCreate {
                 name: "fcn".to_string(),
                 state,
                 manager_snapshot: None,
@@ -2696,7 +2697,7 @@ fn shared_watermark_is_cross_worktree_no_resurrect() {
         let repo_a = Repository::open(&wt_a).unwrap();
         repo_a
             .commit_and_publish(
-                vec![OpRecord::ThreadCreateV2 {
+                vec![OpRecord::ThreadCreate {
                     name: "shared-thread".to_string(),
                     state: created,
                     manager_snapshot: None,
@@ -2755,7 +2756,7 @@ fn non_atomic_write_materializes_committed_tail() {
     // Phase-4 only: a committed-but-unpublished thread "x" (canonical absent,
     // watermark behind).
     repo.oplog()
-        .record_batch(vec![OpRecord::ThreadCreateV2 {
+        .record_batch(vec![OpRecord::ThreadCreate {
             name: "x".to_string(),
             state: v_new,
             manager_snapshot: None,

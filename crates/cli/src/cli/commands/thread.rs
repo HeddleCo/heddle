@@ -1917,7 +1917,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // — runs as ONE atomic transaction on the heddle#330 primitive (impl-c). A
     // failure anywhere mid-materialize rewinds every applied effect, with
     // precise directory + symlink rewind, back to the exact pre-start state;
-    // the oplog `ThreadCreateV2` is the staged commit record appended once at
+    // the oplog `ThreadCreate` is the staged commit record appended once at
     // the single commit point. See `start_atomic::StartThread`.
     let mount_ownership =
         mount_lifecycle::MountOwnership::from_flags(args.daemon, args.no_daemon);
@@ -2431,7 +2431,7 @@ pub(crate) fn cmd_thread_create(
     // can recreate it after `heddle undo` destroys it. Without this,
     // redo restores only the ref and record-backed commands (`thread
     // cd`, delegate, integration policy) silently degrade. heddle#23 r2
-    // Codex P1 (mirrors the heddle#99 r2 FastForwardV2 pattern — record
+    // Codex P1 (mirrors the heddle#99 r2 FastForward pattern — record
     // what redo needs).
     //
     // Snapshot failure is fatal here: we just wrote the record, so a

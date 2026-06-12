@@ -192,8 +192,6 @@ impl AtomicMutation for SnapshotMutation<'_> {
             | OpRecord::Redact { .. }
             | OpRecord::Purge { .. }
             | OpRecord::FastForward { .. }
-            | OpRecord::FastForwardV2 { .. }
-            | OpRecord::ThreadCreateV2 { .. }
             | OpRecord::GitCheckpoint { .. }
             | OpRecord::RemoteThreadUpdate { .. }
             | OpRecord::RemoteThreadDelete { .. }

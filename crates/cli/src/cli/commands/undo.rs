@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Undo and redo commands.
 
-use objects::store::ObjectStore;
 use anyhow::{Result, anyhow};
 use objects::object::{ChangeId, ContentHash};
+use objects::store::ObjectStore;
 use oplog::{OpBatch, RedactionUndoClass};
 use refs::UNDO_RECOVERY_HANDLE;
 use repo::{Repository, ThreadManager};
@@ -216,11 +216,9 @@ pub fn cmd_undo(
     let recovery_state = repo.head()?;
     let generation = repo.oplog().head_id()?;
     let transaction_id = undo_redo_transaction_id("undo", &scope, generation, &batches);
-    let updated_batches = repo::atomic::execute(
-        &repo,
-        UndoOp::new(batches, recovery_state, transaction_id),
-    )
-    .map_err(|e| anyhow!(e))?;
+    let updated_batches =
+        repo::atomic::execute(&repo, UndoOp::new(batches, recovery_state, transaction_id))
+            .map_err(|e| anyhow!(e))?;
 
     let post_undo_repo = Repository::open(repo.root())?;
     let post_undo_trust = build_repository_verification_state(&post_undo_repo);
@@ -338,8 +336,8 @@ pub fn cmd_redo(cli: &Cli, steps: usize, preview: bool) -> Result<()> {
     // failure mid-redo rewinds every applied step (mirror of `cmd_undo`).
     let generation = repo.oplog().head_id()?;
     let transaction_id = undo_redo_transaction_id("redo", &scope, generation, &batches);
-    let updated_batches =
-        repo::atomic::execute(&repo, RedoOp::new(batches, transaction_id)).map_err(|e| anyhow!(e))?;
+    let updated_batches = repo::atomic::execute(&repo, RedoOp::new(batches, transaction_id))
+        .map_err(|e| anyhow!(e))?;
 
     let post_redo_trust = build_repository_verification_state(&repo);
     let recommended_action = ActionFields::from_action(&post_redo_trust.recommended_action);
@@ -642,9 +640,7 @@ fn ensure_undo_states_reachable(repo: &Repository, batches: &[OpBatch]) -> Resul
 /// inside `goto`, identical in shape to the undo destructive-boundary
 /// case. The redo arms that touch the object store at apply time are
 /// `Snapshot`, `Goto`, `ThreadCreate`, `ThreadUpdate`, `MarkerCreate`,
-/// and `FastForwardV2`; all carry the post-state SHA directly. The
-/// legacy V1 `FastForward` redo re-resolves `source_thread → tip` and
-/// has its own error path, so we skip it here.
+/// and `FastForward`; all carry the post-state SHA directly.
 fn ensure_redo_states_reachable(repo: &Repository, batches: &[OpBatch]) -> Result<()> {
     let mut missing: Vec<(u64, ChangeId)> = Vec::new();
     for batch in batches {
@@ -721,12 +717,14 @@ fn ensure_redaction_undo_safe(
                 RedactionUndoClass::Purge { redaction_id } => {
                     purge_ops.push((entry.id, *redaction_id))
                 }
-                RedactionUndoClass::Redact { blob, state, path } => redact_ops.push(RedactSummary {
-                    op_id: entry.id,
-                    blob: *blob,
-                    state: *state,
-                    path: path.to_string(),
-                }),
+                RedactionUndoClass::Redact { blob, state, path } => {
+                    redact_ops.push(RedactSummary {
+                        op_id: entry.id,
+                        blob: *blob,
+                        state: *state,
+                        path: path.to_string(),
+                    })
+                }
                 RedactionUndoClass::Other => {}
             }
         }
@@ -877,9 +875,8 @@ fn ensure_thread_worktree_undo_safe(repo: &Repository, batches: &[OpBatch]) -> R
 
     for batch in batches {
         for entry in &batch.entries {
-            // V1 and V2 thread-creates (the rename batch's new-name arm and all
-            // post-heddle#23-r2 creates) share the worktree-orphan hazard on
-            // undo; every other record is irrelevant to this preflight.
+            // Thread creates share the worktree-orphan hazard on undo; every
+            // other record is irrelevant to this preflight.
             let Some(name) = entry.operation.thread_worktree_undo_hazard_name() else {
                 continue;
             };
@@ -1020,14 +1017,17 @@ mod tests {
         assert_eq!(winner_seen.id, "rec-winner");
         assert!(!winner_seen.materialized_path.unwrap().exists());
 
-        // Record a `ThreadCreateV2` for the name; its undo converges the name to
+        // Record a `ThreadCreate` for the name; its undo converges the name to
         // empty, removing BOTH same-name records.
         std::fs::write(temp.path().join("f.txt"), "x").unwrap();
-        let state = repo.snapshot(Some("s".to_string()), None).unwrap().change_id;
+        let state = repo
+            .snapshot(Some("s".to_string()), None)
+            .unwrap()
+            .change_id;
         let scope = repo.op_scope();
         repo.oplog()
             .record_batch_scoped(
-                vec![OpRecord::ThreadCreateV2 {
+                vec![OpRecord::ThreadCreate {
                     name: "feature/x".to_string(),
                     state,
                     manager_snapshot: None,
@@ -1039,9 +1039,9 @@ mod tests {
         assert!(
             batches.iter().any(|b| b.entries.iter().any(|e| matches!(
                 &e.operation,
-                OpRecord::ThreadCreateV2 { name, .. } if name == "feature/x"
+                OpRecord::ThreadCreate { name, .. } if name == "feature/x"
             ))),
-            "the recorded ThreadCreateV2 is the undoable batch"
+            "the recorded ThreadCreate is the undoable batch"
         );
 
         let result = ensure_thread_worktree_undo_safe(&repo, &batches);

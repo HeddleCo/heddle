@@ -632,7 +632,7 @@ fn apply_undo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         | OpRecord::Goto {
             prev_head: None, ..
         } => {}
-        OpRecord::ThreadCreate { name, .. } | OpRecord::ThreadCreateV2 { name, .. } => {
+        OpRecord::ThreadCreate { name, .. } => {
             delete_thread_safely(steps, &ThreadName::new(name.as_str()))?;
             // Cross-thread contract rule 4 (docs/design/cross-thread-undo.md):
             // the inverse of `ThreadCreate` must also remove the matching
@@ -643,13 +643,11 @@ fn apply_undo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
             // record we hit here has `materialized_path = None` or a path
             // that no longer exists — either way, dropping the record is
             // safe. Missing record is fine: not every `ThreadCreate` path
-            // writes one (legacy oplog entries may predate the record
-            // store).
+            // writes one.
             //
-            // Both V1 and V2 use the same undo: V2's `manager_snapshot`
-            // is recorded for redo, so undo can still destroy the live
-            // record without losing the data needed to put it back.
-            // Matches the FastForward/V2 shared-undo shape.
+            // `manager_snapshot` is recorded for redo, so undo can still
+            // destroy the live record without losing the data needed to put it
+            // back.
             remove_thread_manager_record(steps, name)?;
         }
         OpRecord::ThreadDelete { name, state } => {
@@ -700,15 +698,7 @@ fn apply_undo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         // during the FF, so it's untouched. Closes heddle#99 r1 — the
         // bug where recording an FF as `OpRecord::Goto` left the target
         // thread ref stranded at the FF target after undo.
-        //
-        // V1 and V2 share the same undo: both carry `pre_target_id`.
         OpRecord::FastForward {
-            source_thread,
-            target_thread,
-            pre_target_id,
-            ..
-        }
-        | OpRecord::FastForwardV2 {
             source_thread,
             target_thread,
             pre_target_id,
@@ -818,36 +808,14 @@ fn apply_redo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         OpRecord::Goto { target, .. } => {
             steps.goto(*target)?;
         }
-        // V1 ThreadCreate redo: ref-only, with a stderr note that the
-        // ThreadManager record is not being restored. V1 records were
-        // written by code pre-heddle#23 r2 that didn't carry a record
-        // snapshot in the OpRecord; redo can't reconstruct the body
-        // (mode, base_state, base_root, …) from `(name, state)` alone.
-        // Record-backed commands (`thread cd`, delegate, integration
-        // policy) will silently degrade on this thread — pointed out
-        // on stderr so the operator can rerun `heddle thread start
-        // <name>` if they want the record back. V1 ages out as the
-        // live oplog window slides forward.
-        OpRecord::ThreadCreate { name, state } => {
-            steps.set_thread(name.as_str(), *state)?;
-            eprintln!(
-                "warning: redo of legacy V1 `ThreadCreate` for '{}' restores the ref only — \
-                 the matching ThreadManager record body was not snapshotted by this oplog entry. \
-                 Run `heddle thread start {}` to re-establish the record if record-backed \
-                 commands (`thread cd`, delegate, integration policy) misbehave.",
-                name, name
-            );
-        }
-        // V2 ThreadCreate redo (heddle#23 r2): restore both the thread
-        // ref and the ThreadManager record body from the snapshot
-        // captured at recording time. Mirrors the FastForwardV2 redo
-        // pattern (record what redo needs).
+        // Restore both the thread ref and the ThreadManager record body
+        // from the snapshot captured at recording time.
         //
         // `manager_snapshot = None` means the forward path didn't have
         // a record to snapshot (cmd_start before materialization, the
         // rename batch's new-name arm, ingest, harness/agent stubs).
         // Restore the ref only in that case — no record to put back.
-        OpRecord::ThreadCreateV2 {
+        OpRecord::ThreadCreate {
             name,
             state,
             manager_snapshot,
@@ -871,14 +839,14 @@ fn apply_redo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         OpRecord::MarkerDelete { name, .. } => {
             steps.delete_marker(name.as_str())?;
         }
-        // FF merge redo (V2): replay the *recorded* FF target. We do
+        // FF merge redo: replay the *recorded* FF target. We do
         // not re-read `source_thread` — the recorded `post_target_id`
         // is the exact state the target advanced to at the original
         // FF, so redo is deterministic regardless of what the source
         // thread did between undo and redo (advanced, was deleted,
         // etc.). Closes heddle#99 r2 — Codex's non-determinism finding
         // on the r1 implementation.
-        OpRecord::FastForwardV2 {
+        OpRecord::FastForward {
             source_thread,
             target_thread,
             post_target_id,
@@ -893,31 +861,6 @@ fn apply_redo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
             ..
         } => {
             apply_git_checkpoint_redo(steps, branch, previous_git_oid.as_deref(), new_git_oid)?;
-        }
-        // FF merge redo (V1, legacy): the r1 implementation didn't
-        // record `post_target_id`, so we have to re-resolve
-        // `source_thread → tip`. This is the non-deterministic redo
-        // Codex flagged; V1 records can only be written by the r1
-        // implementation and age out as the undo window slides
-        // forward. New ops are recorded as `FastForwardV2` so this
-        // path stops accumulating.
-        OpRecord::FastForward {
-            source_thread,
-            target_thread,
-            ..
-        } => {
-            let source_tip = steps
-                .repo()
-                .refs()
-                .get_thread(&ThreadName::new(source_thread.as_str()))?
-                .ok_or_else(|| {
-                    HeddleError::Conflict(format!(
-                        "cannot redo fast-forward: source thread '{}' no longer exists \
-                         (legacy V1 oplog record; re-run the merge or `heddle maintenance gc --prune` to prune)",
-                        source_thread
-                    ))
-                })?;
-            apply_ff_redo(steps, source_thread, target_thread, &source_tip)?;
         }
         // No redo replay: these records don't re-advance a ref redo touches, or
         // they are refused upstream. Enumerated explicitly (no wildcard) so a
@@ -1618,8 +1561,8 @@ fn change_contains(repo: &Repository, ancestor: &ChangeId, descendant: &ChangeId
 
 /// Remove EVERY ThreadManager record filed under `thread_name`, converging the
 /// name to EMPTY as ONE lock-atomic `step_nonatomic` (cid 3331603131). Used by
-/// the `ThreadCreate`/`ThreadCreateV2` inverse to keep refs and record-store
-/// state in lockstep (cross-thread undo contract rule 4).
+/// the `ThreadCreate` inverse to keep refs and record-store state in lockstep
+/// (cross-thread undo contract rule 4).
 ///
 /// Converging to empty under a SINGLE write lock via
 /// [`ThreadManager::converge_records`] — rather than taking an unlocked `list()`
@@ -2541,6 +2484,7 @@ mod atomic_tests {
                     OpRecord::ThreadCreate {
                         name: "old".to_string(),
                         state: s1,
+                        manager_snapshot: None,
                     },
                     OpRecord::ThreadDelete {
                         name: "new".to_string(),
@@ -3082,7 +3026,7 @@ mod atomic_tests {
     impl DeferredMutation for RestoreSnapshotOnly {}
 
     /// The redo-snapshot sibling of `..._restores_replacement_save_...`: the redo
-    /// of a `ThreadCreateV2` restores the record from an opaque snapshot whose
+    /// of a `ThreadCreate` restores the record from an opaque snapshot whose
     /// record id is NOT known to the applier. The forward writes that snapshot-id
     /// record (newer timestamp); on rollback the converge must drop it so
     /// `find_by_thread` returns ONLY the prior record. A re-save-only restore
@@ -3148,7 +3092,7 @@ mod atomic_tests {
         assert_eq!(restored.current_state.as_deref(), Some("current-A"));
     }
 
-    /// SUCCESS-path postcondition of the redo `ThreadCreateV2` restore (cid
+    /// SUCCESS-path postcondition of the redo `ThreadCreate` restore (cid
     /// 3331603135): when a pre-existing DUPLICATE is already filed under the name,
     /// redoing the create restores the snapshot AND leaves ONLY the restored
     /// record — the success path has the same single-record postcondition as the
@@ -3221,9 +3165,9 @@ mod atomic_tests {
     }
 
     /// Test-only deferred mutation that runs `remove_thread_manager_record` — the
-    /// `ThreadCreate`/`ThreadCreateV2` inverse — through the `EntrySteps` applier,
-    /// so its single lock-atomic `converge_records`-to-empty step and the
-    /// converge-back-to-prior rollback can be exercised in isolation.
+    /// `ThreadCreate` inverse — through the `EntrySteps` applier, so its single
+    /// lock-atomic `converge_records`-to-empty step and the converge-back-to-prior
+    /// rollback can be exercised in isolation.
     struct RemoveRecordOnly {
         name: String,
     }

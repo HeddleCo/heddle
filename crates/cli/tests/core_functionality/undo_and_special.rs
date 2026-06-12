@@ -111,10 +111,11 @@ fn test_undo_preserves_ignored_siblings_in_tracked_dirs() {
     assert!(!temp.path().join("main.rs").exists());
     assert!(!temp.path().join("web/index.html").exists());
     // Ignored siblings preserved across the apply.
-    assert!(temp
-        .path()
-        .join("web/node_modules/lodash/index.js")
-        .exists());
+    assert!(
+        temp.path()
+            .join("web/node_modules/lodash/index.js")
+            .exists()
+    );
     assert!(temp.path().join("target/foo.bin").exists());
 
     // HEAD advanced and disk matches state — no divergence.
@@ -140,11 +141,8 @@ fn test_undo_refuses_when_untracked_file_present() {
     let untracked = temp.path().join("my-notes.md");
     std::fs::write(&untracked, "user-written content").unwrap();
 
-    let err = heddle(
-        &["undo", "-n", "1", "--output", "json"],
-        Some(temp.path()),
-    )
-    .expect_err("undo must refuse on dirty worktree");
+    let err = heddle(&["undo", "-n", "1", "--output", "json"], Some(temp.path()))
+        .expect_err("undo must refuse on dirty worktree");
     assert!(
         err.contains("untracked"),
         "error should mention untracked: {err}"
@@ -168,11 +166,8 @@ fn test_undo_refuses_when_tracked_file_modified() {
 
     std::fs::write(temp.path().join("a.txt"), "uncommitted edit").unwrap();
 
-    let err = heddle(
-        &["undo", "-n", "1", "--output", "json"],
-        Some(temp.path()),
-    )
-    .expect_err("undo must refuse with modified file");
+    let err = heddle(&["undo", "-n", "1", "--output", "json"], Some(temp.path()))
+        .expect_err("undo must refuse with modified file");
     assert!(
         err.contains("modified"),
         "error should mention modified: {err}"
@@ -659,7 +654,10 @@ fn test_undo_recovery_lives_outside_user_marker_namespace() {
     heddle_must_succeed(&["marker", "delete", "undo-recovery"], temp.path());
     let repo = Repository::open(temp.path()).unwrap();
     assert_eq!(
-        repo.refs().get_undo_recovery().unwrap().map(|id| id.short()),
+        repo.refs()
+            .get_undo_recovery()
+            .unwrap()
+            .map(|id| id.short()),
         Some(friction_state),
         "user marker create/delete must not touch the internal recovery ref"
     );
@@ -914,7 +912,7 @@ fn test_redo_ff_merge_restores_head_and_thread_ref() {
 /// result SHA) at recording time and uses it directly on redo, so the
 /// replay is deterministic.
 ///
-/// Pinned the bug pre-fix: this test was red before `FastForwardV2` landed.
+/// Pinned the bug pre-fix: this test was red before `FastForward` landed.
 #[test]
 fn test_redo_ff_merge_pins_recorded_tip_when_source_advances() {
     let temp = TempDir::new().unwrap();
@@ -2147,7 +2145,7 @@ fn test_undo_preview_surfaces_worktree_refusal() {
 // recorded an implicit `OpRecord::Goto` for its FF, and the `Goto`
 // inverse only rewinds HEAD — silently stranding the attached thread
 // ref at the post-FF target. heddle#99 closed the bug for `merge` by
-// emitting `OpRecord::FastForwardV2` instead; this PR extends the same
+// emitting `OpRecord::FastForward` instead; this PR extends the same
 // pattern to the other call sites. Per-site tests below pin each fix.
 // ---------------------------------------------------------------------------
 
@@ -2215,7 +2213,7 @@ fn test_undo_rebase_ancestor_ff_restores_thread_ref() {
 
 /// Rebase replay: when the threads have diverged, rebase replays
 /// each commit one at a time. Each replay step records its own
-/// `OpRecord::FastForwardV2`, so a single `heddle undo` after the
+/// `OpRecord::FastForward`, so a single `heddle undo` after the
 /// rebase rewinds exactly one replayed commit — and the thread ref
 /// rewinds with it. Pre-fix, the ref was stranded at the last
 /// replayed commit while HEAD rewound to the prior step.
@@ -2336,12 +2334,12 @@ fn test_undo_pull_local_restores_thread_ref() {
 /// worktree back to the pre-merge state. During a 3-way conflict
 /// merge HEAD never moves (only the worktree gets conflict markers),
 /// so the FF is a worktree reset and the recorded
-/// `FastForwardV2`'s pre/post target ids are equal. The contract
+/// `FastForward`'s pre/post target ids are equal. The contract
 /// pinned here is that undo of the abort leaves the thread ref at
 /// `ours` — same as before the abort — rather than stranding it
 /// elsewhere. Pre-fix the implicit `OpRecord::Goto` happened to
 /// produce the same observable end state here (no strand because
-/// pre = post), but the migration to `FastForwardV2` keeps the
+/// pre = post), but the migration to `FastForward` keeps the
 /// invariant uniform across all `fast_forward_attached` call sites
 /// and future-proofs against a partial-apply merge variant that
 /// might move HEAD before abort.
@@ -2381,7 +2379,7 @@ fn test_undo_resolve_abort_keeps_thread_ref_at_ours() {
         "abort must leave HEAD at feature's pre-refresh tip"
     );
 
-    // Undo the abort — `FastForwardV2 { pre = post = feature_tip_before }`
+    // Undo the abort — `FastForward { pre = post = feature_tip_before }`
     // so the observable state is unchanged.
     heddle_must_succeed(&["undo"], temp.path());
     let repo = Repository::open(temp.path()).unwrap();
@@ -2494,7 +2492,7 @@ fn test_undo_ship_manual_resolution_restores_thread_ref() {
 /// source thread → redo must replay to the recorded post-FF SHA,
 /// not re-resolve from the source thread's (now advanced) tip. This
 /// pins heddle#99 r2's deterministic-redo contract for the rebase
-/// call sites: the recorded FastForwardV2 carries `post_target_id`
+/// call sites: the recorded FastForward carries `post_target_id`
 /// so the OpRecord is self-sufficient.
 #[test]
 fn test_redo_rebase_pins_recorded_tip_when_source_advances() {
@@ -2512,7 +2510,7 @@ fn test_redo_rebase_pins_recorded_tip_when_source_advances() {
 
     heddle_must_succeed(&["thread", "switch", "main"], temp.path());
     let main_tip_before = head_short(temp.path());
-    // Ancestor FF (main → feature): records FastForwardV2 with
+    // Ancestor FF (main → feature): records FastForward with
     // post_target_id = feature's current tip.
     heddle_must_succeed(&["rebase", "feature"], temp.path());
     assert_eq!(head_short(temp.path()), feature_at_rebase);
@@ -2550,7 +2548,7 @@ fn test_redo_rebase_pins_recorded_tip_when_source_advances() {
 /// remote source thread → redo must replay to the recorded pulled
 /// SHA, not re-resolve the remote's current tip. The bug shape is
 /// identical to the rebase case above; this pin guarantees the
-/// FastForwardV2 contract holds on the pull call site too.
+/// FastForward contract holds on the pull call site too.
 #[test]
 fn test_redo_pull_pins_recorded_tip_when_source_advances() {
     let source = TempDir::new().unwrap();
@@ -2592,7 +2590,7 @@ fn test_redo_pull_pins_recorded_tip_when_source_advances() {
 // ---------------------------------------------------------------------------
 // heddle#198 — `heddle undo` for `heddle rebase` via transaction grouping.
 //
-// Pre-fix, `rebase_ops::replay_commits` recorded one `FastForwardV2` op
+// Pre-fix, `rebase_ops::replay_commits` recorded one `FastForward` op
 // per replayed commit, each in its own undo batch. A 3-commit rebase
 // therefore needed 3 `heddle undo` invocations to roll back, and an
 // undo chain that stopped one or two steps in left the thread tip
@@ -2624,7 +2622,7 @@ fn test_undo_rebase_replay_multi_commit_rewinds_whole_transaction() {
 
     // main accumulates THREE commits on disjoint paths so the rebase
     // produces three apply_commit calls, each of which today records
-    // its own FastForwardV2 entry.
+    // its own FastForward entry.
     heddle_must_succeed(&["thread", "switch", "main"], temp.path());
     std::fs::write(temp.path().join("a.txt"), "a1").unwrap();
     heddle_must_succeed(&["capture", "-m", "a"], temp.path());

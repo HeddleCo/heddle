@@ -250,7 +250,6 @@ pub async fn cmd_retro(cli: &Cli, options: RetroCommandOptions) -> Result<()> {
                 // (heddle#354 r9).
                 OpRecord::Goto { .. }
                 | OpRecord::ThreadCreate { .. }
-                | OpRecord::ThreadCreateV2 { .. }
                 | OpRecord::ThreadDelete { .. }
                 | OpRecord::ThreadUpdate { .. }
                 | OpRecord::Fork { .. }
@@ -263,7 +262,6 @@ pub async fn cmd_retro(cli: &Cli, options: RetroCommandOptions) -> Result<()> {
                 | OpRecord::Redact { .. }
                 | OpRecord::Purge { .. }
                 | OpRecord::FastForward { .. }
-                | OpRecord::FastForwardV2 { .. }
                 | OpRecord::GitCheckpoint { .. }
                 | OpRecord::RemoteThreadUpdate { .. }
                 | OpRecord::RemoteThreadDelete { .. }
@@ -351,7 +349,6 @@ fn find_recent_turn_ts(repo: &Repository) -> Result<Option<DateTime<Utc>>> {
                 // intent-carrying variant is considered here (heddle#354 r9).
                 OpRecord::Goto { .. }
                 | OpRecord::ThreadCreate { .. }
-                | OpRecord::ThreadCreateV2 { .. }
                 | OpRecord::ThreadDelete { .. }
                 | OpRecord::ThreadUpdate { .. }
                 | OpRecord::Fork { .. }
@@ -365,7 +362,6 @@ fn find_recent_turn_ts(repo: &Repository) -> Result<Option<DateTime<Utc>>> {
                 | OpRecord::Redact { .. }
                 | OpRecord::Purge { .. }
                 | OpRecord::FastForward { .. }
-                | OpRecord::FastForwardV2 { .. }
                 | OpRecord::GitCheckpoint { .. }
                 | OpRecord::RemoteThreadUpdate { .. }
                 | OpRecord::RemoteThreadDelete { .. }

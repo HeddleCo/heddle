@@ -4,7 +4,7 @@
 use objects::store::ObjectStore;
 use std::{fs, io::Write};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use objects::object::ChangeId;
 use oplog::OpRecord;
 use repo::Repository;
@@ -213,18 +213,17 @@ fn load_rebase_state_internal(path: &std::path::Path, for_abort: bool) -> Result
                     Err(e) => return Err(e),
                     Ok(advance) => match advance {
                         // heddle#198 r4 (Codex PR #218 P2): only the
-                        // FF-advance variants (FFV2, Goto) plus the
-                        // legacy V1 FastForward read-back path can
-                        // legitimately appear in a rebase batch.
+                        // FF-advance variants plus `Goto` can legitimately
+                        // appear in a rebase batch.
                         // Anything else — MarkerCreate, ThreadX,
                         // Snapshot — would land in the committed batch
                         // verbatim and pollute undo/redo with records
                         // the rebase never produced. Strict loader
                         // rejects; abort silently drops them since the
                         // buffered FF history is discarded on rewind.
-                        OpRecord::FastForward { .. }
-                        | OpRecord::FastForwardV2 { .. }
-                        | OpRecord::Goto { .. } => pending_advances.push(advance),
+                        OpRecord::FastForward { .. } | OpRecord::Goto { .. } => {
+                            pending_advances.push(advance)
+                        }
                         // Anything else would land in the committed batch
                         // verbatim and pollute undo/redo with records the
                         // rebase never produced. Abort silently drops them (the
@@ -234,7 +233,6 @@ fn load_rebase_state_internal(path: &std::path::Path, for_abort: bool) -> Result
                         // here rather than silently rejected (heddle#354 r9).
                         OpRecord::Snapshot { .. }
                         | OpRecord::ThreadCreate { .. }
-                        | OpRecord::ThreadCreateV2 { .. }
                         | OpRecord::ThreadDelete { .. }
                         | OpRecord::ThreadUpdate { .. }
                         | OpRecord::Fork { .. }
@@ -260,7 +258,7 @@ fn load_rebase_state_internal(path: &std::path::Path, for_abort: bool) -> Result
                             return Err(anyhow!(RecoveryAdvice::rebase_state_corrupted(
                                 "Unexpected pending_advance variant in rebase state",
                                 format!(
-                                    "{} — only FastForward/FastForwardV2/Goto are accepted",
+                                    "{} — only FastForward/Goto are accepted",
                                     advance.description()
                                 ),
                             )));
@@ -374,7 +372,7 @@ mod tests {
     }
 
     fn ff_record() -> OpRecord {
-        OpRecord::FastForwardV2 {
+        OpRecord::FastForward {
             source_thread: "<rebase>".to_string(),
             target_thread: "main".to_string(),
             pre_target_id: ChangeId::generate(),
@@ -671,9 +669,8 @@ mod tests {
     /// decodes can inject non-rebase operations (e.g. `MarkerCreate`,
     /// `ThreadDelete`) into the rebase's undo/redo history — undo would
     /// replay records the rebase never produced. The strict loader
-    /// must whitelist only the FF-advance variants (`FastForwardV2`
-    /// / `Goto`) plus the legacy V1 `FastForward` read-back path,
-    /// and reject anything else.
+    /// must whitelist only the FF-advance records (`FastForward` / `Goto`) and
+    /// reject anything else.
     #[test]
     fn load_strict_rejects_non_advance_pending_record() {
         let tmp = TempDir::new().unwrap();
