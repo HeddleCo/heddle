@@ -2838,3 +2838,109 @@ fn test_merge_no_semantic_omits_top_level_symbol_deltas() {
         "top-level `semantic_changes` must be absent when --no-semantic is set: {parsed}"
     );
 }
+
+/// heddle#153/#467: `--no-semantic` must switch the merge strategy,
+/// not just suppress semantic JSON fields. This uses the same structural
+/// reshape shape as the semantic preview tests: one side reorders the
+/// file and edits `b`; the destination edits `d`.
+#[cfg(feature = "semantic")]
+#[test]
+fn test_merge_no_semantic_switches_relation_to_path_conflicts() {
+    let semantic_temp = TempDir::new().unwrap();
+    let semantic_src = create_structural_reshape_merge_fixture(&semantic_temp);
+
+    let semantic_out = heddle(
+        &[
+            "--output",
+            "json",
+            "merge",
+            "feature",
+            "-m",
+            "semantic merge",
+        ],
+        Some(semantic_temp.path()),
+    )
+    .unwrap();
+    let semantic: Value =
+        serde_json::from_str(&semantic_out).expect("semantic merge should emit JSON");
+    assert_eq!(semantic["merge_relation"], "clean_apply", "{semantic}");
+    assert_eq!(semantic["conflict_count"], 0, "{semantic}");
+    assert_eq!(semantic["conflicts"].as_array().map(Vec::len), Some(0));
+    let semantic_merged = fs::read_to_string(&semantic_src).unwrap();
+    assert!(
+        !semantic_merged.contains("<<<<<<<"),
+        "default semantic merge must not leave conflict markers: {semantic_merged}"
+    );
+    assert!(semantic_merged.contains("fn b() { let x = 22; }"));
+    assert!(semantic_merged.contains("fn d() { let x = 44; }"));
+
+    let hunk_temp = TempDir::new().unwrap();
+    let hunk_src = create_structural_reshape_merge_fixture(&hunk_temp);
+
+    let hunk_output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "merge",
+            "feature",
+            "-m",
+            "hunk merge",
+            "--no-semantic",
+        ],
+        Some(hunk_temp.path()),
+    )
+    .expect("hunk-only merge should emit process output");
+    let hunk_json = if hunk_output.stdout.is_empty() {
+        str::from_utf8(&hunk_output.stderr).unwrap_or("")
+    } else {
+        str::from_utf8(&hunk_output.stdout).unwrap_or("")
+    };
+    let hunk: Value = serde_json::from_str(hunk_json)
+        .unwrap_or_else(|_| panic!("hunk-only merge should emit JSON: {hunk_json}"));
+    assert_eq!(hunk["merge_relation"], "path_conflicts", "{hunk}");
+    assert!(
+        hunk["conflict_count"].as_u64().unwrap_or(0) >= 1,
+        "hunk-only merge must report at least one path conflict: {hunk}"
+    );
+    let hunk_merged = fs::read_to_string(&hunk_src).unwrap();
+    assert!(
+        hunk_merged.contains("<<<<<<<"),
+        "hunk-only merge must leave conflict markers: {hunk_merged}"
+    );
+}
+
+fn create_structural_reshape_merge_fixture(temp: &TempDir) -> std::path::PathBuf {
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let src = temp.path().join("lib.rs");
+    fs::write(
+        &src,
+        "fn a() { let x = 1; }\nfn b() { let x = 2; }\nfn c() { let x = 3; }\nfn d() { let x = 4; }\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
+
+    heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
+    fs::write(
+        &src,
+        "fn d() { let x = 4; }\nfn c() { let x = 3; }\nfn b() { let x = 22; }\nfn a() { let x = 1; }\n",
+    )
+    .unwrap();
+    heddle(
+        &["capture", "-m", "feature: reorder + edit b"],
+        Some(temp.path()),
+    )
+    .unwrap();
+
+    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
+    heddle(&["thread", "create", "dest"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "dest"], Some(temp.path())).unwrap();
+    fs::write(
+        &src,
+        "fn a() { let x = 1; }\nfn b() { let x = 2; }\nfn c() { let x = 3; }\nfn d() { let x = 44; }\n",
+    )
+    .unwrap();
+    heddle(&["capture", "-m", "dest: edit d"], Some(temp.path())).unwrap();
+
+    src
+}

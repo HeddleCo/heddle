@@ -72,7 +72,7 @@ pub struct ThreadPreviewReport {
     pub changed_path_count: usize,
     pub impact_categories: Vec<String>,
     pub heavy_impact_paths: Vec<String>,
-    pub semantic_result: String,
+    pub merge_relation: String,
     pub conflicts: Vec<String>,
     pub conflict_count: usize,
     pub blockers: Vec<String>,
@@ -1837,7 +1837,7 @@ fn build_thread_preview_report_with_graph(
     };
 
     let mut preview_changed_paths: Option<Vec<String>> = None;
-    let semantic_result = if let Some((target_label, target_id)) = resolved_target {
+    let merge_relation = if let Some((target_label, target_id)) = resolved_target {
         let thread_id = repo
             .refs()
             .get_thread(&ThreadName::new(&thread.thread))?
@@ -1858,18 +1858,18 @@ fn build_thread_preview_report_with_graph(
         if let Some(merge_result) = merge_plan.merge_result() {
             conflicts = merge_result.conflicts.clone();
         }
-        let semantic_result = merge_plan.relation().as_json_value().to_string();
-        if semantic_result != "already_integrated" {
+        let merge_relation = merge_plan.relation().as_json_value().to_string();
+        if merge_relation != "already_integrated" {
             preview_changed_paths = Some(merge_changed_paths(repo, &target_id, &thread_id)?);
         }
-        semantic_result
+        merge_relation
     } else {
         "no_target".to_string()
     };
 
     let mut advice =
         describe_thread_advice(thread, false, conflicts.len(), prefer_apply_recommendation);
-    if semantic_result == "already_integrated" {
+    if merge_relation == "already_integrated" {
         advice.blockers.clear();
         advice.recommended_action.clear();
         advice.thread_health = "clean".to_string();
@@ -1919,7 +1919,7 @@ fn build_thread_preview_report_with_graph(
             .map(ToString::to_string)
             .collect(),
         heavy_impact_paths: thread.heavy_impact_paths.clone(),
-        semantic_result,
+        merge_relation,
         conflict_count,
         conflicts,
         blockers: advice.blockers,
@@ -2075,7 +2075,7 @@ fn merge_output_from_report(input: MergeOutputInput<'_>) -> MergeOutput {
         merge_relation: input.merge_relation.or_else(|| {
             input
                 .preview_report
-                .map(|report| report.semantic_result.clone())
+                .map(|report| report.merge_relation.clone())
         }),
         conflict_count: input
             .conflict_count
@@ -2301,7 +2301,7 @@ fn merge_blocked_by_trust_output(
             .unwrap_or(false),
         heavy_impact_paths: thread_heavy_paths(thread),
         merge_relation: merge_relation
-            .or_else(|| preview_report.map(|report| report.semantic_result.clone())),
+            .or_else(|| preview_report.map(|report| report.merge_relation.clone())),
         conflict_count: 0,
         thread_health: trust.status.clone(),
         renames: Vec::new(),
@@ -2399,7 +2399,7 @@ fn stale_thread_merge_blocked_output(
         impact_categories: preview_report.impact_categories.clone(),
         promotion_suggested: !preview_report.heavy_impact_paths.is_empty(),
         heavy_impact_paths: preview_report.heavy_impact_paths.clone(),
-        merge_relation: Some(preview_report.semantic_result.clone()),
+        merge_relation: Some(preview_report.merge_relation.clone()),
         conflict_count: preview_report.conflict_count,
         thread_health: "blocked".to_string(),
         renames: Vec::new(),
@@ -2680,7 +2680,7 @@ fn build_preview_summary(report: Option<&ThreadPreviewReport>) -> Vec<String> {
         }
         lines.push(format!(
             "merge type: {}",
-            semantic_result_summary(&report.semantic_result)
+            merge_relation_summary(&report.merge_relation)
         ));
         if report.conflict_count > 0 {
             lines.push(format!(
@@ -2728,7 +2728,7 @@ fn build_stale_preview_summary(report: &ThreadPreviewReport) -> Vec<String> {
     }
     lines.push(format!(
         "merge type: {}",
-        semantic_result_summary(&report.semantic_result)
+        merge_relation_summary(&report.merge_relation)
     ));
     if report.conflict_count > 0 {
         lines.push(format!(
@@ -2748,7 +2748,7 @@ fn thread_mode_summary(mode: &str) -> &str {
     }
 }
 
-fn semantic_result_summary(result: &str) -> String {
+fn merge_relation_summary(result: &str) -> String {
     result.replace('_', "-")
 }
 
