@@ -108,6 +108,12 @@ const SWEPT: &[&str] = &[
     "review next",
     "review health",
     "cherry-pick",
+    // heddle#662 — additive discriminator paths for state inspection,
+    // rebase progress JSONL, and conflict show success.
+    "conflict show",
+    "inspect",
+    "rebase",
+    "show",
     // heddle#641 — swept the remaining verbs whose runtime JSON already
     // emits `output_kind`. Every value below was probed live against the
     // built binary (or read off the emitting struct for the daemon-style
@@ -184,7 +190,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "bridge git reason",
     "collapse",
     "conflict list",
-    "conflict show",
     "daemon serve",
     "daemon status",
     "delegate",
@@ -195,7 +200,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "hook install",
     "hook list",
     "hook uninstall",
-    "inspect",
     "integration doctor",
     "integration install",
     "integration list",
@@ -209,7 +213,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "marker delete",
     "marker list",
     "marker show",
-    "rebase",
     "resolve",
     "retro",
     "semantic hot",
@@ -218,7 +221,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "session segment",
     "session show",
     "session start",
-    "show",
     "stash apply",
     "stash clear",
     "stash drop",
@@ -279,6 +281,12 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         // The maintenance wrappers emit their inner tool's kind.
         "maintenance gc" => Some("gc"),
         "maintenance index" => Some("index"),
+        // `inspect` defaults to `thread show`, but the registered
+        // state-inspection schema is discriminated as `inspect_state`.
+        "inspect" => Some("inspect_state"),
+        // Rebase emits JSONL progress records rather than a single
+        // command-shaped object.
+        "rebase" => Some("rebase_progress"),
         _ => None,
     }
 }
@@ -648,6 +656,40 @@ fn init_fixture() -> TempDir {
         Some(temp.path()),
     )
     .expect("heddle init");
+    temp
+}
+
+fn init_conflicted_merge_fixture() -> TempDir {
+    let temp = init_fixture();
+    std::fs::write(temp.path().join("conflict.txt"), "base\n").unwrap();
+    heddle(&["capture", "-m", "Base"], Some(temp.path())).unwrap();
+    heddle(&["thread", "create", "feature"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("conflict.txt"), "feature version\n").unwrap();
+    heddle(&["capture", "-m", "Feature change"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "main"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("conflict.txt"), "main version\n").unwrap();
+    heddle(&["capture", "-m", "Main change"], Some(temp.path())).unwrap();
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).unwrap();
+
+    let merge = heddle_output(&["merge", "main"], Some(temp.path()))
+        .expect("heddle merge should run and report conflict state");
+    assert!(
+        !merge.status.success(),
+        "conflicted merge should exit nonzero: stdout={} stderr={}",
+        String::from_utf8_lossy(&merge.stdout),
+        String::from_utf8_lossy(&merge.stderr)
+    );
+    temp
+}
+
+fn init_rebase_fast_forward_fixture() -> TempDir {
+    let temp = init_fixture();
+    heddle(&["thread", "create", "feature"], Some(temp.path())).expect("thread create feature");
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).expect("switch feature");
+    std::fs::write(temp.path().join("feat.txt"), "feature work\n").expect("write feature file");
+    heddle(&["capture", "-m", "feature"], Some(temp.path())).expect("feature capture");
+    heddle(&["thread", "switch", "main"], Some(temp.path())).expect("switch main");
     temp
 }
 
@@ -1032,6 +1074,14 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
         // heddle#641 — the newly-swept generic-schema verbs. Their opaque
         // mirrors pin no fields, so the documented sample must be compared
         // against the live payload here.
+        "conflict_show" => (
+            init_conflicted_merge_fixture(),
+            sv(&["conflict", "show", "conflict.txt"]),
+        ),
+        "rebase_progress" => (
+            init_rebase_fast_forward_fixture(),
+            sv(&["rebase", "feature"]),
+        ),
         "gc" => (init_fixture(), sv(&["maintenance", "gc"])),
         // Stopping a daemon that is not running still exits 0 with the
         // full `daemon_stop` payload, so a bare init fixture suffices.

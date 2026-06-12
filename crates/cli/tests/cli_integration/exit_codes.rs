@@ -209,6 +209,41 @@ fn unsupported_output_json_compact_is_data_err() {
 }
 
 #[test]
+fn conflict_show_missing_id_is_data_err_with_error_envelope() {
+    let repo = init_repo();
+    let output = heddle_output(
+        &["--output", "json", "conflict", "show", "missing-id"],
+        Some(repo.path()),
+    )
+    .expect("spawn conflict show missing-id");
+    assert_eq!(
+        output.status.code(),
+        Some(65),
+        "missing conflict id should exit 65 (DataErr); stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).trim().is_empty(),
+        "missing conflict id must not print a success payload on stdout"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let envelope: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap_or_else(|err| {
+        panic!("conflict missing-id envelope not JSON: {err}\n  stderr: {stderr}")
+    });
+    assert_eq!(envelope["kind"], "conflict_not_found");
+    assert_eq!(envelope["exit_code"], 65);
+    assert!(
+        envelope["recovery_commands"]
+            .as_array()
+            .is_some_and(|commands| commands
+                .iter()
+                .any(|command| command == "heddle conflict list")),
+        "missing conflict id should point callers at conflict list: {envelope}"
+    );
+}
+
+#[test]
 fn status_on_corrupted_state_is_data_err_with_recovery_path() {
     // HeddleCo/heddle#642: corrupted msgpack state must not dead-end on
     // raw decoder internals. `heddle status` is the natural recovery

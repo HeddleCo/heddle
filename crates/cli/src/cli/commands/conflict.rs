@@ -10,7 +10,7 @@
 use objects::store::ObjectStore;
 use std::fs;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use objects::object::{ConflictSymbol, StructuredConflict};
 use repo::{MergeState, Repository};
 use serde::Serialize;
@@ -145,18 +145,9 @@ async fn run_show(cli: &Cli, args: &ConflictShowArgs) -> Result<()> {
         .iter()
         .find(|c| c.id == args.conflict_id);
     let Some(conflict) = conflict else {
-        render_conflict_not_found(cli, &repo, &args.conflict_id);
-        return Ok(());
+        return Err(anyhow!(conflict_not_found_advice(&args.conflict_id)));
     };
     render_structured_conflict(cli, &repo, conflict)
-}
-
-fn render_conflict_not_found(cli: &Cli, repo: &Repository, conflict_id: &str) {
-    if should_output_json(cli, Some(repo.config())) {
-        println!("null");
-    } else {
-        println!("conflict {conflict_id} not found");
-    }
 }
 
 fn render_structured_conflict(
@@ -199,8 +190,7 @@ fn render_active_merge_conflict(
         .iter()
         .find(|path| path.as_str() == args.conflict_id)
     else {
-        render_conflict_not_found(cli, repo, &args.conflict_id);
-        return Ok(());
+        return Err(anyhow!(conflict_not_found_advice(&args.conflict_id)));
     };
     let resolved = merge_state.resolved.iter().any(|resolved| resolved == path);
     let worktree_content = fs::read_to_string(repo.root().join(path)).ok();
@@ -251,6 +241,19 @@ fn render_active_merge_conflict(
         println!("  next: {}", view.next_action);
     }
     Ok(())
+}
+
+fn conflict_not_found_advice(conflict_id: &str) -> crate::cli::commands::RecoveryAdvice {
+    crate::cli::commands::RecoveryAdvice::safety_refusal(
+        "conflict_not_found",
+        format!("Conflict '{conflict_id}' not found"),
+        "Run `heddle conflict list` to inspect available conflicts, then retry with an id from the list.",
+        format!("conflict show was requested for missing conflict id '{conflict_id}'"),
+        "showing a nonexistent conflict would give automation an ambiguous empty payload",
+        "no conflict state, refs, or worktree files were changed",
+        "heddle conflict list",
+        vec!["heddle conflict list".to_string()],
+    )
 }
 
 fn load_head_conflicts(repo: &Repository) -> Result<StructuredConflict> {

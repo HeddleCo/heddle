@@ -198,7 +198,7 @@ pub use session::{
     cmd_session_end, cmd_session_list, cmd_session_segment, cmd_session_show, cmd_session_start,
 };
 pub use shell::cmd_shell;
-pub use show::cmd_show;
+pub use show::{cmd_inspect_state, cmd_show};
 pub use snapshot::{SnapshotAgentOverrides, cmd_snapshot};
 pub use stack::cmd_stack;
 pub use stash::cmd_stash;

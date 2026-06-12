@@ -108,7 +108,7 @@ schema_registry! {
     (&["bridge git status"], BridgeGitStatusSchema),
     (&["log"], LogSchema),
     (&["log --reflog"], LogReflogSchema),
-    (&["show"], ShowSchema),
+    (&["show", "inspect"], ShowSchema),
     (&["marker list"], MarkerListSchema),
     (&["marker create", "marker delete", "marker show"], MarkerOpSchema),
     (&["marker delete --prefix"], MarkerBulkDeleteSchema),
@@ -2178,6 +2178,7 @@ pub struct ReflogEntrySchema {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ShowSchema {
+    pub output_kind: String,
     pub repository_capability: String,
     pub storage_model: String,
     pub change_id: String,

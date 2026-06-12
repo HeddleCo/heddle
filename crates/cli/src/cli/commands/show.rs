@@ -18,6 +18,7 @@ use crate::{
 
 #[derive(Serialize)]
 struct ShowOutput {
+    output_kind: &'static str,
     repository_capability: String,
     storage_model: String,
     change_id: String,
@@ -73,11 +74,23 @@ struct ShowGitOverlayImportHintOutput {
 }
 
 pub fn cmd_show(cli: &Cli, state_spec: Option<String>) -> Result<()> {
+    cmd_show_with_output_kind(cli, state_spec, "show")
+}
+
+pub fn cmd_inspect_state(cli: &Cli, state_spec: Option<String>) -> Result<()> {
+    cmd_show_with_output_kind(cli, state_spec, "inspect_state")
+}
+
+fn cmd_show_with_output_kind(
+    cli: &Cli,
+    state_spec: Option<String>,
+    output_kind: &'static str,
+) -> Result<()> {
     let state_spec = state_spec.unwrap_or_else(|| "HEAD".to_string());
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd);
     if let Some(probe) = build_plain_git_verification_probe(start)? {
-        return render_plain_git_show(cli, &probe, &state_spec);
+        return render_plain_git_show(cli, &probe, &state_spec, output_kind);
     }
 
     let repo = Repository::open(start)?;
@@ -93,6 +106,7 @@ pub fn cmd_show(cli: &Cli, state_spec: Option<String>) -> Result<()> {
     let state = require_resolved_state(&repo, &id)?;
 
     let output = ShowOutput {
+        output_kind,
         repository_capability: repo.capability_label().to_string(),
         storage_model: repo.storage_model_label().to_string(),
         git_overlay_import_hint: repo.git_overlay_import_hint()?.map(|hint| {
@@ -149,12 +163,14 @@ fn render_plain_git_show(
     cli: &Cli,
     probe: &PlainGitVerificationProbe,
     state_spec: &str,
+    output_kind: &'static str,
 ) -> Result<()> {
     if should_output_json(cli, None) {
         println!(
             "{}",
             serde_json::to_string(&serde_json::json!({
                 "repository_capability": "plain-git",
+                "output_kind": output_kind,
                 "storage_model": "git",
                 "requested": state_spec,
                 "state": null,

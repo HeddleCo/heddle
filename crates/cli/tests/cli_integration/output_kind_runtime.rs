@@ -45,6 +45,9 @@ fn heddle_json(args: &[&str], temp: &TempDir) -> Value {
     let stdout = heddle(&argv, Some(temp.path())).unwrap_or_else(|err| {
         panic!("heddle {argv:?} failed: {err}");
     });
+    if let Ok(value) = serde_json::from_str(stdout.trim()) {
+        return value;
+    }
     let line = stdout
         .lines()
         .next()
@@ -287,6 +290,49 @@ fn branch_rename_and_delete_advertised_thread_kinds_are_runtime_truths() {
 
     let delete = heddle_json(&["branch", "-d", "renamed"], &temp);
     assert_output_kind(&delete, "thread_drop");
+}
+
+#[test]
+fn show_and_inspect_state_emit_distinct_output_kinds() {
+    let temp = init_and_capture();
+
+    let show = heddle_json(&["show", "HEAD"], &temp);
+    assert_output_kind(&show, "show");
+
+    let inspect_state = heddle_json(&["inspect", "HEAD"], &temp);
+    assert_output_kind(&inspect_state, "inspect_state");
+
+    let inspect_thread = heddle_json(&["inspect"], &temp);
+    assert_output_kind(&inspect_thread, "thread_show");
+}
+
+#[test]
+fn rebase_json_records_emit_progress_output_kind() {
+    let temp = init_and_capture();
+    heddle(&["thread", "create", "feature"], Some(temp.path())).expect("thread create feature");
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).expect("switch feature");
+    fs::write(temp.path().join("feat.txt"), "feature work\n").expect("write feature file");
+    heddle(&["capture", "-m", "feature"], Some(temp.path())).expect("feature capture");
+    heddle(&["thread", "switch", "main"], Some(temp.path())).expect("switch main");
+
+    let output = heddle(
+        &["rebase", "feature", "--output", "json"],
+        Some(temp.path()),
+    )
+    .expect("rebase feature");
+    let lines = output
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert!(
+        !lines.is_empty(),
+        "rebase JSON output should emit at least one record"
+    );
+    for line in lines {
+        let value: Value = serde_json::from_str(line)
+            .unwrap_or_else(|err| panic!("rebase line not JSON: {err}\n  line: {line}"));
+        assert_output_kind(&value, "rebase_progress");
+    }
 }
 
 #[test]

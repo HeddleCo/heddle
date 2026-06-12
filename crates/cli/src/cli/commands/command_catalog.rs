@@ -779,6 +779,11 @@ const WORKTREE_MUTATION: CommandContract = CommandContract {
     ..MUTATING
 };
 
+const WORKTREE_MUTATION_JSONL: CommandContract = CommandContract {
+    json_kind: "jsonl",
+    ..WORKTREE_MUTATION
+};
+
 const WORKTREE_ONLY_MUTATION: CommandContract = CommandContract {
     may_move_ref: false,
     writes_heddle_refs: false,
@@ -1566,7 +1571,14 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["conflict", "show"],
-        opaque_schemas(READ_JSON, &["conflict show"]),
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["conflict show"]),
+            &[json_discriminator(
+                Some("conflict show"),
+                "output_kind",
+                "conflict_show",
+            )],
+        ),
     ),
     entry(
         &["continue"],
@@ -1919,7 +1931,21 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["inspect"],
-        category(documented_schemas(READ_JSON, &["inspect"]), "states"),
+        category(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["inspect"]),
+                &[
+                    json_discriminator(Some("inspect"), "output_kind", "inspect_state"),
+                    json_discriminator_no_schema(
+                        "inspect without a state target aliases `thread show`; the \
+                         registered `inspect` schema mirrors the state-inspection path",
+                        "output_kind",
+                        "thread_show",
+                    ),
+                ],
+            ),
+            "states",
+        ),
     ),
     entry(&["integration"], surface(GROUP, "admin")),
     entry(
@@ -2205,7 +2231,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["rebase"],
-        category(opaque_schemas(WORKTREE_MUTATION, &["rebase"]), "threads"),
+        category(
+            json_discriminators(
+                opaque_schemas(WORKTREE_MUTATION_JSONL, &["rebase"]),
+                &[json_discriminator(
+                    Some("rebase"),
+                    "output_kind",
+                    "rebase_progress",
+                )],
+            ),
+            "threads",
+        ),
     ),
     entry(&["redact"], category(GROUP, "recovery")),
     entry(
@@ -2483,7 +2519,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["show"],
-        front_door(documented_schemas(READ_JSON, &["show"]), 140),
+        front_door(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["show"]),
+                &[json_discriminator(Some("show"), "output_kind", "show")],
+            ),
+            140,
+        ),
     ),
     entry(
         &["start"],
@@ -5672,6 +5714,7 @@ mod tests {
         let catalog = build_command_catalog();
         for (display, kind) in [
             ("watch", "jsonl"),
+            ("rebase", "jsonl"),
             ("status", "json_or_jsonl"),
             ("thread show", "json_or_jsonl"),
             ("workspace show", "json_or_jsonl"),
@@ -5746,6 +5789,7 @@ mod tests {
                 "clone",
                 "commit",
                 "commands",
+                "conflict show",
                 "continue",
                 "context set",
                 "context get",
@@ -5771,6 +5815,8 @@ mod tests {
                 "fork",
                 "goto",
                 "init",
+                "inspect",
+                "inspect",
                 // `log` appears twice: the entry advertises both `log` and the
                 // `log --reflog` variant (`log_reflog`), mirroring `undo`/`clone`.
                 "log",
@@ -5787,6 +5833,7 @@ mod tests {
                 "push",
                 "query",
                 "ready",
+                "rebase",
                 "redact apply",
                 "redact list",
                 "redact show",
@@ -5806,6 +5853,7 @@ mod tests {
                 "review health",
                 "schemas",
                 "land",
+                "show",
                 "start",
                 "stash list",
                 "stash show",

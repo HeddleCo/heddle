@@ -1782,6 +1782,7 @@ State detail view, pretty-printed.
 
 ```json
 {
+  "output_kind": "show",
   "repository_capability": "git-overlay",
   "storage_model": "git+heddle-sidecar",
   "change_id": "hd-def456",
@@ -2977,10 +2978,16 @@ true` and `status` is `"applied"`:
 {"change_id": "hd-collapsed123", "collapsed": 3, "message": "collapse feature checkpoints", "parents": ["hd-base123"]}
 ```
 
-`heddle conflict list|show --output json` emit:
+`heddle conflict list --output json` emits:
 
 ```json
 {"conflicts": [{"id": "conflict-1", "kind": "content", "path": "src/lib.rs", "candidate_resolutions": []}]}
+```
+
+`heddle conflict show --output json` emits:
+
+```json
+{"output_kind": "conflict_show", "kind": "active_merge_conflict", "id": "conflict-1", "file": "src/lib.rs", "symbol": "text_merge", "resolved": false, "ours_state": "hd-ours123", "theirs_state": "hd-theirs456", "base_state": "hd-base789", "worktree_content": "<<<<<<< ours\n...\n>>>>>>> theirs\n", "recommended_action": "heddle resolve src/lib.rs", "recommended_action_template": {"argv_template": ["heddle", "resolve", "src/lib.rs"]}, "next_action": "heddle resolve src/lib.rs", "next_action_template": {"argv_template": ["heddle", "resolve", "src/lib.rs"]}}
 ```
 
 `heddle context set|get|list|history|edit|supersede|rm|check|suggest|audit --output json` emit per-subcommand shapes (each carries `output_kind` set to the snake-cased subcommand, e.g. `context_set`, `context_get`) — there is no single shared shape. For example, `context set` (and `edit`/`supersede`/`rm`) reports the mutated target and the new state:
@@ -3045,7 +3052,7 @@ names a new thread for the fork):
 `heddle inspect --output json` emits:
 
 ```json
-{"repository_capability": "native", "storage_model": "native", "change_id": "hd-sqr398d", "change_id_full": "hd-sqr398dvx9ay", "content_hash": "sha256:abc123", "tree": "sha256:def456", "parents": ["hd-base123"], "intent": "capture parser fix", "confidence": 0.91, "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "codex", "model": "gpt-5", "session_id": "session-123"}, "created_at": "2026-01-01T00:00:00Z", "status": "Complete", "verification": {"tests_passed": true}, "git_checkpoint": "abc123"}
+{"output_kind": "inspect_state", "repository_capability": "native", "storage_model": "native", "change_id": "hd-sqr398d", "change_id_full": "hd-sqr398dvx9ay", "content_hash": "sha256:abc123", "tree": "sha256:def456", "parents": ["hd-base123"], "intent": "capture parser fix", "confidence": 0.91, "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "codex", "model": "gpt-5", "session_id": "session-123"}, "created_at": "2026-01-01T00:00:00Z", "status": "Complete", "verification": {"tests_passed": true}, "git_checkpoint": "abc123"}
 ```
 
 `heddle integration list|install|doctor|uninstall|upgrade --output json` emit:
@@ -3086,7 +3093,7 @@ set to the snake-cased subcommand, e.g. `purge_apply`, `purge_list`).
 `heddle rebase --output json` emits:
 
 ```json
-{"rebased": true, "old_base": "hd-old123", "new_base": "hd-new456", "change_id": "hd-result789", "conflicts": []}
+{"output_kind": "rebase_progress", "status": "fast_forwarded", "to": "hd-result789"}
 ```
 
 `heddle redact apply|list|show --output json` emit (each carries

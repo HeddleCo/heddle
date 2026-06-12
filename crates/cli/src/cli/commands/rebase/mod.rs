@@ -201,8 +201,12 @@ fn run_rebase(
             && should_output_json(cli, Some(repo.config()))
         {
             println!(
-                "{{\"status\": \"fast_forwarded\", \"to\": \"{}\"}}",
-                target_change_id
+                "{}",
+                serde_json::json!({
+                    "output_kind": "rebase_progress",
+                    "status": "fast_forwarded",
+                    "to": target_change_id,
+                })
             );
         } else if cli.is_some() {
             // Lead with the active thread name (where applicable) so
@@ -271,7 +275,13 @@ fn emit_up_to_date_if_trusted(repo: &Repository, cli: Option<&Cli>) -> Result<()
     let trust = build_repository_verification_state(repo);
     if trust.verified {
         if should_output_json(cli, Some(repo.config())) {
-            println!("{{\"status\": \"up_to_date\"}}");
+            println!(
+                "{}",
+                serde_json::json!({
+                    "output_kind": "rebase_progress",
+                    "status": "up_to_date",
+                })
+            );
         } else {
             println!("Already up to date");
         }
@@ -291,6 +301,7 @@ fn emit_up_to_date_blocked_by_trust(
         println!(
             "{}",
             serde_json::to_string(&json!({
+                "output_kind": "rebase_progress",
                 "status": "blocked",
                 "reason": "repository_verification",
                 "summary": trust.summary,
@@ -371,7 +382,13 @@ fn handle_abort(
     if let Some(cli) = cli
         && should_output_json(cli, Some(repo.config()))
     {
-        println!("{{\"status\": \"aborted\"}}");
+        println!(
+            "{}",
+            serde_json::json!({
+                "output_kind": "rebase_progress",
+                "status": "aborted",
+            })
+        );
     } else if cli.is_some() {
         println!("Rebase aborted");
     }

@@ -85,8 +85,12 @@ fn replay_commits_internal(
             && should_output_json(cli, Some(repo.config()))
         {
             println!(
-                "{{\"status\": \"applying\", \"commit\": \"{}\"}}",
-                commit_id.short()
+                "{}",
+                serde_json::json!({
+                    "output_kind": "rebase_progress",
+                    "status": "applying",
+                    "commit": commit_id.short(),
+                })
             );
         } else if cli.is_some() {
             println!("Applying {}...", commit_id.short());
@@ -116,8 +120,12 @@ fn replay_commits_internal(
                     && should_output_json(cli, Some(repo.config()))
                 {
                     println!(
-                        "{{\"status\": \"conflict\", \"commit\": \"{}\"}}",
-                        commit_id.short()
+                        "{}",
+                        serde_json::json!({
+                            "output_kind": "rebase_progress",
+                            "status": "conflict",
+                            "commit": commit_id.short(),
+                        })
                     );
                 } else if cli.is_some() {
                     println!(
@@ -241,8 +249,12 @@ fn resume_manual_resolution_if_present(
             && should_output_json(cli, Some(repo.config()))
         {
             println!(
-                "{{\"status\": \"conflict\", \"commit\": \"{}\"}}",
-                pending_commit.short()
+                "{}",
+                serde_json::json!({
+                    "output_kind": "rebase_progress",
+                    "status": "conflict",
+                    "commit": pending_commit.short(),
+                })
             );
         } else if cli.is_some() {
             println!(
@@ -287,9 +299,13 @@ fn resume_manual_resolution_if_present(
         && should_output_json(cli, Some(repo.config()))
     {
         println!(
-            "{{\"status\": \"manual-resolution-accepted\", \"commit\": \"{}\", \"resolved_as\": \"{}\"}}",
-            pending_commit.short(),
-            current_state.change_id.short()
+            "{}",
+            serde_json::json!({
+                "output_kind": "rebase_progress",
+                "status": "manual-resolution-accepted",
+                "commit": pending_commit.short(),
+                "resolved_as": current_state.change_id.short(),
+            })
         );
     } else if cli.is_some() {
         println!(
