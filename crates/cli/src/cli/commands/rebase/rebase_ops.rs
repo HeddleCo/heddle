@@ -12,9 +12,10 @@ use repo::Repository;
 
 use super::{
     super::{advice::RecoveryAdvice, ff_record::ff_advance_deferred},
+    emit_rebase_progress,
     rebase_state::{load_rebase_state, save_rebase_state},
 };
-use crate::cli::{Cli, should_output_json};
+use crate::cli::Cli;
 
 /// Synthetic `source_thread` for `OpRecord::FastForwardV2` entries
 /// emitted during a rebase replay. Each replayed commit becomes its
@@ -71,37 +72,26 @@ fn replay_commits_internal(
 
     while state.current_index < state.commits_to_replay.len() {
         let commit_id = state.commits_to_replay[state.current_index];
-        let commit_state = repo
-            .store()
-            .get_state(&commit_id)?
-            .ok_or_else(|| {
-                anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
-                    &commit_id.to_string(),
-                    "commit",
-                ))
-            })?;
+        let commit_state = repo.store().get_state(&commit_id)?.ok_or_else(|| {
+            anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
+                &commit_id.to_string(),
+                "commit",
+            ))
+        })?;
 
-        if let Some(cli) = cli
-            && should_output_json(cli, Some(repo.config()))
+        if !emit_rebase_progress(
+            repo,
+            cli,
+            serde_json::json!({
+                "status": "applying",
+                "commit": commit_id.short(),
+            }),
+        )? && cli.is_some()
         {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "output_kind": "rebase_progress",
-                    "status": "applying",
-                    "commit": commit_id.short(),
-                })
-            );
-        } else if cli.is_some() {
             println!("Applying {}...", commit_id.short());
         }
 
-        let result = apply_commit(
-            repo,
-            &commit_state,
-            &current_head,
-            discard_local_changes,
-        )?;
+        let result = apply_commit(repo, &commit_state, &current_head, discard_local_changes)?;
 
         match result {
             ApplyResult::Success { new_head, advance } => {
@@ -116,18 +106,15 @@ fn replay_commits_internal(
                 state.pending_manual_resolution = Some(commit_id);
                 state.pre_conflict_head = Some(current_head);
                 save_rebase_state(rebase_state_path, &state)?;
-                if let Some(cli) = cli
-                    && should_output_json(cli, Some(repo.config()))
+                if !emit_rebase_progress(
+                    repo,
+                    cli,
+                    serde_json::json!({
+                        "status": "conflict",
+                        "commit": commit_id.short(),
+                    }),
+                )? && cli.is_some()
                 {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "output_kind": "rebase_progress",
-                            "status": "conflict",
-                            "commit": commit_id.short(),
-                        })
-                    );
-                } else if cli.is_some() {
                     println!(
                         "Conflict applying {}. Fix conflicts and run 'heddle rebase --continue'",
                         commit_id.short()
@@ -152,14 +139,15 @@ fn replay_commits_internal(
 
     fs::remove_file(rebase_state_path)?;
 
-    if let Some(cli) = cli
-        && should_output_json(cli, Some(repo.config()))
+    if !emit_rebase_progress(
+        repo,
+        cli,
+        serde_json::json!({
+            "status": "completed",
+            "onto": state.onto.to_string(),
+        }),
+    )? && cli.is_some()
     {
-        println!(
-            "{{\"status\": \"completed\", \"onto\": \"{}\"}}",
-            state.onto
-        );
-    } else if cli.is_some() {
         println!("Rebase completed");
     }
 
@@ -235,28 +223,23 @@ fn resume_manual_resolution_if_present(
         return Ok(());
     };
 
-    let current_state = repo
-        .current_state()?
-        .ok_or_else(|| {
-            anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
-                "<current>",
-                "current state",
-            ))
-        })?;
+    let current_state = repo.current_state()?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
+            "<current>",
+            "current state",
+        ))
+    })?;
 
     if current_state.change_id == pre_conflict_head || current_state.change_id == pending_commit {
-        if let Some(cli) = cli
-            && should_output_json(cli, Some(repo.config()))
+        if !emit_rebase_progress(
+            repo,
+            cli,
+            serde_json::json!({
+                "status": "conflict",
+                "commit": pending_commit.short(),
+            }),
+        )? && cli.is_some()
         {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "output_kind": "rebase_progress",
-                    "status": "conflict",
-                    "commit": pending_commit.short(),
-                })
-            );
-        } else if cli.is_some() {
             println!(
                 "Conflict applying {}. Capture a manual resolution, then run 'heddle rebase --continue'",
                 pending_commit.short()
@@ -295,19 +278,16 @@ fn resume_manual_resolution_if_present(
     state.pre_conflict_head = None;
     save_rebase_state(rebase_state_path, state)?;
 
-    if let Some(cli) = cli
-        && should_output_json(cli, Some(repo.config()))
+    if !emit_rebase_progress(
+        repo,
+        cli,
+        serde_json::json!({
+            "status": "manual-resolution-accepted",
+            "commit": pending_commit.short(),
+            "resolved_as": current_state.change_id.short(),
+        }),
+    )? && cli.is_some()
     {
-        println!(
-            "{}",
-            serde_json::json!({
-                "output_kind": "rebase_progress",
-                "status": "manual-resolution-accepted",
-                "commit": pending_commit.short(),
-                "resolved_as": current_state.change_id.short(),
-            })
-        );
-    } else if cli.is_some() {
         println!(
             "Accepted manual resolution for {} as {}",
             pending_commit.short(),
@@ -340,25 +320,19 @@ fn apply_commit(
     let current_tree_hash = get_tree_for_state(repo, current_head)?;
     let commit_tree_hash = commit_state.tree;
 
-    let current_tree = repo
-        .store()
-        .get_tree(&current_tree_hash)?
-        .ok_or_else(|| {
-            anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
-                &current_tree_hash.to_string(),
-                "current tree",
-            ))
-        })?;
+    let current_tree = repo.store().get_tree(&current_tree_hash)?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
+            &current_tree_hash.to_string(),
+            "current tree",
+        ))
+    })?;
 
-    let commit_tree = repo
-        .store()
-        .get_tree(&commit_tree_hash)?
-        .ok_or_else(|| {
-            anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
-                &commit_tree_hash.to_string(),
-                "commit tree",
-            ))
-        })?;
+    let commit_tree = repo.store().get_tree(&commit_tree_hash)?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
+            &commit_tree_hash.to_string(),
+            "commit tree",
+        ))
+    })?;
 
     let parent_tree_hash = if let Some(parent_id) = commit_state.parents.first() {
         get_tree_for_state(repo, parent_id)?
@@ -372,15 +346,12 @@ fn apply_commit(
         );
     };
 
-    let parent_tree = repo
-        .store()
-        .get_tree(&parent_tree_hash)?
-        .ok_or_else(|| {
-            anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
-                &parent_tree_hash.to_string(),
-                "parent tree",
-            ))
-        })?;
+    let parent_tree = repo.store().get_tree(&parent_tree_hash)?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
+            &parent_tree_hash.to_string(),
+            "parent tree",
+        ))
+    })?;
 
     let changes = compute_tree_diff(&parent_tree, &commit_tree);
 
@@ -621,15 +592,12 @@ fn copy_state_metadata(
 }
 
 fn get_tree_for_state(repo: &Repository, state_id: &ChangeId) -> Result<ContentHash> {
-    let state = repo
-        .store()
-        .get_state(state_id)?
-        .ok_or_else(|| {
-            anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
-                &state_id.to_string(),
-                "state",
-            ))
-        })?;
+    let state = repo.store().get_state(state_id)?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::rebase_referenced_state_missing(
+            &state_id.to_string(),
+            "state",
+        ))
+    })?;
     Ok(state.tree)
 }
 

@@ -791,8 +791,13 @@ fn runtime_top_level_keys(argv: &[&str], dir: &std::path::Path) -> BTreeSet<Stri
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let first_line = stdout.lines().next().unwrap_or("").trim();
-    let parsed: Value = serde_json::from_str(first_line)
-        .unwrap_or_else(|err| panic!("{argv:?} stdout not JSON: {err}\n  line: {first_line}"));
+    let parsed: Value = serde_json::from_str(first_line).unwrap_or_else(|line_err| {
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|full_err| {
+            panic!(
+                "{argv:?} stdout not JSON: first line error: {line_err}; full stdout error: {full_err}\n  stdout: {stdout}"
+            )
+        })
+    });
     parsed
         .as_object()
         .unwrap_or_else(|| panic!("{argv:?} top-level JSON is not an object: {first_line}"))
@@ -883,6 +888,12 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             std::fs::write(t.path().join("a.txt"), "base").unwrap();
             heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
             (t, sv(&["goto", "main"]))
+        }
+        "inspect_state" => {
+            let t = init_fixture();
+            std::fs::write(t.path().join("a.txt"), "base").unwrap();
+            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            (t, sv(&["inspect", "HEAD"]))
         }
         "revert" => {
             let t = init_fixture();

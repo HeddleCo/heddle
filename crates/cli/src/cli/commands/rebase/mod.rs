@@ -4,11 +4,11 @@
 use objects::store::ObjectStore;
 use std::fs;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use objects::object::ThreadName;
 use refs::Head;
 use repo::Repository;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::{
     action_line::print_next_step,
@@ -41,6 +41,33 @@ use rebase_state::{
 };
 
 const REBASE_STATE_FILE: &str = "REBASE_STATE";
+
+pub(super) fn emit_rebase_progress(
+    repo: &Repository,
+    cli: Option<&Cli>,
+    payload: Value,
+) -> Result<bool> {
+    let Some(cli) = cli else {
+        return Ok(false);
+    };
+    if !should_output_json(cli, Some(repo.config())) {
+        return Ok(false);
+    }
+
+    let mut object = payload
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow!("rebase progress payload must be a JSON object"))?;
+    object.insert(
+        "output_kind".to_string(),
+        Value::String("rebase_progress".to_string()),
+    );
+    println!(
+        "{}",
+        serde_json::to_string(&Value::Object(object)).context("serialize rebase progress")?
+    );
+    Ok(true)
+}
 
 pub(crate) enum OperatorContinueStatus {
     Continued,
@@ -197,18 +224,15 @@ fn run_rebase(
         )?;
         flush_rebase_batch(repo, &[advance], &mint_rebase_transaction_id())?;
 
-        if let Some(cli) = cli
-            && should_output_json(cli, Some(repo.config()))
+        if !emit_rebase_progress(
+            repo,
+            cli,
+            json!({
+                "status": "fast_forwarded",
+                "to": target_change_id.to_string(),
+            }),
+        )? && cli.is_some()
         {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "output_kind": "rebase_progress",
-                    "status": "fast_forwarded",
-                    "to": target_change_id,
-                })
-            );
-        } else if cli.is_some() {
             // Lead with the active thread name (where applicable) so
             // operators don't need to map a worktree path back to a
             // thread mentally. JSON output is unchanged.
@@ -246,14 +270,15 @@ fn run_rebase(
 
     save_rebase_state(&rebase_state_path, &rebase_state)?;
 
-    if let Some(cli) = cli
-        && should_output_json(cli, Some(repo.config()))
+    if !emit_rebase_progress(
+        repo,
+        cli,
+        json!({
+            "status": "started",
+            "commits": commits_to_replay.len(),
+        }),
+    )? && cli.is_some()
     {
-        println!(
-            "{{\"status\": \"started\", \"commits\": {}}}",
-            commits_to_replay.len()
-        );
-    } else if cli.is_some() {
         println!(
             "Rebasing {} commits onto {}",
             commits_to_replay.len(),
@@ -274,15 +299,13 @@ fn emit_up_to_date_if_trusted(repo: &Repository, cli: Option<&Cli>) -> Result<()
     };
     let trust = build_repository_verification_state(repo);
     if trust.verified {
-        if should_output_json(cli, Some(repo.config())) {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "output_kind": "rebase_progress",
-                    "status": "up_to_date",
-                })
-            );
-        } else {
+        if !emit_rebase_progress(
+            repo,
+            Some(cli),
+            json!({
+                "status": "up_to_date",
+            }),
+        )? {
             println!("Already up to date");
         }
         return Ok(());
@@ -298,18 +321,18 @@ fn emit_up_to_date_blocked_by_trust(
 ) -> Result<()> {
     let recommended_action = repository_verification_primary_command(&trust);
     if should_output_json(cli, Some(repo.config())) {
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
-                "output_kind": "rebase_progress",
+        emit_rebase_progress(
+            repo,
+            Some(cli),
+            json!({
                 "status": "blocked",
                 "reason": "repository_verification",
                 "summary": trust.summary,
                 "recommended_action": recommended_action.clone(),
                 "recommended_action_template": action_template(&recommended_action),
                 "recovery_commands": trust.recovery_commands,
-            }))?
-        );
+            }),
+        )?;
     } else {
         println!(
             "Rebase is up to date, but repository verification is blocked: {}",
@@ -379,17 +402,14 @@ fn handle_abort(
 
     fs::remove_file(rebase_state_path)?;
 
-    if let Some(cli) = cli
-        && should_output_json(cli, Some(repo.config()))
+    if !emit_rebase_progress(
+        repo,
+        cli,
+        json!({
+            "status": "aborted",
+        }),
+    )? && cli.is_some()
     {
-        println!(
-            "{}",
-            serde_json::json!({
-                "output_kind": "rebase_progress",
-                "status": "aborted",
-            })
-        );
-    } else if cli.is_some() {
         println!("Rebase aborted");
     }
 

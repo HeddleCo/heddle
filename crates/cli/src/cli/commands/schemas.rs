@@ -16,13 +16,13 @@
 
 use std::{collections::BTreeMap, sync::OnceLock};
 
-use anyhow::{anyhow, Result};
-use schemars::{schema_for, JsonSchema};
+use anyhow::{Result, anyhow};
+use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{command_catalog, command_runtime_contract, CommandCatalogOutput, RecoveryAdvice};
-use crate::cli::{should_output_json, Cli};
+use super::{CommandCatalogOutput, RecoveryAdvice, command_catalog, command_runtime_contract};
+use crate::cli::{Cli, should_output_json};
 
 static SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
 static DOCUMENTED_SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
@@ -108,7 +108,7 @@ schema_registry! {
     (&["bridge git status"], BridgeGitStatusSchema),
     (&["log"], LogSchema),
     (&["log --reflog"], LogReflogSchema),
-    (&["show", "inspect"], ShowSchema),
+    (&["show"], ShowSchema),
     (&["marker list"], MarkerListSchema),
     (&["marker create", "marker delete", "marker show"], MarkerOpSchema),
     (&["marker delete --prefix"], MarkerBulkDeleteSchema),
@@ -2802,18 +2802,53 @@ mod tests {
             .unwrap_or_else(|| panic!("schema has `{property}` property"))
     }
 
+    fn resolve_schema_ref<'a>(root: &'a Value, reference: &str) -> &'a Value {
+        reference
+            .strip_prefix("#/$defs/")
+            .or_else(|| reference.strip_prefix("#/definitions/"))
+            .and_then(|name| {
+                root.get("$defs")
+                    .or_else(|| root.get("definitions"))
+                    .and_then(|defs| defs.get(name))
+            })
+            .unwrap_or_else(|| panic!("schema reference `{reference}` resolves"))
+    }
+
+    fn schema_declares_property(root: &Value, schema: &Value, property: &str) -> bool {
+        if let Some(reference) = schema.get("$ref").and_then(|value| value.as_str()) {
+            return schema_declares_property(root, resolve_schema_ref(root, reference), property);
+        }
+
+        if schema
+            .get("properties")
+            .and_then(|properties| properties.get(property))
+            .is_some()
+        {
+            return true;
+        }
+
+        for combinator in ["anyOf", "oneOf"] {
+            if let Some(schemas) = schema.get(combinator).and_then(|value| value.as_array()) {
+                return !schemas.is_empty()
+                    && schemas
+                        .iter()
+                        .all(|schema| schema_declares_property(root, schema, property));
+            }
+        }
+
+        schema
+            .get("allOf")
+            .and_then(|value| value.as_array())
+            .is_some_and(|schemas| {
+                schemas
+                    .iter()
+                    .any(|schema| schema_declares_property(root, schema, property))
+            })
+    }
+
     fn schema_allows_null(root: &Value, schema: &Value) -> bool {
         if let Some(reference) = schema.get("$ref").and_then(|value| value.as_str()) {
-            let definition = reference
-                .strip_prefix("#/$defs/")
-                .or_else(|| reference.strip_prefix("#/definitions/"))
-                .and_then(|name| {
-                    root.get("$defs")
-                        .or_else(|| root.get("definitions"))
-                        .and_then(|defs| defs.get(name))
-                })
-                .unwrap_or_else(|| panic!("schema reference `{reference}` resolves"));
-            return schema_allows_null(root, definition);
+            return schema_allows_null(root, resolve_schema_ref(root, reference));
         }
 
         if schema.get("type") == Some(&Value::String("null".to_string())) {
@@ -2841,16 +2876,7 @@ mod tests {
 
     fn collect_string_enums<'a>(root: &'a Value, schema: &'a Value, values: &mut Vec<&'a str>) {
         if let Some(reference) = schema.get("$ref").and_then(|value| value.as_str()) {
-            let definition = reference
-                .strip_prefix("#/$defs/")
-                .or_else(|| reference.strip_prefix("#/definitions/"))
-                .and_then(|name| {
-                    root.get("$defs")
-                        .or_else(|| root.get("definitions"))
-                        .and_then(|defs| defs.get(name))
-                })
-                .unwrap_or_else(|| panic!("schema reference `{reference}` resolves"));
-            collect_string_enums(root, definition, values);
+            collect_string_enums(root, resolve_schema_ref(root, reference), values);
         }
 
         if let Some(enum_values) = schema.get("enum").and_then(|value| value.as_array()) {
@@ -2929,10 +2955,7 @@ mod tests {
             }
             let bare = schema_for_registered_verb(verb)
                 .unwrap_or_else(|| panic!("documented verb `{verb}` has no registered schema"));
-            let declares = bare
-                .get("properties")
-                .and_then(|properties| properties.get("output_kind"))
-                .is_some();
+            let declares = schema_declares_property(&bare, &bare, "output_kind");
             if !declares {
                 missing.push(format!(
                     "{verb}: catalog advertises output_kind=`{}` but the schema struct declares no `output_kind` property",
@@ -3096,9 +3119,7 @@ mod tests {
         fn walk(root: &Value, schema: &Value, verb: &str, path: &str) {
             match schema {
                 Value::Object(object) => {
-                    if let Some(properties) =
-                        object.get("properties").and_then(|p| p.as_object())
-                    {
+                    if let Some(properties) = object.get("properties").and_then(|p| p.as_object()) {
                         let required: Vec<&str> = object
                             .get("required")
                             .and_then(|value| value.as_array())

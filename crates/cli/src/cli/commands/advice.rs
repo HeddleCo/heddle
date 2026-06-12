@@ -433,6 +433,7 @@ impl RecoveryAdvice {
         )
     }
 
+    #[cfg(not(feature = "client"))]
     pub(crate) fn network_feature_unavailable(operation: &str) -> Self {
         Self::safety_refusal(
             "network_feature_unavailable",

@@ -1337,24 +1337,7 @@ export interface InitSchema {
   status: string;
 }
 
-export interface InspectSchema {
-  agent?: ShowAgentSchema | null;
-  change_id: string;
-  change_id_full: string;
-  confidence?: number | null;
-  content_hash: string;
-  created_at: string;
-  git_checkpoint?: string | null;
-  intent?: string | null;
-  output_kind: "inspect_state";
-  parents: string[];
-  principal: ShowPrincipalSchema;
-  repository_capability: string;
-  status: string;
-  storage_model: string;
-  tree: string;
-  verification?: unknown;
-}
+export type InspectSchema = ShowSchema | ThreadShowSchema;
 
 export type IntegrationDoctorSchema = Record<string, unknown>;
 
@@ -2122,6 +2105,25 @@ export interface ShowSchema {
   created_at: string;
   git_checkpoint?: string | null;
   intent?: string | null;
+  output_kind: string;
+  parents: string[];
+  principal: ShowPrincipalSchema;
+  repository_capability: string;
+  status: string;
+  storage_model: string;
+  tree: string;
+  verification?: unknown;
+}
+
+export interface ShowSchema2 {
+  agent?: ShowAgentSchema | null;
+  change_id: string;
+  change_id_full: string;
+  confidence?: number | null;
+  content_hash: string;
+  created_at: string;
+  git_checkpoint?: string | null;
+  intent?: string | null;
   output_kind: "show";
   parents: string[];
   principal: ShowPrincipalSchema;
@@ -2642,6 +2644,67 @@ export interface ThreadShowSchema {
   next_action?: string | null;
   next_action_template?: ActionTemplateSchema | null;
   operation?: unknown;
+  output_kind?: string | null;
+  parent_thread?: string | null;
+  path?: string | null;
+  probe_confidence?: number | null;
+  probe_source?: string | null;
+  promotion_suggested: boolean;
+  recommended_action?: string | null;
+  recommended_action_template?: ActionTemplateSchema | null;
+  recovery_commands: string[];
+  remote_tracking?: unknown;
+  report_flush_state?: string | null;
+  repository_context?: RepositoryContextInfoSchema | null;
+  repository_label: string;
+  session_id?: string | null;
+  shared_target_dir?: string | null;
+  sibling_threads: string[];
+  stack_depth: number;
+  stale_from_parent: boolean;
+  target_thread?: string | null;
+  task?: string | null;
+  thinking_level?: string | null;
+  thread_health: string;
+  thread_mode?: ThreadModeSchema | null;
+  thread_state?: ThreadStateSchema | null;
+  usage_summary?: unknown;
+  verification: RepositoryVerificationStateSchema;
+  verification_summary: unknown;
+  visibility: string;
+}
+
+export interface ThreadShowSchema2 {
+  actor?: ActorInfoSchema | null;
+  attach_reason?: string | null;
+  auto: boolean;
+  base_root?: string | null;
+  base_state?: string | null;
+  blockers: string[];
+  changed_paths: string[];
+  child_threads: string[];
+  confidence_summary: unknown;
+  coordination_status: CoordinationStatusSchema;
+  current_state?: string | null;
+  execution_path?: string | null;
+  freshness?: ThreadFreshnessSchema | null;
+  git_branch_tip?: string | null;
+  harness?: string | null;
+  heavy_impact_paths: string[];
+  heddle_session_id?: string | null;
+  history_imported: boolean;
+  impact_categories: ThreadImpactCategorySchema[];
+  integration_policy_result: unknown;
+  is_current: boolean;
+  is_isolated: boolean;
+  last_activity_at?: string | null;
+  last_progress_at?: string | null;
+  name: string;
+  native_actor_key?: string | null;
+  native_parent_actor_key?: string | null;
+  next_action?: string | null;
+  next_action_template?: ActionTemplateSchema | null;
+  operation?: unknown;
   output_kind: "thread_show";
   parent_thread?: string | null;
   path?: string | null;
@@ -3065,7 +3128,7 @@ export interface HeddleVerbOutputs {
   "session segment": SessionSegmentEnvelopeSchema;
   "session show": SessionShowSchema;
   "session start": SessionStartSchema;
-  show: ShowSchema;
+  show: ShowSchema2;
   stack: StackSchema;
   "stack ready": StackReadySchema;
   "stack snapshot": StackSnapshotSchema;
@@ -3096,7 +3159,7 @@ export interface HeddleVerbOutputs {
   "thread rename": ThreadRenameSchema;
   "thread resolve": ThreadResolveSchema;
   "thread revoke-approval": ThreadRevokeApprovalSchema;
-  "thread show": ThreadShowSchema;
+  "thread show": ThreadShowSchema2;
   "thread switch": ThreadSwitchSchema;
   "transaction abort": TransactionAbortSchema;
   "transaction begin": TransactionBeginSchema;

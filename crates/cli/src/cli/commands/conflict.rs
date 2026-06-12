@@ -56,6 +56,14 @@ struct ActiveMergeConflictShowOutput {
     next_action_template: Option<ActionTemplate>,
 }
 
+#[derive(Serialize)]
+struct StructuredConflictShowOutput<'a> {
+    output_kind: &'static str,
+    kind: &'static str,
+    #[serde(flatten)]
+    conflict: &'a ConflictSymbol,
+}
+
 pub async fn run(cli: &Cli, command: &ConflictCommands) -> Result<()> {
     match command {
         ConflictCommands::List => run_list(cli).await,
@@ -156,9 +164,14 @@ fn render_structured_conflict(
     conflict: &ConflictSymbol,
 ) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
+        let view = StructuredConflictShowOutput {
+            output_kind: "conflict_show",
+            kind: "stored_structured_conflict",
+            conflict,
+        };
         println!(
             "{}",
-            serde_json::to_string(conflict).context("serialize conflict")?
+            serde_json::to_string(&view).context("serialize conflict")?
         );
     } else {
         println!("conflict {}", conflict.id);

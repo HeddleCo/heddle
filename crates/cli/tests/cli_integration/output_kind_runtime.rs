@@ -14,6 +14,11 @@
 
 use std::fs;
 
+use objects::{
+    object::{Blob, ConflictSide, ConflictSymbol, StructuredConflict, SymbolAnchor},
+    store::ObjectStore,
+};
+use repo::Repository;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -314,6 +319,8 @@ fn rebase_json_records_emit_progress_output_kind() {
     fs::write(temp.path().join("feat.txt"), "feature work\n").expect("write feature file");
     heddle(&["capture", "-m", "feature"], Some(temp.path())).expect("feature capture");
     heddle(&["thread", "switch", "main"], Some(temp.path())).expect("switch main");
+    fs::write(temp.path().join("main.txt"), "main work\n").expect("write main file");
+    heddle(&["capture", "-m", "main"], Some(temp.path())).expect("main capture");
 
     let output = heddle(
         &["rebase", "feature", "--output", "json"],
@@ -328,11 +335,57 @@ fn rebase_json_records_emit_progress_output_kind() {
         !lines.is_empty(),
         "rebase JSON output should emit at least one record"
     );
+    let mut statuses = Vec::new();
     for line in lines {
         let value: Value = serde_json::from_str(line)
             .unwrap_or_else(|err| panic!("rebase line not JSON: {err}\n  line: {line}"));
         assert_output_kind(&value, "rebase_progress");
+        statuses.push(
+            value["status"]
+                .as_str()
+                .unwrap_or_else(|| panic!("rebase line missing status: {value}"))
+                .to_string(),
+        );
     }
+    assert_eq!(
+        statuses,
+        vec!["started", "applying", "completed"],
+        "fixture must exercise replay JSONL, not the fast-forward path"
+    );
+}
+
+#[test]
+fn conflict_show_stored_conflict_emits_output_kind() {
+    let temp = init_and_capture();
+    let repo = Repository::open(temp.path()).expect("open repo");
+    let head = repo
+        .current_state()
+        .expect("read current state")
+        .expect("current state exists");
+
+    let conflict = ConflictSymbol {
+        id: "stored-1".to_string(),
+        anchor: SymbolAnchor::new("main.rs", "main"),
+        base: ConflictSide::from_body(Some(head.change_id), "fn main() {}\n"),
+        ours: ConflictSide::from_body(Some(head.change_id), "fn main() { ours(); }\n"),
+        theirs: ConflictSide::from_body(Some(head.change_id), "fn main() { theirs(); }\n"),
+        candidate_resolutions: Vec::new(),
+    };
+    let structured = StructuredConflict::new(vec![conflict]);
+    let blob_hash = repo
+        .store()
+        .put_blob(&Blob::new(structured.encode().expect("encode conflict")))
+        .expect("store structured conflict blob");
+    let updated = head.with_structured_conflicts(blob_hash);
+    repo.store()
+        .put_state(&updated)
+        .expect("overwrite head state");
+
+    let value = heddle_json(&["conflict", "show", "stored-1"], &temp);
+    assert_output_kind(&value, "conflict_show");
+    assert_eq!(value["kind"].as_str(), Some("stored_structured_conflict"));
+    assert_eq!(value["id"].as_str(), Some("stored-1"));
+    assert_eq!(value["anchor"]["file"].as_str(), Some("main.rs"));
 }
 
 #[test]
