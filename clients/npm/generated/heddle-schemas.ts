@@ -2266,6 +2266,7 @@ export interface StatusSchema {
   session_id?: string | null;
   state?: StateInfoSchema | null;
   storage_model: string;
+  submodules: SubmoduleStatusEntrySchema[];
   target_thread?: string | null;
   task?: string | null;
   thinking_level?: string | null;
@@ -2277,6 +2278,15 @@ export interface StatusSchema {
   usage_summary?: unknown;
   verification: RepositoryVerificationStateSchema;
   worktree_changed_path_count: number;
+}
+
+export interface SubmoduleInfoSchema {
+  commit: string;
+}
+
+export interface SubmoduleStatusEntrySchema {
+  path: string;
+  submodule: SubmoduleInfoSchema;
 }
 
 export interface SwitchCheckoutSchema {
