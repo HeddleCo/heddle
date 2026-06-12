@@ -183,7 +183,11 @@ fn test_cli_capture_blocks_large_git_overlay_deletion_without_force() {
     let stderr = str::from_utf8(&json_refusal.stderr).expect("stderr should be utf8");
     let envelope: Value = serde_json::from_str(stderr.trim()).expect("stderr should be JSON");
     assert_eq!(envelope["kind"], "large_capture_requires_force");
-    assert_eq!(envelope["code"], "large_capture_requires_force");
+    assert!(
+        envelope.get("code").is_none(),
+        "`kind` is the envelope's only discriminator; the redundant `code` \
+         duplicate was dropped pre-1.0 (HeddleCo/heddle#647): {envelope}"
+    );
     assert!(
         envelope["error"]
             .as_str()

@@ -236,21 +236,29 @@ async fn async_main() -> Result<()> {
         "CLI startup complete"
     );
 
+    // Unsupported-output gates exit through `from_error` so the process
+    // exit code and the envelope's `exit_code` field agree: DataErr (65),
+    // because `--output json[-compact]` here is well-formed syntax the
+    // command semantically rejects — not a malformed invocation (Usage 64).
+    // Agents treat 64 as "fix your argv" and retry-with-mutation; 65 tells
+    // them to fall back to a supported output mode (HeddleCo/heddle#648).
     if explicit_json_requested(&cli) && !command_contract.supports_json {
         telemetry.shutdown();
         let err = anyhow::anyhow!(cli::cli::commands::RecoveryAdvice::json_unsupported(
             &command_name
         ));
+        let code = HeddleExitCode::from_error(&err);
         print_error_with_hint(&cli, &err);
-        std::process::exit(HeddleExitCode::Usage.into());
+        std::process::exit(code.into());
     }
     if cli::cli::output_is_compact(&cli) && !command_contract.supports_json_compact {
         telemetry.shutdown();
         let err = anyhow::anyhow!(
             cli::cli::commands::RecoveryAdvice::json_compact_unsupported(&command_name)
         );
+        let code = HeddleExitCode::from_error(&err);
         print_error_with_hint(&cli, &err);
-        std::process::exit(HeddleExitCode::Usage.into());
+        std::process::exit(code.into());
     }
 
     match run_local_idempotency_if_requested(&cli, &command_name, command_supports_op_id) {
