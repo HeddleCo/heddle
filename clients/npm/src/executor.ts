@@ -130,31 +130,32 @@ export class SpawnExecutor implements Executor {
     const child = spawn(this.binaryPath, argv, spawnOptions);
     const stderr: Buffer[] = [];
     child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
+    const childExit = this.waitForExit(child);
     let spawnError: Error | undefined;
     child.on("error", (err: Error) => {
       spawnError = err;
     });
 
     const stdoutLines: string[] = [];
-    if (child.stdout) {
-      const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
-      // readline yields each line as it arrives on stdout — the loop
-      // produces values during the child's lifetime, not after exit.
-      for await (const line of rl) {
-        stdoutLines.push(line);
-        yield line;
+    let stdoutDone = false;
+    try {
+      if (child.stdout) {
+        const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
+        // readline yields each line as it arrives on stdout — the loop
+        // produces values during the child's lifetime, not after exit.
+        for await (const line of rl) {
+          stdoutLines.push(line);
+          yield line;
+        }
+      }
+      stdoutDone = true;
+    } finally {
+      if (!stdoutDone) {
+        await this.terminateChild(child, childExit);
       }
     }
 
-    const exitCode = await new Promise<number>((resolve) => {
-      const settle = (code: number | null, signal: NodeJS.Signals | null) =>
-        resolve(code ?? (signal ? 128 : 1));
-      if (child.exitCode !== null || child.signalCode !== null) {
-        settle(child.exitCode, child.signalCode);
-      } else {
-        child.once("close", settle);
-      }
-    });
+    const exitCode = await childExit;
 
     if (spawnError) throw spawnError;
     if (exitCode !== 0) {
@@ -166,13 +167,48 @@ export class SpawnExecutor implements Executor {
     }
   }
 
-  /** `[...verb tokens, --output json, -C <repo>?, --op-id <id>?, ...args]`. */
+  /** `[--output json, -C <repo>?, --op-id <id>?, ...verb tokens, ...args]`. */
   private buildArgv(req: ExecRequest): string[] {
-    const argv: string[] = [...req.verb.split(" "), "--output", "json"];
+    const argv: string[] = ["--output", "json"];
     const repoPath = req.repoPath ?? this.repoPath;
     if (repoPath !== undefined) argv.push("-C", repoPath);
     if (req.opId !== undefined) argv.push("--op-id", req.opId);
+    argv.push(...req.verb.split(" "));
     argv.push(...req.args);
     return argv;
+  }
+
+  private waitForExit(child: ReturnType<typeof spawn>): Promise<number> {
+    return new Promise<number>((resolve) => {
+      const settle = (code: number | null, signal: NodeJS.Signals | null) =>
+        resolve(code ?? (signal ? 128 : 1));
+      if (child.exitCode !== null || child.signalCode !== null) {
+        settle(child.exitCode, child.signalCode);
+      } else {
+        child.once("close", settle);
+      }
+    });
+  }
+
+  private async terminateChild(
+    child: ReturnType<typeof spawn>,
+    childExit: Promise<number>,
+  ): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      await childExit;
+      return;
+    }
+
+    child.kill("SIGTERM");
+    const killTimer = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+      }
+    }, 250);
+    try {
+      await childExit;
+    } finally {
+      clearTimeout(killTimer);
+    }
   }
 }

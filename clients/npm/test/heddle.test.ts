@@ -256,3 +256,52 @@ test("real-binary smoke test", { skip: !process.env["HEDDLE_BIN"] }, async () =>
   const schemas = await heddle.run("schemas");
   assert.ok(schemas, "schemas payload should parse");
 });
+
+// --- SpawnExecutor regression tests (codex catch-up findings, 2026-06-12) ---
+
+import { SpawnExecutor } from "../src/index.js";
+import { join } from "node:path";
+
+const ECHO_ARGV = join(process.cwd(), "test", "fixtures", "echo-argv.cjs");
+const STREAM_FOREVER = join(process.cwd(), "test", "fixtures", "stream-forever.cjs");
+
+test("buildArgv puts global flags before verb tokens (value-taking verb flags)", async () => {
+  // Regression: `marker delete --prefix` ends in a value-taking flag; with
+  // globals appended after the verb, `--output` was consumed as the
+  // --prefix value and the verb could not run through the API at all.
+  const exec = new SpawnExecutor({ binaryPath: ECHO_ARGV });
+  const result = await exec.exec({
+    verb: "marker delete --prefix",
+    args: ["foo"],
+    repoPath: "/repos/demo",
+    opId: "op-9",
+  });
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(JSON.parse(result.stdout.trim()), [
+    "--output", "json",
+    "-C", "/repos/demo",
+    "--op-id", "op-9",
+    "marker", "delete", "--prefix",
+    "foo",
+  ]);
+});
+
+test("execStream kills the child when the consumer stops early", async () => {
+  // Regression: breaking out of the async generator after the first event
+  // left watch-mode children running until process exit.
+  const exec = new SpawnExecutor({ binaryPath: STREAM_FOREVER });
+  let childPid: number | undefined;
+  for await (const line of exec.execStream({ verb: "watch", args: [] })) {
+    childPid = Number(line);
+    break; // closes the generator at the yield
+  }
+  assert.ok(childPid && childPid > 0, "first line is the stub's pid");
+  // The finally block sends SIGTERM; give it a beat, then probe liveness.
+  const alive = (pid: number) => {
+    try { process.kill(pid, 0); return true; } catch { return false; }
+  };
+  for (let i = 0; i < 40 && alive(childPid); i++) {
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  assert.equal(alive(childPid), false, "stream child must be terminated on early close");
+});
