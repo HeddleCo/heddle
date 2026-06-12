@@ -432,7 +432,6 @@ fn test_cli_help_shows_thread_surface() {
 
     let advanced = heddle(&["help", "advanced"], Some(temp.path())).unwrap();
     assert!(advanced.contains("\n  thread"));
-    assert!(advanced.contains("\n  workspace"));
     assert!(advanced.contains("review"));
     assert!(!advanced.contains("\n  worktree"));
     assert!(!advanced.contains("\n  lane"));

@@ -55,10 +55,8 @@ const SWEPT: &[&str] = &[
     "clone",
     "diff",
     "undo",
-    "redo",
     "thread list",
     "thread show",
-    "workspace show",
     "doctor docs",
     "doctor schemas",
     "schemas",
@@ -68,16 +66,11 @@ const SWEPT: &[&str] = &[
     "bridge git reconcile",
     "bridge backfill-fidelity",
     // heddle#272 — output_kind sweep on the named-by-persona verbs.
-    "stack",
-    "stack ready",
-    "stack snapshot",
-    "goto",
-    "fork",
     "revert",
-    "purge apply",
-    "purge list",
     "redact apply",
     "redact list",
+    "redact purge apply",
+    "redact purge list",
     "redact show",
     "redact trust add",
     "redact trust list",
@@ -111,8 +104,6 @@ const SWEPT: &[&str] = &[
     "cherry-pick",
     // heddle#662 — additive discriminator paths for state inspection,
     // rebase progress JSONL, and conflict show success.
-    "conflict show",
-    "inspect",
     "rebase",
     "show",
     // heddle#641 — swept the remaining verbs whose runtime JSON already
@@ -128,8 +119,6 @@ const SWEPT: &[&str] = &[
     "agent serve",
     "agent status",
     "agent stop",
-    "blame",
-    "branch",
     "bridge git pull",
     "bridge git push",
     "continue",
@@ -256,10 +245,6 @@ fn expected_output_kind(display: &str) -> String {
 /// path rule. Frozen wire format — agents already key off these.
 fn output_kind_override(display: &str) -> Option<&'static str> {
     match display {
-        // `workspace show` was instrumented in PR #251 as
-        // `workspace_summary` (the underlying struct's semantic name)
-        // rather than the snake-cased path. Wire-format-stable.
-        "workspace show" => Some("workspace_summary"),
         // heddle#641 — runtime-probed wire values that pre-date the
         // snake-cased-path rule. The catalog advertises what the
         // commands actually emit TODAY; renaming any of these is a
@@ -271,9 +256,6 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         // they emit the delegate's kind.
         "agent capture" => Some("capture"),
         "agent ready" => Some("ready"),
-        // Git-compat verbs delegate to the thread family and emit the
-        // delegate's kind.
-        "branch" => Some("thread_list"),
         "start" => Some("thread_start"),
         "switch" => Some("thread_switch"),
         // `doctor` is implemented by the diagnose module.
@@ -281,9 +263,9 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         // The maintenance wrappers emit their inner tool's kind.
         "maintenance gc" => Some("gc"),
         "maintenance index" => Some("index"),
-        // `inspect` defaults to `thread show`, but the registered
-        // state-inspection schema is discriminated as `inspect_state`.
-        "inspect" => Some("inspect_state"),
+        // `redact purge` preserves the pre-consolidation wire values.
+        "redact purge apply" => Some("purge_apply"),
+        "redact purge list" => Some("purge_list"),
         // Rebase emits JSONL progress records rather than a single
         // command-shaped object.
         "rebase" => Some("rebase_progress"),
@@ -761,9 +743,7 @@ fn runtime_invocation_args(
     display: &str,
 ) -> Option<(&'static [&'static str], bool /* expect_ok */)> {
     match display {
-        "stack" => Some((&["stack"], true)),
-        "stack ready" => Some((&["stack", "ready"], true)),
-        "purge list" => Some((&["purge", "list"], true)),
+        "redact purge list" => Some((&["redact", "purge", "list"], true)),
         "redact list" => Some((&["redact", "list"], true)),
         "redact trust list" => Some((&["redact", "trust", "list"], true)),
         "stash list" => Some((&["stash", "list"], true)),
@@ -771,8 +751,6 @@ fn runtime_invocation_args(
         "context list" => Some((&["context", "list"], true)),
         "review next" => Some((&["review", "next"], true)),
         "review health" => Some((&["review", "health"], true)),
-        // `fork` succeeds in an init'd repo (forks the empty initial state).
-        "fork" => Some((&["fork"], true)),
         // heddle#641 — the swept verbs that run clean (exit 0, full JSON
         // payload) in the shared init'd fixture, verified live before
         // being added here. Each pins runtime emission against the
@@ -785,7 +763,6 @@ fn runtime_invocation_args(
         // has no equivalent escape hatch here) is runtime-covered by
         // its `agent ready` delegation probe instead.
         "abort" => Some((&["abort"], true)),
-        "branch" => Some((&["branch"], true)),
         "continue" => Some((&["continue"], true)),
         "doctor" => Some((&["doctor"], true)),
         "log" => Some((&["log"], true)),
@@ -1031,8 +1008,23 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
             .expect("redact apply");
             (
                 t,
-                sv(&["purge", "apply", "HEAD", "--path", "secrets.env", "--force"]),
+                sv(&[
+                    "redact",
+                    "purge",
+                    "apply",
+                    "HEAD",
+                    "--path",
+                    "secrets.env",
+                    "--force",
+                ]),
             )
+        }
+        "query_attribution" => {
+            let t = init_fixture();
+            std::fs::create_dir_all(t.path().join("src")).unwrap();
+            std::fs::write(t.path().join("src/lib.rs"), "pub fn run() {}\n").unwrap();
+            heddle(&["commit", "-m", "base"], Some(t.path())).expect("commit");
+            (t, sv(&["query", "--attribution", "src/lib.rs", "--context"]))
         }
         "redact_trust_add" => (
             init_fixture(),

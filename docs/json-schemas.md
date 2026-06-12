@@ -95,14 +95,12 @@ specifiers. Pass any of them — they all resolve to the same change ID:
   `--output json` verb's `change_id` field, e.g. `hd-sqr398dvx9ay`. Any
   unambiguous prefix of length 4 or more works; ambiguous prefixes
   yield an `ambiguous state ID prefix '<X>' matches: <list>` error.
-* **Marker name** — anything created by `heddle marker create <name>`,
-  e.g. `failed-build-2026-05-09`.
 * **`HEAD`, `@`, `HEAD~N`, `@~N`** — relative walks from the active
   thread's tip.
 * **Thread name** — resolves to that thread's tip.
 
 Verbs covered: `show`, `diff`, `revert`, `cherry-pick`,
-`goto`, `blame --state`, `log --since`, `review show`,
+`switch`, `query --attribution --state`, `log --since`, `review show`,
 `review sign`, `discuss open|list|resolve --state`, `retro --since`.
 The `heddle log --output json` `change_id` field is the canonical short form
 that downstream verbs consume.
@@ -1838,42 +1836,6 @@ State detail view, pretty-printed.
 
 ---
 
-## `heddle marker list --output json`
-
-```json
-{
-  "markers": [
-    {"name": "v1.0.0", "change_id": "hd-abc123"}
-  ]
-}
-```
-
-| Field | Type | Optionality | Semantics |
-|-------|------|-------------|-----------|
-| `markers` | array<object> | required | Empty array when no markers exist. |
-| `markers[].name` | string | required | Marker name. |
-| `markers[].change_id` | string | required | Short change-id the marker points at. |
-
-`heddle marker create|delete|show` emit:
-
-```json
-{"name": "v1.0.0", "change_id": "hd-abc123", "message": "Created marker 'v1.0.0' at hd-abc123"}
-```
-
-`marker delete --prefix` emits:
-
-```json
-{
-  "deleted": [
-    {"name": "tmp/audit", "change_id": "hd-abc123"}
-  ],
-  "count": 1,
-  "message": "Deleted 1 marker with prefix 'tmp/'"
-}
-```
-
----
-
 ## `heddle thread list --output json`
 
 ```json
@@ -1942,78 +1904,6 @@ for the field-level definition. Notable invariants:
   `impact_categories` are empty arrays — never omitted.
 - `shared_target_dir` is `null` when the thread uses cargo's default
   per-checkout `target/` (was previously omitted).
-
----
-
-## `heddle workspace show --output json`
-
-Control-tower view across every active thread.
-
-| Field | Type | Optionality | Semantics |
-|-------|------|-------------|-----------|
-| `repository`, `repository_capability`, `repository_label`, `storage_model`, `hosted_enabled` | scalars | required | `repository_label` is the human-facing identity. |
-| `repository_context` | object | optional | Present for managed child checkouts; includes parent repository and recorded target/parent thread context. |
-| `operation` | object \| null | required | |
-| `remote_tracking` | object \| null | required | |
-| `verification` | object | required | Full `RepositoryVerificationState`; top-level workspace recommendations defer to this when verification is blocked. |
-| `recommended_action` | string | required | Empty string when no action. |
-| `current_thread` | string \| null | required | |
-| `groups` | array<object> | required | One per non-empty bucket; can be empty. |
-| `groups[].id` | enum string | required | `current` / `stacked` / `parallel` / `ready` / `blocked` / `recent`. |
-| `groups[].label` | string | required | Human label. |
-| `groups[].threads` | array<ThreadSummary> | required | At least one element per emitted group. |
-| `available_git_refs` | array<object> | required | Git refs available for optional adoption/import; not counted as active threads and not nested in `groups`. |
-| `available_git_refs[].name`, `git_commit`, `recommended_action`, `recommended_action_template` | scalars/object | required except `recommended_action_template` may be null | Typed import guidance for a Git ref not yet modeled as a Heddle thread. |
-| `thread_count` | int | required | |
-
-```json
-{
-  "output_kind": "workspace_summary",
-  "repository": "/work/project",
-  "repository_capability": "git-overlay",
-  "storage_model": "git+heddle-sidecar",
-  "hosted_enabled": false,
-  "operation": null,
-  "remote_tracking": null,
-  "verification": {
-    "verified": true,
-    "status": "clean",
-    "repository_mode": "git-overlay",
-    "heddle_initialized": true,
-    "git_branch": "main",
-    "heddle_thread": "feature/parser-fast",
-    "worktree_dirty": false,
-    "import_state": "clean",
-    "mapping_state": "clean",
-    "remote_drift": "clean",
-    "active_operation": null,
-    "default_remote": null,
-    "clone_verification": "not_applicable",
-    "machine_contract": "available",
-    "summary": "Git overlay and Heddle agree",
-    "recommended_action": "",
-    "recovery_commands": [],
-    "checks": []
-  },
-  "recommended_action": "heddle commit -m \"...\"",
-  "current_thread": "feature/parser-fast",
-  "groups": [
-    {
-      "id": "current",
-      "label": "Current",
-      "threads": []
-    }
-  ],
-  "available_git_refs": [
-    {
-      "name": "support/git-only",
-      "git_commit": "9fceb02",
-      "recommended_action": "heddle adopt --ref support/git-only"
-    }
-  ],
-  "thread_count": 1
-}
-```
 
 ---
 
@@ -2326,19 +2216,6 @@ human-readable dump text in `dump` instead of writing a second stdout payload.
 }
 ```
 
----
-
-## `heddle harness-bridge --output json`
-
-Hidden harness bridge output is JSONL-capable and registered for automation
-contract coverage.
-
-```json
-{"event": "ready"}
-```
-
----
-
 ## `heddle bridge git init|export|import|sync|push|pull --output json`
 
 All bridge ops emit JSON via `serde_json::json!{}` with consistent
@@ -2636,42 +2513,6 @@ lives in `recovery_commands`.
 
 ---
 
-## `heddle attempt --output json`
-
-Run N isolated candidates and recommend the best thread to inspect or merge.
-
-```json
-{
-  "status": "completed",
-  "action": "attempt",
-  "message": "2/3 attempt(s) succeeded; recommended: attempt-1",
-  "command": "cargo test",
-  "evaluate": "cargo test",
-  "attempts_total": 3,
-  "attempts_succeeded": 2,
-  "attempts_dropped": 1,
-  "attempts": [
-    {
-      "index": 1,
-      "thread": "attempt-1",
-      "status": "succeeded",
-      "primary_exit_code": 0,
-      "primary_duration_secs": 1.24,
-      "evaluate_exit_code": 0,
-      "evaluate_duration_secs": 0.81,
-      "captured_state": "hd-sqr398dvx9ay",
-      "diff_files": 2,
-      "thread_dropped": false,
-      "note": null
-    }
-  ],
-  "recommended": "attempt-1",
-  "next_action": "heddle ready --thread attempt-1"
-}
-```
-
----
-
 ## `heddle continue|abort --output json`
 
 Operator recovery commands share one command-result envelope.
@@ -2711,44 +2552,6 @@ Refresh the active or named thread, or report the verification/action blocker.
 }
 ```
 
----
-
-## `heddle delegate --output json`
-
-Create isolated delegated threads from the current thread.
-
-```json
-{
-  "parent_thread": "main",
-  "delegated": [
-    {
-      "name": "delegate-1",
-      "task": "fix parser",
-      "path": "../delegate-1",
-      "execution_path": "../delegate-1"
-    }
-  ],
-  "message": "Delegated 1 thread(s)"
-}
-```
-
----
-
-## `heddle goto --output json`
-
-Move the active checkout to a resolved state.
-
-```json
-{
-  "output_kind": "goto",
-  "target": "hd-sqr398dvx9ay",
-  "intent": "capture parser fix",
-  "message": "Now at: hd-sqr398dvx9ay"
-}
-```
-
----
-
 ## `heddle clean --output json`
 
 List or remove untracked worktree paths.
@@ -2760,72 +2563,6 @@ List or remove untracked worktree paths.
   "dry_run": true
 }
 ```
-
----
-
-## `heddle branch --output json`
-
-Git adapter thread listing and mutation. With no branch name it
-emits the same top-level verification/list contract as `thread list`; with a
-name, delete, or rename it emits a thread operation result.
-
-```json
-{
-  "output_kind": "thread_create",
-  "name": "feature/parser",
-  "message": "Created thread 'feature/parser' at hd-sqr398dvx9ay",
-  "thread": {
-    "name": "feature/parser",
-    "operation": null,
-    "remote_tracking": null,
-    "base_state": "hd-sqr398dvx9ay",
-    "base_root": "c5b5ee6e",
-    "current_state": "hd-sqr398dvx9ay",
-    "path": null,
-    "execution_path": null,
-    "actor": null,
-    "harness": null,
-    "thinking_level": null,
-    "usage_summary": null,
-    "last_progress_at": null,
-    "last_activity_at": "2026-05-23T23:32:39Z",
-    "report_flush_state": null,
-    "attach_reason": null,
-    "thread_mode": "materialized",
-    "thread_state": "active",
-    "freshness": "current",
-    "visibility": "materialized",
-    "target_thread": "main",
-    "parent_thread": null,
-    "child_threads": [],
-    "sibling_threads": [],
-    "stack_depth": 0,
-    "stale_from_parent": false,
-    "task": null,
-    "changed_paths": [],
-    "promotion_suggested": false,
-    "impact_categories": [],
-    "heavy_impact_paths": [],
-    "verification_summary": {},
-    "confidence_summary": {},
-    "integration_policy_result": {},
-    "coordination_status": "clean",
-    "is_current": false,
-    "is_isolated": true,
-    "thread_health": "clean",
-    "blockers": [],
-    "recommended_action": "",
-    "git_branch_tip": null,
-    "history_imported": true,
-    "auto": false,
-    "shared_target_dir": null
-  },
-  "path": null,
-  "execution_path": null
-}
-```
-
----
 
 ## `heddle switch --output json`
 
@@ -2863,30 +2600,6 @@ Preview or apply a ref reconciliation between Git and Heddle.
   ]
 }
 ```
-
----
-
-## `heddle stack --output json`
-
-`heddle stack` emits:
-
-```json
-{"output_kind": "stack", "thread": "main", "stack": null, "stacks": []}
-```
-
-`heddle stack ready` emits:
-
-```json
-{"output_kind": "stack_ready", "thread": "main", "next_action": {"kind": "unknown"}}
-```
-
-`heddle stack snapshot` emits a `RepositorySnapshot` flattened beneath the discriminator, so the root carries `output_kind` alongside `version`, `captured_at`, `stacks`, and `threads` — there is no `thread`/`snapshot` wrapper:
-
-```json
-{"output_kind": "stack_snapshot", "version": 1, "captured_at": "2026-05-28T15:43:36Z", "stacks": [{"root": {"name": "feature-x", "children": []}}], "threads": [{"thread": "feature-x", "parent_thread": null, "base_state": "hd-sqr398dvx9ay", "current_state": "hd-sqr398dvx9ay", "state": "active", "freshness": "current"}]}
-```
-
----
 
 ## `heddle stash push --output json`
 
@@ -2958,7 +2671,7 @@ Every verified everyday/agent runtime schema is a concrete machine-contract
 mirror. Advanced/internal/admin opaque entries are counted separately
 outside clean verification coverage.
 
-`heddle blame --output json` emits structured attribution that mirrors
+`heddle query --attribution <path> --output json` emits structured attribution that mirrors
 `log` / `show`: each line (and each entry in `origins`) carries a
 `principal` object (`name`, `email`) and an `agent` field that is either
 a structured object (`provider`, `model`, optional `session_id` /
@@ -2966,7 +2679,7 @@ a structured object (`provider`, `model`, optional `session_id` /
 required:
 
 ```json
-{"output_kind": "blame", "file": "src/lib.rs", "context": [], "lines": [{"line_number": 1, "content": "pub fn run() {}", "change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z", "origins": [{"change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z"}]}]}
+{"output_kind": "query_attribution", "status": "completed", "file": "src/lib.rs", "lines": [{"line_number": 1, "content": "pub fn run() {}", "change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z", "origins": [{"change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z"}]}]}
 ```
 
 `heddle bridge git ingest|reason --output json` emit:
@@ -2993,18 +2706,6 @@ true` and `status` is `"applied"`:
 
 ```json
 {"change_id": "hd-collapsed123", "collapsed": 3, "message": "collapse feature checkpoints", "parents": ["hd-base123"]}
-```
-
-`heddle conflict list --output json` emits:
-
-```json
-{"conflicts": [{"id": "conflict-1", "kind": "content", "path": "src/lib.rs", "candidate_resolutions": []}]}
-```
-
-`heddle conflict show --output json` emits:
-
-```json
-{"output_kind": "conflict_show", "kind": "active_merge_conflict", "id": "conflict-1", "file": "src/lib.rs", "symbol": "text_merge", "resolved": false, "ours_state": "hd-ours123", "theirs_state": "hd-theirs456", "base_state": "hd-base789", "worktree_content": "<<<<<<< ours\n...\n>>>>>>> theirs\n", "recommended_action": "heddle resolve src/lib.rs", "recommended_action_template": {"argv_template": ["heddle", "resolve", "src/lib.rs"]}, "next_action": "heddle resolve src/lib.rs", "next_action_template": {"argv_template": ["heddle", "resolve", "src/lib.rs"]}}
 ```
 
 `heddle context set|get|list|history|edit|supersede|rm|check|suggest|audit --output json` emit per-subcommand shapes (each carries `output_kind` set to the snake-cased subcommand, e.g. `context_set`, `context_get`) — there is no single shared shape. For example, `context set` (and `edit`/`supersede`/`rm`) reports the mutated target and the new state:
@@ -3047,13 +2748,6 @@ nothing to stop — both exit 0):
 {"output_kind": "discuss_list", "discussions": [{"id": "disc-123", "file": "src/lib.rs", "symbol": "verify", "opened_against_state": "hd-sqr398dvx9ay", "opened_at_secs": 1767225600, "visibility": "team", "body_changed_since_open": false, "orphaned": false, "resolution": {"kind": "open", "annotation_id": null, "state_id": null, "reason": null}, "turns": [{"author_name": "A. Engineer", "author_email": "a@example.com", "body": "Please check this edge case.", "posted_at_secs": 1767225600}], "resolved_annotation_id": null}]}
 ```
 
-`heddle fork --output json` emits (`thread` is `null` unless `--name`
-names a new thread for the fork):
-
-```json
-{"output_kind": "fork", "change_id": "hd-result456", "content_hash": "b9c34842", "thread": "review/fix-parser", "from_state": "hd-sqr398dvx9ay", "message": "Created fork hd-result456 from hd-sqr398dvx9ay"}
-```
-
 `heddle fsck --output json` emits:
 
 ```json
@@ -3064,12 +2758,6 @@ names a new thread for the fork):
 
 ```json
 {"hooks": [{"event": "pre-capture", "command": "cargo test"}], "installed": true, "uninstalled": false, "events": [{"name": "pre-capture", "description": "before capture"}]}
-```
-
-`heddle inspect --output json` emits:
-
-```json
-{"output_kind": "inspect_state", "repository_capability": "native", "storage_model": "native", "change_id": "hd-sqr398d", "change_id_full": "hd-sqr398dvx9ay", "content_hash": "sha256:abc123", "tree": "sha256:def456", "parents": ["hd-base123"], "intent": "capture parser fix", "confidence": 0.91, "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "codex", "model": "gpt-5", "session_id": "session-123"}, "created_at": "2026-01-01T00:00:00Z", "status": "Complete", "verification": {"tests_passed": true}, "git_checkpoint": "abc123"}
 ```
 
 `heddle integration list|install|doctor|uninstall|upgrade --output json` emit:
@@ -3111,7 +2799,7 @@ set to the snake-cased subcommand, e.g. `purge_apply`, `purge_list`).
 for a tracked file:
 
 ```json
-{"output_kind": "query_attribution", "status": "completed", "file": "src/lib.rs", "context": [], "lines": [{"line_number": 1, "content": "pub fn run() {}", "change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": null, "timestamp": "2026-01-01T00:00:00Z", "origins": null}]}
+{"output_kind": "query_attribution", "status": "completed", "file": "src/lib.rs", "lines": [{"line_number": 1, "content": "pub fn run() {}", "change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": null, "timestamp": "2026-01-01T00:00:00Z", "origins": null}]}
 ```
 
 `heddle rebase --output json` emits:
@@ -3194,16 +2882,16 @@ no record exists — public-by-absence):
 The following verbs also emit `--output json`. Their shapes follow the same
 discipline; see the corresponding handler in `crates/cli/src/cli/commands/`:
 
-`heddle blame`, `heddle checkpoint`, `heddle cherry-pick`,
+`heddle checkpoint`, `heddle cherry-pick`,
 `heddle clean`, `heddle clone`, `heddle collapse`,
-`heddle conflict show`, `heddle context get/set`, `heddle diff`,
-`heddle discuss`, `heddle doctor docs`, `heddle fetch`, `heddle fork`,
-`heddle fsck`, `heddle goto`, `heddle init`, `heddle integration`,
+`heddle context get/set`, `heddle diff`,
+`heddle discuss`, `heddle doctor docs`, `heddle fetch`,
+`heddle fsck`, `heddle init`, `heddle integration`,
 `heddle maintenance`, `heddle merge`, `heddle ready`,
 `heddle rebase`, `heddle remote`, `heddle resolve`, `heddle retro`,
 `heddle session`, `heddle capture`,
 `heddle support`, `heddle thread show/start`,
-`heddle try`, `heddle attempt`, `heddle undo`, `heddle watch`.
+`heddle try`, `heddle undo`, `heddle watch`.
 
 Each of these:
 

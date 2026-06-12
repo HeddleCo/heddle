@@ -701,7 +701,7 @@ workflow states:\n\
   `virtualized` when a mount is available, otherwise `solid`.\n\
 \n\
 A `solid` thread and a `materialized` thread are interchangeable from\n\
-the workflow's point of view — `capture`, `land`, `goto`, etc. behave\n\
+the workflow's point of view — `capture`, `land`, `switch`, etc. behave\n\
 identically. The mode only controls bytes-on-disk semantics.\n\
 \n\
 # Materialize vs. promote\n\
@@ -727,12 +727,11 @@ Resolution paths:\n\
   the replay is clean. The fast path for a stale thread with no\n\
   conflicts.\n\
 - If `sync` reports conflicts or other blockers, use\n\
-  `heddle resolve`, `heddle continue`, or `heddle conflict` to handle\n\
-  the conflicts as structured data.\n\
+  `heddle resolve` or `heddle continue` to handle the conflicts.\n\
 - `heddle land` will refresh-then-merge for you when the replay is\n\
   clean; it fails closed when manual resolution is required.\n\
 \n\
-# `goto` vs. `git checkout` vs. `thread switch`\n\
+# `switch` vs. `git checkout` vs. `thread switch`\n\
 \n\
 These three look similar but operate at different layers:\n\
 \n\
@@ -741,7 +740,7 @@ These three look similar but operate at different layers:\n\
   outstanding work on the thread you're leaving. Pair with the shell\n\
   hook (`heddle shell init`) to auto-cd into the target thread's\n\
   directory.\n\
-- `heddle goto <state>` — move the *current thread's* worktree to a\n\
+- `heddle switch <state>` — move the *current thread's* worktree to a\n\
   specific captured state. It refuses with uncommitted changes unless\n\
   `--force` is passed; it does not change which thread is active.\n\
 - `git checkout` — operates on the git-overlay branch and index\n\
@@ -1046,7 +1045,6 @@ mod tests {
             "abort",
             "shell",
             "git-overlay",
-            "inspect",
         ] {
             assert!(
                 advanced.contains(verb),
@@ -1073,7 +1071,7 @@ mod tests {
                  the everyday surface"
             );
         }
-        for verb in ["review", "discuss", "context", "goto", "thread", "bridge"] {
+        for verb in ["review", "discuss", "context", "thread", "bridge"] {
             assert!(
                 !everyday.contains(verb),
                 "`{verb}` belongs behind advanced/topic help, not the core-loop surface"

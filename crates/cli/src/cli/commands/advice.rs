@@ -725,14 +725,14 @@ impl RecoveryAdvice {
     pub(crate) fn no_attached_parent_thread() -> Self {
         Self::safety_refusal(
             "no_attached_parent_thread",
-            "No attached parent thread; pass --parent",
-            "Run `heddle delegate --parent <THREAD> <task>` from a detached checkout, or switch into an attached thread first.",
+            "No attached parent thread; pass --parent-thread",
+            "Run `heddle start <task> --parent-thread <THREAD>` from a detached checkout, or switch into an attached thread first.",
             "the current checkout is detached and no parent thread was supplied",
-            "`heddle delegate` without a parent would have to guess which thread should own the delegated work",
+            "`heddle start` without a parent would have to guess which thread should own the delegated work",
             "no delegated threads, refs, metadata, or worktree files were changed",
-            "heddle delegate --parent <THREAD> <task>",
+            "heddle start <task> --parent-thread <THREAD>",
             vec![
-                "heddle delegate --parent <THREAD> <task>".to_string(),
+                "heddle start <task> --parent-thread <THREAD>".to_string(),
                 "heddle thread list".to_string(),
             ],
         )

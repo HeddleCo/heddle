@@ -2131,7 +2131,6 @@ fn git_overlay_matrix_observe_only_contract_preserves_plain_git_repo() {
             "thread show",
             &["thread", "show", "main", "--output", "json"],
         ),
-        ("workspace show", &["workspace", "show", "--output", "json"]),
         ("log", &["log", "--output", "json"]),
         ("show", &["show", "HEAD", "--output", "json"]),
         ("diff", &["diff", "--output", "json"]),

@@ -101,13 +101,13 @@ fn delegate_without_attached_parent_thread_uses_typed_advice() {
     assert_eq!(envelope["kind"], "no_attached_parent_thread");
     assert_eq!(
         envelope["primary_command"],
-        "heddle delegate --parent <THREAD> <task>"
+        "heddle start <task> --parent-thread <THREAD>"
     );
     assert_eq!(envelope["primary_command_argv"], Value::Null);
     assert_action_template(
         &envelope["primary_command_template"],
-        "heddle delegate --parent <THREAD> <task>",
-        heddle_argv_json(["delegate", "--parent", "<thread>", "<task>"]),
+        "heddle start <task> --parent-thread <THREAD>",
+        heddle_argv_json(["start", "<task>", "--parent-thread", "<thread>"]),
         &["thread", "task"],
         false,
     );
@@ -116,7 +116,8 @@ fn delegate_without_attached_parent_thread_uses_typed_advice() {
             .as_array()
             .is_some_and(|templates| templates
                 .iter()
-                .any(|template| template["action"] == "heddle delegate --parent <THREAD> <task>")),
+                .any(|template| template["action"]
+                    == "heddle start <task> --parent-thread <THREAD>")),
         "delegate recovery commands should carry template metadata: {envelope}"
     );
     assert!(

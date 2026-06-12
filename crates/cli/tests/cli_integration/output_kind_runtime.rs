@@ -409,46 +409,48 @@ fn thread_promote_and_cleanup_emit_approved_thread_kinds() {
 }
 
 #[test]
-fn branch_rename_and_delete_advertised_thread_kinds_are_runtime_truths() {
+fn thread_rename_and_delete_advertised_thread_kinds_are_runtime_truths() {
     let temp = init_and_capture();
-    heddle(&["branch", "side"], Some(temp.path())).expect("branch side");
+    heddle(&["thread", "create", "side"], Some(temp.path())).expect("thread create side");
 
-    let rename = heddle_json(&["branch", "-m", "side", "renamed"], &temp);
+    let rename = heddle_json(&["thread", "rename", "side", "renamed"], &temp);
     assert_output_kind(&rename, "thread_rename");
 
-    let delete = heddle_json(&["branch", "-d", "renamed"], &temp);
+    let delete = heddle_json(&["thread", "drop", "renamed", "--delete-thread"], &temp);
     assert_output_kind(&delete, "thread_drop");
 }
 
 #[test]
-fn show_and_inspect_state_emit_distinct_output_kinds() {
+fn show_and_thread_show_emit_distinct_output_kinds() {
     let temp = init_and_capture();
 
     let show = heddle_json(&["show", "HEAD"], &temp);
     assert_output_kind(&show, "show");
 
-    let inspect_state = heddle_json(&["inspect", "HEAD"], &temp);
-    assert_output_kind(&inspect_state, "inspect_state");
-
-    let inspect_thread = heddle_json(&["inspect"], &temp);
-    assert_output_kind(&inspect_thread, "thread_show");
+    let thread = heddle_json(&["thread", "show"], &temp);
+    assert_output_kind(&thread, "thread_show");
 }
 
 #[test]
-fn inspect_schema_accepts_state_and_thread_show_payloads() {
+fn show_and_thread_show_schemas_accept_payloads() {
     let temp = init_and_capture();
-    let schema: Value = serde_json::from_str(
-        &heddle(&["schemas", "inspect"], Some(temp.path())).expect("schemas inspect"),
+    let show_schema: Value = serde_json::from_str(
+        &heddle(&["schemas", "show"], Some(temp.path())).expect("schemas show"),
     )
-    .expect("schemas inspect emits JSON schema");
+    .expect("schemas show emits JSON schema");
+    let thread_show_schema: Value = serde_json::from_str(
+        &heddle(&["schemas", "thread", "show"], Some(temp.path()))
+            .expect("schemas thread show"),
+    )
+    .expect("schemas thread show emits JSON schema");
 
-    let inspect_state = heddle_json(&["inspect", "HEAD"], &temp);
-    assert_output_kind(&inspect_state, "inspect_state");
-    assert_schema_accepts_payload(&schema, &inspect_state);
+    let show = heddle_json(&["show", "HEAD"], &temp);
+    assert_output_kind(&show, "show");
+    assert_schema_accepts_payload(&show_schema, &show);
 
-    let inspect_thread = heddle_json(&["inspect"], &temp);
-    assert_output_kind(&inspect_thread, "thread_show");
-    assert_schema_accepts_payload(&schema, &inspect_thread);
+    let thread = heddle_json(&["thread", "show"], &temp);
+    assert_output_kind(&thread, "thread_show");
+    assert_schema_accepts_payload(&thread_show_schema, &thread);
 }
 
 fn init_rebase_replay_fixture() -> TempDir {
@@ -811,7 +813,9 @@ fn purge_apply_emits_output_kind() {
     .expect("redact apply");
 
     let value = heddle_json(
-        &["purge", "apply", &state, "--path", "main.rs", "--force"],
+        &[
+            "redact", "purge", "apply", &state, "--path", "main.rs", "--force",
+        ],
         &temp,
     );
     assert_output_kind(&value, "purge_apply");
@@ -1067,12 +1071,14 @@ fn purge_list_envelope_includes_recent_apply() {
     )
     .expect("redact apply");
     heddle(
-        &["purge", "apply", &state, "--path", "main.rs", "--force"],
+        &[
+            "redact", "purge", "apply", &state, "--path", "main.rs", "--force",
+        ],
         Some(temp.path()),
     )
     .expect("purge apply");
 
-    let value = heddle_json(&["purge", "list"], &temp);
+    let value = heddle_json(&["redact", "purge", "list"], &temp);
     assert_output_kind(&value, "purge_list");
     assert!(
         value["count"].as_u64().is_some_and(|n| n >= 1),

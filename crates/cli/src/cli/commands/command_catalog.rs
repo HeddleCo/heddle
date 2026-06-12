@@ -14,10 +14,8 @@ use crate::cli::{
     ActorCommands, AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands,
     HookCommands, IntegrationCommands, MaintenanceCommands, MarkerCommands, PurgeCommands,
     RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands, ShellCommands,
-    StackCommands, StashCommands, ThreadCommands, VisibilityCommands, WorkspaceCommands,
-    cli_args::{
-        CommandCatalogArgs, ConflictCommands, DiscussCommands, ReviewCommands, TransactionCommands,
-    },
+    StackCommands, StashCommands, ThreadCommands, VisibilityCommands,
+    cli_args::{CommandCatalogArgs, DiscussCommands, ReviewCommands, TransactionCommands},
     render::{shell_quote, write_json_stdout, write_stdout},
     should_output_json, style,
 };
@@ -577,8 +575,8 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         true,
     ),
     (
-        "heddle delegate --parent <THREAD> <task>",
-        &["heddle", "delegate", "--parent", "<thread>", "<task>"],
+        "heddle start <task> --parent-thread <THREAD>",
+        &["heddle", "start", "<task>", "--parent-thread", "<thread>"],
         &["thread", "task"],
         false,
     ),
@@ -1189,13 +1187,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["agent", "list"],
         surface(documented_schemas(READ_JSON, &["agent list"]), "automation"),
     ),
-    entry(
-        &["attempt"],
-        category(
-            documented_schemas(EXTERNAL_WORKTREE_MUTATION, &["attempt"]),
-            "threads",
-        ),
-    ),
     #[cfg(feature = "client")]
     entry(&["auth"], category(GROUP, "repo")),
     #[cfg(feature = "client")]
@@ -1206,57 +1197,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["auth", "status"], READ_JSON),
     #[cfg(feature = "client")]
     entry(&["auth", "create-service-token"], MUTATING_NO_OP_ID),
-    entry(
-        &["blame"],
-        category(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["blame"]),
-                &[json_discriminator(Some("blame"), "output_kind", "blame")],
-            ),
-            "states",
-        ),
-    ),
-    entry(
-        &["branch"],
-        git_adapter_action(
-            json_discriminators(
-                documented_schemas(MUTATING, &["branch"]),
-                &[
-                    // No-arg `branch` emits the thread-list contract; this
-                    // is the shape the registered `branch` schema mirrors.
-                    json_discriminator(Some("branch"), "output_kind", "thread_list"),
-                    // `branch <name>` (create/rename/delete) delegates to
-                    // the thread family and emits the delegate's record
-                    // (e.g. `thread_create`). Advertised without a schema
-                    // verb — only the listing shape is schema-backed —
-                    // mirroring how hosted `clone` advertises its
-                    // preliminary `clone_connection` envelope.
-                    json_discriminator_no_schema(
-                        "branch mutations delegate to the thread family; the \
-                         registered `branch` schema mirrors only the no-arg \
-                         listing shape",
-                        "output_kind",
-                        "thread_create",
-                    ),
-                    json_discriminator_no_schema(
-                        "branch -m delegates to `thread rename`; the registered \
-                         `branch` schema mirrors only the no-arg listing shape",
-                        "output_kind",
-                        "thread_rename",
-                    ),
-                    json_discriminator_no_schema(
-                        "branch -d delegates to `thread drop`; the registered \
-                         `branch` schema mirrors only the no-arg listing shape",
-                        "output_kind",
-                        "thread_drop",
-                    ),
-                ],
-            ),
-            "thread",
-            "command_family",
-            "Use the thread command family for branch listing, creation, rename, and deletion.",
-        ),
-    ),
     entry(&["bridge"], surface(GROUP, "git_adapter")),
     entry(&["bridge", "git"], surface(GROUP, "git_adapter")),
     entry(
@@ -1573,22 +1513,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "automation",
         ),
     ),
-    entry(&["conflict"], category(GROUP, "recovery")),
-    entry(
-        &["conflict", "list"],
-        opaque_schemas(READ_JSON, &["conflict list"]),
-    ),
-    entry(
-        &["conflict", "show"],
-        json_discriminators(
-            opaque_schemas(READ_JSON, &["conflict show"]),
-            &[json_discriminator(
-                Some("conflict show"),
-                "output_kind",
-                "conflict_show",
-            )],
-        ),
-    ),
     entry(
         &["continue"],
         category(
@@ -1738,13 +1662,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["delegate"],
-        category(
-            documented_schemas(WORKTREE_MUTATION, &["delegate"]),
-            "threads",
-        ),
-    ),
-    entry(
         &["diff"],
         front_door(
             json_discriminators(
@@ -1866,32 +1783,12 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["fork"],
-        category(
-            json_discriminators(
-                opaque_schemas(MUTATING, &["fork"]),
-                &[json_discriminator(Some("fork"), "output_kind", "fork")],
-            ),
-            "threads",
-        ),
-    ),
-    entry(
         &["fsck"],
         category(documented_schemas(MUTATING, &["fsck"]), "recovery"),
     ),
     entry(
         &["git-overlay"],
         category(documented_schemas(READ_JSON, &["git-overlay"]), "repo"),
-    ),
-    entry(
-        &["goto"],
-        category(
-            json_discriminators(
-                documented_schemas(WORKTREE_MUTATION, &["goto"]),
-                &[json_discriminator(Some("goto"), "output_kind", "goto")],
-            ),
-            "threads",
-        ),
     ),
     entry(&["help"], category(READ_TEXT, "repo")),
     entry(&["hook"], surface(GROUP, "automation")),
@@ -1932,19 +1829,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 (73, "cannot create state directory"),
                 (78, "workspace config invalid"),
             ],
-        ),
-    ),
-    entry(
-        &["inspect"],
-        category(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["inspect", "thread show"]),
-                &[
-                    json_discriminator(Some("inspect"), "output_kind", "inspect_state"),
-                    json_discriminator(Some("thread show"), "output_kind", "thread_show"),
-                ],
-            ),
-            "states",
         ),
     ),
     entry(&["integration"], surface(GROUP, "admin")),
@@ -2032,23 +1916,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["maintenance", "monitor"],
         surface(opaque_schemas(READ_JSON, &["maintenance monitor"]), "admin"),
     ),
-    entry(&["marker"], category(GROUP, "collab")),
-    entry(
-        &["marker", "list"],
-        documented_schemas(READ_JSON, &["marker list"]),
-    ),
-    entry(
-        &["marker", "create"],
-        documented_schemas(MUTATING, &["marker create"]),
-    ),
-    entry(
-        &["marker", "delete"],
-        documented_schemas(MUTATING, &["marker delete", "marker delete --prefix"]),
-    ),
-    entry(
-        &["marker", "show"],
-        documented_schemas(READ_JSON, &["marker show"]),
-    ),
     entry(
         &["merge"],
         category(
@@ -2081,38 +1948,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 ],
             ),
             "threads",
-        ),
-    ),
-    entry(
-        &["stack"],
-        category(
-            json_discriminators(
-                opaque_schemas(READ_JSON, &["stack"]),
-                &[json_discriminator(Some("stack"), "output_kind", "stack")],
-            ),
-            "threads",
-        ),
-    ),
-    entry(
-        &["stack", "ready"],
-        json_discriminators(
-            opaque_schemas(READ_JSON, &["stack ready"]),
-            &[json_discriminator(
-                Some("stack ready"),
-                "output_kind",
-                "stack_ready",
-            )],
-        ),
-    ),
-    entry(
-        &["stack", "snapshot"],
-        json_discriminators(
-            opaque_schemas(READ_JSON, &["stack snapshot"]),
-            &[json_discriminator(
-                Some("stack snapshot"),
-                "output_kind",
-                "stack_snapshot",
-            )],
         ),
     ),
     entry(
@@ -2947,24 +2782,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["watch"],
         surface(documented_schemas(READ_JSONL, &["watch"]), "automation"),
     ),
-    entry(
-        &["workspace"],
-        category(
-            documented_schemas(READ_JSON, &["workspace show"]),
-            "threads",
-        ),
-    ),
-    entry(
-        &["workspace", "show"],
-        json_discriminators(
-            documented_schemas(READ_JSON_OR_JSONL, &["workspace show"]),
-            &[json_discriminator(
-                Some("workspace show"),
-                "output_kind",
-                "workspace_summary",
-            )],
-        ),
-    ),
 ];
 
 static ACTIVE_COMMAND_CONTRACT_ENTRIES: OnceLock<Vec<&'static CommandContractEntry>> =
@@ -3169,6 +2986,10 @@ fn removed_phase_1_2_root(root: &str) -> bool {
             | "stack"
             | "workspace"
     )
+}
+
+pub fn command_contract_removed_alias_root(root: &str) -> bool {
+    removed_phase_1_2_root(root)
 }
 
 fn removed_phase_1_2_contract_path(path: &[&str]) -> bool {
@@ -4437,13 +4258,13 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Commands(_) => vec!["commands"],
         Commands::Start(_) => vec!["start"],
         Commands::Try(_) => vec!["try"],
-        Commands::Attempt(_) => vec!["attempt"],
+        Commands::Attempt(_) => vec!["try"],
         Commands::Run(_) => vec!["run"],
         Commands::Sync(_) => vec!["sync"],
         Commands::Continue => vec!["continue"],
         Commands::Abort => vec!["abort"],
         Commands::Land(_) => vec!["land"],
-        Commands::Delegate(_) => vec!["delegate"],
+        Commands::Delegate(_) => vec!["start"],
         Commands::Ready(_) => vec!["ready"],
         Commands::Capture(_) => vec!["capture"],
         Commands::Commit(_) => vec!["commit"],
@@ -4451,11 +4272,31 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Log(_) => vec!["log"],
         Commands::Show { .. } => vec!["show"],
         Commands::Retro(_) => vec!["retro"],
-        Commands::Inspect { .. } => vec!["inspect"],
-        Commands::Goto { .. } => vec!["goto"],
+        Commands::Inspect { target } => {
+            if target.is_some() {
+                vec!["show"]
+            } else {
+                vec!["thread", "show"]
+            }
+        }
+        Commands::Goto { .. } => vec!["switch"],
         Commands::Clean { .. } => vec!["clean"],
         Commands::Diff(_) => vec!["diff"],
-        Commands::Branch(_) => vec!["branch"],
+        Commands::Branch(args) => {
+            let delete = args.delete || args.force_delete;
+            match (
+                args.name.as_ref(),
+                args.new_name.as_ref(),
+                delete,
+                args.move_branch,
+            ) {
+                (None, None, false, false) => vec!["thread", "list"],
+                (Some(_), None, true, false) => vec!["thread", "drop"],
+                (Some(_), Some(_), false, true) => vec!["thread", "rename"],
+                (Some(_), None, false, false) => vec!["thread", "create"],
+                _ => vec!["thread", "list"],
+            }
+        }
         Commands::Switch(_) => vec!["switch"],
         Commands::Discuss { command } => match command {
             DiscussCommands::Open(_) => vec!["discuss", "open"],
@@ -4471,10 +4312,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             TransactionCommands::Abort(_) => vec!["transaction", "abort"],
             TransactionCommands::Status(_) => vec!["transaction", "status"],
         },
-        Commands::Conflict { command } => match command {
-            ConflictCommands::List => vec!["conflict", "list"],
-            ConflictCommands::Show(_) => vec!["conflict", "show"],
-        },
+        Commands::Conflict { .. } => vec!["resolve"],
         Commands::Review { command } => match command {
             ReviewCommands::Show(_) => vec!["review", "show"],
             ReviewCommands::Sign(_) => vec!["review", "sign"],
@@ -4496,8 +4334,8 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             },
         },
         Commands::Purge { command } => match command {
-            PurgeCommands::Apply(_) => vec!["purge", "apply"],
-            PurgeCommands::List(_) => vec!["purge", "list"],
+            PurgeCommands::Apply(_) => vec!["redact", "purge", "apply"],
+            PurgeCommands::List(_) => vec!["redact", "purge", "list"],
         },
         Commands::Visibility { command } => match command {
             VisibilityCommands::Set(_) => vec!["visibility", "set"],
@@ -4507,13 +4345,13 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         },
         Commands::Revert(_) => vec!["revert"],
         Commands::Undo(_) => vec!["undo"],
-        Commands::Fork { .. } => vec!["fork"],
+        Commands::Fork { .. } => vec!["start"],
         Commands::Collapse(_) => vec!["collapse"],
         Commands::Marker { command } => match command {
-            MarkerCommands::List { .. } => vec!["marker", "list"],
-            MarkerCommands::Create { .. } => vec!["marker", "create"],
-            MarkerCommands::Delete { .. } => vec!["marker", "delete"],
-            MarkerCommands::Show { .. } => vec!["marker", "show"],
+            MarkerCommands::List { .. } => vec!["thread", "list"],
+            MarkerCommands::Create { .. } => vec!["thread", "create"],
+            MarkerCommands::Delete { .. } => vec!["thread", "drop"],
+            MarkerCommands::Show { .. } => vec!["thread", "show"],
         },
         Commands::Thread { command } => match command {
             ThreadCommands::Create { .. } => vec!["thread", "create"],
@@ -4540,15 +4378,11 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             ShellCommands::Init { .. } => vec!["shell", "init"],
             ShellCommands::Completion { .. } => vec!["shell", "completion"],
         },
-        Commands::Workspace { command } => match command {
-            None => vec!["workspace"],
-            Some(WorkspaceCommands::Show(_)) => vec!["workspace", "show"],
-        },
+        Commands::Workspace { .. } => vec!["status"],
         Commands::Merge(_) => vec!["merge"],
         Commands::Stack(args) => match &args.command {
-            None => vec!["stack"],
-            Some(StackCommands::Ready { .. }) => vec!["stack", "ready"],
-            Some(StackCommands::Snapshot { .. }) => vec!["stack", "snapshot"],
+            Some(StackCommands::Ready { .. }) => vec!["ready"],
+            None | Some(StackCommands::Snapshot { .. }) => vec!["status"],
         },
         Commands::Resolve(_) => vec!["resolve"],
         Commands::Fsck { .. } => vec!["fsck"],
@@ -4649,7 +4483,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             MaintenanceCommands::Index { .. } => vec!["maintenance", "index"],
             MaintenanceCommands::Monitor { .. } => vec!["maintenance", "monitor"],
         },
-        Commands::Blame { .. } => vec!["blame"],
+        Commands::Blame { .. } => vec!["query"],
         Commands::CherryPick { .. } => vec!["cherry-pick"],
         Commands::Clone(_) => vec!["clone"],
         Commands::Rebase { .. } => vec!["rebase"],
@@ -4729,9 +4563,6 @@ mod tests {
             &["agent", "release", "--session", "session-1"],
         ),
         sample(&["agent", "list"], &["agent", "list"]),
-        sample(&["attempt"], &["attempt", "1", "true"]),
-        sample(&["blame"], &["blame", "src/lib.rs"]),
-        sample(&["branch"], &["branch"]),
         #[cfg(feature = "git-overlay")]
         sample(
             &["bridge", "backfill-fidelity"],
@@ -4785,8 +4616,6 @@ mod tests {
         ),
         sample(&["commit"], &["commit"]),
         sample(&["commands"], &["commands"]),
-        sample(&["conflict", "list"], &["conflict", "list"]),
-        sample(&["conflict", "show"], &["conflict", "show", "conflict-1"]),
         sample(&["continue"], &["continue"]),
         sample(
             &["context", "set"],
@@ -4813,7 +4642,6 @@ mod tests {
         sample(&["daemon", "serve"], &["daemon", "serve"]),
         sample(&["daemon", "status"], &["daemon", "status"]),
         sample(&["daemon", "stop"], &["daemon", "stop"]),
-        sample(&["delegate"], &["delegate", "task"]),
         sample(&["diff"], &["diff"]),
         sample(
             &["discuss", "open"],
@@ -4833,11 +4661,9 @@ mod tests {
         sample(&["doctor", "docs"], &["doctor", "docs"]),
         sample(&["doctor", "schemas"], &["doctor", "schemas"]),
         sample(&["fetch"], &["fetch"]),
-        sample(&["fork"], &["fork"]),
         sample(&["fsck"], &["fsck"]),
         #[cfg(feature = "git-overlay")]
         sample(&["git-overlay"], &["git-overlay"]),
-        sample(&["goto"], &["goto", "HEAD"]),
         sample(&["help"], &["help"]),
         sample(&["hook", "list"], &["hook", "list"]),
         sample(&["hook", "install"], &["hook", "install", "pre-snapshot"]),
@@ -4847,7 +4673,6 @@ mod tests {
         ),
         sample(&["hook", "events"], &["hook", "events"]),
         sample(&["init"], &["init"]),
-        sample(&["inspect"], &["inspect"]),
         sample(&["integration", "list"], &["integration", "list"]),
         sample(&["integration", "install"], &["integration", "install"]),
         sample(&["integration", "doctor"], &["integration", "doctor"]),
@@ -4863,19 +4688,12 @@ mod tests {
         sample(&["maintenance", "gc"], &["maintenance", "gc"]),
         sample(&["maintenance", "index"], &["maintenance", "index"]),
         sample(&["maintenance", "monitor"], &["maintenance", "monitor"]),
-        sample(&["marker", "list"], &["marker", "list"]),
-        sample(&["marker", "create"], &["marker", "create", "mark-1"]),
-        sample(&["marker", "delete"], &["marker", "delete", "mark-1"]),
-        sample(&["marker", "show"], &["marker", "show", "mark-1"]),
         sample(&["merge"], &["merge", "feature"]),
         sample(&["pull"], &["pull"]),
         sample(&["push"], &["push"]),
         sample(&["query"], &["query"]),
         sample(&["ready"], &["ready"]),
         sample(&["rebase"], &["rebase"]),
-        sample(&["stack"], &["stack"]),
-        sample(&["stack", "ready"], &["stack", "ready"]),
-        sample(&["stack", "snapshot"], &["stack", "snapshot"]),
         sample(
             &["redact", "apply"],
             &[
@@ -5062,8 +4880,6 @@ mod tests {
         sample(&["try"], &["try", "true"]),
         sample(&["undo"], &["undo"]),
         sample(&["watch"], &["watch"]),
-        sample(&["workspace"], &["workspace"]),
-        sample(&["workspace", "show"], &["workspace", "show"]),
     ];
 
     const fn sample(
@@ -5823,8 +5639,8 @@ mod tests {
         // revert, purge, redact, stash, clean, discuss, context, review,
         // cherry-pick, bisect); heddle#641 swept the remaining verbs whose
         // runtime JSON already emits `output_kind` (abort, adopt, the agent
-        // session verbs, blame, branch, bridge git push/pull, conflict show,
-        // continue, daemon stop, doctor, fetch, inspect, land, log,
+        // session verbs, bridge git push/pull, continue, daemon stop,
+        // doctor, fetch, land, log,
         // maintenance gc/index, merge --preview, pull, push, query, ready,
         // the remote family, start, switch, sync, and the thread lifecycle
         // verbs). Any further sweep MUST extend this list and document the
@@ -5854,11 +5670,6 @@ mod tests {
                 "agent stop",
                 "agent capture",
                 "agent ready",
-                "blame",
-                "branch",
-                "branch",
-                "branch",
-                "branch",
                 "bridge git status",
                 "bridge git import",
                 "bridge git sync",
@@ -5874,7 +5685,6 @@ mod tests {
                 "clone",
                 "commit",
                 "commands",
-                "conflict show",
                 "continue",
                 "context set",
                 "context get",
@@ -5897,11 +5707,7 @@ mod tests {
                 "doctor docs",
                 "doctor schemas",
                 "fetch",
-                "fork",
-                "goto",
                 "init",
-                "inspect",
-                "inspect",
                 // `log` appears twice: the entry advertises both `log` and the
                 // `log --reflog` variant (`log_reflog`), mirroring `undo`/`clone`.
                 "log",
@@ -5909,9 +5715,6 @@ mod tests {
                 "maintenance gc",
                 "maintenance index",
                 "merge",
-                "stack",
-                "stack ready",
-                "stack snapshot",
                 "pull",
                 "push",
                 "query",
@@ -5965,7 +5768,6 @@ mod tests {
                 "undo",
                 "undo",
                 "undo",
-                "workspace show",
             ]
         );
     }

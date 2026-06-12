@@ -346,7 +346,6 @@ fn core_json_surfaces_use_verification_not_trust() {
     for (label, args) in [
         ("status", &["status", "--output", "json"][..]),
         ("doctor", &["doctor", "--output", "json"]),
-        ("workspace show", &["workspace", "show", "--output", "json"]),
         ("thread list", &["thread", "list", "--output", "json"]),
     ] {
         let value = json_value(temp.path(), args);
@@ -1076,19 +1075,6 @@ fn command_catalog_exposes_agent_metadata_for_options() {
             command["display"].as_str().unwrap_or("<unknown>")
         );
     }
-    let workspace = commands
-        .iter()
-        .find(|entry| entry["display"] == "workspace")
-        .expect("bare workspace command should be cataloged");
-    assert_eq!(
-        workspace["schema_verbs"],
-        serde_json::json!(["workspace show"])
-    );
-    assert_eq!(
-        workspace["documented_schema_verbs"],
-        serde_json::json!(["workspace show"]),
-        "bare workspace defaults to workspace show, so its catalog schema docs should match: {parsed}"
-    );
     let status = commands
         .iter()
         .find(|entry| entry["display"] == "status")
@@ -1251,14 +1237,14 @@ fn command_catalog_exposes_agent_metadata_for_options() {
         serde_json::json!(["may_write_worktree", "external_command"])
     );
 
-    let attempt = commands
+    let try_entry = commands
         .iter()
-        .find(|entry| entry["display"] == "attempt")
-        .expect("attempt should be cataloged");
-    assert_eq!(attempt["external_command"], true);
-    assert_eq!(attempt["writes_worktree"], true);
-    assert_eq!(attempt["writes_heddle_refs"], true);
-    assert_eq!(attempt["side_effect_class"], "worktree_mutation");
+        .find(|entry| entry["display"] == "try")
+        .expect("try should be cataloged");
+    assert_eq!(try_entry["external_command"], true);
+    assert_eq!(try_entry["writes_worktree"], true);
+    assert_eq!(try_entry["writes_heddle_refs"], true);
+    assert_eq!(try_entry["side_effect_class"], "worktree_mutation");
 
     let watch = commands
         .iter()
@@ -3066,8 +3052,8 @@ fn core_loop_schemas_are_discoverable() {
         "agent ready",
         "agent release",
         "agent list",
-        "branch",
         "switch",
+        "thread list",
         "bridge git reconcile",
         "remote list",
         "remote show",
@@ -3307,10 +3293,6 @@ fn core_git_overlay_json_surfaces_emit_one_machine_value() {
         (
             "thread show",
             vec!["thread", "show", "main", "--output", "json"],
-        ),
-        (
-            "workspace show",
-            vec!["workspace", "show", "--output", "json"],
         ),
         ("diff", vec!["diff", "--output", "json"]),
         ("ready", vec!["ready", "--output", "json"]),
@@ -8876,15 +8858,6 @@ fn command_catalog_exposes_public_surface_for_agents() {
         checkpoint["command_action"]["argv"],
         heddle_argv_json(["checkpoint"])
     );
-    let branch = commands
-        .iter()
-        .find(|entry| entry["display"] == "branch")
-        .expect("branch command should be cataloged");
-    assert_eq!(branch["canonical_action"]["command"], "thread");
-    assert_eq!(branch["canonical_action"]["kind"], "command_family");
-    assert_eq!(branch["canonical_action"]["executable"], false);
-    assert_eq!(branch["canonical_action"]["argv"], Value::Null);
-    assert_eq!(branch["canonical_action"]["template"], Value::Null);
     let bridge_import = commands
         .iter()
         .find(|entry| entry["display"] == "bridge git import")
@@ -11293,8 +11266,8 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
         );
     }
     for verb in [
-        "branch",
         "switch",
+        "thread list",
         "bridge git reconcile",
         "capture",
         "commit",
@@ -11356,7 +11329,7 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
         "git-overlay",
         "watch",
         "try",
-        "blame",
+        "query --attribution",
         "fsck",
         "resolve",
     ] {
