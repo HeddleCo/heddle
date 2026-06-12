@@ -98,10 +98,12 @@ fn quickstart_writes_placeholder_when_directory_is_empty() {
     );
 }
 
-/// `heddle status` on a freshly-`init`'d native repo whose log is empty
-/// surfaces `heddle init --quickstart` in `recommended_action`.
+/// heddle#644: `heddle status` on a freshly-`init`'d native repo whose
+/// log is empty points at the first save — never back at `heddle init
+/// --quickstart`, which read as "you initialized wrong" on a repo that
+/// is already initialized.
 #[test]
-fn status_recommends_quickstart_on_empty_native_repo() {
+fn status_recommends_first_save_not_reinit_on_empty_native_repo() {
     let temp = TempDir::new().unwrap();
     let dir = temp.path();
 
@@ -110,8 +112,15 @@ fn status_recommends_quickstart_on_empty_native_repo() {
     let status = status_json(dir);
     assert_eq!(
         status["recommended_action"].as_str(),
-        Some("heddle init --quickstart --yes"),
-        "fresh native repo recommends the runnable quickstart command: {status}"
+        Some("heddle commit -m \"...\""),
+        "fresh native repo recommends the first save: {status}"
+    );
+    assert!(
+        !status["recommended_action"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("init --quickstart"),
+        "status must not suggest re-init on an already-initialized repo: {status}"
     );
 
     // Once quickstart has produced a capture, the log is no longer empty
@@ -133,8 +142,8 @@ fn status_recommends_quickstart_on_empty_native_repo() {
     let status = status_json(dir);
     assert_ne!(
         status["recommended_action"].as_str(),
-        Some("heddle init --quickstart"),
-        "after quickstart the recommendation no longer fires: {status}"
+        Some("heddle commit -m \"...\""),
+        "after the first capture the first-save recommendation no longer fires: {status}"
     );
 }
 

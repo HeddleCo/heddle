@@ -232,13 +232,16 @@ struct PlainGitStatusOutput {
     git_index: Option<GitIndexPlan>,
 }
 
-/// Recommend the one-command first run when a native Heddle repository
-/// has been initialized but has no user-visible history yet (the log
-/// shows only the filtered synthetic root) and the worktree is clean —
-/// i.e. there is genuinely nothing to act on yet. A dirty worktree
-/// already has its own advice (`heddle commit`), and Git-overlay repos
-/// have their own onboarding (import/adopt), so both are left alone.
-fn quickstart_init_recommendation(
+/// Recommend the first save when a native Heddle repository has been
+/// initialized but has no user-visible history yet (the log shows only
+/// the filtered synthetic root) and the worktree is clean — i.e. there
+/// is genuinely nothing to act on yet. The repo is already initialized,
+/// so recommending `heddle init --quickstart` here read as "you
+/// initialized wrong" (heddle#644); point at the first commit instead.
+/// A dirty worktree already has its own advice (`heddle commit`), and
+/// Git-overlay repos have their own onboarding (import/adopt), so both
+/// are left alone.
+fn first_save_recommendation(
     repo: &Repository,
     current_state: Option<&objects::object::State>,
     worktree_clean: bool,
@@ -247,11 +250,7 @@ fn quickstart_init_recommendation(
         return None;
     }
     let empty_log = current_state.map(is_synthetic_root).unwrap_or(true);
-    // The repo already has `.heddle/` (it has been init'd to reach this
-    // branch), so a bare `heddle init --quickstart` hits the confirmation
-    // gate and is refused non-interactively. Recommend the runnable form —
-    // `--yes` clears the gate — so an agent/script can run it verbatim.
-    empty_log.then(|| "heddle init --quickstart --yes".to_string())
+    empty_log.then(|| "heddle commit -m \"...\"".to_string())
 }
 
 fn changes_from_status(status: &WorktreeStatus) -> ChangesInfo {
@@ -528,7 +527,7 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
             && changes.added.is_empty()
             && changes.deleted.is_empty();
         let recommended_action =
-            quickstart_init_recommendation(&repo, current_state.as_ref(), worktree_clean)
+            first_save_recommendation(&repo, current_state.as_ref(), worktree_clean)
                 .unwrap_or(recommended_action);
         debug!(
             repo_open_ms,
@@ -979,10 +978,9 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     }
     // A freshly-`init`'d native repo whose log is still empty (only the
     // synthetic root) and whose worktree is clean has nothing to act on
-    // yet — point the user at the one-command first run.
-    let recommended_action =
-        quickstart_init_recommendation(&repo, current_state.as_ref(), !has_changes)
-            .unwrap_or(recommended_action);
+    // yet — point the user at the first save.
+    let recommended_action = first_save_recommendation(&repo, current_state.as_ref(), !has_changes)
+        .unwrap_or(recommended_action);
     let recommended_action_fields = ActionFields::from_action(&recommended_action);
     let thread_health = if trust.verified {
         advice

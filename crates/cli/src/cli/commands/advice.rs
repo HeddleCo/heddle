@@ -1029,7 +1029,9 @@ impl RecoveryAdvice {
         Self::safety_refusal(
             "remote_not_configured",
             format!("No default remote is configured for {action}"),
-            "Add a remote with `heddle remote add <name> <url>`, inspect remotes with `heddle remote list`, or choose one with `heddle remote set-default <name>`.",
+            format!(
+                "Add a remote with `heddle remote add <name> <url>`, inspect remotes with `heddle remote list`, or choose one with `heddle remote set-default <name>`. Ad-hoc targets are supported without configuration: `heddle {action} <remote>` accepts a remote name, URL, local path, or hosted address positionally."
+            ),
             "the command did not receive a remote argument and no default remote is configured",
             format!(
                 "{action} needs a concrete remote target before it can move remote refs or transfer objects"

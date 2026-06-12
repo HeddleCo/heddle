@@ -285,7 +285,9 @@ Examples:
   heddle commit --all -m 'save everything'  # include unstaged/untracked paths even when the Git index is staged
 ")]
 pub struct CommitArgs {
-    /// Commit/capture message.
+    /// Commit/capture message. `--intent` is a deliberate alias: agents
+    /// (and humans) may prefer it to record WHY the change was made, not
+    /// just what changed — intent is first-class in Heddle's state model.
     #[arg(short = 'm', long = "message", visible_alias = "intent")]
     pub message: Option<String>,
 
@@ -448,6 +450,10 @@ pub struct RetroArgs {
 
 /// Arguments for the `diff` command.
 #[derive(Clone, Debug, clap::Args)]
+#[command(after_help = "\
+Patch compatibility:
+  --patch output targets a clean `git apply` round-trip; patch(1) support is best-effort — use `git apply` for git extended headers (type changes, mode bits, empty add/delete hunks).
+")]
 pub struct DiffArgs {
     /// Base state (default: HEAD).
     pub from: Option<String>,
@@ -606,6 +612,9 @@ Examples:
   heddle start fix-flake --task 'fix CI flake'    # attach a task description
 
 Isolated checkouts are Heddle-managed working directories. They do not contain a .git directory; use Heddle commands inside them, and run raw Git commands from the parent Git-overlay repo when needed.
+
+Advanced (hidden) flags:
+  --agent-provider/--agent-model (agent attribution for the registered thread), --parent-thread (delegated child work), --print-cd-path (print only the checkout path for shell wrappers), --daemon/--no-daemon (virtualized-mount ownership), --shared-target (workspace-shared cargo target dir). All are accepted here; they stay out of the flag list to keep everyday help terse.
 ")]
 pub struct ThreadStartArgs {
     /// Thread name to create or resume.
@@ -1300,6 +1309,10 @@ impl PushArgs {
 
 /// Arguments for the `pull` command.
 #[derive(Clone, Debug, clap::Args)]
+#[command(after_help = "\
+Advanced (hidden) flags:
+  --lazy leaves blob content absent by design and hydrates it explicitly later. Hosted/network Heddle remotes only; Git-overlay pulls reject it today — lazy hydration over the Git transport is planned for v0.3.1.
+")]
 pub struct PullArgs {
     #[command(flatten)]
     pub remote_op: RemoteOperationArgs,
@@ -1322,6 +1335,9 @@ Behavior:
   Depth controls history extent only — how many states the clone fetches — and says nothing about object contents. Whether a state's blobs are present locally or fetched lazily is a separate, independent concern that --depth never governs.
 
   See `heddle help threads` for the thread model and `heddle help advanced` for power surfaces.
+
+Advanced (hidden) flags:
+  --lazy and --filter blob:none skip blob content and hydrate it on demand. Hosted/network Heddle remotes only; Git-overlay clones (plain `https://…/repo.git` URLs and local-path clones) reject them today — lazy hydration over the Git transport is planned for v0.3.1.
 
 Examples:
   heddle clone https://example.com/repo.git ./clone   # Git repo: lands on the remote's default branch
