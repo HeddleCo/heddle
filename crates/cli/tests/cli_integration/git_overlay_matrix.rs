@@ -4389,9 +4389,27 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
         status["verification"]["summary"]
             .as_str()
             .is_some_and(|summary| {
-                summary.contains("Git branch 'feature/drop-in' advanced outside Heddle")
+                summary.contains(
+                    "Git branch 'feature/drop-in' advanced outside Heddle (1 out-of-band git commit detected)"
+                )
             }),
-        "status JSON should identify external Git branch advancement: {status}"
+        "status JSON should identify external Git branch advancement and how far it moved: {status}"
+    );
+    let head_mapping_check = status["git_overlay_health"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "head_mapping")
+        .unwrap_or_else(|| panic!("health should carry a head_mapping check: {status}"));
+    assert_eq!(
+        head_mapping_check["details"]["out_of_band_commit_count"], "1",
+        "head_mapping check should count the out-of-band git commits: {status}"
+    );
+    assert!(
+        head_mapping_check["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("(1 out-of-band git commit detected)")),
+        "head_mapping check summary should state the out-of-band commit count: {status}"
     );
     assert_eq!(
         status["changed_path_count"], 0,
@@ -4418,7 +4436,7 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
     let status_text = heddle(&["status", "--output", "text", "-v"], Some(temp.path())).unwrap();
     assert!(
         status_text.contains(
-            "Verification: Git branch 'feature/drop-in' advanced outside Heddle; import the new Git tip to restore the mapping"
+            "Verification: Git branch 'feature/drop-in' advanced outside Heddle (1 out-of-band git commit detected); import the new Git tip to restore the mapping"
         )
             && status_text.contains("Health: Git branch advanced outside Heddle")
             && status_text.contains("heddle adopt --ref feature/drop-in")
@@ -4544,6 +4562,88 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
     assert_eq!(
         ready["recommended_action"],
         "heddle adopt --ref feature/drop-in"
+    );
+}
+
+/// Full out-of-band round trip (#534): adopt → plain-git commits → detection
+/// reports the out-of-band commit count → the recommended one-line
+/// `heddle adopt --ref` reconcile → state verified back in sync with the Git
+/// branch SHA untouched.
+#[test]
+fn git_overlay_matrix_manual_git_commits_reconcile_round_trip() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "feature/drop-in");
+    std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
+    git_commit_all(temp.path(), "seed branch");
+    heddle_adopt(temp.path());
+
+    std::fs::write(temp.path().join("tracked.txt"), "first manual git edit\n").unwrap();
+    git_commit_all(temp.path(), "manual git commit 1");
+    std::fs::write(temp.path().join("second.txt"), "second manual file\n").unwrap();
+    git_commit_all(temp.path(), "manual git commit 2");
+    let out_of_band_head = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
+
+    // Detection leg: divergence is reported with how far git moved.
+    let status = json(temp.path(), &["status", "--output", "json"]);
+    assert_eq!(status["verification"]["status"], "git_branch_advanced");
+    assert!(
+        status["verification"]["summary"]
+            .as_str()
+            .is_some_and(|summary| summary.contains("(2 out-of-band git commits detected)")),
+        "detection should count both out-of-band git commits: {status}"
+    );
+    let head_mapping_check = status["git_overlay_health"]["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "head_mapping")
+        .unwrap_or_else(|| panic!("health should carry a head_mapping check: {status}"));
+    assert_eq!(
+        head_mapping_check["details"]["out_of_band_commit_count"], "2",
+        "head_mapping check should count the out-of-band git commits: {status}"
+    );
+    assert_eq!(
+        head_mapping_check["details"]["git_commit"],
+        Value::String(out_of_band_head.clone()),
+        "head_mapping check should name the out-of-band Git tip: {status}"
+    );
+    assert_eq!(
+        status["recommended_action"],
+        "heddle adopt --ref feature/drop-in"
+    );
+
+    // Reconcile leg: run the exact recommended one-liner.
+    let adopted = json(
+        temp.path(),
+        &["adopt", "--ref", "feature/drop-in", "--output", "json"],
+    );
+    assert_eq!(
+        adopted["verification"]["verified"], true,
+        "reconcile should return clean post-adoption verification: {adopted}"
+    );
+    assert_eq!(adopted["verification"]["status"], "clean");
+
+    // Round trip closed: the Git branch SHA is untouched and Heddle agrees.
+    assert_eq!(
+        git_stdout(temp.path(), &["rev-parse", "HEAD"]),
+        out_of_band_head,
+        "reconcile must import the out-of-band tip, not rewrite Git history"
+    );
+    assert_eq!(
+        mirror_git_stdout(temp.path(), &["rev-parse", "refs/heads/feature/drop-in"]),
+        out_of_band_head,
+        "the internal Git mirror branch should land on the identical out-of-band SHA"
+    );
+    let verify = json(temp.path(), &["verify", "--output", "json"]);
+    assert_eq!(verify["verified"], true);
+    assert_eq!(verify["status"], "clean");
+    let status_after = json(temp.path(), &["status", "--output", "json"]);
+    assert_eq!(status_after["verification"]["status"], "clean");
+    assert_eq!(status_after["git_overlay_health"]["status"], "clean");
+    assert_eq!(status_after["git_overlay_health"]["clean"], true);
+    assert_eq!(
+        status_after["changed_path_count"], 0,
+        "a reconciled checkout should have nothing left to save: {status_after}"
     );
 }
 
