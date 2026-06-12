@@ -1933,15 +1933,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["inspect"],
         category(
             json_discriminators(
-                documented_schemas(READ_JSON, &["inspect"]),
+                documented_schemas(READ_JSON, &["inspect", "thread show"]),
                 &[
                     json_discriminator(Some("inspect"), "output_kind", "inspect_state"),
-                    json_discriminator_no_schema(
-                        "inspect without a state target aliases `thread show`; the \
-                         registered `inspect` schema mirrors the state-inspection path",
-                        "output_kind",
-                        "thread_show",
-                    ),
+                    json_discriminator(Some("thread show"), "output_kind", "thread_show"),
                 ],
             ),
             "states",
@@ -3690,6 +3685,21 @@ fn raw_command_contract_for_path<'a>(
         .iter()
         .find(|entry| entry.path == path.as_slice())
         .map(|entry| entry.contract)
+}
+
+#[cfg(test)]
+pub(crate) fn sibling_documented_schema_verbs(schema_verb: &str) -> Vec<&'static str> {
+    active_command_contract_entries()
+        .iter()
+        .filter(|entry| {
+            entry
+                .contract
+                .documented_schema_verbs
+                .contains(&schema_verb)
+        })
+        .flat_map(|entry| entry.contract.documented_schema_verbs.iter().copied())
+        .filter(|documented| *documented != schema_verb)
+        .collect()
 }
 
 fn active_command_contract_entries() -> &'static [&'static CommandContractEntry] {
@@ -6007,7 +6017,8 @@ mod tests {
             if schema.get("anyOf").is_some() {
                 expected_discriminators.extend(command_json_discriminators().into_iter().filter(
                     |discriminator| {
-                        discriminator.display == verb && discriminator.schema_verb.is_none()
+                        discriminator.display == verb
+                            && discriminator.schema_verb.as_deref() != Some(verb)
                     },
                 ));
             }
@@ -6068,7 +6079,7 @@ mod tests {
             "JSON discriminator table contains duplicate (path, value) pairs"
         );
 
-        let mut schema_verbs = BTreeSet::new();
+        let mut schema_verb_values = std::collections::BTreeMap::new();
         for (path, discriminator) in raw_discriminators {
             let display = path.join(" ");
             let contract = raw_command_contract_for_path(path.iter().copied())
@@ -6089,10 +6100,14 @@ mod tests {
             );
 
             if let Some(schema_verb) = discriminator.schema_verb {
-                assert!(
-                    schema_verbs.insert(schema_verb),
-                    "JSON discriminator schema verb `{schema_verb}` is registered more than once"
-                );
+                let schema_value = (discriminator.field, discriminator.value);
+                if let Some(previous) = schema_verb_values.insert(schema_verb, schema_value) {
+                    assert_eq!(
+                        previous, schema_value,
+                        "JSON discriminator schema verb `{schema_verb}` is registered with \
+                         conflicting discriminator values"
+                    );
+                }
                 assert!(
                     contract.schema_verbs.contains(&schema_verb),
                     "`{display}` advertises discriminator schema verb `{schema_verb}` not present in its command contract"

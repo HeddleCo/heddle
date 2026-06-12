@@ -144,6 +144,18 @@ fn schema_accepts_payload(root: &Value, schema: &Value, payload: &Value) -> Resu
         return Err(format!("payload matched no anyOf branch: {errors:?}"));
     }
 
+    if let Some(subschemas) = schema.get("allOf").and_then(|value| value.as_array()) {
+        let mut errors = Vec::new();
+        for subschema in subschemas {
+            if let Err(err) = schema_accepts_payload(root, subschema, payload) {
+                errors.push(err);
+            }
+        }
+        if !errors.is_empty() {
+            return Err(format!("payload failed allOf subschema(s): {errors:?}"));
+        }
+    }
+
     Ok(())
 }
 

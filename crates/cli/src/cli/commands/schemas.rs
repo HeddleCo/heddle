@@ -288,7 +288,7 @@ fn add_json_discriminator_if_advertised(verb: &str, schema: &mut Value) {
         for discriminator in command_catalog::command_json_discriminators()
             .into_iter()
             .filter(|discriminator| {
-                discriminator.display == verb && discriminator.schema_verb.is_none()
+                discriminator.display == verb && discriminator.schema_verb.as_deref() != Some(verb)
             })
         {
             discriminators.push(discriminator);
@@ -3480,10 +3480,21 @@ mod tests {
             let schema =
                 schema_for_verb(schema_verb).unwrap_or_else(|| panic!("{schema_verb} schema"));
             if schema.get("anyOf").is_some() {
+                // A union schema published under this verb covers every schema
+                // verb its catalog entry documents — the expected discriminator
+                // set must include the siblings (e.g. inspect's union carries
+                // the `thread show` branch's thread_show).
+                for sibling in command_catalog::sibling_documented_schema_verbs(schema_verb) {
+                    discriminators
+                        .extend(command_catalog::command_json_discriminators_for_schema_verb(
+                            sibling,
+                        ));
+                }
                 for discriminator in command_catalog::command_json_discriminators()
                     .into_iter()
                     .filter(|discriminator| {
-                        discriminator.display == *schema_verb && discriminator.schema_verb.is_none()
+                        discriminator.display == *schema_verb
+                            && discriminator.schema_verb.as_deref() != Some(schema_verb)
                     })
                 {
                     discriminators.push(discriminator);
