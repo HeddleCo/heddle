@@ -59,6 +59,13 @@ pub enum MountError {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
+    /// The platform shell failed to construct its mount session
+    /// (e.g. the Swift FSKit shim returned a null session handle).
+    /// Maps to `EIO`: the mount never came up, nothing to retry
+    /// at the filesystem layer.
+    #[error("mount session initialization failed: {0}")]
+    SessionInit(String),
+
     /// Errors bubbling up from the underlying object store / repo.
     #[error(transparent)]
     Store(#[from] HeddleError),
@@ -84,6 +91,7 @@ impl MountError {
             MountError::IsADirectory(_) => libc::EISDIR,
             MountError::NotEmpty(_) => libc::ENOTEMPTY,
             MountError::InvalidArgument(_) => libc::EINVAL,
+            MountError::SessionInit(_) => libc::EIO,
             MountError::Store(HeddleError::NotFound(_))
             | MountError::Store(HeddleError::StateNotFound(_))
             | MountError::Store(HeddleError::MissingObject { .. }) => libc::ENOENT,
