@@ -24,8 +24,8 @@ use super::{
     diff::{DiffOutput, SemanticChangeEntry, compute_state_diff, compute_tree_diff},
     git_overlay_health::{
         RepositoryVerificationState, action_template, build_repository_verification_state,
-        override_trust_recommended_action,
-        repository_verification_blocked_advice, serialize_empty_action_as_null,
+        override_trust_recommended_action, repository_verification_blocked_advice,
+        serialize_empty_action_as_null,
     },
     next_action::{NextActionValidationContext, write_command_json},
     operator_core::{OperatorCommandOutput, blocked_operator_exit_code},
@@ -621,7 +621,7 @@ pub(crate) fn merge_thread_into_current(
             // `merge_fast_forward_advances_current_thread`.
             //
             // We perform the FF *without recording* an `OpRecord::Goto`
-            // and then explicitly record `OpRecord::FastForwardV2` so
+            // and then explicitly record `OpRecord::FastForward` so
             // both ends of the FF are captured. r1 (heddle#99) added the
             // variant to fix stranded-ref-on-undo. r2 added
             // `post_target_id` so redo replays the recorded SHA instead
@@ -900,9 +900,10 @@ pub(crate) fn merge_thread_into_current(
             && thread
                 .as_ref()
                 .is_some_and(|thread| thread.state == ThreadState::Ready)
-            && let Some(thread) = thread.as_ref() {
-                mark_merge_previewed(repo, &thread.id)?;
-            }
+            && let Some(thread) = thread.as_ref()
+        {
+            mark_merge_previewed(repo, &thread.id)?;
+        }
         return Ok(merge_output_from_report(MergeOutputInput {
             repo,
             thread: &thread,
@@ -1443,17 +1444,16 @@ fn merge_op_targets_state(op: &OpRecord, state: &ChangeId) -> bool {
     match op {
         OpRecord::Snapshot { new_state, .. } => new_state == state,
         OpRecord::Goto { target, .. } => target == state,
-        OpRecord::FastForwardV2 { post_target_id, .. } => post_target_id == state,
+        OpRecord::FastForward { post_target_id, .. } => post_target_id == state,
         OpRecord::Checkpoint {
             state: checkpoint_state,
             ..
         } => checkpoint_state == state,
         // These records don't advance HEAD/thread to the merge state the merge
-        // flow tracks (legacy V1 `FastForward` carries no post-target id).
+        // flow tracks.
         // Enumerated explicitly (no wildcard) so a new state-advancing variant
         // must be considered as a possible merge target here (heddle#354 r9).
         OpRecord::ThreadCreate { .. }
-        | OpRecord::ThreadCreateV2 { .. }
         | OpRecord::ThreadDelete { .. }
         | OpRecord::ThreadUpdate { .. }
         | OpRecord::Fork { .. }
@@ -1466,7 +1466,6 @@ fn merge_op_targets_state(op: &OpRecord, state: &ChangeId) -> bool {
         | OpRecord::TransactionCommit { .. }
         | OpRecord::Redact { .. }
         | OpRecord::Purge { .. }
-        | OpRecord::FastForward { .. }
         | OpRecord::GitCheckpoint { .. }
         | OpRecord::RemoteThreadUpdate { .. }
         | OpRecord::RemoteThreadDelete { .. }
@@ -1870,7 +1869,10 @@ fn build_thread_preview_report_with_graph(
         advice.thread_health = "clean".to_string();
     }
 
-    let thread_tip = repo.refs().get_thread(&ThreadName::new(&thread.thread))?.map(|id| id.short());
+    let thread_tip = repo
+        .refs()
+        .get_thread(&ThreadName::new(&thread.thread))?
+        .map(|id| id.short());
     let manual_resolution_current = thread
         .integration_policy_result
         .manual_resolution_state
@@ -1979,7 +1981,10 @@ fn merge_output_from_report(input: MergeOutputInput<'_>) -> MergeOutput {
     let stale_refresh_action = input.preview_report.and_then(|report| {
         (report.freshness == ThreadFreshness::Stale.to_string()).then(|| {
             if report.recommended_action.trim().is_empty() {
-                format!("heddle sync --thread {}", recommended_action_quote(&report.thread))
+                format!(
+                    "heddle sync --thread {}",
+                    recommended_action_quote(&report.thread)
+                )
             } else {
                 report.recommended_action.clone()
             }
@@ -2332,7 +2337,10 @@ fn stale_thread_merge_blocked_output(
     preview_only: bool,
 ) -> MergeOutput {
     let recommended_action = if preview_report.recommended_action.trim().is_empty() {
-        format!("heddle sync --thread {}", recommended_action_quote(&preview_report.thread))
+        format!(
+            "heddle sync --thread {}",
+            recommended_action_quote(&preview_report.thread)
+        )
     } else {
         preview_report.recommended_action.clone()
     };

@@ -112,7 +112,7 @@ impl Repository {
 
     /// Variant of [`Self::fast_forward_attached`] that performs the
     /// fast-forward without recording an `OpRecord::Goto`. The merge
-    /// command uses this so it can record an `OpRecord::FastForwardV2`
+    /// command uses this so it can record an `OpRecord::FastForward`
     /// instead — the FF-specific variant carries both `pre_target_id`
     /// (for undo) and `post_target_id` (for deterministic redo). The
     /// generic `Goto` inverse only rewinds HEAD, which stranded the

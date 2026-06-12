@@ -452,17 +452,14 @@ fn kind_for(op: &OpRecord) -> String {
 fn thread_for(op: &OpRecord, _kind: &str) -> Option<String> {
     match op {
         OpRecord::Snapshot { thread, .. } => thread.clone(),
-        OpRecord::ThreadCreate { name, .. } | OpRecord::ThreadCreateV2 { name, .. } => {
-            Some(name.clone())
-        }
+        OpRecord::ThreadCreate { name, .. } => Some(name.clone()),
         OpRecord::ThreadDelete { name, .. } => Some(name.clone()),
         OpRecord::ThreadUpdate { name, .. } => Some(name.clone()),
         OpRecord::MarkerCreate { name, .. } => Some(name.clone()),
         OpRecord::MarkerDelete { name, .. } => Some(name.clone()),
         OpRecord::Checkpoint { thread, .. } => thread.clone(),
         OpRecord::EphemeralThreadCollapse { thread, .. } => Some(thread.clone()),
-        OpRecord::FastForward { target_thread, .. }
-        | OpRecord::FastForwardV2 { target_thread, .. } => Some(target_thread.clone()),
+        OpRecord::FastForward { target_thread, .. } => Some(target_thread.clone()),
         OpRecord::GitCheckpoint { branch, .. } => Some(branch.clone()),
         OpRecord::RemoteThreadUpdate { thread, .. }
         | OpRecord::RemoteThreadDelete { thread, .. } => Some(thread.clone()),
@@ -487,9 +484,7 @@ fn primary_change_id(op: &OpRecord) -> Option<ChangeId> {
     match op {
         OpRecord::Snapshot { new_state, .. } => Some(*new_state),
         OpRecord::Goto { target, .. } => Some(*target),
-        OpRecord::ThreadCreate { state, .. } | OpRecord::ThreadCreateV2 { state, .. } => {
-            Some(*state)
-        }
+        OpRecord::ThreadCreate { state, .. } => Some(*state),
         OpRecord::ThreadDelete { state, .. } => Some(*state),
         OpRecord::ThreadUpdate { new_state, .. } => Some(*new_state),
         OpRecord::Fork { new_state, .. } => Some(*new_state),
@@ -502,15 +497,15 @@ fn primary_change_id(op: &OpRecord) -> Option<ChangeId> {
         OpRecord::Redact { state, .. } => Some(*state),
         OpRecord::StateVisibilitySet { state, .. }
         | OpRecord::StateVisibilityPromote { state, .. } => Some(*state),
-        OpRecord::RemoteThreadUpdate { state, .. }
-        | OpRecord::RemoteThreadDelete { state, .. } => Some(*state),
+        OpRecord::RemoteThreadUpdate { state, .. } | OpRecord::RemoteThreadDelete { state, .. } => {
+            Some(*state)
+        }
         OpRecord::UndoRecoveryUpdate { state } => Some(*state),
         OpRecord::TransactionAbort { .. }
         | OpRecord::TransactionCommit { .. }
         | OpRecord::ConflictResolved { .. }
         | OpRecord::Purge { .. }
-        | OpRecord::FastForward { .. }
-        | OpRecord::FastForwardV2 { .. } => None,
+        | OpRecord::FastForward { .. } => None,
     }
 }
 
@@ -818,6 +813,7 @@ mod tests {
                 OpRecord::ThreadCreate {
                     name: "approach-anthropic".into(),
                     state: cid_b,
+                    manager_snapshot: None,
                 },
             ],
         );
@@ -867,6 +863,7 @@ mod tests {
                 OpRecord::ThreadCreate {
                     name: "x".into(),
                     state: ChangeId::generate(),
+                    manager_snapshot: None,
                 },
             ),
             kind: "thread_create".into(),
@@ -982,6 +979,7 @@ mod tests {
             OpRecord::ThreadCreate {
                 name: "x".into(),
                 state: cid,
+                manager_snapshot: None,
             },
             OpRecord::ThreadDelete {
                 name: "x".into(),

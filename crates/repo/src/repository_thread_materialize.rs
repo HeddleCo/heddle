@@ -480,14 +480,14 @@ impl Repository {
 
     /// The staged domain commit record for a brand-new materialized-thread
     /// start. The repo owns the op-record shape so callers don't reconstruct
-    /// `OpRecord::ThreadCreateV2`'s fields. `manager_snapshot` is `None`: the
+    /// `OpRecord::ThreadCreate`'s fields. `manager_snapshot` is `None`: the
     /// thread record is written by the start's converge step (so there is
     /// nothing to snapshot at record-construction time — heddle#23 r2). The
     /// caller stages this as the executor's single commit record (it is NOT
     /// appended eagerly); the commit marker dedups on the stable
     /// `transaction_id`.
     pub fn thread_create_op_record(&self, name: &str, state: ChangeId) -> OpRecord {
-        OpRecord::ThreadCreateV2 {
+        OpRecord::ThreadCreate {
             name: name.to_string(),
             state,
             manager_snapshot: None,
@@ -1620,7 +1620,8 @@ mod tests {
 
         // State S1 (visible): contains the secret that must not linger later.
         fs::write(repo_dir.path().join("old-secret.txt"), b"launch codes\n").unwrap();
-        repo.snapshot(Some("seed with secret".into()), None).unwrap();
+        repo.snapshot(Some("seed with secret".into()), None)
+            .unwrap();
 
         // Root A materialized VISIBLE at S1 — the real bytes land on disk and the
         // clobber-proof per-root record for A captures `old-secret.txt`.
@@ -1650,8 +1651,12 @@ mod tests {
         // now resolves to B, the precise race that reopened the leak in r7.
         let b_holder = TempDir::new().unwrap();
         let root_b = b_holder.path().join("root-b");
-        repo.materialize_thread("main", &root_b, &AudienceTier::Restricted("sec-embargo".into()))
-            .unwrap();
+        repo.materialize_thread(
+            "main",
+            &root_b,
+            &AudienceTier::Restricted("sec-embargo".into()),
+        )
+        .unwrap();
         assert!(root_b.join("kept.txt").exists());
         // Confirm the clobber really happened: the per-thread manifest no longer
         // records root A.
@@ -1804,8 +1809,14 @@ mod tests {
             dest.join(COURTESY_STUB_FILENAME).exists(),
             "stub must be written for the under-tier checkout"
         );
-        assert!(manifest.files.is_empty(), "no tracked files in a stub checkout");
-        assert!(manifest.withheld, "manifest must mark the checkout withheld");
+        assert!(
+            manifest.files.is_empty(),
+            "no tracked files in a stub checkout"
+        );
+        assert!(
+            manifest.withheld,
+            "manifest must mark the checkout withheld"
+        );
 
         let head_before = repo
             .refs()
@@ -1935,7 +1946,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(captured_tree.entries().iter().any(|e| e.name == "extra.rs"));
-        assert!(captured_tree.entries().iter().any(|e| e.name == "secret.rs"));
+        assert!(
+            captured_tree
+                .entries()
+                .iter()
+                .any(|e| e.name == "secret.rs")
+        );
         assert!(
             !captured_tree
                 .entries()
@@ -2043,7 +2059,11 @@ mod tests {
         let repo = Repository::init_default(repo_dir.path()).unwrap();
         let dest = TempDir::new().unwrap();
         let err = repo
-            .materialize_thread("no-such-thread", &dest.path().join("out"), &AudienceTier::Internal)
+            .materialize_thread(
+                "no-such-thread",
+                &dest.path().join("out"),
+                &AudienceTier::Internal,
+            )
             .expect_err("should fail");
         assert!(format!("{err}").contains("unknown thread"));
     }
@@ -2057,11 +2077,17 @@ mod tests {
         let repo = Repository::init_default(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("hello.txt"), b"hello\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
-        let before = repo.refs().get_thread(&ThreadName::new("main")).unwrap().expect("head");
+        let before = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("head");
 
         let dest_holder = TempDir::new().unwrap();
         let dest = dest_holder.path().join("out");
-        let materialize_manifest = repo.materialize_thread("main", &dest, &AudienceTier::Internal).unwrap();
+        let materialize_manifest = repo
+            .materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
 
         // Mutate a file in the materialized worktree.
         fs::write(dest.join("hello.txt"), b"hello world\n").unwrap();
@@ -2075,7 +2101,11 @@ mod tests {
         };
 
         // Thread head advanced.
-        let after = repo.refs().get_thread(&ThreadName::new("main")).unwrap().expect("head");
+        let after = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("head");
         assert_ne!(before, after);
         assert_eq!(after, new_state);
 
@@ -2096,17 +2126,26 @@ mod tests {
         let repo = Repository::init_default(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("steady.txt"), b"unchanged\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
-        let before = repo.refs().get_thread(&ThreadName::new("main")).unwrap().expect("head");
+        let before = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("head");
 
         let dest_holder = TempDir::new().unwrap();
         let dest = dest_holder.path().join("out");
-        repo.materialize_thread("main", &dest, &AudienceTier::Internal).unwrap();
+        repo.materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
 
         let outcome = repo.capture_thread_from_disk("main", &dest).unwrap();
         assert_eq!(outcome, ThreadCaptureOutcome::NoOp);
 
         // Thread head unchanged.
-        let after = repo.refs().get_thread(&ThreadName::new("main")).unwrap().expect("head");
+        let after = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("head");
         assert_eq!(before, after);
     }
 
@@ -2128,7 +2167,9 @@ mod tests {
 
         let dest_holder = TempDir::new().unwrap();
         let dest = dest_holder.path().join("out");
-        let manifest = repo.materialize_thread("main", &dest, &AudienceTier::Internal).unwrap();
+        let manifest = repo
+            .materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
         assert_eq!(manifest.files.len(), 20);
 
         // The fast-path predicate alone — without touching the
@@ -2156,7 +2197,9 @@ mod tests {
 
         let dest_holder = TempDir::new().unwrap();
         let dest = dest_holder.path().join("out");
-        let manifest = repo.materialize_thread("main", &dest, &AudienceTier::Internal).unwrap();
+        let manifest = repo
+            .materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
 
         // Sleep briefly so the mtime moves; APFS gives sub-ms
         // resolution on modern macOS but Linux ext4 is only
@@ -2187,7 +2230,9 @@ mod tests {
 
         let dest_holder = TempDir::new().unwrap();
         let dest = dest_holder.path().join("out");
-        let manifest = repo.materialize_thread("main", &dest, &AudienceTier::Internal).unwrap();
+        let manifest = repo
+            .materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
 
         fs::write(dest.join("b.txt"), b"b\n").unwrap();
 
@@ -2278,7 +2323,9 @@ mod tests {
         // records `dest_holder/out` as the worktree.
         let dest_holder = TempDir::new().unwrap();
         let dest = dest_holder.path().join("out");
-        let materialize_manifest = repo.materialize_thread("main", &dest, &AudienceTier::Internal).unwrap();
+        let materialize_manifest = repo
+            .materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
         let materialize_state_id = materialize_manifest.state_id;
         let materialize_tree_hash = materialize_manifest.tree_hash;
         let materialized_path = materialize_manifest.worktree_path.clone();
@@ -2323,7 +2370,11 @@ mod tests {
         // And `heddle status`'s staleness check should now correctly
         // report the materialized worktree as stale (head moved,
         // manifest didn't).
-        let head_now = repo.refs().get_thread(&ThreadName::new("main")).unwrap().expect("head");
+        let head_now = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("head");
         assert_ne!(
             head_now, after.state_id,
             "post-fix invariant: main head advanced past manifest's recorded state → stale"
@@ -2354,7 +2405,8 @@ mod tests {
         // exposes the bug.
         let dest_holder = TempDir::new().unwrap();
         let dest = dest_holder.path().join("thread-worktree");
-        repo.materialize_thread("main", &dest, &AudienceTier::Internal).unwrap();
+        repo.materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
 
         // Edit a non-symlink file so the slow path fires (the fast
         // stat-cache no-op would mask the bug). Sleep so the mtime
@@ -2394,7 +2446,9 @@ mod tests {
 
         let dest_holder = TempDir::new().unwrap();
         let dest = dest_holder.path().join("out");
-        let manifest = repo.materialize_thread("main", &dest, &AudienceTier::Internal).unwrap();
+        let manifest = repo
+            .materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
         assert!(manifest.files.contains_key("secret.txt"));
 
         // Tighten the ignore set in the source repo to exclude
@@ -2432,7 +2486,9 @@ mod tests {
 
         let dest_holder = TempDir::new().unwrap();
         let dest = dest_holder.path().join("out");
-        let manifest = repo.materialize_thread("main", &dest, &AudienceTier::Internal).unwrap();
+        let manifest = repo
+            .materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
 
         // Sanity: the empty dir landed on disk after materialise.
         assert!(
@@ -2466,7 +2522,9 @@ mod tests {
 
         let dest_holder = TempDir::new().unwrap();
         let dest = dest_holder.path().join("out");
-        let manifest = repo.materialize_thread("main", &dest, &AudienceTier::Internal).unwrap();
+        let manifest = repo
+            .materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
 
         // Add an empty directory that has no manifest entry.
         fs::create_dir_all(dest.join("brand-new-empty-dir")).unwrap();
@@ -2491,7 +2549,9 @@ mod tests {
 
         let dest_holder = TempDir::new().unwrap();
         let dest = dest_holder.path().join("out");
-        let manifest = repo.materialize_thread("main", &dest, &AudienceTier::Internal).unwrap();
+        let manifest = repo
+            .materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
 
         // Remove the leaf file AND its parent dir. The file-side
         // check already catches the file removal, but if we then
@@ -2518,7 +2578,9 @@ mod tests {
 
         let dest_holder = TempDir::new().unwrap();
         let dest = dest_holder.path().join("out");
-        let manifest = repo.materialize_thread("main", &dest, &AudienceTier::Internal).unwrap();
+        let manifest = repo
+            .materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
 
         fs::remove_file(dest.join("a.txt")).unwrap();
 
@@ -2550,15 +2612,21 @@ mod tests {
         let repo = Arc::new(Repository::init_default(repo_dir.path()).unwrap());
         fs::write(repo_dir.path().join("shared.txt"), b"seed\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
-        let initial_head = repo.refs().get_thread(&ThreadName::new("main")).unwrap().expect("seeded");
+        let initial_head = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("seeded");
 
         // Two sibling materialized worktrees of the same thread.
         let dest_a_holder = TempDir::new().unwrap();
         let dest_a = dest_a_holder.path().join("a");
-        repo.materialize_thread("main", &dest_a, &AudienceTier::Internal).unwrap();
+        repo.materialize_thread("main", &dest_a, &AudienceTier::Internal)
+            .unwrap();
         let dest_b_holder = TempDir::new().unwrap();
         let dest_b = dest_b_holder.path().join("b");
-        repo.materialize_thread("main", &dest_b, &AudienceTier::Internal).unwrap();
+        repo.materialize_thread("main", &dest_b, &AudienceTier::Internal)
+            .unwrap();
 
         // Disjoint edits so each capture has real work to do (no
         // stat-cache no-op short-circuit).
@@ -2598,7 +2666,11 @@ mod tests {
         // the loser's parent would be `initial_head`. With the
         // lock, the loser's parent is the winner's id and the
         // winner's parent is `initial_head`.
-        let final_head = repo.refs().get_thread(&ThreadName::new("main")).unwrap().expect("head");
+        let final_head = repo
+            .refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .expect("head");
         let winner_id = final_head;
         let loser_id = if final_head == id_a { id_b } else { id_a };
 

@@ -168,7 +168,7 @@ sketch.
   single record (r16) because some atomic ref batches back **multiple** records: a
   thread-rename publishes new-thread + old-thread-delete (± a HEAD move) in **one**
   atomic `update_refs` vector (`thread.rs:3074-3100`) while the oplog records a **batch
-  of two** via `record_thread_rename` → `ThreadCreateV2` + `ThreadDelete`
+  of two** via `record_thread_rename` → `ThreadCreate` + `ThreadDelete`
   (`oplog_records.rs:96-110`). A one-`OpRecord` chokepoint would either **drop** a
   backing record for one published ref or **split** the atomic batch into two publishes
   (breaking atomicity); the batch signature represents the multi-record case faithfully —
@@ -542,7 +542,7 @@ could not know **which** ref to materialize on replay — the record is unreplay
 atomic `update_refs` batch** — create the new thread, delete the old thread, and (when
 HEAD was attached to the renamed thread) move `HEAD` — all in a single `updates` vector
 (`thread.rs:3074-3100`), then records via `record_thread_rename` (`thread.rs:3101-3102`),
-which appends a **batch of two `OpRecord`s** — `ThreadCreateV2 { name: new, … }` +
+which appends a **batch of two `OpRecord`s** — `ThreadCreate { name: new, … }` +
 `ThreadDelete { name: old, … }` (`oplog_records.rs:96-110`). So this atomic ref batch is
 backed by **multiple** records, not one. A chokepoint whose signature took a single
 `OpRecord` could not represent this faithfully: it would either **drop** a backing
@@ -560,7 +560,7 @@ pushes a **third** update onto the vector — `RefUpdate::Head` re-attaching HEA
 old thread name to the new (`thread.rs:3090-3099`) — so the published batch carries
 **three** refs: new-thread create, old-thread delete, **and** the HEAD move. But
 `record_thread_rename` (`oplog_records.rs:96-110`) appends only **two** records
-(`ThreadCreateV2` + `ThreadDelete`) in *every* case — there is **no record for the HEAD
+(`ThreadCreate` + `ThreadDelete`) in *every* case — there is **no record for the HEAD
 move**. So an attached rename routed through `commit_and_publish` would publish a HEAD ref
 whose backing record is absent: a crash after phase 4 (commit) and before phase 5
 (publish) leaves reconciliation with **no ref-carrying record for the HEAD move**, and the
@@ -609,7 +609,7 @@ first**:
 > because some atomic ref batches are backed by **multiple** records: thread-rename
 > publishes new-thread + old-thread-delete (± a HEAD move) in one atomic `update_refs`
 > vector (`thread.rs:3074-3100`) while `record_thread_rename` records a **batch of two**
-> (`ThreadCreateV2` + `ThreadDelete`, `oplog_records.rs:96-110`). A single-`OpRecord`
+> (`ThreadCreate` + `ThreadDelete`, `oplog_records.rs:96-110`). A single-`OpRecord`
 > signature would force such a writer to drop a backing record or split the atomic batch
 > into multiple publishes (breaking atomicity); the batch signature lets the atomic ref
 > batch and **all** its backing records commit-then-publish together. Single-record ops
@@ -640,7 +640,7 @@ The callers split by whether they carry a high-level operation:
   `RefUpdate::Thread`/`RefUpdate::Head`. `cmd_collapse` builds a one-element batch
   `[OpRecord::Collapse { sources, result, <published-ref discriminant> }]` (thread name
   or detached-HEAD marker) and the matching `RefUpdate`. **`cmd_thread_rename` builds a
-  *two*-element batch** `[ThreadCreateV2 { name: new, … }, ThreadDelete { name: old, … }]`
+  *two*-element batch** `[ThreadCreate { name: new, … }, ThreadDelete { name: old, … }]`
   (its existing `record_thread_rename` records, `oplog_records.rs:96-110`) for the
   detached / HEAD-unaffected case — **or a *three*-element batch** that adds a HEAD-move
   record when HEAD was attached to the renamed thread and the published vector therefore
@@ -831,7 +831,7 @@ record-before-publish guarantee in one of two ways, both honoring phase-4-before
   append-records then publish-refs in a single call (for a plain ref edit the thin
   `set_thread`/`write_head`/`set_marker` wrapper builds a one-element generic record and
   makes that call for it; fork/collapse hand in a one-element rich batch; thread-rename
-  hands in its two-element `ThreadCreateV2`+`ThreadDelete` batch with the matching atomic
+  hands in its two-element `ThreadCreate`+`ThreadDelete` batch with the matching atomic
   ref vector). This
   is what closes the class for code that has *not* yet been migrated to
   `AtomicMutation`, exactly as `reconciled_load` reconciles for readers that were never
@@ -863,16 +863,16 @@ confirms the proposed variant names appear only in this doc):
 |---|---|---|---|---|
 | `Snapshot { new_state, prev_head, thread }` (`:18`) | EXISTING | thread + HEAD | ✅ `thread` name + `new_state` target | none — already correct |
 | `Goto { target, prev_head }` (`:24`) | EXISTING | HEAD | ✅ HEAD is the unique implicit ref; `target` is its value | none — already correct |
-| `ThreadCreate`/`ThreadCreateV2`/`ThreadUpdate`/`ThreadDelete` (`:29`,`:215`,`:33`,`:31`) | EXISTING | thread | ✅ `name` + `state` | none — already correct |
+| `ThreadCreate`/`ThreadCreate`/`ThreadUpdate`/`ThreadDelete` (`:29`,`:215`,`:33`,`:31`) | EXISTING | thread | ✅ `name` + `state` | none — already correct |
 | `MarkerCreate`/`MarkerDelete { name, state }` (`:46`,`:47`) | EXISTING | marker | ✅ `name` + `state` | none — already correct |
 | `Checkpoint { parent, state, thread }` (`:53`) | EXISTING | thread + HEAD | ✅ `thread` + `state` | none — already correct |
-| `FastForwardV2 { source_thread, target_thread, pre_target_id, post_target_id }` (`:169`) | EXISTING | `target_thread` ref | ✅ `target_thread` + `post_target_id` — **the precedent**: heddle#99 r2 added `post_target_id` *specifically* so replay names the published ref *and* its target | none — already correct |
+| `FastForward { source_thread, target_thread, pre_target_id, post_target_id }` (`:169`) | EXISTING | `target_thread` ref | ✅ `target_thread` + `post_target_id` — **the precedent**: heddle#99 r2 added `post_target_id` *specifically* so replay names the published ref *and* its target | none — already correct |
 | `RemoteThreadUpdate`/`RemoteThreadDelete`/`UndoRecoveryUpdate` | **PROPOSED (r9)** — **do NOT exist** in the tree; enum tail ends at `GitCheckpoint` (`oplog_types.rs:223`); the corresponding writes (`set_remote_thread`/`delete_remote_thread`/`set_undo_recovery`, `refs_manager.rs:261`,`:284`,`:242`) currently write the ref **directly with no `OpRecord`** | remote-thread / undo-recovery | (designed to) ✅ remote+thread / recovery target | **BUILD** → add these three tail variants + route the three direct setters through the oplog-commit path so their reconciliation is non-vacuous |
 | **`Fork { from, new_state }`** (`:39`) | **EXISTING, ref-blind → EXTENDED IN PLACE** | thread + HEAD (`fork.rs:85`,`:88`) | ❌ **no** published thread name, **no** HEAD | **BUILD** → extend the existing variant in place to `Fork { from, new_state, thread: Option<String>, head }` (published thread name, `None` for detached, + the HEAD it set), modelled on `ThreadUpdate`'s `{ name, state }` shape |
 | **`Collapse { sources, result }`** (`:41-44`) | **EXISTING, ref-blind → EXTENDED IN PLACE** | thread *or* detached HEAD (`collapse.rs:101`,`:104`) | ❌ carries `result` target but **not** which ref it published | **BUILD** → extend the existing variant in place to `Collapse { sources, result, <published-ref discriminant> }` (thread name or detached-HEAD marker) |
 
 So among the variants **in the tree today**, only **`Fork` and `Collapse`** lack ref
-identity (every other *existing* publishing variant — including `FastForwardV2`, which
+identity (every other *existing* publishing variant — including `FastForward`, which
 already carries it — needs no change); and the **remote-thread / undo-recovery** publishing
 variants **do not exist at all yet** — they are net-new spike-proposed work, not
 "covered." The retrofit adds the ref identity by **mutating the existing `Fork`/`Collapse`
@@ -1653,7 +1653,7 @@ Together they hold the invariant for every writer, reader, and crash timing:
   one primitive, which enforces ordering + atomicity *universally* regardless of which
   records it is handed. It accepts a **batch** (r16) so a multi-record atomic op is faithful:
   thread-rename publishes new-thread + old-thread-delete (± HEAD) in one atomic ref vector
-  (`thread.rs:3074-3100`) backed by a two-record batch (`ThreadCreateV2`+`ThreadDelete`,
+  (`thread.rs:3074-3100`) backed by a two-record batch (`ThreadCreate`+`ThreadDelete`,
   `oplog_records.rs:96-110`) — a single-`OpRecord` chokepoint would have dropped a backing
   record or split that atomic batch. **And the batch must back EVERY ref it publishes
   (full-batch-record-coverage, r17, cid 3329019021):** when the renamed thread is the
@@ -2076,7 +2076,7 @@ impl AtomicMutation for StartThread {
         tx.enroll(RecordThreadManifest::new(…))?;
         tx.enroll(SaveThreadRecord::new(record))?;               // rewind: delete the record
         tx.enroll(CreateAgentEntry::new(entry))?;                // rewind: strip the entry
-        Ok(StagedCommit { output: …, oplog: vec![/* ThreadCreateV2 */] })
+        Ok(StagedCommit { output: …, oplog: vec![/* ThreadCreate */] })
     }
 }
 ```
@@ -2200,7 +2200,7 @@ commit-then-publish primitive `commit_and_publish(op_records: &[OpRecord], ref_u
 4) before publishing the atomic ref batch (phase 5) without splitting it. It takes a
 **batch** rather than a single record (r16) so a multi-record atomic op — thread-rename's
 new-thread+old-thread-delete (± HEAD) ref vector (`thread.rs:3074-3100`) backed by a
-two-record `ThreadCreateV2`+`ThreadDelete` batch (`oplog_records.rs:96-110`) — **three
+two-record `ThreadCreate`+`ThreadDelete` batch (`oplog_records.rs:96-110`) — **three
 records when HEAD was attached to the renamed thread and the vector therefore carries a
 `RefUpdate::Head` (`thread.rs:3090-3099`), the HEAD-move record added per
 full-batch-record-coverage (r17, cid 3329019021)** — commits
@@ -2248,7 +2248,7 @@ preceding ref-carrying record" holds for the Postgres backend too, by its own me
 | remote/undo refs | `refs_manager.rs:242`,`:261`,`:284` | n/a | no | — | were direct-write, no `OpRecord` (cid 3328869364); r9 routes through oplog-commit + new variants so reconciliation is non-vacuous |
 | fork | `fork.rs:74-92` | no | no | — | published thread+HEAD *before* `record_fork` (`:94`), passed `record_fork`'s args **reversed** (`oplog_records.rs:113` vs `:94-95`, r15), and `OpRecord::Fork` was ref-blind (cid 3328926767); fix: `cmd_fork` builds `Fork { from: source_state, new_state, thread, head }` (corrected order + published ref) and calls `commit_and_publish(&[op_record], ref_updates)` (one-element batch; r11 chokepoint, records-first; existing variant extended in place, pre-1.0 clean format break, no shim) |
 | collapse | `collapse.rs:99-108` | no | no | — | published thread/HEAD *before* `record_collapse` (`:112`) and `OpRecord::Collapse` was ref-blind (cid 3328926767); fix: `cmd_collapse` builds `Collapse { sources, result, <published-ref> }` and calls `commit_and_publish(&[op_record], ref_updates)` (one-element batch; r11 chokepoint, records-first; existing variant extended in place, pre-1.0 clean format break, no shim) |
-| thread-rename | `thread.rs:3061-3116` | no | no | — | publishes an **atomic ref batch** — create-new + delete-old (± HEAD move) in one `update_refs` vector (`:3074-3100`) — backed by a **two-record** batch (`ThreadCreateV2`+`ThreadDelete`, `oplog_records.rs:96-110`); the **multi-record motivator for the batch chokepoint (r16, cid 3329003333)**: a single-`OpRecord` primitive would drop a backing record or split the atomic batch. Fix: `cmd_thread_rename` calls `commit_and_publish(&[create, delete], ref_updates)` — full record batch + atomic ref batch, published together |
+| thread-rename | `thread.rs:3061-3116` | no | no | — | publishes an **atomic ref batch** — create-new + delete-old (± HEAD move) in one `update_refs` vector (`:3074-3100`) — backed by a **two-record** batch (`ThreadCreate`+`ThreadDelete`, `oplog_records.rs:96-110`); the **multi-record motivator for the batch chokepoint (r16, cid 3329003333)**: a single-`OpRecord` primitive would drop a backing record or split the atomic batch. Fix: `cmd_thread_rename` calls `commit_and_publish(&[create, delete], ref_updates)` — full record batch + atomic ref batch, published together |
 | pg ref backend | `pg_refs.rs:35`,`:324`,`:328` | n/a | no | — | second `RefBackend` impl (`ref_backend.rs:15`); `update_refs` published thread/marker/HEAD via its **own** SQL `pool.begin()…tx.commit()`, bypassing the file temp→rename seam (cid 3329052679); fix (r18): `commit_and_publish` is a **`RefBackend`-trait method** — `PgRefBackend` inserts the ref-carrying record(s) + ref/head rows in **one** SQL tx (`PgOpLogBackend` shares the pool, `pg_oplog.rs:40`,`:259`), native ACID atomicity, no reconciliation/watermark; its raw SQL publish made private behind the seam |
 
 ---
@@ -2413,7 +2413,7 @@ preceding ref-carrying record" holds for the Postgres backend too, by its own me
   (r16, cid 3329003333)**, because some atomic ref batches back multiple records:
   thread-rename publishes create-new + delete-old (± HEAD) in one atomic `update_refs`
   vector (`thread.rs:3074-3100`) while `record_thread_rename` records a two-record batch
-  (`ThreadCreateV2`+`ThreadDelete`, `oplog_records.rs:96-110`) — which, per r17 (cid
+  (`ThreadCreate`+`ThreadDelete`, `oplog_records.rs:96-110`) — which, per r17 (cid
   3329019021), must become a *three*-record batch in the attached-HEAD case so the
   published `RefUpdate::Head` (`thread.rs:3090-3099`) has a backing record; see (e). A
   single-`OpRecord`
@@ -2467,7 +2467,7 @@ preceding ref-carrying record" holds for the Postgres backend too, by its own me
   must survive, but because the new field shapes must land coherently across every
   reader/writer of these variants. **(e)** Route `cmd_thread_rename`
   (`thread.rs:3061-3116`) through the chokepoint with its **full record batch** — its
-  existing `record_thread_rename` records (`ThreadCreateV2`+`ThreadDelete`,
+  existing `record_thread_rename` records (`ThreadCreate`+`ThreadDelete`,
   `oplog_records.rs:96-110`) handed in as `&[create, delete]` alongside the atomic
   `update_refs` vector it already builds (`thread.rs:3074-3100`). This is the concrete
   case that drives the batch signature in (a): the create + delete ref batch and its two
@@ -2540,7 +2540,7 @@ publication routes through one commit-then-publish primitive
 **all** of the **caller-supplied** ref-carrying record batch (phase 4) *before*
 publishing the atomic canonical-ref batch (phase 5) without splitting it. It takes a
 **batch** (r16) so multi-record atomic ops — thread-rename's create-new+delete-old
-(± HEAD) ref vector backed by a two-record `ThreadCreateV2`+`ThreadDelete` batch
+(± HEAD) ref vector backed by a two-record `ThreadCreate`+`ThreadDelete` batch
 (`thread.rs:3074-3100`, `oplog_records.rs:96-110`), or **three records** when HEAD was
 attached to the renamed thread so the published `RefUpdate::Head` (`thread.rs:3090-3099`)
 gets a backing HEAD-move record (full-batch-record-coverage, r17, cid 3329019021) — are
@@ -2807,13 +2807,13 @@ revision, only one migration is in flight, not five.
   not a single record (r16), because some atomic ref batches back multiple records:
   `cmd_thread_rename` (`thread.rs:3061-3116`) publishes create-new + delete-old (± HEAD)
   in **one** atomic `update_refs` vector (`:3074-3100`) backed by a **two-record** batch
-  (`ThreadCreateV2`+`ThreadDelete` via `record_thread_rename`, `oplog_records.rs:96-110`)
+  (`ThreadCreate`+`ThreadDelete` via `record_thread_rename`, `oplog_records.rs:96-110`)
   — a single-`OpRecord` chokepoint would drop a backing record or split the atomic batch;
   the batch signature commits every record then publishes the whole ref batch together
   (single-record ops pass a one-element batch), so **every published ref in a batch has a
   backing record in the same atomic publish** — including the attached-HEAD thread-rename,
   whose third `RefUpdate::Head` (`thread.rs:3090-3099`) requires `record_thread_rename`
-  (which today emits only `ThreadCreateV2`+`ThreadDelete`, `oplog_records.rs:96-110`) to
+  (which today emits only `ThreadCreate`+`ThreadDelete`, `oplog_records.rs:96-110`) to
   add a third HEAD-move record, so the count of refs backed by a record equals the count
   of refs published (full-batch-record-coverage, r17, cid 3329019021).
   The primitive **takes** the caller's records rather than synthesizing them (r15): the

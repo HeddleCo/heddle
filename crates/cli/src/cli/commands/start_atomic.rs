@@ -25,7 +25,7 @@
 //!   * **Thread-record writes** route through [`ThreadManager::converge_records`]
 //!     — the same lock-atomic record-set chokepoint undo/redo uses — captured
 //!     via [`ThreadManager::snapshot_records`] for the converge-back inverse.
-//!   * **The oplog `ThreadCreateV2`** is the staged domain record handed to the
+//!   * **The oplog `ThreadCreate`** is the staged domain record handed to the
 //!     executor's single commit point (it is NOT appended inside `apply`); the
 //!     commit marker dedups on the stable `transaction_id`.
 //!
@@ -90,7 +90,10 @@ fn apply_error(err: anyhow::Error) -> HeddleError {
         // carry the full context chain (`{err:#}`) as the message so the
         // path/action survives. Extract the kind first so the `downcast_ref`
         // borrow is dropped before we format `err`.
-        Err(err) => match err.downcast_ref::<std::io::Error>().map(std::io::Error::kind) {
+        Err(err) => match err
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind)
+        {
             Some(kind) => HeddleError::Io(std::io::Error::new(kind, format!("{err:#}"))),
             None => HeddleError::Conflict(format!("{err:#}")),
         },
@@ -610,7 +613,7 @@ pub(crate) struct StartThread {
     pub base_state: ChangeId,
     /// `Some(prior)` when a thread ref already exists (re-start reuses it via a
     /// CAS against `prior`); `None` for a brand-new thread (CAS-against-missing
-    /// + a staged `ThreadCreateV2` commit record).
+    /// + a staged `ThreadCreate` commit record).
     pub existing_thread_state: Option<ChangeId>,
     pub thread_mode: ThreadMode,
     /// The materialization target (mount point for virtualized).
@@ -670,7 +673,7 @@ impl StartThread {
     }
 
     /// Stage the thread-ref write (atomic, forward-first), pushing the staged
-    /// `ThreadCreateV2` commit record for a brand-new thread.
+    /// `ThreadCreate` commit record for a brand-new thread.
     fn stage_ref(&self, tx: &mut Tx<'_>, oplog: &mut Vec<OpRecord>) -> HeddleResult<()> {
         let repo = tx.repo();
         let base_state = self.base_state;
@@ -759,8 +762,9 @@ impl StartThread {
                 // means only the courtesy stub is on disk, so the manifest stage
                 // must NOT stat the unmaterialized real tree (heddle#316 r9
                 // Finding 3).
-                let outcome = write_isolated_checkout(repo, &checkout_root, &base_state, Some(&name))
-                    .map_err(apply_error)?;
+                let outcome =
+                    write_isolated_checkout(repo, &checkout_root, &base_state, Some(&name))
+                        .map_err(apply_error)?;
                 checkout_outcome.set(Some(outcome));
                 Ok(())
             },
@@ -1022,7 +1026,7 @@ impl AtomicMutation for StartThread {
         //    inverse runs last and a self-created dir never leaks).
         self.stage_target_dir(tx, Rc::clone(&target_claim))?;
 
-        // 1. Thread ref (+ staged ThreadCreateV2 for a brand-new thread).
+        // 1. Thread ref (+ staged ThreadCreate for a brand-new thread).
         self.stage_ref(tx, &mut oplog)?;
 
         // 2. Mode-specific materialization.
@@ -1030,7 +1034,11 @@ impl AtomicMutation for StartThread {
             ThreadMode::Solid | ThreadMode::Materialized => {
                 self.stage_checkout(tx, Rc::clone(&target_claim), Rc::clone(&checkout_outcome))?;
                 if matches!(self.thread_mode, ThreadMode::Materialized) {
-                    self.stage_manifest(tx, Rc::clone(&target_claim), Rc::clone(&checkout_outcome))?;
+                    self.stage_manifest(
+                        tx,
+                        Rc::clone(&target_claim),
+                        Rc::clone(&checkout_outcome),
+                    )?;
                 }
                 if let Some(dir) = self.shared_target_dir.clone() {
                     let applied = self.stage_cargo_config(tx, &dir, Rc::clone(&target_claim))?;

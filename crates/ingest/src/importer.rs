@@ -386,7 +386,10 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
                 .unwrap_or_default();
             if !entries.is_empty() {
                 if !self.options.lossy {
-                    return Err(fail_lossy_entry(&rebase_lossy_entry(path_prefix, &entries[0])));
+                    return Err(fail_lossy_entry(&rebase_lossy_entry(
+                        path_prefix,
+                        &entries[0],
+                    )));
                 }
                 self.stats.lossy_entries.extend(
                     entries
@@ -882,7 +885,10 @@ mod tests {
             .expect_err("default import must not reuse cached lossy tree silently");
         let message = err.to_string();
 
-        assert!(message.contains("bad"), "error names cached entry: {message}");
+        assert!(
+            message.contains("bad"),
+            "error names cached entry: {message}"
+        );
         assert!(
             message.contains("not valid UTF-8"),
             "error explains cached conversion: {message}"
@@ -913,11 +919,7 @@ mod tests {
 
         assert_eq!(second.lossy_entries.len(), 1);
         assert_eq!(second.lossy_entries[0].path, "bad\u{fffd}name");
-        assert!(
-            second.lossy_entries[0]
-                .summary_line()
-                .contains("converted")
-        );
+        assert!(second.lossy_entries[0].summary_line().contains("converted"));
     }
 
     #[test]
@@ -1044,7 +1046,6 @@ mod tests {
         for entry in &recent {
             match &entry.operation {
                 OpRecord::ThreadCreate { .. }
-                | OpRecord::ThreadCreateV2 { .. }
                 | OpRecord::ThreadUpdate { .. }
                 | OpRecord::ThreadDelete { .. }
                 | OpRecord::MarkerCreate { .. }

@@ -170,6 +170,7 @@ enum StrictCurrentOpRecord {
     ThreadCreate {
         name: String,
         state: ChangeId,
+        manager_snapshot: Option<Vec<u8>>,
     },
     ThreadDelete {
         name: String,
@@ -234,17 +235,7 @@ enum StrictCurrentOpRecord {
         source_thread: String,
         target_thread: String,
         pre_target_id: ChangeId,
-    },
-    FastForwardV2 {
-        source_thread: String,
-        target_thread: String,
-        pre_target_id: ChangeId,
         post_target_id: ChangeId,
-    },
-    ThreadCreateV2 {
-        name: String,
-        state: ChangeId,
-        manager_snapshot: Option<Vec<u8>>,
     },
     GitCheckpoint {
         branch: String,
@@ -309,7 +300,15 @@ impl StrictCurrentOpRecord {
                 prev_head,
                 head,
             },
-            Self::ThreadCreate { name, state } => OpRecord::ThreadCreate { name, state },
+            Self::ThreadCreate {
+                name,
+                state,
+                manager_snapshot,
+            } => OpRecord::ThreadCreate {
+                name,
+                state,
+                manager_snapshot,
+            },
             Self::ThreadDelete { name, state } => OpRecord::ThreadDelete { name, state },
             Self::ThreadUpdate {
                 name,
@@ -395,30 +394,12 @@ impl StrictCurrentOpRecord {
                 source_thread,
                 target_thread,
                 pre_target_id,
+                post_target_id,
             } => OpRecord::FastForward {
                 source_thread,
                 target_thread,
                 pre_target_id,
-            },
-            Self::FastForwardV2 {
-                source_thread,
-                target_thread,
-                pre_target_id,
                 post_target_id,
-            } => OpRecord::FastForwardV2 {
-                source_thread,
-                target_thread,
-                pre_target_id,
-                post_target_id,
-            },
-            Self::ThreadCreateV2 {
-                name,
-                state,
-                manager_snapshot,
-            } => OpRecord::ThreadCreateV2 {
-                name,
-                state,
-                manager_snapshot,
             },
             Self::GitCheckpoint {
                 branch,
@@ -498,6 +479,7 @@ enum PreAtomicOpRecord {
     ThreadCreate {
         name: String,
         state: ChangeId,
+        manager_snapshot: Option<Vec<u8>>,
     },
     ThreadDelete {
         name: String,
@@ -559,17 +541,7 @@ enum PreAtomicOpRecord {
         source_thread: String,
         target_thread: String,
         pre_target_id: ChangeId,
-    },
-    FastForwardV2 {
-        source_thread: String,
-        target_thread: String,
-        pre_target_id: ChangeId,
         post_target_id: ChangeId,
-    },
-    ThreadCreateV2 {
-        name: String,
-        state: ChangeId,
-        manager_snapshot: Option<Vec<u8>>,
     },
     GitCheckpoint {
         branch: String,
@@ -597,7 +569,15 @@ impl PreAtomicOpRecord {
                 prev_head,
                 head: target,
             },
-            Self::ThreadCreate { name, state } => OpRecord::ThreadCreate { name, state },
+            Self::ThreadCreate {
+                name,
+                state,
+                manager_snapshot,
+            } => OpRecord::ThreadCreate {
+                name,
+                state,
+                manager_snapshot,
+            },
             Self::ThreadDelete { name, state } => OpRecord::ThreadDelete { name, state },
             Self::ThreadUpdate {
                 name,
@@ -678,30 +658,12 @@ impl PreAtomicOpRecord {
                 source_thread,
                 target_thread,
                 pre_target_id,
+                post_target_id,
             } => OpRecord::FastForward {
                 source_thread,
                 target_thread,
                 pre_target_id,
-            },
-            Self::FastForwardV2 {
-                source_thread,
-                target_thread,
-                pre_target_id,
                 post_target_id,
-            } => OpRecord::FastForwardV2 {
-                source_thread,
-                target_thread,
-                pre_target_id,
-                post_target_id,
-            },
-            Self::ThreadCreateV2 {
-                name,
-                state,
-                manager_snapshot,
-            } => OpRecord::ThreadCreateV2 {
-                name,
-                state,
-                manager_snapshot,
             },
             Self::GitCheckpoint {
                 branch,
@@ -735,6 +697,7 @@ enum AtomicNoHeadOpRecord {
     ThreadCreate {
         name: String,
         state: ChangeId,
+        manager_snapshot: Option<Vec<u8>>,
     },
     ThreadDelete {
         name: String,
@@ -799,17 +762,7 @@ enum AtomicNoHeadOpRecord {
         source_thread: String,
         target_thread: String,
         pre_target_id: ChangeId,
-    },
-    FastForwardV2 {
-        source_thread: String,
-        target_thread: String,
-        pre_target_id: ChangeId,
         post_target_id: ChangeId,
-    },
-    ThreadCreateV2 {
-        name: String,
-        state: ChangeId,
-        manager_snapshot: Option<Vec<u8>>,
     },
     GitCheckpoint {
         branch: String,
@@ -850,7 +803,15 @@ impl AtomicNoHeadOpRecord {
                 prev_head,
                 head: target,
             },
-            Self::ThreadCreate { name, state } => OpRecord::ThreadCreate { name, state },
+            Self::ThreadCreate {
+                name,
+                state,
+                manager_snapshot,
+            } => OpRecord::ThreadCreate {
+                name,
+                state,
+                manager_snapshot,
+            },
             Self::ThreadDelete { name, state } => OpRecord::ThreadDelete { name, state },
             Self::ThreadUpdate {
                 name,
@@ -936,30 +897,12 @@ impl AtomicNoHeadOpRecord {
                 source_thread,
                 target_thread,
                 pre_target_id,
+                post_target_id,
             } => OpRecord::FastForward {
                 source_thread,
                 target_thread,
                 pre_target_id,
-            },
-            Self::FastForwardV2 {
-                source_thread,
-                target_thread,
-                pre_target_id,
                 post_target_id,
-            } => OpRecord::FastForwardV2 {
-                source_thread,
-                target_thread,
-                pre_target_id,
-                post_target_id,
-            },
-            Self::ThreadCreateV2 {
-                name,
-                state,
-                manager_snapshot,
-            } => OpRecord::ThreadCreateV2 {
-                name,
-                state,
-                manager_snapshot,
             },
             Self::GitCheckpoint {
                 branch,
@@ -1033,6 +976,7 @@ mod tests {
             OpRecord::ThreadCreate {
                 name: "topic".into(),
                 state: cid(4),
+                manager_snapshot: Some(vec![1, 2, 3]),
             },
             OpRecord::ThreadDelete {
                 name: "old".into(),
@@ -1096,18 +1040,8 @@ mod tests {
             OpRecord::FastForward {
                 source_thread: "feature".into(),
                 target_thread: "main".into(),
-                pre_target_id: cid(16),
-            },
-            OpRecord::FastForwardV2 {
-                source_thread: "feature".into(),
-                target_thread: "main".into(),
                 pre_target_id: cid(17),
                 post_target_id: cid(18),
-            },
-            OpRecord::ThreadCreateV2 {
-                name: "recorded".into(),
-                state: cid(19),
-                manager_snapshot: Some(vec![1, 2, 3]),
             },
             OpRecord::GitCheckpoint {
                 branch: "main".into(),
@@ -1419,9 +1353,14 @@ pub(crate) mod tests_support {
                     target: *target,
                     prev_head: *prev_head,
                 },
-                OpRecord::ThreadCreate { name, state } => Self::ThreadCreate {
+                OpRecord::ThreadCreate {
+                    name,
+                    state,
+                    manager_snapshot,
+                } => Self::ThreadCreate {
                     name: name.clone(),
                     state: *state,
+                    manager_snapshot: manager_snapshot.clone(),
                 },
                 OpRecord::ThreadDelete { name, state } => Self::ThreadDelete {
                     name: name.clone(),
@@ -1516,30 +1455,12 @@ pub(crate) mod tests_support {
                     source_thread,
                     target_thread,
                     pre_target_id,
+                    post_target_id,
                 } => Self::FastForward {
                     source_thread: source_thread.clone(),
                     target_thread: target_thread.clone(),
                     pre_target_id: *pre_target_id,
-                },
-                OpRecord::FastForwardV2 {
-                    source_thread,
-                    target_thread,
-                    pre_target_id,
-                    post_target_id,
-                } => Self::FastForwardV2 {
-                    source_thread: source_thread.clone(),
-                    target_thread: target_thread.clone(),
-                    pre_target_id: *pre_target_id,
                     post_target_id: *post_target_id,
-                },
-                OpRecord::ThreadCreateV2 {
-                    name,
-                    state,
-                    manager_snapshot,
-                } => Self::ThreadCreateV2 {
-                    name: name.clone(),
-                    state: *state,
-                    manager_snapshot: manager_snapshot.clone(),
                 },
                 OpRecord::GitCheckpoint {
                     branch,
@@ -1582,9 +1503,14 @@ pub(crate) mod tests_support {
                     target: *target,
                     prev_head: *prev_head,
                 },
-                OpRecord::ThreadCreate { name, state } => Self::ThreadCreate {
+                OpRecord::ThreadCreate {
+                    name,
+                    state,
+                    manager_snapshot,
+                } => Self::ThreadCreate {
                     name: name.clone(),
                     state: *state,
+                    manager_snapshot: manager_snapshot.clone(),
                 },
                 OpRecord::ThreadDelete { name, state } => Self::ThreadDelete {
                     name: name.clone(),
@@ -1683,30 +1609,12 @@ pub(crate) mod tests_support {
                     source_thread,
                     target_thread,
                     pre_target_id,
+                    post_target_id,
                 } => Self::FastForward {
                     source_thread: source_thread.clone(),
                     target_thread: target_thread.clone(),
                     pre_target_id: *pre_target_id,
-                },
-                OpRecord::FastForwardV2 {
-                    source_thread,
-                    target_thread,
-                    pre_target_id,
-                    post_target_id,
-                } => Self::FastForwardV2 {
-                    source_thread: source_thread.clone(),
-                    target_thread: target_thread.clone(),
-                    pre_target_id: *pre_target_id,
                     post_target_id: *post_target_id,
-                },
-                OpRecord::ThreadCreateV2 {
-                    name,
-                    state,
-                    manager_snapshot,
-                } => Self::ThreadCreateV2 {
-                    name: name.clone(),
-                    state: *state,
-                    manager_snapshot: manager_snapshot.clone(),
                 },
                 OpRecord::GitCheckpoint {
                     branch,

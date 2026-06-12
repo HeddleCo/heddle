@@ -80,6 +80,7 @@ fn test_record_batch() {
             OpRecord::ThreadCreate {
                 name: "main".to_string(),
                 state,
+                manager_snapshot: None,
             },
             OpRecord::ThreadDelete {
                 name: "legacy".to_string(),
@@ -527,6 +528,7 @@ fn op_record_variants_roundtrip_and_describe() {
         OpRecord::ThreadCreate {
             name: "feat".into(),
             state: st,
+            manager_snapshot: Some(vec![1, 2, 3]),
         },
         OpRecord::ThreadDelete {
             name: "feat".into(),
@@ -609,17 +611,7 @@ fn op_record_variants_roundtrip_and_describe() {
             source_thread: "topic".into(),
             target_thread: "main".into(),
             pre_target_id: st2,
-        },
-        OpRecord::FastForwardV2 {
-            source_thread: "topic".into(),
-            target_thread: "main".into(),
-            pre_target_id: st2,
             post_target_id: st,
-        },
-        OpRecord::ThreadCreateV2 {
-            name: "feat".into(),
-            state: st,
-            manager_snapshot: Some(vec![1, 2, 3]),
         },
         OpRecord::GitCheckpoint {
             branch: "main".into(),
@@ -728,7 +720,12 @@ fn record_methods_persist_expected_variants() {
         .record_goto(&result, Some(&from), Some("lane"))
         .unwrap();
     oplog
-        .record_thread_create(&ThreadName::new("feat"), &result, Some(vec![9, 8, 7]), Some("lane"))
+        .record_thread_create(
+            &ThreadName::new("feat"),
+            &result,
+            Some(vec![9, 8, 7]),
+            Some("lane"),
+        )
         .unwrap();
     oplog
         .record_thread_delete(&ThreadName::new("legacy"), &result, None)
@@ -790,9 +787,9 @@ fn record_methods_persist_expected_variants() {
     assert_eq!(fork.2.as_deref(), Some("topic"));
     assert_eq!(fork.3, None);
 
-    // A ThreadCreate is always emitted as the V2 variant with the snapshot.
+    // A ThreadCreate is always emitted with the snapshot.
     let created = entries.iter().find_map(|e| match &e.operation {
-        OpRecord::ThreadCreateV2 {
+        OpRecord::ThreadCreate {
             name,
             manager_snapshot,
             ..
@@ -801,10 +798,10 @@ fn record_methods_persist_expected_variants() {
     });
     assert_eq!(created, Some(Some(vec![9u8, 8, 7])));
 
-    // The fast-forward always lands as the V2 variant carrying post_target_id.
+    // The fast-forward always carries post_target_id.
     assert!(entries.iter().any(|e| matches!(
         &e.operation,
-        OpRecord::FastForwardV2 { post_target_id, .. } if *post_target_id == result
+        OpRecord::FastForward { post_target_id, .. } if *post_target_id == result
     )));
 }
 
@@ -1105,7 +1102,7 @@ mod default_backend {
         )));
         assert!(ops.iter().any(|o| matches!(
             o,
-            OpRecord::ThreadCreateV2 { name, manager_snapshot, .. }
+            OpRecord::ThreadCreate { name, manager_snapshot, .. }
                 if name == "ft" && manager_snapshot.as_deref() == Some(&[1u8, 2, 3][..])
         )));
         assert!(ops.iter().any(|o| matches!(
@@ -1118,7 +1115,7 @@ mod default_backend {
         );
         assert!(ops.iter().any(|o| matches!(
             o,
-            OpRecord::FastForwardV2 { post_target_id, .. } if *post_target_id == cid
+            OpRecord::FastForward { post_target_id, .. } if *post_target_id == cid
         )));
     }
 }

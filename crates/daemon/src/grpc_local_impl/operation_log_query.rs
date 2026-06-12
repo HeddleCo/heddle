@@ -64,7 +64,12 @@ fn build_query(req: &QueryOperationsRequest) -> OperationLogQuery {
         // a hand-maintained list — so a new `OpRecord` variant is surfaced by
         // default the moment it joins the catalog, instead of being silently
         // dropped from the default query (heddle#354 r9, cid 3330304663).
-        q.verbs = Some(OpRecord::verbs(false).iter().map(|s| s.to_string()).collect());
+        q.verbs = Some(
+            OpRecord::verbs(false)
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
     }
     q
 }
@@ -187,17 +192,14 @@ fn indexed_operation_matches(hit: &IndexedOperation, query: &OperationLogQuery) 
 fn thread_for(op: &OpRecord) -> Option<String> {
     match op {
         OpRecord::Snapshot { thread, .. } => thread.clone(),
-        OpRecord::ThreadCreate { name, .. } | OpRecord::ThreadCreateV2 { name, .. } => {
-            Some(name.clone())
-        }
+        OpRecord::ThreadCreate { name, .. } => Some(name.clone()),
         OpRecord::ThreadDelete { name, .. } => Some(name.clone()),
         OpRecord::ThreadUpdate { name, .. } => Some(name.clone()),
         OpRecord::MarkerCreate { name, .. } => Some(name.clone()),
         OpRecord::MarkerDelete { name, .. } => Some(name.clone()),
         OpRecord::Checkpoint { thread, .. } => thread.clone(),
         OpRecord::EphemeralThreadCollapse { thread, .. } => Some(thread.clone()),
-        OpRecord::FastForward { target_thread, .. }
-        | OpRecord::FastForwardV2 { target_thread, .. } => Some(target_thread.clone()),
+        OpRecord::FastForward { target_thread, .. } => Some(target_thread.clone()),
         OpRecord::GitCheckpoint { branch, .. } => Some(branch.clone()),
         OpRecord::RemoteThreadUpdate { thread, .. }
         | OpRecord::RemoteThreadDelete { thread, .. } => Some(thread.clone()),
@@ -219,9 +221,7 @@ fn primary_change_id(op: &OpRecord) -> Option<ChangeId> {
     match op {
         OpRecord::Snapshot { new_state, .. } => Some(*new_state),
         OpRecord::Goto { target, .. } => Some(*target),
-        OpRecord::ThreadCreate { state, .. } | OpRecord::ThreadCreateV2 { state, .. } => {
-            Some(*state)
-        }
+        OpRecord::ThreadCreate { state, .. } => Some(*state),
         OpRecord::ThreadDelete { state, .. } => Some(*state),
         OpRecord::ThreadUpdate { new_state, .. } => Some(*new_state),
         OpRecord::Fork { new_state, .. } => Some(*new_state),
@@ -234,15 +234,15 @@ fn primary_change_id(op: &OpRecord) -> Option<ChangeId> {
         OpRecord::Redact { state, .. } => Some(*state),
         OpRecord::StateVisibilitySet { state, .. }
         | OpRecord::StateVisibilityPromote { state, .. } => Some(*state),
-        OpRecord::RemoteThreadUpdate { state, .. }
-        | OpRecord::RemoteThreadDelete { state, .. } => Some(*state),
+        OpRecord::RemoteThreadUpdate { state, .. } | OpRecord::RemoteThreadDelete { state, .. } => {
+            Some(*state)
+        }
         OpRecord::UndoRecoveryUpdate { state } => Some(*state),
         OpRecord::TransactionAbort { .. }
         | OpRecord::TransactionCommit { .. }
         | OpRecord::ConflictResolved { .. }
         | OpRecord::Purge { .. }
-        | OpRecord::FastForward { .. }
-        | OpRecord::FastForwardV2 { .. } => None,
+        | OpRecord::FastForward { .. } => None,
     }
 }
 
@@ -408,7 +408,11 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        assert_eq!(resp.hits.len(), 1, "newer non-checkpoint verb must not be dropped");
+        assert_eq!(
+            resp.hits.len(),
+            1,
+            "newer non-checkpoint verb must not be dropped"
+        );
         assert_eq!(resp.hits[0].verb, "transaction_commit");
     }
 

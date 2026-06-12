@@ -90,7 +90,7 @@ pub(crate) fn abort_merge_state(
     // (conflict markers) but did not move HEAD or the target thread
     // ref — both stay at `ours` throughout the conflicted-merge
     // window. The FF here is therefore a worktree reset to `ours`,
-    // not a thread advance, so the recorded `FastForwardV2`'s
+    // not a thread advance, so the recorded `FastForward`'s
     // `pre_target_id` and `post_target_id` are equal. Migrated as
     // part of the heddle#110 Rule-7 sweep for uniformity with the
     // other `fast_forward_attached` callers: a future merge variant

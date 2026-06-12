@@ -125,15 +125,12 @@ impl Fold {
                     }
                 }
             },
-            OpRecord::ThreadCreate { name, state }
+            OpRecord::ThreadCreate { name, state, .. }
             | OpRecord::ThreadUpdate {
                 name,
                 new_state: state,
                 ..
             } => {
-                self.threads.insert(name.clone(), Some(*state));
-            }
-            OpRecord::ThreadCreateV2 { name, state, .. } => {
                 self.threads.insert(name.clone(), Some(*state));
             }
             OpRecord::ThreadDelete { name, .. } => {
@@ -194,7 +191,7 @@ impl Fold {
                 // write (symmetric with the detached `Snapshot` arm).
                 None => self.head = HeadFold::Canonical,
             },
-            OpRecord::FastForwardV2 {
+            OpRecord::FastForward {
                 target_thread,
                 post_target_id,
                 ..
@@ -226,13 +223,6 @@ impl Fold {
             }
             OpRecord::Goto { head, .. } => {
                 self.head = HeadFold::Republish(Head::Detached { state: *head });
-            }
-            // Publish-first HEAD move: legacy V1 `FastForward` moved HEAD via a
-            // direct write. Canonical already reflects it (and may carry a
-            // newer unrecorded re-attach), so defer — while masking any earlier
-            // `Republish` so a stale Fork cannot resurrect.
-            OpRecord::FastForward { .. } => {
-                self.head = HeadFold::Canonical;
             }
             // Records that do not move canonical HEAD: transaction markers,
             // conflict resolution, redaction bookkeeping, and the Git-overlay
