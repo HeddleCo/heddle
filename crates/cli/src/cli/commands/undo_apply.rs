@@ -301,6 +301,24 @@ impl<'a> EntrySteps<'_, 'a> {
         )
     }
 
+    /// Re-materialize the currently attached thread at `target`, preserving its
+    /// attached HEAD. No-op when undo/redo is replaying a different thread's ref.
+    fn restore_active_thread_worktree(&mut self, name: &str, target: ChangeId) -> HeddleResult<()> {
+        let repo = self.repo();
+        let head_ref = repo.head_ref()?;
+        let Head::Attached { thread } = &head_ref else {
+            return Ok(());
+        };
+        if thread != name {
+            return Ok(());
+        }
+        self.step_nonatomic(
+            move || Ok((repo.head()?, repo.head_ref()?)),
+            move |(prev_state, prev_head_ref)| restore_head(repo, prev_state, &prev_head_ref),
+            move || repo.fast_forward_attached_without_record_discard_local(&target),
+        )
+    }
+
     /// Write HEAD to `head`; inverse restores the prior HEAD ref. A single ref
     /// write — genuinely all-or-nothing.
     fn write_head(&mut self, head: Head) -> HeddleResult<()> {
@@ -665,6 +683,7 @@ fn apply_undo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
             ..
         } => {
             steps.set_thread(name.as_str(), *old_state)?;
+            steps.restore_active_thread_worktree(name.as_str(), *old_state)?;
             if let Some(bytes) = manager_snapshots
                 .as_ref()
                 .and_then(|snapshots| snapshots.old.as_ref())
@@ -849,6 +868,7 @@ fn apply_redo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
             ..
         } => {
             steps.set_thread(name.as_str(), *new_state)?;
+            steps.restore_active_thread_worktree(name.as_str(), *new_state)?;
             if let Some(bytes) = manager_snapshots
                 .as_ref()
                 .and_then(|snapshots| snapshots.new.as_ref())

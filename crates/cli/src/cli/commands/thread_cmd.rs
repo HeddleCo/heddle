@@ -59,16 +59,12 @@ pub(crate) fn current_thread_ref_state(repo: &Repository, thread: &Thread) -> Re
         return Ok(state);
     }
     if let Some(current_state) = thread.current_state.as_deref() {
-        return ChangeId::parse(current_state).map_err(|err| {
-            anyhow!(
-                "invalid current state for thread '{}': {}",
-                thread.thread,
-                err
-            )
-        });
+        return repo
+            .resolve_state(current_state)?
+            .ok_or_else(|| anyhow!("current state not found for thread '{}'", thread.thread));
     }
-    ChangeId::parse(&thread.base_state)
-        .map_err(|err| anyhow!("invalid base state for thread '{}': {}", thread.thread, err))
+    repo.resolve_state(&thread.base_state)?
+        .ok_or_else(|| anyhow!("base state not found for thread '{}'", thread.thread))
 }
 
 pub(crate) fn save_thread_update_with_oplog(
@@ -1973,5 +1969,48 @@ mod cleanup_tests {
         assert_eq!(format_bytes(512), "512 B");
         assert_eq!(format_bytes(2048), "2.0 KB");
         assert_eq!(format_bytes(1024 * 1024 * 5), "5.0 MB");
+    }
+
+    #[test]
+    fn current_thread_ref_state_resolves_persisted_short_state() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(dir.path()).unwrap();
+        fs::write(dir.path().join("file.txt"), "content\n").unwrap();
+        let state = repo.snapshot(Some("content".to_string()), None).unwrap();
+
+        let thread = Thread {
+            id: "feature".to_string(),
+            thread: "feature".to_string(),
+            target_thread: Some("main".to_string()),
+            parent_thread: Some("main".to_string()),
+            mode: ThreadMode::Materialized,
+            state: ThreadState::Active,
+            base_state: state.change_id.short(),
+            base_root: state.tree.short(),
+            current_state: Some(state.change_id.short()),
+            merged_state: None,
+            task: None,
+            execution_path: dir.path().to_path_buf(),
+            materialized_path: None,
+            changed_paths: Vec::new(),
+            impact_categories: Vec::new(),
+            heavy_impact_paths: Vec::new(),
+            promotion_suggested: false,
+            freshness: ThreadFreshness::Unknown,
+            verification_summary: Default::default(),
+            confidence_summary: Default::default(),
+            integration_policy_result: Default::default(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            ephemeral: None,
+            auto: false,
+            shared_target_dir: None,
+        };
+
+        let resolved = current_thread_ref_state(&repo, &thread).unwrap();
+        assert_eq!(
+            resolved, state.change_id,
+            "fallback must resolve thread-record short current_state values"
+        );
     }
 }

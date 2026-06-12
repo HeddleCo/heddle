@@ -2144,6 +2144,15 @@ fn test_undo_thread_refresh_restores_base_state() {
     };
 
     heddle_must_succeed(&["thread", "refresh", "feature"], temp.path());
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("feature.txt")).unwrap(),
+        "feature\n",
+        "refresh must keep the feature work materialized"
+    );
+    assert!(
+        temp.path().join("main.txt").exists(),
+        "test setup must materialize the refreshed base on disk"
+    );
 
     {
         let repo = Repository::open(temp.path()).unwrap();
@@ -2174,6 +2183,15 @@ fn test_undo_thread_refresh_restores_base_state() {
     assert_eq!(
         feature_ref, feature_tip_before_refresh,
         "undo of refresh must restore the feature ref"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("feature.txt")).unwrap(),
+        "feature\n",
+        "undo of refresh must restore the pre-refresh worktree content"
+    );
+    assert!(
+        !temp.path().join("main.txt").exists(),
+        "undo of refresh on the checked-out thread must remove files introduced by refresh"
     );
 
     let manager = ThreadManager::new(repo.heddle_dir());
