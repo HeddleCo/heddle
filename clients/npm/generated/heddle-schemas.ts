@@ -1648,6 +1648,8 @@ export interface PushSchema {
   recommended_action: NullableStringSchema;
   recommended_action_template: NullableActionTemplateSchema;
   ref_scope?: string | null;
+  /** Full ref names this push wrote at the destination (sorted; empty for a no-op push). Present on the Git-overlay refs path; omitted on the native Heddle transport. Verify with `git ls-remote`. */
+  refs_written?: string[] | null;
   remote?: string | null;
   replayed?: boolean | null;
   state?: string | null;

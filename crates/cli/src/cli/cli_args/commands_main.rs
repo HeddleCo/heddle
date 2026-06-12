@@ -488,6 +488,13 @@ Examples:
     },
 
     /// Push to a remote repository.
+    ///
+    /// In Git-overlay mode, push writes plain Git refs the remote's users can
+    /// inspect with `git ls-remote`: each Heddle thread's state goes to
+    /// `refs/heads/<thread>`, Heddle metadata (state identity carried as Git
+    /// notes) goes to `refs/notes/heddle`, and with `--all-threads` Git tags go
+    /// to `refs/tags/<tag>`. JSON output lists the refs actually written this
+    /// invocation in `refs_written`.
     Push(PushArgs),
 
     /// Pull from a remote repository.
