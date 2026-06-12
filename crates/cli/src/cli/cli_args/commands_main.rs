@@ -8,17 +8,17 @@ use super::BridgeCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
-    AgentCommands, CheckpointArgs, ConflictCommands, ContextCommands,
-    DiscussCommands, HookCommands, IntegrationCommands, MarkerCommands, PurgeCommands, QueryArgs,
-    RedactCommands, RemoteCommands, ReviewCommands, ShellCommands, StackArgs, StashCommands,
-    ThreadCommands, TransactionCommands, VisibilityCommands, WorkspaceCommands,
+    AgentCommands, CheckpointArgs, ConflictCommands, ContextCommands, DiscussCommands,
+    HookCommands, IntegrationCommands, MarkerCommands, PurgeCommands, QueryArgs, RedactCommands,
+    RemoteCommands, ReviewCommands, ShellCommands, StackArgs, StashCommands, ThreadCommands,
+    TransactionCommands, VisibilityCommands, WorkspaceCommands,
     commands_args::{
         ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AdoptArgs,
         AttemptArgs, BranchArgs, CloneArgs, CollapseArgs, CommandCatalogArgs, CommitArgs,
-        DelegateArgs, DiffArgs, DoctorArgs, InitArgs, LogArgs, MergeArgs, PullArgs,
+        DelegateArgs, DiffArgs, DoctorArgs, InitArgs, LandArgs, LogArgs, MergeArgs, PullArgs,
         PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionEndArgs,
-        SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, LandArgs,
-        SnapshotArgs, SwitchArgs, SyncArgs, ThreadStartArgs, TryArgs, UndoArgs, WatchArgs,
+        SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, SnapshotArgs,
+        SwitchArgs, SyncArgs, ThreadStartArgs, TryArgs, UndoArgs, WatchArgs,
     },
 };
 #[cfg(feature = "client")]
@@ -164,6 +164,7 @@ Examples:
     /// exit → diff size → duration). Failed attempts are dropped
     /// automatically; successful ones stay around for the user to
     /// merge or drop. Implements item 3.2 from the heddle 6→8 plan.
+    #[command(hide = true)]
     Attempt(AttemptArgs),
 
     /// Automation/workflow command: run a command inside an existing
@@ -208,6 +209,7 @@ Examples:
     /// the spawned threads with `--parent-thread <current>`. For a
     /// single child with no per-task agent override, `heddle start
     /// <name>` is the lower-level path.
+    #[command(hide = true)]
     Delegate(DelegateArgs),
 
     /// Prepare this thread for review or merge.
@@ -253,12 +255,14 @@ Examples:
     Retro(RetroArgs),
 
     /// Inspect a state or thread (default: current thread).
+    #[command(hide = true)]
     Inspect {
         /// State ID or thread name.
         target: Option<String>,
     },
 
     /// Move worktree to a state.
+    #[command(hide = true)]
     Goto {
         /// Target state.
         target: String,
@@ -283,6 +287,7 @@ Examples:
     Diff(DiffArgs),
 
     /// Git-compatible alias for the Heddle thread command family.
+    #[command(hide = true)]
     Branch(BranchArgs),
 
     /// Git-compatible alias for `heddle thread switch`.
@@ -324,6 +329,7 @@ Examples:
 
     /// Structured conflicts. List, show, resolve conflicts as
     /// data — agents resolve programmatically without parsing markers.
+    #[command(hide = true)]
     Conflict {
         #[command(subcommand)]
         command: ConflictCommands,
@@ -363,6 +369,7 @@ Examples:
 
     /// Physically remove the bytes referenced by an existing redaction.
     /// Irreversible; refuses without `--force`.
+    #[command(hide = true)]
     Purge {
         #[command(subcommand)]
         command: PurgeCommands,
@@ -387,6 +394,7 @@ Examples:
     Undo(UndoArgs),
 
     /// Fork an exploration thread from a state.
+    #[command(hide = true)]
     Fork {
         /// Name for the fork (creates thread).
         #[arg(long)]
@@ -401,6 +409,7 @@ Examples:
     Collapse(CollapseArgs),
 
     /// Manage markers.
+    #[command(hide = true)]
     Marker {
         #[command(subcommand)]
         command: MarkerCommands,
@@ -425,6 +434,7 @@ Examples:
   heddle workspace show --watch            # continuously refresh thread state
   heddle workspace show --output json      # stable groups for scripts and agents
 ")]
+    #[command(hide = true)]
     Workspace {
         #[command(subcommand)]
         command: Option<WorkspaceCommands>,
@@ -445,6 +455,7 @@ Examples:
   heddle stack ready                             # next-action verdict for the current stack
   heddle stack snapshot --output json            # serialize the stack as RepositorySnapshot
 ")]
+    #[command(hide = true)]
     Stack(StackArgs),
 
     /// Preview or land a thread into the current thread.
@@ -599,6 +610,7 @@ Examples:
     },
 
     /// Show line-by-line attribution for a file.
+    #[command(hide = true)]
     Blame {
         /// File to blame.
         file: String,

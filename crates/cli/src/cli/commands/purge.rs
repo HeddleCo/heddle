@@ -59,7 +59,7 @@ fn cmd_purge_apply(cli: &Cli, repo: &Repository, args: PurgeApplyArgs) -> Result
 
     if !args.force {
         let force_command = format!(
-            "heddle purge apply {} --path {} --force",
+            "heddle redact purge apply {} --path {} --force",
             state.short(),
             args.path
         );

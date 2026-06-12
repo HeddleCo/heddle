@@ -200,38 +200,38 @@ in-progress operation.
       "status": "available",
       "verified_scope": "everyday_and_agent",
       "advanced_scope": "advanced_internal_admin",
-      "summary": "203 command(s), 174 JSON command(s), 104 mutating command(s), 103 mutating JSON command(s); verified everyday/agent machine surface has 38 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 56 accepted opaque schema(s) outside clean verification",
-      "catalog_commands_total": 203,
-      "catalog_mutating_commands_total": 104,
-      "json_commands_total": 174,
-      "json_mutating_commands_total": 103,
-      "json_commands_with_schema": 118,
-      "json_commands_with_accepted_opaque_schema": 56,
+      "summary": "181 command(s), 154 JSON command(s), 96 mutating command(s), 95 mutating JSON command(s); verified everyday/agent machine surface has 38 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 49 accepted opaque schema(s) outside clean verification",
+      "catalog_commands_total": 181,
+      "catalog_mutating_commands_total": 96,
+      "json_commands_total": 154,
+      "json_mutating_commands_total": 95,
+      "json_commands_with_schema": 105,
+      "json_commands_with_accepted_opaque_schema": 49,
       "json_commands_without_schema": 0,
       "verified_scope_json_commands_total": 38,
       "verified_scope_json_commands_with_schema": 38,
       "verified_scope_json_commands_with_accepted_opaque_schema": 0,
       "verified_scope_json_commands_without_schema": 0,
-      "advanced_scope_json_commands_total": 136,
-      "advanced_scope_json_commands_with_accepted_opaque_schema": 56,
-      "mutating_commands_total": 103,
-      "mutating_commands_with_schema": 74,
-      "mutating_commands_with_accepted_opaque_schema": 29,
+      "advanced_scope_json_commands_total": 116,
+      "advanced_scope_json_commands_with_accepted_opaque_schema": 49,
+      "mutating_commands_total": 95,
+      "mutating_commands_with_schema": 67,
+      "mutating_commands_with_accepted_opaque_schema": 28,
       "mutating_commands_without_schema": 0,
       "verified_scope_mutating_commands_total": 23,
       "verified_scope_mutating_commands_with_schema": 23,
       "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
       "verified_scope_mutating_commands_without_schema": 0,
-      "advanced_scope_mutating_commands_total": 80,
-      "advanced_scope_mutating_commands_with_accepted_opaque_schema": 29,
-      "schema_verbs_total": 177,
-      "documented_schema_verbs_total": 177,
+      "advanced_scope_mutating_commands_total": 72,
+      "advanced_scope_mutating_commands_with_accepted_opaque_schema": 28,
+      "schema_verbs_total": 159,
+      "documented_schema_verbs_total": 159,
       "undocumented_schema_verbs_total": 0,
-      "opaque_schema_verbs_total": 56,
-      "accepted_opaque_schema_verbs_total": 56,
+      "opaque_schema_verbs_total": 49,
+      "accepted_opaque_schema_verbs_total": 49,
       "unaccepted_opaque_schema_verbs_total": 0,
-      "supports_op_id_total": 99,
-      "jsonl_commands_total": 5,
+      "supports_op_id_total": 91,
+      "jsonl_commands_total": 3,
       "missing_schema_examples": [],
       "missing_mutating_schema_examples": [],
       "verified_scope_missing_schema_examples": [],
@@ -240,21 +240,21 @@ in-progress operation.
         "transaction begin",
         "transaction abort",
         "transaction status",
-        "conflict list",
-        "conflict show",
         "redact apply",
         "redact list",
-        "redact show"
+        "redact show",
+        "redact trust add",
+        "redact trust list"
       ],
       "accepted_opaque_schema_examples": [
         "transaction begin",
         "transaction abort",
         "transaction status",
-        "conflict list",
-        "conflict show",
         "redact apply",
         "redact list",
-        "redact show"
+        "redact show",
+        "redact trust add",
+        "redact trust list"
       ],
       "unaccepted_opaque_schema_examples": [],
       "undocumented_schema_examples": []
@@ -521,7 +521,7 @@ surface; the native first-run loop should prefer `commit`.
 }
 ```
 
-`heddle undo|redo --output json` emit:
+`heddle undo` emits JSON when invoked with `--output json`:
 
 ```json
 {
@@ -537,8 +537,24 @@ surface; the native first-run loop should prefer `commit`.
 }
 ```
 
+`heddle undo --redo` emits JSON when invoked with `--output json`:
+
+```json
+{
+  "output_kind": "redo",
+  "status": "completed",
+  "action": "redo",
+  "message": "re-applied previously undone logical operation",
+  "batches": [],
+  "next_action": null,
+  "next_action_template": null,
+  "recommended_action": null,
+  "recommended_action_template": null
+}
+```
+
 `heddle undo --list --output json` emits the history view (its own
-`output_kind: "undo_list"` discriminator — distinct from the `undo`/`redo`
+`output_kind: "undo_list"` discriminator — distinct from the `undo` / `undo --redo`
 payload above):
 
 ```json
@@ -603,19 +619,19 @@ saves a Heddle state without recommending a Git checkpoint.
 | `confidence` | number \| null | required for `capture` | Agent or human confidence score, when supplied. |
 | `principal`, `agent` | object / object \| null | required for `capture`/`commit` | Accountable principal and optional agent/model provenance recorded on the captured state. |
 | `promotion_suggested`, `heavy_impact_paths` | bool / array<string> | required for `capture` | Thread-promotion signal. Empty array if none. |
-| `output_kind`, `status` | string \| null | required when present | Stable output discriminator and machine status; `undo`/`redo` report `completed` or `preview`. |
+| `output_kind`, `status` | string \| null | required when present | Stable output discriminator and machine status; `undo` and `undo --redo` report `completed` or `preview`. |
 | `message`, `summary` | string \| null | required when present | Human-readable result. |
 | `next_action`, `recommended_action` | string \| null | required | Primary next command, if one is known. |
 | `next_action_template`, `recommended_action_template` | object \| null | required | Fillable template metadata (`argv_template`, `required_inputs`, `agent_may_fill`) for the next/recommended command; present for every valid action, `null` when none. |
 | `git_commit` | string \| null | required for `checkpoint`/`commit` | Git commit OID produced by the checkpoint path; `null` for native Heddle commits. |
 | `capability`, `storage_model`, `committed_at` | string | required for `checkpoint` | Repository mode, storage model, and checkpoint timestamp. |
 | `status` | string | required for `capture`/`checkpoint`/`commit`/`ready`/`land` | Machine-stable success status for the operation. |
-| `action` | string | required for `capture`/`checkpoint`/`commit`/`undo`/`redo`/`land` | Logical operation name. |
-| `batches` | array<object> | required for `undo`/`redo` | Oplog batches affected by the operation. Empty if none are reported. |
+| `action` | string | required for `capture`/`checkpoint`/`commit`/`undo`/`undo --redo`/`land` | Logical operation name. |
+| `batches` | array<object> | required for `undo`/`undo --redo` | Oplog batches affected by the operation. Empty if none are reported. |
 | `thread_state`, `report` | string \| null / object | required for `ready` | Readiness result and structured readiness report. |
 | `thread`, `captured`, `checkpointed`, `synced`, `integrated`, `pushed`, `pushed_remote` | string / bool / string \| null | required for `land` | Thread landed, which local/publish steps completed, and the remote name pushed when publish ran. |
 | `performed_steps`, `skipped_steps`, `merge_state`, `chosen_path` | array<string> / string \| null / string | required for `land` | Machine-readable path through the land loop and the merge state landed, when one exists. |
-| `verification` | object \| null | required | Post-operation verification proof. `null` only for undo/redo paths that cannot compute it. |
+| `verification` | object \| null | required | Post-operation verification proof. `null` only for undo / undo --redo paths that cannot compute it. |
 
 ---
 
@@ -2474,7 +2490,7 @@ catalog-wide schema coverage.
   "output_kind": "doctor_schemas",
   "status": "available",
   "verified": true,
-  "summary": "196 command(s), 168 JSON command(s), 100 mutating command(s), 99 mutating JSON command(s); verified everyday/agent machine surface has 38 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 51 accepted opaque schema(s) outside clean verification",
+  "summary": "181 command(s), 154 JSON command(s), 96 mutating command(s), 95 mutating JSON command(s); verified everyday/agent machine surface has 38 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 49 accepted opaque schema(s) outside clean verification",
   "recommended_action": null,
   "recovery_commands": [],
   "registered_verbs": ["status", "verify", "try"],
@@ -2487,33 +2503,33 @@ catalog-wide schema coverage.
     "status": "available",
     "verified_scope": "everyday_and_agent",
     "advanced_scope": "advanced_internal_admin",
-    "summary": "203 command(s), 174 JSON command(s), 104 mutating command(s), 103 mutating JSON command(s); verified everyday/agent machine surface has 38 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 56 accepted opaque schema(s) outside clean verification",
-    "catalog_commands_total": 203,
-    "catalog_mutating_commands_total": 104,
-    "json_commands_total": 174,
-    "json_mutating_commands_total": 103,
-    "json_commands_with_schema": 118,
-    "json_commands_with_accepted_opaque_schema": 56,
+    "summary": "181 command(s), 154 JSON command(s), 96 mutating command(s), 95 mutating JSON command(s); verified everyday/agent machine surface has 38 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 49 accepted opaque schema(s) outside clean verification",
+    "catalog_commands_total": 181,
+    "catalog_mutating_commands_total": 96,
+    "json_commands_total": 154,
+    "json_mutating_commands_total": 95,
+    "json_commands_with_schema": 105,
+    "json_commands_with_accepted_opaque_schema": 49,
     "json_commands_without_schema": 0,
     "verified_scope_json_commands_total": 38,
     "verified_scope_json_commands_with_schema": 38,
     "verified_scope_json_commands_with_accepted_opaque_schema": 0,
     "verified_scope_json_commands_without_schema": 0,
-    "advanced_scope_json_commands_total": 136,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 56,
-    "mutating_commands_total": 103,
-    "mutating_commands_with_schema": 74,
-    "mutating_commands_with_accepted_opaque_schema": 29,
+    "advanced_scope_json_commands_total": 116,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 49,
+    "mutating_commands_total": 95,
+    "mutating_commands_with_schema": 67,
+    "mutating_commands_with_accepted_opaque_schema": 28,
     "mutating_commands_without_schema": 0,
     "verified_scope_mutating_commands_total": 23,
     "verified_scope_mutating_commands_with_schema": 23,
     "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
     "verified_scope_mutating_commands_without_schema": 0,
-    "advanced_scope_mutating_commands_total": 80,
-    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 29,
+    "advanced_scope_mutating_commands_total": 72,
+    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 28,
     "undocumented_schema_verbs_total": 0,
-    "opaque_schema_verbs_total": 56,
-    "accepted_opaque_schema_verbs_total": 56,
+    "opaque_schema_verbs_total": 49,
+    "accepted_opaque_schema_verbs_total": 49,
     "unaccepted_opaque_schema_verbs_total": 0,
     "missing_schema_examples": [],
     "missing_mutating_schema_examples": [],
@@ -2523,21 +2539,21 @@ catalog-wide schema coverage.
       "transaction begin",
       "transaction abort",
       "transaction status",
-      "conflict list",
-      "conflict show",
       "redact apply",
       "redact list",
-      "redact show"
+      "redact show",
+      "redact trust add",
+      "redact trust list"
     ],
     "accepted_opaque_schema_examples": [
       "transaction begin",
       "transaction abort",
       "transaction status",
-      "conflict list",
-      "conflict show",
       "redact apply",
       "redact list",
-      "redact show"
+      "redact show",
+      "redact trust add",
+      "redact trust list"
     ],
     "unaccepted_opaque_schema_examples": [],
     "undocumented_schema_examples": []
@@ -3069,7 +3085,7 @@ report redacted blobs the collector refused to touch):
 {"output_kind": "gc", "action": "gc", "status": "ok", "dry_run": false, "prune": false, "packed_count": 1, "bytes_saved": 0, "pruned_loose": 0, "bytes_freed": 0, "pinned_redactions": 0, "preserved_redactions": 0, "pruned_git_mapping_entries": 0}
 ```
 
-`heddle purge apply|list --output json` emit (each carries `output_kind`
+`heddle redact purge apply|list --output json` emit (each carries `output_kind`
 set to the snake-cased subcommand, e.g. `purge_apply`, `purge_list`).
 `ignore_hint` is present only when the purged path is not yet covered by a
 `.heddleignore` / `.gitignore` glob:
@@ -3082,6 +3098,13 @@ set to the snake-cased subcommand, e.g. `purge_apply`, `purge_list`).
 
 ```json
 {"output_kind": "query", "hits": [{"seq": 1, "timestamp_secs": 1767225600, "verb": "capture", "actor_email": "a@example.com", "operation_id": "op-123", "thread": "main", "symbols": ["verify"], "signal_kinds": ["test_passed"], "change_id": "hd-sqr398dvx9ay"}]}
+```
+
+`heddle query --attribution --output json` emits structured attribution
+for a tracked file:
+
+```json
+{"output_kind": "query_attribution", "status": "completed", "file": "src/lib.rs", "context": [], "lines": [{"line_number": 1, "content": "pub fn run() {}", "change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": null, "timestamp": "2026-01-01T00:00:00Z", "origins": null}]}
 ```
 
 `heddle rebase --output json` emits:

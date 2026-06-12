@@ -16,13 +16,13 @@
 
 use std::{collections::BTreeMap, sync::OnceLock};
 
-use anyhow::{anyhow, Result};
-use schemars::{schema_for, JsonSchema};
+use anyhow::{Result, anyhow};
+use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{command_catalog, command_runtime_contract, CommandCatalogOutput, RecoveryAdvice};
-use crate::cli::{should_output_json, Cli};
+use super::{CommandCatalogOutput, RecoveryAdvice, command_catalog, command_runtime_contract};
+use crate::cli::{Cli, should_output_json};
 
 static SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
 static DOCUMENTED_SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
@@ -119,6 +119,7 @@ schema_registry! {
     (&["discuss open", "discuss append", "discuss resolve", "discuss show"], DiscussionEnvelopeSchema),
     (&["discuss list"], DiscussionListSchema),
     (&["query"], QuerySchema),
+    (&["query --attribution"], BlameSchema),
     (&["transaction commit"], TransactionCommitSchema),
     (&["bridge git init"], BridgeInitSchema),
     (&["bridge git export"], BridgeExportSchema),
@@ -3089,9 +3090,7 @@ mod tests {
         fn walk(root: &Value, schema: &Value, verb: &str, path: &str) {
             match schema {
                 Value::Object(object) => {
-                    if let Some(properties) =
-                        object.get("properties").and_then(|p| p.as_object())
-                    {
+                    if let Some(properties) = object.get("properties").and_then(|p| p.as_object()) {
                         let required: Vec<&str> = object
                             .get("required")
                             .and_then(|value| value.as_array())

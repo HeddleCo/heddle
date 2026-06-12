@@ -5,6 +5,16 @@ use clap::Args;
 
 #[derive(Clone, Debug, Args)]
 pub struct QueryArgs {
+    /// Show line-by-line attribution for a tracked file.
+    #[arg(long, value_name = "FILE")]
+    pub attribution: Option<String>,
+    /// State to inspect with `--attribution`. Accepts short or full
+    /// state IDs, marker names, `HEAD`, `@`, or `HEAD~N`.
+    #[arg(long, requires = "attribution")]
+    pub state: Option<String>,
+    /// Include applicable context annotations with `--attribution`.
+    #[arg(long, requires = "attribution")]
+    pub context: bool,
     /// Filter by actor email.
     #[arg(long)]
     pub actor: Option<String>,

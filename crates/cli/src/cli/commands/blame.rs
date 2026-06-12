@@ -118,6 +118,25 @@ impl LineInfo {
 }
 
 pub fn cmd_blame(cli: &Cli, file: String, state: Option<String>, show_context: bool) -> Result<()> {
+    cmd_blame_with_output_kind(cli, file, state, show_context, "blame")
+}
+
+pub fn cmd_query_attribution(
+    cli: &Cli,
+    file: String,
+    state: Option<String>,
+    show_context: bool,
+) -> Result<()> {
+    cmd_blame_with_output_kind(cli, file, state, show_context, "query_attribution")
+}
+
+fn cmd_blame_with_output_kind(
+    cli: &Cli,
+    file: String,
+    state: Option<String>,
+    show_context: bool,
+    output_kind: &'static str,
+) -> Result<()> {
     let repo = cli.open_repo()?;
 
     let target_state_id = if let Some(state_id) = state {
@@ -201,7 +220,7 @@ pub fn cmd_blame(cli: &Cli, file: String, state: Option<String>, show_context: b
             .collect();
 
         let output = BlameOutput {
-            output_kind: "blame",
+            output_kind,
             status: "completed",
             file: file.clone(),
             context,
@@ -470,7 +489,10 @@ mod tests {
     fn attribution_parts_omits_agent_for_human_only() {
         let (principal, agent) = attribution_parts(&human());
         assert_eq!(principal.name, "Ada Lovelace");
-        assert!(agent.is_none(), "human-only attribution must not synthesize an agent");
+        assert!(
+            agent.is_none(),
+            "human-only attribution must not synthesize an agent"
+        );
     }
 
     #[test]
@@ -484,8 +506,14 @@ mod tests {
         let json = serde_json::to_value(agent.unwrap()).unwrap();
         assert_eq!(json["provider"], "openai");
         assert_eq!(json["model"], "gpt-5");
-        assert!(json.get("session_id").is_none(), "absent session_id must be omitted, not null");
-        assert!(json.get("policy_id").is_none(), "absent policy_id must be omitted, not null");
+        assert!(
+            json.get("session_id").is_none(),
+            "absent session_id must be omitted, not null"
+        );
+        assert!(
+            json.get("policy_id").is_none(),
+            "absent policy_id must be omitted, not null"
+        );
     }
 
     #[test]

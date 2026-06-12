@@ -11,11 +11,10 @@ use serde::Serialize;
 #[cfg(feature = "semantic")]
 use crate::cli::SemanticCommands;
 use crate::cli::{
-    ActorCommands, AgentCommands, Cli, Commands, ContextCommands, DaemonCommands,
-    DoctorCommands, HookCommands, IntegrationCommands, MaintenanceCommands, MarkerCommands,
-    PurgeCommands, RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands,
-    ShellCommands, StackCommands, StashCommands, ThreadCommands, VisibilityCommands,
-    WorkspaceCommands,
+    ActorCommands, AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands,
+    HookCommands, IntegrationCommands, MaintenanceCommands, MarkerCommands, PurgeCommands,
+    RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands, ShellCommands,
+    StackCommands, StashCommands, ThreadCommands, VisibilityCommands, WorkspaceCommands,
     cli_args::{
         CommandCatalogArgs, ConflictCommands, DiscussCommands, ReviewCommands, TransactionCommands,
     },
@@ -1086,7 +1085,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
         surface(
             json_discriminators(
                 documented_schemas(DAEMON_MUTATION, &["agent serve"]),
-                &[json_discriminator(Some("agent serve"), "output_kind", "agent_serve")],
+                &[json_discriminator(
+                    Some("agent serve"),
+                    "output_kind",
+                    "agent_serve",
+                )],
             ),
             "automation",
         ),
@@ -1096,7 +1099,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
         surface(
             json_discriminators(
                 documented_schemas(READ_JSON, &["agent status"]),
-                &[json_discriminator(Some("agent status"), "output_kind", "agent_status")],
+                &[json_discriminator(
+                    Some("agent status"),
+                    "output_kind",
+                    "agent_status",
+                )],
             ),
             "automation",
         ),
@@ -1106,7 +1113,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
         surface(
             json_discriminators(
                 documented_schemas(DAEMON_MUTATION, &["agent stop"]),
-                &[json_discriminator(Some("agent stop"), "output_kind", "agent_stop")],
+                &[json_discriminator(
+                    Some("agent stop"),
+                    "output_kind",
+                    "agent_stop",
+                )],
             ),
             "automation",
         ),
@@ -1130,7 +1141,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
         surface(
             json_discriminators(
                 documented_schemas(CAPTURE, &["agent capture"]),
-                &[json_discriminator(Some("agent capture"), "output_kind", "capture")],
+                &[json_discriminator(
+                    Some("agent capture"),
+                    "output_kind",
+                    "capture",
+                )],
             ),
             "automation",
         ),
@@ -1140,7 +1155,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
         surface(
             json_discriminators(
                 documented_schemas(CAPTURE, &["agent ready"]),
-                &[json_discriminator(Some("agent ready"), "output_kind", "ready")],
+                &[json_discriminator(
+                    Some("agent ready"),
+                    "output_kind",
+                    "ready",
+                )],
             ),
             "automation",
         ),
@@ -1164,13 +1183,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     #[cfg(feature = "client")]
-    entry(
-        &["auth"],
-        category(
-            GROUP,
-            "repo",
-        ),
-    ),
+    entry(&["auth"], category(GROUP, "repo")),
     #[cfg(feature = "client")]
     entry(&["auth", "login"], MUTATING_TEXT),
     #[cfg(feature = "client")]
@@ -1332,7 +1345,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
                     },
                     &["bridge git push"],
                 ),
-                &[json_discriminator(Some("bridge git push"), "output_kind", "bridge_git_push")],
+                &[json_discriminator(
+                    Some("bridge git push"),
+                    "output_kind",
+                    "bridge_git_push",
+                )],
             ),
             "push",
         ),
@@ -1349,7 +1366,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
                     },
                     &["bridge git pull"],
                 ),
-                &[json_discriminator(Some("bridge git pull"), "output_kind", "bridge_git_pull")],
+                &[json_discriminator(
+                    Some("bridge git pull"),
+                    "output_kind",
+                    "bridge_git_pull",
+                )],
             ),
             "pull",
         ),
@@ -1480,10 +1501,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["collapse"],
-        category(
-            opaque_schemas(MUTATING, &["collapse"]),
-            "states",
-        ),
+        category(opaque_schemas(MUTATING, &["collapse"]), "states"),
     ),
     entry(
         &["commit"],
@@ -1529,13 +1547,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "automation",
         ),
     ),
-    entry(
-        &["conflict"],
-        category(
-            GROUP,
-            "recovery",
-        ),
-    ),
+    entry(&["conflict"], category(GROUP, "recovery")),
     entry(
         &["conflict", "list"],
         opaque_schemas(READ_JSON, &["conflict list"]),
@@ -1549,18 +1561,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
         category(
             json_discriminators(
                 documented_schemas(compact_json(MUTATING), &["continue"]),
-                &[json_discriminator(Some("continue"), "output_kind", "continue")],
+                &[json_discriminator(
+                    Some("continue"),
+                    "output_kind",
+                    "continue",
+                )],
             ),
             "recovery",
         ),
     ),
-    entry(
-        &["context"],
-        category(
-            GROUP,
-            "collab",
-        ),
-    ),
+    entry(&["context"], category(GROUP, "collab")),
     entry(
         &["context", "set"],
         json_discriminators(
@@ -1711,13 +1721,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             20,
         ),
     ),
-    entry(
-        &["discuss"],
-        category(
-            GROUP,
-            "collab",
-        ),
-    ),
+    entry(&["discuss"], category(GROUP, "collab")),
     entry(
         &["discuss", "open"],
         json_discriminators(
@@ -1778,7 +1782,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
         front_door(
             json_discriminators(
                 documented_schemas(READ_JSON, &["doctor"]),
-                &[json_discriminator(Some("doctor"), "output_kind", "diagnose")],
+                &[json_discriminator(
+                    Some("doctor"),
+                    "output_kind",
+                    "diagnose",
+                )],
             ),
             120,
         ),
@@ -1836,17 +1844,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["fsck"],
-        category(
-            documented_schemas(MUTATING, &["fsck"]),
-            "recovery",
-        ),
+        category(documented_schemas(MUTATING, &["fsck"]), "recovery"),
     ),
     entry(
         &["git-overlay"],
-        category(
-            documented_schemas(READ_JSON, &["git-overlay"]),
-            "repo",
-        ),
+        category(documented_schemas(READ_JSON, &["git-overlay"]), "repo"),
     ),
     entry(
         &["goto"],
@@ -1858,13 +1860,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "threads",
         ),
     ),
-    entry(
-        &["help"],
-        category(
-            READ_TEXT,
-            "repo",
-        ),
-    ),
+    entry(&["help"], category(READ_TEXT, "repo")),
     entry(&["hook"], surface(GROUP, "automation")),
     entry(
         &["hook", "list"],
@@ -1907,10 +1903,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["inspect"],
-        category(
-            documented_schemas(READ_JSON, &["inspect"]),
-            "states",
-        ),
+        category(documented_schemas(READ_JSON, &["inspect"]), "states"),
     ),
     entry(&["integration"], surface(GROUP, "admin")),
     entry(
@@ -1970,7 +1963,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
         surface(
             json_discriminators(
                 opaque_schemas(GC_MUTATION, &["maintenance gc"]),
-                &[json_discriminator(Some("maintenance gc"), "output_kind", "gc")],
+                &[json_discriminator(
+                    Some("maintenance gc"),
+                    "output_kind",
+                    "gc",
+                )],
             ),
             "admin",
         ),
@@ -1980,7 +1977,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
         surface(
             json_discriminators(
                 documented_schemas(READ_JSON, &["maintenance index"]),
-                &[json_discriminator(Some("maintenance index"), "output_kind", "index")],
+                &[json_discriminator(
+                    Some("maintenance index"),
+                    "output_kind",
+                    "index",
+                )],
             ),
             "admin",
         ),
@@ -1989,13 +1990,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["maintenance", "monitor"],
         surface(opaque_schemas(READ_JSON, &["maintenance monitor"]), "admin"),
     ),
-    entry(
-        &["marker"],
-        category(
-            GROUP,
-            "collab",
-        ),
-    ),
+    entry(&["marker"], category(GROUP, "collab")),
     entry(
         &["marker", "list"],
         documented_schemas(READ_JSON, &["marker list"]),
@@ -2019,8 +2014,15 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 surface(
                     advertised_action(
                         json_discriminators(
-                            documented_schemas(compact_json(WORKTREE_MUTATION), &["merge --preview"]),
-                            &[json_discriminator(Some("merge --preview"), "output_kind", "merge")],
+                            documented_schemas(
+                                compact_json(WORKTREE_MUTATION),
+                                &["merge --preview"],
+                            ),
+                            &[json_discriminator(
+                                Some("merge --preview"),
+                                "output_kind",
+                                "merge",
+                            )],
                         ),
                         "heddle merge <thread> --preview",
                         &["heddle", "merge", "<thread>", "--preview"],
@@ -2073,10 +2075,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["presence"],
-        category(
-            feature_gated(READ_JSON, "client"),
-            "collab",
-        ),
+        category(feature_gated(READ_JSON, "client"), "collab"),
     ),
     entry(&["presence", "publish"], feature_gated(READ_JSON, "client")),
     entry(
@@ -2102,41 +2101,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 (76, "upstream protocol error"),
                 (78, "no upstream configured"),
             ],
-        ),
-    ),
-    entry(
-        &["purge"],
-        category(
-            GROUP,
-            "recovery",
-        ),
-    ),
-    entry(
-        &["purge", "apply"],
-        json_discriminators(
-            opaque_schemas(
-                CommandContract {
-                    destructive_requires_force: true,
-                    ..DESTRUCTIVE_DATA_MUTATION
-                },
-                &["purge apply"],
-            ),
-            &[json_discriminator(
-                Some("purge apply"),
-                "output_kind",
-                "purge_apply",
-            )],
-        ),
-    ),
-    entry(
-        &["purge", "list"],
-        json_discriminators(
-            opaque_schemas(READ_JSON, &["purge list"]),
-            &[json_discriminator(
-                Some("purge list"),
-                "output_kind",
-                "purge_list",
-            )],
         ),
     ),
     entry(
@@ -2178,8 +2142,15 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["query"],
         category(
             json_discriminators(
-                documented_schemas(READ_JSON, &["query"]),
-                &[json_discriminator(Some("query"), "output_kind", "query")],
+                documented_schemas(READ_JSON, &["query", "query --attribution"]),
+                &[
+                    json_discriminator(Some("query"), "output_kind", "query"),
+                    json_discriminator(
+                        Some("query --attribution"),
+                        "output_kind",
+                        "query_attribution",
+                    ),
+                ],
             ),
             "states",
         ),
@@ -2196,18 +2167,9 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["rebase"],
-        category(
-            opaque_schemas(WORKTREE_MUTATION, &["rebase"]),
-            "threads",
-        ),
+        category(opaque_schemas(WORKTREE_MUTATION, &["rebase"]), "threads"),
     ),
-    entry(
-        &["redact"],
-        category(
-            GROUP,
-            "recovery",
-        ),
-    ),
+    entry(&["redact"], category(GROUP, "recovery")),
     entry(
         &["redact", "apply"],
         json_discriminators(
@@ -2238,6 +2200,35 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 Some("redact show"),
                 "output_kind",
                 "redact_show",
+            )],
+        ),
+    ),
+    entry(&["redact", "purge"], GROUP),
+    entry(
+        &["redact", "purge", "apply"],
+        json_discriminators(
+            opaque_schemas(
+                CommandContract {
+                    destructive_requires_force: true,
+                    ..DESTRUCTIVE_DATA_MUTATION
+                },
+                &["redact purge apply"],
+            ),
+            &[json_discriminator(
+                Some("redact purge apply"),
+                "output_kind",
+                "purge_apply",
+            )],
+        ),
+    ),
+    entry(
+        &["redact", "purge", "list"],
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["redact purge list"]),
+            &[json_discriminator(
+                Some("redact purge list"),
+                "output_kind",
+                "purge_list",
             )],
         ),
     ),
@@ -2275,46 +2266,60 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
-    entry(
-        &["remote"],
-        category(
-            surface(GROUP, "native"),
-            "repo",
-        ),
-    ),
+    entry(&["remote"], category(surface(GROUP, "native"), "repo")),
     entry(
         &["remote", "list"],
         json_discriminators(
             documented_schemas(READ_JSON, &["remote list"]),
-            &[json_discriminator(Some("remote list"), "output_kind", "remote_list")],
+            &[json_discriminator(
+                Some("remote list"),
+                "output_kind",
+                "remote_list",
+            )],
         ),
     ),
     entry(
         &["remote", "add"],
         json_discriminators(
             documented_schemas(CONFIG_MUTATION, &["remote add"]),
-            &[json_discriminator(Some("remote add"), "output_kind", "remote_add")],
+            &[json_discriminator(
+                Some("remote add"),
+                "output_kind",
+                "remote_add",
+            )],
         ),
     ),
     entry(
         &["remote", "remove"],
         json_discriminators(
             documented_schemas(CONFIG_MUTATION, &["remote remove"]),
-            &[json_discriminator(Some("remote remove"), "output_kind", "remote_remove")],
+            &[json_discriminator(
+                Some("remote remove"),
+                "output_kind",
+                "remote_remove",
+            )],
         ),
     ),
     entry(
         &["remote", "set-default"],
         json_discriminators(
             documented_schemas(CONFIG_MUTATION, &["remote set-default"]),
-            &[json_discriminator(Some("remote set-default"), "output_kind", "remote_set_default")],
+            &[json_discriminator(
+                Some("remote set-default"),
+                "output_kind",
+                "remote_set_default",
+            )],
         ),
     ),
     entry(
         &["remote", "show"],
         json_discriminators(
             documented_schemas(READ_JSON, &["remote show"]),
-            &[json_discriminator(Some("remote show"), "output_kind", "remote_show")],
+            &[json_discriminator(
+                Some("remote show"),
+                "output_kind",
+                "remote_show",
+            )],
         ),
     ),
     entry(
@@ -2323,10 +2328,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["retro"],
-        category(
-            documented_schemas(READ_JSON, &["retro"]),
-            "states",
-        ),
+        category(documented_schemas(READ_JSON, &["retro"]), "states"),
     ),
     entry(
         &["revert"],
@@ -2338,13 +2340,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "states",
         ),
     ),
-    entry(
-        &["review"],
-        category(
-            GROUP,
-            "collab",
-        ),
-    ),
+    entry(&["review"], category(GROUP, "collab")),
     entry(
         &["review", "show"],
         json_discriminators(
@@ -2404,13 +2400,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "automation",
         ),
     ),
-    entry(
-        &["semantic"],
-        category(
-            GROUP,
-            "states",
-        ),
-    ),
+    entry(&["semantic"], category(GROUP, "states")),
     entry(
         &["semantic", "hot"],
         opaque_schemas(READ_JSON, &["semantic hot"]),
@@ -2448,13 +2438,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "automation",
         ),
     ),
-    entry(
-        &["shell"],
-        category(
-            READ_TEXT,
-            "repo",
-        ),
-    ),
+    entry(&["shell"], category(READ_TEXT, "repo")),
     entry(&["shell", "init"], READ_TEXT),
     entry(&["shell", "completion"], READ_TEXT),
     entry(
@@ -2597,10 +2581,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["support"],
-        category(
-            feature_gated(MUTATING, "client"),
-            "repo",
-        ),
+        category(feature_gated(MUTATING, "client"), "repo"),
     ),
     entry(
         &["support", "grant"],
@@ -2647,18 +2628,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "threads",
         ),
     ),
-    entry(
-        &["thread"],
-        category(
-            surface(GROUP, "native"),
-            "threads",
-        ),
-    ),
+    entry(&["thread"], category(surface(GROUP, "native"), "threads")),
     entry(
         &["thread", "create"],
         json_discriminators(
             documented_schemas(MUTATING, &["thread create"]),
-            &[json_discriminator(Some("thread create"), "output_kind", "thread_create")],
+            &[json_discriminator(
+                Some("thread create"),
+                "output_kind",
+                "thread_create",
+            )],
         ),
     ),
     entry(
@@ -2669,7 +2648,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["thread", "switch"],
         json_discriminators(
             documented_schemas(WORKTREE_MUTATION, &["thread switch"]),
-            &[json_discriminator(Some("thread switch"), "output_kind", "thread_switch")],
+            &[json_discriminator(
+                Some("thread switch"),
+                "output_kind",
+                "thread_switch",
+            )],
         ),
     ),
     entry(&["thread", "cd"], READ_TEXT),
@@ -2703,14 +2686,22 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["thread", "rename"],
         json_discriminators(
             documented_schemas(MUTATING, &["thread rename"]),
-            &[json_discriminator(Some("thread rename"), "output_kind", "thread_rename")],
+            &[json_discriminator(
+                Some("thread rename"),
+                "output_kind",
+                "thread_rename",
+            )],
         ),
     ),
     entry(
         &["thread", "refresh"],
         json_discriminators(
             documented_schemas(WORKTREE_MUTATION, &["thread refresh"]),
-            &[json_discriminator(Some("thread refresh"), "output_kind", "thread")],
+            &[json_discriminator(
+                Some("thread refresh"),
+                "output_kind",
+                "thread",
+            )],
         ),
     ),
     entry(
@@ -2725,21 +2716,33 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["thread", "resolve"],
         json_discriminators(
             documented_schemas(MUTATING, &["thread resolve"]),
-            &[json_discriminator(Some("thread resolve"), "output_kind", "resolve")],
+            &[json_discriminator(
+                Some("thread resolve"),
+                "output_kind",
+                "resolve",
+            )],
         ),
     ),
     entry(
         &["thread", "promote"],
         json_discriminators(
             documented_schemas(WORKTREE_MUTATION, &["thread promote"]),
-            &[json_discriminator(Some("thread promote"), "output_kind", "thread")],
+            &[json_discriminator(
+                Some("thread promote"),
+                "output_kind",
+                "thread",
+            )],
         ),
     ),
     entry(
         &["thread", "drop"],
         json_discriminators(
             documented_schemas(DESTRUCTIVE_WORKTREE_MUTATION, &["thread drop"]),
-            &[json_discriminator(Some("thread drop"), "output_kind", "thread")],
+            &[json_discriminator(
+                Some("thread drop"),
+                "output_kind",
+                "thread",
+            )],
         ),
     ),
     entry(
@@ -2769,7 +2772,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["thread", "cleanup"],
         json_discriminators(
             documented_schemas(DESTRUCTIVE_WORKTREE_MUTATION, &["thread cleanup"]),
-            &[json_discriminator(Some("thread cleanup"), "output_kind", "thread.cleanup")],
+            &[json_discriminator(
+                Some("thread cleanup"),
+                "output_kind",
+                "thread.cleanup",
+            )],
         ),
     ),
     entry(&["transaction"], hidden(GROUP)),
@@ -2806,13 +2813,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ],
         ),
     ),
-    entry(
-        &["visibility"],
-        category(
-            GROUP,
-            "collab",
-        ),
-    ),
+    entry(&["visibility"], category(GROUP, "collab")),
     entry(
         &["visibility", "set"],
         json_discriminators(
@@ -2979,8 +2980,7 @@ fn apply_command_catalog_filters(output: &mut CommandCatalogOutput, args: &Comma
             || command_filters
                 .iter()
                 .any(|filter| command_matches_filter(command, filter)))
-            && (tier_filters.is_empty()
-                || tier_filters.contains(&command.tier.as_str()))
+            && (tier_filters.is_empty() || tier_filters.contains(&command.tier.as_str()))
             && (!args.mutating || command.mutates)
             && (!args.supports_op_id || command.supports_op_id)
     });
@@ -3082,10 +3082,40 @@ fn walk_commands(
 ) {
     for subcommand in command.get_subcommands() {
         prefix.push(subcommand.get_name().to_string());
-        out.push(catalog_entry(subcommand, prefix, op_id_option));
-        walk_commands(subcommand, prefix, out, op_id_option);
+        if !removed_phase_1_2_catalog_path(prefix) {
+            out.push(catalog_entry(subcommand, prefix, op_id_option));
+            walk_commands(subcommand, prefix, out, op_id_option);
+        }
         prefix.pop();
     }
+}
+
+fn removed_phase_1_2_catalog_path(path: &[String]) -> bool {
+    path.first()
+        .is_some_and(|root| removed_phase_1_2_root(root.as_str()))
+}
+
+fn removed_phase_1_2_root(root: &str) -> bool {
+    matches!(
+        root,
+        "attempt"
+            | "blame"
+            | "branch"
+            | "conflict"
+            | "delegate"
+            | "fork"
+            | "goto"
+            | "inspect"
+            | "marker"
+            | "purge"
+            | "stack"
+            | "workspace"
+    )
+}
+
+fn removed_phase_1_2_contract_path(path: &[&str]) -> bool {
+    path.first()
+        .is_some_and(|root| removed_phase_1_2_root(root))
 }
 
 fn catalog_entry(
@@ -3105,9 +3135,10 @@ fn catalog_entry(
 
     let contract = command_contract(path);
     if contract.supports_op_id
-        && let Some(op_id_option) = op_id_option {
-            options.push(op_id_option.clone());
-        }
+        && let Some(op_id_option) = op_id_option
+    {
+        options.push(op_id_option.clone());
+    }
     CommandCatalogEntry {
         path: path.to_vec(),
         display: path.join(" "),
@@ -3654,6 +3685,7 @@ pub fn command_json_discriminators() -> Vec<CommandJsonDiscriminator> {
     active_command_contract_entries()
         .iter()
         .copied()
+        .filter(|entry| !removed_phase_1_2_contract_path(entry.path))
         .flat_map(|entry| {
             entry
                 .contract
@@ -3670,6 +3702,7 @@ pub fn command_json_discriminator_for_schema_verb(
     active_command_contract_entries()
         .iter()
         .copied()
+        .filter(|entry| !removed_phase_1_2_contract_path(entry.path))
         .flat_map(|entry| {
             entry
                 .contract
@@ -3688,6 +3721,7 @@ fn json_discriminators_for_path<'a>(
     active_command_contract_entries()
         .iter()
         .copied()
+        .filter(|entry| !removed_phase_1_2_contract_path(entry.path))
         .filter(|entry| entry.path == path.as_slice())
         .flat_map(|entry| {
             entry
@@ -4267,6 +4301,9 @@ fn collect_schema_verbs(
 ) -> Vec<&'static str> {
     let mut verbs = Vec::new();
     for entry in active_command_contract_entries().iter().copied() {
+        if removed_phase_1_2_contract_path(entry.path) {
+            continue;
+        }
         for verb in select(entry.contract) {
             if !verbs.contains(verb) {
                 verbs.push(*verb);
@@ -4347,6 +4384,10 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 RedactTrustCommands::Add(_) => vec!["redact", "trust", "add"],
                 RedactTrustCommands::List(_) => vec!["redact", "trust", "list"],
                 RedactTrustCommands::Remove(_) => vec!["redact", "trust", "remove"],
+            },
+            RedactCommands::Purge(command) => match command {
+                PurgeCommands::Apply(_) => vec!["redact", "purge", "apply"],
+                PurgeCommands::List(_) => vec!["redact", "purge", "list"],
             },
         },
         Commands::Purge { command } => match command {
@@ -4723,11 +4764,6 @@ mod tests {
         sample(&["marker", "show"], &["marker", "show", "mark-1"]),
         sample(&["merge"], &["merge", "feature"]),
         sample(&["pull"], &["pull"]),
-        sample(
-            &["purge", "apply"],
-            &["purge", "apply", "HEAD", "--path", "secret.txt", "--force"],
-        ),
-        sample(&["purge", "list"], &["purge", "list"]),
         sample(&["push"], &["push"]),
         sample(&["query"], &["query"]),
         sample(&["ready"], &["ready"]),
@@ -4749,6 +4785,19 @@ mod tests {
         ),
         sample(&["redact", "list"], &["redact", "list"]),
         sample(&["redact", "show"], &["redact", "show", "redaction-1"]),
+        sample(
+            &["redact", "purge", "apply"],
+            &[
+                "redact",
+                "purge",
+                "apply",
+                "HEAD",
+                "--path",
+                "secret.txt",
+                "--force",
+            ],
+        ),
+        sample(&["redact", "purge", "list"], &["redact", "purge", "list"]),
         sample(
             &["redact", "trust", "add"],
             &[
@@ -5247,6 +5296,10 @@ mod tests {
 
         let missing_contracts = clap_paths
             .difference(&active_contract_paths)
+            .filter(|path| {
+                let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
+                !removed_phase_1_2_contract_path(&parts)
+            })
             .map(|path| path.join(" "))
             .collect::<Vec<_>>();
         assert!(
@@ -5378,8 +5431,7 @@ mod tests {
                 .unwrap_or_else(|err| panic!("failed to parse sample {argv:?}: {err}"));
             let runtime = command_runtime_contract_for_command(&cli.command);
             assert!(
-                runtime.supports_json_compact
-                    || !expected_compact.contains(&runtime.display),
+                runtime.supports_json_compact || !expected_compact.contains(&runtime.display),
                 "`{}` accepts json-compact at parse time but lacks an explicit compact projection; main must reject it before command execution",
                 runtime.display
             );
@@ -5645,7 +5697,6 @@ mod tests {
             ("watch", "jsonl"),
             ("status", "json_or_jsonl"),
             ("thread show", "json_or_jsonl"),
-            ("workspace show", "json_or_jsonl"),
         ] {
             let entry = catalog
                 .commands
@@ -5751,14 +5802,15 @@ mod tests {
                 "stack ready",
                 "stack snapshot",
                 "pull",
-                "purge apply",
-                "purge list",
                 "push",
+                "query",
                 "query",
                 "ready",
                 "redact apply",
                 "redact list",
                 "redact show",
+                "redact purge apply",
+                "redact purge list",
                 "redact trust add",
                 "redact trust list",
                 "redact trust remove",
@@ -5884,9 +5936,9 @@ mod tests {
             mismatched.join("\n  - ")
         );
         assert!(
-            checked >= 100,
+            checked >= 90,
             "expected the conformance sweep to inspect the full discriminator \
-             surface (~107 schema verbs declare `output_kind`); only {checked} \
+             surface (~95 schema verbs declare `output_kind` after #473 phases 1-2); only {checked} \
              were checked — the schema injection or verb collection likely regressed"
         );
     }
@@ -6142,7 +6194,6 @@ mod tests {
             assert_eq!(command_canonical_command(display), canonical);
         }
         for (display, canonical, kind) in [
-            ("branch", "thread", "command_family"),
             ("stash pop", "undo", "conceptual_home"),
             ("fetch", "pull", "workflow"),
         ] {

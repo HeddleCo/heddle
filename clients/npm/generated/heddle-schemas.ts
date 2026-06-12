@@ -280,41 +280,6 @@ export type Array_of_ThreadApprovalSchema = ThreadApprovalSchema[];
 
 export type Array_of_ThreadCaptureEntrySchema = ThreadCaptureEntrySchema[];
 
-export interface AttemptResultSchema {
-  captured_state?: string | null;
-  diff_files?: number | null;
-  evaluate_duration_secs?: number | null;
-  evaluate_exit_code?: number | null;
-  index: number;
-  note?: string | null;
-  primary_duration_secs: number;
-  primary_exit_code?: number | null;
-  status: string;
-  thread: string;
-  thread_dropped: boolean;
-}
-
-export interface AttemptSchema {
-  action: string;
-  attempts: AttemptResultSchema[];
-  attempts_dropped: number;
-  attempts_succeeded: number;
-  attempts_total: number;
-  command: string;
-  evaluate?: string | null;
-  idempotency_status?: string | null;
-  message: string;
-  next_action?: string | null;
-  next_action_template?: ActionTemplateSchema | null;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  recommended?: string | null;
-  recommended_action?: string | null;
-  recommended_action_template?: ActionTemplateSchema | null;
-  replayed?: boolean | null;
-  status: string;
-}
-
 export interface AvailableGitRefSchema {
   git_commit: string;
   name: string;
@@ -362,29 +327,8 @@ export interface BlameSchema {
   context: BlameContextSnippetSchema[];
   file: string;
   lines: BlameLineSchema[];
-  output_kind: "blame";
+  output_kind: "query_attribution";
   status?: string | null;
-}
-
-export interface BranchCompatSchema {
-  current?: string | null;
-  execution_path?: string | null;
-  hosted_enabled?: boolean | null;
-  idempotency_status?: string | null;
-  message?: string | null;
-  name?: string | null;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "thread_list";
-  path?: string | null;
-  recommended_action?: string | null;
-  recovery_commands?: string[] | null;
-  replayed?: boolean | null;
-  repository_capability?: string | null;
-  storage_model?: string | null;
-  thread?: ThreadSummarySchema | null;
-  threads?: ThreadSummarySchema[] | null;
-  verification?: RepositoryVerificationStateSchema | null;
 }
 
 export interface BridgeBackfillFidelitySchema {
@@ -823,10 +767,6 @@ export interface CommitSchema {
   summary: string;
 }
 
-export type ConflictListSchema = Record<string, unknown>;
-
-export type ConflictShowSchema = Record<string, unknown>;
-
 export interface ContextAuditSchema {
   output_kind: "context_audit";
   [key: string]: unknown;
@@ -919,23 +859,6 @@ export type DaemonStatusSchema = Record<string, unknown>;
 export interface DaemonStopSchema {
   output_kind: "daemon_stop";
   [key: string]: unknown;
-}
-
-export interface DelegateSchema {
-  delegated: DelegatedThreadSchema[];
-  idempotency_status?: string | null;
-  message: string;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  parent_thread: string;
-  replayed?: boolean | null;
-}
-
-export interface DelegatedThreadSchema {
-  execution_path?: string | null;
-  name: string;
-  path?: string | null;
-  task: string;
 }
 
 export interface DiagnoseSchema {
@@ -1179,15 +1102,6 @@ export interface FetchSchema {
   tags_included?: boolean | null;
 }
 
-export interface ForkSchema {
-  idempotency_status?: string | null;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "fork";
-  replayed?: boolean | null;
-  [key: string]: unknown;
-}
-
 export interface FsckErrorSchema {
   kind: string;
   message: string;
@@ -1258,19 +1172,6 @@ export interface GitUpstreamConfiguredSchema {
   remote: string;
 }
 
-export interface GotoSchema {
-  idempotency_status?: string | null;
-  intent?: string | null;
-  message: string;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "goto";
-  replayed?: boolean | null;
-  target: string;
-}
-
-export type HarnessBridgeSchema = Record<string, unknown>;
-
 export type HookEventsSchema = Record<string, unknown>;
 
 export interface HookInstallSchema {
@@ -1333,8 +1234,6 @@ export interface InitSchema {
   side_effects: string[];
   status: string;
 }
-
-export type InspectSchema = ShowSchema | ThreadShowSchema;
 
 export type IntegrationDoctorSchema = Record<string, unknown>;
 
@@ -1491,51 +1390,6 @@ export interface MaintenanceRunSchema {
   [key: string]: unknown;
 }
 
-export interface MarkerBulkDeleteSchema {
-  count: number;
-  deleted: MarkerEntrySchema[];
-  idempotency_status?: string | null;
-  message: string;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  replayed?: boolean | null;
-}
-
-export interface MarkerCreateSchema {
-  change_id?: string | null;
-  idempotency_status?: string | null;
-  message: string;
-  name: string;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  replayed?: boolean | null;
-}
-
-export interface MarkerDeleteSchema {
-  change_id?: string | null;
-  idempotency_status?: string | null;
-  message: string;
-  name: string;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  replayed?: boolean | null;
-}
-
-export interface MarkerEntrySchema {
-  change_id: string;
-  name: string;
-}
-
-export interface MarkerListSchema {
-  markers: MarkerEntrySchema[];
-}
-
-export interface MarkerShowSchema {
-  change_id?: string | null;
-  message: string;
-  name: string;
-}
-
 export interface MergePreviewSchema {
   action?: string | null;
   blockers?: string[] | null;
@@ -1615,20 +1469,6 @@ export interface PullSchema {
   success?: boolean | null;
   thread?: string | null;
   transport?: string | null;
-}
-
-export interface PurgeApplySchema {
-  idempotency_status?: string | null;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "purge_apply";
-  replayed?: boolean | null;
-  [key: string]: unknown;
-}
-
-export interface PurgeListSchema {
-  output_kind: "purge_list";
-  [key: string]: unknown;
 }
 
 export interface PushSchema {
@@ -1725,6 +1565,20 @@ export interface RedactListSchema {
   [key: string]: unknown;
 }
 
+export interface RedactPurgeApplySchema {
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "purge_apply";
+  replayed?: boolean | null;
+  [key: string]: unknown;
+}
+
+export interface RedactPurgeListSchema {
+  output_kind: "purge_list";
+  [key: string]: unknown;
+}
+
 export interface RedactShowSchema {
   output_kind: "redact_show";
   [key: string]: unknown;
@@ -1751,25 +1605,6 @@ export interface RedactTrustRemoveSchema {
   output_kind: "redact_trust_remove";
   replayed?: boolean | null;
   [key: string]: unknown;
-}
-
-export interface RedoSchema {
-  action: string;
-  batches: unknown[];
-  idempotency_status?: string | null;
-  message: string;
-  next_action?: string | null;
-  next_action_template?: ActionTemplateSchema | null;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "redo";
-  recommended_action?: string | null;
-  recommended_action_template?: ActionTemplateSchema | null;
-  recovery_marker?: string | null;
-  /** heddle#305: the pre-undo state preserved for recovery, and the marker pointing at it. Present only on a completed `undo`. */
-  recovery_state?: string | null;
-  replayed?: boolean | null;
-  status?: string | null;
 }
 
 export interface ReflogEntrySchema {
@@ -2108,21 +1943,6 @@ export interface ShowSchema {
   storage_model: string;
   tree: string;
   verification?: unknown;
-}
-
-export interface StackReadySchema {
-  output_kind: "stack_ready";
-  [key: string]: unknown;
-}
-
-export interface StackSchema {
-  output_kind: "stack";
-  [key: string]: unknown;
-}
-
-export interface StackSnapshotSchema {
-  output_kind: "stack_snapshot";
-  [key: string]: unknown;
 }
 
 export interface StartSchema {
@@ -2620,67 +2440,6 @@ export interface ThreadShowSchema {
   next_action?: string | null;
   next_action_template?: ActionTemplateSchema | null;
   operation?: unknown;
-  output_kind?: string | null;
-  parent_thread?: string | null;
-  path?: string | null;
-  probe_confidence?: number | null;
-  probe_source?: string | null;
-  promotion_suggested: boolean;
-  recommended_action?: string | null;
-  recommended_action_template?: ActionTemplateSchema | null;
-  recovery_commands: string[];
-  remote_tracking?: unknown;
-  report_flush_state?: string | null;
-  repository_context?: RepositoryContextInfoSchema | null;
-  repository_label: string;
-  session_id?: string | null;
-  shared_target_dir?: string | null;
-  sibling_threads: string[];
-  stack_depth: number;
-  stale_from_parent: boolean;
-  target_thread?: string | null;
-  task?: string | null;
-  thinking_level?: string | null;
-  thread_health: string;
-  thread_mode?: ThreadModeSchema | null;
-  thread_state?: ThreadStateSchema | null;
-  usage_summary?: unknown;
-  verification: RepositoryVerificationStateSchema;
-  verification_summary: unknown;
-  visibility: string;
-}
-
-export interface ThreadShowSchema2 {
-  actor?: ActorInfoSchema | null;
-  attach_reason?: string | null;
-  auto: boolean;
-  base_root?: string | null;
-  base_state?: string | null;
-  blockers: string[];
-  changed_paths: string[];
-  child_threads: string[];
-  confidence_summary: unknown;
-  coordination_status: CoordinationStatusSchema;
-  current_state?: string | null;
-  execution_path?: string | null;
-  freshness?: ThreadFreshnessSchema | null;
-  git_branch_tip?: string | null;
-  harness?: string | null;
-  heavy_impact_paths: string[];
-  heddle_session_id?: string | null;
-  history_imported: boolean;
-  impact_categories: ThreadImpactCategorySchema[];
-  integration_policy_result: unknown;
-  is_current: boolean;
-  is_isolated: boolean;
-  last_activity_at?: string | null;
-  last_progress_at?: string | null;
-  name: string;
-  native_actor_key?: string | null;
-  native_parent_actor_key?: string | null;
-  next_action?: string | null;
-  next_action_template?: ActionTemplateSchema | null;
-  operation?: unknown;
   output_kind: "thread_show";
   parent_thread?: string | null;
   path?: string | null;
@@ -2846,6 +2605,25 @@ export interface UndoListSchema {
   replayed?: boolean | null;
 }
 
+export interface UndoRedoSchema {
+  action: string;
+  batches: unknown[];
+  idempotency_status?: string | null;
+  message: string;
+  next_action?: string | null;
+  next_action_template?: ActionTemplateSchema | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "redo";
+  recommended_action?: string | null;
+  recommended_action_template?: ActionTemplateSchema | null;
+  recovery_marker?: string | null;
+  /** heddle#305: the pre-undo state preserved for recovery, and the marker pointing at it. Present only on a completed `undo`. */
+  recovery_state?: string | null;
+  replayed?: boolean | null;
+  status?: string | null;
+}
+
 export interface UndoSchema {
   action: string;
   batches: unknown[];
@@ -2947,31 +2725,6 @@ export interface WatchLineSchema {
   ts: string;
 }
 
-export interface WorkspaceGroupSchema {
-  id: string;
-  label: string;
-  threads: ThreadSummarySchema[];
-}
-
-export interface WorkspaceShowSchema {
-  available_git_refs: AvailableGitRefSchema[];
-  current_thread?: string | null;
-  groups: WorkspaceGroupSchema[];
-  hosted_enabled: boolean;
-  operation?: unknown;
-  output_kind: "workspace_summary";
-  recommended_action?: string | null;
-  recommended_action_template?: ActionTemplateSchema | null;
-  remote_tracking?: unknown;
-  repository: string;
-  repository_capability: string;
-  repository_context?: RepositoryContextInfoSchema | null;
-  repository_label: string;
-  storage_model: string;
-  thread_count: number;
-  verification: RepositoryVerificationStateSchema;
-}
-
 /** Maps each `--output json` verb to its output payload type. */
 export interface HeddleVerbOutputs {
   abort: AbortSchema;
@@ -2990,9 +2743,6 @@ export interface HeddleVerbOutputs {
   "agent serve": AgentServeSchema;
   "agent status": AgentDaemonStatusSchema;
   "agent stop": AgentStopSchema;
-  attempt: AttemptSchema;
-  blame: BlameSchema;
-  branch: BranchCompatSchema;
   "bridge backfill-fidelity": BridgeBackfillFidelitySchema;
   "bridge git export": BridgeExportSchema;
   "bridge git import": BridgeImportSchema;
@@ -3012,8 +2762,6 @@ export interface HeddleVerbOutputs {
   collapse: CollapseSchema;
   commands: CommandCatalogOutput;
   commit: CommitSchema;
-  "conflict list": ConflictListSchema;
-  "conflict show": ConflictShowSchema;
   "context audit": ContextAuditSchema;
   "context check": ContextCheckSchema;
   "context edit": ContextEditSchema;
@@ -3028,7 +2776,6 @@ export interface HeddleVerbOutputs {
   "daemon serve": DaemonServeSchema;
   "daemon status": DaemonStatusSchema;
   "daemon stop": DaemonStopSchema;
-  delegate: DelegateSchema;
   diff: DiffSchema;
   "discuss append": DiscussAppendSchema;
   "discuss list": DiscussionListSchema;
@@ -3040,17 +2787,13 @@ export interface HeddleVerbOutputs {
   "doctor schemas": DoctorSchemasSchema;
   error: ErrorEnvelopeSchema;
   fetch: FetchSchema;
-  fork: ForkSchema;
   fsck: FsckSchema;
   "git-overlay": GitOverlayGuideSchema;
-  goto: GotoSchema;
-  "harness-bridge": HarnessBridgeSchema;
   "hook events": HookEventsSchema;
   "hook install": HookInstallSchema;
   "hook list": HookListSchema;
   "hook uninstall": HookUninstallSchema;
   init: InitSchema;
-  inspect: InspectSchema;
   "integration doctor": IntegrationDoctorSchema;
   "integration install": IntegrationInstallSchema;
   "integration list": IntegrationListSchema;
@@ -3065,26 +2808,21 @@ export interface HeddleVerbOutputs {
   "maintenance inspect": MaintenanceInspectSchema;
   "maintenance monitor": MaintenanceMonitorSchema;
   "maintenance run": MaintenanceRunSchema;
-  "marker create": MarkerCreateSchema;
-  "marker delete": MarkerDeleteSchema;
-  "marker delete --prefix": MarkerBulkDeleteSchema;
-  "marker list": MarkerListSchema;
-  "marker show": MarkerShowSchema;
   "merge --preview": MergePreviewSchema;
   pull: PullSchema;
-  "purge apply": PurgeApplySchema;
-  "purge list": PurgeListSchema;
   push: PushSchema;
   query: QuerySchema;
+  "query --attribution": BlameSchema;
   ready: ReadySchema;
   rebase: RebaseSchema;
   "redact apply": RedactApplySchema;
   "redact list": RedactListSchema;
+  "redact purge apply": RedactPurgeApplySchema;
+  "redact purge list": RedactPurgeListSchema;
   "redact show": RedactShowSchema;
   "redact trust add": RedactTrustAddSchema;
   "redact trust list": RedactTrustListSchema;
   "redact trust remove": RedactTrustRemoveSchema;
-  redo: RedoSchema;
   "remote add": RemoteAddSchema;
   "remote list": RemoteListSchema;
   "remote remove": RemoteRemoveSchema;
@@ -3105,9 +2843,6 @@ export interface HeddleVerbOutputs {
   "session show": SessionShowSchema;
   "session start": SessionStartSchema;
   show: ShowSchema;
-  stack: StackSchema;
-  "stack ready": StackReadySchema;
-  "stack snapshot": StackSnapshotSchema;
   start: StartSchema;
   "stash apply": StashApplySchema;
   "stash clear": StashClearSchema;
@@ -3135,7 +2870,7 @@ export interface HeddleVerbOutputs {
   "thread rename": ThreadRenameSchema;
   "thread resolve": ThreadResolveSchema;
   "thread revoke-approval": ThreadRevokeApprovalSchema;
-  "thread show": ThreadShowSchema2;
+  "thread show": ThreadShowSchema;
   "thread switch": ThreadSwitchSchema;
   "transaction abort": TransactionAbortSchema;
   "transaction begin": TransactionBeginSchema;
@@ -3144,13 +2879,13 @@ export interface HeddleVerbOutputs {
   try: TrySchema;
   undo: UndoSchema;
   "undo --list": UndoListSchema;
+  "undo --redo": UndoRedoSchema;
   verify: VerifySchema;
   "visibility list": VisibilityListSchema;
   "visibility promote": VisibilityPromoteSchema;
   "visibility set": VisibilitySetSchema;
   "visibility show": VisibilityShowSchema;
   watch: WatchLineSchema;
-  "workspace show": WorkspaceShowSchema;
 }
 
 /** Every verb that emits a schema-backed `--output json` payload. */
@@ -3173,9 +2908,6 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "agent serve",
   "agent status",
   "agent stop",
-  "attempt",
-  "blame",
-  "branch",
   "bridge backfill-fidelity",
   "bridge git export",
   "bridge git import",
@@ -3195,8 +2927,6 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "collapse",
   "commands",
   "commit",
-  "conflict list",
-  "conflict show",
   "context audit",
   "context check",
   "context edit",
@@ -3211,7 +2941,6 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "daemon serve",
   "daemon status",
   "daemon stop",
-  "delegate",
   "diff",
   "discuss append",
   "discuss list",
@@ -3223,17 +2952,13 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "doctor schemas",
   "error",
   "fetch",
-  "fork",
   "fsck",
   "git-overlay",
-  "goto",
-  "harness-bridge",
   "hook events",
   "hook install",
   "hook list",
   "hook uninstall",
   "init",
-  "inspect",
   "integration doctor",
   "integration install",
   "integration list",
@@ -3248,26 +2973,21 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "maintenance inspect",
   "maintenance monitor",
   "maintenance run",
-  "marker create",
-  "marker delete",
-  "marker delete --prefix",
-  "marker list",
-  "marker show",
   "merge --preview",
   "pull",
-  "purge apply",
-  "purge list",
   "push",
   "query",
+  "query --attribution",
   "ready",
   "rebase",
   "redact apply",
   "redact list",
+  "redact purge apply",
+  "redact purge list",
   "redact show",
   "redact trust add",
   "redact trust list",
   "redact trust remove",
-  "redo",
   "remote add",
   "remote list",
   "remote remove",
@@ -3288,9 +3008,6 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "session show",
   "session start",
   "show",
-  "stack",
-  "stack ready",
-  "stack snapshot",
   "start",
   "stash apply",
   "stash clear",
@@ -3327,11 +3044,11 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "try",
   "undo",
   "undo --list",
+  "undo --redo",
   "verify",
   "visibility list",
   "visibility promote",
   "visibility set",
   "visibility show",
   "watch",
-  "workspace show",
 ] as const;

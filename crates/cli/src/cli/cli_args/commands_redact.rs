@@ -35,6 +35,9 @@ pub enum RedactCommands {
     /// on this workspace.
     #[command(subcommand)]
     Trust(RedactTrustCommands),
+    /// Physically remove bytes for an existing redaction.
+    #[command(subcommand)]
+    Purge(PurgeCommands),
 }
 
 #[derive(Clone, Debug, Subcommand)]
