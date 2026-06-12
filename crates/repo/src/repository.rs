@@ -154,6 +154,22 @@ pub struct GitOverlayTagTip {
     pub mapped_change: Option<ChangeId>,
 }
 
+/// How many Git commits reachable from a branch tip have no Heddle mapping
+/// (neither bridge-imported nor checkpointed). Used to report how far a Git
+/// branch moved out-of-band before `heddle adopt --ref` reconciles it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GitOverlayOutOfBandCommits {
+    pub count: usize,
+    /// True when the walk stopped at the scan limit before exhausting the
+    /// unmapped history; `count` is then a lower bound.
+    pub truncated: bool,
+}
+
+/// Cap for the out-of-band commit walk so a read path (status/verify/health)
+/// never pays an O(full-history) traversal when external history was rewritten
+/// and no mapped ancestor exists.
+const GIT_OVERLAY_OUT_OF_BAND_SCAN_LIMIT: usize = 1000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum OperationScope {
@@ -1468,6 +1484,75 @@ impl Repository {
         let bridge_mapping = self.git_overlay_bridge_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
         self.git_overlay_mapped_change_for_commit(&git_commit, &bridge_mapping, &checkpoint_mapping)
+    }
+
+    /// Count the Git commits reachable from `tip_git_commit` that are not
+    /// represented in Heddle state (no bridge mapping and no checkpoint
+    /// mapping). The walk prunes at the first mapped commit on each lineage,
+    /// so the cost is proportional to the out-of-band suffix, capped at
+    /// `GIT_OVERLAY_OUT_OF_BAND_SCAN_LIMIT`.
+    ///
+    /// Returns `Ok(None)` when the repository is not a Git overlay or the tip
+    /// cannot be resolved; callers should degrade to a countless report.
+    pub fn git_overlay_out_of_band_commits(
+        &self,
+        tip_git_commit: &str,
+    ) -> Result<Option<GitOverlayOutOfBandCommits>> {
+        if self.capability() != RepositoryCapability::GitOverlay {
+            return Ok(None);
+        }
+        let git_repo = match gix::discover(&self.root) {
+            Ok(repo) => repo,
+            Err(_) => return Ok(None),
+        };
+        let Ok(tip) = gix::hash::ObjectId::from_hex(tip_git_commit.as_bytes()) else {
+            return Ok(None);
+        };
+
+        let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
+
+        let mut pending = vec![tip];
+        let mut visited = std::collections::HashSet::new();
+        let mut count = 0usize;
+        while let Some(oid) = pending.pop() {
+            if !visited.insert(oid) {
+                continue;
+            }
+            let git_commit = oid.to_string();
+            if self
+                .git_overlay_mapped_change_for_commit(
+                    &git_commit,
+                    &bridge_mapping,
+                    &checkpoint_mapping,
+                )?
+                .is_some()
+            {
+                // Mapped into Heddle: this lineage is reconciled; stop here.
+                continue;
+            }
+            count += 1;
+            if count >= GIT_OVERLAY_OUT_OF_BAND_SCAN_LIMIT {
+                return Ok(Some(GitOverlayOutOfBandCommits {
+                    count,
+                    truncated: true,
+                }));
+            }
+            let Some(commit) = git_repo
+                .find_object(oid)
+                .ok()
+                .and_then(|object| object.try_into_commit().ok())
+            else {
+                continue;
+            };
+            for parent in commit.parent_ids() {
+                pending.push(parent.detach());
+            }
+        }
+        Ok(Some(GitOverlayOutOfBandCommits {
+            count,
+            truncated: false,
+        }))
     }
 
     pub fn git_overlay_current_branch(&self) -> Result<Option<String>> {

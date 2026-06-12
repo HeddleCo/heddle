@@ -818,3 +818,27 @@ jobs:
 
       - name: sccache stats
         run: sccache --show-stats
+
+  # The fskit feature is cfg(target_os = "macos") and OFF by default, so no
+  # other lane ever compiles it (release.yml builds default features; this
+  # workflow runs on Linux). Without this job, FSKit changes land
+  # compile-unverified — caught on PR #667, whose FSKit fix was authored on
+  # a Linux box. `cargo check` also exercises build.rs's swiftc compile of
+  # the HeddleFSKit bridge, so the Swift side is validated too.
+  fskit-check:
+    name: FSKit compile check (macOS)
+    runs-on: macos-14
+    timeout-minutes: 30
+    env:
+      # The workflow-level RUSTC_WRAPPER points at sccache, which only the
+      # main job installs; without this override cargo dies at startup.
+      RUSTC_WRAPPER: ""
+      SCCACHE_GHA_ENABLED: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fskit-check
+      - name: cargo check with fskit
+        run: cargo check --locked -p heddle-mount --features fskit

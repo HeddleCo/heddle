@@ -36,7 +36,8 @@
 //! task. See `crates/mount/README.md` for the install steps.
 //!
 //! What works today:
-//!   * `FSKitShell::new` constructs a session; `Drop` releases it.
+//!   * `FSKitShell::new` constructs a session (erroring, not
+//!     aborting, if the Swift shim fails); `Drop` releases it.
 //!   * Every kernel callback FSKit will eventually invoke is
 //!     wired through to the trait.
 //!   * [`Self::is_runtime_available`] reports whether the host can
@@ -96,14 +97,29 @@ unsafe impl Sync for FSKitShell {}
 
 impl FSKitShell {
     /// Wrap a mount into an FSKit session.
-    pub fn new(mount: ContentAddressedMount) -> Self {
+    ///
+    /// Errors with [`MountError::SessionInit`] when the Swift shim
+    /// fails to allocate a session (see [`Self::from_shell`]).
+    pub fn new(mount: ContentAddressedMount) -> Result<Self> {
         Self::from_shell(Arc::new(mount))
     }
 
     /// Construct from any [`PlatformShell`]. Useful in tests where
     /// you want to wire a mock shell into the FSKit ABI without
     /// spinning up a real `ContentAddressedMount`.
-    pub fn from_shell(shell: Arc<dyn PlatformShell + Send + Sync>) -> Self {
+    ///
+    /// Errors with [`MountError::SessionInit`] when
+    /// `heddle_fskit_session_new` returns null — a hard failure of
+    /// the Swift shim (allocation failure or shim-internal init
+    /// error), not a runtime condition we expect. This is the live
+    /// mount path on shipped macOS binaries, so it must surface as
+    /// a recoverable error to the caller rather than aborting the
+    /// process. The null branch isn't unit-testable from Rust: the
+    /// constructor is a Swift static-lib symbol (only linked under
+    /// `--features fskit` on macOS) declared in [`c_abi`], so there
+    /// is no seam to substitute a null-returning mock without
+    /// faking the whole extern block.
+    pub fn from_shell(shell: Arc<dyn PlatformShell + Send + Sync>) -> Result<Self> {
         // Box the shell once and leak the pointer into the C ABI.
         // The Swift session calls `drop_callback` exactly once when
         // the session is freed; that reclaims the box.
@@ -123,17 +139,22 @@ impl FSKitShell {
             )
         };
         if handle.is_null() {
-            // Reclaim the box so we don't leak. `session_new`
-            // returning null is a hard failure of the Swift shim,
-            // not a runtime condition we expect.
+            // Reclaim the box so we don't leak: the Swift side never
+            // saw a session, so `trampoline_drop` will never fire.
+            // SAFETY: `user_data` came from `Box::into_raw` above and
+            // ownership never transferred (no session was created).
             unsafe {
                 drop(Box::from_raw(
                     user_data as *mut Arc<dyn PlatformShell + Send + Sync>,
                 ))
             };
-            panic!("heddle_fskit_session_new returned null");
+            return Err(MountError::SessionInit(
+                "heddle_fskit_session_new returned null (Swift FSKit shim \
+                 failed to allocate a session)"
+                    .to_string(),
+            ));
         }
-        Self { handle }
+        Ok(Self { handle })
     }
 
     /// Returns true when the host OS can actually load the FSKit
@@ -309,8 +330,15 @@ pub(super) fn open_thread(repo_path: &str, thread_id: &str) -> c_abi::HeddleFSKi
             return std::ptr::null_mut();
         }
     };
+    let shell = match FSKitShell::new(mount) {
+        Ok(s) => s,
+        Err(e) => {
+            fskit_log(&format!("FSKitShell::new FAILED: {e:?}"));
+            return std::ptr::null_mut();
+        }
+    };
     fskit_log("open_thread returning handle");
-    FSKitShell::new(mount).into_handle()
+    shell.into_handle()
 }
 
 // ----------------------------------------------------------------
@@ -652,7 +680,7 @@ mod tests {
     fn fskit_session_lifecycle_drops_inner_shell() {
         let (counting, drops) = CountingShell::new();
         let shell = Arc::new(counting);
-        let fskit = FSKitShell::from_shell(shell);
+        let fskit = FSKitShell::from_shell(shell).expect("construct FSKit session");
         // Construction alone shouldn't drop the inner shell.
         assert_eq!(drops.load(Ordering::SeqCst), 0);
         drop(fskit);

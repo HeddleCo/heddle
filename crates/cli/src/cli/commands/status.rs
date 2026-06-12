@@ -10,7 +10,10 @@ use std::{
 use anyhow::Result;
 #[cfg(feature = "client")]
 use futures::{SinkExt, StreamExt};
-use objects::{object::Tree, store::ObjectStore};
+use objects::{
+    object::{FileMode, Tree},
+    store::ObjectStore,
+};
 use objects::worktree::WorktreeStatus;
 use repo::{
     AgentUsageSummary, GitRemoteTrackingStatus, Repository, RepositoryCapability,
@@ -37,9 +40,8 @@ use super::{
     git_overlay_health::{
         GitOverlayHealth, RepositoryVerificationState,
         build_git_overlay_health_with_worktree_status, build_plain_git_verification_probe,
-        override_trust_recommended_action,
-        remote_tracking_with_verification_action, repository_setup_guidance,
-        serialize_empty_action_as_null,
+        override_trust_recommended_action, remote_tracking_with_verification_action,
+        repository_setup_guidance, serialize_empty_action_as_null,
     },
     next_action::{NextActionValidationContext, write_command_json},
     operator_loop::primary_next_action_with_verification,
@@ -249,6 +251,7 @@ struct PlainGitStatusOutput {
     git_overlay_health: GitOverlayHealth,
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
+    #[serde(serialize_with = "serialize_empty_action_as_null")]
     recommended_action: String,
     recommended_action_template: Option<super::command_catalog::ActionTemplate>,
     recovery_commands: Vec<String>,
@@ -339,7 +342,8 @@ fn collect_submodules_from_tree(
             if let Some(subtree) = repo.store().get_tree(&entry.hash)? {
                 collect_submodules_from_tree(repo, &subtree, &path, submodules)?;
             }
-        } else if entry.is_blob()
+        } else if entry.mode == FileMode::Normal
+            && entry.is_blob()
             && let Some(blob) = repo.store().get_blob(&entry.hash)?
             && let Some(commit) = submodule_commit_from_blob(blob.content())
         {
@@ -2561,7 +2565,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        ActorInfo, CoordinationStatus, MaterializedThreadInfo, assess_materialized_threads,
+        ActorInfo, ChangesInfo, CoordinationStatus, GitOverlayHealth, MaterializedThreadInfo,
+        PlainGitStatusOutput, RepositoryVerificationState, assess_materialized_threads,
         build_status_output, combined_verdict_axes, coordination_axis_clean, coordination_label,
         render_status_materialized, resolve_coordination_with_trust, submodule_status_line,
     };
@@ -2728,6 +2733,31 @@ mod tests {
         let repo = Repository::init_default(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("hello.txt"), b"hello\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
+
+        let json = status_json(repo_dir.path());
+        assert_eq!(json["submodules"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn status_does_not_report_executable_submodule_marker_as_submodule() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let commit = "0505050505050505050505050505050505050505";
+        let blob = Blob::new(format!("heddle-submodule: {commit}").into_bytes());
+        let hash = repo.store().put_blob(&blob).expect("put executable blob");
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file("run", hash, true).expect("executable marker entry"),
+        ]);
+        let tree_hash = repo.store().put_tree(&tree).expect("put tree");
+        let state = State::new_snapshot(
+            tree_hash,
+            vec![],
+            Attribution::human(Principal::new("Status Test", "status@example.com")),
+        );
+        repo.store().put_state(&state).expect("put state");
+        repo.refs()
+            .set_thread(&ThreadName::new("main"), &state.change_id)
+            .expect("set main");
 
         let json = status_json(repo_dir.path());
         assert_eq!(json["submodules"], serde_json::json!([]));
@@ -3092,5 +3122,79 @@ mod tests {
             resolve_coordination_with_trust(CoordinationStatus::Clean, true, true);
         assert!(matches!(coordination, CoordinationStatus::Clean), "no override → axis stays clean");
         assert!(!blocked_by_trust_only);
+    }
+
+    /// Action-field presence contract (HeddleCo/heddle#645): an empty
+    /// `recommended_action` must serialize as `null`, never `""` — the
+    /// serialization-boundary walker hard-fails the whole command on a
+    /// raw empty. `PlainGitStatusOutput.recommended_action` is cloned
+    /// from `trust.recommended_action`, which CAN legitimately be empty;
+    /// this pins the safe-by-construction wire shape.
+    #[test]
+    fn plain_git_status_serializes_empty_recommended_action_as_null() {
+        let machine_contract_coverage =
+            crate::cli::commands::git_overlay_health::machine_contract_coverage();
+        let trust = RepositoryVerificationState {
+            verified: true,
+            status: "verified".to_string(),
+            repository_mode: "plain-git".to_string(),
+            heddle_initialized: false,
+            git_branch: Some("main".to_string()),
+            heddle_thread: None,
+            worktree_dirty: false,
+            worktree_state: "clean".to_string(),
+            import_state: "not_applicable".to_string(),
+            mapping_state: "not_applicable".to_string(),
+            remote_drift: "clean".to_string(),
+            active_operation: None,
+            default_remote: None,
+            clone_verification: "not_applicable".to_string(),
+            machine_contract: crate::cli::commands::git_overlay_health::machine_contract_status(
+                &machine_contract_coverage,
+            )
+            .to_string(),
+            machine_contract_coverage,
+            workflow_status: "clean".to_string(),
+            workflow_summary: "no ready threads are waiting to land".to_string(),
+            summary: "plain Git repository".to_string(),
+            recommended_action: String::new(),
+            recommended_action_template: None,
+            recovery_commands: Vec::new(),
+            recovery_action_templates: Vec::new(),
+            checks: Vec::new(),
+        };
+        let output = PlainGitStatusOutput {
+            output_kind: "status",
+            repository_capability: "plain-git".to_string(),
+            repository_label: crate::cli::render::repository_mode_label("plain-git", "git-only"),
+            storage_model: "git-only".to_string(),
+            heddle_initialized: false,
+            git_branch: Some("main".to_string()),
+            path: "/tmp/repo".to_string(),
+            git_overlay_health: GitOverlayHealth {
+                status: "healthy".to_string(),
+                clean: true,
+                summary: "plain Git repository".to_string(),
+                recovery_commands: Vec::new(),
+                checks: Vec::new(),
+            },
+            recommended_action: trust.recommended_action.clone(),
+            recommended_action_template: trust.recommended_action_template.clone(),
+            recovery_commands: trust.recovery_commands.clone(),
+            recovery_action_templates: trust.recovery_action_templates.clone(),
+            thread_health: trust.status.clone(),
+            changed_path_count: 0,
+            changes: ChangesInfo {
+                modified: Vec::new(),
+                added: Vec::new(),
+                deleted: Vec::new(),
+            },
+            git_index: None,
+            trust,
+        };
+
+        let value = serde_json::to_value(&output).unwrap();
+        assert!(value["recommended_action"].is_null());
+        assert!(value["verification"]["recommended_action"].is_null());
     }
 }

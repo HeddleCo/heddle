@@ -1101,9 +1101,7 @@ pub struct SwitchCheckoutSchema {
     pub name: Option<String>,
     pub message: String,
     pub thread: Option<ThreadSummarySchema>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_path: Option<String>,
     pub target: Option<String>,
     pub intent: Option<String>,
