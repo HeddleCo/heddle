@@ -1100,7 +1100,7 @@ fn doc_samples_match_runtime_for_every_catalog_discriminator() {
                     "{value} ({displays:?}): runtime payload is missing `output_kind` (keys: {runtime_keys:?})"
                 ));
             }
-            if &doc_keys != &runtime_keys {
+            if doc_keys != runtime_keys {
                 let doc_only: Vec<&String> = doc_keys.difference(&runtime_keys).collect();
                 let runtime_only: Vec<&String> = runtime_keys.difference(&doc_keys).collect();
                 failures.push(format!(
