@@ -61,6 +61,43 @@ fn heddle_json(args: &[&str], temp: &TempDir) -> Value {
         .unwrap_or_else(|err| panic!("heddle {argv:?} stdout not JSON: {err}\n  line: {line}"))
 }
 
+fn heddle_stdout_json_allow_failure(args: &[&str], temp: &TempDir) -> Value {
+    let mut argv: Vec<&str> = vec!["--output", "json"];
+    argv.extend(args.iter().copied());
+    let output = heddle_output(&argv, Some(temp.path()))
+        .unwrap_or_else(|err| panic!("heddle {argv:?} failed to run: {err}"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_else(|| {
+            panic!(
+                "heddle {argv:?} produced no JSON stdout: status={:?} stderr={}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+    serde_json::from_str(line)
+        .unwrap_or_else(|err| panic!("heddle {argv:?} stdout line not JSON: {err}\n  line: {line}"))
+}
+
+fn heddle_stderr_json_allow_failure(args: &[&str], temp: &TempDir) -> Value {
+    let output = heddle_output(args, Some(temp.path()))
+        .unwrap_or_else(|err| panic!("heddle {args:?} failed to run: {err}"));
+    assert!(
+        !output.status.success(),
+        "heddle {args:?} should fail for this recovery-envelope fixture"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "error envelopes should stay on stderr, stdout={}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|err| panic!("heddle {args:?} stderr not JSON: {err}\n{stderr}"))
+}
+
 fn assert_output_kind(value: &Value, expected: &str) {
     assert_eq!(
         value.get("output_kind").and_then(|v| v.as_str()),
@@ -429,6 +466,123 @@ fn set_repo_output_format_json(temp: &TempDir) {
     let mut config = RepoConfig::load(&config_path).expect("load repo config");
     config.output.format = Some(OutputFormat::Json);
     config.save(&config_path).expect("save repo config");
+}
+
+fn init_active_merge_fixture() -> TempDir {
+    let temp = init_and_capture();
+    heddle(&["thread", "create", "feature"], Some(temp.path())).expect("thread create feature");
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).expect("switch feature");
+    fs::write(temp.path().join("main.rs"), "fn main() { feature(); }\n")
+        .expect("write feature conflict");
+    heddle(&["capture", "-m", "feature"], Some(temp.path())).expect("feature capture");
+    heddle(&["thread", "switch", "main"], Some(temp.path())).expect("switch main");
+    fs::write(temp.path().join("main.rs"), "fn main() { mainline(); }\n")
+        .expect("write main conflict");
+    heddle(&["capture", "-m", "main"], Some(temp.path())).expect("main capture");
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).expect("switch feature again");
+
+    let output =
+        heddle_output(&["merge", "main"], Some(temp.path())).expect("conflicted merge runs");
+    assert!(
+        temp.path().join(".heddle").join("MERGE_STATE").exists(),
+        "merge fixture must leave active MERGE_STATE: status={:?} stdout={} stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    temp
+}
+
+fn init_active_rebase_fixture() -> TempDir {
+    let temp = TempDir::new().expect("tempdir");
+    heddle(&["init"], Some(temp.path())).expect("heddle init");
+    fs::write(temp.path().join("conflict.txt"), "base\n").expect("write base");
+    heddle(&["capture", "-m", "base"], Some(temp.path())).expect("base capture");
+
+    heddle(&["thread", "create", "feature"], Some(temp.path())).expect("thread create feature");
+    heddle(&["thread", "switch", "feature"], Some(temp.path())).expect("switch feature");
+    fs::write(temp.path().join("conflict.txt"), "feature\n").expect("write feature");
+    heddle(&["capture", "-m", "feature"], Some(temp.path())).expect("feature capture");
+
+    heddle(&["thread", "switch", "main"], Some(temp.path())).expect("switch main");
+    fs::write(temp.path().join("conflict.txt"), "main\n").expect("write main");
+    heddle(&["capture", "-m", "main"], Some(temp.path())).expect("main capture");
+
+    let output =
+        heddle_output(&["rebase", "feature"], Some(temp.path())).expect("conflicted rebase runs");
+    assert!(
+        temp.path().join(".heddle").join("REBASE_STATE").exists(),
+        "rebase fixture must leave active REBASE_STATE: status={:?} stdout={} stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    temp
+}
+
+#[derive(Clone, Copy)]
+enum RecoveryFixture {
+    Idle,
+    ActiveMerge,
+    ActiveRebase,
+}
+
+impl RecoveryFixture {
+    fn init(self) -> TempDir {
+        match self {
+            Self::Idle => init_and_capture(),
+            Self::ActiveMerge => init_active_merge_fixture(),
+            Self::ActiveRebase => init_active_rebase_fixture(),
+        }
+    }
+
+    fn expected_action(self, verb: &str) -> &str {
+        match self {
+            Self::Idle => verb,
+            Self::ActiveMerge => "merge",
+            Self::ActiveRebase => "rebase",
+        }
+    }
+}
+
+#[test]
+fn recovery_path_family_output_kind_matches_invoked_verb() {
+    for (verb, fixture) in [
+        ("continue", RecoveryFixture::Idle),
+        ("abort", RecoveryFixture::Idle),
+        ("continue", RecoveryFixture::ActiveMerge),
+        ("abort", RecoveryFixture::ActiveMerge),
+        ("continue", RecoveryFixture::ActiveRebase),
+        ("abort", RecoveryFixture::ActiveRebase),
+    ] {
+        let temp = fixture.init();
+        let value = heddle_stdout_json_allow_failure(&[verb], &temp);
+        assert_output_kind(&value, verb);
+        assert_eq!(
+            value["action"].as_str(),
+            Some(fixture.expected_action(verb)),
+            "{verb} should keep the operation action while output_kind stays tied to the invoked command: {value}"
+        );
+        if !matches!(fixture, RecoveryFixture::Idle) {
+            assert_not_output_kind(&value, &["merge", "rebase"]);
+        }
+    }
+}
+
+#[test]
+fn conflict_not_found_honors_repo_json_config_for_stored_and_active_merge() {
+    let stored = init_and_capture();
+    set_repo_output_format_json(&stored);
+    let stored_error = heddle_stderr_json_allow_failure(&["conflict", "show", "missing"], &stored);
+    assert_eq!(stored_error["kind"].as_str(), Some("conflict_not_found"));
+    assert_eq!(stored_error["exit_code"].as_u64(), Some(65));
+
+    let active_merge = init_active_merge_fixture();
+    set_repo_output_format_json(&active_merge);
+    let active_error =
+        heddle_stderr_json_allow_failure(&["conflict", "show", "missing"], &active_merge);
+    assert_eq!(active_error["kind"].as_str(), Some("conflict_not_found"));
+    assert_eq!(active_error["exit_code"].as_u64(), Some(65));
 }
 
 #[test]

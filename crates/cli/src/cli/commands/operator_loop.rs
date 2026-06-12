@@ -152,8 +152,11 @@ fn emit(
     emitting_command: &[&str],
 ) -> Result<()> {
     if should_output_json(cli, None) {
+        let output_kind =
+            OperatorAction::for_emitting_command(emitting_command).unwrap_or(output.action);
+        let envelope = output.envelope_for_command(output_kind);
         write_command_json(
-            &output,
+            &envelope,
             output_is_compact(cli),
             NextActionValidationContext::new(emitting_command, repo.capability()),
         )?;

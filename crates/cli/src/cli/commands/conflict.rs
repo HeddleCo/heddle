@@ -20,9 +20,11 @@ use crate::cli::{
     commands::{
         command_catalog::{ActionTemplate, recommended_action_template},
         git_overlay_health::serialize_empty_action_as_null,
+        print_error_with_hint_with_config,
     },
     should_output_json,
 };
+use crate::exit::HeddleExitCode;
 
 #[derive(Serialize)]
 struct ConflictListOutput {
@@ -153,7 +155,7 @@ async fn run_show(cli: &Cli, args: &ConflictShowArgs) -> Result<()> {
         .iter()
         .find(|c| c.id == args.conflict_id);
     let Some(conflict) = conflict else {
-        return Err(anyhow!(conflict_not_found_advice(&args.conflict_id)));
+        render_conflict_not_found(cli, &repo, &args.conflict_id);
     };
     render_structured_conflict(cli, &repo, conflict)
 }
@@ -203,7 +205,7 @@ fn render_active_merge_conflict(
         .iter()
         .find(|path| path.as_str() == args.conflict_id)
     else {
-        return Err(anyhow!(conflict_not_found_advice(&args.conflict_id)));
+        render_conflict_not_found(cli, repo, &args.conflict_id);
     };
     let resolved = merge_state.resolved.iter().any(|resolved| resolved == path);
     let worktree_content = fs::read_to_string(repo.root().join(path)).ok();
@@ -254,6 +256,13 @@ fn render_active_merge_conflict(
         println!("  next: {}", view.next_action);
     }
     Ok(())
+}
+
+fn render_conflict_not_found(cli: &Cli, repo: &Repository, conflict_id: &str) -> ! {
+    let err = anyhow!(conflict_not_found_advice(conflict_id));
+    let code = HeddleExitCode::from_error(&err);
+    print_error_with_hint_with_config(cli, &err, repo.config());
+    std::process::exit(code.into());
 }
 
 fn conflict_not_found_advice(conflict_id: &str) -> crate::cli::commands::RecoveryAdvice {

@@ -7,24 +7,24 @@ use chrono::Utc;
 use gix::bstr::ByteSlice;
 use objects::object::ThreadName;
 use repo::{
-    GitOverlayImportHint, GitRemoteTrackingStatus, OperationKind, OperationScope, Repository,
-    RepositoryOperationStatus, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
-    ThreadState, shell_quote, update_thread_state_from_state,
+    shell_quote, update_thread_state_from_state, GitOverlayImportHint, GitRemoteTrackingStatus,
+    OperationKind, OperationScope, Repository, RepositoryOperationStatus, ThreadFreshness,
+    ThreadIntegrationPolicy, ThreadManager, ThreadState,
 };
-use serde::{Serialize, Serializer, ser::SerializeStruct};
+use serde::{ser::SerializeStruct, Serialize, Serializer};
 
 use super::{
     git_overlay_health::{
-        RepositoryVerificationState, action_template, repository_verification_blockers,
-        repository_verification_primary_command,
+        action_template, repository_verification_blockers, repository_verification_primary_command,
+        RepositoryVerificationState,
     },
-    next_action::{NextActionInput, effective_next_action},
+    next_action::{effective_next_action, NextActionInput},
     rebase::{
-        OperatorContinueStatus, cmd_rebase_silent, continue_rebase_for_operator,
-        has_persisted_rebase_state,
+        cmd_rebase_silent, continue_rebase_for_operator, has_persisted_rebase_state,
+        OperatorContinueStatus,
     },
     resolve::abort_merge_state,
-    snapshot::{SnapshotAgentOverrides, create_snapshot},
+    snapshot::{create_snapshot, SnapshotAgentOverrides},
 };
 use crate::config::UserConfig;
 
@@ -66,6 +66,15 @@ impl OperatorAction {
             Self::ThreadPromote => "thread_promote",
             Self::ThreadRefresh => "thread_refresh",
             Self::ThreadResolve => "thread_resolve",
+        }
+    }
+
+    pub(crate) fn for_emitting_command(command: &[&str]) -> Option<Self> {
+        match command {
+            ["abort"] => Some(Self::Abort),
+            ["continue"] => Some(Self::Continue),
+            ["sync"] => Some(Self::Sync),
+            _ => None,
         }
     }
 }
@@ -216,6 +225,29 @@ impl Serialize for OperatorCommandOutput {
     where
         S: Serializer,
     {
+        self.serialize_with_output_kind(serializer, self.action)
+    }
+}
+
+impl OperatorCommandOutput {
+    pub(crate) fn envelope_for_command(
+        &self,
+        output_kind: OperatorAction,
+    ) -> OperatorCommandEnvelope<'_> {
+        OperatorCommandEnvelope {
+            output: self,
+            output_kind,
+        }
+    }
+
+    fn serialize_with_output_kind<S>(
+        &self,
+        serializer: S,
+        output_kind: OperatorAction,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
         let next_action = normalized_action(self.next_action.as_deref());
         let recommended_action = normalized_action(self.recommended_action.as_deref());
         let next_action_template = next_action.and_then(action_template);
@@ -230,7 +262,7 @@ impl Serialize for OperatorCommandOutput {
         }
 
         let mut state = serializer.serialize_struct("OperatorCommandOutput", len)?;
-        state.serialize_field("output_kind", &self.action.wire_value())?;
+        state.serialize_field("output_kind", &output_kind.wire_value())?;
         state.serialize_field("status", &self.status)?;
         state.serialize_field("action", &self.action)?;
         state.serialize_field("message", &self.message)?;
@@ -248,6 +280,21 @@ impl Serialize for OperatorCommandOutput {
     }
 }
 
+pub(crate) struct OperatorCommandEnvelope<'a> {
+    output: &'a OperatorCommandOutput,
+    output_kind: OperatorAction,
+}
+
+impl Serialize for OperatorCommandEnvelope<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.output
+            .serialize_with_output_kind(serializer, self.output_kind)
+    }
+}
+
 fn normalized_action(action: Option<&str>) -> Option<&str> {
     action.filter(|action| !action.trim().is_empty())
 }
@@ -260,17 +307,32 @@ impl super::compact::CompactProjection for OperatorCommandOutput {
     /// also carry changed-path / conflict axes layer those on top of the
     /// returned value.
     fn compact(&self) -> super::compact::CompactOutput {
+        self.compact_with_output_kind(self.action)
+    }
+}
+
+impl OperatorCommandOutput {
+    fn compact_with_output_kind(
+        &self,
+        output_kind: OperatorAction,
+    ) -> super::compact::CompactOutput {
         // Prefer the validated `recommended_action`; fall back to
         // `next_action`. Both are the same canonical breadcrumb in the
         // full envelope — compact emits exactly one, as `next_action`.
         let action = normalized_action(self.recommended_action.as_deref())
             .or_else(|| normalized_action(self.next_action.as_deref()));
-        let mut compact = super::compact::CompactOutput::new(self.action.wire_value());
+        let mut compact = super::compact::CompactOutput::new(output_kind.wire_value());
         compact.status = Some(self.status.clone());
         compact.blockers = self.blockers.clone();
         compact.next_action = action.map(str::to_string);
         compact.next_action_template = action.and_then(action_template);
         compact
+    }
+}
+
+impl super::compact::CompactProjection for OperatorCommandEnvelope<'_> {
+    fn compact(&self) -> super::compact::CompactOutput {
+        self.output.compact_with_output_kind(self.output_kind)
     }
 }
 
@@ -295,7 +357,7 @@ pub(crate) fn continue_operator(repo: &Repository) -> Result<OperatorCommandOutp
             let recommended_action = format!("heddle resolve {}", shell_quote(&unresolved[0]));
             return Ok(OperatorCommandOutput {
                 status: "blocked".to_string(),
-                action: OperatorAction::Continue,
+                action: OperatorAction::Merge,
                 message: format!(
                     "Merge still has unresolved conflicts: {}. After removing conflict markers, mark each file resolved with `heddle resolve <path>`.",
                     unresolved.join(", ")
@@ -636,7 +698,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::cli::commands::git_overlay_health::{VerificationCheck, machine_contract_coverage};
+    use crate::cli::commands::git_overlay_health::{machine_contract_coverage, VerificationCheck};
 
     // heddle#464 close-the-class (paths): a conflict path can contain spaces.
     // `continue` builds `recommended_action = heddle resolve <path>`, a VALIDATED
@@ -646,7 +708,7 @@ mod tests {
     #[test]
     fn validated_resolve_action_with_spaced_path_passes_only_when_quoted() {
         use crate::cli::commands::next_action::{
-            NextActionValidationContext, validated_json_string,
+            validated_json_string, NextActionValidationContext,
         };
         use repo::shell_quote;
 
@@ -695,7 +757,7 @@ mod tests {
     #[test]
     fn blocked_land_with_unvalidated_thread_id_passes_only_when_quoted() {
         use crate::cli::commands::next_action::{
-            NextActionValidationContext, validated_json_string,
+            validated_json_string, NextActionValidationContext,
         };
         use repo::shell_quote;
 
@@ -754,18 +816,14 @@ mod tests {
         );
         assert!(output.message.contains("no-git runtime"));
         assert!(output.message.contains("conflict.txt"));
-        assert!(
-            output
-                .blockers
-                .iter()
-                .any(|path| path == "unresolved: conflict.txt")
-        );
-        assert!(
-            !output
-                .recommended_action
-                .as_deref()
-                .is_some_and(|action| action.starts_with("git "))
-        );
+        assert!(output
+            .blockers
+            .iter()
+            .any(|path| path == "unresolved: conflict.txt"));
+        assert!(!output
+            .recommended_action
+            .as_deref()
+            .is_some_and(|action| action.starts_with("git ")));
     }
 
     #[test]
@@ -792,11 +850,9 @@ mod tests {
             output.recommended_action.as_deref(),
             Some("heddle commit -m \"...\"")
         );
-        assert!(
-            output
-                .message
-                .contains("repository verification is blocked")
-        );
+        assert!(output
+            .message
+            .contains("repository verification is blocked"));
     }
 
     #[test]

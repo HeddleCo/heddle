@@ -2,6 +2,7 @@
 //! Shared stderr error envelopes for CLI failures.
 
 use clap::error::Error as ClapError;
+use repo::Config;
 
 use super::{
     RecoveryAdvice,
@@ -21,12 +22,20 @@ use crate::{
 /// parse it cleanly. The envelope is a stderr-only contract — the stdout schemas in
 /// `crates/cli/src/cli/commands/schemas.rs` are untouched.
 pub fn print_error_with_hint(cli: &Cli, err: &anyhow::Error) {
+    print_error_with_hint_inner(cli, err, None);
+}
+
+pub fn print_error_with_hint_with_config(cli: &Cli, err: &anyhow::Error, config: &Config) {
+    print_error_with_hint_inner(cli, err, Some(config));
+}
+
+fn print_error_with_hint_inner(cli: &Cli, err: &anyhow::Error, config: Option<&Config>) {
     let verb_help = verb_specific_help_command(cli);
     let classification = classify_error_with_verb(err, verb_help.as_deref());
     let hint = classification.hint.clone();
     let kind = classification.kind.clone();
     let error = display_error_message(err, &kind);
-    let json = should_output_json(cli, None);
+    let json = should_output_json(cli, config);
     if json {
         let envelope_error = classification
             .human_error
@@ -342,10 +351,7 @@ fn classify_error(err: &anyhow::Error) -> ErrorClassification {
     classify_error_with_verb(err, None)
 }
 
-fn classify_error_with_verb(
-    err: &anyhow::Error,
-    verb_help: Option<&str>,
-) -> ErrorClassification {
+fn classify_error_with_verb(err: &anyhow::Error, verb_help: Option<&str>) -> ErrorClassification {
     let mut classification = classify_error_inner(err);
     if classification.kind == "runtime_error"
         && let Some(help) = verb_help
@@ -376,9 +382,10 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
             };
         }
         if let Some(git_error) = cause.downcast_ref::<crate::bridge::git_core::GitBridgeError>()
-            && let Some(advice) = RecoveryAdvice::from_git_bridge_error(git_error) {
-                return ErrorClassification::from_advice(&advice);
-            }
+            && let Some(advice) = RecoveryAdvice::from_git_bridge_error(git_error)
+        {
+            return ErrorClassification::from_advice(&advice);
+        }
         if let Some(heddle_err) = cause.downcast_ref::<HeddleError>() {
             // `output.format = "auto"` is rejected at config-parse time by
             // the hand-rolled `OutputFormat` deserializer (see
@@ -425,9 +432,9 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                 // internals — `heddle status` is the natural recovery probe
                 // and would otherwise dead-end on the same opaque error.
                 HeddleError::Serialization(detail) => {
-                    return ErrorClassification::from_advice(
-                        &RecoveryAdvice::serialization_error(detail),
-                    );
+                    return ErrorClassification::from_advice(&RecoveryAdvice::serialization_error(
+                        detail,
+                    ));
                 }
                 HeddleError::RepositoryNotFound(path) => {
                     let command =
