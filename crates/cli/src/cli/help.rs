@@ -1168,8 +1168,8 @@ mod tests {
     ///     points at a reveal surface (`heddle help <topic>` /
     ///     `--help-agent`).
     ///
-    /// Hidden commands (debug surfaces like `heddle index`/`monitor`)
-    /// are skipped wholesale — their entire surface is intentionally
+    /// Hidden commands (debug surfaces like `index`/`monitor`) are
+    /// skipped wholesale — their entire surface is intentionally
     /// unadvertised. Global args are skipped (`--op-id` has its own
     /// contract-driven reveal in `help_command_for_path` plus the
     /// `operation-ids` topic).

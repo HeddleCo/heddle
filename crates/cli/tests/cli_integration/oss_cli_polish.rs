@@ -8145,7 +8145,14 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
         );
     }
 
+    // heddle#646: hidden flags stay out of the options list, but a single
+    // after-help "Advanced (hidden) flags" breadcrumb names them so they
+    // remain discoverable. The first-run surface (everything before the
+    // breadcrumb) stays free of the advanced machinery.
     let start_help = heddle_help(&["start", "--help"]);
+    let (start_first_run, start_breadcrumb) = start_help
+        .split_once("Advanced (hidden) flags:")
+        .expect("start help carries the advanced-flags breadcrumb (heddle#646)");
     for hidden in [
         "--agent-provider",
         "--agent-model",
@@ -8153,12 +8160,20 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
         "--daemon",
         "--no-daemon",
         "--shared-target",
-        "FUSE",
-        "heddled",
     ] {
         assert!(
-            !start_help.contains(hidden),
+            !start_first_run.contains(hidden),
             "start help should keep advanced checkout machinery out of the first-run surface: {start_help}"
+        );
+        assert!(
+            start_breadcrumb.contains(hidden),
+            "start help's advanced-flags breadcrumb should name `{hidden}`: {start_help}"
+        );
+    }
+    for jargon in ["FUSE", "heddled"] {
+        assert!(
+            !start_help.contains(jargon),
+            "start help should avoid mount-internals jargon everywhere: {start_help}"
         );
     }
     assert!(
@@ -8168,10 +8183,17 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
     );
 
     let clone_help = heddle_help(&["clone", "--help"]);
+    let (clone_first_run, clone_breadcrumb) = clone_help
+        .split_once("Advanced (hidden) flags:")
+        .expect("clone help carries the advanced-flags breadcrumb (heddle#646)");
     for hidden in ["--lazy", "--filter", "v0.3.1", "blob:none"] {
         assert!(
-            !clone_help.contains(hidden),
+            !clone_first_run.contains(hidden),
             "clone help should not lead with planned partial-clone machinery: {clone_help}"
+        );
+        assert!(
+            clone_breadcrumb.contains(hidden),
+            "clone help's advanced-flags breadcrumb should name `{hidden}`: {clone_help}"
         );
     }
 

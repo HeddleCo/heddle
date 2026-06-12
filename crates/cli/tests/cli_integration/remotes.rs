@@ -462,12 +462,22 @@ fn test_cli_pull_local_dirty_refusal_leaves_thread_ref_unchanged() {
     );
 }
 
+/// heddle#646: the planned lazy/partial-clone flags stay `hide = true`
+/// (out of the options list) but are named once in the after-help
+/// "Advanced (hidden) flags" breadcrumb so they're discoverable.
 #[test]
-fn test_cli_clone_help_hides_planned_lazy_flag() {
+fn test_cli_clone_help_keeps_planned_lazy_flag_to_breadcrumb() {
     let output = heddle_help(&["clone", "--help"]);
+    let (first_run, breadcrumb) = output
+        .split_once("Advanced (hidden) flags:")
+        .expect("clone help carries the advanced-flags breadcrumb (heddle#646)");
     assert!(
-        !output.contains("--lazy") && !output.contains("--filter"),
+        !first_run.contains("--lazy") && !first_run.contains("--filter"),
         "clone help should keep planned lazy/partial clone flags out of first-run help: {output}"
+    );
+    assert!(
+        breadcrumb.contains("--lazy") && breadcrumb.contains("--filter"),
+        "clone help's breadcrumb should name the hidden lazy/filter flags: {output}"
     );
 }
 
@@ -634,12 +644,22 @@ fn test_cli_pull_local_detached_head_materializes_then_publishes_thread() {
     );
 }
 
+/// heddle#646: `pull --lazy` stays `hide = true` (out of the options
+/// list) but is named once in the after-help "Advanced (hidden) flags"
+/// breadcrumb so it's discoverable.
 #[test]
-fn test_cli_pull_help_hides_planned_lazy_flag() {
+fn test_cli_pull_help_keeps_planned_lazy_flag_to_breadcrumb() {
     let output = heddle_help(&["pull", "--help"]);
+    let (first_run, breadcrumb) = output
+        .split_once("Advanced (hidden) flags:")
+        .expect("pull help carries the advanced-flags breadcrumb (heddle#646)");
     assert!(
-        !output.contains("--lazy"),
+        !first_run.contains("--lazy"),
         "pull help should keep planned lazy pull out of first-run help: {output}"
+    );
+    assert!(
+        breadcrumb.contains("--lazy"),
+        "pull help's breadcrumb should name the hidden --lazy flag: {output}"
     );
 }
 
