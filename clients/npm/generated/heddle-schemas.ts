@@ -318,7 +318,7 @@ export interface AttemptSchema {
 export interface AvailableGitRefSchema {
   git_commit: string;
   name: string;
-  recommended_action: string;
+  recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
 }
 
@@ -449,7 +449,7 @@ export interface BridgeGitStatusSchema {
   mirror_initialized: boolean;
   mirror_path?: string | null;
   output_kind: "bridge_git_status";
-  recommended_action: string;
+  recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   recovery_commands: string[];
   repository_capability: string;
@@ -944,7 +944,7 @@ export interface DiagnoseSchema {
   operation?: unknown;
   output_kind?: string | null;
   profile?: unknown;
-  recommended_action: string;
+  recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   recovery_commands: string[];
   remote_tracking?: unknown;
@@ -1142,7 +1142,6 @@ export interface DoctorSchemasSchema {
 }
 
 export interface ErrorEnvelopeSchema {
-  code: string;
   error: string;
   exit_code: number;
   hint: string;
@@ -1638,16 +1637,16 @@ export interface PushSchema {
   git_tracking_remote?: string | null;
   git_upstream_configured?: GitUpstreamConfiguredSchema | null;
   idempotency_status?: string | null;
-  next_action: string;
-  next_action_template: { action: string; agent_may_fill: boolean; argv_template: string[]; required_inputs: string[]; };
+  next_action: NullableStringSchema;
+  next_action_template: NullableActionTemplateSchema;
   objects?: number | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
   output_kind: string;
   push_scope?: string | null;
   pushed: boolean;
-  recommended_action: string;
-  recommended_action_template: { action: string; agent_may_fill: boolean; argv_template: string[]; required_inputs: string[]; };
+  recommended_action: NullableStringSchema;
+  recommended_action_template: NullableActionTemplateSchema;
   ref_scope?: string | null;
   remote?: string | null;
   replayed?: boolean | null;
@@ -2447,7 +2446,7 @@ export interface ThreadListSchema {
   current?: string | null;
   hosted_enabled: boolean;
   output_kind: "thread_list";
-  recommended_action: string;
+  recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   recovery_action_templates: ActionTemplateSchema[];
   recovery_commands: string[];
@@ -2610,7 +2609,7 @@ export interface ThreadShowSchema {
   probe_confidence?: number | null;
   probe_source?: string | null;
   promotion_suggested: boolean;
-  recommended_action: string | null;
+  recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   recovery_commands: string[];
   remote_tracking?: unknown;
@@ -2671,7 +2670,7 @@ export interface ThreadShowSchema2 {
   probe_confidence?: number | null;
   probe_source?: string | null;
   promotion_suggested: boolean;
-  recommended_action: string | null;
+  recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   recovery_commands: string[];
   remote_tracking?: unknown;
@@ -2731,7 +2730,7 @@ export interface ThreadSummarySchema {
   probe_confidence?: number | null;
   probe_source?: string | null;
   promotion_suggested: boolean;
-  recommended_action: string;
+  recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   remote_tracking?: unknown;
   report_flush_state?: string | null;
@@ -2944,7 +2943,7 @@ export interface WorkspaceShowSchema {
   hosted_enabled: boolean;
   operation?: unknown;
   output_kind: "workspace_summary";
-  recommended_action: string;
+  recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   remote_tracking?: unknown;
   repository: string;

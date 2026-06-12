@@ -58,6 +58,17 @@ and assume the discipline holds.
 5. **Pretty printing is reserved for `heddle show`.** Every other verb
    emits compact, single-line JSON suitable for line-oriented streaming
    (one document per line for `heddle watch`, etc.).
+6. **Action fields (`next_action`, `recommended_action`) follow one
+   presence contract.** `null` means "this output carries the field and
+   no action is needed right now"; an *absent* field means "not
+   applicable to this output shape"; the empty string is **never**
+   emitted. Agents can branch on `action == null` for "nothing to do"
+   without an emptiness guard. Enforced at the serialization boundary
+   (`validate_next_actions_at_path` rejects `""`) and by the
+   `action_fields_follow_presence_contract_in_every_schema` conformance
+   test over the schema registry; emitters normalize empty selections
+   through `next_action::normalized_action` /
+   `serialize_empty_action_as_null` (HeddleCo/heddle#645).
 
 The schemas below are hand-curated rather than auto-generated. We
 chose this over `schemars`-based introspection because the surface is
@@ -408,7 +419,6 @@ standard recovery fields plus nested verification proof:
 
 ```text
 {
-  "code": "verify_failed",
   "error": "Repository is not verified: dirty_worktree",
   "exit_code": 1,
   "hint": "Run `heddle commit -m <message>` to clear the primary verification blocker.",
@@ -3188,7 +3198,6 @@ without scraping freeform text.
 
 ```json
 {
-  "code": "repository_not_found",
   "error": "repository not found at /tmp/scratch",
   "exit_code": 1,
   "hint": "Run `heddle init` to initialize a repository here.",
@@ -3207,7 +3216,7 @@ without scraping freeform text.
 
 | Field | Type | Optionality | Semantics |
 |-------|------|-------------|-----------|
-| `code`, `kind` | string | required | Stable predicate name keying the hint class. `code` mirrors `kind` for callers that prefer error-code naming. |
+| `kind` | string | required | Stable predicate name keying the hint class. The envelope's single discriminator — the redundant `code` mirror was dropped pre-1.0 (HeddleCo/heddle#647). |
 | `error` | string | required | Human-readable failure message (the anyhow chain rendered via `{:#}`). Never empty. |
 | `exit_code` | integer | required | Process exit code for this failure; currently `1`. |
 | `hint` | string | required | One-line actionable next step. JSON-mode runtime errors use a non-empty fallback hint. |

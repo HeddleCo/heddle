@@ -25,7 +25,7 @@ use super::{
     git_overlay_health::{
         RepositoryVerificationState, action_template, build_repository_verification_state,
         override_trust_recommended_action,
-        repository_verification_blocked_advice,
+        repository_verification_blocked_advice, serialize_empty_action_as_null,
     },
     next_action::{NextActionValidationContext, write_command_json},
     operator_core::{OperatorCommandOutput, blocked_operator_exit_code},
@@ -76,6 +76,9 @@ pub struct ThreadPreviewReport {
     pub conflicts: Vec<String>,
     pub conflict_count: usize,
     pub blockers: Vec<String>,
+    // "" means "no action selected" internally; the wire contract is null
+    // (HeddleCo/heddle#645) — the boundary walker rejects raw empties.
+    #[serde(serialize_with = "serialize_empty_action_as_null")]
     pub recommended_action: String,
     pub recommended_action_template: Option<ActionTemplate>,
     pub thread_health: String,

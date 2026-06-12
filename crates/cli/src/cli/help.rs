@@ -1153,4 +1153,88 @@ mod tests {
             );
         }
     }
+
+    /// heddle#646. Close-the-class: every `hide = true` flag on a visible
+    /// command must carry a discovery affordance, so no flag is learnable
+    /// only by reading the source (the clone `--lazy`/`--filter` gap).
+    /// Two affordances are recognized:
+    ///
+    /// (a) internal plumbing — the flag's own help text starts with
+    ///     "Internal", declaring it not-for-users (test helpers, hints
+    ///     automation sets on the user's behalf); or
+    /// (b) a help breadcrumb — the command's after-help carries an
+    ///     advanced/hidden-flags note (mentions "hidden" or "advanced
+    ///     flag") that either names the flag (`--<long>`) inline or
+    ///     points at a reveal surface (`heddle help <topic>` /
+    ///     `--help-agent`).
+    ///
+    /// Hidden commands (debug surfaces like `index`/`monitor`) are
+    /// skipped wholesale — their entire surface is intentionally
+    /// unadvertised. Global args are skipped (`--op-id` has its own
+    /// contract-driven reveal in `help_command_for_path` plus the
+    /// `operation-ids` topic).
+    #[test]
+    fn hidden_flags_carry_discovery_affordances() {
+        use clap::CommandFactory;
+
+        fn walk(cmd: &clap::Command, path: &str, violations: &mut Vec<String>) {
+            let after_help = [
+                cmd.get_after_help().map(ToString::to_string),
+                cmd.get_after_long_help().map(ToString::to_string),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n");
+            let after_lower = after_help.to_lowercase();
+            let breadcrumb_marker =
+                after_lower.contains("hidden") || after_lower.contains("advanced flag");
+            let points_at_reveal =
+                after_help.contains("heddle help ") || after_help.contains("--help-agent");
+
+            for arg in cmd.get_arguments() {
+                if !arg.is_hide_set() || arg.is_global_set() {
+                    continue;
+                }
+                let flag_help = arg
+                    .get_long_help()
+                    .or_else(|| arg.get_help())
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                if flag_help.starts_with("Internal") {
+                    continue;
+                }
+                let named_inline = arg
+                    .get_long()
+                    .is_some_and(|long| after_help.contains(&format!("--{long}")));
+                if breadcrumb_marker && (points_at_reveal || named_inline) {
+                    continue;
+                }
+                let name = arg
+                    .get_long()
+                    .map(|long| format!("--{long}"))
+                    .unwrap_or_else(|| arg.get_id().to_string());
+                violations.push(format!("`{path}` hides `{name}`"));
+            }
+
+            for sub in cmd.get_subcommands() {
+                if sub.is_hide_set() {
+                    continue;
+                }
+                walk(sub, &format!("{path} {}", sub.get_name()), violations);
+            }
+        }
+
+        let cmd = crate::cli::cli_args::Cli::command();
+        let mut violations = Vec::new();
+        walk(&cmd, cmd.get_name(), &mut violations);
+        assert!(
+            violations.is_empty(),
+            "hidden flags without a discovery affordance (heddle#646): either \
+             prefix the flag's help with `Internal` (plumbing, not for users) \
+             or add an after-help breadcrumb that mentions the hidden/advanced \
+             flags and names the flag or a reveal surface:\n  {}",
+            violations.join("\n  ")
+        );
+    }
 }

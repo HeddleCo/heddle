@@ -171,6 +171,108 @@ fn bridge_git_reconcile_without_side_is_data_err() {
 }
 
 #[test]
+fn unsupported_output_json_is_data_err() {
+    // HeddleCo/heddle#648: `--output json` against a text-only command is
+    // well-formed syntax the command semantically rejects — DataErr (65),
+    // not Usage (64). Agents treat 64 as "fix your argv" and may
+    // retry-with-mutation instead of falling back to `--output text`.
+    let repo = init_repo();
+    assert_exit(
+        &["--output", "json", "shell", "completion", "bash"],
+        repo.path(),
+        65,
+    );
+}
+
+#[test]
+fn unsupported_output_json_compact_is_data_err() {
+    // Sibling gate: `--output json-compact` against a command without a
+    // compact projection. Same semantics, same code (HeddleCo/heddle#648).
+    // The envelope's `exit_code` field must agree with the process exit.
+    let repo = init_repo();
+    let output = heddle_output(&["--output", "json-compact", "log"], Some(repo.path()))
+        .expect("spawn log --output json-compact");
+    assert_eq!(
+        output.status.code(),
+        Some(65),
+        "json-compact rejection should exit 65 (DataErr); stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let envelope: serde_json::Value = serde_json::from_str(stderr.trim())
+        .unwrap_or_else(|err| panic!("rejection envelope not JSON: {err}\n  stderr: {stderr}"));
+    assert_eq!(envelope["kind"], "json_compact_unsupported");
+    assert_eq!(
+        envelope["exit_code"], 65,
+        "envelope exit_code must agree with the process exit: {envelope}"
+    );
+}
+
+#[test]
+fn status_on_corrupted_state_is_data_err_with_recovery_path() {
+    // HeddleCo/heddle#642: corrupted msgpack state must not dead-end on
+    // raw decoder internals. `heddle status` is the natural recovery
+    // probe, so it must name the condition, exit DataErr (65), and hand
+    // back executable recovery commands in both output modes.
+    let repo = init_repo();
+    std::fs::write(repo.path().join("f.txt"), "base\n").expect("write f.txt");
+    assert_exit(&["commit", "-m", "base"], repo.path(), 0);
+
+    // Corrupt every stored state object: 0x90 is msgpack FixArray(0),
+    // the exact marker from the persona report's dead-end.
+    let states_dir = repo.path().join(".heddle/objects/states");
+    let mut corrupted = 0usize;
+    for entry in std::fs::read_dir(&states_dir).expect("read states dir") {
+        let path = entry.expect("dir entry").path();
+        std::fs::write(&path, [0x90u8]).expect("corrupt state file");
+        corrupted += 1;
+    }
+    assert!(corrupted > 0, "fixture should have stored state objects");
+
+    let json = heddle_output(&["--output", "json", "status"], Some(repo.path()))
+        .expect("spawn status on corrupted repo");
+    assert_eq!(
+        json.status.code(),
+        Some(65),
+        "corrupted state should exit 65 (DataErr); stderr: {}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&json.stderr);
+    let envelope: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap_or_else(|err| {
+        panic!("corrupted-state envelope not JSON: {err}\n  stderr: {stderr}")
+    });
+    assert_eq!(envelope["kind"], "state_corrupted");
+    assert_eq!(envelope["exit_code"], 65);
+    assert_eq!(
+        envelope["error"], "Repository state is corrupted or unreadable",
+        "user-facing error must name the condition, not echo decoder internals: {envelope}"
+    );
+    let recovery_commands = envelope["recovery_commands"]
+        .as_array()
+        .unwrap_or_else(|| panic!("recovery_commands should be an array: {envelope}"));
+    assert!(
+        !recovery_commands.is_empty(),
+        "corrupted state must hand back recovery commands: {envelope}"
+    );
+    assert!(
+        recovery_commands
+            .iter()
+            .any(|command| command.as_str().is_some_and(|c| c.contains("fsck"))),
+        "recovery should point at the integrity tooling: {envelope}"
+    );
+
+    let text = heddle_output(&["status"], Some(repo.path()))
+        .expect("spawn text status on corrupted repo");
+    assert_eq!(text.status.code(), Some(65));
+    let text_stderr = String::from_utf8_lossy(&text.stderr);
+    assert!(
+        text_stderr.contains("Repository state is corrupted or unreadable")
+            && text_stderr.contains("Next: heddle verify"),
+        "text mode should name the condition and the recovery probe: {text_stderr}"
+    );
+}
+
+#[test]
 fn unconfigured_remote_keeps_no_default_remote_phrasing() {
     // Regression guard for the string sentinel `from_error` relies on for
     // the raw `resolve_remote` path (HeddleCo/heddle#252). If the
