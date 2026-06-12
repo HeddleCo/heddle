@@ -106,10 +106,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "abort"
+          ],
+          "type": "string"
         },
         "recommended_action": {
           "type": [
@@ -148,7 +148,8 @@
         "action",
         "message",
         "blockers",
-        "warnings"
+        "warnings",
+        "output_kind"
       ],
       "title": "OperatorCommandSchema",
       "type": "object"
@@ -2629,10 +2630,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "adopt"
+          ],
+          "type": "string"
         },
         "partial_mirror_refs": {
           "format": "uint",
@@ -2707,7 +2708,8 @@
         "skipped_non_commit_refs",
         "partial_mirror_refs",
         "already_in_sync",
-        "verification"
+        "verification",
+        "output_kind"
       ],
       "title": "AdoptSchema",
       "type": "object"
@@ -2894,10 +2896,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "capture"
+          ],
+          "type": "string"
         },
         "principal": {
           "$ref": "#/$defs/CommitPrincipalSchema"
@@ -2943,7 +2945,8 @@
         "promotion_suggested",
         "heavy_impact_paths",
         "signed",
-        "message"
+        "message",
+        "output_kind"
       ],
       "title": "CaptureSchema",
       "type": "object"
@@ -3820,10 +3823,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "ready"
+          ],
+          "type": "string"
         },
         "recommended_action": {
           "type": [
@@ -3872,7 +3875,8 @@
         "action",
         "message",
         "captured",
-        "report"
+        "report",
+        "output_kind"
       ],
       "title": "ReadySchema",
       "type": "object"
@@ -4179,6 +4183,9 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "output_kind": {
+          "enum": [
+            "agent_serve"
+          ],
           "type": "string"
         },
         "pid_path": {
@@ -4694,6 +4701,9 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "output_kind": {
+          "enum": [
+            "agent_status"
+          ],
           "type": "string"
         },
         "pid": {
@@ -4731,6 +4741,9 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "output_kind": {
+          "enum": [
+            "agent_stop"
+          ],
           "type": "string"
         },
         "pid": {
@@ -5170,10 +5183,10 @@
           "type": "array"
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "blame"
+          ],
+          "type": "string"
         },
         "status": {
           "type": [
@@ -5185,7 +5198,8 @@
       "required": [
         "file",
         "context",
-        "lines"
+        "lines",
+        "output_kind"
       ],
       "title": "BlameSchema",
       "type": "object"
@@ -6114,10 +6128,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "thread_list"
+          ],
+          "type": "string"
         },
         "path": {
           "type": [
@@ -6188,6 +6202,9 @@
           ]
         }
       },
+      "required": [
+        "output_kind"
+      ],
       "title": "BranchCompatSchema",
       "type": "object"
     },
@@ -6755,10 +6772,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "bridge_git_pull"
+          ],
+          "type": "string"
         },
         "pulled": {
           "type": "boolean"
@@ -6793,7 +6810,8 @@
       },
       "required": [
         "pulled",
-        "remote"
+        "remote",
+        "output_kind"
       ],
       "title": "BridgePullSchema",
       "type": "object"
@@ -6856,10 +6874,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "bridge_git_push"
+          ],
+          "type": "string"
         },
         "pushed": {
           "type": "boolean"
@@ -6894,7 +6912,8 @@
       },
       "required": [
         "pushed",
-        "remote"
+        "remote",
+        "output_kind"
       ],
       "title": "BridgePushSchema",
       "type": "object"
@@ -9967,10 +9986,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "continue"
+          ],
+          "type": "string"
         },
         "recommended_action": {
           "type": [
@@ -10009,7 +10028,8 @@
         "action",
         "message",
         "blockers",
-        "warnings"
+        "warnings",
+        "output_kind"
       ],
       "title": "OperatorCommandSchema",
       "type": "object"
@@ -10029,6 +10049,17 @@
     "daemon stop": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": true,
+      "properties": {
+        "output_kind": {
+          "enum": [
+            "daemon_stop"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind"
+      ],
       "title": "GenericJsonObjectSchema",
       "type": "object"
     },
@@ -11645,10 +11676,10 @@
         },
         "operation": true,
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "diagnose"
+          ],
+          "type": "string"
         },
         "profile": true,
         "recommended_action": {
@@ -11700,7 +11731,8 @@
         "changes",
         "workspace",
         "health",
-        "recovery_commands"
+        "recovery_commands",
+        "output_kind"
       ],
       "title": "DiagnoseSchema",
       "type": "object"
@@ -12316,10 +12348,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "fetch"
+          ],
+          "type": "string"
         },
         "ref_scope": {
           "type": [
@@ -12351,7 +12383,8 @@
       "required": [
         "remote",
         "refs_fetched",
-        "objects_fetched"
+        "objects_fetched",
+        "output_kind"
       ],
       "title": "FetchSchema",
       "type": "object"
@@ -14350,6 +14383,12 @@
             }
           ]
         },
+        "output_kind": {
+          "enum": [
+            "land"
+          ],
+          "type": "string"
+        },
         "performed_steps": {
           "items": {
             "type": "string"
@@ -14424,7 +14463,8 @@
         "pushed",
         "performed_steps",
         "skipped_steps",
-        "chosen_path"
+        "chosen_path",
+        "output_kind"
       ],
       "title": "LandSchema",
       "type": "object"
@@ -14490,10 +14530,10 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "log"
+          ],
+          "type": "string"
         },
         "repository_capability": {
           "type": "string"
@@ -14517,7 +14557,8 @@
       "required": [
         "repository_capability",
         "storage_model",
-        "states"
+        "states",
+        "output_kind"
       ],
       "title": "LogSchema",
       "type": "object"
@@ -14571,10 +14612,10 @@
           "type": "array"
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "log_reflog"
+          ],
+          "type": "string"
         },
         "repository_capability": {
           "type": "string"
@@ -14592,7 +14633,8 @@
       "required": [
         "repository_capability",
         "storage_model",
-        "entries"
+        "entries",
+        "output_kind"
       ],
       "title": "LogReflogSchema",
       "type": "object"
@@ -14643,6 +14685,12 @@
             }
           ]
         },
+        "output_kind": {
+          "enum": [
+            "gc"
+          ],
+          "type": "string"
+        },
         "replayed": {
           "type": [
             "boolean",
@@ -14650,6 +14698,9 @@
           ]
         }
       },
+      "required": [
+        "output_kind"
+      ],
       "title": "GenericJsonObjectSchema",
       "type": "object"
     },
@@ -14688,6 +14739,9 @@
           "type": "integer"
         },
         "output_kind": {
+          "enum": [
+            "index"
+          ],
           "type": "string"
         },
         "path": {
@@ -15264,10 +15318,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "merge"
+          ],
+          "type": "string"
         },
         "preview_only": {
           "type": [
@@ -15350,7 +15404,8 @@
         }
       },
       "required": [
-        "would_merge"
+        "would_merge",
+        "output_kind"
       ],
       "title": "MergePreviewSchema",
       "type": "object"
@@ -15488,10 +15543,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "pull"
+          ],
+          "type": "string"
         },
         "pulled": {
           "type": [
@@ -15556,6 +15611,9 @@
           ]
         }
       },
+      "required": [
+        "output_kind"
+      ],
       "title": "PullSchema",
       "type": "object"
     },
@@ -15838,6 +15896,9 @@
           ]
         },
         "output_kind": {
+          "enum": [
+            "push"
+          ],
           "type": "string"
         },
         "push_scope": {
@@ -15987,6 +16048,9 @@
           "type": "array"
         },
         "output_kind": {
+          "enum": [
+            "query"
+          ],
           "type": "string"
         }
       },
@@ -16114,10 +16178,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "ready"
+          ],
+          "type": "string"
         },
         "recommended_action": {
           "type": [
@@ -16166,7 +16230,8 @@
         "action",
         "message",
         "captured",
-        "report"
+        "report",
+        "output_kind"
       ],
       "title": "ReadySchema",
       "type": "object"
@@ -16693,10 +16758,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "remote_add"
+          ],
+          "type": "string"
         },
         "replayed": {
           "type": [
@@ -16718,7 +16783,8 @@
         "status",
         "action",
         "name",
-        "message"
+        "message",
+        "output_kind"
       ],
       "title": "RemoteMutationSchema",
       "type": "object"
@@ -16758,10 +16824,10 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "remote_list"
+          ],
+          "type": "string"
         },
         "remotes": {
           "items": {
@@ -16771,7 +16837,8 @@
         }
       },
       "required": [
-        "remotes"
+        "remotes",
+        "output_kind"
       ],
       "title": "RemoteListSchema",
       "type": "object"
@@ -16837,10 +16904,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "remote_remove"
+          ],
+          "type": "string"
         },
         "replayed": {
           "type": [
@@ -16862,7 +16929,8 @@
         "status",
         "action",
         "name",
-        "message"
+        "message",
+        "output_kind"
       ],
       "title": "RemoteMutationSchema",
       "type": "object"
@@ -16928,10 +16996,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "remote_set_default"
+          ],
+          "type": "string"
         },
         "replayed": {
           "type": [
@@ -16953,7 +17021,8 @@
         "status",
         "action",
         "name",
-        "message"
+        "message",
+        "output_kind"
       ],
       "title": "RemoteMutationSchema",
       "type": "object"
@@ -16968,10 +17037,10 @@
           "type": "string"
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "remote_show"
+          ],
+          "type": "string"
         },
         "source": {
           "type": "string"
@@ -16984,7 +17053,8 @@
         "name",
         "url",
         "source",
-        "is_default"
+        "is_default",
+        "output_kind"
       ],
       "title": "RemoteInfoSchema",
       "type": "object"
@@ -19399,10 +19469,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "thread_start"
+          ],
+          "type": "string"
         },
         "path": {
           "type": [
@@ -19451,7 +19521,8 @@
       },
       "required": [
         "name",
-        "message"
+        "message",
+        "output_kind"
       ],
       "title": "ThreadStartSchema",
       "type": "object"
@@ -21442,6 +21513,12 @@
             }
           ]
         },
+        "output_kind": {
+          "enum": [
+            "thread_switch"
+          ],
+          "type": "string"
+        },
         "path": {
           "type": [
             "string",
@@ -21472,7 +21549,8 @@
         }
       },
       "required": [
-        "message"
+        "message",
+        "output_kind"
       ],
       "title": "SwitchCheckoutSchema",
       "type": "object"
@@ -21594,10 +21672,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "sync"
+          ],
+          "type": "string"
         },
         "recommended_action": {
           "type": [
@@ -21642,7 +21720,8 @@
         "action",
         "message",
         "blockers",
-        "warnings"
+        "warnings",
+        "output_kind"
       ],
       "title": "SyncSchema",
       "type": "object"
@@ -22266,10 +22345,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "thread.cleanup"
+          ],
+          "type": "string"
         },
         "reclaimed_bytes": {
           "format": "uint64",
@@ -22329,7 +22408,8 @@
         "merged",
         "auto",
         "reclaimed_bytes",
-        "would_reclaim_bytes"
+        "would_reclaim_bytes",
+        "output_kind"
       ],
       "title": "ThreadCleanupSchema",
       "type": "object"
@@ -22803,10 +22883,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "thread_create"
+          ],
+          "type": "string"
         },
         "path": {
           "type": [
@@ -22855,7 +22935,8 @@
       },
       "required": [
         "name",
-        "message"
+        "message",
+        "output_kind"
       ],
       "title": "ThreadStartSchema",
       "type": "object"
@@ -23339,6 +23420,9 @@
           ]
         },
         "output_kind": {
+          "enum": [
+            "thread"
+          ],
           "type": "string"
         },
         "path": {
@@ -24949,6 +25033,9 @@
           ]
         },
         "output_kind": {
+          "enum": [
+            "thread"
+          ],
           "type": "string"
         },
         "path": {
@@ -25469,6 +25556,9 @@
           ]
         },
         "output_kind": {
+          "enum": [
+            "thread"
+          ],
           "type": "string"
         },
         "path": {
@@ -25992,10 +26082,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "thread_rename"
+          ],
+          "type": "string"
         },
         "path": {
           "type": [
@@ -26044,7 +26134,8 @@
       },
       "required": [
         "name",
-        "message"
+        "message",
+        "output_kind"
       ],
       "title": "ThreadStartSchema",
       "type": "object"
@@ -26154,10 +26245,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "resolve"
+          ],
+          "type": "string"
         },
         "recommended_action": {
           "type": [
@@ -26200,7 +26291,8 @@
         "message",
         "blockers",
         "warnings",
-        "thread"
+        "thread",
+        "output_kind"
       ],
       "title": "ThreadResolveSchema",
       "type": "object"
@@ -26256,6 +26348,12 @@
             }
           ]
         },
+        "output_kind": {
+          "enum": [
+            "thread_revoke_approval"
+          ],
+          "type": "string"
+        },
         "replayed": {
           "type": [
             "boolean",
@@ -26264,6 +26362,7 @@
         }
       },
       "required": [
+        "output_kind",
         "deleted",
         "id"
       ],
@@ -27666,10 +27765,10 @@
           ]
         },
         "output_kind": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "enum": [
+            "thread_switch"
+          ],
+          "type": "string"
         },
         "path": {
           "type": [
@@ -27718,7 +27817,8 @@
       },
       "required": [
         "name",
-        "message"
+        "message",
+        "output_kind"
       ],
       "title": "ThreadStartSchema",
       "type": "object"

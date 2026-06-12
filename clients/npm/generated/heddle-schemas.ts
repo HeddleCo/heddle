@@ -14,7 +14,7 @@ export interface AbortSchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "abort";
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   replayed?: boolean | null;
@@ -145,7 +145,7 @@ export interface AdoptSchema {
   initialized: boolean;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "adopt";
   partial_mirror_refs: number;
   path: string;
   recommended_action?: string | null;
@@ -173,7 +173,7 @@ export interface AgentCaptureSchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "capture";
   principal: CommitPrincipalSchema;
   promotion_suggested: boolean;
   recommended_action?: string | null;
@@ -184,7 +184,7 @@ export interface AgentCaptureSchema {
 }
 
 export interface AgentDaemonStatusSchema {
-  output_kind: string;
+  output_kind: "agent_status";
   pid?: number | null;
   pid_path: string;
   running: boolean;
@@ -211,7 +211,7 @@ export interface AgentReadySchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "ready";
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   replayed?: boolean | null;
@@ -262,14 +262,14 @@ export interface AgentReserveSchema {
 }
 
 export interface AgentServeSchema {
-  output_kind: string;
+  output_kind: "agent_serve";
   pid_path: string;
   socket_path: string;
   status: string;
 }
 
 export interface AgentStopSchema {
-  output_kind: string;
+  output_kind: "agent_stop";
   pid?: number | null;
   reason?: string | null;
   stopped: boolean;
@@ -362,7 +362,7 @@ export interface BlameSchema {
   context: BlameContextSnippetSchema[];
   file: string;
   lines: BlameLineSchema[];
-  output_kind?: string | null;
+  output_kind: "blame";
   status?: string | null;
 }
 
@@ -375,7 +375,7 @@ export interface BranchCompatSchema {
   name?: string | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "thread_list";
   path?: string | null;
   recommended_action?: string | null;
   recovery_commands?: string[] | null;
@@ -494,7 +494,7 @@ export interface BridgePullSchema {
   idempotency_status?: string | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "bridge_git_pull";
   pulled: boolean;
   remote: string;
   replayed?: boolean | null;
@@ -509,7 +509,7 @@ export interface BridgePushSchema {
   idempotency_status?: string | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "bridge_git_push";
   pushed: boolean;
   remote: string;
   replayed?: boolean | null;
@@ -902,7 +902,7 @@ export interface ContinueSchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "continue";
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   replayed?: boolean | null;
@@ -916,7 +916,10 @@ export type DaemonServeSchema = Record<string, unknown>;
 
 export type DaemonStatusSchema = Record<string, unknown>;
 
-export type DaemonStopSchema = Record<string, unknown>;
+export interface DaemonStopSchema {
+  output_kind: "daemon_stop";
+  [key: string]: unknown;
+}
 
 export interface DelegateSchema {
   delegated: DelegatedThreadSchema[];
@@ -942,7 +945,7 @@ export interface DiagnoseSchema {
   health: unknown;
   hosted_enabled: boolean;
   operation?: unknown;
-  output_kind?: string | null;
+  output_kind: "diagnose";
   profile?: unknown;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
@@ -1168,7 +1171,7 @@ export interface FetchSchema {
   objects_fetched: number;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "fetch";
   ref_scope?: string | null;
   refs_fetched: number;
   remote: string;
@@ -1295,7 +1298,7 @@ export interface IndexSchema {
   journal_bytes: number;
   journal_ops: number;
   journal_replay_ms: number;
-  output_kind: string;
+  output_kind: "index";
   path: string;
   present: boolean;
   snapshot_bytes: number;
@@ -1384,6 +1387,7 @@ export interface LandSchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "land";
   performed_steps: string[];
   pushed: boolean;
   pushed_remote?: string | null;
@@ -1399,14 +1403,14 @@ export interface LandSchema {
 
 export interface LogReflogSchema {
   entries: ReflogEntrySchema[];
-  output_kind?: string | null;
+  output_kind: "log_reflog";
   repository_capability: string;
   status?: string | null;
   storage_model: string;
 }
 
 export interface LogSchema {
-  output_kind?: string | null;
+  output_kind: "log";
   repository_capability: string;
   states: StateEntrySchema[];
   status?: string | null;
@@ -1470,6 +1474,7 @@ export interface MaintenanceGcSchema {
   idempotency_status?: string | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "gc";
   replayed?: boolean | null;
   [key: string]: unknown;
 }
@@ -1550,7 +1555,7 @@ export interface MergePreviewSchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "merge";
   preview_only?: boolean | null;
   preview_summary?: string[] | null;
   promotion_suggested?: boolean | null;
@@ -1599,7 +1604,7 @@ export interface PullSchema {
   old_state?: string | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "pull";
   pulled?: boolean | null;
   ref_scope?: string | null;
   remote?: string | null;
@@ -1642,7 +1647,7 @@ export interface PushSchema {
   objects?: number | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: string;
+  output_kind: "push";
   push_scope?: string | null;
   pushed: boolean;
   recommended_action: NullableStringSchema;
@@ -1672,7 +1677,7 @@ export interface QueryHitSchema {
 
 export interface QuerySchema {
   hits: QueryHitSchema[];
-  output_kind: string;
+  output_kind: "query";
 }
 
 export interface ReadySchema {
@@ -1686,7 +1691,7 @@ export interface ReadySchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "ready";
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   replayed?: boolean | null;
@@ -1783,7 +1788,7 @@ export interface RemoteAddSchema {
   name: string;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "remote_add";
   replayed?: boolean | null;
   status: string;
   url?: string | null;
@@ -1797,8 +1802,16 @@ export interface RemoteInfoSchema {
   url: string;
 }
 
+export interface RemoteInfoSchema2 {
+  is_default: boolean;
+  name: string;
+  output_kind: "remote_show";
+  source: string;
+  url: string;
+}
+
 export interface RemoteListSchema {
-  output_kind?: string | null;
+  output_kind: "remote_list";
   remotes: RemoteInfoSchema[];
 }
 
@@ -1810,7 +1823,7 @@ export interface RemoteRemoveSchema {
   name: string;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "remote_remove";
   replayed?: boolean | null;
   status: string;
   url?: string | null;
@@ -1824,7 +1837,7 @@ export interface RemoteSetDefaultSchema {
   name: string;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "remote_set_default";
   replayed?: boolean | null;
   status: string;
   url?: string | null;
@@ -2120,7 +2133,7 @@ export interface StartSchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "thread_start";
   path?: string | null;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
@@ -2272,6 +2285,7 @@ export interface SwitchCheckoutSchema {
   name?: string | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "thread_switch";
   path?: string | null;
   replayed?: boolean | null;
   target?: string | null;
@@ -2289,7 +2303,7 @@ export interface SyncSchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "sync";
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   replayed?: boolean | null;
@@ -2368,7 +2382,7 @@ export interface ThreadCleanupSchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "thread.cleanup";
   reclaimed_bytes: number;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
@@ -2396,7 +2410,7 @@ export interface ThreadCreateSchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "thread_create";
   path?: string | null;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
@@ -2419,7 +2433,7 @@ export interface ThreadDropSchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: string;
+  output_kind: "thread";
   path?: string | null;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
@@ -2498,7 +2512,7 @@ export interface ThreadPromoteSchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: string;
+  output_kind: "thread";
   path?: string | null;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
@@ -2517,7 +2531,7 @@ export interface ThreadRefreshSchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: string;
+  output_kind: "thread";
   path?: string | null;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
@@ -2536,7 +2550,7 @@ export interface ThreadRenameSchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "thread_rename";
   path?: string | null;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
@@ -2554,7 +2568,7 @@ export interface ThreadResolveSchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "resolve";
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   replayed?: boolean | null;
@@ -2569,6 +2583,7 @@ export interface ThreadRevokeApprovalSchema {
   idempotency_status?: string | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "thread_revoke_approval";
   replayed?: boolean | null;
 }
 
@@ -2760,7 +2775,7 @@ export interface ThreadSwitchSchema {
   next_action_template?: ActionTemplateSchema | null;
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind?: string | null;
+  output_kind: "thread_switch";
   path?: string | null;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
@@ -3072,7 +3087,7 @@ export interface HeddleVerbOutputs {
   "remote list": RemoteListSchema;
   "remote remove": RemoteRemoveSchema;
   "remote set-default": RemoteSetDefaultSchema;
-  "remote show": RemoteInfoSchema;
+  "remote show": RemoteInfoSchema2;
   resolve: ResolveSchema;
   retro: RetroSchema;
   revert: RevertSchema;
