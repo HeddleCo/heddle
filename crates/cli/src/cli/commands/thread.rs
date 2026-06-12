@@ -158,6 +158,7 @@ pub struct ThreadSummary {
 pub struct AvailableGitRef {
     pub name: String,
     pub git_commit: String,
+    #[serde(serialize_with = "serialize_empty_action_as_null")]
     pub recommended_action: String,
     pub recommended_action_template: Option<ActionTemplate>,
 }
@@ -3603,5 +3604,23 @@ mod tests {
         // Distinct slashed/dashed ids no longer collide.
         let other = default_thread_checkout_path(&repo, "foo-bar");
         assert_ne!(checkout, other);
+    }
+
+    /// Action-field presence contract (HeddleCo/heddle#645): an empty
+    /// `recommended_action` must serialize as `null`, never `""` — the
+    /// serialization-boundary walker hard-fails the whole command on a
+    /// raw empty. `AvailableGitRef` is non-empty by construction today
+    /// (available refs always get `canonical_adopt_ref_command`); this
+    /// pins the safe-by-construction wire shape regardless.
+    #[test]
+    fn available_git_ref_serializes_empty_recommended_action_as_null() {
+        let value = serde_json::to_value(AvailableGitRef {
+            name: "main".to_string(),
+            git_commit: "0123456789abcdef".to_string(),
+            recommended_action: String::new(),
+            recommended_action_template: None,
+        })
+        .unwrap();
+        assert!(value["recommended_action"].is_null());
     }
 }
