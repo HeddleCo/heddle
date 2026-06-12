@@ -1549,6 +1549,7 @@ export interface MergePreviewSchema {
   heavy_impact_paths?: string[] | null;
   idempotency_status?: string | null;
   impact_categories?: string[] | null;
+  merge_relation?: string | null;
   merge_state?: string | null;
   message?: string | null;
   next_action?: string | null;
@@ -1562,7 +1563,6 @@ export interface MergePreviewSchema {
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   replayed?: boolean | null;
-  semantic_result?: string | null;
   status?: string | null;
   thread_health?: string | null;
   thread_state?: string | null;

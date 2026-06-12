@@ -721,7 +721,7 @@ Examples:
   heddle merge feature/auth --preview         # structured blockers + recommendation
   heddle merge feature/auth -m 'land auth'    # integrate with a commit message
   heddle merge feature/auth --with-diff       # preview with the resulting diff
-  heddle merge feature/auth --semantic        # use semantic merge for code edits
+  heddle merge feature/auth --no-semantic     # opt out to hunk-only merge
 ")]
 pub struct MergeArgs {
     /// Thread to merge.
@@ -745,11 +745,11 @@ pub struct MergeArgs {
     #[arg(long = "with-diff")]
     pub with_diff: bool,
 
-    /// When combined with `--with-diff`, return a semantic-aware diff
-    /// (function/class-level changes) in addition to line hunks.
-    /// Requires building heddle with `--features semantic`.
-    #[arg(long)]
-    pub semantic: bool,
+    /// Use the hunk-only merge strategy instead of the semantic merge
+    /// engine. Semantic merge is the default when the `semantic` cargo
+    /// feature is compiled in.
+    #[arg(long = "no-semantic")]
+    pub no_semantic: bool,
 
     /// After a successful (non-preview) merge, also write a git commit
     /// staging the paths the merge introduced. Fails if the worktree

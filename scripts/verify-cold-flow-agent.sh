@@ -365,7 +365,7 @@ assert_transcript_claims() {
     '"merge"' \
     '"blame"' \
     '"git_checkpoint"' \
-    '"semantic_result": "fast_forward"' \
+    '"merge_relation": "fast_forward"' \
     '"agent": "codex-cli/oss-cold-flow"' \
     '"confidence": 0.' \
     '"recommended_action"' \
@@ -638,7 +638,7 @@ with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
 thread = sys.argv[2]
 expected = f"heddle ship --thread {thread} --no-push"
-if data.get("preview_only") is not True or data.get("semantic_result") != "fast_forward":
+if data.get("preview_only") is not True or data.get("merge_relation") != "fast_forward":
     raise SystemExit(f"expected a clean fast-forward preview: {data!r}")
 if data.get("recommended_action") != expected or data.get("next_action") != expected:
     raise SystemExit(f"merge preview should point to ship, got {data!r}")

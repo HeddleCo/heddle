@@ -114,7 +114,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
         let mut report = build_thread_preview_report(&repo, &mut thread, true)?;
         report.thread_state = "blocked".to_string();
         report.freshness = "not_checked".to_string();
-        report.semantic_result = "blocked".to_string();
+        report.merge_relation = "blocked".to_string();
         report.thread_health = "blocked".to_string();
         if report.blockers.is_empty() {
             report
@@ -192,7 +192,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     }
 
     let mut report = build_thread_preview_report(&repo, &mut thread, true)?;
-    let has_integration_target = report.semantic_result != "no_target";
+    let has_integration_target = report.merge_relation != "no_target";
     if has_integration_target {
         let policy_blockers = super::workflow::auto_land_policy_blockers(&repo, &thread);
         if !policy_blockers.is_empty() {
@@ -418,7 +418,7 @@ fn write_ready_output_inner(
 }
 
 fn ready_blocked_by_missing_intent(output: &ReadyOutput) -> bool {
-    output.report.semantic_result == "not_checked"
+    output.report.merge_relation == "not_checked"
         && output
             .report
             .blockers
@@ -586,7 +586,7 @@ fn missing_ready_capture_intent_report_for(
         changed_path_count,
         impact_categories: Vec::new(),
         heavy_impact_paths: Vec::new(),
-        semantic_result: "not_checked".to_string(),
+        merge_relation: "not_checked".to_string(),
         conflicts: Vec::new(),
         conflict_count: 0,
         blockers: vec!["commit the work with -m/--message/--intent before readiness checks".to_string()],
@@ -597,7 +597,7 @@ fn missing_ready_capture_intent_report_for(
 }
 
 fn write_preview_report(report: &ThreadPreviewReport, recommended_action: Option<&str>) {
-    let no_target = report.semantic_result == "no_target";
+    let no_target = report.merge_relation == "no_target";
     println!();
     println!("{}", style::section("Readiness"));
     println!("  {}", style::field("thread", &style::bold(&report.thread)));
@@ -623,7 +623,7 @@ fn write_preview_report(report: &ThreadPreviewReport, recommended_action: Option
             "  {}",
             style::field(
                 "merge type",
-                &style::thread_state(&ready_merge_type_label(&report.semantic_result))
+                &style::thread_state(&ready_merge_type_label(&report.merge_relation))
             )
         );
     }
@@ -663,7 +663,7 @@ fn ready_merge_type_label(result: &str) -> String {
 }
 
 fn ready_report_recommended_action(report: &ThreadPreviewReport) -> Option<String> {
-    if report.semantic_result == "no_target" {
+    if report.merge_relation == "no_target" {
         return None;
     }
     normalized_action(report.recommended_action.clone())
@@ -685,7 +685,7 @@ fn trust_blocked_report_for(
         changed_path_count: 0,
         impact_categories: Vec::new(),
         heavy_impact_paths: Vec::new(),
-        semantic_result: "blocked".to_string(),
+        merge_relation: "blocked".to_string(),
         conflicts: Vec::new(),
         conflict_count: 0,
         blockers: vec!["repository verification is blocked".to_string()],
@@ -700,7 +700,7 @@ mod tests {
     use super::*;
     use crate::cli::commands::git_overlay_health;
 
-    fn report(semantic_result: &str, recommended_action: &str) -> ThreadPreviewReport {
+    fn report(merge_relation: &str, recommended_action: &str) -> ThreadPreviewReport {
         ThreadPreviewReport {
             thread: "main".to_string(),
             thread_mode: "solid".to_string(),
@@ -711,7 +711,7 @@ mod tests {
             changed_path_count: 0,
             impact_categories: Vec::new(),
             heavy_impact_paths: Vec::new(),
-            semantic_result: semantic_result.to_string(),
+            merge_relation: merge_relation.to_string(),
             conflicts: Vec::new(),
             conflict_count: 0,
             blockers: Vec::new(),

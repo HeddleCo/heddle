@@ -72,7 +72,7 @@ pub struct ThreadPreviewReport {
     pub changed_path_count: usize,
     pub impact_categories: Vec<String>,
     pub heavy_impact_paths: Vec<String>,
-    pub semantic_result: String,
+    pub merge_relation: String,
     pub conflicts: Vec<String>,
     pub conflict_count: usize,
     pub blockers: Vec<String>,
@@ -107,7 +107,7 @@ pub(crate) struct MergeOutput {
     pub impact_categories: Vec<String>,
     pub promotion_suggested: bool,
     pub heavy_impact_paths: Vec<String>,
-    pub semantic_result: Option<String>,
+    pub merge_relation: Option<String>,
     pub conflict_count: usize,
     pub thread_health: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -116,14 +116,13 @@ pub(crate) struct MergeOutput {
     directory_renames: Vec<RenameEntry>,
     /// Per-symbol deltas produced by the semantic driver
     /// (function_renamed, function_added, function_deleted,
-    /// signature_changed, etc.). Present when `--semantic` is set so
+    /// signature_changed, etc.). Present when semantic merge is active so
     /// agents can detect that semantic analysis ran and act on the
     /// rename/symbol mapping programmatically without parsing the
     /// line-by-line `diff` payload. Absent (not `null`) when
-    /// `--semantic` is not set — that's the unambiguous "semantic mode
-    /// was not honored" signal. An empty array means "semantic ran but
-    /// found no symbol-level deltas" (e.g. non-source files or a
-    /// no-op fast-forward).
+    /// `--no-semantic` is set or the build lacks semantic support.
+    /// An empty array means "semantic ran but found no symbol-level
+    /// deltas" (e.g. non-source files or a no-op fast-forward).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub semantic_changes: Option<Vec<SemanticChangeEntry>>,
     /// Diff between the parent's tip and the thread's tip. Populated
@@ -153,7 +152,7 @@ struct MergeOutputInput<'a> {
     thread: &'a Option<Thread>,
     preview_report: Option<&'a ThreadPreviewReport>,
     conflicts: Option<Vec<String>>,
-    semantic_result: Option<String>,
+    merge_relation: Option<String>,
     conflict_count: Option<usize>,
     changed_paths: Option<Vec<String>>,
     preview_summary: Vec<String>,
@@ -191,7 +190,7 @@ pub fn cmd_merge(
     no_commit: bool,
     preview: bool,
     with_diff: bool,
-    semantic: bool,
+    no_semantic: bool,
     git_commit: bool,
 ) -> Result<()> {
     let cwd_repo = cli.open_repo()?;
@@ -231,7 +230,7 @@ pub fn cmd_merge(
         no_commit,
         preview,
         with_diff,
-        semantic,
+        no_semantic,
         git_commit,
     )?;
     scope_merge_recommendations_to_cli_repo(cli, &mut output);
@@ -322,6 +321,18 @@ fn current_thread_name(repo: &Repository) -> String {
     }
 }
 
+fn semantic_merge_enabled(no_semantic: bool) -> bool {
+    cfg!(feature = "semantic") && !no_semantic
+}
+
+fn merge_strategy_for(use_semantic: bool) -> MergeStrategy {
+    if use_semantic {
+        MergeStrategy::Semantic
+    } else {
+        MergeStrategy::HunkOnly
+    }
+}
+
 fn merge_already_in_progress_advice() -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "merge_already_in_progress",
@@ -347,9 +358,10 @@ pub(crate) fn merge_thread_into_current(
     no_commit: bool,
     preview: bool,
     with_diff: bool,
-    semantic: bool,
+    no_semantic: bool,
     git_commit: bool,
 ) -> Result<MergeOutput> {
+    let use_semantic = semantic_merge_enabled(no_semantic);
     let registry = AgentRegistry::new(repo.heddle_dir());
     let thread_manager = ThreadManager::new(repo.heddle_dir());
     let mut thread = thread_manager.find_by_thread(track_name)?;
@@ -406,11 +418,7 @@ pub(crate) fn merge_thread_into_current(
     // the `preview_summary` lines don't contradict the real outcome
     // (e.g. reporting `conflicts: 1 path conflict(s)` on a structural
     // reshape that semantic resolves cleanly).
-    let preview_strategy = if semantic {
-        merge_algo::MergeStrategy::Semantic
-    } else {
-        merge_algo::MergeStrategy::HunkOnly
-    };
+    let preview_strategy = merge_strategy_for(use_semantic);
     let current_thread = repo
         .current_lane()?
         .unwrap_or_else(|| "detached".to_string());
@@ -458,11 +466,7 @@ pub(crate) fn merge_thread_into_current(
         ConflictLabels {
             current: &current_label,
             incoming: &incoming_label,
-            strategy: if semantic {
-                merge_algo::MergeStrategy::Semantic
-            } else {
-                merge_algo::MergeStrategy::HunkOnly
-            },
+            strategy: merge_strategy_for(use_semantic),
         },
     )?;
 
@@ -477,19 +481,19 @@ pub(crate) fn merge_thread_into_current(
         if !with_diff {
             return Ok(None);
         }
-        Ok(Some(compute_state_diff(repo, from, to, semantic, 3)?))
+        Ok(Some(compute_state_diff(repo, from, to, use_semantic, 3)?))
     };
     // heddle#153: surface per-symbol deltas at the top level so agents
     // can detect that semantic analysis ran and act on the rename
     // mapping without digging into `diff.semantic_changes`. We derive
-    // this from the (already-computed) diff payload when both
-    // `--semantic` and `--with-diff` are set; without `--with-diff` the
+    // this from the (already-computed) diff payload when both semantic
+    // merge and `--with-diff` are active; without `--with-diff` the
     // diff isn't computed at all, so there's nothing to mirror. Use
     // `Some(vec![])` (not `None`) on the with-diff+semantic path even
     // when the driver found no symbol changes, so consumers can branch
     // on field presence to detect "semantic mode honored".
     let top_level_semantic = |diff: Option<&DiffOutput>| -> Option<Vec<SemanticChangeEntry>> {
-        if !semantic || !with_diff {
+        if !use_semantic || !with_diff {
             return None;
         }
         Some(
@@ -506,7 +510,7 @@ pub(crate) fn merge_thread_into_current(
                 preview_report.as_ref(),
                 trust,
                 preview,
-                Some(merge_plan.relation().semantic_result().to_string()),
+                Some(merge_plan.relation().as_json_value().to_string()),
             ));
         }
         // Already-up-to-date means the merge doesn't write anything — the
@@ -523,7 +527,7 @@ pub(crate) fn merge_thread_into_current(
             thread: &thread,
             preview_report: preview_report.as_ref(),
             conflicts: Some(vec![]),
-            semantic_result: Some(merge_plan.relation().semantic_result().to_string()),
+            merge_relation: Some(merge_plan.relation().as_json_value().to_string()),
             conflict_count: Some(0),
             changed_paths: Some(Vec::new()),
             preview_summary: vec![],
@@ -573,7 +577,7 @@ pub(crate) fn merge_thread_into_current(
                 thread: &thread,
                 preview_report: preview_report.as_ref(),
                 conflicts: Some(vec![]),
-                semantic_result: Some("fast_forward".to_string()),
+                merge_relation: Some("fast_forward".to_string()),
                 conflict_count: Some(0),
                 changed_paths: Some(ff_paths.clone()),
                 preview_summary,
@@ -815,7 +819,7 @@ pub(crate) fn merge_thread_into_current(
                 .map(|thread| thread.promotion_suggested)
                 .unwrap_or(false),
             heavy_impact_paths: thread_heavy_paths(&thread),
-            semantic_result: Some("fast_forward".to_string()),
+            merge_relation: Some("fast_forward".to_string()),
             conflict_count: 0,
             thread_health: merge_output_thread_health(thread.as_ref(), preview_report.as_ref()),
             renames: ff_renames,
@@ -890,7 +894,7 @@ pub(crate) fn merge_thread_into_current(
             &current_state.change_id,
             &merge_result.tree,
             "<merged-preview>",
-            with_diff && semantic,
+            with_diff && use_semantic,
             if with_diff { 3 } else { 0 },
         )
         .map(|diff| diff_with_known_renames(diff, &rename_entries))?;
@@ -909,7 +913,7 @@ pub(crate) fn merge_thread_into_current(
             thread: &thread,
             preview_report: preview_report.as_ref(),
             conflicts: Some(merge_result.conflicts.clone()),
-            semantic_result: Some(merge_plan.relation().semantic_result().to_string()),
+            merge_relation: Some(merge_plan.relation().as_json_value().to_string()),
             conflict_count: Some(merge_plan.relation().conflict_count()),
             changed_paths: Some(preview_changed_paths.clone()),
             preview_summary,
@@ -956,7 +960,7 @@ pub(crate) fn merge_thread_into_current(
             thread: &thread,
             preview_report: preview_report.as_ref(),
             conflicts: Some(merge_result.conflicts.clone()),
-            semantic_result: Some(merge_plan.relation().semantic_result().to_string()),
+            merge_relation: Some(merge_plan.relation().as_json_value().to_string()),
             conflict_count: Some(merge_plan.relation().conflict_count()),
             changed_paths: Some(merge_result.conflicts.clone()),
             preview_summary,
@@ -1001,7 +1005,7 @@ pub(crate) fn merge_thread_into_current(
             thread: &thread,
             preview_report: preview_report.as_ref(),
             conflicts: Some(vec![]),
-            semantic_result: Some(merge_plan.relation().semantic_result().to_string()),
+            merge_relation: Some(merge_plan.relation().as_json_value().to_string()),
             conflict_count: Some(merge_plan.relation().conflict_count()),
             changed_paths: Some(no_commit_changed_paths),
             preview_summary,
@@ -1066,7 +1070,7 @@ pub(crate) fn merge_thread_into_current(
             thread: &thread,
             preview_report: preview_report.as_ref(),
             conflicts: Some(vec![]),
-            semantic_result: Some(merge_plan.relation().semantic_result().to_string()),
+            merge_relation: Some(merge_plan.relation().as_json_value().to_string()),
             conflict_count: Some(merge_plan.relation().conflict_count()),
             changed_paths: Some(Vec::new()),
             preview_summary,
@@ -1208,7 +1212,7 @@ pub(crate) fn merge_thread_into_current(
         repo,
         &current_state.change_id,
         &new_state.change_id,
-        with_diff && semantic,
+        with_diff && use_semantic,
         if with_diff { 3 } else { 0 },
     )
     .map(|diff| diff_with_known_renames(diff, &rename_entries))?;
@@ -1229,7 +1233,7 @@ pub(crate) fn merge_thread_into_current(
         thread: &thread,
         preview_report: preview_report.as_ref(),
         conflicts: Some(vec![]),
-        semantic_result: Some(merge_plan.relation().semantic_result().to_string()),
+        merge_relation: Some(merge_plan.relation().as_json_value().to_string()),
         conflict_count: Some(merge_plan.relation().conflict_count()),
         changed_paths: Some(committed_changed_paths),
         preview_summary,
@@ -1778,15 +1782,15 @@ pub(crate) fn build_thread_preview_report(
 ) -> Result<ThreadPreviewReport> {
     let mut graph = CommitGraphIndex::new(repo);
     // External callers (`heddle sync`, `heddle land`, `heddle ready`)
-    // don't have a `--semantic` flag today; preserve the historic
-    // hunk-only preview behaviour. The merge command path threads its
-    // own strategy by calling `_with_graph` directly.
+    // route through the same default merge strategy as `heddle merge`.
+    // The merge command path can still opt out by passing an explicit
+    // strategy to `_with_graph`.
     build_thread_preview_report_with_graph(
         repo,
         &mut graph,
         thread,
         prefer_apply_recommendation,
-        merge_algo::MergeStrategy::HunkOnly,
+        merge_strategy_for(semantic_merge_enabled(false)),
         None,
     )
 }
@@ -1831,7 +1835,7 @@ fn build_thread_preview_report_with_graph(
     };
 
     let mut preview_changed_paths: Option<Vec<String>> = None;
-    let semantic_result = if let Some((target_label, target_id)) = resolved_target {
+    let merge_relation = if let Some((target_label, target_id)) = resolved_target {
         let thread_id = repo
             .refs()
             .get_thread(&ThreadName::new(&thread.thread))?
@@ -1852,18 +1856,18 @@ fn build_thread_preview_report_with_graph(
         if let Some(merge_result) = merge_plan.merge_result() {
             conflicts = merge_result.conflicts.clone();
         }
-        let semantic_result = merge_plan.relation().semantic_result().to_string();
-        if semantic_result != "already_integrated" {
+        let merge_relation = merge_plan.relation().as_json_value().to_string();
+        if merge_relation != "already_integrated" {
             preview_changed_paths = Some(merge_changed_paths(repo, &target_id, &thread_id)?);
         }
-        semantic_result
+        merge_relation
     } else {
         "no_target".to_string()
     };
 
     let mut advice =
         describe_thread_advice(thread, false, conflicts.len(), prefer_apply_recommendation);
-    if semantic_result == "already_integrated" {
+    if merge_relation == "already_integrated" {
         advice.blockers.clear();
         advice.recommended_action.clear();
         advice.thread_health = "clean".to_string();
@@ -1913,7 +1917,7 @@ fn build_thread_preview_report_with_graph(
             .map(ToString::to_string)
             .collect(),
         heavy_impact_paths: thread.heavy_impact_paths.clone(),
-        semantic_result,
+        merge_relation,
         conflict_count,
         conflicts,
         blockers: advice.blockers,
@@ -2066,10 +2070,10 @@ fn merge_output_from_report(input: MergeOutputInput<'_>) -> MergeOutput {
             .map(|thread| thread.promotion_suggested)
             .unwrap_or(false),
         heavy_impact_paths: thread_heavy_paths(input.thread),
-        semantic_result: input.semantic_result.or_else(|| {
+        merge_relation: input.merge_relation.or_else(|| {
             input
                 .preview_report
-                .map(|report| report.semantic_result.clone())
+                .map(|report| report.merge_relation.clone())
         }),
         conflict_count: input
             .conflict_count
@@ -2270,7 +2274,7 @@ fn merge_blocked_by_trust_output(
     preview_report: Option<&ThreadPreviewReport>,
     trust: RepositoryVerificationState,
     preview_only: bool,
-    semantic_result: Option<String>,
+    merge_relation: Option<String>,
 ) -> MergeOutput {
     MergeOutput {
         operator: OperatorCommandOutput::blocked_by_repository_verification(
@@ -2294,8 +2298,8 @@ fn merge_blocked_by_trust_output(
             .map(|thread| thread.promotion_suggested)
             .unwrap_or(false),
         heavy_impact_paths: thread_heavy_paths(thread),
-        semantic_result: semantic_result
-            .or_else(|| preview_report.map(|report| report.semantic_result.clone())),
+        merge_relation: merge_relation
+            .or_else(|| preview_report.map(|report| report.merge_relation.clone())),
         conflict_count: 0,
         thread_health: trust.status.clone(),
         renames: Vec::new(),
@@ -2393,7 +2397,7 @@ fn stale_thread_merge_blocked_output(
         impact_categories: preview_report.impact_categories.clone(),
         promotion_suggested: !preview_report.heavy_impact_paths.is_empty(),
         heavy_impact_paths: preview_report.heavy_impact_paths.clone(),
-        semantic_result: Some(preview_report.semantic_result.clone()),
+        merge_relation: Some(preview_report.merge_relation.clone()),
         conflict_count: preview_report.conflict_count,
         thread_health: "blocked".to_string(),
         renames: Vec::new(),
@@ -2486,10 +2490,10 @@ fn merge_preview_blocked_advice(output: &MergeOutput) -> RecoveryAdvice {
             ),
         );
     }
-    if let Some(semantic_result) = output.semantic_result.as_ref() {
+    if let Some(merge_relation) = output.merge_relation.as_ref() {
         advice.extra_json_fields.insert(
-            "semantic_result".to_string(),
-            Value::String(semantic_result.clone()),
+            "merge_relation".to_string(),
+            Value::String(merge_relation.clone()),
         );
     }
     advice
@@ -2674,7 +2678,7 @@ fn build_preview_summary(report: Option<&ThreadPreviewReport>) -> Vec<String> {
         }
         lines.push(format!(
             "merge type: {}",
-            semantic_result_summary(&report.semantic_result)
+            merge_relation_summary(&report.merge_relation)
         ));
         if report.conflict_count > 0 {
             lines.push(format!(
@@ -2722,7 +2726,7 @@ fn build_stale_preview_summary(report: &ThreadPreviewReport) -> Vec<String> {
     }
     lines.push(format!(
         "merge type: {}",
-        semantic_result_summary(&report.semantic_result)
+        merge_relation_summary(&report.merge_relation)
     ));
     if report.conflict_count > 0 {
         lines.push(format!(
@@ -2742,7 +2746,7 @@ fn thread_mode_summary(mode: &str) -> &str {
     }
 }
 
-fn semantic_result_summary(result: &str) -> String {
+fn merge_relation_summary(result: &str) -> String {
     result.replace('_', "-")
 }
 

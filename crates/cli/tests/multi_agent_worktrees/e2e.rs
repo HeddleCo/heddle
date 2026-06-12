@@ -967,7 +967,7 @@ fn thread_start_creates_isolated_thread_and_aliases_work() {
     .unwrap();
     let ready: Value = serde_json::from_str(&ready_json).unwrap();
     assert_eq!(ready["thread_state"], "ready");
-    assert_eq!(ready["report"]["semantic_result"], "fast_forward");
+    assert_eq!(ready["report"]["merge_relation"], "fast_forward");
     assert_eq!(
         ready["report"]["recommended_action"],
         "heddle land --thread feature/native-cli --no-push"

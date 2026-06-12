@@ -9,7 +9,7 @@ Heddle is an AI-native version control CLI written in Rust. It keeps its own sta
 - thread-first agent workflows (lightweight named work units with lifecycle, freshness, and promotion semantics)
 - local captures and Git-compatible commits with explicit human and agent attribution
 - content-addressed immutable history with stable change identifiers that survive rewrites
-- provenance-aware inspection (`heddle blame`, `heddle inspect`, `heddle diff --semantic`)
+- provenance-aware inspection (`heddle blame`, `heddle inspect`, `heddle diff`)
 
 ```bash
 cargo install heddle-cli
@@ -44,7 +44,7 @@ Heddle's CLI follows five operating principles — verification, disposability, 
 - Explicit principal and agent attribution
 - Provenance-backed local blame with rewrite preservation across snapshot, collapse, and merge flows
 - Semantic diff and compare
-- Semantic merge: AST-item-level merge within a file (first-class Rust/Python/JS/TS; Go/C/C++/Java opt-in); does not auto-rewrite cross-file imports or call-sites
+- Semantic merge by default: `heddle merge` uses AST-item-level merge within a file when built with the default `semantic` feature (first-class Rust/Python/JS/TS; Go/C/C++/Java opt-in); `--no-semantic` opts out to hunk-only merge; does not auto-rewrite cross-file imports or call-sites
 - Automatic state signing: device-local ed25519 identity minted on first use signs every authored state — provenance with no manual key setup
 - Git adapter/bridge: adopt, import, export, sync
 - Byte-identical Git round-trip, CI-enforced: adopt→export reproduces identical commit/tree/blob/tag SHAs with a `git fsck`-clean result, gated per-PR by 10 deterministic fixtures
@@ -125,7 +125,7 @@ heddle land --thread feature/auth --push
 
 # Inspect history and provenance
 heddle log
-heddle diff HEAD~1 HEAD --semantic
+heddle diff HEAD~1 HEAD
 heddle blame path/to/file.rs
 ```
 

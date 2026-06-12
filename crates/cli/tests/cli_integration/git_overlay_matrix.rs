@@ -347,7 +347,7 @@ fn git_overlay_imported_ref_preview_diff_uses_merge_tree() {
     );
 
     assert_eq!(parsed["status"], "completed", "{parsed}");
-    assert_eq!(parsed["semantic_result"], "clean_apply", "{parsed}");
+    assert_eq!(parsed["merge_relation"], "clean_apply", "{parsed}");
     assert_eq!(parsed["changed_path_count"], 2, "{parsed}");
     assert_eq!(parsed["recommended_action"], Value::Null, "{parsed}");
     assert_eq!(parsed["next_action"], Value::Null, "{parsed}");
@@ -393,7 +393,7 @@ fn git_overlay_imported_ref_fast_forward_preview_has_no_ship_action() {
     );
 
     assert_eq!(parsed["status"], "preview", "{parsed}");
-    assert_eq!(parsed["semantic_result"], "fast_forward", "{parsed}");
+    assert_eq!(parsed["merge_relation"], "fast_forward", "{parsed}");
     assert_eq!(parsed["recommended_action"], Value::Null, "{parsed}");
     assert_eq!(parsed["recommended_action_argv"], Value::Null, "{parsed}");
     assert_eq!(parsed["next_action"], Value::Null, "{parsed}");
@@ -4275,7 +4275,7 @@ fn git_overlay_matrix_remote_set_default_unknown_returns_not_found() {
 }
 
 #[test]
-fn git_overlay_matrix_local_ahead_noop_merge_preserves_semantic_result() {
+fn git_overlay_matrix_local_ahead_noop_merge_preserves_merge_relation() {
     let temp = TempDir::new().unwrap();
     let origin = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "main");
@@ -4295,7 +4295,7 @@ fn git_overlay_matrix_local_ahead_noop_merge_preserves_semantic_result() {
         &["--output", "json", "merge", "main", "--preview"],
     );
     assert_eq!(merge["status"], "completed");
-    assert_eq!(merge["semantic_result"], "already_up_to_date");
+    assert_eq!(merge["merge_relation"], "already_up_to_date");
     let verify = json(temp.path(), &["--output", "json", "verify"]);
     assert_eq!(verify["verified"], true);
     assert_eq!(verify["status"], "clean");
@@ -5512,7 +5512,7 @@ fn git_overlay_matrix_stale_conflict_thread_resolve_enters_conflict_recovery() {
     );
     assert_eq!(preview["conflict_count"], 1, "{preview}");
     assert_eq!(preview["conflicts"], serde_json::json!(["conflict.txt"]));
-    assert_eq!(preview["semantic_result"], "path_conflicts", "{preview}");
+    assert_eq!(preview["merge_relation"], "path_conflicts", "{preview}");
 
     let resolved = json(
         temp.path(),

@@ -134,7 +134,7 @@ pub fn cmd_diff(
     };
     let status_options = worktree_status_options(Some(repo.config()));
 
-    let semantic_result: Option<SemanticDiffResult> = if semantic {
+    let semantic_diff_result: Option<SemanticDiffResult> = if semantic {
         #[cfg(not(feature = "semantic"))]
         {
             return Err(anyhow!(RecoveryAdvice::feature_unavailable(
@@ -184,7 +184,7 @@ pub fn cmd_diff(
         let to_state = require_resolved_state(&repo, &to_id)?;
         to_tree = repo.store().get_tree(&to_state.tree)?;
     }
-    let changes: FileChangeSet = if let Some(ref result) = semantic_result {
+    let changes: FileChangeSet = if let Some(ref result) = semantic_diff_result {
         result.file_changes.clone()
     } else if let Some(ref to_spec) = to {
         let to_id = resolve_state_id(&repo, to_spec)?;
@@ -366,7 +366,7 @@ pub fn cmd_diff(
         unified,
     )?;
 
-    let semantic_changes = semantic_result.map(|r| {
+    let semantic_changes = semantic_diff_result.map(|r| {
         r.changes
             .into_iter()
             .map(SemanticChangeEntry::from)
@@ -1463,7 +1463,7 @@ pub fn compute_state_diff(
         .map(|s| s.tree)
         .unwrap_or_else(|| Tree::new().hash());
 
-    let semantic_result: Option<SemanticDiffResult> = if semantic {
+    let semantic_diff_result: Option<SemanticDiffResult> = if semantic {
         #[cfg(not(feature = "semantic"))]
         {
             return Err(anyhow!(RecoveryAdvice::feature_unavailable(
@@ -1480,7 +1480,7 @@ pub fn compute_state_diff(
         None
     };
 
-    let changes: FileChangeSet = if let Some(ref result) = semantic_result {
+    let changes: FileChangeSet = if let Some(ref result) = semantic_diff_result {
         result.file_changes.clone()
     } else {
         repo.diff_trees(&from_hash, &to_state.tree)?
@@ -1518,7 +1518,7 @@ pub fn compute_state_diff(
         unified,
     )?;
 
-    let semantic_changes = semantic_result.map(|r| {
+    let semantic_changes = semantic_diff_result.map(|r| {
         r.changes
             .into_iter()
             .map(SemanticChangeEntry::from)
@@ -1564,7 +1564,7 @@ pub fn compute_tree_diff(
 
     let to_hash = repo.store().put_tree(to_tree)?;
 
-    let semantic_result: Option<SemanticDiffResult> = if semantic {
+    let semantic_diff_result: Option<SemanticDiffResult> = if semantic {
         #[cfg(not(feature = "semantic"))]
         {
             return Err(anyhow!(RecoveryAdvice::feature_unavailable(
@@ -1581,7 +1581,7 @@ pub fn compute_tree_diff(
         None
     };
 
-    let changes: FileChangeSet = if let Some(ref result) = semantic_result {
+    let changes: FileChangeSet = if let Some(ref result) = semantic_diff_result {
         result.file_changes.clone()
     } else {
         repo.diff_trees(&from_hash, &to_hash)?
@@ -1619,7 +1619,7 @@ pub fn compute_tree_diff(
         unified,
     )?;
 
-    let semantic_changes = semantic_result.map(|r| {
+    let semantic_changes = semantic_diff_result.map(|r| {
         r.changes
             .into_iter()
             .map(SemanticChangeEntry::from)

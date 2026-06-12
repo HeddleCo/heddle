@@ -570,7 +570,7 @@ async fn async_main() -> Result<()> {
             no_commit,
             preview,
             with_diff,
-            semantic,
+            no_semantic,
             git_commit,
         }) => cmd_merge(
             &cli,
@@ -579,7 +579,7 @@ async fn async_main() -> Result<()> {
             *no_commit,
             *preview,
             *with_diff,
-            *semantic,
+            *no_semantic,
             *git_commit,
         ),
 
