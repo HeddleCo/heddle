@@ -9,7 +9,8 @@ use super::{
         NextActionInput, NextActionValidationContext, effective_next_action, write_command_json,
     },
     operator_core::{
-        OperatorAction, OperatorCommandOutput, abort_operator, exit_if_blocked_operator_status,
+        ABORT_OPERATOR_EMISSION, CONTINUE_OPERATOR_EMISSION, OperatorAction, OperatorCommandOutput,
+        OperatorEmission, SYNC_OPERATOR_EMISSION, abort_operator, exit_if_blocked_operator_status,
         open_operator_repo_from_path, recommend_next_action,
     },
     remote::resolve_default_remote_name,
@@ -27,7 +28,7 @@ pub async fn cmd_continue(cli: &Cli) -> Result<()> {
     let repo = open_operator_repo_from_path(cwd)?;
     let output = super::operator_core::continue_operator(&repo)?;
     let status = output.status.clone();
-    emit(cli, &repo, output, &["continue"])?;
+    emit(cli, &repo, output, CONTINUE_OPERATOR_EMISSION)?;
     exit_if_blocked_operator_status(&status);
     Ok(())
 }
@@ -37,7 +38,7 @@ pub fn cmd_abort(cli: &Cli) -> Result<()> {
     let cwd = cli.repo.as_ref().unwrap_or(&current_dir);
     let repo = open_operator_repo_from_path(cwd)?;
     let output = abort_operator(&repo)?;
-    emit(cli, &repo, output, &["abort"])
+    emit(cli, &repo, output, ABORT_OPERATOR_EMISSION)
 }
 
 pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
@@ -57,7 +58,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
                 next_action: Some("heddle continue".to_string()),
                 recommended_action: Some("heddle continue".to_string()),
             },
-            &["sync"],
+            SYNC_OPERATOR_EMISSION,
         );
     }
 
@@ -83,7 +84,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
                     next_action: Some(recommended_action.clone()),
                     recommended_action: Some(recommended_action),
                 },
-                &["sync"],
+                SYNC_OPERATOR_EMISSION,
             );
         }
         if remote_decision.status == "remote_behind" {
@@ -93,7 +94,12 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
             let outcome = bridge.pull(&remote_name)?;
             let verification = build_repository_verification_state(&repo);
             if !verification.verified {
-                return emit(cli, &repo, sync_blocked_by_trust(verification), &["sync"]);
+                return emit(
+                    cli,
+                    &repo,
+                    sync_blocked_by_trust(verification),
+                    SYNC_OPERATOR_EMISSION,
+                );
             }
             return emit(
                 cli,
@@ -110,7 +116,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
                     next_action: None,
                     recommended_action: None,
                 },
-                &["sync"],
+                SYNC_OPERATOR_EMISSION,
             );
         }
         if remote_decision.status == "remote_ahead" {
@@ -126,7 +132,7 @@ pub async fn cmd_sync_smart(cli: &Cli, args: SyncArgs) -> Result<()> {
                     next_action: Some("heddle push".to_string()),
                     recommended_action: Some("heddle push".to_string()),
                 },
-                &["sync"],
+                SYNC_OPERATOR_EMISSION,
             );
         }
     }
@@ -149,16 +155,14 @@ fn emit(
     cli: &Cli,
     repo: &repo::Repository,
     output: OperatorCommandOutput,
-    emitting_command: &[&str],
+    emission: OperatorEmission,
 ) -> Result<()> {
     if should_output_json(cli, None) {
-        let output_kind =
-            OperatorAction::for_emitting_command(emitting_command).unwrap_or(output.action);
-        let envelope = output.envelope_for_command(output_kind);
+        let envelope = output.envelope_for_command(emission.output_kind);
         write_command_json(
             &envelope,
             output_is_compact(cli),
-            NextActionValidationContext::new(emitting_command, repo.capability()),
+            NextActionValidationContext::new(emission.command, repo.capability()),
         )?;
     } else {
         let message = match output.status.as_str() {

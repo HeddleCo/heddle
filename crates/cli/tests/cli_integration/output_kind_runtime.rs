@@ -22,6 +22,8 @@ use repo::{OutputFormat, RepoConfig, Repository};
 use serde_json::Value;
 use tempfile::TempDir;
 
+use cli::cli::commands::{build_command_catalog, operator_envelope_verbs};
+
 use super::{heddle, heddle_output};
 
 /// Init a repo, write a tracked file, capture one state.
@@ -537,34 +539,67 @@ impl RecoveryFixture {
     }
 
     fn expected_action(self, verb: &str) -> &str {
-        match self {
-            Self::Idle => verb,
-            Self::ActiveMerge => "merge",
-            Self::ActiveRebase => "rebase",
+        match (self, verb) {
+            (Self::Idle, _) | (_, "sync") => verb,
+            (Self::ActiveMerge, _) => "merge",
+            (Self::ActiveRebase, _) => "rebase",
         }
     }
 }
 
+fn catalog_operator_envelope_output_kinds() -> Vec<(String, String)> {
+    let catalog = build_command_catalog();
+    operator_envelope_verbs()
+        .into_iter()
+        .map(|display| {
+            let entry = catalog
+                .commands
+                .iter()
+                .find(|entry| entry.display == display)
+                .unwrap_or_else(|| panic!("operator envelope verb `{display}` is cataloged"));
+            let output_kind = entry
+                .json_discriminators
+                .iter()
+                .find(|discriminator| discriminator.field == "output_kind")
+                .unwrap_or_else(|| {
+                    panic!("operator envelope verb `{display}` declares output_kind")
+                })
+                .value
+                .clone();
+            (display, output_kind)
+        })
+        .collect()
+}
+
 #[test]
 fn recovery_path_family_output_kind_matches_invoked_verb() {
-    for (verb, fixture) in [
-        ("continue", RecoveryFixture::Idle),
-        ("abort", RecoveryFixture::Idle),
-        ("continue", RecoveryFixture::ActiveMerge),
-        ("abort", RecoveryFixture::ActiveMerge),
-        ("continue", RecoveryFixture::ActiveRebase),
-        ("abort", RecoveryFixture::ActiveRebase),
+    let operator_verbs = catalog_operator_envelope_output_kinds();
+    assert!(
+        operator_verbs.iter().any(|(display, _)| display == "sync"),
+        "catalog-driven operator envelope sweep must include `sync`: {operator_verbs:?}"
+    );
+
+    for fixture in [
+        RecoveryFixture::Idle,
+        RecoveryFixture::ActiveMerge,
+        RecoveryFixture::ActiveRebase,
     ] {
-        let temp = fixture.init();
-        let value = heddle_stdout_json_allow_failure(&[verb], &temp);
-        assert_output_kind(&value, verb);
-        assert_eq!(
-            value["action"].as_str(),
-            Some(fixture.expected_action(verb)),
-            "{verb} should keep the operation action while output_kind stays tied to the invoked command: {value}"
-        );
-        if !matches!(fixture, RecoveryFixture::Idle) {
-            assert_not_output_kind(&value, &["merge", "rebase"]);
+        for (verb, output_kind) in &operator_verbs {
+            if matches!(fixture, RecoveryFixture::Idle) && verb == "sync" {
+                continue;
+            }
+            let temp = fixture.init();
+            let args = verb.split_whitespace().collect::<Vec<_>>();
+            let value = heddle_stdout_json_allow_failure(&args, &temp);
+            assert_output_kind(&value, output_kind);
+            assert_eq!(
+                value["action"].as_str(),
+                Some(fixture.expected_action(verb)),
+                "{verb} should keep the operation action while output_kind stays tied to the invoked command: {value}"
+            );
+            if !matches!(fixture, RecoveryFixture::Idle) {
+                assert_not_output_kind(&value, &["merge", "rebase"]);
+            }
         }
     }
 }

@@ -32,7 +32,8 @@ use tempfile::TempDir;
 
 use cli::cli::commands::{
     CLONE_CONNECTION_OUTPUT_KIND, CLONE_OUTPUT_KIND, build_command_catalog,
-    documented_samples_with_bound_verbs, schema_for_verb,
+    documented_samples_with_bound_verbs, operator_emission_output_kinds, operator_envelope_verbs,
+    schema_for_verb,
 };
 
 use super::{heddle, heddle_output};
@@ -407,6 +408,66 @@ fn swept_verbs_declare_output_kind_in_catalog() {
              path (snake-cased).\n\n{msg}"
         );
     }
+}
+
+#[test]
+fn operator_envelope_verbs_have_declared_emissions() {
+    let catalog_verbs: BTreeSet<String> = operator_envelope_verbs().into_iter().collect();
+    let emissions: BTreeSet<String> = operator_emission_output_kinds()
+        .into_iter()
+        .map(|(display, _)| display)
+        .collect();
+    let missing: Vec<&str> = catalog_verbs
+        .difference(&emissions)
+        .map(String::as_str)
+        .collect();
+    let stale: Vec<&str> = emissions
+        .difference(&catalog_verbs)
+        .map(String::as_str)
+        .collect();
+
+    assert!(
+        missing.is_empty() && stale.is_empty(),
+        "Operator envelope verbs must be registered in the catalog and in the \
+         closed emission table. A missing emission would otherwise allow the \
+         output_kind source to drift back toward the live operation action.\n\
+         Missing emission declaration(s): {missing:?}\n\
+         Stale emission declaration(s): {stale:?}"
+    );
+}
+
+#[test]
+fn operator_emissions_match_catalog_discriminators() {
+    let catalog = build_command_catalog();
+    let mut failures = Vec::new();
+
+    for (display, output_kind) in operator_emission_output_kinds() {
+        let Some(entry) = catalog
+            .commands
+            .iter()
+            .find(|entry| entry.display == display)
+        else {
+            failures.push(format!("{display}: not present in command catalog"));
+            continue;
+        };
+        let advertised: BTreeSet<&str> = entry
+            .json_discriminators
+            .iter()
+            .filter(|discriminator| discriminator.field == "output_kind")
+            .map(|discriminator| discriminator.value.as_str())
+            .collect();
+        if !advertised.contains(output_kind.as_str()) {
+            failures.push(format!(
+                "{display}: emission declares output_kind=`{output_kind}` but catalog advertises {advertised:?}"
+            ));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "Operator emission declarations drifted from the catalog:\n  - {}",
+        failures.join("\n  - ")
+    );
 }
 
 #[test]

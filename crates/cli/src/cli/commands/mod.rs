@@ -131,7 +131,7 @@ pub use command_catalog::{
     command_help_visibility, command_path, command_persists_op_id, command_runtime_contract,
     command_runtime_contract_for_command, command_supports_json_for_command,
     command_supports_op_id, command_supports_op_id_for_command, command_surface,
-    command_uses_bootstrap_op_id_store, observe_only_root_commands,
+    command_uses_bootstrap_op_id_store, observe_only_root_commands, operator_envelope_verbs,
     root_commands_for_advanced_help, root_commands_for_help_visibility,
 };
 pub use completion::cmd_completion;
@@ -178,6 +178,7 @@ pub use marker::cmd_marker;
 pub use merge::cmd_merge;
 pub(crate) use merge::{bench_detect_renames, bench_find_merge_base, bench_three_way_merge};
 pub use monitor::cmd_monitor;
+pub use operator_core::operator_emission_output_kinds;
 pub use operator_loop::{cmd_abort, cmd_continue, cmd_sync_smart};
 #[cfg(feature = "git-overlay")]
 pub use oss::cmd_git_overlay_guide;

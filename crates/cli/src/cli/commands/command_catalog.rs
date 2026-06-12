@@ -283,6 +283,7 @@ struct CommandContract {
     external_command: bool,
     requires_git_executable: bool,
     destructive_data: bool,
+    operator_envelope: bool,
     json_kind: &'static str,
     json_discriminators: &'static [CommandJsonDiscriminatorSpec],
     schema_verbs: &'static [&'static str],
@@ -696,6 +697,7 @@ const READ_JSON: CommandContract = CommandContract {
     external_command: false,
     requires_git_executable: false,
     destructive_data: false,
+    operator_envelope: false,
     json_kind: "json",
     json_discriminators: &[],
     schema_verbs: &[],
@@ -769,6 +771,13 @@ const CAPTURE: CommandContract = CommandContract { ..MUTATING };
 const fn compact_json(contract: CommandContract) -> CommandContract {
     CommandContract {
         supports_json_compact: true,
+        ..contract
+    }
+}
+
+const fn operator_envelope(contract: CommandContract) -> CommandContract {
+    CommandContract {
+        operator_envelope: true,
         ..contract
     }
 }
@@ -1037,7 +1046,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["abort"],
         category(
             json_discriminators(
-                documented_schemas(compact_json(MUTATING), &["abort"]),
+                documented_schemas(operator_envelope(compact_json(MUTATING)), &["abort"]),
                 &[json_discriminator(Some("abort"), "output_kind", "abort")],
             ),
             "recovery",
@@ -1584,7 +1593,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["continue"],
         category(
             json_discriminators(
-                documented_schemas(compact_json(MUTATING), &["continue"]),
+                documented_schemas(operator_envelope(compact_json(MUTATING)), &["continue"]),
                 &[json_discriminator(
                     Some("continue"),
                     "output_kind",
@@ -2682,7 +2691,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["sync"],
         category(
             json_discriminators(
-                documented_schemas(compact_json(MUTATING), &["sync"]),
+                documented_schemas(operator_envelope(compact_json(MUTATING)), &["sync"]),
                 &[json_discriminator(Some("sync"), "output_kind", "sync")],
             ),
             "threads",
@@ -3739,6 +3748,15 @@ pub fn command_json_discriminators() -> Vec<CommandJsonDiscriminator> {
                 .iter()
                 .map(move |discriminator| json_discriminator_metadata(entry.path, discriminator))
         })
+        .collect()
+}
+
+pub fn operator_envelope_verbs() -> Vec<String> {
+    active_command_contract_entries()
+        .iter()
+        .copied()
+        .filter(|entry| entry.contract.operator_envelope)
+        .map(|entry| entry.path.join(" "))
         .collect()
 }
 

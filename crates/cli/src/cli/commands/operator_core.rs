@@ -48,6 +48,45 @@ pub(crate) enum OperatorAction {
     ThreadResolve,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OperatorEmission {
+    pub(crate) command: &'static [&'static str],
+    pub(crate) output_kind: OperatorAction,
+}
+
+pub(crate) const ABORT_OPERATOR_EMISSION: OperatorEmission = OperatorEmission {
+    command: &["abort"],
+    output_kind: OperatorAction::Abort,
+};
+
+pub(crate) const CONTINUE_OPERATOR_EMISSION: OperatorEmission = OperatorEmission {
+    command: &["continue"],
+    output_kind: OperatorAction::Continue,
+};
+
+pub(crate) const SYNC_OPERATOR_EMISSION: OperatorEmission = OperatorEmission {
+    command: &["sync"],
+    output_kind: OperatorAction::Sync,
+};
+
+pub(crate) const OPERATOR_EMISSIONS: &[OperatorEmission] = &[
+    ABORT_OPERATOR_EMISSION,
+    CONTINUE_OPERATOR_EMISSION,
+    SYNC_OPERATOR_EMISSION,
+];
+
+pub fn operator_emission_output_kinds() -> Vec<(String, String)> {
+    OPERATOR_EMISSIONS
+        .iter()
+        .map(|emission| {
+            (
+                emission.command.join(" "),
+                emission.output_kind.wire_value().to_string(),
+            )
+        })
+        .collect()
+}
+
 impl OperatorAction {
     const fn wire_value(self) -> &'static str {
         match self {
@@ -66,15 +105,6 @@ impl OperatorAction {
             Self::ThreadPromote => "thread_promote",
             Self::ThreadRefresh => "thread_refresh",
             Self::ThreadResolve => "thread_resolve",
-        }
-    }
-
-    pub(crate) fn for_emitting_command(command: &[&str]) -> Option<Self> {
-        match command {
-            ["abort"] => Some(Self::Abort),
-            ["continue"] => Some(Self::Continue),
-            ["sync"] => Some(Self::Sync),
-            _ => None,
         }
     }
 }
