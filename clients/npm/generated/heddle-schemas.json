@@ -5859,7 +5859,10 @@
               "type": "boolean"
             },
             "recommended_action": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "recommended_action_template": {
               "anyOf": [
@@ -5970,7 +5973,6 @@
             "is_isolated",
             "thread_health",
             "blockers",
-            "recommended_action",
             "history_imported",
             "auto"
           ],
@@ -7701,7 +7703,10 @@
           "type": "string"
         },
         "recommended_action": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "recommended_action_template": {
           "anyOf": [
@@ -7734,7 +7739,6 @@
         "storage_model",
         "mirror_initialized",
         "git_overlay_health",
-        "recommended_action",
         "recovery_commands",
         "verification",
         "output_kind"
@@ -11648,7 +11652,10 @@
         },
         "profile": true,
         "recommended_action": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "recommended_action_template": {
           "anyOf": [
@@ -11693,7 +11700,6 @@
         "changes",
         "workspace",
         "health",
-        "recommended_action",
         "recovery_commands"
       ],
       "title": "DiagnoseSchema",
@@ -12182,9 +12188,6 @@
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
-        "code": {
-          "type": "string"
-        },
         "error": {
           "type": "string"
         },
@@ -12247,7 +12250,6 @@
         }
       },
       "required": [
-        "code",
         "error",
         "exit_code",
         "hint",
@@ -13890,7 +13892,6 @@
             "is_isolated",
             "thread_health",
             "blockers",
-            "recommended_action",
             "history_imported",
             "auto",
             "verification",
@@ -15642,6 +15643,35 @@
     },
     "push": {
       "$defs": {
+        "ActionTemplateSchema": {
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "agent_may_fill": {
+              "type": "boolean"
+            },
+            "argv_template": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "required_inputs": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "action",
+            "argv_template",
+            "required_inputs",
+            "agent_may_fill"
+          ],
+          "type": "object"
+        },
         "GitRemoteConfiguredSchema": {
           "properties": {
             "name": {
@@ -15671,6 +15701,26 @@
             "remote"
           ],
           "type": "object"
+        },
+        "NullableActionTemplateSchema": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActionTemplateSchema"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "NullableStringSchema": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -15738,36 +15788,10 @@
           ]
         },
         "next_action": {
-          "type": "string"
+          "$ref": "#/$defs/NullableStringSchema"
         },
         "next_action_template": {
-          "properties": {
-            "action": {
-              "type": "string"
-            },
-            "agent_may_fill": {
-              "type": "boolean"
-            },
-            "argv_template": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "required_inputs": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            }
-          },
-          "required": [
-            "action",
-            "argv_template",
-            "required_inputs",
-            "agent_may_fill"
-          ],
-          "type": "object"
+          "$ref": "#/$defs/NullableActionTemplateSchema"
         },
         "objects": {
           "format": "uint",
@@ -15826,36 +15850,10 @@
           "type": "boolean"
         },
         "recommended_action": {
-          "type": "string"
+          "$ref": "#/$defs/NullableStringSchema"
         },
         "recommended_action_template": {
-          "properties": {
-            "action": {
-              "type": "string"
-            },
-            "agent_may_fill": {
-              "type": "boolean"
-            },
-            "argv_template": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "required_inputs": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            }
-          },
-          "required": [
-            "action",
-            "argv_template",
-            "required_inputs",
-            "agent_may_fill"
-          ],
-          "type": "object"
+          "$ref": "#/$defs/NullableActionTemplateSchema"
         },
         "ref_scope": {
           "type": [
@@ -19202,7 +19200,10 @@
               "type": "boolean"
             },
             "recommended_action": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "recommended_action_template": {
               "anyOf": [
@@ -19313,7 +19314,6 @@
             "is_isolated",
             "thread_health",
             "blockers",
-            "recommended_action",
             "history_imported",
             "auto"
           ],
@@ -21257,7 +21257,10 @@
               "type": "boolean"
             },
             "recommended_action": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "recommended_action_template": {
               "anyOf": [
@@ -21368,7 +21371,6 @@
             "is_isolated",
             "thread_health",
             "blockers",
-            "recommended_action",
             "history_imported",
             "auto"
           ],
@@ -22602,7 +22604,10 @@
               "type": "boolean"
             },
             "recommended_action": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "recommended_action_template": {
               "anyOf": [
@@ -22713,7 +22718,6 @@
             "is_isolated",
             "thread_health",
             "blockers",
-            "recommended_action",
             "history_imported",
             "auto"
           ],
@@ -23139,7 +23143,10 @@
               "type": "boolean"
             },
             "recommended_action": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "recommended_action_template": {
               "anyOf": [
@@ -23250,7 +23257,6 @@
             "is_isolated",
             "thread_health",
             "blockers",
-            "recommended_action",
             "history_imported",
             "auto"
           ],
@@ -23444,7 +23450,10 @@
               "type": "string"
             },
             "recommended_action": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "recommended_action_template": {
               "anyOf": [
@@ -23459,8 +23468,7 @@
           },
           "required": [
             "name",
-            "git_commit",
-            "recommended_action"
+            "git_commit"
           ],
           "type": "object"
         },
@@ -24114,7 +24122,10 @@
               "type": "boolean"
             },
             "recommended_action": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "recommended_action_template": {
               "anyOf": [
@@ -24225,7 +24236,6 @@
             "is_isolated",
             "thread_health",
             "blockers",
-            "recommended_action",
             "history_imported",
             "auto"
           ],
@@ -24316,7 +24326,10 @@
           "type": "string"
         },
         "recommended_action": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "recommended_action_template": {
           "anyOf": [
@@ -24377,7 +24390,6 @@
         "threads",
         "available_git_refs",
         "verification",
-        "recommended_action",
         "recovery_commands",
         "recovery_action_templates",
         "output_kind"
@@ -24741,7 +24753,10 @@
               "type": "boolean"
             },
             "recommended_action": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "recommended_action_template": {
               "anyOf": [
@@ -24852,7 +24867,6 @@
             "is_isolated",
             "thread_health",
             "blockers",
-            "recommended_action",
             "history_imported",
             "auto"
           ],
@@ -25259,7 +25273,10 @@
               "type": "boolean"
             },
             "recommended_action": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "recommended_action_template": {
               "anyOf": [
@@ -25370,7 +25387,6 @@
             "is_isolated",
             "thread_health",
             "blockers",
-            "recommended_action",
             "history_imported",
             "auto"
           ],
@@ -25777,7 +25793,10 @@
               "type": "boolean"
             },
             "recommended_action": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "recommended_action_template": {
               "anyOf": [
@@ -25888,7 +25907,6 @@
             "is_isolated",
             "thread_health",
             "blockers",
-            "recommended_action",
             "history_imported",
             "auto"
           ],
@@ -27170,7 +27188,6 @@
         "is_isolated",
         "thread_health",
         "blockers",
-        "recommended_action",
         "history_imported",
         "auto",
         "verification",
@@ -27450,7 +27467,10 @@
               "type": "boolean"
             },
             "recommended_action": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "recommended_action_template": {
               "anyOf": [
@@ -27561,7 +27581,6 @@
             "is_isolated",
             "thread_health",
             "blockers",
-            "recommended_action",
             "history_imported",
             "auto"
           ],
@@ -29147,7 +29166,10 @@
               "type": "string"
             },
             "recommended_action": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "recommended_action_template": {
               "anyOf": [
@@ -29162,8 +29184,7 @@
           },
           "required": [
             "name",
-            "git_commit",
-            "recommended_action"
+            "git_commit"
           ],
           "type": "object"
         },
@@ -29817,7 +29838,10 @@
               "type": "boolean"
             },
             "recommended_action": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "recommended_action_template": {
               "anyOf": [
@@ -29928,7 +29952,6 @@
             "is_isolated",
             "thread_health",
             "blockers",
-            "recommended_action",
             "history_imported",
             "auto"
           ],
@@ -30048,7 +30071,10 @@
           "type": "string"
         },
         "recommended_action": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "recommended_action_template": {
           "anyOf": [
@@ -30099,7 +30125,6 @@
         "storage_model",
         "hosted_enabled",
         "verification",
-        "recommended_action",
         "groups",
         "available_git_refs",
         "thread_count",
