@@ -34,9 +34,8 @@ use super::{
     git_overlay_health::{
         GitOverlayHealth, RepositoryVerificationState,
         build_git_overlay_health_with_worktree_status, build_plain_git_verification_probe,
-        override_trust_recommended_action,
-        remote_tracking_with_verification_action, repository_setup_guidance,
-        serialize_empty_action_as_null,
+        override_trust_recommended_action, remote_tracking_with_verification_action,
+        repository_setup_guidance, serialize_empty_action_as_null,
     },
     next_action::{NextActionValidationContext, write_command_json},
     operator_loop::primary_next_action_with_verification,
@@ -83,25 +82,37 @@ pub(crate) struct StatusOutput {
     base_state: Option<String>,
     base_root: Option<String>,
     current_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     execution_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     heddle_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     actor: Option<ActorInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     thinking_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     usage_summary: Option<AgentUsageSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     last_progress_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     report_flush_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     attach_reason: Option<String>,
     thread_mode: Option<ThreadMode>,
     thread_state: Option<ThreadState>,
     freshness: Option<ThreadFreshness>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     target_thread: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     parent_thread: Option<String>,
     child_threads: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     task: Option<String>,
     promotion_suggested: bool,
     impact_categories: Vec<ThreadImpactCategory>,
@@ -2040,16 +2051,17 @@ fn render_status_changes(output: &StatusOutput) {
         for path in &output.changes.deleted {
             println!("  {}:  {}", style::error("deleted"), path);
         }
-    } else if output.trust.verified {
+    }
+    if !has_changes && output.trust.verified {
         println!("{}", style::dim("No unsaved changes, worktree clean"));
-    } else if output.trust.worktree_state == "not_checked" {
+    } else if !has_changes && output.trust.worktree_state == "not_checked" {
         let message = if output.trust.status == "git_branch_advanced" {
             "No unsaved worktree changes detected; import the external Git branch tip before comparing Heddle state"
         } else {
             "No unsaved worktree changes detected; finish setup before comparing Heddle state"
         };
         println!("{}", style::dim(message));
-    } else if output.trust.worktree_state == "clean" {
+    } else if !has_changes && output.trust.worktree_state == "clean" {
         println!(
             "{}",
             style::dim(&format!(
@@ -2057,7 +2069,7 @@ fn render_status_changes(output: &StatusOutput) {
                 output.trust.status
             ))
         );
-    } else {
+    } else if !has_changes {
         println!("{}", style::dim("No unsaved worktree changes detected"));
     }
 }
@@ -2446,15 +2458,52 @@ fn normalize_presence_ws_url(upstream: &str) -> Result<String> {
 mod tests {
     use std::fs;
 
+    use clap::Parser as _;
+    use repo::AgentUsageSummary;
     use repo::Repository;
+    use serde_json::Value;
     use tempfile::TempDir;
 
     use super::{
-        ChangesInfo, CoordinationStatus, GitOverlayHealth, MaterializedThreadInfo,
+        ActorInfo, ChangesInfo, CoordinationStatus, GitOverlayHealth, MaterializedThreadInfo,
         PlainGitStatusOutput, RepositoryVerificationState, assess_materialized_threads,
-        combined_verdict_axes, coordination_axis_clean, coordination_label,
+        build_status_output, combined_verdict_axes, coordination_axis_clean, coordination_label,
         render_status_materialized, resolve_coordination_with_trust,
     };
+
+    const AGENT_CONTEXT_STATUS_KEYS: &[&str] = &[
+        "path",
+        "execution_path",
+        "session_id",
+        "heddle_session_id",
+        "actor",
+        "harness",
+        "thinking_level",
+        "usage_summary",
+        "last_progress_at",
+        "report_flush_state",
+        "attach_reason",
+        "target_thread",
+        "parent_thread",
+        "task",
+    ];
+
+    fn status_cli(repo_dir: &std::path::Path) -> crate::cli::Cli {
+        crate::cli::Cli::parse_from([
+            "heddle",
+            "--repo",
+            repo_dir.to_str().expect("utf-8 temp path"),
+            "--output",
+            "json",
+            "status",
+        ])
+    }
+
+    fn status_json(repo_dir: &std::path::Path) -> Value {
+        let cli = status_cli(repo_dir);
+        let output = build_status_output(&cli, false).expect("build status output");
+        serde_json::to_value(&output).expect("serialize status")
+    }
 
     fn init_repo_with_materialized_thread(content: &[u8]) -> (TempDir, TempDir, Repository) {
         let repo_dir = TempDir::new().unwrap();
@@ -2473,6 +2522,68 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let repo = Repository::init_default(dir.path()).unwrap();
         assert!(assess_materialized_threads(&repo).is_empty());
+    }
+
+    #[test]
+    fn status_omits_agent_context_fields_when_unset() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("hello.txt"), b"hello\n").unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+
+        let json = status_json(repo_dir.path());
+        for key in AGENT_CONTEXT_STATUS_KEYS {
+            assert!(
+                json.get(*key).is_none(),
+                "status must omit unset agent-context key `{key}`: {json}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn status_serializes_agent_context_fields_when_set() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("hello.txt"), b"hello\n").unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+
+        let cli = status_cli(repo_dir.path());
+        super::super::actor_cmd::cmd_actor_spawn(
+            &cli,
+            None,
+            true,
+            Some("codex".to_string()),
+            Some("gpt-5".to_string()),
+        )
+        .await
+        .expect("spawn attached actor");
+
+        let mut output = build_status_output(&cli, false).expect("build status output");
+        output.path = Some(repo_dir.path().display().to_string());
+        output.execution_path = Some(repo_dir.path().display().to_string());
+        output.heddle_session_id = Some("heddle-session-1".to_string());
+        output.actor = Some(ActorInfo {
+            provider: Some("codex".to_string()),
+            model: Some("gpt-5".to_string()),
+        });
+        output.harness = Some("codex-cli".to_string());
+        output.thinking_level = Some("high".to_string());
+        output.usage_summary = Some(AgentUsageSummary::default());
+        output.last_progress_at = Some("2026-06-12T00:00:00Z".to_string());
+        output.report_flush_state = Some("flushed".to_string());
+        output.target_thread = Some("main".to_string());
+        output.parent_thread = Some("main".to_string());
+        output.task = Some("status surface".to_string());
+
+        let json = serde_json::to_value(&output).expect("serialize status");
+        for key in AGENT_CONTEXT_STATUS_KEYS {
+            assert!(
+                json.get(*key).is_some(),
+                "status must serialize set agent-context key `{key}`: {json}"
+            );
+        }
+        assert_eq!(json["actor"]["provider"], "codex");
+        assert_eq!(json["actor"]["model"], "gpt-5");
     }
 
     #[test]
