@@ -1114,10 +1114,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["agent", "ready"],
-        surface(json_discriminators(
-                    documented_schemas(CAPTURE, &["agent ready"]),
-                    &[json_discriminator(Some("agent ready"), "output_kind", "ready")],
-                ), "automation"),
+        surface(
+            json_discriminators(
+                documented_schemas(CAPTURE, &["agent ready"]),
+                &[json_discriminator(Some("agent ready"), "output_kind", "ready")],
+            ),
+            "automation",
+        ),
     ),
     entry(
         &["agent", "release"],
@@ -1144,10 +1147,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["auth", "status"], READ_JSON),
     #[cfg(feature = "client")]
     entry(&["auth", "create-service-token"], MUTATING_NO_OP_ID),
-    entry(&["blame"], json_discriminators(
-                      documented_schemas(READ_JSON, &["blame"]),
-                      &[json_discriminator(Some("blame"), "output_kind", "blame")],
-                  )),
+    entry(
+        &["blame"],
+        json_discriminators(
+            documented_schemas(READ_JSON, &["blame"]),
+            &[json_discriminator(Some("blame"), "output_kind", "blame")],
+        ),
+    ),
     entry(
         &["branch"],
         git_adapter_action(
@@ -1608,10 +1614,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["daemon", "stop"],
-        surface(json_discriminators(
-                    opaque_schemas(DAEMON_MUTATION, &["daemon stop"]),
-                    &[json_discriminator(Some("daemon stop"), "output_kind", "daemon_stop")],
-                ), "admin"),
+        surface(
+            json_discriminators(
+                opaque_schemas(DAEMON_MUTATION, &["daemon stop"]),
+                &[json_discriminator(
+                    Some("daemon stop"),
+                    "output_kind",
+                    "daemon_stop",
+                )],
+            ),
+            "admin",
+        ),
     ),
     entry(
         &["delegate"],
@@ -1685,10 +1698,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["doctor"],
-        front_door(json_discriminators(
-                       documented_schemas(READ_JSON, &["doctor"]),
-                       &[json_discriminator(Some("doctor"), "output_kind", "diagnose")],
-                   ), 120),
+        front_door(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["doctor"]),
+                &[json_discriminator(Some("doctor"), "output_kind", "diagnose")],
+            ),
+            120,
+        ),
     ),
     entry(
         &["doctor", "docs"],
@@ -1829,13 +1845,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["log"],
-        front_door(json_discriminators(
-                       documented_schemas(READ_JSON, &["log", "log --reflog"]),
-                       &[
-                           json_discriminator(Some("log"), "output_kind", "log"),
-                           json_discriminator(Some("log --reflog"), "output_kind", "log_reflog"),
-                       ],
-                   ), 130),
+        front_door(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["log", "log --reflog"]),
+                &[
+                    json_discriminator(Some("log"), "output_kind", "log"),
+                    json_discriminator(Some("log --reflog"), "output_kind", "log_reflog"),
+                ],
+            ),
+            130,
+        ),
     ),
     entry(&["maintenance"], surface(GROUP, "admin")),
     entry(
@@ -1848,10 +1867,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["maintenance", "gc"],
-        surface(json_discriminators(
-                    opaque_schemas(GC_MUTATION, &["maintenance gc"]),
-                    &[json_discriminator(Some("maintenance gc"), "output_kind", "gc")],
-                ), "admin"),
+        surface(
+            json_discriminators(
+                opaque_schemas(GC_MUTATION, &["maintenance gc"]),
+                &[json_discriminator(Some("maintenance gc"), "output_kind", "gc")],
+            ),
+            "admin",
+        ),
     ),
     entry(
         &["maintenance", "index"],
@@ -2028,16 +2050,22 @@ const CONTRACTS: &[CommandContractEntry] = &[
             ],
         ),
     ),
-    entry(&["query"], json_discriminators(
-                      documented_schemas(READ_JSON, &["query"]),
-                      &[json_discriminator(Some("query"), "output_kind", "query")],
-                  )),
+    entry(
+        &["query"],
+        json_discriminators(
+            documented_schemas(READ_JSON, &["query"]),
+            &[json_discriminator(Some("query"), "output_kind", "query")],
+        ),
+    ),
     entry(
         &["ready"],
-        front_door(json_discriminators(
-                       documented_schemas(compact_json(CAPTURE), &["ready"]),
-                       &[json_discriminator(Some("ready"), "output_kind", "ready")],
-                   ), 50),
+        front_door(
+            json_discriminators(
+                documented_schemas(compact_json(CAPTURE), &["ready"]),
+                &[json_discriminator(Some("ready"), "output_kind", "ready")],
+            ),
+            50,
+        ),
     ),
     entry(&["rebase"], opaque_schemas(WORKTREE_MUTATION, &["rebase"])),
     entry(&["redact"], GROUP),
@@ -2291,10 +2319,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(
         &["start"],
-        front_door(json_discriminators(
-                       documented_schemas(WORKTREE_MUTATION, &["start"]),
-                       &[json_discriminator(Some("start"), "output_kind", "thread_start")],
-                   ), 40),
+        front_door(
+            json_discriminators(
+                documented_schemas(WORKTREE_MUTATION, &["start"]),
+                &[json_discriminator(
+                    Some("start"),
+                    "output_kind",
+                    "thread_start",
+                )],
+            ),
+            40,
+        ),
     ),
     entry(
         &["stash"],
