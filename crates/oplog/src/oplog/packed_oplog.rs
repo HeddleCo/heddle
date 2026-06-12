@@ -236,7 +236,16 @@ impl PackedOpLog {
 
     pub(crate) fn load(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)?;
-        let data = load(&bytes)?;
+        let data = match load(&bytes) {
+            Ok(data) => data,
+            Err(err) => {
+                if let Some(data) = recover_truncated_latest(path, &bytes, &err)? {
+                    data
+                } else {
+                    return Err(err);
+                }
+            }
+        };
         Ok(Self {
             entries: data.entries,
             head_id: data.head_id,
@@ -377,7 +386,21 @@ impl PackedOpLogIndex {
 
     fn open_v4(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)?;
-        let header = parse_header(&bytes)?;
+        match Self::open_v4_bytes(path, &bytes) {
+            Ok(index) => Ok(index),
+            Err(err) => {
+                if recover_truncated_latest(path, &bytes, &err)?.is_some() {
+                    let bytes = std::fs::read(path)?;
+                    Self::open_v4_bytes(path, &bytes)
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+
+    fn open_v4_bytes(path: &Path, bytes: &[u8]) -> Result<Self> {
+        let header = parse_header(bytes)?;
         if header.version != u32::from(Latest::VERSION) {
             return Err(HeddleError::InvalidObject(format!(
                 "unsupported oplog version {}",
@@ -393,13 +416,13 @@ impl PackedOpLogIndex {
                 "unsupported OpRecord schema version {found}"
             )));
         }
-        let footer = PackedFooter::parse(&bytes, &header)?;
+        let footer = PackedFooter::parse(bytes, &header)?;
         let index = Self {
             path: path.to_path_buf(),
             header,
             footer,
         };
-        index.validate_index_records(&bytes)?;
+        index.validate_index_records(bytes)?;
         Ok(index)
     }
 
@@ -1025,6 +1048,155 @@ fn load(bytes: &[u8]) -> Result<OplogData> {
             "unsupported oplog version {version}"
         ))),
     }
+}
+
+struct TruncatedTailRecovery {
+    data: OplogData,
+    original_entry_count: Option<u64>,
+    damaged_byte_start: usize,
+    damaged_byte_end: usize,
+}
+
+fn recover_truncated_latest(
+    path: &Path,
+    bytes: &[u8],
+    source_error: &HeddleError,
+) -> Result<Option<OplogData>> {
+    let Some(recovery) = plan_truncated_latest_recovery(bytes, source_error)? else {
+        return Ok(None);
+    };
+
+    let mut recovered_bytes = Vec::new();
+    Latest::encode(&recovery.data, &mut recovered_bytes)?;
+    let corrupt_path = next_corrupt_path(path);
+    std::fs::rename(path, &corrupt_path)?;
+    write_file_atomic(path, &recovered_bytes)?;
+    if let Some(parent) = path.parent() {
+        sync_directory(parent)?;
+    }
+
+    emit_truncated_oplog_recovery_warning(path, &corrupt_path, &recovery);
+    Ok(Some(recovery.data))
+}
+
+fn plan_truncated_latest_recovery(
+    bytes: &[u8],
+    source_error: &HeddleError,
+) -> Result<Option<TruncatedTailRecovery>> {
+    if !is_truncation_shaped_error(source_error) {
+        return Ok(None);
+    }
+
+    let (header, mut cursor) = match parse_header_with_cursor(bytes) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            if !is_truncation_shaped_error(&err)
+                || bytes.len() > V4_HEADER_LEN as usize
+                || !(MAGIC.starts_with(bytes) || bytes.starts_with(MAGIC))
+            {
+                return Ok(None);
+            }
+            return Ok(Some(TruncatedTailRecovery {
+                data: OplogData {
+                    entries: Vec::new(),
+                    head_id: 0,
+                },
+                original_entry_count: None,
+                damaged_byte_start: 0,
+                damaged_byte_end: bytes.len(),
+            }));
+        }
+    };
+
+    if header.version != u32::from(Latest::VERSION)
+        || header.record_schema_version != Some(OpRecordSchemaVersion::Current)
+    {
+        return Ok(None);
+    }
+    let schema = header.record_schema_version.ok_or_else(|| {
+        HeddleError::InvalidObject("oplog v4 missing OpRecord schema version".to_string())
+    })?;
+
+    let mut entries = Vec::new();
+    let mut damaged_byte_start = cursor.offset;
+    for _ in 0..header.entry_count {
+        let entry_start = cursor.offset;
+        match parse_entry_with_schema(&mut cursor, schema) {
+            Ok(entry) => {
+                damaged_byte_start = cursor.offset;
+                entries.push(entry);
+            }
+            Err(err) if is_truncation_shaped_error(&err) => {
+                damaged_byte_start = entry_start;
+                break;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    if entries.len() as u64 == header.entry_count {
+        damaged_byte_start = cursor.offset;
+    }
+
+    let head_id = entries.last().map(|entry| entry.id).unwrap_or(0);
+    Ok(Some(TruncatedTailRecovery {
+        data: OplogData { entries, head_id },
+        original_entry_count: Some(header.entry_count),
+        damaged_byte_start,
+        damaged_byte_end: bytes.len(),
+    }))
+}
+
+fn is_truncation_shaped_error(err: &HeddleError) -> bool {
+    match err {
+        HeddleError::InvalidObject(message) => {
+            message.contains("oplog truncated")
+                || message.contains("oplog missing index footer")
+                || message.contains("invalid oplog index magic")
+                || message.contains("oplog index footer length mismatch")
+                || message.contains("oplog entry/index boundary disagreement")
+                || message.contains("oplog entry section points outside file")
+                || message.contains("oplog footer length disagrees with file length")
+                || message.contains("section points outside file")
+        }
+        _ => false,
+    }
+}
+
+fn next_corrupt_path(path: &Path) -> PathBuf {
+    let base = PathBuf::from(format!("{}.corrupt", path.display()));
+    if !base.exists() {
+        return base;
+    }
+    for index in 1.. {
+        let candidate = PathBuf::from(format!("{}.corrupt.{index}", path.display()));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded corrupt-path suffix search should always return")
+}
+
+fn emit_truncated_oplog_recovery_warning(
+    path: &Path,
+    corrupt_path: &Path,
+    recovery: &TruncatedTailRecovery,
+) {
+    let recovered_records = recovery.data.entries.len() as u64;
+    let lost_records = recovery
+        .original_entry_count
+        .map(|count| count.saturating_sub(recovered_records))
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    eprintln!(
+        "Warning: kind=state_corrupted error=\"Packed oplog was truncated; recovered complete records\" path={} quarantined={} recovered_records={} lost_records={} damaged_byte_range={}..{} hint=\"Heddle kept complete oplog records, moved the damaged tail to .corrupt, and rebuilt oplog.bin; full fsck-style recovery remains a manual follow-up.\"",
+        path.display(),
+        corrupt_path.display(),
+        recovered_records,
+        lost_records,
+        recovery.damaged_byte_start,
+        recovery.damaged_byte_end,
+    );
 }
 
 fn encode_data_v4(data: &OplogData, out: &mut Vec<u8>) -> Result<()> {
@@ -2117,16 +2289,7 @@ mod tests {
 
     fn corrupt_payload_first_byte(path: &Path, entry_index: usize) {
         let mut bytes = std::fs::read(path).unwrap();
-        let header = parse_header(&bytes).unwrap();
-        let footer = PackedFooter::parse(&bytes, &header).unwrap();
-        let mut cursor = Cursor::new(&bytes[footer.entry_offsets_offset as usize..]);
-        let mut offsets = Vec::with_capacity(footer.entry_offsets_count as usize);
-        for _ in 0..footer.entry_offsets_count {
-            offsets.push(EntryOffsetRecord {
-                entry_id: cursor.read_u64().unwrap(),
-                entry_offset: cursor.read_u64().unwrap(),
-            });
-        }
+        let (offsets, _footer) = read_current_entry_offsets(&bytes);
         let entry_offset = offsets[entry_index].entry_offset as usize;
         let payload_offset = {
             let mut cursor = Cursor::new(&bytes[entry_offset..]);
@@ -2144,6 +2307,20 @@ mod tests {
         };
         bytes[entry_offset + payload_offset] = 0xc1;
         std::fs::write(path, bytes).unwrap();
+    }
+
+    fn read_current_entry_offsets(bytes: &[u8]) -> (Vec<EntryOffsetRecord>, PackedFooter) {
+        let header = parse_header(bytes).unwrap();
+        let footer = PackedFooter::parse(bytes, &header).unwrap();
+        let mut cursor = Cursor::new(&bytes[footer.entry_offsets_offset as usize..]);
+        let mut offsets = Vec::with_capacity(footer.entry_offsets_count as usize);
+        for _ in 0..footer.entry_offsets_count {
+            offsets.push(EntryOffsetRecord {
+                entry_id: cursor.read_u64().unwrap(),
+                entry_offset: cursor.read_u64().unwrap(),
+            });
+        }
+        (offsets, footer)
     }
 
     #[test]
@@ -2968,23 +3145,72 @@ mod tests {
     }
 
     #[test]
-    fn torn_footer_is_rejected() {
+    fn truncated_latest_oplog_is_quarantined_and_salvaged_at_complete_records() {
         let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("oplog.bin");
-        let mut log = PackedOpLog::new(path.clone());
-        log.append(vec![make_entry(1, None)]);
-        log.head_id = 1;
+        let source_path = tmp.path().join("source-oplog.bin");
+        let mut log = PackedOpLog::new(source_path.clone());
+        log.append(vec![
+            make_entry(1, None),
+            make_entry(2, None),
+            make_entry(3, None),
+        ]);
+        log.head_id = 3;
         log.save().unwrap();
 
-        let mut bytes = std::fs::read(&path).unwrap();
-        bytes.truncate(bytes.len() - 1);
-        std::fs::write(&path, bytes).unwrap();
+        let original = std::fs::read(&source_path).unwrap();
+        let (offsets, footer) = read_current_entry_offsets(&original);
+        let cases = [
+            (
+                "entry-header",
+                (offsets[0].entry_offset + 4) as usize,
+                0usize,
+            ),
+            (
+                "mid-record",
+                (offsets[1].entry_offset
+                    + ((offsets[2].entry_offset - offsets[1].entry_offset) / 2))
+                    as usize,
+                1,
+            ),
+            (
+                "last-record",
+                (offsets[2].entry_offset + ((footer.entry_data_end - offsets[2].entry_offset) / 2))
+                    as usize,
+                2,
+            ),
+            ("footer", original.len() - 1, 3),
+        ];
 
-        let err = PackedOpLogIndex::open(&path).unwrap_err();
-        assert!(
-            matches!(&err, HeddleError::InvalidObject(message) if message.contains("index magic") || message.contains("footer")),
-            "torn file must reject loudly, got {err:?}"
-        );
+        for (name, truncate_at, expected_count) in cases {
+            let case_dir = TempDir::new().unwrap();
+            let path = case_dir.path().join("oplog.bin");
+            let mut truncated = original.clone();
+            truncated.truncate(truncate_at);
+            std::fs::write(&path, truncated).unwrap();
+
+            let index = PackedOpLogIndex::open(&path).unwrap_or_else(|err| {
+                panic!("{name}: truncated oplog should salvage, got {err:?}")
+            });
+            assert_eq!(index.head_id(), expected_count as u64, "{name}: head id");
+            assert!(
+                case_dir.path().join("oplog.bin.corrupt").exists(),
+                "{name}: damaged oplog must be quarantined"
+            );
+
+            let loaded = PackedOpLog::load(&path).unwrap();
+            assert_eq!(
+                loaded.entries.len(),
+                expected_count,
+                "{name}: recovered entry count"
+            );
+            assert_eq!(loaded.head_id, expected_count as u64, "{name}: loaded head");
+
+            let appended = index.append_entries(&[make_entry((expected_count + 1) as u64, None)]);
+            assert!(
+                appended.is_ok(),
+                "{name}: repo should be appendable afterward"
+            );
+        }
     }
 
     #[test]

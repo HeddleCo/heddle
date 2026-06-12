@@ -60,6 +60,8 @@ mod hooks;
 mod hydrate;
 #[path = "cli_integration/misc.rs"]
 mod misc;
+#[path = "cli_integration/oplog_salvage.rs"]
+mod oplog_salvage;
 #[path = "cli_integration/oss_cli_polish.rs"]
 mod oss_cli_polish;
 #[path = "cli_integration/output_kind_invariant.rs"]
