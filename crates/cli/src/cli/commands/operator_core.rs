@@ -28,11 +28,12 @@ use super::{
 };
 use crate::config::UserConfig;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OperatorAction {
     Abort,
     Bisect,
     CherryPick,
+    #[default]
     Continue,
     Land,
     Merge,
@@ -66,12 +67,6 @@ impl OperatorAction {
             Self::ThreadRefresh => "thread_refresh",
             Self::ThreadResolve => "thread_resolve",
         }
-    }
-}
-
-impl Default for OperatorAction {
-    fn default() -> Self {
-        Self::Continue
     }
 }
 
