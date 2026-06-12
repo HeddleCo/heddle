@@ -60,7 +60,6 @@ schema_registry! {
     (&["status"], StatusSchema),
     (&["verify"], VerifySchema),
     (&["adopt"], AdoptSchema),
-    (&["attempt"], AttemptSchema),
     (&["capture"], CaptureSchema),
     (&["commit"], CommitSchema),
     (&["checkpoint"], CheckpointSchema),
@@ -68,15 +67,12 @@ schema_registry! {
     (&["undo --list"], UndoListSchema),
     (&["clean"], CleanSchema),
     (&["diff"], DiffSchema),
-    (&["goto"], GotoSchema),
-    (&["branch"], BranchCompatSchema),
     (&["switch"], SwitchCheckoutSchema),
     (&["merge --preview"], MergePreviewSchema),
     (&["ready"], ReadySchema),
     (&["land"], LandSchema),
     (&["sync"], SyncSchema),
     (&["continue", "abort"], OperatorCommandSchema),
-    (&["delegate"], DelegateSchema),
     (&["start"], ThreadStartSchema),
     (&["thread create", "thread switch", "thread rename"], ThreadStartSchema),
     (&["thread current"], ThreadCurrentSchema),
@@ -103,18 +99,13 @@ schema_registry! {
     (&["log"], LogSchema),
     (&["log --reflog"], LogReflogSchema),
     (&["show"], ShowSchema),
-    (&["marker list"], MarkerListSchema),
-    (&["marker create", "marker delete", "marker show"], MarkerOpSchema),
-    (&["marker delete --prefix"], MarkerBulkDeleteSchema),
     (&["thread list"], ThreadListSchema),
-    (&["workspace show"], WorkspaceShowSchema),
     (&["commands"], CommandCatalogOutput),
     (&["schemas"], SchemasListSchema),
     (&["review show"], ReviewShowSchema),
     (&["review sign"], ReviewSignSchema),
     (&["review next"], ReviewNextSchema),
     (&["review health"], ReviewHealthSchema),
-    (&["inspect"], InspectSchema),
     (&["retro"], RetroSchema),
     (&["discuss open", "discuss append", "discuss resolve", "discuss show"], DiscussionEnvelopeSchema),
     (&["discuss list"], DiscussionListSchema),
@@ -152,7 +143,6 @@ schema_registry! {
     (&["git-overlay"], GitOverlayGuideSchema),
     (&["watch"], WatchLineSchema),
     (&["try"], TrySchema),
-    (&["blame"], BlameSchema),
     (&["fsck"], FsckSchema),
     (&["resolve"], ResolveSchema),
     (&["maintenance index"], IndexSchema),
@@ -1158,33 +1148,6 @@ pub struct DiffStatsSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct GotoSchema {
-    pub output_kind: String,
-    pub target: String,
-    pub intent: Option<String>,
-    pub message: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BranchCompatSchema {
-    pub output_kind: Option<String>,
-    pub repository_capability: Option<String>,
-    pub storage_model: Option<String>,
-    pub hosted_enabled: Option<bool>,
-    pub threads: Option<Vec<ThreadSummarySchema>>,
-    pub current: Option<String>,
-    pub recommended_action: Option<String>,
-    pub recovery_commands: Option<Vec<String>>,
-    pub name: Option<String>,
-    pub message: Option<String>,
-    pub thread: Option<ThreadSummarySchema>,
-    pub path: Option<String>,
-    pub execution_path: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: Option<RepositoryVerificationStateSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub struct SwitchCheckoutSchema {
     pub output_kind: Option<String>,
     pub name: Option<String>,
@@ -1225,39 +1188,6 @@ pub struct MergePreviewSchema {
     pub conflict_count: Option<usize>,
     pub thread_health: Option<String>,
     pub diff: Option<Value>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AttemptSchema {
-    pub status: String,
-    pub action: String,
-    pub message: String,
-    pub command: String,
-    pub evaluate: Option<String>,
-    pub attempts_total: usize,
-    pub attempts_succeeded: usize,
-    pub attempts_dropped: usize,
-    pub attempts: Vec<AttemptResultSchema>,
-    pub recommended: Option<String>,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AttemptResultSchema {
-    pub index: usize,
-    pub thread: String,
-    pub status: String,
-    pub primary_exit_code: Option<i32>,
-    pub primary_duration_secs: f64,
-    pub evaluate_exit_code: Option<i32>,
-    pub evaluate_duration_secs: Option<f64>,
-    pub captured_state: Option<String>,
-    pub diff_files: Option<usize>,
-    pub thread_dropped: bool,
-    pub note: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1311,21 +1241,6 @@ pub struct LandSchema {
     pub skipped_steps: Vec<String>,
     pub merge_state: Option<String>,
     pub chosen_path: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DelegateSchema {
-    pub parent_thread: String,
-    pub delegated: Vec<DelegatedThreadSchema>,
-    pub message: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DelegatedThreadSchema {
-    pub name: String,
-    pub task: String,
-    pub path: Option<String>,
-    pub execution_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2312,33 +2227,6 @@ pub struct ShowAgentSchema {
     pub policy_id: Option<String>,
 }
 
-// ---- marker ---------------------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct MarkerListSchema {
-    pub markers: Vec<MarkerEntrySchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct MarkerEntrySchema {
-    pub name: String,
-    pub change_id: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct MarkerOpSchema {
-    pub name: String,
-    pub change_id: Option<String>,
-    pub message: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct MarkerBulkDeleteSchema {
-    pub deleted: Vec<MarkerEntrySchema>,
-    pub count: usize,
-    pub message: String,
-}
-
 // ---- thread list ----------------------------------------------------------
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2366,36 +2254,6 @@ pub struct AvailableGitRefSchema {
     pub git_commit: String,
     pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
-}
-
-// ---- workspace show -------------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct WorkspaceShowSchema {
-    pub output_kind: Option<String>,
-    pub repository: String,
-    pub repository_capability: String,
-    pub repository_label: String,
-    pub repository_context: Option<RepositoryContextInfoSchema>,
-    pub storage_model: String,
-    pub hosted_enabled: bool,
-    pub operation: OpaqueObject,
-    pub remote_tracking: OpaqueObject,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub current_thread: Option<String>,
-    pub groups: Vec<WorkspaceGroupSchema>,
-    pub available_git_refs: Vec<AvailableGitRefSchema>,
-    pub thread_count: usize,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct WorkspaceGroupSchema {
-    pub id: String,
-    pub label: String,
-    pub threads: Vec<ThreadSummarySchema>,
 }
 
 // ---- review ---------------------------------------------------------------
@@ -3096,7 +2954,7 @@ mod tests {
     /// discriminator from the catalog after deriving the struct schema,
     /// so `heddle schemas <verb>` already surfaces `output_kind`. That
     /// injection masks the fact that the Rust mirror struct (e.g.
-    /// `CleanSchema`, `GotoSchema`) never declares the field. The mirror
+    /// `CleanSchema`, `DiffSchema`) never declares the field. The mirror
     /// is the source of truth a reader greps; it must be honest about the
     /// discriminator the runtime always emits. This check reads the
     /// *pre-injection* struct schema so a missing field fails CI rather
@@ -3524,34 +3382,18 @@ mod tests {
     }
 
     #[test]
-    fn inspect_schema_accepts_both_advertised_output_kinds() {
-        use std::collections::BTreeSet;
-
-        let schema = schema_for_verb("inspect").expect("inspect schema");
-        let mut values = Vec::new();
-        collect_discriminator_values(&schema, &schema, "output_kind", &mut values);
-        let values = values.into_iter().collect::<BTreeSet<_>>();
-        assert_eq!(
-            values,
-            BTreeSet::from(["inspect_state", "thread_show"]),
-            "inspect aliases state inspection and thread show, so both output kinds must be represented"
-        );
-    }
-
-    #[test]
     fn oss_recovery_surfaces_do_not_use_opaque_generic_schema() {
         for verb in [
-            "blame",
             "fsck",
             "resolve",
             "retro",
-            "inspect",
             "discuss open",
             "discuss append",
             "discuss resolve",
             "discuss list",
             "discuss show",
             "query",
+            "query --attribution",
         ] {
             assert!(
                 !opaque_schema_verbs().contains(&verb),

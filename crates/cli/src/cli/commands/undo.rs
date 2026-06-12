@@ -813,7 +813,7 @@ fn ensure_redaction_undo_safe(
     Ok(())
 }
 
-/// Pre-flight for `heddle redo`: refuse when the batch chain contains a
+/// Pre-flight for `heddle undo --redo`: refuse when the batch chain contains a
 /// `Redact` or `Purge` op. Neither has a faithful re-apply path today —
 /// `OpRecord::Redact` doesn't carry the full `Redaction` (reason,
 /// redactor, signature, etc.), so a re-application would invent fields,

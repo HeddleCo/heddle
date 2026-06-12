@@ -2427,7 +2427,7 @@ pub(crate) fn cmd_thread_create(
     };
     thread_manager.save(&thread_state)?;
 
-    // Snapshot the just-saved record into the OpRecord so `heddle redo`
+    // Snapshot the just-saved record into the OpRecord so `heddle undo --redo`
     // can recreate it after `heddle undo` destroys it. Without this,
     // redo restores only the ref and record-backed commands (`thread
     // cd`, delegate, integration policy) silently degrade. heddle#23 r2
