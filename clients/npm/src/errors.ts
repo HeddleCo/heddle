@@ -50,7 +50,7 @@ export class HeddleStreamingVerbError extends Error {
 export class HeddleError extends Error {
   /** Process exit code (sysexits). */
   readonly exitCode: number;
-  /** Stable error `kind`/`code` from the envelope, if present. */
+  /** Stable error `kind` from the envelope, if present. */
   readonly code: string | undefined;
   /** Safe to retry with the same args? True only for exit 75 (TempFail). */
   readonly retryable: boolean;
@@ -82,7 +82,7 @@ export class HeddleError extends Error {
     this.stdout = stdout;
     this.stderr = stderr;
     this.envelope = envelope;
-    this.code = envelope?.code ?? envelope?.kind;
+    this.code = envelope?.kind;
     this.retryable = exitCode === RETRYABLE_EXIT_CODE;
   }
 }
