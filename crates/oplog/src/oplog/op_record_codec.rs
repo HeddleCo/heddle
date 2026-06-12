@@ -1337,6 +1337,18 @@ mod tests {
                 new_state: cid(7),
                 manager_snapshots: ThreadUpdateSnapshots::from_parts(None, Some(vec![7])),
             },
+            OpRecord::ThreadUpdate {
+                name: "main".into(),
+                old_state: cid(6),
+                new_state: cid(7),
+                manager_snapshots: ThreadUpdateSnapshots::from_record_sets(
+                    Some(vec![6]),
+                    Some(vec![7]),
+                    vec![vec![60], vec![61]],
+                    vec![vec![70], vec![71]],
+                    true,
+                ),
+            },
         ];
         for expected in records {
             let bytes = encode_latest_record(&expected).unwrap();

@@ -14,7 +14,7 @@ use objects::{
     object::{ChangeId, ThreadName},
     store::AgentRegistry,
 };
-use oplog::OpLogBackend;
+use oplog::{OpLogBackend, ThreadUpdateSnapshots};
 use refs::Head;
 use repo::{
     Repository, Thread, ThreadFreshness, ThreadManager, ThreadMode, ThreadState,
@@ -50,41 +50,107 @@ struct ThreadOutput {
     changed_path_count: usize,
 }
 
+pub(crate) struct ThreadRefState {
+    pub state: ChangeId,
+    pub ref_absent: bool,
+}
+
+pub(crate) struct ThreadUpdateBefore {
+    pub state: ChangeId,
+    pub ref_absent: bool,
+    pub manager_snapshot: Option<Vec<u8>>,
+    pub manager_records: Vec<Thread>,
+}
+
 pub(crate) fn thread_manager(repo: &Repository) -> ThreadManager {
     ThreadManager::new(repo.heddle_dir())
 }
 
-pub(crate) fn current_thread_ref_state(repo: &Repository, thread: &Thread) -> Result<ChangeId> {
+pub(crate) fn current_thread_ref_state_with_presence(
+    repo: &Repository,
+    thread: &Thread,
+) -> Result<ThreadRefState> {
     if let Some(state) = repo.refs().get_thread(&ThreadName::new(&thread.thread))? {
-        return Ok(state);
+        return Ok(ThreadRefState {
+            state,
+            ref_absent: false,
+        });
     }
-    if let Some(current_state) = thread.current_state.as_deref() {
-        return repo
-            .resolve_state(current_state)?
-            .ok_or_else(|| anyhow!("current state not found for thread '{}'", thread.thread));
-    }
-    repo.resolve_state(&thread.base_state)?
-        .ok_or_else(|| anyhow!("base state not found for thread '{}'", thread.thread))
+    let state = if let Some(current_state) = thread.current_state.as_deref() {
+        repo.resolve_state(current_state)?
+            .ok_or_else(|| anyhow!("current state not found for thread '{}'", thread.thread))?
+    } else {
+        repo.resolve_state(&thread.base_state)?
+            .ok_or_else(|| anyhow!("base state not found for thread '{}'", thread.thread))?
+    };
+    Ok(ThreadRefState {
+        state,
+        ref_absent: true,
+    })
+}
+
+pub(crate) fn current_thread_ref_state(repo: &Repository, thread: &Thread) -> Result<ChangeId> {
+    Ok(current_thread_ref_state_with_presence(repo, thread)?.state)
+}
+
+pub(crate) fn capture_thread_update_before(
+    repo: &Repository,
+    manager: &ThreadManager,
+    thread: &Thread,
+) -> Result<ThreadUpdateBefore> {
+    let ref_state = current_thread_ref_state_with_presence(repo, thread)?;
+    Ok(ThreadUpdateBefore {
+        state: ref_state.state,
+        ref_absent: ref_state.ref_absent,
+        manager_snapshot: manager.snapshot_thread_record(&thread.thread)?,
+        manager_records: manager.snapshot_records(&thread.thread)?,
+    })
 }
 
 pub(crate) fn save_thread_update_with_oplog(
     repo: &Repository,
     manager: &ThreadManager,
     thread: &Thread,
-    old_state: ChangeId,
+    before: ThreadUpdateBefore,
     new_state: ChangeId,
-    old_manager_snapshot: Option<Vec<u8>>,
 ) -> Result<()> {
     let new_manager_snapshot = Some(manager.encode_thread_record_snapshot(thread)?);
+    let mut new_manager_records = before.manager_records.clone();
+    if let Some(existing) = new_manager_records
+        .iter_mut()
+        .find(|record| record.id == thread.id)
+    {
+        *existing = thread.clone();
+    } else {
+        new_manager_records.push(thread.clone());
+    }
+    let old_manager_records = encode_thread_records(manager, &before.manager_records)?;
+    let new_manager_records = encode_thread_records(manager, &new_manager_records)?;
     repo.oplog().record_thread_update(
         &ThreadName::new(&thread.thread),
-        &old_state,
+        &before.state,
         &new_state,
-        old_manager_snapshot,
-        new_manager_snapshot,
+        ThreadUpdateSnapshots::from_record_sets(
+            before.manager_snapshot,
+            new_manager_snapshot,
+            old_manager_records,
+            new_manager_records,
+            before.ref_absent,
+        ),
         Some(&repo.op_scope()),
     )?;
     Ok(manager.save(thread)?)
+}
+
+fn encode_thread_records(manager: &ThreadManager, records: &[Thread]) -> Result<Vec<Vec<u8>>> {
+    records
+        .iter()
+        .map(|record| {
+            manager
+                .encode_thread_record_snapshot(record)
+                .map_err(Into::into)
+        })
+        .collect()
 }
 
 /// Resolve an optional positional thread identifier to a concrete
@@ -477,8 +543,7 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
             thread_repo.root(),
         )));
     }
-    let old_state = current_thread_ref_state(repo, &thread)?;
-    let old_manager_snapshot = manager.snapshot_thread_record(&thread.thread)?;
+    let before_update = capture_thread_update_before(repo, &manager, &thread)?;
     let rebase_state_path = thread_repo.heddle_dir().join("REBASE_STATE");
     if rebase_state_path.exists() {
         super::rebase::cmd_rebase_silent(thread_repo, None, false, true)?;
@@ -577,9 +642,8 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
         repo,
         &manager,
         &thread,
-        old_state,
+        before_update,
         current_state,
-        old_manager_snapshot,
     )?;
     Ok(thread)
 }

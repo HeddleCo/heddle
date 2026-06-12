@@ -234,8 +234,7 @@ pub trait OpLogBackend: Send + Sync {
         name: &ThreadName,
         old_state: &ChangeId,
         new_state: &ChangeId,
-        old_manager_snapshot: Option<Vec<u8>>,
-        new_manager_snapshot: Option<Vec<u8>>,
+        manager_snapshots: Option<ThreadUpdateSnapshots>,
         scope: Option<&str>,
     ) -> Result<u64> {
         let ids = self.record_batch_scoped(
@@ -243,10 +242,7 @@ pub trait OpLogBackend: Send + Sync {
                 name: name.to_string(),
                 old_state: *old_state,
                 new_state: *new_state,
-                manager_snapshots: ThreadUpdateSnapshots::from_parts(
-                    old_manager_snapshot,
-                    new_manager_snapshot,
-                ),
+                manager_snapshots,
             }],
             scope,
         )?;

@@ -334,6 +334,19 @@ pub struct ThreadUpdateSnapshots {
     /// rmp-serde-encoded `Thread` record body after the update, or `None`
     /// when the forward path only moved the ref.
     pub new: Option<Vec<u8>>,
+    /// Complete same-thread record set before the update. Empty for records
+    /// written before duplicate-record convergence needed full-set restore.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub old_records: Vec<Vec<u8>>,
+    /// Complete same-thread record set after the update. Empty for records
+    /// written before duplicate-record convergence needed full-set restore.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub new_records: Vec<Vec<u8>>,
+    /// Whether the thread ref was absent before the update. This lets undo of
+    /// a metadata-only repair remove a recreated ref instead of setting it to a
+    /// fallback state that was only used to identify the record.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub old_ref_absent: bool,
 }
 
 impl ThreadUpdateSnapshots {
@@ -341,9 +354,44 @@ impl ThreadUpdateSnapshots {
         if old.is_none() && new.is_none() {
             None
         } else {
-            Some(Self { old, new })
+            Some(Self {
+                old,
+                new,
+                old_records: Vec::new(),
+                new_records: Vec::new(),
+                old_ref_absent: false,
+            })
         }
     }
+
+    pub fn from_record_sets(
+        old: Option<Vec<u8>>,
+        new: Option<Vec<u8>>,
+        old_records: Vec<Vec<u8>>,
+        new_records: Vec<Vec<u8>>,
+        old_ref_absent: bool,
+    ) -> Option<Self> {
+        if old.is_none()
+            && new.is_none()
+            && old_records.is_empty()
+            && new_records.is_empty()
+            && !old_ref_absent
+        {
+            None
+        } else {
+            Some(Self {
+                old,
+                new,
+                old_records,
+                new_records,
+                old_ref_absent,
+            })
+        }
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// The logical isolation keys touched by one committed record.

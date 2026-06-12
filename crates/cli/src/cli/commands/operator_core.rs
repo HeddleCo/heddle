@@ -507,8 +507,7 @@ fn complete_current_thread_manual_resolution(repo: &Repository) -> Result<Option
     let Some(target_state_obj) = repo.store().get_state(&target_state)? else {
         return Ok(None);
     };
-    let old_state = super::thread_cmd::current_thread_ref_state(repo, &thread)?;
-    let old_manager_snapshot = manager.snapshot_thread_record(&thread.thread)?;
+    let before_update = super::thread_cmd::capture_thread_update_before(repo, &manager, &thread)?;
 
     thread.base_state = target_state.short();
     thread.base_root = target_state_obj.tree.short();
@@ -527,9 +526,8 @@ fn complete_current_thread_manual_resolution(repo: &Repository) -> Result<Option
         repo,
         &manager,
         &thread,
-        old_state,
+        before_update,
         current_state,
-        old_manager_snapshot,
     )?;
 
     let action = super::thread_landing::land_command_for_thread(repo, &thread_id);

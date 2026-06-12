@@ -23,8 +23,8 @@ use super::{
     ready_cmd::worktree_dirty,
     snapshot::{SnapshotAgentOverrides, create_snapshot},
     thread_cmd::{
-        current_thread_ref_state, load_thread, refresh_thread, refresh_thread_freshness,
-        save_thread_update_with_oplog, thread_not_found_advice,
+        capture_thread_update_before, current_thread_ref_state, load_thread, refresh_thread,
+        refresh_thread_freshness, save_thread_update_with_oplog, thread_not_found_advice,
     },
     thread_landing::{land_command_for_thread, land_command_with_push_target},
 };
@@ -287,9 +287,8 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                 let mut refreshed_thread = manager.load(&thread_id)?.ok_or_else(|| {
                     anyhow!(thread_not_found_advice(&thread_id, "resolve thread"))
                 })?;
-                let old_state = current_thread_ref_state(&repo, &refreshed_thread)?;
-                let old_manager_snapshot =
-                    manager.snapshot_thread_record(&refreshed_thread.thread)?;
+                let before_update =
+                    capture_thread_update_before(&repo, &manager, &refreshed_thread)?;
                 let resolved_state = repo
                     .refs()
                     .get_thread(&ThreadName::new(&refreshed_thread.thread))?
@@ -306,9 +305,8 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                     &repo,
                     &manager,
                     &refreshed_thread,
-                    old_state,
+                    before_update,
                     new_state,
-                    old_manager_snapshot,
                 )?;
                 let operator = if rebase_state_path.exists() {
                     thread_resolve_rebase_followup_operator(
@@ -415,8 +413,8 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
     }
     if blockers.is_empty() {
         let manager = super::thread_cmd::thread_manager(&repo);
-        let thread_state = current_thread_ref_state(&repo, &thread)?;
-        let old_manager_snapshot = manager.snapshot_thread_record(&thread.thread)?;
+        let before_update = capture_thread_update_before(&repo, &manager, &thread)?;
+        let thread_state = before_update.state;
         thread.integration_policy_result.status = Some("manual_resolved".to_string());
         thread.integration_policy_result.reason =
             Some("manual integration resolution captured".to_string());
@@ -428,9 +426,8 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
             &repo,
             &manager,
             &thread,
+            before_update,
             thread_state,
-            thread_state,
-            old_manager_snapshot,
         )?;
     }
     let recommended_action = if blockers.is_empty() {
