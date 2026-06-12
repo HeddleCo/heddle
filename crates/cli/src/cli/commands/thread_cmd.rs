@@ -126,6 +126,7 @@ pub(crate) fn save_thread_update_with_oplog(
     }
     let old_manager_records = encode_thread_records(manager, &before.manager_records)?;
     let new_manager_records = encode_thread_records(manager, &new_manager_records)?;
+    manager.save(thread)?;
     repo.oplog().record_thread_update(
         &ThreadName::new(&thread.thread),
         &before.state,
@@ -139,7 +140,7 @@ pub(crate) fn save_thread_update_with_oplog(
         ),
         Some(&repo.op_scope()),
     )?;
-    Ok(manager.save(thread)?)
+    Ok(())
 }
 
 fn encode_thread_records(manager: &ThreadManager, records: &[Thread]) -> Result<Vec<Vec<u8>>> {
@@ -638,13 +639,7 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
     thread.integration_policy_result.manual_resolution_state = Some(current_state.short());
     thread.updated_at = Utc::now();
     thread.freshness = ThreadFreshness::Current;
-    save_thread_update_with_oplog(
-        repo,
-        &manager,
-        &thread,
-        before_update,
-        current_state,
-    )?;
+    save_thread_update_with_oplog(repo, &manager, &thread, before_update, current_state)?;
     Ok(thread)
 }
 

@@ -279,6 +279,7 @@ impl ThreadManager {
     pub fn save(&self, thread: &Thread) -> Result<()> {
         let _lock = self.write_lock()?;
         self.save_record_file(&thread.to_record())?;
+        objects::fault_inject::maybe_fail_at("thread_manager_save_before_workspace")?;
         self.save_workspace_file(&thread.id, &thread.workspace_state())
     }
 
