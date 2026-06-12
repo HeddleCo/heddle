@@ -126,7 +126,8 @@ pub use clone::{
 };
 pub use collapse::cmd_collapse;
 pub use command_catalog::{
-    CommandCatalogOutput, build_command_catalog, cmd_commands, command_canonical_command,
+    CommandCatalogOutput, advanced_help_groups, build_command_catalog, cmd_commands,
+    command_canonical_command,
     command_contract_root_commands, command_help_tier, command_help_visibility, command_path,
     command_persists_op_id, command_runtime_contract, command_runtime_contract_for_command,
     command_supports_json_for_command, command_supports_op_id, command_supports_op_id_for_command,
