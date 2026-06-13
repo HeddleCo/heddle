@@ -133,11 +133,11 @@ pub fn compress_zstd(_data: &[u8], _level: i32) -> Result<Vec<u8>, CompressionEr
 #[cfg(feature = "zstd")]
 /// Decompress zstd data while enforcing the recorded output size.
 pub fn decompress_zstd(data: &[u8], expected_size: u64) -> Result<Vec<u8>, CompressionError> {
-    validate_size(expected_size)?;
+    let expected_capacity = validated_decompressed_capacity(expected_size)?;
 
     let mut decoder = zstd::stream::read::Decoder::new(data)
         .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))?;
-    let mut decompressed = Vec::with_capacity(expected_size as usize);
+    let mut decompressed = Vec::with_capacity(expected_capacity);
     let mut buffer = [0u8; 8192];
 
     loop {
@@ -408,14 +408,38 @@ fn read_u64_size(data: &[u8]) -> Result<u64, CompressionError> {
 }
 
 fn validate_size(size: u64) -> Result<(), CompressionError> {
-    if size > MAX_DECOMPRESSED_SIZE {
-        return Err(CompressionError::SizeLimitExceeded {
-            size,
-            max: MAX_DECOMPRESSED_SIZE,
-        });
+    let max = max_decompressed_size();
+    if size > max {
+        return Err(CompressionError::SizeLimitExceeded { size, max });
     }
 
     Ok(())
+}
+
+fn max_decompressed_size() -> u64 {
+    effective_decompressed_size_limit(MAX_DECOMPRESSED_SIZE, platform_max_decompressed_size())
+}
+
+fn effective_decompressed_size_limit(configured_limit: u64, platform_limit: u64) -> u64 {
+    configured_limit.min(platform_limit)
+}
+
+fn platform_max_decompressed_size() -> u64 {
+    u64::try_from(usize::MAX).unwrap_or(u64::MAX)
+}
+
+#[cfg(feature = "zstd")]
+fn validated_decompressed_capacity(expected_size: u64) -> Result<usize, CompressionError> {
+    validate_size(expected_size)?;
+    expected_size_to_capacity(expected_size)
+}
+
+#[cfg(any(feature = "zstd", all(test, target_pointer_width = "32")))]
+fn expected_size_to_capacity(expected_size: u64) -> Result<usize, CompressionError> {
+    usize::try_from(expected_size).map_err(|_| CompressionError::SizeLimitExceeded {
+        size: expected_size,
+        max: max_decompressed_size(),
+    })
 }
 
 fn validate_decompressed_len(expected: u64, actual: usize) -> Result<(), CompressionError> {

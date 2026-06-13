@@ -143,6 +143,45 @@ fn test_decompress_rejects_oversized_header() {
 }
 
 #[test]
+#[cfg(feature = "zstd")]
+fn test_decompress_zstd_rejects_expected_size_above_effective_limit() {
+    let compressed_payload = zstd::encode_all(&b"tiny"[..], 3).unwrap();
+    let size = max_decompressed_size() + 1;
+
+    let error = decompress_zstd(&compressed_payload, size).unwrap_err();
+
+    let CompressionError::SizeLimitExceeded { size: actual, max } = error else {
+        panic!("expected size-limit error");
+    };
+    assert_eq!(actual, size);
+    assert_eq!(max, max_decompressed_size());
+}
+
+#[test]
+fn test_effective_decompressed_size_limit_caps_at_platform_limit() {
+    let platform_limit = u64::from(u32::MAX);
+    let configured_limit = platform_limit + 1;
+
+    assert_eq!(
+        effective_decompressed_size_limit(configured_limit, platform_limit),
+        platform_limit
+    );
+}
+
+#[test]
+#[cfg(target_pointer_width = "32")]
+fn test_expected_size_to_capacity_rejects_unrepresentable_u64() {
+    let size = u64::try_from(usize::MAX).expect("32-bit usize must fit in u64 for this test") + 1;
+
+    let error = expected_size_to_capacity(size).unwrap_err();
+
+    assert!(matches!(
+        error,
+        CompressionError::SizeLimitExceeded { size: actual, .. } if actual == size
+    ));
+}
+
+#[test]
 fn test_decompress_none_header_rejects_size_mismatch() {
     let payload = b"tiny";
     let mut encoded = vec![CompressionType::None as u8];
