@@ -10,11 +10,13 @@
 //! Three layers:
 //!
 //! 1. [`detect_local_daemon`] — file-stat probe (pidfile + liveness via
-//!    `kill(pid, 0)`). Cheap, syscall-only, used as the cheap negative
-//!    case ("no daemon, fall through to in-process").
+//!    `kill(pid, 0)` + same-executable identity). Cheap, syscall-only,
+//!    used as the cheap negative case ("no daemon, fall through to
+//!    in-process").
 //! 2. [`detect_local_daemon_with_connect_probe`] — same as (1) but
-//!    actually opens a `UnixStream` to confirm the listener accepts.
-//!    Catches the "stale socket file with a live unrelated PID" race.
+//!    actually opens a `UnixStream` and checks kernel-reported peer
+//!    credentials to confirm the listener is owned by our uid. Catches
+//!    the "stale socket file with a live unrelated PID" race.
 //! 3. [`connect_local_daemon_channel`] — full path: build a tonic
 //!    [`tonic::transport::Channel`] over the UDS, run the gRPC
 //!    `Health.Check` handshake, and cache the working channel for the
@@ -25,9 +27,13 @@
 //! invocation that touches one repo pays the probe cost exactly once.
 
 use std::{
+    io,
     path::{Path, PathBuf},
     time::Duration,
 };
+
+#[cfg(unix)]
+use daemon::local_daemon::is_heddle_process;
 
 use crate::util::OnceMap;
 
@@ -102,7 +108,10 @@ pub async fn detect_local_daemon_with_connect_probe(
     )
     .await
     {
-        Ok(Ok(_stream)) => Some(target),
+        Ok(Ok(stream)) => match check_peer_uid_matches_self(&stream) {
+            Ok(()) => Some(target),
+            Err(_) => None,
+        },
         // Either the connect errored (socket present but listener
         // dead — rare but possible during a graceful shutdown) or
         // the connect timed out (daemon hung). Either way it's not
@@ -215,6 +224,7 @@ async fn build_channel(
         let socket_path = socket_path.clone();
         async move {
             let stream = tokio::net::UnixStream::connect(&socket_path).await?;
+            check_peer_uid_matches_self(&stream)?;
             // tonic 0.14 requires the connector's response type to
             // implement `hyper::rt::{Read, Write}`. `TokioIo` is the
             // standard adapter and it's what tonic's own UDS connector
@@ -293,7 +303,8 @@ pub struct LocalDaemonProbe {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocalDaemonStatus {
-    /// Socket and pidfile both exist and the pid is alive.
+    /// Socket and pidfile both exist, the pid is alive, and the pid resolves
+    /// to the same executable as this client.
     Running { pid: u32 },
     /// Pidfile exists but the pid is dead. The socket may be a leftover.
     Stale { pid: u32 },
@@ -301,13 +312,15 @@ pub enum LocalDaemonStatus {
     Absent,
 }
 
-/// Probe the per-repo daemon directory. Cheap (two file stats + one
-/// `kill(pid, 0)`).
+/// Probe the per-repo daemon directory. Cheap (two file stats, `kill(pid, 0)`,
+/// and same-executable identity for live pids).
 pub fn probe(heddle_dir: &Path) -> LocalDaemonProbe {
     let socket_path = heddle_dir.join("sockets").join("grpc.sock");
     let pid_path = heddle_dir.join("sockets").join("grpc.pid");
     let status = match read_pid(&pid_path) {
-        Some(pid) if pid_alive(pid) => LocalDaemonStatus::Running { pid },
+        Some(pid) if pid_alive(pid) && pid_identity_verified(pid) => {
+            LocalDaemonStatus::Running { pid }
+        }
         Some(pid) => LocalDaemonStatus::Stale { pid },
         None => LocalDaemonStatus::Absent,
     };
@@ -330,6 +343,37 @@ fn read_pid(path: &Path) -> Option<u32> {
         .parse::<u32>()
         .ok()
         .or_else(|| raw.trim().parse::<u32>().ok())
+}
+
+#[cfg(unix)]
+fn pid_identity_verified(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    is_heddle_process(pid)
+}
+
+#[cfg(not(unix))]
+fn pid_identity_verified(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn check_peer_uid_matches_self(stream: &tokio::net::UnixStream) -> io::Result<()> {
+    let creds = stream.peer_cred()?;
+    // SAFETY: geteuid() never fails.
+    enforce_peer_uid(creds.uid(), unsafe { libc::geteuid() })
+}
+
+#[cfg(unix)]
+fn enforce_peer_uid(peer_uid: u32, our_uid: u32) -> io::Result<()> {
+    if peer_uid != our_uid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("daemon peer uid {peer_uid} does not match client uid {our_uid}"),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -380,6 +424,29 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn stale_when_pidfile_holds_live_non_heddle_pid() {
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .env_clear()
+            .spawn()
+            .expect("spawn sleep");
+        let temp = TempDir::new().unwrap();
+        let sockets = temp.path().join("sockets");
+        std::fs::create_dir_all(&sockets).unwrap();
+        std::fs::write(sockets.join("grpc.pid"), child.id().to_string()).unwrap();
+
+        let probe = probe(temp.path());
+
+        let _ = child.kill();
+        let _ = child.wait();
+        match probe.status {
+            LocalDaemonStatus::Stale { pid } => assert_eq!(pid, child.id()),
+            other => panic!("expected Stale for live non-Heddle pid, got {other:?}"),
+        }
+    }
+
     #[test]
     fn detect_returns_target_when_running() {
         let temp = TempDir::new().unwrap();
@@ -401,6 +468,19 @@ mod tests {
         // A fresh temp dir with no `sockets/` subtree — probe returns
         // Absent, detect collapses that to None.
         assert!(detect_local_daemon(temp.path()).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enforce_peer_uid_accepts_matching_uid() {
+        assert!(enforce_peer_uid(1000, 1000).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enforce_peer_uid_rejects_mismatched_uid() {
+        let err = enforce_peer_uid(1001, 1000).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     #[cfg(unix)]
@@ -444,6 +524,13 @@ mod tests {
             result.is_some(),
             "connect probe should succeed when a listener is bound"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn check_peer_uid_matches_self_accepts_socketpair() {
+        let (peer, _local) = tokio::net::UnixStream::pair().expect("socketpair");
+        assert!(check_peer_uid_matches_self(&peer).is_ok());
     }
 
     #[cfg(unix)]

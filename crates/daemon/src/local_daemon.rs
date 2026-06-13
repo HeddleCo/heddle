@@ -107,7 +107,7 @@ pub const PIDFILE_MARKER: &str = "heddle-agent";
 /// ```
 ///
 /// The marker line lets `agent stop` reject a pidfile that wasn't written
-/// by us. Combined with the process-identity check in
+/// by us. Combined with the same-executable identity check in
 /// [`is_heddle_process`], this closes the "PID got reused after a dirty
 /// crash" hole that the reviewer flagged: even if `<pid>` now belongs to
 /// some unrelated process, we won't SIGTERM it.
@@ -151,7 +151,7 @@ impl PidGuard {
         }
         // If a stale pidfile exists for a dead PID, clean both files and
         // proceed. If the PID is alive AND the file contains our marker
-        // AND the running process actually looks like heddle, refuse to
+        // AND the running process is this exact executable, refuse to
         // start. A foreign-format pidfile is treated as stale (we wrote
         // it, or it's debris) — we don't want to refuse forever because
         // some other tool dropped a file with the same name.
@@ -213,13 +213,13 @@ pub fn pid_alive(_pid: i32) -> bool {
     true
 }
 
-/// Best-effort check that `pid` actually belongs to a heddle binary.
+/// Verify that `pid` belongs to the same executable as this process.
 ///
 /// The pidfile marker alone doesn't protect against the "daemon dies
 /// uncleanly, OS reuses the PID" case the reviewer flagged: the marker
 /// stays in the file but the PID now points at someone else. So before
 /// any signal is delivered we also verify that the process at `pid` is
-/// running an executable whose path contains "heddle".
+/// running this exact executable, not merely a path containing "heddle".
 ///
 /// On Linux we read the `/proc/{pid}/exe` symlink — the kernel resolves
 /// it to the absolute on-disk path of the running binary. On macOS we
@@ -227,32 +227,70 @@ pub fn pid_alive(_pid: i32) -> bool {
 /// `false` (operators on those platforms can use `--force-clear` to
 /// override; better to refuse than to SIGTERM the wrong process).
 pub fn is_heddle_process(pid: i32) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        let exe = std::path::PathBuf::from(format!("/proc/{pid}/exe"));
-        match std::fs::read_link(&exe) {
-            Ok(path) => path.to_string_lossy().contains("heddle"),
-            // ENOENT (process gone) or EACCES (different user) — treat
-            // as "not a heddle process we can verify" and refuse to act.
-            Err(_) => false,
-        }
+    process_uid_matches_self(pid) && process_exe_matches_current(pid)
+}
+
+#[cfg(target_os = "linux")]
+fn process_uid_matches_self(pid: i32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let path = PathBuf::from(format!("/proc/{pid}"));
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    // SAFETY: geteuid() never fails.
+    metadata.uid() == unsafe { libc::geteuid() }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_uid_matches_self(_pid: i32) -> bool {
+    true
+}
+
+fn process_exe_matches_current(pid: i32) -> bool {
+    let Some(process_exe) = process_exe_path(pid) else {
+        return false;
+    };
+    let Ok(current_exe) = std::env::current_exe() else {
+        return false;
+    };
+    executable_identity_matches(&process_exe, &current_exe)
+}
+
+fn executable_identity_matches(process_exe: &Path, current_exe: &Path) -> bool {
+    let Ok(process_exe) = process_exe.canonicalize() else {
+        return false;
+    };
+    let Ok(current_exe) = current_exe.canonicalize() else {
+        return false;
+    };
+    process_exe == current_exe
+}
+
+#[cfg(target_os = "linux")]
+fn process_exe_path(pid: i32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn process_exe_path(pid: i32) -> Option<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: buf is owned and large enough per the macOS contract.
+    let len = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut _, buf.len() as u32) };
+    if len <= 0 {
+        return None;
     }
-    #[cfg(target_os = "macos")]
-    {
-        let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
-        // SAFETY: buf is owned and large enough per the macOS contract.
-        let len = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut _, buf.len() as u32) };
-        if len <= 0 {
-            return false;
-        }
-        let path = String::from_utf8_lossy(&buf[..len as usize]);
-        path.contains("heddle")
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = pid;
-        false
-    }
+    Some(PathBuf::from(OsString::from_vec(
+        buf[..len as usize].to_vec(),
+    )))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_exe_path(_pid: i32) -> Option<PathBuf> {
+    None
 }
 
 /// Open a [`Repository`] at `repo_path`, then run the local gRPC daemon
@@ -586,25 +624,12 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let pid = temp.path().join("grpc.pid");
         let sock = temp.path().join("grpc.sock");
-        // Write our own PID with the heddle marker. The current process
-        // (cargo test) doesn't have "heddle" in its binary path, so the
-        // identity check would fail in production — but to exercise the
-        // refusal branch we need to simulate a fresh owner. We do that by
-        // pre-installing a guard (which writes the correct format) and
-        // then immediately attempting a second install on the same path.
+        // Pre-installing a guard writes the current process PID with the
+        // marker. A second install must refuse because the recorded PID is
+        // alive and resolves to this exact test executable.
         let first = PidGuard::install(pid.clone(), sock.clone()).unwrap();
-        if is_heddle_process(std::process::id() as i32) {
-            // Test process happens to look like a heddle binary — the
-            // double-install should refuse.
-            let result = PidGuard::install(pid.clone(), sock.clone());
-            assert!(result.is_err(), "expected refusal for live owner");
-        } else {
-            // Test process isn't seen as heddle (cargo test harness),
-            // which means the identity check intentionally treats the
-            // pidfile as stale. That's the correct behavior — verify
-            // the second install succeeds and replaces the first.
-            let _second = PidGuard::install(pid.clone(), sock.clone()).unwrap();
-        }
+        let result = PidGuard::install(pid.clone(), sock.clone());
+        assert!(result.is_err(), "expected refusal for live owner");
         drop(first);
     }
 
@@ -668,6 +693,35 @@ mod tests {
         // Legacy single-integer pidfile body. Parser refuses because it
         // can't verify the file is ours.
         assert!(PidFileContents::parse("12345").is_none());
+    }
+
+    #[test]
+    fn executable_identity_accepts_same_canonical_path() {
+        let current = std::env::current_exe().unwrap();
+        assert!(executable_identity_matches(&current, &current));
+    }
+
+    #[test]
+    fn executable_identity_rejects_spoofed_heddle_path() {
+        let temp = TempDir::new().unwrap();
+        let spoofed = temp.path().join("contains-heddle").join("heddle-spoof");
+        std::fs::create_dir_all(spoofed.parent().unwrap()).unwrap();
+        std::fs::write(&spoofed, "not the current executable").unwrap();
+
+        let current = std::env::current_exe().unwrap();
+
+        assert!(
+            !executable_identity_matches(&spoofed, &current),
+            "a pathname containing heddle must not satisfy executable identity"
+        );
+    }
+
+    #[test]
+    fn is_heddle_process_accepts_self_pid() {
+        assert!(
+            is_heddle_process(std::process::id() as i32),
+            "the current process should resolve to the current executable"
+        );
     }
 
     #[test]
