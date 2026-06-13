@@ -251,15 +251,15 @@ async fn run_stop(cli: &Cli) -> Result<()> {
             return Ok(());
         }
         // Identity check — protects against PID reuse after a dirty
-        // crash. If the running process at `pid` isn't a heddle binary,
+        // crash. If the running process at `pid` isn't this executable,
         // the pidfile is stale and we must not signal.
         if !is_heddle_process(pid) {
             let _ = std::fs::remove_file(&pid_path);
             return Err(anyhow!(RecoveryAdvice::safety_refusal(
                 "agent_pid_not_heddle",
-                format!("pid {pid} is alive but does not look like a heddle process"),
+                format!("pid {pid} is alive but does not match this Heddle executable"),
                 "Rerun `heddle agent stop` only if a fresh Heddle agent pidfile appears.",
-                format!("pidfile pointed at live non-Heddle pid {pid}"),
+                format!("pidfile pointed at live pid {pid} with a different executable identity"),
                 "sending SIGTERM could stop a process Heddle does not own",
                 "the stale pidfile was removed; repository objects, refs, and worktree files were left unchanged",
                 "heddle agent status",
