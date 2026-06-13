@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pack index for fast object lookup within packfiles.
 
-use crate::store::{Result, pack::PackObjectId};
+use crate::store::{
+    pack::{
+        versioned_header::{HeaderChecksum, VersionedHeader},
+        PackObjectId,
+    },
+    Result,
+};
 
-pub(super) const INDEX_MAGIC: &[u8] = b"LMI\0";
+pub(super) const INDEX_MAGIC: &[u8; 4] = b"LMI\0";
 pub(super) const INDEX_VERSION: u32 = 2;
 const MIN_INDEX_ENTRY_LEN: usize = 17 + 8;
 
@@ -49,9 +55,7 @@ impl PackIndex {
     /// Serialize to bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut result = Vec::new();
-        result.extend_from_slice(INDEX_MAGIC);
-        result.extend_from_slice(&INDEX_VERSION.to_be_bytes());
-        result.extend_from_slice(&(self.entries.len() as u64).to_be_bytes());
+        index_header().write_vec(&mut result, self.entries.len() as u64);
         for entry in &self.entries {
             entry.id.encode_tagged(&mut result);
             result.extend_from_slice(&entry.offset.to_be_bytes());
@@ -61,27 +65,9 @@ impl PackIndex {
 
     /// Deserialize from bytes.
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        if data.len() < 16 {
-            return Err(crate::store::StoreError::InvalidObject(
-                "Index too short".to_string(),
-            ));
-        }
-        if &data[0..4] != INDEX_MAGIC {
-            return Err(crate::store::StoreError::InvalidObject(
-                "Invalid index magic".to_string(),
-            ));
-        }
-        let version = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-        if version != INDEX_VERSION {
-            return Err(crate::store::StoreError::InvalidObject(format!(
-                "Unsupported index version: {}",
-                version
-            )));
-        }
-        let count = u64::from_be_bytes([
-            data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
-        ]);
-        let max_entries = ((data.len() - 16) / MIN_INDEX_ENTRY_LEN) as u64;
+        let header = index_header().verify(data)?;
+        let count = header.count;
+        let max_entries = ((data.len() - header.header_len) / MIN_INDEX_ENTRY_LEN) as u64;
         if count > max_entries {
             return Err(crate::store::StoreError::InvalidObject(format!(
                 "Index entry count {} exceeds available data capacity {}",
@@ -94,7 +80,7 @@ impl PackIndex {
             )
         })?;
         let mut entries = Vec::with_capacity(count);
-        let mut pos = 16;
+        let mut pos = header.header_len;
         for _ in 0..count {
             let (id, id_len) = PackObjectId::decode_tagged(&data[pos..])?;
             pos += id_len;
@@ -123,5 +109,17 @@ impl PackIndex {
 impl Default for PackIndex {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+pub(super) fn index_header() -> VersionedHeader {
+    VersionedHeader {
+        magic: INDEX_MAGIC,
+        version: INDEX_VERSION,
+        checksum: HeaderChecksum::None,
+        too_short: "Index too short",
+        invalid_magic: "Invalid index magic",
+        unsupported_version: "Unsupported index version",
+        checksum_mismatch: "",
     }
 }

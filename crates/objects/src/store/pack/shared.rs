@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 #![deny(clippy::cast_possible_truncation)]
 
-use super::{ObjectType, varint};
+use super::{
+    varint,
+    versioned_header::{HeaderChecksum, VersionedHeader},
+    ObjectType,
+};
 use crate::{
     object::{ChangeId, ContentHash},
-    store::{Result, StoreError, compression::CompressionConfig},
+    store::{compression::CompressionConfig, Result, StoreError},
 };
 
 pub const PACK_CHECKSUM_LEN: usize = 32;
@@ -94,45 +98,28 @@ pub struct PackEntryHeader {
 }
 
 pub fn write_container_header(buf: &mut Vec<u8>, spec: PackContainerSpec, count: u64) {
-    buf.extend_from_slice(spec.magic);
-    buf.extend_from_slice(&spec.version.to_be_bytes());
-    buf.extend_from_slice(&count.to_be_bytes());
+    pack_container_header(spec).write_vec(buf, count);
 }
 
 pub fn verify_container(data: &[u8], spec: PackContainerSpec) -> Result<(u64, usize, usize)> {
-    if data.len() < 16 + PACK_CHECKSUM_LEN {
-        return Err(StoreError::InvalidObject("Pack too short".to_string()));
-    }
-    if &data[..4] != spec.magic {
-        return Err(StoreError::InvalidObject("Invalid pack magic".to_string()));
-    }
-    let version = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-    if version != spec.version {
-        return Err(StoreError::InvalidObject(format!(
-            "Unsupported pack version: {}",
-            version
-        )));
-    }
-
-    let content_end = data.len() - PACK_CHECKSUM_LEN;
-    let content = &data[..content_end];
-    let stored_checksum = &data[content_end..];
-    let computed_checksum = blake3::hash(content);
-    if computed_checksum.as_bytes() != stored_checksum {
-        return Err(StoreError::InvalidObject(
-            "Pack checksum mismatch".to_string(),
-        ));
-    }
-
-    let count = u64::from_be_bytes([
-        data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
-    ]);
-    Ok((count, 16, content_end))
+    let header = pack_container_header(spec).verify(data)?;
+    Ok((header.count, header.header_len, header.content_end))
 }
 
 pub fn append_container_checksum(buf: &mut Vec<u8>) {
-    let checksum = blake3::hash(buf);
-    buf.extend_from_slice(checksum.as_bytes());
+    HeaderChecksum::Blake3Trailer.append(buf);
+}
+
+fn pack_container_header(spec: PackContainerSpec) -> VersionedHeader {
+    VersionedHeader {
+        magic: spec.magic,
+        version: spec.version,
+        checksum: HeaderChecksum::Blake3Trailer,
+        too_short: "Pack too short",
+        invalid_magic: "Invalid pack magic",
+        unsupported_version: "Unsupported pack version",
+        checksum_mismatch: "Pack checksum mismatch",
+    }
 }
 
 pub fn encode_tagged_entry(
