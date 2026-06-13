@@ -591,6 +591,10 @@ impl GitSource {
     /// same discovered depth) ties break on committer time then SHA.
     ///
     /// Commits appear exactly once even if multiple refs reach them.
+    ///
+    /// Resident-set: all N commits held in memory simultaneously
+    /// (~3× commit count × CommitEntry). Acceptable for batch import; revisit
+    /// for streaming if repos exceed ~1M commits.
     pub fn commits_topo(
         &self,
         heads: impl IntoIterator<Item = String>,
@@ -640,7 +644,8 @@ impl GitSource {
             .collect();
         sort_by_time_then_sha(&mut frontier, &entries);
 
-        let mut out = Vec::with_capacity(entries.len());
+        let total_entries = entries.len();
+        let mut out = Vec::with_capacity(total_entries);
         // children[p] = list of commits that have p as a parent.
         let mut children: HashMap<String, Vec<String>> = HashMap::new();
         for (sha, entry) in entries.iter() {
@@ -657,8 +662,8 @@ impl GitSource {
             // To keep that invariant sane and documented, we instead re-sort
             // after each drain — the frontier is small enough that this is
             // cheap.
-            let entry = entries.get(&sha).expect("sha present in entries").clone();
-            out.push(entry.clone());
+            let entry = entries.remove(&sha).expect("sha present in entries");
+            out.push(entry);
             if let Some(kids) = children.remove(&sha) {
                 for k in kids {
                     let d = indeg.get_mut(&k).expect("indeg for child");
@@ -671,10 +676,10 @@ impl GitSource {
             }
         }
 
-        if out.len() != entries.len() {
+        if out.len() != total_entries {
             return Err(IngestError::Other(format!(
                 "topo sort dropped commits: {} in graph, {} emitted — cycle?",
-                entries.len(),
+                total_entries,
                 out.len()
             )));
         }

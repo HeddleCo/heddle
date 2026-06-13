@@ -126,8 +126,7 @@ fn detected_harness_argv_impl() -> Option<Vec<String>> {
 
 pub fn cmd_harness_bridge(cli: &Cli) -> Result<()> {
     let repo = cli.open_repo()?;
-    let user_config = UserConfig::load_default().unwrap_or_default();
-    let mut runtime = HarnessBridgeRuntime::new(repo, user_config);
+    let mut runtime = init_harness_runtime(&repo)?;
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -157,13 +156,11 @@ pub fn cmd_harness_bridge(cli: &Cli) -> Result<()> {
 
 pub(crate) fn relay_harness_event(
     repo: &Repository,
-    user_config: &UserConfig,
     harness: &str,
     event: &str,
     payload: &str,
 ) -> Result<()> {
-    let mut runtime =
-        HarnessBridgeRuntime::new(Repository::open(repo.root())?, user_config.clone());
+    let mut runtime = init_harness_runtime(repo)?;
     let json = if payload.trim().is_empty() {
         Value::Null
     } else {
@@ -175,6 +172,14 @@ pub(crate) fn relay_harness_event(
         "opencode" => relay_opencode(&mut runtime, event, &json),
         other => Err(anyhow!("unsupported harness relay: {other}")),
     }
+}
+
+fn init_harness_runtime(repo: &Repository) -> Result<HarnessBridgeRuntime> {
+    let user_config = UserConfig::load_default().unwrap_or_default();
+    Ok(HarnessBridgeRuntime::new(
+        Repository::open(repo.root())?,
+        user_config,
+    ))
 }
 
 struct HarnessBridgeRuntime {

@@ -13,10 +13,10 @@ pub mod git_notes;
 pub mod git_reconstruct;
 pub mod git_sync;
 pub mod git_util;
+#[cfg(debug_assertions)]
+#[doc(hidden)]
+pub mod test_support;
 
 pub use git_core::{
     GitBridge, GitBridgeError, GitResult, SyncMapping, WriteThroughOutcome, WriteThroughSkipReason,
 };
-
-#[cfg(all(test, feature = "git-overlay"))]
-mod git_bridge_tests;

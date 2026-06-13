@@ -20,7 +20,6 @@ use crate::{
         Cli, IntegrationCommands, IntegrationInstallArgs, IntegrationRelayArgs,
         IntegrationTargetArgs, is_tty, should_output_json,
     },
-    config::UserConfig,
     harness,
 };
 
@@ -471,8 +470,7 @@ fn classify_command_path_mode(cmd: &str) -> PathMode {
 fn relay_integration(repo: &Repository, args: IntegrationRelayArgs) -> Result<()> {
     let mut payload = String::new();
     io::stdin().read_to_string(&mut payload)?;
-    let user_config = UserConfig::load_default().unwrap_or_default();
-    harness::relay_harness_event(repo, &user_config, &args.harness, &args.event, &payload)
+    harness::relay_harness_event(repo, &args.harness, &args.event, &payload)
 }
 
 fn manifest_path(repo: &Repository) -> PathBuf {
