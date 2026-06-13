@@ -128,6 +128,10 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
                 out,
                 "Start here: `heddle init`, `heddle adopt`, or `heddle clone`."
             );
+            let _ = writeln!(
+                out,
+                "Coming from Git? Run `heddle help git-concepts` for the concept map."
+            );
             let _ = writeln!(out);
             // The ONE place the --output machine-contract blurb is stated
             // in full on a help screen; per-command --help carries only the
@@ -146,7 +150,8 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
                 out,
                 "Run `heddle help model` for the short mental model, \
                  `heddle help advanced` for power surfaces, automation, and Git interop, \
-                 or `heddle help <topic>` for a topic page (e.g. `git-overlay`, \
+                 or `heddle help <topic>` for a topic page (e.g. `git-concepts`, \
+                 `git-overlay`, \
                  `threads`, `daemon`, `signals`, `bridge`, `operation-ids`, \
                  `remotes`, `output-formats`, `git-dependencies`)."
             );
@@ -486,6 +491,7 @@ pub fn topic_text(topic: &str) -> Option<&'static str> {
         "output-formats" | "output-format" | "output" => OUTPUT_FORMATS_TOPIC,
         "clone" => CLONE_TOPIC,
         "git-overlay" => GIT_OVERLAY_TOPIC,
+        "git-concepts" | "git-concept-map" | "git-veteran" => GIT_CONCEPTS_TOPIC,
         "model" | "mental-model" | "concepts" => MODEL_TOPIC,
         "threads" => THREADS_TOPIC,
         "operation-ids" | "idempotency" => OPERATION_IDS_TOPIC,
@@ -659,6 +665,41 @@ Existing Git checkout:
 
 If a command refuses, read the first `Next:` line. Heddle fails closed when it
 cannot prove the move is safe.
+"#;
+
+const GIT_CONCEPTS_TOPIC: &str = r#"Git to Heddle concept map.
+
+| Git concept | Heddle concept + semantic difference |
+|-------------|--------------------------------------|
+| `git commit` | `heddle commit -m "..."`: saves a Heddle State. In native Heddle this is the authored snapshot; in Git-overlay mode it also writes the matching Git checkpoint when safe. |
+| Git commit SHA | Heddle `hd-...` change id. Use it with `heddle show`, `log`, and `diff`; Git SHAs remain the interop handle for Git tooling. |
+| `git branch foo` | `heddle start foo` for a working thread, or `heddle thread create foo` for a ref only. A thread is a unit of work with checkout, captured history, metadata, and readiness state, not just a movable ref. |
+| `git checkout foo` / `git switch foo` | `heddle thread switch foo`. Heddle switches between thread checkouts and may auto-capture the thread you leave; raw Git checkout only moves the Git layer. |
+| `git tag v1.0` | `heddle thread marker create v1.0`. A marker names a Heddle State; it is for pinning a state in Heddle history, not for creating a signed or annotated Git tag object. |
+| `git remote add origin <url>` | `heddle remote add origin <url>`. Heddle remotes can be native Heddle endpoints, hosted addresses, local paths, or Git remotes depending on repository mode. |
+| `git push` / `git pull` | `heddle push` / `heddle pull`. Heddle pushes or pulls the selected thread/state through its remote contract and refuses when verification says the mapping is unsafe. |
+| `git fetch` | `heddle fetch`. Fetch updates remote knowledge without making your current thread's checkout silently absorb changes. |
+| `git rebase` to catch up | `heddle sync`. Sync refreshes a stale thread onto its target when replay is clean; conflicts route through `heddle resolve` / `heddle continue`. |
+
+Reconciliation examples:
+
+    git branch feature/auth
+    git checkout feature/auth
+    # Heddle: create/resume an isolated unit of work instead
+    heddle start feature/auth --path ../feature-auth
+
+    git tag v1.0
+    # Heddle: pin the current State by name
+    heddle thread marker create v1.0
+
+    git fetch origin
+    git rebase origin/main
+    # Heddle: update remote knowledge, then refresh the current thread when safe
+    heddle fetch origin
+    heddle sync
+
+For an existing Git checkout, start with `heddle status`; it prints the exact
+`heddle adopt` command when Heddle needs to import Git refs first.
 "#;
 
 const THREADS_TOPIC: &str = "Threads — Heddle's unit of in-progress work.\n\
@@ -993,6 +1034,9 @@ mod tests {
         for topic in [
             "advanced",
             "agent-flags",
+            "git-concepts",
+            "git-concept-map",
+            "git-veteran",
             "git-overlay",
             "agent",
             "daemon",
