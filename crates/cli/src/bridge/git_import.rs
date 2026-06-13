@@ -18,8 +18,8 @@ use super::git_import_tree::{PackImportSink, fail_lossy_entry};
 use crate::bridge::{
     git_core::{
         GitBridge, GitBridgeError, GitResult, RefNamespace, RefUpdate, SyncMapping,
-        apply_ref_updates, copy_reachable_objects, git_err, open_repo, parse_git_ref,
-        thread_is_unclaimed_bootstrap,
+        apply_ref_updates, collect_reachable_entries_excluding, copy_reachable_objects, git_err,
+        install_objects_pack, open_repo, parse_git_ref, thread_is_unclaimed_bootstrap,
     },
     git_notes,
     git_util::{GitImportOptions, ImportStats, PartialMirrorRef, SkippedRef},
@@ -792,28 +792,36 @@ fn import_with_ref_filter(
     //      `sync_marker_to_tag` skip the rewrite — leaving the
     //      annotated tag intact through to the destination push.
     //
-    // We do this **per ref** rather than as a single bulk copy. A ref
-    // whose ancestry references a missing object (a known failure mode
-    // in real-world repos like git-lfs, where pack data carries dangling
-    // references that `git fsck` doesn't catch) doesn't poison the rest
-    // of the mirror — only that one ref loses SHA stability.
+    // We collect entries **per ref** so a ref whose ancestry references a
+    // missing object (a known failure mode in real-world repos like git-lfs,
+    // where pack data carries dangling references that `git fsck` doesn't
+    // catch) doesn't poison the rest of the mirror. Successful refs are then
+    // installed together as one pack, avoiding N loose writes and N per-ref
+    // packfiles on the adopt path.
     if git_path.is_some() {
         bridge.init_mirror()?;
         let mirror_repo = bridge.open_git_repo()?;
         if mirror_repo.git_dir() != repo.git_dir() {
             let mut successful_updates: Vec<RefUpdate> = Vec::new();
+            let mut mirror_entries = Vec::new();
+            let mut mirror_seen = HashSet::new();
             for plan in &plans {
                 // Roots include both the immediate target (tag object for
                 // annotated tags) and the peeled commit (so the walker
                 // descends through commit→tree→blob even when the
                 // immediate object is a tag).
                 let roots = [plan.immediate_oid, plan.peeled_commit_oid];
-                match copy_reachable_objects(&repo, &mirror_repo, roots) {
-                    Ok(()) => successful_updates.push(RefUpdate {
-                        name: plan.short_name.clone(),
-                        target: plan.immediate_oid,
-                        namespace: plan.namespace,
-                    }),
+                let mut candidate_seen = mirror_seen.clone();
+                match collect_reachable_entries_excluding(&repo, roots, &mut candidate_seen) {
+                    Ok(entries) => {
+                        mirror_seen = candidate_seen;
+                        mirror_entries.extend(entries);
+                        successful_updates.push(RefUpdate {
+                            name: plan.short_name.clone(),
+                            target: plan.immediate_oid,
+                            namespace: plan.namespace,
+                        });
+                    }
                     Err(err) => {
                         let full = match plan.namespace {
                             RefNamespace::Branch => format!("refs/heads/{}", plan.short_name),
@@ -833,6 +841,7 @@ fn import_with_ref_filter(
                     }
                 }
             }
+            install_objects_pack(&mirror_repo, mirror_entries)?;
             // Write source refs into the mirror. For annotated tags this
             // points refs/tags/<name> at the tag object (not the peeled
             // commit), which is what preserves the annotated form across

@@ -3151,6 +3151,89 @@ fn import_isolates_per_ref_mirror_failures() {
         );
     }
 }
+
+/// #561: `adopt` writes the mirror's reachable objects as one packfile, not as
+/// one loose object write per source object. The packed mirror must still carry
+/// the same object bytes, including annotated tag objects.
+#[test]
+fn import_writes_mirror_as_single_pack_with_identical_object_set() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_src_temp, source_repo) = init_git_repo();
+
+    // Use a stored blob/tree instead of the synthetic empty tree so source and
+    // mirror object stores can be compared directly.
+    let blob = source_repo.write_blob(b"hello\n").expect("blob").detach();
+    let mut editor = source_repo
+        .edit_tree(gix::hash::ObjectId::empty_tree(source_repo.object_hash()))
+        .expect("tree editor");
+    editor
+        .upsert("file.txt", gix::object::tree::EntryKind::Blob, blob)
+        .expect("upsert blob");
+    let tree = editor.write().expect("tree").detach();
+
+    let first = commit_with_tree(&source_repo, Some("refs/heads/main"), tree, "first", &[]);
+    let second = commit_with_tree(
+        &source_repo,
+        Some("refs/heads/main"),
+        tree,
+        "second",
+        &[first],
+    );
+    let tag_oid = create_annotated_tag(&source_repo, "v1.0", second, "release");
+
+    let mut bridge = GitBridge::new(&repo);
+    bridge
+        .import(Some(source_repo.workdir().expect("workdir")))
+        .expect("import");
+
+    let mirror = test_support::open_git_repo(&bridge).expect("open mirror");
+    let pack_dir = mirror.git_dir().join("objects").join("pack");
+    let pack_count = std::fs::read_dir(&pack_dir)
+        .expect("read pack dir")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "pack"))
+        .count();
+    assert_eq!(pack_count, 1, "adopt mirror should write exactly one pack");
+
+    let loose_dirs: Vec<_> = std::fs::read_dir(mirror.git_dir().join("objects"))
+        .expect("read objects dir")
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.len() == 2 && name.chars().all(|c| c.is_ascii_hexdigit())
+        })
+        .collect();
+    assert!(
+        loose_dirs.is_empty(),
+        "mirror must not contain loose object directories: {loose_dirs:?}"
+    );
+
+    let source_set: std::collections::HashSet<_> = source_repo
+        .objects
+        .iter()
+        .expect("source object iter")
+        .map(|result| result.expect("source oid"))
+        .collect();
+    let mirror_set: std::collections::HashSet<_> = mirror
+        .objects
+        .iter()
+        .expect("mirror object iter")
+        .map(|result| result.expect("mirror oid"))
+        .collect();
+    assert_eq!(
+        mirror_set, source_set,
+        "packed mirror object set must equal the source object set"
+    );
+
+    let source_tag = source_repo.find_object(tag_oid).expect("source tag present");
+    let mirror_tag = mirror.find_object(tag_oid).expect("mirror tag present");
+    assert_eq!(source_tag.kind, gix::objs::Kind::Tag);
+    assert_eq!(mirror_tag.kind, source_tag.kind);
+    assert_eq!(mirror_tag.data, source_tag.data);
+}
+
 #[test]
 fn import_honors_legacy_heddle_change_id_trailer() {
     let heddle_temp = TempDir::new().expect("heddle temp");
