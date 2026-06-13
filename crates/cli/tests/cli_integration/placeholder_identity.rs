@@ -1,0 +1,100 @@
+use std::fs;
+
+use tempfile::TempDir;
+
+use super::heddle_output_with_env;
+
+fn write_user_config(dir: &TempDir, name: &str, email: &str) -> std::path::PathBuf {
+    let config = dir.path().join("user-config.toml");
+    fs::write(
+        &config,
+        format!("[principal]\nname = \"{name}\"\nemail = \"{email}\"\n"),
+    )
+    .expect("write user config");
+    config
+}
+
+fn stderr(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn init_warns_when_user_config_principal_is_placeholder() {
+    let temp = TempDir::new().unwrap();
+    let config = write_user_config(&temp, "T", "t@e.c");
+
+    let output = heddle_output_with_env(
+        &["init"],
+        Some(temp.path()),
+        &[("HEDDLE_CONFIG", config.to_str().unwrap())],
+    )
+    .expect("run init");
+
+    assert!(output.status.success(), "init should warn, not fail");
+    let stderr = stderr(&output);
+    assert!(
+        stderr.contains("WARNING: principal attribution looks like a placeholder")
+            && stderr.contains("T <t@e.c>")
+            && stderr.contains("heddle init --principal-name <name> --principal-email <email>"),
+        "init should explain the placeholder identity and fix: {stderr}"
+    );
+}
+
+#[test]
+fn first_commit_warns_once_when_user_config_principal_is_placeholder() {
+    let temp = TempDir::new().unwrap();
+    let config = write_user_config(&temp, "T", "t@e.c");
+    let env = [("HEDDLE_CONFIG", config.to_str().unwrap())];
+
+    let init = heddle_output_with_env(&["init"], Some(temp.path()), &env).expect("run init");
+    assert!(init.status.success(), "init should succeed");
+
+    fs::write(temp.path().join("one.txt"), "one\n").expect("write first file");
+    let first = heddle_output_with_env(&["commit", "-m", "first"], Some(temp.path()), &env)
+        .expect("run first commit");
+    assert!(first.status.success(), "first commit should warn, not fail");
+    let first_stderr = stderr(&first);
+    assert!(
+        first_stderr.contains("WARNING: principal attribution looks like a placeholder")
+            && first_stderr.contains("T <t@e.c>"),
+        "first commit should warn about placeholder attribution: {first_stderr}"
+    );
+
+    fs::write(temp.path().join("two.txt"), "two\n").expect("write second file");
+    let second = heddle_output_with_env(&["commit", "-m", "second"], Some(temp.path()), &env)
+        .expect("run second commit");
+    assert!(
+        second.status.success(),
+        "second commit should still succeed"
+    );
+    let second_stderr = stderr(&second);
+    assert!(
+        !second_stderr.contains("principal attribution looks like a placeholder"),
+        "later commits should not spam the placeholder warning: {second_stderr}"
+    );
+}
+
+#[test]
+fn real_user_config_principal_does_not_warn_on_init_or_first_commit() {
+    let temp = TempDir::new().unwrap();
+    let config = write_user_config(&temp, "Ada Lovelace", "ada@users.test");
+    let env = [("HEDDLE_CONFIG", config.to_str().unwrap())];
+
+    let init = heddle_output_with_env(&["init"], Some(temp.path()), &env).expect("run init");
+    assert!(init.status.success(), "init should succeed");
+    let init_stderr = stderr(&init);
+    assert!(
+        !init_stderr.contains("principal attribution looks like a placeholder"),
+        "real init identity should not warn: {init_stderr}"
+    );
+
+    fs::write(temp.path().join("file.txt"), "content\n").expect("write file");
+    let commit = heddle_output_with_env(&["commit", "-m", "first"], Some(temp.path()), &env)
+        .expect("run first commit");
+    assert!(commit.status.success(), "commit should succeed");
+    let commit_stderr = stderr(&commit);
+    assert!(
+        !commit_stderr.contains("principal attribution looks like a placeholder"),
+        "real commit identity should not warn: {commit_stderr}"
+    );
+}

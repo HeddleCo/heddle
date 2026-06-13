@@ -1056,6 +1056,21 @@ pub(crate) fn resolve_principal(repo: &Repository, user_config: &UserConfig) -> 
     Ok(principal)
 }
 
+pub(crate) fn is_placeholder_principal(principal: &Principal) -> bool {
+    let name = principal.name.trim();
+    let email = principal.email.trim().to_ascii_lowercase();
+    name.is_empty()
+        || email.is_empty()
+        || (name == "T" && email == "t@e.c")
+        || email.ends_with("@e.c")
+}
+
+pub(crate) fn placeholder_principal_warning(principal: &Principal) -> String {
+    format!(
+        "WARNING: principal attribution looks like a placeholder: {principal}. Set a real identity with `heddle init --principal-name <name> --principal-email <email>`."
+    )
+}
+
 fn is_default_unknown_principal(principal: &Principal) -> bool {
     principal.name.trim().is_empty()
         || principal.email.trim().is_empty()

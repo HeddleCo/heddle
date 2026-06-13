@@ -18,7 +18,10 @@ use super::{
     action_line::print_next,
     checkpoint::create_git_checkpoint,
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
-    snapshot::{SnapshotAgentOverrides, create_snapshot},
+    snapshot::{
+        SnapshotAgentOverrides, create_snapshot, is_placeholder_principal,
+        placeholder_principal_warning,
+    },
 };
 use crate::{
     bridge::{
@@ -61,6 +64,8 @@ struct InitOutput {
     principal_source: Option<String>,
     principal: Option<InitPrincipalOutput>,
     principal_recommended_action: Option<String>,
+    #[serde(skip)]
+    placeholder_principal_warning: Option<String>,
     side_effects: Vec<String>,
     message: String,
     next_action: Option<String>,
@@ -414,6 +419,13 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
         Some("heddle commit -m \"...\"".to_string())
     };
     let principal_status = init_principal_status(&repo, &user_config)?;
+    let placeholder_principal_warning = principal_status
+        .principal
+        .as_ref()
+        .map(|principal| Principal::new(&principal.name, &principal.email))
+        .filter(is_placeholder_principal)
+        .map(|principal| placeholder_principal_warning(&principal));
+
     let output = InitOutput {
         output_kind: "init",
         status: "initialized".to_string(),
@@ -428,6 +440,7 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
         principal_source: principal_status.source,
         principal: principal_status.principal,
         principal_recommended_action: principal_status.recommended_action,
+        placeholder_principal_warning,
         side_effects: init_side_effects(repo_is_git_overlay, principal_configured),
         message,
         next_action: next_action.clone(),
@@ -472,6 +485,9 @@ fn render_init(output: &InitOutput, json: bool) -> Result<()> {
                     println!("  set with: {action}");
                 }
             }
+        }
+        if let Some(warning) = output.placeholder_principal_warning.as_deref() {
+            eprintln!("{}", style::warn(warning));
         }
         if !output.side_effects.is_empty() {
             println!("Side effects:");

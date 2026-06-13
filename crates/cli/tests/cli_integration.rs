@@ -70,6 +70,8 @@ mod output_kind_runtime;
 mod output_mode_no_auto;
 #[path = "cli_integration/perf_core_loop.rs"]
 mod perf_core_loop;
+#[path = "cli_integration/placeholder_identity.rs"]
+mod placeholder_identity;
 #[path = "cli_integration/quickstart.rs"]
 mod quickstart;
 #[path = "cli_integration/realworld_git.rs"]
