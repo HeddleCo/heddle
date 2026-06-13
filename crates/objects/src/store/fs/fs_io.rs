@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+#![deny(clippy::cast_possible_truncation)]
+
 //! IO helpers for FsStore.
 
 use std::{
@@ -172,7 +174,11 @@ pub(super) fn read_file_header(path: &Path, header_len: usize) -> Result<Option<
 
     let metadata = file.metadata()?;
     let len = metadata.len();
-    let to_read = std::cmp::min(header_len as u64, len) as usize;
+    let to_read = if len > header_len as u64 {
+        header_len
+    } else {
+        checked_file_len_to_usize(len)?
+    };
     let mut header = vec![0u8; to_read];
     if to_read > 0 {
         use std::io::Read as _;
@@ -195,14 +201,14 @@ pub fn read_file_bytes_for_pack(path: &Path) -> Result<Bytes> {
     }
     if len >= MMAP_THRESHOLD_BYTES {
         let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
-        if mmap.len() != len as usize {
+        if mmap.len() != checked_file_len_to_usize(len)? {
             return Err(HeddleError::InvalidObject(
                 "pack file size changed during memory mapping".to_string(),
             ));
         }
         return Ok(Bytes::from_owner(mmap));
     }
-    let mut data = Vec::with_capacity(len as usize);
+    let mut data = Vec::with_capacity(checked_file_len_to_usize(len)?);
     let mut reader = file;
     reader.read_to_end(&mut data)?;
     Ok(Bytes::from(data))
@@ -222,7 +228,7 @@ pub(super) fn read_file_bytes(path: &Path) -> Result<Option<FileBytes>> {
     }
     if len >= MMAP_THRESHOLD_BYTES {
         let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
-        if mmap.len() != len as usize {
+        if mmap.len() != checked_file_len_to_usize(len)? {
             return Err(crate::store::HeddleError::InvalidObject(
                 "file size changed during memory mapping".to_string(),
             ));
@@ -230,10 +236,16 @@ pub(super) fn read_file_bytes(path: &Path) -> Result<Option<FileBytes>> {
         return Ok(Some(FileBytes::Mmap(mmap)));
     }
 
-    let mut data = Vec::with_capacity(len as usize);
+    let mut data = Vec::with_capacity(checked_file_len_to_usize(len)?);
     let mut reader = file;
     reader.read_to_end(&mut data)?;
     Ok(Some(FileBytes::Vec(data)))
+}
+
+fn checked_file_len_to_usize(len: u64) -> Result<usize> {
+    usize::try_from(len).map_err(|_| {
+        HeddleError::InvalidObject(format!("file length {len} exceeds platform limits"))
+    })
 }
 
 /// List all content hashes from a sharded directory structure (aa/bbcc... → aabbcc...).

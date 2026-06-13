@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+#![deny(clippy::cast_possible_truncation)]
+
 use super::{ObjectType, varint};
 use crate::{
     object::{ChangeId, ContentHash},
@@ -192,8 +194,8 @@ pub fn decode_tagged_entry_header(data: &[u8]) -> Result<PackEntryHeader> {
     Ok(PackEntryHeader {
         id,
         obj_type,
-        uncompressed_size: uncompressed_size as usize,
-        compressed_size: compressed_size as usize,
+        uncompressed_size: checked_decoded_size("uncompressed_size", uncompressed_size)?,
+        compressed_size: checked_decoded_size("compressed_size", compressed_size)?,
         delta_base,
         header_len,
     })
@@ -283,11 +285,21 @@ pub fn try_decode_tagged_entry_header(data: &[u8]) -> Result<Option<PackEntryHea
     Ok(Some(PackEntryHeader {
         id,
         obj_type,
-        uncompressed_size: uncompressed_size as usize,
-        compressed_size: compressed_size as usize,
+        uncompressed_size: checked_decoded_size("uncompressed_size", uncompressed_size)?,
+        compressed_size: checked_decoded_size("compressed_size", compressed_size)?,
         delta_base,
         header_len,
     }))
+}
+
+fn checked_decoded_size(field: &str, size: u64) -> Result<usize> {
+    let size = usize::try_from(size).map_err(|_| {
+        StoreError::InvalidObject(format!("Decoded {field} exceeds platform limits"))
+    })?;
+    if field == "uncompressed_size" {
+        reject_pack_object_output_over_limit(size, MAX_PACK_OBJECT_OUTPUT_SIZE)?;
+    }
+    Ok(size)
 }
 
 pub fn compress_pack_payload(data: &[u8], config: &CompressionConfig) -> Result<Vec<u8>> {
@@ -426,5 +438,41 @@ mod tests {
         assert_eq!(decoded.uncompressed_size, 5);
         assert_eq!(decoded.compressed_size, 5);
         assert_eq!(decoded.delta_base, None);
+    }
+
+    #[test]
+    fn tagged_entry_header_rejects_size_that_truncates_on_32_bit() {
+        let mut encoded = Vec::new();
+        PackObjectId::Hash(ContentHash::compute(b"oversized-pack-object"))
+            .encode_tagged(&mut encoded);
+        varint::encode_type_and_size(ObjectType::Blob, u64::from(u32::MAX) + 1, &mut encoded);
+        varint::encode_varint(1, &mut encoded);
+        encoded.push(0);
+
+        let result = decode_tagged_entry_header(&encoded);
+
+        let error = result.expect_err("absurd 32-bit-overflow size must be rejected");
+        assert!(
+            matches!(&error, StoreError::InvalidObject(message) if message.contains("platform limits") || message.contains("Pack object output size")),
+            "expected size-limit InvalidObject, got: {error:?}",
+        );
+    }
+
+    #[test]
+    fn tagged_entry_header_rejects_u64_max_size_when_platform_cannot_represent_it() {
+        let mut encoded = Vec::new();
+        PackObjectId::Hash(ContentHash::compute(b"u64-max-pack-object"))
+            .encode_tagged(&mut encoded);
+        varint::encode_type_and_size(ObjectType::Blob, u64::MAX, &mut encoded);
+        varint::encode_varint(1, &mut encoded);
+        encoded.push(0);
+
+        let result = decode_tagged_entry_header(&encoded);
+
+        let error = result.expect_err("absurd u64::MAX size must be rejected");
+        assert!(
+            matches!(&error, StoreError::InvalidObject(message) if message.contains("platform limits") || message.contains("Pack object output size")),
+            "expected size-limit InvalidObject, got: {error:?}",
+        );
     }
 }

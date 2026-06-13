@@ -6,8 +6,8 @@ use std::path::Path;
 use bytes::Bytes;
 
 use super::{
-    decompress_pack_payload, has_zstd_magic, pack_container_spec, pack_index::PackIndex, varint,
-    verify_container, ObjectType, PackObjectId, PackObjectRecord,
+    ObjectType, PackObjectId, PackObjectRecord, decompress_pack_payload, has_zstd_magic,
+    pack_container_spec, pack_index::PackIndex, varint, verify_container,
 };
 use crate::{
     object::ContentHash,
@@ -68,10 +68,7 @@ impl PackReader<'static> {
         })
     }
 
-    pub fn from_bytes(
-        pack_data: impl Into<Bytes>,
-        index_data: impl AsRef<[u8]>,
-    ) -> Result<Self> {
+    pub fn from_bytes(pack_data: impl Into<Bytes>, index_data: impl AsRef<[u8]>) -> Result<Self> {
         let pack_data = pack_data.into();
         let (_, _, content_end) = verify_container(&pack_data, pack_container_spec())?;
         let index = PackIndex::from_bytes(index_data.as_ref())?;
@@ -376,8 +373,16 @@ fn checked_index_offset(offset: u64) -> Result<usize> {
 }
 
 fn checked_decoded_size(field: &str, size: u64) -> Result<usize> {
-    usize::try_from(size)
-        .map_err(|_| StoreError::InvalidObject(format!("Decoded {field} exceeds platform limits")))
+    let size = usize::try_from(size).map_err(|_| {
+        StoreError::InvalidObject(format!("Decoded {field} exceeds platform limits"))
+    })?;
+    if field == "uncompressed_size" && size > super::shared::MAX_PACK_OBJECT_OUTPUT_SIZE {
+        return Err(StoreError::InvalidObject(format!(
+            "Pack object output size {size} exceeds max {}",
+            super::shared::MAX_PACK_OBJECT_OUTPUT_SIZE
+        )));
+    }
+    Ok(size)
 }
 
 fn checked_index_add(start: usize, len: usize, field: &str) -> Result<usize> {
@@ -427,7 +432,7 @@ fn verify_record_id_matches(requested: &PackObjectId, found: &PackObjectId) -> R
 
 #[cfg(test)]
 mod tests {
-    use super::{verify_record_id_matches, PackObjectId, PackReader};
+    use super::{PackObjectId, PackReader, verify_record_id_matches};
     use crate::{object::ContentHash, store::StoreError};
 
     #[test]
