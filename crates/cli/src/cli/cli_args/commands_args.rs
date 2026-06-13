@@ -1109,8 +1109,7 @@ pub struct PullArgs {
 Behavior:
   Git-overlay clones land on the remote's default branch; Heddle remotes check out `main` (pass --thread to pick another). --depth N limits history on Heddle remotes only. Never prompts. Full details: `heddle help clone`.
 
-Advanced (hidden) flags:
-  --lazy and --filter blob:none skip blob content and hydrate it on demand. Hosted/network Heddle remotes only; Git-overlay clones (plain `https://…/repo.git` URLs and local-path clones) reject them today — lazy hydration over the Git transport is planned for v0.3.1.
+Advanced/planned flags: see `heddle help clone`.
 
 Examples:
   heddle clone https://example.com/repo.git ./clone   # Git repo: lands on the remote's default branch

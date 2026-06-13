@@ -122,6 +122,7 @@ pub struct CommandCatalogOption {
     pub help: Option<String>,
     pub required: bool,
     pub global: bool,
+    pub hidden: bool,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -2827,7 +2828,7 @@ pub fn build_command_catalog() -> CommandCatalogOutput {
     let command = Cli::command();
     let mut global_options: Vec<_> = command
         .get_arguments()
-        .filter(|arg| arg.is_global_set() && should_catalog_global_option(arg))
+        .filter(|arg| arg.is_global_set())
         .map(catalog_option)
         .collect();
     if !command.is_disable_help_flag_set() {
@@ -2935,7 +2936,7 @@ fn catalog_entry(
 ) -> CommandCatalogEntry {
     let mut options = Vec::new();
     let mut arguments = Vec::new();
-    for arg in command.get_arguments().filter(|arg| !arg.is_hide_set()) {
+    for arg in command.get_arguments() {
         if arg.get_long().is_some() || arg.get_short().is_some() {
             options.push(catalog_option(arg));
         } else {
@@ -3219,10 +3220,6 @@ fn clean_catalog_summary(summary: String) -> String {
     }
 }
 
-fn should_catalog_global_option(arg: &clap::Arg) -> bool {
-    !arg.is_hide_set()
-}
-
 fn side_effect_class(contract: CommandContract) -> &'static str {
     if contract.observe_only {
         "observe_only"
@@ -3371,6 +3368,7 @@ fn catalog_option(arg: &clap::Arg) -> CommandCatalogOption {
         help: arg.get_help().map(|help| help.to_string()),
         required: arg.is_required_set(),
         global: arg.is_global_set(),
+        hidden: arg.is_hide_set(),
     }
 }
 
@@ -3387,6 +3385,7 @@ fn generated_help_option() -> CommandCatalogOption {
         help: Some("Print help".to_string()),
         required: false,
         global: true,
+        hidden: false,
     }
 }
 
@@ -5529,6 +5528,83 @@ mod tests {
                 "`{display}` must advertise its streaming JSON contract"
             );
         }
+    }
+
+    #[test]
+    fn hidden_clap_flags_are_present_in_machine_catalog() {
+        fn walk_clap_hidden_flags(
+            command: &clap::Command,
+            path: &mut Vec<String>,
+            hidden_flags: &mut Vec<(String, String)>,
+        ) {
+            let display = path.join(" ");
+            for arg in command.get_arguments() {
+                if !arg.is_hide_set() {
+                    continue;
+                }
+                if arg.get_long().is_some() || arg.get_short().is_some() {
+                    hidden_flags.push((display.clone(), arg.get_id().as_str().to_string()));
+                }
+            }
+
+            for subcommand in command.get_subcommands() {
+                path.push(subcommand.get_name().to_string());
+                walk_clap_hidden_flags(subcommand, path, hidden_flags);
+                path.pop();
+            }
+        }
+
+        let clap = Cli::command();
+        let catalog = build_command_catalog();
+        let mut hidden_flags = Vec::new();
+        walk_clap_hidden_flags(&clap, &mut Vec::new(), &mut hidden_flags);
+
+        let mut failures = Vec::new();
+        for (display, id) in hidden_flags {
+            if display.is_empty() {
+                let Some(option) = catalog.global_options.iter().find(|option| option.id == id)
+                else {
+                    failures.push(format!("global hidden flag `{id}` missing from catalog"));
+                    continue;
+                };
+                if !option.hidden {
+                    failures.push(format!(
+                        "global hidden flag `{id}` is cataloged but hidden=false"
+                    ));
+                }
+                continue;
+            }
+
+            let Some(entry) = catalog.command_by_display(&display) else {
+                if command_contract_removed_alias_root(
+                    display.split_whitespace().next().unwrap_or(""),
+                ) {
+                    continue;
+                }
+                failures.push(format!(
+                    "{display}: hidden flag `{id}` command missing from catalog"
+                ));
+                continue;
+            };
+            let Some(option) = entry.options.iter().find(|option| option.id == id) else {
+                failures.push(format!(
+                    "{display}: hidden flag `{id}` missing from catalog options"
+                ));
+                continue;
+            };
+            if !option.hidden {
+                failures.push(format!(
+                    "{display}: hidden flag `{id}` is cataloged but hidden=false"
+                ));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "every clap `hide = true` flag must remain machine-discoverable in \
+             `heddle help --output json` with `hidden: true`:\n  {}",
+            failures.join("\n  ")
+        );
     }
 
     #[test]

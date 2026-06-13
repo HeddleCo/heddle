@@ -569,8 +569,9 @@ and clones full history.
 Depth controls history extent only — how many states the clone fetches —
 and says nothing about object contents. Whether a state's blobs are
 present locally or fetched lazily is a separate concern that `--depth`
-never governs (see the hidden `--lazy` / `--filter blob:none` flags in
-`heddle clone --help`; hosted/network Heddle remotes only).
+never governs. Advanced/planned flags `--lazy` and `--filter blob:none`
+skip blob content and hydrate it on demand for hosted/network Heddle
+remotes; local and Git-overlay clone paths reject them today.
 
 See `heddle help threads` for the thread model and `heddle help remotes`
 for remote management.
@@ -1300,7 +1301,7 @@ mod tests {
         // The trim must not cost discoverability: the hidden-flag
         // affordance and the deep-dive breadcrumb both survive.
         assert!(
-            help.contains("Advanced (hidden) flags:"),
+            help.contains("Advanced/planned flags: see `heddle help clone`."),
             "clone --help keeps the hidden-flags affordance: {help}"
         );
         assert!(
@@ -1431,8 +1432,9 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
             let after_lower = after_help.to_lowercase();
-            let breadcrumb_marker =
-                after_lower.contains("hidden") || after_lower.contains("advanced flag");
+            let breadcrumb_marker = after_lower.contains("hidden")
+                || after_lower.contains("advanced flag")
+                || after_lower.contains("advanced/planned flags");
             let points_at_reveal =
                 after_help.contains("heddle help ") || after_help.contains("--help-agent");
 

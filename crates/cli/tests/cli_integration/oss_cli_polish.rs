@@ -8137,17 +8137,14 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
     );
 
     let clone_help = heddle_help(&["clone", "--help"]);
-    let (clone_first_run, clone_breadcrumb) = clone_help
-        .split_once("Advanced (hidden) flags:")
-        .expect("clone help carries the advanced-flags breadcrumb (heddle#646)");
+    assert!(
+        clone_help.contains("Advanced/planned flags: see `heddle help clone`."),
+        "clone help carries the advanced/planned flags breadcrumb (heddle#646): {clone_help}"
+    );
     for hidden in ["--lazy", "--filter", "v0.3.1", "blob:none"] {
         assert!(
-            !clone_first_run.contains(hidden),
+            !clone_help.contains(hidden),
             "clone help should not lead with planned partial-clone machinery: {clone_help}"
-        );
-        assert!(
-            clone_breadcrumb.contains(hidden),
-            "clone help's advanced-flags breadcrumb should name `{hidden}`: {clone_help}"
         );
     }
 
@@ -8894,8 +8891,10 @@ fn command_catalog_exposes_public_surface_for_agents() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|option| option["long"] != "op-id" && option["id"] != "op_id"),
-        "catalog should not imply --op-id is accepted by every command; use per-command op_id_behavior: {json}"
+            .any(|option| option["long"] == "op-id"
+                && option["id"] == "op_id"
+                && option["hidden"] == true),
+        "catalog should expose hidden global --op-id as machine metadata; use per-command op_id_behavior for acceptance: {json}"
     );
     let commit = commands
         .iter()
@@ -8906,7 +8905,9 @@ fn command_catalog_exposes_public_surface_for_agents() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|option| option["long"] == "op-id" && option["global"] == true),
+            .any(|option| option["long"] == "op-id"
+                && option["global"] == true
+                && option["hidden"] == true),
         "op-id capable commands should expose --op-id as a per-command option: {commit}"
     );
     let status = commands

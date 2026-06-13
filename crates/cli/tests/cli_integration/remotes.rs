@@ -463,21 +463,18 @@ fn test_cli_pull_local_dirty_refusal_leaves_thread_ref_unchanged() {
 }
 
 /// heddle#646: the planned lazy/partial-clone flags stay `hide = true`
-/// (out of the options list) but are named once in the after-help
-/// "Advanced (hidden) flags" breadcrumb so they're discoverable.
+/// (out of the human options list), and human help carries a one-line
+/// breadcrumb to the detailed topic.
 #[test]
 fn test_cli_clone_help_keeps_planned_lazy_flag_to_breadcrumb() {
     let output = heddle_help(&["clone", "--help"]);
-    let (first_run, breadcrumb) = output
-        .split_once("Advanced (hidden) flags:")
-        .expect("clone help carries the advanced-flags breadcrumb (heddle#646)");
     assert!(
-        !first_run.contains("--lazy") && !first_run.contains("--filter"),
-        "clone help should keep planned lazy/partial clone flags out of first-run help: {output}"
+        output.contains("Advanced/planned flags: see `heddle help clone`."),
+        "clone help carries the advanced/planned flags breadcrumb: {output}"
     );
     assert!(
-        breadcrumb.contains("--lazy") && breadcrumb.contains("--filter"),
-        "clone help's breadcrumb should name the hidden lazy/filter flags: {output}"
+        !output.contains("--lazy") && !output.contains("--filter"),
+        "clone help should keep planned lazy/partial clone flags out of first-run help: {output}"
     );
 }
 
