@@ -89,6 +89,11 @@ sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chron
 syn = { version = "2", features = ["full", "visit", "extra-traits"] }
 tempfile = "3"
 thiserror = "2"
+# Tokio is centralized here so optional crate opt-ins cannot resolve a
+# weaker runtime than the CLI-level feature union needs. Member crates
+# should use `tokio.workspace = true` (or `dep:tokio` for optional
+# features) and only add local Tokio features when a new actual API need
+# is not already covered by this baseline.
 tokio = { version = "1", default-features = false, features = [
     "rt",          # current_thread runtime
     "macros",      # #[tokio::main], select!, pin!, join!
