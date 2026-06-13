@@ -33,6 +33,7 @@ gix-config = "0.57"
 gix-index = "0.52"
 gix-pack = "0.71"
 gix-protocol = { version = "0.62", features = ["blocking-client"] }
+gix-refspec = "0.42"
 gix-transport.workspace = true
 gix.workspace = true
 hex.workspace = true

@@ -2801,6 +2801,7 @@ dependencies = [
  "gix-index",
  "gix-pack",
  "gix-protocol",
+ "gix-refspec",
  "gix-transport",
  "heddle-cli-shared",
  "heddle-client",
