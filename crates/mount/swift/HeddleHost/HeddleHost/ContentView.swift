@@ -169,7 +169,6 @@ private struct CinematicOnboardingRoot: View {
             .padding(.horizontal, 42)
             .padding(.bottom, 28)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
         .animation(.smooth(duration: reduceMotion ? 0 : 0.75), value: hasAppeared)
         .animation(.smooth(duration: reduceMotion ? 0 : 0.82), value: presentationStage.rawValue)
         .animation(.easeInOut(duration: reduceMotion ? 0 : 1.2), value: manager.installState)
@@ -254,19 +253,6 @@ private struct CinematicTopBar: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            HStack(spacing: 9) {
-                ForEach(Array([
-                    Color(red: 0.96, green: 0.37, blue: 0.34),
-                    Color(red: 0.96, green: 0.72, blue: 0.26),
-                    Color(red: 0.34, green: 0.76, blue: 0.40)
-                ].enumerated()), id: \.offset) { _, color in
-                    Circle()
-                        .fill(color.opacity(0.80))
-                        .frame(width: 11, height: 11)
-                }
-            }
-            .opacity(0.88)
-
             Text("Heddle")
                 .font(.system(.callout, design: .monospaced))
                 .fontWeight(.bold)
@@ -2298,10 +2284,11 @@ private struct WindowChromeConfigurator: NSViewRepresentable {
                 return
             }
 
-            window.titleVisibility = .hidden
-            window.titlebarAppearsTransparent = true
-            window.isMovableByWindowBackground = true
-            window.styleMask.insert(.fullSizeContentView)
+            window.title = "Heddle"
+            window.titleVisibility = .visible
+            window.titlebarAppearsTransparent = false
+            window.isMovableByWindowBackground = false
+            window.styleMask.remove(.fullSizeContentView)
             window.backgroundColor = NSColor(
                 calibratedRed: 0.961,
                 green: 0.945,
