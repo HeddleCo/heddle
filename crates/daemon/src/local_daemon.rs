@@ -31,7 +31,7 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use grpc::{
@@ -48,6 +48,10 @@ use crate::grpc_local_impl::{
     GrpcLocalService, LocalDiscussionService, LocalHookService, LocalOperationLogQueryService,
     LocalSignalService, LocalStateReviewService, LocalTransactionService,
 };
+
+const PRIVATE_SOCKET_UMASK: libc::mode_t = 0o177;
+
+static SOCKET_BIND_UMASK_LOCK: Mutex<()> = Mutex::new(());
 
 /// Default socket path inside a repo: `<heddle_dir>/sockets/grpc.sock`.
 pub fn default_socket_path(heddle_dir: &Path) -> PathBuf {
@@ -258,9 +262,7 @@ pub async fn serve(
     config: LocalDaemonConfig,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    if let Some(parent) = config.socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    create_private_socket_parent(&config.socket_path)?;
     // PidGuard refuses to start when another daemon owns this repo.
     let _guard = PidGuard::install(config.pid_path.clone(), config.socket_path.clone())?;
 
@@ -269,14 +271,30 @@ pub async fn serve(
     if config.socket_path.exists() {
         std::fs::remove_file(&config.socket_path)?;
     }
-    let listener = UnixListener::bind(&config.socket_path).map_err(|e| {
+    let listener = bind_private_unix_listener(&config.socket_path)?;
+    // Mode 0600 — same-user only. The umask guard in
+    // `bind_private_unix_listener` makes the socket born private; this chmod
+    // remains defense-in-depth and normalizes platforms that report mode bits
+    // differently after bind.
+    set_socket_mode_0600(&config.socket_path)?;
+    listener.set_nonblocking(true).map_err(|e| {
         HeddleError::Io(std::io::Error::new(
             e.kind(),
-            format!("UnixListener::bind({}): {e}", config.socket_path.display()),
+            format!(
+                "UnixListener::set_nonblocking({}): {e}",
+                config.socket_path.display()
+            ),
         ))
     })?;
-    // Mode 0600 — same-user only. The PidGuard cleans up at drop.
-    set_socket_mode_0600(&config.socket_path)?;
+    let listener = UnixListener::from_std(listener).map_err(|e| {
+        HeddleError::Io(std::io::Error::new(
+            e.kind(),
+            format!(
+                "UnixListener::from_std({}): {e}",
+                config.socket_path.display()
+            ),
+        ))
+    })?;
 
     // Crash recovery for the transaction sentinel directory. Runs before
     // any service starts handling RPCs so an in-flight transaction from a
@@ -357,6 +375,59 @@ pub async fn serve(
     Ok(())
 }
 
+fn create_private_socket_parent(socket_path: &Path) -> Result<()> {
+    if let Some(parent) = socket_path.parent() {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder.create(parent)?;
+    }
+    Ok(())
+}
+
+fn bind_private_unix_listener(socket_path: &Path) -> Result<std::os::unix::net::UnixListener> {
+    let _lock = SOCKET_BIND_UMASK_LOCK
+        .lock()
+        .map_err(|_| HeddleError::InvalidObject("daemon socket umask lock poisoned".to_string()))?;
+    // Pathname UDS permissions are chosen by the kernel at bind time from
+    // the process umask, so chmod-after-bind is too late for security. This
+    // async `serve` path performs all startup work synchronously before the
+    // daemon accepts connections or spawns service work; no `.await` occurs
+    // while the process-global umask is narrowed. The mutex serializes other
+    // Heddle socket binds in this process, and the guard restores the prior
+    // umask even when bind fails.
+    let _umask = UmaskGuard::set(PRIVATE_SOCKET_UMASK);
+    std::os::unix::net::UnixListener::bind(socket_path).map_err(|e| {
+        HeddleError::Io(std::io::Error::new(
+            e.kind(),
+            format!("UnixListener::bind({}): {e}", socket_path.display()),
+        ))
+    })
+}
+
+struct UmaskGuard {
+    previous: libc::mode_t,
+}
+
+impl UmaskGuard {
+    fn set(mask: libc::mode_t) -> Self {
+        // SAFETY: umask is process-global and always succeeds. The caller
+        // keeps the guarded section synchronous and holds
+        // SOCKET_BIND_UMASK_LOCK for Heddle's own socket-bind paths.
+        let previous = unsafe { libc::umask(mask) };
+        Self { previous }
+    }
+}
+
+impl Drop for UmaskGuard {
+    fn drop(&mut self) {
+        // SAFETY: restoring the previously returned umask is infallible.
+        unsafe {
+            libc::umask(self.previous);
+        }
+    }
+}
+
 #[cfg(unix)]
 fn set_socket_mode_0600(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -431,6 +502,67 @@ mod tests {
         let path = default_socket_path(&heddle);
         assert!(path.starts_with(&heddle));
         assert!(path.ends_with("grpc.sock"));
+    }
+
+    #[test]
+    fn create_private_socket_parent_creates_new_parent_0700() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let socket = temp
+            .path()
+            .join(".heddle")
+            .join("sockets")
+            .join("grpc.sock");
+        create_private_socket_parent(&socket).unwrap();
+
+        let mode = std::fs::metadata(socket.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "new socket parent must be private");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn bind_private_unix_listener_creates_socket_0600_before_chmod() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let socket = temp.path().join("grpc.sock");
+
+        let _listener = bind_private_unix_listener(&socket).unwrap();
+
+        let mode = std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "socket must be born private before set_socket_mode_0600 runs"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn bind_private_unix_listener_restores_umask_after_bind_error() {
+        let temp = TempDir::new().unwrap();
+        let socket = temp.path().join("missing").join("grpc.sock");
+        let before = current_umask();
+
+        let result = bind_private_unix_listener(&socket);
+
+        let after = current_umask();
+        assert!(result.is_err(), "bind should fail for a missing parent");
+        assert_eq!(after, before, "bind errors must restore the prior umask");
+    }
+
+    fn current_umask() -> libc::mode_t {
+        // SAFETY: reading umask requires the standard set-then-restore
+        // sequence; tests that call this are serialized with the bind tests.
+        unsafe {
+            let current = libc::umask(0);
+            libc::umask(current);
+            current
+        }
     }
 
     #[test]
