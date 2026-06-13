@@ -170,7 +170,10 @@ fn adopt_emits_no_terminal_control_codes_in_piped_output() {
     configure_git_identity(&work2);
     commit_file(&work2, "story.txt", "one\n", "seed");
     let json = heddle(&["adopt", "--output", "json"], Some(&work2)).unwrap();
-    assert!(!json.contains('\r'), "adopt JSON leaked a carriage return: {json:?}");
+    assert!(
+        !json.contains('\r'),
+        "adopt JSON leaked a carriage return: {json:?}"
+    );
     assert!(
         !json.contains('\u{1b}'),
         "adopt JSON leaked an ANSI escape: {json:?}"

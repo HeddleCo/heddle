@@ -234,8 +234,8 @@ impl RecoveryAdvice {
                 "reusing it for different arguments would make idempotent replay ambiguous"
                     .to_string(),
             preserved: "no command body was executed for this retry".to_string(),
-            primary_command: "heddle commands --output json".to_string(),
-            recovery_commands: vec!["heddle commands --output json".to_string()],
+            primary_command: "heddle help --output json".to_string(),
+            recovery_commands: vec!["heddle help --output json".to_string()],
             extra_json_fields,
         }
     }
@@ -258,12 +258,12 @@ impl RecoveryAdvice {
         Self {
             kind: "op_id_unsupported",
             error: format!("--op-id is not supported by `heddle {command}`"),
-            hint: "Inspect op-id support with `heddle commands --output json` and retry without --op-id for this command.".to_string(),
+            hint: "Inspect op-id support with `heddle help --output json` and retry without --op-id for this command.".to_string(),
             unsafe_condition: "the command contract marks this command as not idempotent".to_string(),
             would_change: "silently accepting --op-id here would imply a replay guarantee this command does not provide".to_string(),
             preserved: "no command body was executed".to_string(),
-            primary_command: "heddle commands --output json".to_string(),
-            recovery_commands: vec!["heddle commands --output json".to_string()],
+            primary_command: "heddle help --output json".to_string(),
+            recovery_commands: vec!["heddle help --output json".to_string()],
             extra_json_fields: Map::new(),
         }
     }
@@ -279,8 +279,8 @@ impl RecoveryAdvice {
                 "accepting a malformed operation id would make replay and conflict detection ambiguous"
                     .to_string(),
             preserved: "no command body was executed".to_string(),
-            primary_command: "heddle commands --output json".to_string(),
-            recovery_commands: vec!["heddle commands --output json".to_string()],
+            primary_command: "heddle help --output json".to_string(),
+            recovery_commands: vec!["heddle help --output json".to_string()],
             extra_json_fields: Map::new(),
         }
     }
@@ -289,13 +289,13 @@ impl RecoveryAdvice {
         Self {
             kind: "json_unsupported",
             error: format!("--output json is not supported by `heddle {command}`"),
-            hint: "Inspect JSON-capable commands with `heddle commands --output json` or rerun with `--output text`.".to_string(),
+            hint: "Inspect JSON-capable commands with `heddle help --output json` or rerun with `--output text`.".to_string(),
             unsafe_condition: "the command contract marks this command as text-only".to_string(),
             would_change: "emitting ad hoc JSON here would create a machine contract outside the command table".to_string(),
             preserved: "no command body was executed".to_string(),
-            primary_command: "heddle commands --output json".to_string(),
+            primary_command: "heddle help --output json".to_string(),
             recovery_commands: vec![
-                "heddle commands --output json".to_string(),
+                "heddle help --output json".to_string(),
                 format!("heddle {command} --output text"),
             ],
             extra_json_fields: Map::new(),
@@ -313,7 +313,7 @@ impl RecoveryAdvice {
             primary_command: format!("heddle {command} --output json"),
             recovery_commands: vec![
                 format!("heddle {command} --output json"),
-                "heddle commands --output json".to_string(),
+                "heddle help --output json".to_string(),
             ],
             extra_json_fields: Map::new(),
         }
@@ -447,7 +447,7 @@ impl RecoveryAdvice {
             "heddle remote list",
             vec![
                 "heddle remote list".to_string(),
-                "heddle commands --output json".to_string(),
+                "heddle help --output json".to_string(),
             ],
         )
     }
@@ -490,8 +490,8 @@ impl RecoveryAdvice {
             format!("this heddle binary was built without the `{feature}` feature"),
             format!("{command} cannot run because the requested analysis engine is unavailable"),
             "repository state, refs, and worktree files were left unchanged",
-            "heddle commands --output json",
-            vec!["heddle commands --output json".to_string()],
+            "heddle help --output json",
+            vec!["heddle help --output json".to_string()],
         )
     }
 
@@ -719,22 +719,6 @@ impl RecoveryAdvice {
             "no session metadata, repository objects, refs, or worktree files were changed",
             primary_command,
             Vec::new(),
-        )
-    }
-
-    pub(crate) fn no_attached_parent_thread() -> Self {
-        Self::safety_refusal(
-            "no_attached_parent_thread",
-            "No attached parent thread; pass --parent",
-            "Run `heddle delegate --parent <THREAD> <task>` from a detached checkout, or switch into an attached thread first.",
-            "the current checkout is detached and no parent thread was supplied",
-            "`heddle delegate` without a parent would have to guess which thread should own the delegated work",
-            "no delegated threads, refs, metadata, or worktree files were changed",
-            "heddle delegate --parent <THREAD> <task>",
-            vec![
-                "heddle delegate --parent <THREAD> <task>".to_string(),
-                "heddle thread list".to_string(),
-            ],
         )
     }
 

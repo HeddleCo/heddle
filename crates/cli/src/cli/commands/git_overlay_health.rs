@@ -13,9 +13,8 @@ use objects::worktree::WorktreeStatus;
 use refs::Head;
 use repo::{
     CommitGraphIndex, GitOverlayBranchTip, GitOverlayImportHint, GitOverlayOutOfBandCommits,
-    GitRemoteTrackingStatus, OperationKind, OperationScope, Repository, ThreadManager,
-    ThreadState, describe_thread_advice, git_worktree_status::GitWorktreeEntryState,
-    refresh_thread_freshness,
+    GitRemoteTrackingStatus, OperationKind, OperationScope, Repository, ThreadManager, ThreadState,
+    describe_thread_advice, git_worktree_status::GitWorktreeEntryState, refresh_thread_freshness,
 };
 use schemars::JsonSchema;
 use serde::{Serialize, Serializer};
@@ -1942,7 +1941,10 @@ fn plain_git_worktree_status(
     let index_timestamp_secs = index.timestamp().unix_seconds();
     let mut index_entries = BTreeMap::new();
     for (_, (path, entry)) in index.entries_with_paths_by_filter_map(|path, entry| {
-        Some((plain_git_path(path), (entry.id, entry.mode.bits(), entry.stat)))
+        Some((
+            plain_git_path(path),
+            (entry.id, entry.mode.bits(), entry.stat),
+        ))
     }) {
         index_entries.insert(path, entry);
     }
@@ -2446,7 +2448,7 @@ pub(crate) fn remote_drift_decision(
             primary_action: Some(heddle_action(["push", "--force"])),
             recovery_commands: vec![
                 heddle_action(["push", "--force"]),
-                "heddle redo".to_string(),
+                heddle_action(["undo", "--redo"]),
             ],
             requires_clean_worktree: true,
         },
@@ -2470,7 +2472,12 @@ pub(crate) fn remote_drift_decision(
             }
             let import = canonical_bridge_import_ref_command(upstream);
             let reconcile = canonical_bridge_reconcile_ref_preview_command(None, upstream);
-            let imported = repo.refs().get_thread(&ThreadName::new(upstream)).ok().flatten().is_some();
+            let imported = repo
+                .refs()
+                .get_thread(&ThreadName::new(upstream))
+                .ok()
+                .flatten()
+                .is_some();
             RemoteDriftDecision {
                 status,
                 verified_as_clean: false,
@@ -2993,7 +3000,9 @@ fn tag_mapping_check(repo: &Repository) -> anyhow::Result<Option<GitOverlayHealt
     let mut unmapped = Vec::new();
 
     for tip in repo.git_overlay_tag_tips()? {
-        let marker = repo.refs().get_marker(&objects::object::MarkerName::new(&tip.tag))?;
+        let marker = repo
+            .refs()
+            .get_marker(&objects::object::MarkerName::new(&tip.tag))?;
         match (marker, tip.mapped_change) {
             (Some(existing), Some(mapped)) if existing == mapped => {}
             (Some(existing), Some(mapped)) => mismatched.push(format!(
@@ -3115,7 +3124,12 @@ fn stale_integration_metadata_check(
             .as_deref()
             .or(thread.merged_state.as_deref())
             .and_then(|state| repo.resolve_state(state).ok().flatten())
-            .or_else(|| repo.refs().get_thread(&ThreadName::new(&thread.thread)).ok().flatten());
+            .or_else(|| {
+                repo.refs()
+                    .get_thread(&ThreadName::new(&thread.thread))
+                    .ok()
+                    .flatten()
+            });
         let Some(candidate) = candidate else {
             continue;
         };
@@ -3322,17 +3336,13 @@ pub(crate) fn import_hint_includes_active_branch(hint: &GitOverlayImportHint) ->
 /// report degrades to the countless wording instead of failing.
 fn out_of_band_commit_clause(out_of_band: Option<&GitOverlayOutOfBandCommits>) -> String {
     match out_of_band {
-        Some(out_of_band) if out_of_band.truncated => format!(
-            " ({}+ out-of-band git commits detected)",
-            out_of_band.count
-        ),
+        Some(out_of_band) if out_of_band.truncated => {
+            format!(" ({}+ out-of-band git commits detected)", out_of_band.count)
+        }
         Some(out_of_band) if out_of_band.count == 1 => {
             " (1 out-of-band git commit detected)".to_string()
         }
-        Some(out_of_band) => format!(
-            " ({} out-of-band git commits detected)",
-            out_of_band.count
-        ),
+        Some(out_of_band) => format!(" ({} out-of-band git commits detected)", out_of_band.count),
         None => String::new(),
     }
 }
@@ -3775,7 +3785,9 @@ mod tests {
         );
 
         let head = repo.head().unwrap().expect("test repo should have a head");
-        repo.refs().set_thread(&ThreadName::new("origin/main"), &head).unwrap();
+        repo.refs()
+            .set_thread(&ThreadName::new("origin/main"), &head)
+            .unwrap();
         let imported = remote_drift_decision(&repo, &diverged);
         assert_eq!(
             imported.primary_action.as_deref(),

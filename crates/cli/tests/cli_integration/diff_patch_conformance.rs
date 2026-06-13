@@ -558,7 +558,10 @@ fn add_symlink_round_trips() {
 #[test]
 fn delete_nonempty_round_trips() {
     native_cell(
-        &[normal("doomed.txt", "gamma\ndelta\n"), normal("keep.txt", "keep\n")],
+        &[
+            normal("doomed.txt", "gamma\ndelta\n"),
+            normal("keep.txt", "keep\n"),
+        ],
         |dir| std::fs::remove_file(dir.join("doomed.txt")).unwrap(),
         &[
             Expect::Absent("doomed.txt"),
@@ -722,11 +725,7 @@ fn capturable_quoting_paths() -> Vec<&'static str> {
 /// the plain-Git surface, where git — not heddle — owns the tree). The add
 /// path never validates a tree name, so these must still quote correctly.
 fn worktree_only_quoting_paths() -> Vec<&'static str> {
-    vec![
-        "tab\tname.txt",
-        "new\nline.txt",
-        "back\\slash.txt",
-    ]
+    vec!["tab\tname.txt", "new\nline.txt", "back\\slash.txt"]
 }
 
 #[test]
@@ -757,7 +756,10 @@ fn special_char_path_modify_round_trips() {
 fn special_char_path_delete_round_trips() {
     for path in capturable_quoting_paths() {
         native_cell(
-            &[normal(path, "doomed\ncontent\n"), normal("keep.txt", "keep\n")],
+            &[
+                normal(path, "doomed\ncontent\n"),
+                normal("keep.txt", "keep\n"),
+            ],
             move |dir| std::fs::remove_file(dir.join(path)).unwrap(),
             &[
                 Expect::Absent(path),
@@ -981,7 +983,10 @@ const NON_UTF8_TARGET: &[u8] = b"dest/\xff\xfe/link-target";
 #[test]
 fn native_non_utf8_symlink_rename_round_trips() {
     native_cell(
-        &[symlink_bytes("from-link", NON_UTF8_TARGET), normal("anchor.txt", "anchor\n")],
+        &[
+            symlink_bytes("from-link", NON_UTF8_TARGET),
+            normal("anchor.txt", "anchor\n"),
+        ],
         |dir| {
             std::fs::remove_file(dir.join("from-link")).unwrap();
             write_entry(dir, &symlink_bytes("to-link", NON_UTF8_TARGET));
@@ -1000,7 +1005,10 @@ fn native_non_utf8_symlink_rename_round_trips() {
 #[test]
 fn state_non_utf8_symlink_rename_round_trips() {
     state_cell(
-        &[symlink_bytes("from-link", NON_UTF8_TARGET), normal("keep.txt", "keep\n")],
+        &[
+            symlink_bytes("from-link", NON_UTF8_TARGET),
+            normal("keep.txt", "keep\n"),
+        ],
         |dir| {
             std::fs::remove_file(dir.join("from-link")).unwrap();
             write_entry(dir, &symlink_bytes("to-link", NON_UTF8_TARGET));
@@ -1136,17 +1144,16 @@ fn state_cell_bytes(pre: &[Entry], mutate: impl Fn(&Path), expect: &[Expect]) {
     heddle(&["capture", "-m", "v2"], Some(h.path())).unwrap();
 
     let patch = patch_bytes(&["diff", "HEAD~1", "HEAD", "--patch"], h.path());
-    assert_modes_consistent(h.path(), &["HEAD~1", "HEAD"], &String::from_utf8_lossy(&patch));
+    assert_modes_consistent(
+        h.path(),
+        &["HEAD~1", "HEAD"],
+        &String::from_utf8_lossy(&patch),
+    );
     apply_oracle_bytes(pre, &patch, expect);
 }
 
 /// Plain-Git fast-path byte cell: no `heddle init`; HEAD read via gix.
-fn plain_git_cell_bytes(
-    pre: &[Entry],
-    stage: bool,
-    mutate: impl Fn(&Path),
-    expect: &[Expect],
-) {
+fn plain_git_cell_bytes(pre: &[Entry], stage: bool, mutate: impl Fn(&Path), expect: &[Expect]) {
     let h = TempDir::new().unwrap();
     git_init(h.path());
     for entry in pre {
@@ -1203,7 +1210,10 @@ fn plain_git_non_utf8_symlink_add_round_trips() {
 #[test]
 fn native_non_utf8_symlink_delete_round_trips() {
     native_cell_bytes(
-        &[symlink_bytes("doomed", NON_UTF8_TARGET), normal("keep.txt", "keep\n")],
+        &[
+            symlink_bytes("doomed", NON_UTF8_TARGET),
+            normal("keep.txt", "keep\n"),
+        ],
         |dir| std::fs::remove_file(dir.join("doomed")).unwrap(),
         &[
             Expect::Absent("doomed"),
@@ -1216,7 +1226,10 @@ fn native_non_utf8_symlink_delete_round_trips() {
 #[test]
 fn state_non_utf8_symlink_delete_round_trips() {
     state_cell_bytes(
-        &[symlink_bytes("doomed", NON_UTF8_TARGET), normal("keep.txt", "keep\n")],
+        &[
+            symlink_bytes("doomed", NON_UTF8_TARGET),
+            normal("keep.txt", "keep\n"),
+        ],
         |dir| std::fs::remove_file(dir.join("doomed")).unwrap(),
         &[
             Expect::Absent("doomed"),
@@ -1229,7 +1242,10 @@ fn state_non_utf8_symlink_delete_round_trips() {
 #[test]
 fn plain_git_non_utf8_symlink_delete_round_trips() {
     plain_git_cell_bytes(
-        &[symlink_bytes("doomed", NON_UTF8_TARGET), normal("keep.txt", "keep\n")],
+        &[
+            symlink_bytes("doomed", NON_UTF8_TARGET),
+            normal("keep.txt", "keep\n"),
+        ],
         true,
         |dir| std::fs::remove_file(dir.join("doomed")).unwrap(),
         &[
@@ -1341,7 +1357,10 @@ fn native_regular_to_symlink_rename_candidate_stays_split() {
 #[test]
 fn state_regular_to_symlink_rename_candidate_stays_split() {
     state_cell(
-        &[normal("mover.txt", "dest/dir/file"), normal("keep.txt", "keep\n")],
+        &[
+            normal("mover.txt", "dest/dir/file"),
+            normal("keep.txt", "keep\n"),
+        ],
         |dir| {
             std::fs::remove_file(dir.join("mover.txt")).unwrap();
             write_entry(dir, &symlink("linked", "dest/dir/file"));
@@ -1361,7 +1380,10 @@ fn state_regular_to_symlink_rename_candidate_stays_split() {
 #[test]
 fn state_symlink_to_regular_rename_candidate_stays_split() {
     state_cell(
-        &[symlink("mover", "dest/dir/file"), normal("keep.txt", "keep\n")],
+        &[
+            symlink("mover", "dest/dir/file"),
+            normal("keep.txt", "keep\n"),
+        ],
         |dir| {
             std::fs::remove_file(dir.join("mover")).unwrap();
             write_entry(dir, &normal("landed.txt", "dest/dir/file"));
@@ -1436,7 +1458,10 @@ fn cross_type_rename_candidate_renders_as_split_not_rename() {
         "cross-type move must render as delete(100644) + add(120000):\n{patch}"
     );
     apply_oracle(
-        &[normal("mover.txt", "dest/dir/file"), normal("keep.txt", "keep\n")],
+        &[
+            normal("mover.txt", "dest/dir/file"),
+            normal("keep.txt", "keep\n"),
+        ],
         &patch,
         &[
             Expect::Absent("mover.txt"),
@@ -1453,7 +1478,10 @@ fn cross_type_rename_candidate_renders_as_split_not_rename() {
 #[test]
 fn plain_git_regular_to_symlink_rename_candidate_stays_split() {
     plain_git_cell(
-        &[normal("mover.txt", "dest/dir/file"), normal("keep.txt", "keep\n")],
+        &[
+            normal("mover.txt", "dest/dir/file"),
+            normal("keep.txt", "keep\n"),
+        ],
         true,
         |dir| {
             std::fs::remove_file(dir.join("mover.txt")).unwrap();
@@ -1560,7 +1588,10 @@ fn native_symlink_to_symlink_same_target_round_trips() {
 #[test]
 fn state_symlink_to_symlink_same_target_round_trips() {
     state_cell(
-        &[symlink("mover", "shared/target/path"), normal("keep.txt", "keep\n")],
+        &[
+            symlink("mover", "shared/target/path"),
+            normal("keep.txt", "keep\n"),
+        ],
         |dir| {
             std::fs::remove_file(dir.join("mover")).unwrap();
             write_entry(dir, &symlink("moved", "shared/target/path"));
@@ -1582,7 +1613,10 @@ fn state_symlink_to_symlink_same_target_round_trips() {
 #[test]
 fn native_symlink_to_regular_rename_candidate_stays_split() {
     native_cell(
-        &[symlink("mover", "dest/dir/file"), normal("keep.txt", "keep\n")],
+        &[
+            symlink("mover", "dest/dir/file"),
+            normal("keep.txt", "keep\n"),
+        ],
         |dir| {
             std::fs::remove_file(dir.join("mover")).unwrap();
             write_entry(dir, &normal("landed.txt", "dest/dir/file"));
@@ -1699,7 +1733,10 @@ fn status_regular_to_symlink_rename_candidate_stays_split() {
 #[test]
 fn state_status_regular_to_symlink_rename_candidate_stays_split() {
     let renders = state_status_renders(
-        &[normal("mover.txt", "dest/dir/file"), normal("keep.txt", "keep\n")],
+        &[
+            normal("mover.txt", "dest/dir/file"),
+            normal("keep.txt", "keep\n"),
+        ],
         |dir| {
             std::fs::remove_file(dir.join("mover.txt")).unwrap();
             write_entry(dir, &symlink("linked", "dest/dir/file"));
@@ -1718,7 +1755,10 @@ fn state_status_regular_to_symlink_rename_candidate_stays_split() {
 #[test]
 fn status_symlink_to_regular_rename_candidate_stays_split() {
     let renders = status_renders(
-        &[symlink("mover_link", "dest/dir/file"), normal("keep.txt", "keep\n")],
+        &[
+            symlink("mover_link", "dest/dir/file"),
+            normal("keep.txt", "keep\n"),
+        ],
         |dir| {
             std::fs::remove_file(dir.join("mover_link")).unwrap();
             write_entry(dir, &normal("newreg.txt", "dest/dir/file"));
@@ -1732,7 +1772,10 @@ fn status_symlink_to_regular_rename_candidate_stays_split() {
 #[test]
 fn state_status_symlink_to_regular_rename_candidate_stays_split() {
     let renders = state_status_renders(
-        &[symlink("mover_link", "dest/dir/file"), normal("keep.txt", "keep\n")],
+        &[
+            symlink("mover_link", "dest/dir/file"),
+            normal("keep.txt", "keep\n"),
+        ],
         |dir| {
             std::fs::remove_file(dir.join("mover_link")).unwrap();
             write_entry(dir, &normal("newreg.txt", "dest/dir/file"));
@@ -1749,13 +1792,10 @@ fn state_status_symlink_to_regular_rename_candidate_stays_split() {
 #[test]
 fn status_regular_to_exec_move_still_collapses_to_rename() {
     let body = "alpha\nbeta\ngamma\ndelta\nepsilon\n";
-    let renders = status_renders(
-        &[normal("old.sh", body)],
-        |dir| {
-            std::fs::remove_file(dir.join("old.sh")).unwrap();
-            write_entry(dir, &exec("new.sh", body));
-        },
-    );
+    let renders = status_renders(&[normal("old.sh", body)], |dir| {
+        std::fs::remove_file(dir.join("old.sh")).unwrap();
+        write_entry(dir, &exec("new.sh", body));
+    });
     assert!(
         renders.stat.contains("renamed") && renders.stat.contains("old.sh -> new.sh"),
         "--stat must show the regular→exec move as a rename:\n{}",
@@ -1791,7 +1831,10 @@ fn status_regular_to_exec_move_still_collapses_to_rename() {
     apply_oracle(
         &[normal("old.sh", body)],
         &patch,
-        &[Expect::Absent("old.sh"), Expect::Present(exec("new.sh", body))],
+        &[
+            Expect::Absent("old.sh"),
+            Expect::Present(exec("new.sh", body)),
+        ],
     );
 }
 
@@ -1804,7 +1847,10 @@ fn status_regular_to_exec_move_still_collapses_to_rename() {
 #[test]
 fn status_same_path_regular_to_symlink_splits_not_modified() {
     let renders = status_renders(
-        &[normal("swap", "shared payload\n"), normal("anchor.txt", "shared payload\n")],
+        &[
+            normal("swap", "shared payload\n"),
+            normal("anchor.txt", "shared payload\n"),
+        ],
         |dir| {
             std::fs::remove_file(dir.join("swap")).unwrap();
             write_entry(dir, &symlink("swap", "anchor.txt"));
@@ -1820,7 +1866,11 @@ fn status_same_path_regular_to_symlink_splits_not_modified() {
     );
     // `--name-only` lists the path on both the delete and add halves.
     assert_eq!(
-        renders.name_only.lines().filter(|line| *line == "swap").count(),
+        renders
+            .name_only
+            .lines()
+            .filter(|line| *line == "swap")
+            .count(),
         2,
         "--name-only must list the split path twice (delete + add):\n{}",
         renders.name_only
@@ -1880,7 +1930,10 @@ fn git_overlay_status_renders(pre: &[Entry], mutate: impl Fn(&Path)) -> (StatusR
 #[test]
 fn git_overlay_status_symlink_to_regular_rename_candidate_stays_split() {
     let (renders, patch) = git_overlay_status_renders(
-        &[symlink("mover_link", "dest/dir/file"), normal("keep.txt", "keep\n")],
+        &[
+            symlink("mover_link", "dest/dir/file"),
+            normal("keep.txt", "keep\n"),
+        ],
         |dir| {
             std::fs::remove_file(dir.join("mover_link")).unwrap();
             write_entry(dir, &normal("newreg.txt", "dest/dir/file"));
@@ -1924,7 +1977,10 @@ fn dir_to_file_type_change_round_trips() {
     // replaced by a regular file `data`. git deletes `data/item.txt` and
     // adds the `data` file.
     native_cell(
-        &[normal("data/item.txt", "x\ny\n"), normal("keep.txt", "keep\n")],
+        &[
+            normal("data/item.txt", "x\ny\n"),
+            normal("keep.txt", "keep\n"),
+        ],
         |dir| {
             std::fs::remove_file(dir.join("data/item.txt")).unwrap();
             std::fs::remove_dir(dir.join("data")).unwrap();
@@ -1950,7 +2006,10 @@ fn regular_to_symlink_type_change_round_trips() {
     // `node` is a tracked regular file; it becomes a symlink. git represents
     // that as delete(100644 node) + add(120000 node -> target).
     native_cell(
-        &[normal("node", "real contents\n"), normal("keep.txt", "keep\n")],
+        &[
+            normal("node", "real contents\n"),
+            normal("keep.txt", "keep\n"),
+        ],
         |dir| {
             std::fs::remove_file(dir.join("node")).unwrap();
             write_entry(dir, &symlink("node", "some/target/path"));
@@ -1967,7 +2026,10 @@ fn regular_to_symlink_type_change_round_trips() {
 fn symlink_to_regular_type_change_round_trips() {
     // The mirror: a tracked symlink becomes a regular file.
     native_cell(
-        &[symlink("node", "some/target/path"), normal("keep.txt", "keep\n")],
+        &[
+            symlink("node", "some/target/path"),
+            normal("keep.txt", "keep\n"),
+        ],
         |dir| {
             std::fs::remove_file(dir.join("node")).unwrap();
             write_entry(dir, &normal("node", "now real contents\n"));
@@ -2032,7 +2094,10 @@ fn state_file_to_dir_type_change_round_trips() {
 #[test]
 fn state_dir_to_file_type_change_round_trips() {
     state_cell(
-        &[normal("data/item.txt", "x\ny\n"), normal("keep.txt", "keep\n")],
+        &[
+            normal("data/item.txt", "x\ny\n"),
+            normal("keep.txt", "keep\n"),
+        ],
         |dir| {
             std::fs::remove_file(dir.join("data/item.txt")).unwrap();
             std::fs::remove_dir(dir.join("data")).unwrap();
@@ -2049,7 +2114,10 @@ fn state_dir_to_file_type_change_round_trips() {
 #[test]
 fn state_regular_to_symlink_type_change_round_trips() {
     state_cell(
-        &[normal("node", "real contents\n"), normal("keep.txt", "keep\n")],
+        &[
+            normal("node", "real contents\n"),
+            normal("keep.txt", "keep\n"),
+        ],
         |dir| {
             std::fs::remove_file(dir.join("node")).unwrap();
             write_entry(dir, &symlink("node", "some/target/path"));
@@ -2065,7 +2133,10 @@ fn state_regular_to_symlink_type_change_round_trips() {
 #[test]
 fn state_symlink_to_regular_type_change_round_trips() {
     state_cell(
-        &[symlink("node", "some/target/path"), normal("keep.txt", "keep\n")],
+        &[
+            symlink("node", "some/target/path"),
+            normal("keep.txt", "keep\n"),
+        ],
         |dir| {
             std::fs::remove_file(dir.join("node")).unwrap();
             write_entry(dir, &normal("node", "now real contents\n"));
@@ -2315,7 +2386,10 @@ fn plain_git_regular_to_symlink_type_change_round_trips() {
     // regular → symlink in a plain-Git repo must split into delete(100644)
     // + add(120000), matching the heddle path's `expand_type_changes`.
     plain_git_cell(
-        &[normal("node", "real contents\n"), normal("keep.txt", "keep\n")],
+        &[
+            normal("node", "real contents\n"),
+            normal("keep.txt", "keep\n"),
+        ],
         false,
         |dir| {
             std::fs::remove_file(dir.join("node")).unwrap();
@@ -2332,7 +2406,10 @@ fn plain_git_regular_to_symlink_type_change_round_trips() {
 #[test]
 fn plain_git_symlink_to_regular_type_change_round_trips() {
     plain_git_cell(
-        &[symlink("node", "some/target/path"), normal("keep.txt", "keep\n")],
+        &[
+            symlink("node", "some/target/path"),
+            normal("keep.txt", "keep\n"),
+        ],
         false,
         |dir| {
             std::fs::remove_file(dir.join("node")).unwrap();
@@ -2395,7 +2472,10 @@ fn plain_git_dir_to_file_type_change_round_trips() {
     // is added (untracked). Neither lands in the modified set, so this guards
     // that the plain-Git add/delete ordering still round-trips.
     plain_git_cell(
-        &[normal("data/item.txt", "x\ny\n"), normal("keep.txt", "keep\n")],
+        &[
+            normal("data/item.txt", "x\ny\n"),
+            normal("keep.txt", "keep\n"),
+        ],
         false,
         |dir| {
             std::fs::remove_file(dir.join("data/item.txt")).unwrap();
@@ -2649,9 +2729,9 @@ fn merge_with_diff_json_carries_patch() {
         String::from_utf8_lossy(&out.stderr)
     );
     let parsed: Value = serde_json::from_slice(&out.stdout).expect("merge output should be JSON");
-    let patch = parsed["diff"]["patch"]
-        .as_str()
-        .unwrap_or_else(|| panic!("merge preview `.diff.patch` must be populated, not null: {parsed}"));
+    let patch = parsed["diff"]["patch"].as_str().unwrap_or_else(|| {
+        panic!("merge preview `.diff.patch` must be populated, not null: {parsed}")
+    });
     assert!(
         patch.contains("+feature") && patch.contains("new.txt"),
         "embedded patch must carry the incoming hunks:\n{patch}"
@@ -2693,17 +2773,13 @@ const NAME_POOL: &[&str] = &[
 /// line w/ or w/o trailing newline. ASCII-only so heddle never treats it
 /// as binary.
 fn content_strategy() -> impl Strategy<Value = String> {
-    (
-        proptest::collection::vec("[a-z]{1,6}", 0..5),
-        any::<bool>(),
-    )
-        .prop_map(|(lines, trailing)| {
-            let mut joined = lines.join("\n");
-            if !joined.is_empty() && trailing {
-                joined.push('\n');
-            }
-            joined
-        })
+    (proptest::collection::vec("[a-z]{1,6}", 0..5), any::<bool>()).prop_map(|(lines, trailing)| {
+        let mut joined = lines.join("\n");
+        if !joined.is_empty() && trailing {
+            joined.push('\n');
+        }
+        joined
+    })
 }
 
 fn tree_strategy() -> impl Strategy<Value = BTreeMap<String, String>> {

@@ -128,9 +128,11 @@ mod tests {
             })
         );
         assert!(VisibilityTierArg::Restricted.into_tier(None).is_err());
-        assert!(VisibilityTierArg::Restricted
-            .into_tier(Some("   ".to_string()))
-            .is_err());
+        assert!(
+            VisibilityTierArg::Restricted
+                .into_tier(Some("   ".to_string()))
+                .is_err()
+        );
     }
 
     #[test]

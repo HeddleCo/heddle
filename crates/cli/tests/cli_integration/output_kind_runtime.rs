@@ -14,11 +14,7 @@
 
 use std::fs;
 
-use objects::{
-    object::{Blob, ConflictSide, ConflictSymbol, StructuredConflict, SymbolAnchor},
-    store::ObjectStore,
-};
-use repo::{OutputFormat, RepoConfig, Repository};
+use repo::{OutputFormat, RepoConfig};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -81,23 +77,6 @@ fn heddle_stdout_json_allow_failure(args: &[&str], temp: &TempDir) -> Value {
         });
     serde_json::from_str(line)
         .unwrap_or_else(|err| panic!("heddle {argv:?} stdout line not JSON: {err}\n  line: {line}"))
-}
-
-fn heddle_stderr_json_allow_failure(args: &[&str], temp: &TempDir) -> Value {
-    let output = heddle_output(args, Some(temp.path()))
-        .unwrap_or_else(|err| panic!("heddle {args:?} failed to run: {err}"));
-    assert!(
-        !output.status.success(),
-        "heddle {args:?} should fail for this recovery-envelope fixture"
-    );
-    assert!(
-        output.stdout.is_empty(),
-        "error envelopes should stay on stderr, stdout={}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    serde_json::from_str(stderr.trim())
-        .unwrap_or_else(|err| panic!("heddle {args:?} stderr not JSON: {err}\n{stderr}"))
 }
 
 fn assert_output_kind(value: &Value, expected: &str) {
@@ -203,64 +182,22 @@ fn assert_schema_accepts_payload(schema: &Value, payload: &Value) {
         .unwrap_or_else(|err| panic!("published schema rejected payload: {err}\n{payload}"));
 }
 
-/// Detach HEAD onto the current state so `stack snapshot` follows the
-/// detached-HEAD branch (`for_stack(None)`) and yields the full repo
-/// projection. Without this, a fresh `heddle init` leaves HEAD attached
-/// to `main`, but `main` has no thread record — `for_stack("main")`
-/// returns `None` and the snapshot bails out instead of emitting JSON.
-fn detach_head(temp: &TempDir) {
-    let log = heddle_json(&["log", "--limit", "1"], temp);
-    let state = log["states"][0]["change_id"]
-        .as_str()
-        .expect("log JSON change_id")
-        .to_string();
-    heddle(&["goto", &state], Some(temp.path())).expect("goto state detaches HEAD");
-}
-
 #[test]
-fn stack_snapshot_emits_output_kind_alongside_flattened_snapshot() {
-    let temp = init_and_capture();
-    detach_head(&temp);
-    let value = heddle_json(&["stack", "snapshot"], &temp);
-    assert_output_kind(&value, "stack_snapshot");
-    // `#[serde(flatten)]` injects `output_kind` alongside the
-    // pre-existing `RepositorySnapshot` fields. Agents that already
-    // key off `version` / `stacks` / `threads` must keep seeing them
-    // at the top level — not nested under `snapshot`.
-    assert!(
-        value.get("version").is_some(),
-        "stack snapshot must keep `version` at the flat top level: {value}"
-    );
-    assert!(
-        value.get("stacks").and_then(|v| v.as_array()).is_some(),
-        "stack snapshot must keep `stacks` at the flat top level: {value}"
-    );
-    assert!(
-        value.get("threads").and_then(|v| v.as_array()).is_some(),
-        "stack snapshot must keep `threads` at the flat top level: {value}"
-    );
-    assert!(
-        value.get("snapshot").is_none(),
-        "stack snapshot must not wrap the snapshot under a `snapshot` field: {value}"
-    );
-}
-
-#[test]
-fn goto_emits_output_kind_with_target_metadata() {
+fn switch_emits_output_kind_with_target_metadata() {
     let temp = init_and_capture();
     capture_second(&temp);
-    let value = heddle_json(&["goto", "HEAD~1"], &temp);
-    assert_output_kind(&value, "goto");
+    let value = heddle_json(&["switch", "HEAD~1"], &temp);
+    assert_output_kind(&value, "thread_switch");
     assert!(
         value.get("target").and_then(|v| v.as_str()).is_some(),
-        "goto JSON must carry `target` state id: {value}"
+        "switch JSON must carry `target` state id: {value}"
     );
     assert!(
         value
             .get("message")
             .and_then(|v| v.as_str())
             .is_some_and(|m| m.starts_with("Now at: ")),
-        "goto JSON must carry the `message` field: {value}"
+        "switch JSON must carry the `message` field: {value}"
     );
 }
 
@@ -333,7 +270,7 @@ fn cherry_pick_no_commit_emits_output_kind() {
         .as_str()
         .expect("log --output json must expose change_id")
         .to_string();
-    heddle(&["goto", "HEAD~1"], Some(temp.path())).expect("goto back to seed");
+    heddle(&["switch", "HEAD~1"], Some(temp.path())).expect("goto back to seed");
 
     let value = heddle_json(&["cherry-pick", &feature_id, "--no-commit"], &temp);
     assert_output_kind(&value, "cherry_pick");
@@ -356,7 +293,7 @@ fn cherry_pick_commit_emits_output_kind_with_new_commit() {
         .as_str()
         .expect("log JSON change_id")
         .to_string();
-    heddle(&["goto", "HEAD~1"], Some(temp.path())).expect("goto back to seed");
+    heddle(&["switch", "HEAD~1"], Some(temp.path())).expect("goto back to seed");
 
     let value = heddle_json(&["cherry-pick", &feature_id], &temp);
     assert_output_kind(&value, "cherry_pick");
@@ -409,46 +346,47 @@ fn thread_promote_and_cleanup_emit_approved_thread_kinds() {
 }
 
 #[test]
-fn branch_rename_and_delete_advertised_thread_kinds_are_runtime_truths() {
+fn thread_rename_and_delete_advertised_thread_kinds_are_runtime_truths() {
     let temp = init_and_capture();
-    heddle(&["branch", "side"], Some(temp.path())).expect("branch side");
+    heddle(&["thread", "create", "side"], Some(temp.path())).expect("thread create side");
 
-    let rename = heddle_json(&["branch", "-m", "side", "renamed"], &temp);
+    let rename = heddle_json(&["thread", "rename", "side", "renamed"], &temp);
     assert_output_kind(&rename, "thread_rename");
 
-    let delete = heddle_json(&["branch", "-d", "renamed"], &temp);
+    let delete = heddle_json(&["thread", "drop", "renamed", "--delete-thread"], &temp);
     assert_output_kind(&delete, "thread_drop");
 }
 
 #[test]
-fn show_and_inspect_state_emit_distinct_output_kinds() {
+fn show_and_thread_show_emit_distinct_output_kinds() {
     let temp = init_and_capture();
 
     let show = heddle_json(&["show", "HEAD"], &temp);
     assert_output_kind(&show, "show");
 
-    let inspect_state = heddle_json(&["inspect", "HEAD"], &temp);
-    assert_output_kind(&inspect_state, "inspect_state");
-
-    let inspect_thread = heddle_json(&["inspect"], &temp);
-    assert_output_kind(&inspect_thread, "thread_show");
+    let thread = heddle_json(&["thread", "show"], &temp);
+    assert_output_kind(&thread, "thread_show");
 }
 
 #[test]
-fn inspect_schema_accepts_state_and_thread_show_payloads() {
+fn show_and_thread_show_schemas_accept_payloads() {
     let temp = init_and_capture();
-    let schema: Value = serde_json::from_str(
-        &heddle(&["schemas", "inspect"], Some(temp.path())).expect("schemas inspect"),
+    let show_schema: Value = serde_json::from_str(
+        &heddle(&["schemas", "show"], Some(temp.path())).expect("schemas show"),
     )
-    .expect("schemas inspect emits JSON schema");
+    .expect("schemas show emits JSON schema");
+    let thread_show_schema: Value = serde_json::from_str(
+        &heddle(&["schemas", "thread", "show"], Some(temp.path())).expect("schemas thread show"),
+    )
+    .expect("schemas thread show emits JSON schema");
 
-    let inspect_state = heddle_json(&["inspect", "HEAD"], &temp);
-    assert_output_kind(&inspect_state, "inspect_state");
-    assert_schema_accepts_payload(&schema, &inspect_state);
+    let show = heddle_json(&["show", "HEAD"], &temp);
+    assert_output_kind(&show, "show");
+    assert_schema_accepts_payload(&show_schema, &show);
 
-    let inspect_thread = heddle_json(&["inspect"], &temp);
-    assert_output_kind(&inspect_thread, "thread_show");
-    assert_schema_accepts_payload(&schema, &inspect_thread);
+    let thread = heddle_json(&["thread", "show"], &temp);
+    assert_output_kind(&thread, "thread_show");
+    assert_schema_accepts_payload(&thread_show_schema, &thread);
 }
 
 fn init_rebase_replay_fixture() -> TempDir {
@@ -605,22 +543,6 @@ fn recovery_path_family_output_kind_matches_invoked_verb() {
 }
 
 #[test]
-fn conflict_not_found_honors_repo_json_config_for_stored_and_active_merge() {
-    let stored = init_and_capture();
-    set_repo_output_format_json(&stored);
-    let stored_error = heddle_stderr_json_allow_failure(&["conflict", "show", "missing"], &stored);
-    assert_eq!(stored_error["kind"].as_str(), Some("conflict_not_found"));
-    assert_eq!(stored_error["exit_code"].as_u64(), Some(65));
-
-    let active_merge = init_active_merge_fixture();
-    set_repo_output_format_json(&active_merge);
-    let active_error =
-        heddle_stderr_json_allow_failure(&["conflict", "show", "missing"], &active_merge);
-    assert_eq!(active_error["kind"].as_str(), Some("conflict_not_found"));
-    assert_eq!(active_error["exit_code"].as_u64(), Some(65));
-}
-
-#[test]
 fn rebase_json_records_emit_progress_output_kind() {
     let temp = init_rebase_replay_fixture();
 
@@ -675,40 +597,6 @@ fn rebase_repo_json_config_without_output_flag_stays_text() {
             .all(|line| serde_json::from_str::<Value>(line).is_err()),
         "plain rebase under repo output.format=json must not emit JSONL: {output}"
     );
-}
-
-#[test]
-fn conflict_show_stored_conflict_emits_output_kind() {
-    let temp = init_and_capture();
-    let repo = Repository::open(temp.path()).expect("open repo");
-    let head = repo
-        .current_state()
-        .expect("read current state")
-        .expect("current state exists");
-
-    let conflict = ConflictSymbol {
-        id: "stored-1".to_string(),
-        anchor: SymbolAnchor::new("main.rs", "main"),
-        base: ConflictSide::from_body(Some(head.change_id), "fn main() {}\n"),
-        ours: ConflictSide::from_body(Some(head.change_id), "fn main() { ours(); }\n"),
-        theirs: ConflictSide::from_body(Some(head.change_id), "fn main() { theirs(); }\n"),
-        candidate_resolutions: Vec::new(),
-    };
-    let structured = StructuredConflict::new(vec![conflict]);
-    let blob_hash = repo
-        .store()
-        .put_blob(&Blob::new(structured.encode().expect("encode conflict")))
-        .expect("store structured conflict blob");
-    let updated = head.with_structured_conflicts(blob_hash);
-    repo.store()
-        .put_state(&updated)
-        .expect("overwrite head state");
-
-    let value = heddle_json(&["conflict", "show", "stored-1"], &temp);
-    assert_output_kind(&value, "conflict_show");
-    assert_eq!(value["kind"].as_str(), Some("stored_structured_conflict"));
-    assert_eq!(value["id"].as_str(), Some("stored-1"));
-    assert_eq!(value["anchor"]["file"].as_str(), Some("main.rs"));
 }
 
 #[test]
@@ -811,7 +699,9 @@ fn purge_apply_emits_output_kind() {
     .expect("redact apply");
 
     let value = heddle_json(
-        &["purge", "apply", &state, "--path", "main.rs", "--force"],
+        &[
+            "redact", "purge", "apply", &state, "--path", "main.rs", "--force",
+        ],
         &temp,
     );
     assert_output_kind(&value, "purge_apply");
@@ -1067,39 +957,17 @@ fn purge_list_envelope_includes_recent_apply() {
     )
     .expect("redact apply");
     heddle(
-        &["purge", "apply", &state, "--path", "main.rs", "--force"],
+        &[
+            "redact", "purge", "apply", &state, "--path", "main.rs", "--force",
+        ],
         Some(temp.path()),
     )
     .expect("purge apply");
 
-    let value = heddle_json(&["purge", "list"], &temp);
+    let value = heddle_json(&["redact", "purge", "list"], &temp);
     assert_output_kind(&value, "purge_list");
     assert!(
         value["count"].as_u64().is_some_and(|n| n >= 1),
         "purge list after purge apply must show at least one entry: {value}"
     );
-}
-
-#[test]
-fn stack_snapshot_text_mode_still_emits_envelope_with_output_kind() {
-    // Text mode pretty-prints the envelope (the snapshot is
-    // structured data by definition). The discriminator must still
-    // ride on top so agents that read text output during interactive
-    // sessions can still route on it.
-    let temp = init_and_capture();
-    detach_head(&temp);
-    let output = heddle_output(
-        &["--output", "text", "stack", "snapshot"],
-        Some(temp.path()),
-    )
-    .expect("invoke stack snapshot text");
-    assert!(
-        output.status.success(),
-        "stack snapshot text must succeed: stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let value: Value = serde_json::from_str(stdout.trim())
-        .unwrap_or_else(|err| panic!("text stack snapshot must be valid JSON: {err}\n{stdout}"));
-    assert_output_kind(&value, "stack_snapshot");
 }

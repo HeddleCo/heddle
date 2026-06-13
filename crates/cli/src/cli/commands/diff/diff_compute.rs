@@ -282,14 +282,17 @@ pub fn cmd_diff(
                     change.kind
                 };
                 let diff_result = if let Some(ref tree) = to_tree {
-                    get_state_diff(&repo, from_tree.as_ref(), tree, &change.path, &effective_kind)
+                    get_state_diff(
+                        &repo,
+                        from_tree.as_ref(),
+                        tree,
+                        &change.path,
+                        &effective_kind,
+                    )
                 } else {
                     get_worktree_diff(&repo, from_tree.as_ref(), &change.path, &effective_kind)
                 };
-                let binary = diff_result
-                    .as_ref()
-                    .err()
-                    .is_some_and(is_binary_diff_error);
+                let binary = diff_result.as_ref().err().is_some_and(is_binary_diff_error);
                 let (raw_lines, eol) = match diff_result {
                     Ok((lines, eol)) => (Some(lines), eol),
                     Err(_) => (None, FileEolState::default()),
@@ -623,8 +626,7 @@ fn plain_git_file_changes_with_hunks(
     // state as a single modify (HEAD content -> worktree content), so we
     // coalesce here.
     let added_set: BTreeSet<&Path> = probe.changes.added.iter().map(PathBuf::as_path).collect();
-    let deleted_set: BTreeSet<&Path> =
-        probe.changes.deleted.iter().map(PathBuf::as_path).collect();
+    let deleted_set: BTreeSet<&Path> = probe.changes.deleted.iter().map(PathBuf::as_path).collect();
 
     let mut changes = Vec::with_capacity(probe.changes.change_count());
     for path in &probe.changes.modified {
@@ -718,14 +720,15 @@ fn plain_git_file_change(
         DiffKind::Modified => (old_mode, worktree_file_mode(&root.join(path))),
         DiffKind::Unchanged => (None, None),
     };
-    let (lines, eol, binary) = compute_plain_git_hunks(
+    let (lines, eol, binary) =
+        compute_plain_git_hunks(old_blob.as_ref(), new_blob.as_ref(), &diff_kind, unified);
+    let symlink = symlink_change_from_blobs(
+        kind,
         old_blob.as_ref(),
+        old_mode_field,
         new_blob.as_ref(),
-        &diff_kind,
-        unified,
+        mode,
     );
-    let symlink =
-        symlink_change_from_blobs(kind, old_blob.as_ref(), old_mode_field, new_blob.as_ref(), mode);
     Ok(FileChange {
         path: path.display().to_string(),
         kind: kind.to_string(),
@@ -885,9 +888,7 @@ fn compute_plain_git_hunks(
     };
     match attempt() {
         Ok((lines, eol)) => (Some(unified_hunks(lines, unified, &eol)), eol, false),
-        Err(error) if is_binary_diff_error(&error) => {
-            (None, FileEolState::default(), true)
-        }
+        Err(error) if is_binary_diff_error(&error) => (None, FileEolState::default(), true),
         Err(_) => (None, FileEolState::default(), false),
     }
 }
@@ -1104,8 +1105,9 @@ fn build_worktree_change(
         // body, matching git's behaviour for transient races.
         Err(_) => (None, FileEolState::default(), false),
     };
-    let symlink =
-        symlink_change_for_paths(repo, from_tree, None, kind, path_str, path_str, old_mode, mode);
+    let symlink = symlink_change_for_paths(
+        repo, from_tree, None, kind, path_str, path_str, old_mode, mode,
+    );
     FileChange {
         path: path_str.to_string(),
         kind: kind.to_string(),
@@ -1321,9 +1323,9 @@ fn make_type_change_part(
         return make_status_only_change(Some(repo), from_tree, to_tree, path_str, &kind);
     }
     match to_tree {
-        Some(to_tree) => {
-            build_state_change(repo, from_tree, to_tree, path_str, &kind, diff_kind, unified)
-        }
+        Some(to_tree) => build_state_change(
+            repo, from_tree, to_tree, path_str, &kind, diff_kind, unified,
+        ),
         None => build_worktree_change(repo, from_tree, path_str, &kind, diff_kind, unified),
     }
 }
@@ -1341,7 +1343,8 @@ fn build_state_change(
     unified: usize,
 ) -> FileChange {
     let (old_mode, mode) = change_file_modes(repo, from_tree, Some(to_tree), path_str, kind);
-    let (lines, eol, binary) = match get_state_diff(repo, from_tree, to_tree, path_str, &diff_kind) {
+    let (lines, eol, binary) = match get_state_diff(repo, from_tree, to_tree, path_str, &diff_kind)
+    {
         Ok((raw, eol)) => (Some(unified_hunks(raw, unified, &eol)), eol, false),
         Err(error) if is_binary_diff_error(&error) => (None, FileEolState::default(), true),
         Err(_) => (None, FileEolState::default(), false),
@@ -2113,7 +2116,14 @@ fn detect_clear_renames_for_worktree_status(
     } else {
         None
     };
-    detect_clear_renames(&repo, from_tree.as_ref(), None, changes, include_lines, unified)
+    detect_clear_renames(
+        &repo,
+        from_tree.as_ref(),
+        None,
+        changes,
+        include_lines,
+        unified,
+    )
 }
 
 fn detect_clear_renames(
@@ -2316,7 +2326,10 @@ fn rename_lines(
         .iter()
         .map(|line| LineDiff::new(line.prefix(), line.content()))
         .collect();
-    Ok(Some((unified_hunks(number_lines(lines), unified, &eol), eol)))
+    Ok(Some((
+        unified_hunks(number_lines(lines), unified, &eol),
+        eol,
+    )))
 }
 
 fn blob_from_tree(repo: &Repository, tree: Option<&Tree>, path: &str) -> Result<Option<Blob>> {
@@ -2842,7 +2855,10 @@ mod tests {
             "added function body should remain after display trim: {display:?}"
         );
         assert_eq!(
-            display.iter().find(|line| line.prefix == "@").map(|l| l.content.as_str()),
+            display
+                .iter()
+                .find(|line| line.prefix == "@")
+                .map(|l| l.content.as_str()),
             Some("@ -1,2 +1,4 @@"),
             "display trim must not rewrite the `@@` header: {display:?}"
         );

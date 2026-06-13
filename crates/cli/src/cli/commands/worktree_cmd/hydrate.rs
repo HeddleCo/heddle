@@ -307,7 +307,10 @@ mod tests {
                 .is_symlink(),
             "node_modules should be a symlink"
         );
-        assert_eq!(std::fs::read_link(&nm).unwrap(), origin.join("node_modules"));
+        assert_eq!(
+            std::fs::read_link(&nm).unwrap(),
+            origin.join("node_modules")
+        );
         // The pre-existing .venv stayed a real directory (not clobbered).
         assert!(
             !std::fs::symlink_metadata(checkout.join(".venv"))
@@ -365,6 +368,9 @@ mod tests {
             std::fs::symlink_metadata(checkout.join("node_modules")).is_err(),
             "a directory symlink must be removed on rollback (remove_dir, not remove_file)"
         );
-        assert!(origin.join("node_modules").is_dir(), "the link target must survive");
+        assert!(
+            origin.join("node_modules").is_dir(),
+            "the link target must survive"
+        );
     }
 }

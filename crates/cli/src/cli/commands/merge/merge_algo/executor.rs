@@ -414,7 +414,10 @@ fn format_conflict_content(
     .into_bytes()
 }
 
-fn build_nested_tree(store: &impl ObjectStore, flat: &HashMap<String, ContentHash>) -> Result<Tree> {
+fn build_nested_tree(
+    store: &impl ObjectStore,
+    flat: &HashMap<String, ContentHash>,
+) -> Result<Tree> {
     let mut top_files = Vec::new();
     let mut subdirs: HashMap<String, HashMap<String, ContentHash>> = HashMap::new();
 

@@ -22,6 +22,7 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     git_overlay_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
+    marker::cmd_thread_marker,
     mount_lifecycle,
     next_action::normalized_action,
     operator_core::{OperatorAction, OperatorCommandOutput},
@@ -259,6 +260,7 @@ pub async fn cmd_thread(cli: &Cli, command: ThreadCommands) -> Result<()> {
         ThreadCommands::Cd { name } => cmd_thread_cd(&repo, name),
         ThreadCommands::List(args) => cmd_thread_list(cli, &repo, args),
         ThreadCommands::Cleanup(args) => cmd_thread_cleanup(cli, &repo, args),
+        ThreadCommands::Marker { command } => cmd_thread_marker(cli, &repo, command),
         ThreadCommands::Show(args) => {
             if args.watch {
                 let thread = resolve_thread_name_or_current(
@@ -690,13 +692,7 @@ fn thread_refresh_conflicted_advice(
         )
     };
     let repo_arg = quote_recommended_action_arg(&conflict_repo.display().to_string());
-    let conflict_list_command = format!("heddle --repo {repo_arg} conflict list");
-    let first_conflict_command = paths.first().map(|path| {
-        format!(
-            "heddle --repo {repo_arg} conflict show {}",
-            quote_recommended_action_arg(path)
-        )
-    });
+    let conflict_list_command = format!("heddle --repo {repo_arg} resolve --list");
     let resolve_command = paths.first().map(|path| {
         format!(
             "heddle --repo {repo_arg} resolve {}",
@@ -707,9 +703,6 @@ fn thread_refresh_conflicted_advice(
     let preview_command = super::thread_landing::merge_preview_command(thread_id);
 
     let mut recovery_commands = vec![conflict_list_command.clone()];
-    if let Some(show) = first_conflict_command.clone() {
-        recovery_commands.push(show);
-    }
     if let Some(resolve) = resolve_command.clone() {
         recovery_commands.push(resolve);
     }

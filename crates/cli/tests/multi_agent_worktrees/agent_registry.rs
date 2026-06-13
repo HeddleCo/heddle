@@ -28,7 +28,7 @@ fn start_registers_thread_with_agent_metadata() {
 
     let inspect: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "inspect", "feature/spawned"],
+            &["--output", "json", "thread", "show", "feature/spawned"],
             Some(main.path()),
         )
         .unwrap(),
@@ -93,7 +93,7 @@ fn inspect_reflects_thread_provider_and_model() {
 
     let inspect: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "inspect", "feature/attributed"],
+            &["--output", "json", "thread", "show", "feature/attributed"],
             Some(main.path()),
         )
         .unwrap(),
@@ -346,7 +346,7 @@ fn actor_spawn_no_thread_on_detached_head_fails_cleanly() {
     // detaches HEAD (no current thread to attach an actor to).
     fs::write(main.path().join("base.txt"), "base updated").unwrap();
     heddle(&["capture", "-m", "second"], Some(main.path())).unwrap();
-    heddle(&["goto", "HEAD~1"], Some(main.path())).unwrap();
+    heddle(&["switch", "HEAD~1"], Some(main.path())).unwrap();
 
     let before: Value = serde_json::from_str(
         &heddle(&["--output", "json", "thread", "list"], Some(main.path())).unwrap(),

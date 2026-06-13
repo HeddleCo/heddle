@@ -16,7 +16,7 @@ fn test_blame_large_file_performance() {
     assert_performance(
         "blame large file",
         || {
-            let _ = heddle(&["blame", "large.txt"], Some(temp.path()));
+            let _ = heddle(&["query", "--attribution", "large.txt"], Some(temp.path()));
         },
         Duration::from_secs(2),
     );
@@ -31,7 +31,7 @@ fn test_blame_binary_file() {
     fs::write(temp.path().join("binary.bin"), binary_content).unwrap();
     heddle(&["capture", "-m", "Binary"], Some(temp.path())).unwrap();
 
-    let result = heddle(&["blame", "binary.bin"], Some(temp.path()));
+    let result = heddle(&["query", "--attribution", "binary.bin"], Some(temp.path()));
     assert!(result.is_ok() || result.unwrap_err().contains("binary"));
 }
 
@@ -40,7 +40,10 @@ fn test_blame_nonexistent_file() {
     let temp = TempDir::new().unwrap();
     setup_repo_with_file(&temp, "file.txt", "content");
 
-    let result = heddle(&["blame", "nonexistent.txt"], Some(temp.path()));
+    let result = heddle(
+        &["query", "--attribution", "nonexistent.txt"],
+        Some(temp.path()),
+    );
     assert!(result.is_err(), "blame of nonexistent file should fail");
 }
 
@@ -52,7 +55,7 @@ fn test_blame_empty_file() {
     fs::write(temp.path().join("empty.txt"), "").unwrap();
     heddle(&["capture", "-m", "Empty"], Some(temp.path())).unwrap();
 
-    let result = heddle(&["blame", "empty.txt"], Some(temp.path()));
+    let result = heddle(&["query", "--attribution", "empty.txt"], Some(temp.path()));
     assert!(
         result.is_ok(),
         "blame of empty file should succeed: {:?}",
@@ -69,10 +72,10 @@ fn test_blame_json_attribution_is_structured() {
     heddle(&["capture", "-m", "First line"], Some(temp.path())).unwrap();
 
     let output = heddle(
-        &["--output", "json", "blame", "tracked.txt"],
+        &["--output", "json", "query", "--attribution", "tracked.txt"],
         Some(temp.path()),
     )
-    .expect("blame --output json should succeed");
+    .expect("query --attribution --output json should succeed");
     let v: Value = serde_json::from_str(&output).expect("blame should emit JSON");
 
     let line = &v["lines"][0];
@@ -123,10 +126,10 @@ fn test_blame_json_agent_is_structured_object() {
     .unwrap();
 
     let output = heddle(
-        &["--output", "json", "blame", "tracked.txt"],
+        &["--output", "json", "query", "--attribution", "tracked.txt"],
         Some(temp.path()),
     )
-    .expect("blame --output json should succeed");
+    .expect("query --attribution --output json should succeed");
     let v: Value = serde_json::from_str(&output).expect("blame should emit JSON");
 
     let agent = &v["lines"][0]["agent"];
@@ -154,7 +157,10 @@ fn test_blame_multiple_commits_attribution() {
     fs::write(temp.path().join("tracked.txt"), "line 1\nmodified 2\n").unwrap();
     heddle(&["capture", "-m", "Modified second"], Some(temp.path())).unwrap();
 
-    let result = heddle(&["blame", "tracked.txt"], Some(temp.path()));
+    let result = heddle(
+        &["query", "--attribution", "tracked.txt"],
+        Some(temp.path()),
+    );
     assert!(result.is_ok(), "blame failed: {:?}", result.err());
 
     let output = result.unwrap();

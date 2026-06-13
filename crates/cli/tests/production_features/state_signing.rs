@@ -70,17 +70,6 @@ fn authored_commands_auto_sign_their_states() {
         assert_head_signed(temp.path(), "capture");
     }
 
-    // fork (creates a new authored state on a new thread)
-    {
-        let temp = TempDir::new().unwrap();
-        let home = TempDir::new().unwrap();
-        heddle_signed(&["init"], temp.path(), home.path()).unwrap();
-        fs::write(temp.path().join("f.txt"), "x").unwrap();
-        heddle_signed(&["capture", "-m", "base"], temp.path(), home.path()).unwrap();
-        heddle_signed(&["fork", "--name", "explore"], temp.path(), home.path()).unwrap();
-        assert_head_signed(temp.path(), "fork");
-    }
-
     // collapse (squash two states into one authored state)
     {
         let temp = TempDir::new().unwrap();

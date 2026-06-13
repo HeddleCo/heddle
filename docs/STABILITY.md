@@ -246,7 +246,7 @@ maintainer, written before this gate fires.
 
 <TBD: maintainer> — no soak harness exists today. Proposed: a
 **24-hour** soak that runs `heddle commit` / `heddle undo` /
-`heddle redo` in a loop against a synthetic
+`heddle undo --redo` in a loop against a synthetic
 repository, asserts that no `fsck` errors appear at the end, asserts
 that the oplog is replayable from zero, and asserts that
 `heddle maintenance gc --prune` does not delete anything reachable.

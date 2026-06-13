@@ -528,7 +528,7 @@ fn thread_resolve_conflict_recovery_operator(
     }
     let unresolved = source_repo.merge_state_manager().unresolved()?;
     let repo_arg = shell_quote(&source_repo.root().display().to_string());
-    let conflict_list_command = format!("heddle --repo {repo_arg} conflict list");
+    let conflict_list_command = format!("heddle --repo {repo_arg} resolve --list");
     let recommended_action = unresolved
         .first()
         .map(|path| format!("heddle --repo {repo_arg} resolve {}", shell_quote(path)))

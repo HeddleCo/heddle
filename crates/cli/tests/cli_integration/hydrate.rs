@@ -193,10 +193,8 @@ fn hydrate_does_not_dirty_a_tracked_heddleignore() {
     );
 
     // The dep-ignore rule landed in the worktree-local, never-captured exclude.
-    let exclude = std::fs::read_to_string(
-        thread_path.join(".heddle").join("info").join("exclude"),
-    )
-    .expect("hydrate should write the worktree-local exclude");
+    let exclude = std::fs::read_to_string(thread_path.join(".heddle").join("info").join("exclude"))
+        .expect("hydrate should write the worktree-local exclude");
     assert!(
         exclude.contains("node_modules"),
         "the dep-ignore rule must live in the worktree-local exclude; got:\n{exclude}"
@@ -605,7 +603,10 @@ fn start_partial_materialize_preserves_preexisting_empty_dir() {
             thread_path.display()
         )
     });
-    assert!(meta.is_dir(), "the pre-existing target must remain a directory");
+    assert!(
+        meta.is_dir(),
+        "the pre-existing target must remain a directory"
+    );
     let remaining: Vec<_> = std::fs::read_dir(&thread_path)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())

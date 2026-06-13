@@ -15,7 +15,7 @@ use super::{
     collapse::{CollapsePublishedRef, collapse_resolved_states},
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     merge::{build_thread_preview_report, merge_thread_into_current},
-    next_action::{NextActionValidationContext, write_command_json, write_full_command_json},
+    next_action::{NextActionValidationContext, write_command_json},
     operator_core::{
         OperatorAction, OperatorCommandOutput, VerificationClaimPolicy,
         exit_if_blocked_operator_status,
@@ -23,7 +23,6 @@ use super::{
     operator_loop::primary_next_action,
     ready_cmd::worktree_dirty,
     snapshot::{SnapshotAgentOverrides, create_snapshot},
-    thread::start_thread,
     thread_cmd::{
         current_thread, load_thread, refresh_thread, thread_manager, thread_not_found_advice,
     },
@@ -31,8 +30,8 @@ use super::{
 };
 use crate::{
     cli::{
-        Cli, ThreadStartArgs, WorkspaceModeArg,
-        cli_args::{DelegateArgs, LandArgs, SyncArgs},
+        Cli,
+        cli_args::{LandArgs, SyncArgs},
         output_is_compact, should_output_json, style, worktree_status_options,
     },
     config::UserConfig,
@@ -69,21 +68,6 @@ struct LandOutput {
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
     chosen_path: String,
-}
-
-#[derive(Serialize)]
-struct DelegatedThreadOutput {
-    name: String,
-    task: String,
-    path: Option<String>,
-    execution_path: Option<String>,
-}
-
-#[derive(Serialize)]
-struct DelegateOutput {
-    parent_thread: String,
-    delegated: Vec<DelegatedThreadOutput>,
-    message: String,
 }
 
 pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
@@ -1015,196 +999,6 @@ fn land_checkpoint_message(repo: &Repository, thread: &Thread, explicit: Option<
     format!("Land {}", thread.id)
 }
 
-pub fn cmd_delegate(cli: &Cli, args: DelegateArgs) -> Result<()> {
-    let repo = cli.open_repo()?;
-    warn_if_path_prefix_inside_repo(&repo, args.path_prefix.as_deref());
-    let parent = resolve_parent_thread(&repo, args.parent.as_deref())?;
-
-    // Warm the canonical loose-uncompressed store for the parent
-    // state once, before we materialize it into N child worktrees.
-    // The first child would otherwise pay
-    // `decompress + atomic write` per blob (lazy promotion inside
-    // `materialize_blob`), and only worktrees 2..N would hardlink.
-    // A single warm pass amortizes promotion cost across all N
-    // children in the common N-agents-on-the-same-parent case.
-    //
-    // Failures are non-fatal: the lazy path inside
-    // `materialize_blob` will still promote on demand, and an empty
-    // or partially-warm store just means the first materialize pays
-    // promotion cost for any blobs we missed.
-    if args.tasks.len() > 1 {
-        let parent_state_spec = parent
-            .current_state
-            .clone()
-            .unwrap_or_else(|| parent.base_state.clone());
-        match repo
-            .resolve_state(&parent_state_spec)
-            .ok()
-            .and_then(|opt| opt)
-        {
-            Some(parent_state_id) => match repo.warm_canonical_store_for_state(&parent_state_id) {
-                Ok(stats) => {
-                    tracing::debug!(
-                        promoted = stats.promoted,
-                        already_loose = stats.already_loose,
-                        errors = stats.errors,
-                        "Warmed canonical store before delegate fan-out"
-                    );
-                }
-                Err(err) => {
-                    tracing::debug!(
-                        ?err,
-                        "Warm canonical store failed; falling back to lazy promotion in materialize"
-                    );
-                }
-            },
-            None => {
-                tracing::debug!(
-                    parent_state = %parent_state_spec,
-                    "Could not resolve parent state for warm pass; falling back to lazy promotion"
-                );
-            }
-        }
-    }
-
-    // Pre-flight: when two specs collapse to the same slug (e.g.
-    // racing three agents on a "modulo" task with all three entries
-    // labelled "modulo:..."), `start_thread` would refuse the duplicate
-    // thread name halfway through and leave a partial workspace
-    // behind. Disambiguate by suffixing the slug with the provider
-    // when collisions exist. Pure heads-up logic — no behavior change
-    // for the single-agent-per-task case.
-    let mut slug_counts: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    for spec in &args.tasks {
-        *slug_counts.entry(slugify(&spec.task)).or_insert(0) += 1;
-    }
-
-    let delegated = args
-        .tasks
-        .iter()
-        .map(|spec| {
-            let base_slug = slugify(&spec.task);
-            let slug = if slug_counts.get(&base_slug).copied().unwrap_or(0) > 1 {
-                match spec.provider.as_deref() {
-                    Some(provider) => format!("{base_slug}-{}", slugify(provider)),
-                    None => base_slug.clone(),
-                }
-            } else {
-                base_slug
-            };
-            let name = format!("{}/{}", parent.id, slug);
-            let path = args.path_prefix.as_ref().map(|prefix| prefix.join(&slug));
-
-            // Per-spec agent override wins; fall back to the
-            // command-wide default (`--agent-provider`/`--agent-model`).
-            let agent_provider = spec
-                .provider
-                .clone()
-                .or_else(|| args.agent_provider.clone());
-            let agent_model = spec.model.clone().or_else(|| args.agent_model.clone());
-
-            let output = start_thread(
-                &repo,
-                ThreadStartArgs {
-                    name: name.clone(),
-                    from: Some(
-                        parent
-                            .current_state
-                            .clone()
-                            .unwrap_or(parent.base_state.clone()),
-                    ),
-                    path,
-                    workspace: args.workspace.unwrap_or(WorkspaceModeArg::Auto),
-                    agent_provider,
-                    agent_model,
-                    task: Some(spec.task.clone()),
-                    parent_thread: Some(parent.id.clone()),
-                    automated: true,
-                    print_cd_path: false,
-                    // Delegated children inherit the in-process mount path
-                    // explicitly: spawning a `heddled` daemon as a side
-                    // effect of `heddle delegate` would surprise the
-                    // caller (delegate is mostly used with materialized /
-                    // lightweight workspaces anyway). If a future caller
-                    // passes `--workspace virtualized` through delegate
-                    // and wants daemon ownership, they can spawn the
-                    // daemon explicitly first.
-                    daemon: false,
-                    no_daemon: true,
-                    // Delegated children inherit the parent's
-                    // implicit per-checkout target/. If a delegate
-                    // user wants the shared-target arrangement they
-                    // can opt in by re-running `heddle start
-                    // --shared-target` against the spawned thread —
-                    // delegate is a thin orchestration verb and
-                    // shouldn't make filesystem-layout decisions for
-                    // the user.
-                    shared_target: false,
-                    // Delegated children don't auto-hydrate: delegate is a
-                    // thin orchestration verb and shouldn't symlink deps
-                    // into a spawned checkout without an explicit ask.
-                    hydrate: false,
-                },
-            )?;
-            Ok(DelegatedThreadOutput {
-                name,
-                task: spec.task.clone(),
-                path: output.path,
-                execution_path: output.execution_path,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    emit_with_next_action_validation(
-        cli,
-        &repo,
-        &DelegateOutput {
-            parent_thread: parent.id,
-            delegated,
-            message: "Delegated child threads created".to_string(),
-        },
-        &["delegate"],
-    )
-}
-
-/// Print a one-line warning when the operator passes
-/// `--path-prefix <path>` and `<path>` (after resolving against CWD)
-/// is a strict descendant of the repo root. The new
-/// nested-thread-worktree exclusion in `repo` makes this layout safe,
-/// but the conventional shape is a sibling directory; flagging the
-/// unconventional choice keeps the demo geometry honest.
-fn warn_if_path_prefix_inside_repo(repo: &Repository, path_prefix: Option<&std::path::Path>) {
-    let Some(prefix) = path_prefix else {
-        return;
-    };
-    let resolved = if prefix.is_absolute() {
-        prefix.to_path_buf()
-    } else {
-        match std::env::current_dir() {
-            Ok(cwd) => cwd.join(prefix),
-            Err(_) => return,
-        }
-    };
-    let canonical_prefix = resolved.canonicalize().unwrap_or(resolved);
-    let canonical_root = repo
-        .root()
-        .canonicalize()
-        .unwrap_or_else(|_| repo.root().to_path_buf());
-    if canonical_prefix == canonical_root {
-        return;
-    }
-    if !canonical_prefix.starts_with(&canonical_root) {
-        return;
-    }
-    eprintln!(
-        "warn: agent worktree at {} is nested inside repo root {}; \
-         the parent thread's scans will exclude it, but a sibling path is more conventional.",
-        canonical_prefix.display(),
-        canonical_root.display(),
-    );
-}
-
 fn resolve_thread(
     repo: &Repository,
     thread: Option<&str>,
@@ -1221,24 +1015,6 @@ fn resolve_thread(
             ))
         }),
     }
-}
-
-fn resolve_parent_thread(repo: &Repository, thread: Option<&str>) -> Result<Thread> {
-    resolve_thread(
-        repo,
-        thread,
-        "delegate",
-        "heddle delegate --parent <THREAD> <task>",
-    )
-    .or_else(|_| {
-        let head = repo.head_ref()?;
-        match head {
-            refs::Head::Attached { thread } => load_thread(repo, &thread),
-            refs::Head::Detached { .. } => {
-                Err(anyhow!(RecoveryAdvice::no_attached_parent_thread()))
-            }
-        }
-    })
 }
 
 fn update_integration_policy(
@@ -1570,38 +1346,6 @@ fn non_staleness_blockers(blockers: &[String]) -> Vec<String> {
         .filter(|blocker| !blocker.contains(" is stale against "))
         .cloned()
         .collect()
-}
-
-fn slugify(input: &str) -> String {
-    let mut out = String::new();
-    let mut last_dash = false;
-    for ch in input.chars().flat_map(|c| c.to_lowercase()) {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch);
-            last_dash = false;
-        } else if !last_dash {
-            out.push('-');
-            last_dash = true;
-        }
-    }
-    out.trim_matches('-').to_string()
-}
-
-fn emit_with_next_action_validation<T: Serialize>(
-    cli: &Cli,
-    repo: &Repository,
-    output: &T,
-    emitting_command: &[&str],
-) -> Result<()> {
-    if should_output_json(cli, None) {
-        write_full_command_json(
-            output,
-            NextActionValidationContext::new(emitting_command, repo.capability()),
-        )
-    } else {
-        println!("{}", serde_json::to_string_pretty(output)?);
-        Ok(())
-    }
 }
 
 impl super::compact::CompactProjection for SyncOutput {

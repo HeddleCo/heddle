@@ -133,11 +133,11 @@ fn merge_preview_exits_zero() {
     let repo = init_repo();
     std::fs::write(repo.path().join("f.txt"), "base\n").expect("write base");
     assert_exit(&["commit", "-m", "base"], repo.path(), 0);
-    assert_exit(&["fork", "--name", "feature"], repo.path(), 0);
-    assert_exit(&["goto", "feature"], repo.path(), 0);
+    assert_exit(&["thread", "create", "feature"], repo.path(), 0);
+    assert_exit(&["switch", "feature"], repo.path(), 0);
     std::fs::write(repo.path().join("f.txt"), "base\nfeat\n").expect("write feat");
     assert_exit(&["commit", "-m", "feat"], repo.path(), 0);
-    assert_exit(&["goto", "main"], repo.path(), 0);
+    assert_exit(&["switch", "main"], repo.path(), 0);
     assert_exit(&["merge", "feature", "--preview"], repo.path(), 0);
 }
 
@@ -145,14 +145,22 @@ fn merge_preview_exits_zero() {
 fn bridge_git_import_exits_zero() {
     // Documented: `0 ok`.
     let repo = adopted_git_overlay();
-    assert_exit(&["bridge", "git", "import", "--ref", "main"], repo.path(), 0);
+    assert_exit(
+        &["bridge", "git", "import", "--ref", "main"],
+        repo.path(),
+        0,
+    );
 }
 
 #[test]
 fn bridge_git_sync_exits_zero() {
     // Documented: `0 ok`.
     let repo = adopted_git_overlay();
-    assert_exit(&["bridge", "git", "import", "--ref", "main"], repo.path(), 0);
+    assert_exit(
+        &["bridge", "git", "import", "--ref", "main"],
+        repo.path(),
+        0,
+    );
     assert_exit(&["bridge", "git", "sync"], repo.path(), 0);
 }
 
@@ -162,7 +170,11 @@ fn bridge_git_reconcile_without_side_is_data_err() {
     // `reconcile_direction_required` refusal (no `--prefer` side) was the
     // `74 IoErr` catch-all before HeddleCo/heddle#252.
     let repo = adopted_git_overlay();
-    assert_exit(&["bridge", "git", "import", "--ref", "main"], repo.path(), 0);
+    assert_exit(
+        &["bridge", "git", "import", "--ref", "main"],
+        repo.path(),
+        0,
+    );
     assert_exit(
         &["bridge", "git", "reconcile", "--ref", "main"],
         repo.path(),
@@ -205,41 +217,6 @@ fn unsupported_output_json_compact_is_data_err() {
     assert_eq!(
         envelope["exit_code"], 65,
         "envelope exit_code must agree with the process exit: {envelope}"
-    );
-}
-
-#[test]
-fn conflict_show_missing_id_is_data_err_with_error_envelope() {
-    let repo = init_repo();
-    let output = heddle_output(
-        &["--output", "json", "conflict", "show", "missing-id"],
-        Some(repo.path()),
-    )
-    .expect("spawn conflict show missing-id");
-    assert_eq!(
-        output.status.code(),
-        Some(65),
-        "missing conflict id should exit 65 (DataErr); stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stdout).trim().is_empty(),
-        "missing conflict id must not print a success payload on stdout"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let envelope: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap_or_else(|err| {
-        panic!("conflict missing-id envelope not JSON: {err}\n  stderr: {stderr}")
-    });
-    assert_eq!(envelope["kind"], "conflict_not_found");
-    assert_eq!(envelope["exit_code"], 65);
-    assert!(
-        envelope["recovery_commands"]
-            .as_array()
-            .is_some_and(|commands| commands
-                .iter()
-                .any(|command| command == "heddle conflict list")),
-        "missing conflict id should point callers at conflict list: {envelope}"
     );
 }
 
@@ -296,8 +273,8 @@ fn status_on_corrupted_state_is_data_err_with_recovery_path() {
         "recovery should point at the integrity tooling: {envelope}"
     );
 
-    let text = heddle_output(&["status"], Some(repo.path()))
-        .expect("spawn text status on corrupted repo");
+    let text =
+        heddle_output(&["status"], Some(repo.path())).expect("spawn text status on corrupted repo");
     assert_eq!(text.status.code(), Some(65));
     let text_stderr = String::from_utf8_lossy(&text.stderr);
     assert!(

@@ -202,7 +202,7 @@ fn crash_capture_at(repo: &std::path::Path, checkpoint: &str, message: &str) {
 
 fn crash_goto_at(repo: &std::path::Path, checkpoint: &str, target: &str) {
     let crashed = heddle_output_with_env(
-        &["goto", target],
+        &["switch", target],
         Some(repo),
         &[("HEDDLE_FAULT_INJECT", checkpoint)],
     )

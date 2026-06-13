@@ -16,28 +16,25 @@ use cli::{
     cli::{
         ActorCommands, AgentCommands, Cli, CloneArgs, CollapseArgs, Commands, ContextCommands,
         DaemonCommands, DiagnoseArgs, DiffArgs, LogArgs, MergeArgs, ResolveArgs, RetroArgs,
-        RedoArgs, RevertArgs, RunArgs, SessionCommands, SessionEndArgs, SessionListArgs,
-        SessionSegmentArgs, SessionShowArgs, SessionStartArgs, UndoArgs,
-        cli_args::{DelegateArgs, LandArgs, SyncArgs},
+        RevertArgs, RunArgs, SessionCommands, SessionEndArgs, SessionListArgs, SessionSegmentArgs,
+        SessionShowArgs, SessionStartArgs, UndoArgs,
+        cli_args::{LandArgs, SyncArgs},
         commands::{
             LogCommandOptions, RetroCommandOptions, SnapshotAgentOverrides, build_command_catalog,
             cmd_abort, cmd_actor_done, cmd_actor_explain, cmd_actor_list, cmd_actor_show,
-            cmd_actor_spawn, cmd_adopt, cmd_agent, cmd_attempt, cmd_blame,
-            cmd_branch_compat, cmd_capture_split, cmd_checkpoint, cmd_cherry_pick, cmd_clean,
-            cmd_clone, cmd_collapse, cmd_commands, cmd_commit_compat,
-            cmd_conflict, cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get,
+            cmd_actor_spawn, cmd_adopt, cmd_agent, cmd_capture_split, cmd_checkpoint,
+            cmd_cherry_pick, cmd_clean, cmd_clone, cmd_collapse, cmd_commit_compat,
+            cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get,
             cmd_context_history, cmd_context_list, cmd_context_rm, cmd_context_set,
             cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
-            cmd_daemon_status, cmd_daemon_stop, cmd_delegate, cmd_diagnose, cmd_diff, cmd_discuss,
-            cmd_doctor_docs, cmd_doctor_schemas, cmd_fetch, cmd_fork, cmd_fsck, cmd_goto,
-            cmd_harness_bridge, cmd_hook, cmd_init, cmd_inspect_state, cmd_integration, cmd_land,
-            cmd_log, cmd_maintenance, cmd_marker, cmd_merge, cmd_pull, cmd_push, cmd_query,
-            cmd_ready, cmd_rebase, cmd_redo, cmd_remote, cmd_resolve, cmd_retro, cmd_revert,
-            cmd_review, cmd_run, cmd_schemas, cmd_session_end, cmd_session_list,
-            cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell,
-            cmd_show, cmd_snapshot, cmd_stack, cmd_start, cmd_stash, cmd_status,
-            cmd_switch_compat, cmd_sync_smart, cmd_thread, cmd_thread_show, cmd_transaction,
-            cmd_try, cmd_undo, cmd_verify, cmd_watch, cmd_workspace,
+            cmd_daemon_status, cmd_daemon_stop, cmd_diagnose, cmd_diff, cmd_discuss,
+            cmd_doctor_docs, cmd_doctor_schemas, cmd_fetch, cmd_fsck, cmd_hook, cmd_init,
+            cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_merge, cmd_pull, cmd_push,
+            cmd_query, cmd_ready, cmd_rebase, cmd_redo, cmd_remote, cmd_resolve, cmd_retro,
+            cmd_revert, cmd_review, cmd_run, cmd_schemas, cmd_session_end, cmd_session_list,
+            cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell, cmd_show,
+            cmd_snapshot, cmd_start, cmd_stash, cmd_status, cmd_switch_compat, cmd_sync_smart,
+            cmd_thread, cmd_transaction, cmd_try, cmd_undo, cmd_verify, cmd_watch,
             command_runtime_contract_for_command, print_error_with_hint,
             print_parse_error_json_envelope,
         },
@@ -156,7 +153,9 @@ async fn async_main() -> Result<()> {
         // the verb explicitly (it dispatches to Commands::Help). A two-
         // arg form `heddle help <topic>` also goes through clap.
     }
-    let cli = match Cli::try_parse() {
+    let raw_argv: Vec<String> = std::env::args().collect();
+    let parse_argv = rewrite_phase_2_alias_argv(&raw_argv).unwrap_or(raw_argv);
+    let cli = match Cli::try_parse_from(parse_argv) {
         Ok(cli) => cli,
         Err(err) => {
             let raw: Vec<String> = std::env::args().skip(1).collect();
@@ -287,8 +286,13 @@ async fn async_main() -> Result<()> {
 
         Commands::Help { topics } => {
             // Curated help printer. No op-id (read-only), no
-            // structured output (help is human-shaped).
-            cli::cli::help::print_help(&Cli::command(), topics).map_err(Into::into)
+            // structured output unless explicitly asked to print the
+            // command catalog.
+            if explicit_json_requested(&cli) {
+                write_json_stdout(&build_command_catalog())
+            } else {
+                cli::cli::help::print_help(&Cli::command(), topics).map_err(Into::into)
+            }
         }
 
         Commands::Status {
@@ -320,8 +324,6 @@ async fn async_main() -> Result<()> {
         #[cfg(feature = "git-overlay")]
         Commands::GitOverlay => cmd_git_overlay_guide(&cli),
 
-        Commands::Commands(args) => cmd_commands(&cli, args),
-
         Commands::Start(args) => cmd_start(&cli, args.clone()),
 
         Commands::Run(RunArgs { thread, command }) => {
@@ -329,8 +331,6 @@ async fn async_main() -> Result<()> {
         }
 
         Commands::Try(args) => cmd_try(&cli, args.clone()),
-
-        Commands::Attempt(args) => cmd_attempt(&cli, args.clone()),
 
         Commands::Sync(SyncArgs { thread }) => {
             // Codex's enhanced sync (rebase-aware fast-forward path);
@@ -371,25 +371,6 @@ async fn async_main() -> Result<()> {
             )
             .await
         }
-
-        Commands::Delegate(DelegateArgs {
-            tasks,
-            parent,
-            workspace,
-            path_prefix,
-            agent_provider,
-            agent_model,
-        }) => cmd_delegate(
-            &cli,
-            DelegateArgs {
-                tasks: tasks.clone(),
-                parent: parent.clone(),
-                workspace: *workspace,
-                path_prefix: path_prefix.clone(),
-                agent_provider: agent_provider.clone(),
-                agent_model: agent_model.clone(),
-            },
-        ),
 
         Commands::Ready(args) => cmd_ready(&cli, args.clone()).await,
 
@@ -471,31 +452,6 @@ async fn async_main() -> Result<()> {
             .await
         }
 
-        Commands::Inspect { target } => {
-            let cwd;
-            let start = if let Some(path) = cli.repo.as_ref() {
-                path
-            } else {
-                cwd = std::env::current_dir()?;
-                &cwd
-            };
-            if let Some(state) = target
-                && is_plain_git_without_heddle(start)
-            {
-                return cmd_inspect_state(&cli, Some(state.clone()));
-            }
-            let repo = repo::Repository::open(start)?;
-            match target {
-                Some(name) if repo.refs().get_thread(&objects::object::ThreadName::new(name.as_str()))?.is_some() => {
-                    cmd_thread_show(&cli, &repo, Some(name.clone()))
-                }
-                Some(state) => cmd_inspect_state(&cli, Some(state.clone())),
-                None => cmd_thread_show(&cli, &repo, None),
-            }
-        }
-
-        Commands::Goto { target, force } => cmd_goto(&cli, target.clone(), *force),
-
         Commands::Clean { force, dry_run } => cmd_clean(&cli, *force, *dry_run),
 
         Commands::Diff(DiffArgs {
@@ -519,8 +475,6 @@ async fn async_main() -> Result<()> {
             *patch,
         ),
 
-        Commands::Branch(args) => cmd_branch_compat(&cli, args.clone()).await,
-
         Commands::Switch(args) => cmd_switch_compat(&cli, args.clone()).await,
 
         Commands::Revert(RevertArgs {
@@ -534,14 +488,17 @@ async fn async_main() -> Result<()> {
             list,
             depth,
             preview,
+            redo,
             allow_redact_undo,
-        }) => cmd_undo(&cli, *steps, *list, *depth, *preview, *allow_redact_undo),
-
-        Commands::Redo(RedoArgs { steps, preview }) => cmd_redo(&cli, *steps, *preview),
+        }) => {
+            if *redo {
+                cmd_redo(&cli, *steps, *preview)
+            } else {
+                cmd_undo(&cli, *steps, *list, *depth, *preview, *allow_redact_undo)
+            }
+        }
 
         Commands::Fetch { remote, all } => cmd_fetch(&cli, remote.clone(), *all).await,
-
-        Commands::Fork { name, from } => cmd_fork(&cli, name.clone(), from.clone()),
 
         Commands::Fsck {
             full,
@@ -556,15 +513,9 @@ async fn async_main() -> Result<()> {
             confidence,
         }) => cmd_collapse(&cli, states.clone(), into.clone(), *confidence),
 
-        Commands::Marker { command } => cmd_marker(&cli, command.clone()),
-
         Commands::Thread { command } => cmd_thread(&cli, command.clone()).await,
 
         Commands::Shell { command } => cmd_shell(command.clone()),
-
-        Commands::Workspace { command } => cmd_workspace(&cli, command.clone()).await,
-
-        Commands::Stack(args) => cmd_stack(&cli, args.clone()),
 
         Commands::Merge(MergeArgs {
             thread,
@@ -760,25 +711,15 @@ async fn async_main() -> Result<()> {
 
         Commands::Transaction { command } => cmd_transaction(&cli, command).await,
 
-        Commands::Conflict { command } => cmd_conflict(&cli, command).await,
-
         Commands::Review { command } => cmd_review(&cli, command).await,
 
         Commands::Redact { command } => cli::cli::commands::cmd_redact(&cli, command.clone()),
-
-        Commands::Purge { command } => cli::cli::commands::cmd_purge(&cli, command.clone()),
 
         Commands::Visibility { command } => {
             cli::cli::commands::cmd_visibility(&cli, command.clone())
         }
 
         Commands::Maintenance { command } => cmd_maintenance(&cli, command.clone()),
-
-        Commands::Blame {
-            file,
-            state,
-            context,
-        } => cmd_blame(&cli, file.clone(), state.clone(), *context),
 
         Commands::CherryPick {
             commit,
@@ -815,8 +756,6 @@ async fn async_main() -> Result<()> {
         } => cmd_rebase(&cli, thread.as_deref(), *abort, *cont, *force),
 
         Commands::Hook { command } => cmd_hook(&cli, command.clone()),
-
-        Commands::HarnessBridge => cmd_harness_bridge(&cli),
 
         Commands::Actor { command } => match command {
             ActorCommands::Spawn(args) => {
@@ -906,6 +845,58 @@ async fn async_main() -> Result<()> {
     }
 }
 
+fn rewrite_phase_2_alias_argv(argv: &[String]) -> Option<Vec<String>> {
+    let root = first_command_index(argv)?;
+    match argv[root].as_str() {
+        "blame" => {
+            let mut rewritten = Vec::with_capacity(argv.len() + 1);
+            rewritten.extend_from_slice(&argv[..root]);
+            rewritten.push("query".to_string());
+            rewritten.push("--attribution".to_string());
+            rewritten.extend_from_slice(&argv[root + 1..]);
+            Some(rewritten)
+        }
+        "purge" => {
+            let mut rewritten = Vec::with_capacity(argv.len() + 1);
+            rewritten.extend_from_slice(&argv[..root]);
+            rewritten.push("redact".to_string());
+            rewritten.push("purge".to_string());
+            rewritten.extend_from_slice(&argv[root + 1..]);
+            Some(rewritten)
+        }
+        _ => None,
+    }
+}
+
+fn first_command_index(argv: &[String]) -> Option<usize> {
+    let mut index = 1;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        match arg {
+            "--" => return None,
+            "--output" | "--repo" | "-C" | "--op-id" => index += 2,
+            "--no-color" | "--verbose" | "--quiet" | "-v" | "-q" => index += 1,
+            _ if arg.starts_with("--output=")
+                || arg.starts_with("--repo=")
+                || arg.starts_with("--op-id=")
+                || (arg.starts_with("-C") && arg.len() > 2)
+                || short_verbose_quiet_cluster(arg) =>
+            {
+                index += 1;
+            }
+            _ => return Some(index),
+        }
+    }
+    None
+}
+
+fn short_verbose_quiet_cluster(arg: &str) -> bool {
+    arg.len() > 2
+        && arg.starts_with('-')
+        && !arg.starts_with("--")
+        && arg[1..].chars().all(|ch| matches!(ch, 'v' | 'q'))
+}
+
 /// True when the raw argv (after the program name) contains only global
 /// flags and their values — i.e. the user typed `heddle --output text` or
 /// `heddle --no-color -v` with no subcommand verb. We want to show the
@@ -933,10 +924,9 @@ fn raw_wants_json(raw: &[String]) -> bool {
             index += 1;
             continue;
         };
-        if arg.get_id().as_str() == "output"
-            && value.is_some_and(|value| value == "json") {
-                wants_json = true;
-            }
+        if arg.get_id().as_str() == "output" && value.is_some_and(|value| value == "json") {
+            wants_json = true;
+        }
         index += consumed;
     }
 
@@ -1055,16 +1045,6 @@ fn explicit_json_requested(cli: &Cli) -> bool {
         cli.output,
         Some(cli::cli::OutputMode::Json | cli::cli::OutputMode::JsonCompact)
     )
-}
-
-fn is_plain_git_without_heddle(start: &std::path::Path) -> bool {
-    let Ok(git_repo) = gix::discover(start) else {
-        return false;
-    };
-    let Some(workdir) = git_repo.workdir() else {
-        return false;
-    };
-    !workdir.join(".heddle").exists()
 }
 
 fn is_broken_pipe_error(error: &anyhow::Error) -> bool {

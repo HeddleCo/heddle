@@ -93,7 +93,9 @@ fn bench_materialize_cold(c: &mut Criterion) {
                 || TempDir::new().unwrap(),
                 |dest| {
                     let path = dest.path().join("out");
-                    let manifest = repo.materialize_thread("main", &path, &repo::AudienceTier::Internal).expect("materialize");
+                    let manifest = repo
+                        .materialize_thread("main", &path, &repo::AudienceTier::Internal)
+                        .expect("materialize");
                     black_box(manifest);
                 },
                 BatchSize::PerIteration,
@@ -124,7 +126,8 @@ fn bench_capture_noop_fast_path(c: &mut Criterion) {
                     let (fixture, repo) = fixture_repo_with_files(count);
                     let dest = TempDir::new().unwrap();
                     let dest_path = dest.path().join("out");
-                    repo.materialize_thread("main", &dest_path, &repo::AudienceTier::Internal).unwrap();
+                    repo.materialize_thread("main", &dest_path, &repo::AudienceTier::Internal)
+                        .unwrap();
                     (fixture, repo, dest, dest_path)
                 },
                 |(_fixture, repo, _dest, dest_path)| {
@@ -150,7 +153,8 @@ fn bench_capture_single_edit(c: &mut Criterion) {
                     let (fixture, repo) = fixture_repo_with_files(count);
                     let dest = TempDir::new().unwrap();
                     let dest_path = dest.path().join("out");
-                    repo.materialize_thread("main", &dest_path, &repo::AudienceTier::Internal).unwrap();
+                    repo.materialize_thread("main", &dest_path, &repo::AudienceTier::Internal)
+                        .unwrap();
                     // Edit a single file (the file in dir-00) so the
                     // stat-cache invalidates exactly one entry and
                     // the slow path runs minimally — the "agent

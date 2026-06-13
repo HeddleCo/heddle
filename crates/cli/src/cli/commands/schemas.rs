@@ -16,13 +16,13 @@
 
 use std::{collections::BTreeMap, sync::OnceLock};
 
-use anyhow::{anyhow, Result};
-use schemars::{schema_for, JsonSchema};
+use anyhow::{Result, anyhow};
+use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{command_catalog, command_runtime_contract, CommandCatalogOutput, RecoveryAdvice};
-use crate::cli::{should_output_json, Cli};
+use super::{RecoveryAdvice, command_catalog, command_runtime_contract};
+use crate::cli::{Cli, should_output_json};
 
 static SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
 static DOCUMENTED_SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
@@ -60,29 +60,19 @@ schema_registry! {
     (&["status"], StatusSchema),
     (&["verify"], VerifySchema),
     (&["adopt"], AdoptSchema),
-    (&["attempt"], AttemptSchema),
     (&["capture"], CaptureSchema),
     (&["commit"], CommitSchema),
     (&["checkpoint"], CheckpointSchema),
-    (&["undo"], UndoSchema),
-    // heddle#473 phase 1: `redo` is its own top-level verb again (re-split from
-    // the brief `undo --redo` fold), and `undo --list` is undo's history view.
-    // Both emit their own `output_kind`, so both need a schema mirror. `redo`
-    // shares `undo`'s payload (`UndoSchema`); the `--list` view has its own
-    // list-shaped schema.
-    (&["redo"], UndoSchema),
+    (&["undo", "undo --redo"], UndoSchema),
     (&["undo --list"], UndoListSchema),
     (&["clean"], CleanSchema),
     (&["diff"], DiffSchema),
-    (&["goto"], GotoSchema),
-    (&["branch"], BranchCompatSchema),
     (&["switch"], SwitchCheckoutSchema),
     (&["merge --preview"], MergePreviewSchema),
     (&["ready"], ReadySchema),
     (&["land"], LandSchema),
     (&["sync"], SyncSchema),
     (&["continue", "abort"], OperatorCommandSchema),
-    (&["delegate"], DelegateSchema),
     (&["start"], ThreadStartSchema),
     (&["thread create", "thread switch", "thread rename"], ThreadStartSchema),
     (&["thread current"], ThreadCurrentSchema),
@@ -97,6 +87,8 @@ schema_registry! {
     (&["thread revoke-approval"], ThreadRevokeApprovalSchema),
     (&["thread check-merge"], ThreadMergeEligibilitySchema),
     (&["thread cleanup"], ThreadCleanupSchema),
+    (&["thread marker list"], ThreadMarkerListSchema),
+    (&["thread marker create", "thread marker delete", "thread marker show"], ThreadMarkerOpSchema),
     (&["thread show"], ThreadShowSchema),
     (&["clone"], CloneSchema),
     (&["remote list"], RemoteListSchema),
@@ -109,22 +101,17 @@ schema_registry! {
     (&["log"], LogSchema),
     (&["log --reflog"], LogReflogSchema),
     (&["show"], ShowSchema),
-    (&["marker list"], MarkerListSchema),
-    (&["marker create", "marker delete", "marker show"], MarkerOpSchema),
-    (&["marker delete --prefix"], MarkerBulkDeleteSchema),
     (&["thread list"], ThreadListSchema),
-    (&["workspace show"], WorkspaceShowSchema),
-    (&["commands"], CommandCatalogOutput),
     (&["schemas"], SchemasListSchema),
     (&["review show"], ReviewShowSchema),
     (&["review sign"], ReviewSignSchema),
     (&["review next"], ReviewNextSchema),
     (&["review health"], ReviewHealthSchema),
-    (&["inspect"], InspectSchema),
     (&["retro"], RetroSchema),
     (&["discuss open", "discuss append", "discuss resolve", "discuss show"], DiscussionEnvelopeSchema),
     (&["discuss list"], DiscussionListSchema),
     (&["query"], QuerySchema),
+    (&["query --attribution"], BlameSchema),
     (&["transaction commit"], TransactionCommitSchema),
     (&["bridge git init"], BridgeInitSchema),
     (&["bridge git export"], BridgeExportSchema),
@@ -157,7 +144,6 @@ schema_registry! {
     (&["git-overlay"], GitOverlayGuideSchema),
     (&["watch"], WatchLineSchema),
     (&["try"], TrySchema),
-    (&["blame"], BlameSchema),
     (&["fsck"], FsckSchema),
     (&["resolve"], ResolveSchema),
     (&["maintenance index"], IndexSchema),
@@ -476,7 +462,7 @@ fn schema_not_registered_advice(verb: &str, known_verbs: &[&str]) -> RecoveryAdv
         .map(|matched| format!("heddle schemas {matched}"))
         .unwrap_or_else(|| "heddle schemas".to_string());
     let hint = if matches.is_empty() {
-        "Run `heddle schemas` to list schema-backed verbs, or inspect the command catalog with `heddle commands --output json`.".to_string()
+        "Run `heddle schemas` to list schema-backed verbs, or inspect the command catalog with `heddle help --output json`.".to_string()
     } else {
         format!(
             "`{verb}` is not exact; available schema verb{}: {}.",
@@ -493,7 +479,7 @@ fn schema_not_registered_advice(verb: &str, known_verbs: &[&str]) -> RecoveryAdv
     push_unique_command(&mut recovery_commands, "heddle schemas".to_string());
     push_unique_command(
         &mut recovery_commands,
-        "heddle commands --output json".to_string(),
+        "heddle help --output json".to_string(),
     );
     for matched in matches.iter().skip(1) {
         push_unique_command(&mut recovery_commands, format!("heddle schemas {matched}"));
@@ -1163,35 +1149,10 @@ pub struct DiffStatsSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct GotoSchema {
-    pub output_kind: String,
-    pub target: String,
-    pub intent: Option<String>,
-    pub message: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct BranchCompatSchema {
-    pub output_kind: Option<String>,
-    pub repository_capability: Option<String>,
-    pub storage_model: Option<String>,
-    pub hosted_enabled: Option<bool>,
-    pub threads: Option<Vec<ThreadSummarySchema>>,
-    pub current: Option<String>,
-    pub recommended_action: Option<String>,
-    pub recovery_commands: Option<Vec<String>>,
-    pub name: Option<String>,
-    pub message: Option<String>,
-    pub thread: Option<ThreadSummarySchema>,
-    pub path: Option<String>,
-    pub execution_path: Option<String>,
-    #[serde(rename = "verification")]
-    pub trust: Option<RepositoryVerificationStateSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
 pub struct SwitchCheckoutSchema {
     pub output_kind: Option<String>,
+    pub status: Option<String>,
+    pub action: Option<String>,
     pub name: Option<String>,
     pub message: String,
     pub thread: Option<ThreadSummarySchema>,
@@ -1199,6 +1160,10 @@ pub struct SwitchCheckoutSchema {
     pub execution_path: Option<String>,
     pub target: Option<String>,
     pub intent: Option<String>,
+    pub next_action: Option<String>,
+    pub next_action_template: Option<ActionTemplateSchema>,
+    pub recommended_action: Option<String>,
+    pub recommended_action_template: Option<ActionTemplateSchema>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1230,39 +1195,6 @@ pub struct MergePreviewSchema {
     pub conflict_count: Option<usize>,
     pub thread_health: Option<String>,
     pub diff: Option<Value>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AttemptSchema {
-    pub status: String,
-    pub action: String,
-    pub message: String,
-    pub command: String,
-    pub evaluate: Option<String>,
-    pub attempts_total: usize,
-    pub attempts_succeeded: usize,
-    pub attempts_dropped: usize,
-    pub attempts: Vec<AttemptResultSchema>,
-    pub recommended: Option<String>,
-    pub next_action: Option<String>,
-    pub next_action_template: Option<ActionTemplateSchema>,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct AttemptResultSchema {
-    pub index: usize,
-    pub thread: String,
-    pub status: String,
-    pub primary_exit_code: Option<i32>,
-    pub primary_duration_secs: f64,
-    pub evaluate_exit_code: Option<i32>,
-    pub evaluate_duration_secs: Option<f64>,
-    pub captured_state: Option<String>,
-    pub diff_files: Option<usize>,
-    pub thread_dropped: bool,
-    pub note: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1316,21 +1248,6 @@ pub struct LandSchema {
     pub skipped_steps: Vec<String>,
     pub merge_state: Option<String>,
     pub chosen_path: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DelegateSchema {
-    pub parent_thread: String,
-    pub delegated: Vec<DelegatedThreadSchema>,
-    pub message: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct DelegatedThreadSchema {
-    pub name: String,
-    pub task: String,
-    pub path: Option<String>,
-    pub execution_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1490,6 +1407,28 @@ pub struct ThreadCleanupSkippedSchema {
     pub id: String,
     pub reason: String,
     pub note: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ThreadMarkerListSchema {
+    pub output_kind: String,
+    pub markers: Vec<ThreadMarkerEntrySchema>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ThreadMarkerEntrySchema {
+    pub name: String,
+    pub change_id: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ThreadMarkerOpSchema {
+    pub output_kind: String,
+    pub name: Option<String>,
+    pub change_id: Option<String>,
+    pub deleted: Option<Vec<ThreadMarkerEntrySchema>>,
+    pub count: Option<usize>,
+    pub message: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2317,33 +2256,6 @@ pub struct ShowAgentSchema {
     pub policy_id: Option<String>,
 }
 
-// ---- marker ---------------------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct MarkerListSchema {
-    pub markers: Vec<MarkerEntrySchema>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct MarkerEntrySchema {
-    pub name: String,
-    pub change_id: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct MarkerOpSchema {
-    pub name: String,
-    pub change_id: Option<String>,
-    pub message: String,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct MarkerBulkDeleteSchema {
-    pub deleted: Vec<MarkerEntrySchema>,
-    pub count: usize,
-    pub message: String,
-}
-
 // ---- thread list ----------------------------------------------------------
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2371,36 +2283,6 @@ pub struct AvailableGitRefSchema {
     pub git_commit: String,
     pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
-}
-
-// ---- workspace show -------------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct WorkspaceShowSchema {
-    pub output_kind: Option<String>,
-    pub repository: String,
-    pub repository_capability: String,
-    pub repository_label: String,
-    pub repository_context: Option<RepositoryContextInfoSchema>,
-    pub storage_model: String,
-    pub hosted_enabled: bool,
-    pub operation: OpaqueObject,
-    pub remote_tracking: OpaqueObject,
-    #[serde(rename = "verification")]
-    pub trust: RepositoryVerificationStateSchema,
-    pub recommended_action: Option<String>,
-    pub recommended_action_template: Option<ActionTemplateSchema>,
-    pub current_thread: Option<String>,
-    pub groups: Vec<WorkspaceGroupSchema>,
-    pub available_git_refs: Vec<AvailableGitRefSchema>,
-    pub thread_count: usize,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct WorkspaceGroupSchema {
-    pub id: String,
-    pub label: String,
-    pub threads: Vec<ThreadSummarySchema>,
 }
 
 // ---- review ---------------------------------------------------------------
@@ -3101,7 +2983,7 @@ mod tests {
     /// discriminator from the catalog after deriving the struct schema,
     /// so `heddle schemas <verb>` already surfaces `output_kind`. That
     /// injection masks the fact that the Rust mirror struct (e.g.
-    /// `CleanSchema`, `GotoSchema`) never declares the field. The mirror
+    /// `CleanSchema`, `DiffSchema`) never declares the field. The mirror
     /// is the source of truth a reader greps; it must be honest about the
     /// discriminator the runtime always emits. This check reads the
     /// *pre-injection* struct schema so a missing field fails CI rather
@@ -3195,7 +3077,7 @@ mod tests {
 
         assert_eq!(
             catalog_verbs, listed_verbs,
-            "`heddle commands --output json` command schema verbs must match `heddle schemas` except for the cross-cutting JSON error envelope"
+            "`heddle help --output json` command schema verbs must match `heddle schemas` except for the cross-cutting JSON error envelope"
         );
     }
 
@@ -3485,10 +3367,9 @@ mod tests {
                 // set must include the siblings (e.g. inspect's union carries
                 // the `thread show` branch's thread_show).
                 for sibling in command_catalog::sibling_documented_schema_verbs(schema_verb) {
-                    discriminators
-                        .extend(command_catalog::command_json_discriminators_for_schema_verb(
-                            sibling,
-                        ));
+                    discriminators.extend(
+                        command_catalog::command_json_discriminators_for_schema_verb(sibling),
+                    );
                 }
                 for discriminator in command_catalog::command_json_discriminators()
                     .into_iter()
@@ -3529,34 +3410,18 @@ mod tests {
     }
 
     #[test]
-    fn inspect_schema_accepts_both_advertised_output_kinds() {
-        use std::collections::BTreeSet;
-
-        let schema = schema_for_verb("inspect").expect("inspect schema");
-        let mut values = Vec::new();
-        collect_discriminator_values(&schema, &schema, "output_kind", &mut values);
-        let values = values.into_iter().collect::<BTreeSet<_>>();
-        assert_eq!(
-            values,
-            BTreeSet::from(["inspect_state", "thread_show"]),
-            "inspect aliases state inspection and thread show, so both output kinds must be represented"
-        );
-    }
-
-    #[test]
     fn oss_recovery_surfaces_do_not_use_opaque_generic_schema() {
         for verb in [
-            "blame",
             "fsck",
             "resolve",
             "retro",
-            "inspect",
             "discuss open",
             "discuss append",
             "discuss resolve",
             "discuss list",
             "discuss show",
             "query",
+            "query --attribution",
         ] {
             assert!(
                 !opaque_schema_verbs().contains(&verb),

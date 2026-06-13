@@ -54,7 +54,7 @@ fn test_cherry_pick_already_applied() {
         .next()
         .unwrap();
 
-    heddle(&["goto", "HEAD~1"], Some(temp.path())).unwrap();
+    heddle(&["switch", "HEAD~1"], Some(temp.path())).unwrap();
     let result = heddle(&["cherry-pick", commit_id], Some(temp.path()));
 
     assert!(
@@ -98,7 +98,7 @@ fn test_cherry_pick_multiple_commits() {
         .map(|l| l.split_whitespace().next().unwrap())
         .collect();
 
-    heddle(&["goto", "HEAD~2"], Some(temp.path())).unwrap();
+    heddle(&["switch", "HEAD~2"], Some(temp.path())).unwrap();
     for commit in commits.iter().rev() {
         let result = heddle(&["cherry-pick", commit], Some(temp.path()));
         assert!(

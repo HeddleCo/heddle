@@ -39,6 +39,10 @@ use crate::{
 };
 
 pub fn cmd_redact(cli: &Cli, command: RedactCommands) -> Result<()> {
+    if let RedactCommands::Purge(command) = command {
+        return super::purge::cmd_purge(cli, command);
+    }
+
     let _user = UserConfig::load_default().unwrap_or_default();
     let repo = cli.open_repo()?;
     match command {
@@ -46,6 +50,7 @@ pub fn cmd_redact(cli: &Cli, command: RedactCommands) -> Result<()> {
         RedactCommands::List(args) => cmd_redact_list(cli, &repo, args),
         RedactCommands::Show(args) => cmd_redact_show(cli, &repo, args),
         RedactCommands::Trust(sub) => cmd_redact_trust(cli, &repo, sub),
+        RedactCommands::Purge(_) => unreachable!("handled before opening repo"),
     }
 }
 

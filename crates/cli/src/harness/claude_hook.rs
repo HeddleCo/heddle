@@ -150,7 +150,7 @@ fn format_stack_context(
             format!("next-action: waiting-on-review — `{thread}` is still in flight.")
         }
         StackNextAction::Unknown => {
-            "next-action: unknown — stack state is exotic; run `heddle stack ready` for details."
+            "next-action: unknown — stack state is exotic; run `heddle status` for details."
                 .to_string()
         }
     };

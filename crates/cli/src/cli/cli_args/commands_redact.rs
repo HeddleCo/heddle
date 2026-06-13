@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `heddle redact` and `heddle purge` — the redaction primitive.
+//! `heddle redact` and `heddle redact purge` — the redaction primitive.
 //!
 //! See `docs/PRINCIPLES.md` and the build brief at
 //! `.agents/redaction-primitive.md` for the design rationale. Briefly:
@@ -17,7 +17,7 @@ use clap::{Args, Subcommand};
 #[derive(Clone, Debug, Subcommand)]
 pub enum RedactCommands {
     /// Declare a redaction on a blob in a state. The blob bytes stay
-    /// on disk; reads return the stub. Use `heddle purge` afterward
+    /// on disk; reads return the stub. Use `heddle redact purge` afterward
     /// to physically remove the bytes.
     Apply(RedactApplyArgs),
     /// List every active redaction in the repo.
@@ -35,6 +35,9 @@ pub enum RedactCommands {
     /// on this workspace.
     #[command(subcommand)]
     Trust(RedactTrustCommands),
+    /// Physically remove bytes for an existing redaction.
+    #[command(subcommand)]
+    Purge(PurgeCommands),
 }
 
 #[derive(Clone, Debug, Subcommand)]
