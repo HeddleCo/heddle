@@ -20,10 +20,8 @@ $ brew install heddleco/heddle/heddle
 $ heddle start mybranch --workspace virtualized
    ⚠  Heddle FSKit extension not enabled.
       Opening System Settings — toggle "Heddle" on under
-      File System Extensions, then re-run.
-   ℹ  Using NFS fallback for this run.
-[user toggles, comes back]
-$ heddle start mybranch --workspace virtualized
+      File System Extensions.
+[user toggles while the command is still running]
    ✓ mounted at .repo-heddle-mounts/mybranch (via FSKit)
 ```
 
@@ -65,8 +63,8 @@ Possible results:
 | State | What CLI does |
 |---|---|
 | `Ready` (line starts with `+`) | Runs `mount -t heddle -o t=<thread> <repo> <mp>` via the kernel route |
-| `NeedsApproval` (line starts with `-`) | Prints the setup hint, opens System Settings, falls through to NFS for this run |
-| `NotInstalled` (no line for our ID) | Silent fallback to NFS (host app not in /Applications yet) |
+| `NeedsApproval` (line starts with `-`) | Prints a setup block with `System Settings → General → Login Items & Extensions → File System Extensions → enable 'Heddle'`, opens System Settings with a version-aware deep link, polls readiness for about 60 seconds, then mounts via FSKit as soon as the probe reports `Ready`; if the timer elapses, falls back to NFS for this run |
+| `NotInstalled` (no line for our ID) | Prints a one-line host-app install hint, then falls back to NFS |
 | `Unknown` (`pluginkit` failed) | Silent fallback to NFS |
 
 The integration lives in

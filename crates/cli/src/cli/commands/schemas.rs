@@ -16,13 +16,13 @@
 
 use std::{collections::BTreeMap, sync::OnceLock};
 
-use anyhow::{anyhow, Result};
-use schemars::{schema_for, JsonSchema};
+use anyhow::{Result, anyhow};
+use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{command_catalog, command_runtime_contract, CommandCatalogOutput, RecoveryAdvice};
-use crate::cli::{should_output_json, Cli};
+use super::{CommandCatalogOutput, RecoveryAdvice, command_catalog, command_runtime_contract};
+use crate::cli::{Cli, should_output_json};
 
 static SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
 static DOCUMENTED_SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
@@ -1347,6 +1347,15 @@ pub struct ThreadStartSchema {
     pub thread: Option<ThreadSummarySchema>,
     pub path: Option<String>,
     pub execution_path: Option<String>,
+    pub fskit_readiness: Option<FsKitReadinessSchema>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct FsKitReadinessSchema {
+    pub state: String,
+    pub backend: String,
+    pub action: String,
+    pub settings_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -3485,10 +3494,9 @@ mod tests {
                 // set must include the siblings (e.g. inspect's union carries
                 // the `thread show` branch's thread_show).
                 for sibling in command_catalog::sibling_documented_schema_verbs(schema_verb) {
-                    discriminators
-                        .extend(command_catalog::command_json_discriminators_for_schema_verb(
-                            sibling,
-                        ));
+                    discriminators.extend(
+                        command_catalog::command_json_discriminators_for_schema_verb(sibling),
+                    );
                 }
                 for discriminator in command_catalog::command_json_discriminators()
                     .into_iter()

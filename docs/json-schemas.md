@@ -742,6 +742,7 @@ continue.
 | `message` | string | required | Human-readable result. |
 | `thread` | object \| null | required | Thread summary when available. |
 | `path`, `execution_path` | string \| null | required | Materialized checkout path and effective execution path. |
+| `fskit_readiness` | object \| null | optional | macOS FSKit enable state for virtualized starts when the CLI made an FSKit-specific decision; includes `state`, `backend`, `action`, and optional `settings_url`. |
 | `verification` | object \| null | required | Post-start verification proof. |
 
 ---
