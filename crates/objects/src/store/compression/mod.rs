@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+#![deny(clippy::cast_possible_truncation)]
+
 //! Compression utilities for Heddle storage.
 //!
 //! Provides configurable compression with support for:
@@ -134,10 +136,11 @@ pub fn compress_zstd(_data: &[u8], _level: i32) -> Result<Vec<u8>, CompressionEr
 /// Decompress zstd data while enforcing the recorded output size.
 pub fn decompress_zstd(data: &[u8], expected_size: u64) -> Result<Vec<u8>, CompressionError> {
     validate_size(expected_size)?;
+    let expected_capacity = checked_size_to_usize("zstd expected size", expected_size)?;
 
     let mut decoder = zstd::stream::read::Decoder::new(data)
         .map_err(|e| CompressionError::DecompressionFailed(e.to_string()))?;
-    let mut decompressed = Vec::with_capacity(expected_size as usize);
+    let mut decompressed = Vec::with_capacity(expected_capacity);
     let mut buffer = [0u8; 8192];
 
     loop {
@@ -148,7 +151,12 @@ pub fn decompress_zstd(data: &[u8], expected_size: u64) -> Result<Vec<u8>, Compr
             break;
         }
 
-        let next_size = (decompressed.len() + bytes_read) as u64;
+        let next_size = decompressed.len().checked_add(bytes_read).ok_or_else(|| {
+            CompressionError::CorruptedData("decompressed size overflows".to_string())
+        })?;
+        let next_size = u64::try_from(next_size).map_err(|_| {
+            CompressionError::CorruptedData("decompressed size exceeds platform limits".to_string())
+        })?;
         if next_size > expected_size {
             return Err(CompressionError::CorruptedData(format!(
                 "decompressed size exceeds recorded header size: expected {expected_size}, got at least {next_size}",
@@ -377,6 +385,8 @@ where
     F: Fn(&[u8]) -> Result<u64, CompressionError>,
 {
     let uncompressed_size = read_size(delta_data)?;
+    let uncompressed_size_usize =
+        checked_size_to_usize("delta uncompressed size", uncompressed_size)?;
 
     if uncompressed_size > MAX_DELTA_OUTPUT_SIZE as u64 {
         return Err(CompressionError::DecompressionFailed(format!(
@@ -386,7 +396,7 @@ where
     }
 
     let delta = &delta_data[header_len..];
-    let decompressed = DeltaDecoder::decode(base, delta, uncompressed_size as usize)
+    let decompressed = DeltaDecoder::decode(base, delta, uncompressed_size_usize)
         .map_err(|error| CompressionError::DecompressionFailed(error.to_string()))?;
     validate_decompressed_len(uncompressed_size, decompressed.len())?;
     Ok(decompressed)
@@ -416,6 +426,12 @@ fn validate_size(size: u64) -> Result<(), CompressionError> {
     }
 
     Ok(())
+}
+
+#[cfg(any(feature = "zstd", test))]
+fn checked_size_to_usize(field: &str, size: u64) -> Result<usize, CompressionError> {
+    usize::try_from(size)
+        .map_err(|_| CompressionError::CorruptedData(format!("{field} exceeds platform limits")))
 }
 
 fn validate_decompressed_len(expected: u64, actual: usize) -> Result<(), CompressionError> {

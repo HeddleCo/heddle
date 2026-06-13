@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+#![deny(clippy::cast_possible_truncation)]
+
 //! Byte-exact git commit object serialization from a Heddle [`State`] (#566).
 //!
 //! Reconstructs the exact bytes `git cat-file commit <sha>` prints from the
@@ -17,7 +19,7 @@
 
 use gix::hash::ObjectId;
 use objects::object::{Principal, State};
-use objects::store::ObjectStore;
+use objects::store::{ObjectStore, StoreError};
 use repo::Repository as HeddleRepository;
 
 use crate::bridge::git_core::{GitBridge, GitBridgeError, GitResult, SyncMapping, git_err};
@@ -75,7 +77,7 @@ pub fn reconstruct_commit_bytes(
                 .ok_or(GitBridgeError::StateNotFound(*parent))
         })
         .collect::<GitResult<Vec<_>>>()?;
-    Ok(build_commit_content(state, &tree_oid, &parent_oids))
+    build_commit_content(state, &tree_oid, &parent_oids)
 }
 
 /// Frame + write a reconstructed commit object's `content` bytes into `repo`'s
@@ -98,7 +100,11 @@ pub fn write_commit_object(repo: &gix::Repository, content: &[u8]) -> GitResult<
 /// Assemble the commit content bytes from already-resolved OIDs. Pure (no repo,
 /// no mapping) so the byte layout — header order, actor lines, header folding,
 /// verbatim message — is unit-testable in isolation (§1/§2/§5/§6).
-fn build_commit_content(state: &State, tree_oid: &ObjectId, parent_oids: &[ObjectId]) -> Vec<u8> {
+fn build_commit_content(
+    state: &State,
+    tree_oid: &ObjectId,
+    parent_oids: &[ObjectId],
+) -> GitResult<Vec<u8>> {
     let mut out = Vec::new();
 
     // `tree` is always first, exactly once (§1.1).
@@ -125,7 +131,7 @@ fn build_commit_content(state: &State, tree_oid: &ObjectId, parent_oids: &[Objec
         &state.attribution.principal,
         author_seconds,
         state.authored_tz_offset,
-    );
+    )?;
     let committer = state
         .committer
         .as_ref()
@@ -136,7 +142,7 @@ fn build_commit_content(state: &State, tree_oid: &ObjectId, parent_oids: &[Objec
         committer,
         state.created_at.timestamp(),
         state.committer_tz_offset,
-    );
+    )?;
 
     // Extension headers (`encoding`/`gpgsig`/`mergetag`/unknown) at their captured
     // ordinal, multi-line values re-folded (§1.4/§2). The ordered `Vec` is the
@@ -160,7 +166,7 @@ fn build_commit_content(state: &State, tree_oid: &ObjectId, parent_oids: &[Objec
         out.extend_from_slice(message);
     }
 
-    out
+    Ok(out)
 }
 
 /// `<label> <name> <<email>> <unix-seconds> <±HHMM>\n` (§5).
@@ -170,7 +176,8 @@ fn write_actor_line(
     who: &Principal,
     seconds: i64,
     tz_offset_secs: i32,
-) {
+) -> GitResult<()> {
+    let seconds = checked_actor_timestamp(label, seconds, tz_offset_secs)?;
     out.extend_from_slice(label);
     out.push(b' ');
     out.extend_from_slice(who.name.as_bytes());
@@ -181,6 +188,22 @@ fn write_actor_line(
     out.push(b' ');
     out.extend_from_slice(format_tz_offset(tz_offset_secs).as_bytes());
     out.push(b'\n');
+    Ok(())
+}
+
+fn checked_actor_timestamp(label: &[u8], seconds: i64, tz_offset_secs: i32) -> GitResult<i64> {
+    // Git serializes UTC seconds plus a timezone offset. Validate the local
+    // seconds implied by that pair so malformed fidelity data cannot overflow
+    // reconstruct-time timestamp arithmetic.
+    seconds
+        .checked_add(i64::from(tz_offset_secs))
+        .map(|_| seconds)
+        .ok_or_else(|| {
+            let label = String::from_utf8_lossy(label);
+            GitBridgeError::Store(StoreError::InvalidObject(format!(
+                "{label} timestamp {seconds} with timezone offset {tz_offset_secs} overflows i64"
+            )))
+        })
 }
 
 /// Render a timezone offset — stored as **seconds** east of UTC (#565's `i32`
@@ -347,5 +370,34 @@ mod tests {
         assert_eq!(headers.len(), 1);
         assert_eq!(headers[0].0, b"gpgsig");
         assert_eq!(headers[0].1, value);
+    }
+
+    #[test]
+    fn write_actor_line_rejects_overflowing_timestamp_offset_arithmetic() {
+        let principal = Principal::new("A", "a@example.com");
+        let mut out = Vec::new();
+
+        let error = write_actor_line(&mut out, b"author", &principal, i64::MAX, 1)
+            .expect_err("timestamp plus timezone offset must not overflow");
+
+        assert!(
+            matches!(&error, GitBridgeError::Store(StoreError::InvalidObject(message)) if message.contains("overflows i64")),
+            "expected InvalidObject overflow error, got: {error:?}",
+        );
+        assert!(
+            out.is_empty(),
+            "failed actor line must not emit partial bytes"
+        );
+    }
+
+    #[test]
+    fn write_actor_line_valid_timestamp_is_unchanged() {
+        let principal = Principal::new("A", "a@example.com");
+        let mut out = Vec::new();
+
+        write_actor_line(&mut out, b"author", &principal, 1_700_000_000, -8 * 3600)
+            .expect("valid timestamp should serialize");
+
+        assert_eq!(out, b"author A <a@example.com> 1700000000 -0800\n");
     }
 }

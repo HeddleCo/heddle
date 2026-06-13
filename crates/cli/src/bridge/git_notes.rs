@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+#![deny(clippy::cast_possible_truncation)]
+
 //! Git notes attached at `refs/notes/heddle` carry Heddle state metadata
 //! (change_id, agent, confidence, status) without polluting the commit
 //! message — and so without changing the commit SHA.
@@ -345,10 +347,10 @@ pub fn read_all_notes(repo: &gix::Repository) -> GitResult<HashMap<ObjectId, Hed
 }
 
 fn bridge_notes_signature() -> gix::actor::Signature {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let seconds = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
+        Err(_) => 0,
+    };
     gix::actor::Signature {
         name: "Heddle".into(),
         email: "heddle@local".into(),

@@ -3,11 +3,11 @@
 
 use tempfile::TempDir;
 
-use super::{pack_index::PackIndex, ObjectType, PackBuilder, PackObjectId, PackReader};
+use super::{ObjectType, PackBuilder, PackObjectId, PackReader, pack_index::PackIndex};
 use crate::{
     delta::MAX_DELTA_OUTPUT_SIZE,
     object::{ChangeId, ContentHash},
-    store::{compression::CompressionConfig, pack::pack_container_spec, StoreError},
+    store::{StoreError, compression::CompressionConfig, pack::pack_container_spec},
 };
 
 fn create_test_hash(n: u8) -> ContentHash {
@@ -144,7 +144,7 @@ fn test_delta_compression() {
 fn test_pack_reader_rejects_compressed_size_that_overflows_record_end() {
     let hash = create_test_hash(42);
     let (pack_data, index_data) = single_record_pack(hash, |record| {
-        super::varint::encode_type_and_size(ObjectType::Blob, u64::MAX, record);
+        super::varint::encode_type_and_size(ObjectType::Blob, 1, record);
         super::varint::encode_varint(u64::MAX, record);
     });
     let reader = PackReader::from_bytes(pack_data, index_data).expect("container is well-formed");
@@ -172,6 +172,27 @@ fn test_pack_reader_rejects_compressed_size_that_overflows_record_end() {
         ),
         "expected overflow/platform-limit error, got: {bytes_error:?}",
     );
+}
+
+#[test]
+fn test_pack_reader_rejects_uncompressed_size_above_pack_object_limit() {
+    let hash = create_test_hash(48);
+    let (pack_data, index_data) = single_record_pack(hash, |record| {
+        super::varint::encode_type_and_size(ObjectType::Blob, u64::from(u32::MAX) + 1, record);
+        super::varint::encode_varint(1, record);
+        record.push(0);
+    });
+    let reader = PackReader::from_bytes(pack_data, index_data).expect("container is well-formed");
+
+    let error = reader
+        .get_hashed_object(&hash)
+        .expect_err("absurd uncompressed_size must fail before allocation");
+    assert_invalid_object_message_contains(error, "Pack object output size");
+
+    let bytes_error = reader
+        .get_hashed_object_bytes(&hash)
+        .expect_err("zero-copy path must reject absurd uncompressed_size too");
+    assert_invalid_object_message_contains(bytes_error, "Pack object output size");
 }
 
 #[test]
@@ -248,7 +269,8 @@ fn test_pack_reader_rejects_delta_output_above_limit() {
     let index_path = temp_dir.path().join("test.idx");
 
     let target_hash = create_test_hash(9);
-    let oversized = (MAX_DELTA_OUTPUT_SIZE + 1) as u64;
+    let oversized =
+        u64::try_from(MAX_DELTA_OUTPUT_SIZE).expect("MAX_DELTA_OUTPUT_SIZE fits in u64") + 1;
 
     // Build a valid pack with a delta entry whose uncompressed size exceeds the limit
     let mut pack_data = Vec::new();
@@ -258,24 +280,11 @@ fn test_pack_reader_rejects_delta_output_above_limit() {
 
     let entry_offset = pack_data.len() as u64;
 
-    let record = super::PackObjectRecord {
-        id: PackObjectId::Hash(target_hash),
-        obj_type: ObjectType::Blob,
-        data: vec![0],
-        delta_base: Some(PackObjectId::Hash(create_test_hash(1))),
-        path_hint: None,
-    };
-    let mut encoded = Vec::new();
-    super::encode_tagged_entry_parts(
-        &mut encoded,
-        record.id,
-        ObjectType::Delta,
-        oversized as usize,
-        record.delta_base,
-        &[0, b'x'],
-    )
-    .unwrap();
-    pack_data.extend_from_slice(&encoded);
+    PackObjectId::Hash(target_hash).encode_tagged(&mut pack_data);
+    super::varint::encode_type_and_size(ObjectType::Delta, oversized, &mut pack_data);
+    super::varint::encode_varint(2, &mut pack_data);
+    PackObjectId::Hash(create_test_hash(1)).encode_tagged(&mut pack_data);
+    pack_data.extend_from_slice(&[0, b'x']);
 
     let checksum = blake3::hash(&pack_data);
     pack_data.extend_from_slice(checksum.as_bytes());
@@ -503,7 +512,7 @@ fn test_pack_reader_missing_object_returns_none() {
 /// with the expected diagnostic phrase.
 #[test]
 fn stale_index_swapped_offsets_surfaces_as_invalid_object() {
-    use crate::store::{pack::pack_index::PackIndex, StoreError};
+    use crate::store::{StoreError, pack::pack_index::PackIndex};
 
     let blob_a = b"alpha-payload alpha-payload alpha-payload alpha".to_vec();
     let blob_b = b"bravo-payload bravo-payload bravo-payload bravo".to_vec();
