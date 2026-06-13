@@ -73,8 +73,7 @@ export class HeddleError extends Error {
     const { verb, exitCode, stdout, stderr, envelope } = args;
     const message =
       envelope?.error ??
-      stderr.trim() ??
-      `heddle ${verb} exited with code ${exitCode}`;
+      stderr.trim();
     super(message || `heddle ${verb} exited with code ${exitCode}`);
     this.name = "HeddleError";
     this.verb = verb;

@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Heddle, HeddleError, HeddleStreamingVerbError, ExecStreamError, type Executor, type ExecRequest, type ExecResult } from "../src/index.js";
 import type { StatusSchema, WatchLineSchema } from "../generated/heddle-schemas.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 
 /** A deterministic in-memory executor — proves the parsing/error seam works
  *  without building or spawning the real binary. The real-binary smoke test
@@ -257,6 +259,26 @@ test("real-binary smoke test", { skip: !process.env["HEDDLE_BIN"] }, async () =>
   assert.ok(schemas, "schemas payload should parse");
 });
 
+test("real-binary error envelope maps status outside a repo", { skip: !process.env["HEDDLE_BIN"] }, async () => {
+  const nonRepo = await mkdtemp(join(tmpdir(), "heddle-npm-client-"));
+  try {
+    const heddle = new Heddle({
+      binaryPath: process.env["HEDDLE_BIN"],
+      cwd: nonRepo,
+    });
+    await assert.rejects(
+      () => heddle.status(),
+      (err: unknown) => {
+        assert.ok(err instanceof HeddleError);
+        assert.equal(err.code, "repository_not_found");
+        return true;
+      },
+    );
+  } finally {
+    await rm(nonRepo, { recursive: true, force: true });
+  }
+});
+
 // --- SpawnExecutor regression tests (codex catch-up findings, 2026-06-12) ---
 
 import { SpawnExecutor } from "../src/index.js";
@@ -264,6 +286,7 @@ import { join } from "node:path";
 
 const ECHO_ARGV = join(process.cwd(), "test", "fixtures", "echo-argv.cjs");
 const STREAM_FOREVER = join(process.cwd(), "test", "fixtures", "stream-forever.cjs");
+const GENERATE_OUTPUT = join(process.cwd(), "test", "fixtures", "generate-output.cjs");
 
 test("buildArgv puts global flags before verb tokens (value-taking verb flags)", async () => {
   // Regression: `thread marker delete --prefix` ends in a value-taking flag; with
@@ -281,9 +304,36 @@ test("buildArgv puts global flags before verb tokens (value-taking verb flags)",
     "--output", "json",
     "-C", "/repos/demo",
     "--op-id", "op-9",
-    "marker", "delete", "--prefix",
+    "thread", "marker", "delete", "--prefix",
     "foo",
   ]);
+});
+
+test("missing heddle binary rejects as a typed HeddleError", async () => {
+  const heddle = new Heddle({ binaryPath: "heddle-definitely-not-on-path-for-test" });
+  await assert.rejects(
+    () => heddle.status(),
+    (err: unknown) => {
+      assert.ok(err instanceof HeddleError);
+      assert.equal(err.exitCode, 74);
+      assert.equal(err.code, "binary_not_found");
+      assert.equal(err.retryable, false);
+      return true;
+    },
+  );
+});
+
+test("SpawnExecutor rejects when buffered output exceeds the configured cap", async () => {
+  const exec = new SpawnExecutor({ binaryPath: GENERATE_OUTPUT, maxOutputBytes: 8 });
+  await assert.rejects(
+    () => exec.exec({ verb: "status", args: ["16"] }),
+    (err: unknown) => {
+      assert.ok(err instanceof HeddleError);
+      assert.equal(err.exitCode, 74);
+      assert.equal(err.code, "output_too_large");
+      return true;
+    },
+  );
 });
 
 test("execStream kills the child when the consumer stops early", async () => {

@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
+import { HeddleError, HeddleExitCode } from "./errors.js";
+
+const DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 
 /**
  * One CLI invocation, transport-neutral. The `verb` is the canonical
@@ -72,6 +75,12 @@ export interface SpawnExecutorOptions {
   cwd?: string | undefined;
   /** Extra environment overlaid on `process.env`. */
   env?: Record<string, string> | undefined;
+  /**
+   * Maximum buffered stdout + stderr per invocation. Defaults to 64 MiB:
+   * high enough for large JSON envelopes/diffs, but finite so a bad verb or
+   * unexpected stream cannot grow the Node process without bound.
+   */
+  maxOutputBytes?: number | undefined;
 }
 
 /**
@@ -84,12 +93,14 @@ export class SpawnExecutor implements Executor {
   private readonly repoPath: string | undefined;
   private readonly cwd: string | undefined;
   private readonly env: Record<string, string> | undefined;
+  private readonly maxOutputBytes: number;
 
   constructor(options: SpawnExecutorOptions = {}) {
     this.binaryPath = options.binaryPath ?? "heddle";
     this.repoPath = options.repoPath;
     this.cwd = options.cwd;
     this.env = options.env;
+    this.maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
   }
 
   exec(req: ExecRequest): Promise<ExecResult> {
@@ -104,10 +115,33 @@ export class SpawnExecutor implements Executor {
       const child = spawn(this.binaryPath, argv, spawnOptions);
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
-      child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
-      child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
-      child.on("error", reject);
+      let totalOutputBytes = 0;
+      let settled = false;
+      const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        reject(err);
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGTERM");
+        }
+      };
+      const collect = (stream: "stdout" | "stderr", chunk: Buffer) => {
+        totalOutputBytes += chunk.byteLength;
+        if (totalOutputBytes > this.maxOutputBytes) {
+          fail(this.outputTooLargeError(req.verb, totalOutputBytes));
+          return;
+        }
+        if (stream === "stdout") stdout.push(chunk);
+        else stderr.push(chunk);
+      };
+      child.stdout?.on("data", (chunk: Buffer) => collect("stdout", chunk));
+      child.stderr?.on("data", (chunk: Buffer) => collect("stderr", chunk));
+      child.on("error", (err: Error) => {
+        fail(this.spawnError(req.verb, err));
+      });
       child.on("close", (code, signal) => {
+        if (settled) return;
+        settled = true;
         resolve({
           // A signal kill reports `code === null`; surface 128+signal-ish
           // as a generic IO failure so callers still get a non-zero code.
@@ -129,11 +163,23 @@ export class SpawnExecutor implements Executor {
 
     const child = spawn(this.binaryPath, argv, spawnOptions);
     const stderr: Buffer[] = [];
-    child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
+    let totalOutputBytes = 0;
+    let streamFailure: HeddleError | undefined;
+    const trackOutput = (bytes: number) => {
+      totalOutputBytes += bytes;
+      if (totalOutputBytes > this.maxOutputBytes) {
+        streamFailure = this.outputTooLargeError(req.verb, totalOutputBytes);
+        child.kill("SIGTERM");
+      }
+    };
+    child.stderr?.on("data", (chunk: Buffer) => {
+      trackOutput(chunk.byteLength);
+      if (!streamFailure) stderr.push(chunk);
+    });
     const childExit = this.waitForExit(child);
-    let spawnError: Error | undefined;
+    let spawnError: HeddleError | undefined;
     child.on("error", (err: Error) => {
-      spawnError = err;
+      spawnError = this.spawnError(req.verb, err);
     });
 
     const stdoutLines: string[] = [];
@@ -144,6 +190,8 @@ export class SpawnExecutor implements Executor {
         // readline yields each line as it arrives on stdout — the loop
         // produces values during the child's lifetime, not after exit.
         for await (const line of rl) {
+          trackOutput(Buffer.byteLength(line, "utf8") + 1);
+          if (streamFailure) throw streamFailure;
           stdoutLines.push(line);
           yield line;
         }
@@ -157,6 +205,7 @@ export class SpawnExecutor implements Executor {
 
     const exitCode = await childExit;
 
+    if (streamFailure) throw streamFailure;
     if (spawnError) throw spawnError;
     if (exitCode !== 0) {
       throw new ExecStreamError({
@@ -210,5 +259,59 @@ export class SpawnExecutor implements Executor {
     } finally {
       clearTimeout(killTimer);
     }
+  }
+
+  private spawnError(verb: string, err: Error): HeddleError {
+    const nodeCode = typeof (err as NodeJS.ErrnoException).code === "string"
+      ? (err as NodeJS.ErrnoException).code
+      : undefined;
+    const kind = nodeCode === "ENOENT"
+      ? "binary_not_found"
+      : nodeCode === "EACCES"
+        ? "binary_not_executable"
+        : "spawn_failed";
+    return new HeddleError({
+      verb,
+      exitCode: HeddleExitCode.IoErr,
+      stdout: "",
+      stderr: err.message,
+      envelope: {
+        error: err.message,
+        exit_code: HeddleExitCode.IoErr,
+        hint: nodeCode === "ENOENT"
+          ? "Install heddle or pass binaryPath to the Heddle client."
+          : "Check that the heddle binary can be executed.",
+        kind,
+        preserved: "no repository objects, refs, metadata, or worktree files were changed",
+        primary_command: "heddle --version",
+        primary_command_template: null,
+        recovery_action_templates: [],
+        recovery_commands: ["heddle --version"],
+        unsafe_condition: `the client could not start the heddle binary`,
+        would_change: "the command did not start",
+      },
+    });
+  }
+
+  private outputTooLargeError(verb: string, bytes: number): HeddleError {
+    return new HeddleError({
+      verb,
+      exitCode: HeddleExitCode.IoErr,
+      stdout: "",
+      stderr: `heddle ${verb} exceeded buffered output limit of ${this.maxOutputBytes} bytes`,
+      envelope: {
+        error: `heddle ${verb} exceeded buffered output limit of ${this.maxOutputBytes} bytes`,
+        exit_code: HeddleExitCode.IoErr,
+        hint: "Use a narrower query or a streaming API for unbounded output.",
+        kind: "output_too_large",
+        preserved: "no buffered output beyond the configured client limit was retained",
+        primary_command: `heddle ${verb}`,
+        primary_command_template: null,
+        recovery_action_templates: [],
+        recovery_commands: [],
+        unsafe_condition: `the invocation emitted ${bytes} bytes, above the client buffer limit`,
+        would_change: "continuing to buffer output could exhaust the Node process memory",
+      },
+    });
   }
 }
