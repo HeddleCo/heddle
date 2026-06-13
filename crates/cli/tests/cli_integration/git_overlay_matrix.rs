@@ -869,6 +869,104 @@ fn git_overlay_matrix_commit_no_all_nothing_staged_refuses_before_identity_prefl
 }
 
 #[test]
+fn git_overlay_matrix_index_checkpoint_recovery_reuses_preserved_snapshot() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    std::fs::write(temp.path().join("file.txt"), "base\n").unwrap();
+    git_commit_all(temp.path(), "seed");
+    heddle_adopt(temp.path());
+
+    std::fs::write(temp.path().join("file.txt"), "staged\n").unwrap();
+    git(&["add", "file.txt"], temp.path());
+    std::fs::write(temp.path().join("file.txt"), "staged\nunstaged\n").unwrap();
+    std::fs::write(temp.path().join("scratch.txt"), "left behind\n").unwrap();
+
+    let git_dir = temp.path().join(".git");
+    std::fs::write(git_dir.join("index.lock"), "held by test\n").unwrap();
+    let failed = heddle_output(
+        &[
+            "--output",
+            "json",
+            "commit",
+            "--no-all",
+            "-m",
+            "index only recovery",
+        ],
+        Some(temp.path()),
+    )
+    .expect("invoke faulted index-only commit");
+    assert!(
+        !failed.status.success(),
+        "locked index should fail after preserving the Heddle state"
+    );
+    let stderr = std::str::from_utf8(&failed.stderr).unwrap();
+    let envelope: Value =
+        serde_json::from_str(stderr).expect("checkpoint failure should emit JSON advice");
+    assert_eq!(envelope["kind"], "commit_checkpoint_failed");
+    assert_eq!(
+        envelope["recovery_commands"],
+        serde_json::json!(["heddle checkpoint --from-index-snapshot -m \"index only recovery\""])
+    );
+
+    let repo = Repository::open(temp.path()).expect("open repo after failed commit");
+    let preserved = repo
+        .current_state()
+        .expect("read current state")
+        .expect("failed commit should preserve a current state")
+        .change_id;
+    assert_eq!(
+        snapshot_count_for_change(temp.path(), &preserved),
+        1,
+        "the failed commit should preserve exactly one staged-index snapshot"
+    );
+    assert!(
+        repo.latest_git_checkpoint_for_change(&preserved)
+            .expect("read checkpoints")
+            .is_none(),
+        "the locked-index failure should not have recorded the Git checkpoint yet"
+    );
+
+    std::fs::remove_file(git_dir.join("index.lock")).unwrap();
+    let recovered = json(
+        temp.path(),
+        &[
+            "checkpoint",
+            "--from-index-snapshot",
+            "-m",
+            "index only recovery",
+        ],
+    );
+    assert_eq!(recovered["output_kind"], "checkpoint");
+    assert_eq!(recovered["change_id"], preserved.short());
+    assert_eq!(
+        snapshot_count_for_change(temp.path(), &preserved),
+        1,
+        "recovery must not re-enter commit_staged_index and mint a duplicate snapshot"
+    );
+
+    let repo = Repository::open(temp.path()).expect("reopen repo after recovery");
+    let checkpoint = repo
+        .latest_git_checkpoint_for_change(&preserved)
+        .expect("read checkpoint after recovery")
+        .expect("recovery should record the Git checkpoint");
+    assert_eq!(
+        git_stdout(temp.path(), &["rev-parse", "HEAD"]),
+        checkpoint.git_commit,
+        "recovery should advance Git HEAD to the checkpoint commit"
+    );
+    assert_eq!(
+        git_stdout(temp.path(), &["show", "HEAD:file.txt"]),
+        "staged",
+        "the recovered Git checkpoint should commit the preserved staged index tree"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("file.txt")).unwrap(),
+        "staged\nunstaged\n",
+        "checkpoint recovery must preserve unstaged worktree edits after checkpointing the staged tree"
+    );
+}
+
+#[test]
 fn git_overlay_matrix_plain_git_no_commit_bootstrap_commands() {
     let temp = TempDir::new().unwrap();
     init_git_repo_with_branch(temp.path(), "trunk");
@@ -6264,6 +6362,24 @@ fn collapse_records(path: &std::path::Path) -> Vec<(Vec<String>, String, Option<
         .collect()
 }
 
+fn snapshot_count_for_change(
+    path: &std::path::Path,
+    change_id: &objects::object::ChangeId,
+) -> usize {
+    let repo = Repository::open(path).expect("repo should open");
+    repo.oplog()
+        .recent(512)
+        .expect("read oplog")
+        .into_iter()
+        .filter(|entry| {
+            matches!(
+                &entry.operation,
+                OpRecord::Snapshot { new_state, .. } if new_state == change_id
+            )
+        })
+        .count()
+}
+
 fn thread_tip(path: &std::path::Path, thread: &str) -> String {
     let repo = Repository::open(path).expect("repo should open");
     repo.refs()
@@ -6462,7 +6578,10 @@ fn git_overlay_matrix_manual_resolution_land_squashes_and_undo_restores_source_t
     assert_latest_undo_batch_has_land_squash_ops(temp.path());
     let undo = json(temp.path(), &["--output", "json", "undo"]);
     assert_eq!(undo["status"], "completed", "{undo}");
-    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), pre_land_git);
+    assert_eq!(
+        git_stdout(temp.path(), &["rev-parse", "HEAD"]),
+        pre_land_git
+    );
     assert_eq!(thread_tip(temp.path(), "main"), target_tip_before);
     assert_eq!(
         thread_tip(temp.path(), "feature/manual-squash"),

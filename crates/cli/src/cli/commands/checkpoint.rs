@@ -73,11 +73,12 @@ pub async fn run(cli: &Cli, args: &CheckpointArgs) -> Result<()> {
     }
 
     let repo = Repository::open(start)?;
-    let record = create_git_checkpoint(
-        &repo,
-        args.message.as_deref(),
-        worktree_status_options(Some(repo.config())),
-    )?;
+    let status_options = worktree_status_options(Some(repo.config()));
+    let record = if args.from_index_snapshot {
+        create_git_checkpoint_from_index_snapshot(&repo, args.message.as_deref(), status_options)?
+    } else {
+        create_git_checkpoint(&repo, args.message.as_deref(), status_options)?
+    };
     let state = repo
         .current_state()?
         .ok_or_else(|| anyhow!("no captured state found after checkpoint"))?;
@@ -145,11 +146,6 @@ fn create_git_checkpoint_inner(
         .store()
         .get_state(&state_id)?
         .ok_or_else(|| anyhow!("no captured state found after bootstrap"))?;
-    if principal_is_default_unknown(&state.attribution.principal)
-        && git_config_identity_with_global_fallback(repo.root())?.is_none()
-    {
-        return Err(anyhow!(missing_checkpoint_identity_advice("checkpoint")));
-    }
     if require_clean_worktree {
         let tree = repo.require_tree(&state.tree)?;
         let status = repo.compare_worktree_cached_detailed_with_options(&tree, &status_options)?;
@@ -160,6 +156,14 @@ fn create_git_checkpoint_inner(
                 "the current Heddle state was left unchanged; these paths have not been captured",
             )));
         }
+    }
+    if let Some(record) = repo.latest_git_checkpoint_for_change(&state.change_id)? {
+        return Ok(record);
+    }
+    if principal_is_default_unknown(&state.attribution.principal)
+        && git_config_identity_with_global_fallback(repo.root())?.is_none()
+    {
+        return Err(anyhow!(missing_checkpoint_identity_advice("checkpoint")));
     }
 
     let summary = message

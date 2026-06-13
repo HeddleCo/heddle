@@ -1165,12 +1165,16 @@ fn commit_checkpoint_failed_advice(
 }
 
 fn checkpoint_recovery_command(message: Option<&str>, index_only: bool) -> String {
-    // Preserve the index-only (`--no-all`) intent on the staged-index path: a
-    // plain `heddle commit` retry would sweep unstaged worktree changes into a
-    // new capture and lose the staged-only state the user committed.
-    let scope = if index_only { " --no-all" } else { "" };
+    // The Heddle state already exists when checkpoint recovery is offered. The
+    // retry must repair only the Git checkpoint instead of re-entering commit
+    // and minting another capture from the same tree.
+    let scope = if index_only {
+        " --from-index-snapshot"
+    } else {
+        ""
+    };
     format!(
-        "heddle commit{scope} -m {}",
+        "heddle checkpoint{scope} -m {}",
         shell_double_quoted(message.unwrap_or("commit"))
     )
 }
@@ -1405,32 +1409,31 @@ mod tests {
         assert!(advice.error.contains("git write failed"));
         assert_eq!(
             advice.primary_command,
-            "heddle commit -m \"say \\\"hello\\\"\""
+            "heddle checkpoint -m \"say \\\"hello\\\"\""
         );
         assert_eq!(
             advice.recovery_commands,
-            vec!["heddle commit -m \"say \\\"hello\\\"\""]
+            vec!["heddle checkpoint -m \"say \\\"hello\\\"\""]
         );
         assert!(advice.preserved.contains("change-123"));
     }
 
-    // heddle#464: the staged-index (`--no-all`) checkpoint-failure recovery must
-    // keep the index-only intent, otherwise a plain `heddle commit` retry would
-    // sweep unstaged worktree changes into a new capture and lose the staged-only
-    // state the user committed.
+    // heddle#485: the staged-index checkpoint-failure recovery must retry only
+    // the Git checkpoint against the already-preserved state. Re-entering commit
+    // would create a duplicate capture from the same staged index tree.
     #[test]
-    fn commit_checkpoint_failure_advice_preserves_index_only_intent() {
+    fn commit_checkpoint_failure_advice_retries_index_snapshot_checkpoint() {
         let error = anyhow!("git write failed");
         let advice =
             commit_checkpoint_failed_advice("change-456", Some("index only"), &error, true);
 
         assert_eq!(
             advice.primary_command,
-            "heddle commit --no-all -m \"index only\""
+            "heddle checkpoint --from-index-snapshot -m \"index only\""
         );
         assert_eq!(
             advice.recovery_commands,
-            vec!["heddle commit --no-all -m \"index only\""]
+            vec!["heddle checkpoint --from-index-snapshot -m \"index only\""]
         );
     }
 
