@@ -267,6 +267,11 @@ mod refspec {
             forced: bool,
         ) -> GitResult<Self> {
             let destination = destination.into();
+            if source.is_none() && destination.is_empty() {
+                return Err(super::GitBridgeError::InvalidMapping(
+                    "refspec source and destination cannot both be empty".to_string(),
+                ));
+            }
             if let Some(source) = source.as_deref() {
                 validate_refspec_ref(source)?;
             }
@@ -316,24 +321,44 @@ pub use refspec::RefSpec;
 
 /// A negative refspec (`^source`) excluding refs from a fetch or push. Ported
 /// from jj's `NegativeRefSpec` (`lib/src/git.rs`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NegativeRefSpec {
-    source: String,
-}
+mod negative_refspec {
+    use super::{GitBridgeError, GitResult, validate_refspec_ref};
 
-impl NegativeRefSpec {
-    /// A negative refspec excluding `source`.
-    pub fn new(source: impl Into<String>) -> Self {
-        Self {
-            source: source.into(),
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct NegativeRefSpec {
+        source: String,
+    }
+
+    impl NegativeRefSpec {
+        /// Construct a negative refspec after validating the rendered `^source`
+        /// form Git will receive.
+        pub fn new(source: impl Into<String>) -> GitResult<Self> {
+            let source = source.into();
+            validate_refspec_ref(&source)?;
+            let rendered = format!("^{source}");
+            gix_refspec::parse(
+                rendered.as_str().into(),
+                gix_refspec::parse::Operation::Fetch,
+            )
+            .map_err(|error| {
+                GitBridgeError::InvalidMapping(format!(
+                    "invalid negative refspec source '{source}': {error}"
+                ))
+            })?;
+            Ok(Self { source })
+        }
+
+        /// Render in `git` refspec syntax (`^source`).
+        pub fn to_git_format(&self) -> String {
+            format!("^{}", self.source)
         }
     }
-
-    /// Render in `git` refspec syntax (`^source`).
-    pub fn to_git_format(&self) -> String {
-        format!("^{}", self.source)
-    }
 }
+
+// Keep the concrete fields in a private submodule. Callers outside this module
+// cannot construct `NegativeRefSpec { ... }` directly (E0451), so all values
+// pass through `NegativeRefSpec::new`.
+pub use negative_refspec::NegativeRefSpec;
 
 /// The fetch refspecs heddle uses to mirror a remote: every branch and every
 /// heddle note, forced. Built through [`RefSpec`] so the wire format has a
@@ -4000,9 +4025,29 @@ mod tests {
     }
 
     #[test]
+    fn refspec_constructor_rejects_empty_source_and_destination() {
+        let err = RefSpec::new(None, "", false)
+            .expect_err("empty source plus empty destination is rejected");
+        assert!(err.to_string().contains("cannot both be empty"));
+    }
+
+    #[test]
     fn negative_refspec_prefixes_caret() {
-        let spec = NegativeRefSpec::new("refs/heads/wip/*");
-        assert_eq!(spec.to_git_format(), "^refs/heads/wip/*");
+        let spec = NegativeRefSpec::new("refs/heads/wip").expect("valid negative refspec");
+        assert_eq!(spec.to_git_format(), "^refs/heads/wip");
+    }
+
+    #[test]
+    fn negative_refspec_constructor_rejects_unparseable_negation() {
+        let err = NegativeRefSpec::new("refs/heads/wip/*").expect_err("negative glob is rejected");
+        assert!(err.to_string().contains("Negative glob patterns"));
+    }
+
+    #[test]
+    fn negative_refspec_constructor_rejects_reserved_remote_name() {
+        let err = NegativeRefSpec::new("refs/remotes/git/main")
+            .expect_err("reserved remote negative source is rejected");
+        assert!(err.to_string().contains("reserved namespace"));
     }
 
     #[test]
