@@ -369,6 +369,17 @@ fn read_captured_blob(mount: &ContentAddressedMount, change_id: &ChangeId, path:
     blob.into_content()
 }
 
+fn store_contains_blob_with_bytes(mount: &ContentAddressedMount, bytes: &[u8]) -> bool {
+    let store = mount.repo_handle().store();
+    store.list_blobs().unwrap().into_iter().any(|hash| {
+        store
+            .get_blob(&hash)
+            .unwrap()
+            .map(|blob| blob.into_content() == bytes)
+            .unwrap_or(false)
+    })
+}
+
 #[test]
 fn partial_overwrite_preserves_captured_tail() {
     // Write "HELLO" at offset 0 over a captured file of "hello world\n".
@@ -718,6 +729,91 @@ fn flush_promotes_buffer_to_warm_tier() {
     let warm = mount.warm_keys();
     assert_eq!(warm.len(), 1);
     assert_eq!(warm[0], std::path::PathBuf::from("out.txt"));
+}
+
+#[test]
+fn test_release_orphaned_node_flushes_pending_writes() {
+    let (_temp, mount) = open_mount();
+    let node = mount.lookup_path("hello.txt").unwrap();
+    let payload = b"release-orphan-cas-bytes";
+
+    mount.on_open(node).expect("open");
+    mount.write(node, 0, payload).expect("write hot bytes");
+    assert!(
+        !store_contains_blob_with_bytes(&mount, payload),
+        "sanity: dirty hot bytes must not be in CAS before release"
+    );
+
+    mount
+        .unlink_entry(NodeId::ROOT, OsStr::new("hello.txt"))
+        .expect("unlink while open");
+    assert!(
+        mount.orphans_contains(node),
+        "unlink while open must mark the node orphaned"
+    );
+
+    mount.release(node).expect("final release");
+
+    assert!(
+        !mount.orphans_contains(node),
+        "final release must retire orphan lifecycle state"
+    );
+    assert!(
+        store_contains_blob_with_bytes(&mount, payload),
+        "final release of an orphan must persist dirty hot bytes to CAS"
+    );
+    assert!(
+        mount
+            .lookup(NodeId::ROOT, OsStr::new("hello.txt"))
+            .unwrap()
+            .is_none(),
+        "orphan CAS persistence must not resurrect the unlinked path"
+    );
+}
+
+#[test]
+fn test_double_release_is_guarded() {
+    let (_temp, mount) = open_mount();
+    let node = mount.lookup_path("hello.txt").unwrap();
+    let payload = b"double-release-cas-bytes";
+
+    mount.on_open(node).expect("open");
+    mount.write(node, 0, payload).expect("write hot bytes");
+    mount.release(node).expect("first release flushes");
+    let blob = mount
+        .warm_blob("hello.txt")
+        .expect("first release promoted to warm CAS blob");
+
+    mount.release(node).expect("second release is a safe no-op");
+
+    assert_eq!(
+        mount.warm_blob("hello.txt"),
+        Some(blob),
+        "double release must not corrupt or replace the warm blob"
+    );
+    assert_eq!(
+        mount.hot_buffer_count(),
+        0,
+        "double release must not recreate a hot buffer"
+    );
+    assert!(
+        store_contains_blob_with_bytes(&mount, payload),
+        "flushed bytes must remain readable from CAS after double release"
+    );
+}
+
+#[test]
+fn test_release_nonexistent_node_safe_error() {
+    let (_temp, mount) = open_mount();
+    let err = mount
+        .release(NodeId(9_999_999_617))
+        .expect_err("release of an unknown node must fail safely");
+
+    assert!(
+        matches!(err, MountError::NotFound(_)),
+        "unexpected release error: {err:?}"
+    );
+    assert_eq!(err.to_errno(), libc::ENOENT);
 }
 
 #[test]
