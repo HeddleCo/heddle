@@ -552,6 +552,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn open_then_append_turn_persists_both_turns() {
         let (_t, state_id, svc) = fresh_service();
         let opened = svc
@@ -593,6 +594,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn open_idempotent_returns_same_discussion() {
         let (_t, state_id, svc) = fresh_service();
         let op_id = "11111111-2222-3333-4444-555555555555";
@@ -612,6 +614,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn resolve_dismissed_with_empty_reason_is_invalid_argument() {
         let (_t, state_id, svc) = fresh_service();
         let opened = svc
@@ -636,6 +639,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn list_by_state_filters_by_status() {
         let (_t, state_id, svc) = fresh_service();
         // Open two discussions, dismiss one of them.

@@ -495,6 +495,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[serial_test::serial(process_global)]
     fn default_socket_path_lives_under_heddle_dir() {
         let temp = TempDir::new().unwrap();
         let heddle = temp.path().join(".heddle");
@@ -505,6 +506,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(process_global)]
     fn create_private_socket_parent_creates_new_parent_0700() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -525,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(process_global)]
     fn bind_private_unix_listener_creates_socket_0600_before_chmod() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -542,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
+    #[serial_test::serial(process_global)]
     fn bind_private_unix_listener_restores_umask_after_bind_error() {
         let temp = TempDir::new().unwrap();
         let socket = temp.path().join("missing").join("grpc.sock");
@@ -566,6 +568,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(process_global)]
     fn pid_guard_writes_and_removes_pidfile() {
         let temp = TempDir::new().unwrap();
         let pid = temp.path().join("grpc.pid");
@@ -578,6 +581,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(process_global)]
     fn pid_guard_refuses_when_live_heddle_process_owns_pidfile() {
         let temp = TempDir::new().unwrap();
         let pid = temp.path().join("grpc.pid");
@@ -605,6 +609,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(process_global)]
     fn pid_guard_sweeps_stale_pidfile_with_dead_pid() {
         let temp = TempDir::new().unwrap();
         let pid = temp.path().join("grpc.pid");
@@ -625,6 +630,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(process_global)]
     fn pid_guard_sweeps_legacy_unstructured_pidfile() {
         // Pidfiles written by older daemons that pre-date the marker
         // are treated as foreign — the new `parse()` returns None and

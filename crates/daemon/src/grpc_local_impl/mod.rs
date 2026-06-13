@@ -197,6 +197,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn replays_recorded_response() {
         let (_t, service) = make_service();
         let op_id = OperationId::new().to_string();
@@ -222,6 +223,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn concurrent_calls_with_same_op_id_run_execute_only_once() {
         // The original race window: caller A enters with `Fresh`, awaits
         // execute(), and caller B enters with `Fresh` before A records.
@@ -279,6 +281,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn cancels_reservation_on_execute_failure() {
         // If execute returns Err, the reservation must be released so a
         // retry isn't permanently blocked. Without `cancel`, a transient
