@@ -393,30 +393,24 @@ fn thread_update_save_failure_does_not_commit_undoable_record() {
     std::fs::write(thread_path.join("feature.txt"), "feature\n").unwrap();
     heddle(&["capture", "-m", "feature work"], Some(&thread_path)).expect("feature capture");
 
-    std::fs::write(temp.path().join("main.txt"), "main\n").unwrap();
-    heddle(&["capture", "-m", "main advance"], Some(temp.path())).expect("main capture");
-
     let before_count = thread_update_count(temp.path());
     let failed = heddle_output_with_env(
-        &["thread", "refresh", "feature/atomic-save"],
-        Some(&thread_path),
-        &[(
-            "HEDDLE_FAULT_INJECT",
-            "thread_manager_save_before_workspace",
-        )],
+        &["thread", "resolve", "feature/atomic-save"],
+        Some(temp.path()),
+        &[("HEDDLE_FAULT_INJECT", "thread_manager_save_in_thread_update")],
     )
-    .expect("spawn injected refresh");
+    .expect("spawn injected thread resolve");
     assert!(
         !failed.status.success(),
-        "refresh should fail at manager.save fault point: stdout={} stderr={}",
+        "thread resolve should fail at the ThreadUpdate manager.save fault point: stdout={} stderr={}",
         String::from_utf8_lossy(&failed.stdout),
         String::from_utf8_lossy(&failed.stderr)
     );
     let stderr = String::from_utf8_lossy(&failed.stderr);
     assert!(
         stderr.contains("HEDDLE_FAULT_INJECT")
-            && stderr.contains("thread_manager_save_before_workspace"),
-        "refresh should report the intentional manager.save failure: stderr={stderr}"
+            && stderr.contains("thread_manager_save_in_thread_update"),
+        "thread resolve should report the intentional manager.save failure: stderr={stderr}"
     );
 
     assert_eq!(

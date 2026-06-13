@@ -126,6 +126,7 @@ pub(crate) fn save_thread_update_with_oplog(
     }
     let old_manager_records = encode_thread_records(manager, &before.manager_records)?;
     let new_manager_records = encode_thread_records(manager, &new_manager_records)?;
+    objects::fault_inject::maybe_fail_at("thread_manager_save_in_thread_update")?;
     manager.save(thread)?;
     repo.oplog().record_thread_update(
         &ThreadName::new(&thread.thread),
