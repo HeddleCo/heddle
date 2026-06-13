@@ -603,7 +603,7 @@ fn test_cli_pull_local_detached_head_materializes_then_publishes_thread() {
     let target_path_arg = target_path.to_str().unwrap().to_string();
     heddle(&["clone", &source_path, &target_path_arg], None).unwrap();
     let base_state = current_thread_state(&target_path, "main");
-    heddle(&["goto", &base_state], Some(&target_path)).expect("detach target HEAD");
+    heddle(&["switch", &base_state], Some(&target_path)).expect("detach target HEAD");
     let head_before = std::fs::read_to_string(target_path.join(".heddle").join("HEAD"))
         .expect("read detached HEAD");
     assert!(
@@ -1026,9 +1026,13 @@ fn git_overlay_remote_remove_uneditable_include_leaves_both_configs_unmutated() 
         "removing a remote defined in an uneditable include must refuse, not partially apply"
     );
     let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: Value = serde_json::from_str(stderr)
-        .unwrap_or_else(|err| panic!("uneditable-include refusal should emit JSON: {err}: {stderr}"));
-    assert_eq!(envelope["kind"], "git_remote_in_included_config", "{stderr}");
+    let envelope: Value = serde_json::from_str(stderr).unwrap_or_else(|err| {
+        panic!("uneditable-include refusal should emit JSON: {err}: {stderr}")
+    });
+    assert_eq!(
+        envelope["kind"], "git_remote_in_included_config",
+        "{stderr}"
+    );
 
     // No partial state: every config the command could have touched is unchanged.
     assert_eq!(
@@ -2795,7 +2799,8 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
     assert_eq!(import_remote["branches_synced"], 1, "{import_remote}");
     let after_import = verify_json(&local);
     assert_eq!(
-        after_import["recommended_action"], "heddle bridge git reconcile --ref origin/main --preview",
+        after_import["recommended_action"],
+        "heddle bridge git reconcile --ref origin/main --preview",
         "after importing the upstream tip, verify should recommend upstream integration, not local Git/Heddle reconcile: {after_import}"
     );
     let thread_list_json = heddle(&["thread", "list", "--output", "json"], Some(&local))
@@ -2815,7 +2820,8 @@ fn test_cli_git_overlay_sync_refuses_diverged_branch_before_rebase() {
         "{thread_list}"
     );
     assert_eq!(
-        origin_main["recommended_action"], "heddle bridge git reconcile --ref origin/main --preview",
+        origin_main["recommended_action"],
+        "heddle bridge git reconcile --ref origin/main --preview",
         "remote-tracking refs should be presented as upstream integration previews: {thread_list}"
     );
     assert!(
@@ -3090,7 +3096,7 @@ fn test_cli_fetch_local_creates_remote_thread_and_marker() {
     heddle(&["init"], Some(remote.path())).unwrap();
     std::fs::write(remote.path().join("file.txt"), "content").unwrap();
     heddle(&["capture", "-m", "Initial"], Some(remote.path())).unwrap();
-    heddle(&["marker", "create", "v1.0"], Some(remote.path())).unwrap();
+    heddle(&["thread", "marker", "create", "v1.0"], Some(remote.path())).unwrap();
 
     heddle(&["init"], Some(local.path())).unwrap();
     let remote_path = remote.path().to_string_lossy().to_string();
@@ -3103,16 +3109,18 @@ fn test_cli_fetch_local_creates_remote_thread_and_marker() {
     assert!(heddle(&["fetch", "origin"], Some(local.path())).is_ok());
 
     let repo = Repository::open(local.path()).unwrap();
-    assert!(repo
-        .refs()
-        .get_remote_thread("origin", &ThreadName::new("main"))
-        .unwrap()
-        .is_some());
-    assert!(repo
-        .refs()
-        .get_marker(&MarkerName::new("v1.0"))
-        .unwrap()
-        .is_some());
+    assert!(
+        repo.refs()
+            .get_remote_thread("origin", &ThreadName::new("main"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        repo.refs()
+            .get_marker(&MarkerName::new("v1.0"))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]

@@ -7,12 +7,12 @@ fn test_marker_delete() {
     heddle_must_succeed(&["init"], temp.path());
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle_must_succeed(&["capture", "-m", "Tagged"], temp.path());
-    heddle_must_succeed(&["marker", "create", "v1.0.0"], temp.path());
-    let result = heddle(&["marker", "list"], Some(temp.path())).unwrap();
+    heddle_must_succeed(&["thread", "marker", "create", "v1.0.0"], temp.path());
+    let result = heddle(&["thread", "marker", "list"], Some(temp.path())).unwrap();
     assert!(result.contains("v1.0.0"));
-    let result = heddle(&["marker", "delete", "v1.0.0"], Some(temp.path()));
+    let result = heddle(&["thread", "marker", "delete", "v1.0.0"], Some(temp.path()));
     assert!(result.is_ok());
-    let result = heddle(&["marker", "list"], Some(temp.path())).unwrap();
+    let result = heddle(&["thread", "marker", "list"], Some(temp.path())).unwrap();
     assert!(!result.contains("v1.0.0"));
 }
 
@@ -22,12 +22,12 @@ fn test_marker_move_to_state() {
     heddle_must_succeed(&["init"], temp.path());
     std::fs::write(temp.path().join("file.txt"), "v1").unwrap();
     heddle_must_succeed(&["capture", "-m", "v1"], temp.path());
-    heddle_must_succeed(&["marker", "create", "current"], temp.path());
+    heddle_must_succeed(&["thread", "marker", "create", "current"], temp.path());
     std::fs::write(temp.path().join("file.txt"), "v2").unwrap();
     heddle_must_succeed(&["capture", "-m", "v2"], temp.path());
-    heddle_must_succeed(&["marker", "delete", "current"], temp.path());
-    heddle_must_succeed(&["marker", "create", "current"], temp.path());
-    let result = heddle(&["marker", "show", "current"], Some(temp.path())).unwrap();
+    heddle_must_succeed(&["thread", "marker", "delete", "current"], temp.path());
+    heddle_must_succeed(&["thread", "marker", "create", "current"], temp.path());
+    let result = heddle(&["thread", "marker", "show", "current"], Some(temp.path())).unwrap();
     assert!(result.contains("v2") || result.contains("current"));
 }
 
@@ -146,15 +146,18 @@ fn test_remote_duplicate_name() {
 }
 
 #[test]
-fn test_fork_auto_naming() {
+fn test_start_creates_named_thread() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle_must_succeed(&["capture", "-m", "Initial"], temp.path());
-    let result = heddle(&["fork"], Some(temp.path()));
+    let result = heddle(
+        &["start", "feature/auto", "--workspace", "solid"],
+        Some(temp.path()),
+    );
     assert!(result.is_ok());
-    let status = heddle(&["status"], Some(temp.path())).unwrap();
-    assert!(status.contains("Fork") || status.contains("state") || status.contains("change_id"));
+    let threads = heddle(&["thread", "list"], Some(temp.path())).unwrap();
+    assert!(threads.contains("feature/auto"));
 }
 
 #[test]
@@ -164,14 +167,14 @@ fn test_thread_and_marker_listing_survives_ref_summary_maintenance() {
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle_must_succeed(&["capture", "-m", "Initial"], temp.path());
     heddle_must_succeed(&["thread", "create", "feature/ref-summary"], temp.path());
-    heddle_must_succeed(&["marker", "create", "stable"], temp.path());
+    heddle_must_succeed(&["thread", "marker", "create", "stable"], temp.path());
 
     heddle_must_succeed(&["maintenance", "run"], temp.path());
 
     let threads = heddle(&["thread", "list"], Some(temp.path())).unwrap();
     assert!(threads.contains("feature/ref-summary"));
 
-    let markers = heddle(&["marker", "list"], Some(temp.path())).unwrap();
+    let markers = heddle(&["thread", "marker", "list"], Some(temp.path())).unwrap();
     assert!(markers.contains("stable"));
 
     let maintenance: serde_json::Value = serde_json::from_str(

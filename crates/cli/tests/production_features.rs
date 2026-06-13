@@ -349,7 +349,7 @@ mod resolve {
         heddle(&["merge", "feature"], Some(temp.path())).unwrap();
 
         let blame = heddle(
-            &["blame", "file.txt", "--output", "json"],
+            &["--output", "json", "query", "--attribution", "file.txt"],
             Some(temp.path()),
         )
         .unwrap();
@@ -390,7 +390,7 @@ mod resolve {
         heddle(&["merge", "feature"], Some(temp.path())).unwrap();
 
         let blame = heddle(
-            &["blame", "file.txt", "--output", "json"],
+            &["--output", "json", "query", "--attribution", "file.txt"],
             Some(temp.path()),
         )
         .unwrap();
@@ -598,7 +598,7 @@ mod cherry_pick {
             .next()
             .unwrap();
 
-        heddle(&["goto", "HEAD~1"], Some(temp.path())).unwrap();
+        heddle(&["switch", "HEAD~1"], Some(temp.path())).unwrap();
 
         let result = heddle(&["cherry-pick", commit_id], Some(temp.path()));
         assert!(result.is_ok(), "cherry-pick failed: {:?}", result.err());
@@ -630,7 +630,7 @@ mod cherry_pick {
             .next()
             .unwrap();
 
-        heddle(&["goto", "HEAD~1"], Some(temp.path())).unwrap();
+        heddle(&["switch", "HEAD~1"], Some(temp.path())).unwrap();
 
         let result = heddle(
             &["cherry-pick", commit_id, "-m", "Custom message"],
@@ -664,7 +664,7 @@ mod cherry_pick {
             .next()
             .unwrap();
 
-        heddle(&["goto", "HEAD~1"], Some(temp.path())).unwrap();
+        heddle(&["switch", "HEAD~1"], Some(temp.path())).unwrap();
 
         let result = heddle(
             &["cherry-pick", commit_id, "--no-commit"],
@@ -719,7 +719,7 @@ mod cherry_pick {
             .to_string();
 
         // Move back to WITH_WEB so cherry-pick has work to do.
-        heddle(&["goto", "HEAD~1"], Some(temp.path())).unwrap();
+        heddle(&["switch", "HEAD~1"], Some(temp.path())).unwrap();
 
         // User drops explicitly heddle-ignored content alongside the tracked
         // dir. `.heddleignore` names `node_modules/`, so status hides it while
@@ -759,7 +759,10 @@ mod bisect {
         let temp = TempDir::new().unwrap();
         heddle(&["init"], Some(temp.path())).unwrap();
         let result = heddle(&["bisect", "start"], Some(temp.path()));
-        assert!(result.is_err(), "bisect should be an unknown verb after #473");
+        assert!(
+            result.is_err(),
+            "bisect should be an unknown verb after #473"
+        );
     }
 }
 
@@ -796,7 +799,7 @@ mod blame {
         fs::write(temp.path().join("file.txt"), "line 1\nline 2\nline 3\n").unwrap();
         heddle(&["capture", "-m", "Initial"], Some(temp.path())).unwrap();
 
-        let result = heddle(&["blame", "file.txt"], Some(temp.path()));
+        let result = heddle(&["query", "--attribution", "file.txt"], Some(temp.path()));
         assert!(result.is_ok(), "blame failed: {:?}", result.err());
 
         let output = result.unwrap();
@@ -812,16 +815,34 @@ mod blame {
         heddle(&["capture", "-m", "Initial"], Some(temp.path())).unwrap();
 
         let result = heddle(
-            &["blame", "file.txt", "--output", "json"],
+            &["--output", "json", "query", "--attribution", "file.txt"],
             Some(temp.path()),
         );
         assert!(
             result.is_ok(),
-            "blame --output json failed: {:?}",
+            "query --attribution --output json failed: {:?}",
             result.err()
         );
 
         let output: Value = serde_json::from_str(&result.unwrap()).expect("should be JSON");
+        assert!(output.get("lines").is_some(), "should have 'lines' field");
+    }
+
+    #[test]
+    fn test_blame_alias_routes_to_query_attribution_output() {
+        let temp = TempDir::new().unwrap();
+
+        heddle(&["init"], Some(temp.path())).unwrap();
+        fs::write(temp.path().join("file.txt"), "content\n").unwrap();
+        heddle(&["capture", "-m", "Initial"], Some(temp.path())).unwrap();
+
+        let raw = heddle(
+            &["--output", "json", "blame", "file.txt"],
+            Some(temp.path()),
+        )
+        .expect("blame alias should route through query --attribution");
+        let output: Value = serde_json::from_str(&raw).expect("should be JSON");
+        assert_eq!(output["output_kind"], "query_attribution");
         assert!(output.get("lines").is_some(), "should have 'lines' field");
     }
 
@@ -836,7 +857,7 @@ mod blame {
         fs::write(temp.path().join("file.txt"), "modified line\n").unwrap();
         heddle(&["capture", "-m", "Modify"], Some(temp.path())).unwrap();
 
-        let result = heddle(&["blame", "file.txt"], Some(temp.path()));
+        let result = heddle(&["query", "--attribution", "file.txt"], Some(temp.path()));
         assert!(result.is_ok(), "blame failed: {:?}", result.err());
     }
 
@@ -870,7 +891,7 @@ mod blame {
         .unwrap();
 
         let output = heddle(
-            &["blame", "file.txt", "--output", "json"],
+            &["--output", "json", "query", "--attribution", "file.txt"],
             Some(temp.path()),
         )
         .unwrap();
@@ -905,7 +926,7 @@ mod blame {
         refresh_then_merge_thread(temp.path(), "feature");
 
         let output = heddle(
-            &["blame", "file.txt", "--output", "json"],
+            &["--output", "json", "query", "--attribution", "file.txt"],
             Some(temp.path()),
         )
         .unwrap();

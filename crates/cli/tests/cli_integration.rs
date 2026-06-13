@@ -18,8 +18,6 @@ use repo::Repository;
 use serde_json::Value;
 use tempfile::TempDir;
 
-#[path = "cli_integration/attempt.rs"]
-mod attempt;
 #[path = "cli_integration/basics.rs"]
 mod basics;
 #[path = "cli_integration/bridge.rs"]
@@ -62,6 +60,8 @@ mod hydrate;
 mod misc;
 #[path = "cli_integration/oplog_salvage.rs"]
 mod oplog_salvage;
+#[path = "cli_integration/next_action_contract.rs"]
+mod next_action_contract;
 #[path = "cli_integration/oss_cli_polish.rs"]
 mod oss_cli_polish;
 #[path = "cli_integration/output_kind_invariant.rs"]
@@ -70,8 +70,6 @@ mod output_kind_invariant;
 mod output_kind_runtime;
 #[path = "cli_integration/output_mode_no_auto.rs"]
 mod output_mode_no_auto;
-#[path = "cli_integration/next_action_contract.rs"]
-mod next_action_contract;
 #[path = "cli_integration/perf_core_loop.rs"]
 mod perf_core_loop;
 #[path = "cli_integration/quickstart.rs"]
@@ -217,8 +215,12 @@ fn heddle(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String
 /// subprocess the spawn helper used), so substring assertions transfer
 /// unchanged.
 fn heddle_help(args: &[&str]) -> String {
-    cli::cli::help::render_for_args(args)
-        .unwrap_or_else(|| panic!("`heddle {}` is not an in-process help request", args.join(" ")))
+    cli::cli::help::render_for_args(args).unwrap_or_else(|| {
+        panic!(
+            "`heddle {}` is not an in-process help request",
+            args.join(" ")
+        )
+    })
 }
 
 fn heddle_output(args: &[&str], cwd: Option<&std::path::Path>) -> Result<Output, String> {

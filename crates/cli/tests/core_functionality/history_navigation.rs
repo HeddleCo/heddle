@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use super::*;
+use objects::store::ObjectStore;
 
 #[test]
 fn test_long_history_traversal() {
@@ -10,10 +10,10 @@ fn test_long_history_traversal() {
         std::fs::write(temp.path().join("version.txt"), format!("v{}", i)).unwrap();
         heddle_must_succeed(&["capture", "-m", &format!("Version {}", i)], temp.path());
     }
-    heddle_must_succeed(&["goto", "HEAD~5"], temp.path());
+    heddle_must_succeed(&["switch", "HEAD~5"], temp.path());
     let content = std::fs::read_to_string(temp.path().join("version.txt")).unwrap();
     assert_eq!(content, "v5");
-    heddle_must_succeed(&["goto", "HEAD~4"], temp.path());
+    heddle_must_succeed(&["switch", "HEAD~4"], temp.path());
     let content = std::fs::read_to_string(temp.path().join("version.txt")).unwrap();
     assert_eq!(content, "v1");
 }

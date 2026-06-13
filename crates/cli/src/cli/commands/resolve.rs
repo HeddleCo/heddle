@@ -346,9 +346,9 @@ fn conflict_markers_still_present_advice(path: &str) -> RecoveryAdvice {
         format!("{path} still contains conflict marker lines"),
         "continuing the merge would capture unresolved marker text as the resolved file content",
         "the merge state, refs, objects, and worktree files were left unchanged",
-        format!("heddle conflict show {path}"),
+        "heddle resolve --list".to_string(),
         vec![
-            format!("heddle conflict show {path}"),
+            "heddle resolve --list".to_string(),
             format!("heddle resolve {path}"),
             format!("heddle resolve {path} --force"),
         ],

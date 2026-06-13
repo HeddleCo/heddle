@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
+use oplog::{OpLogBackend, OpRecord};
 
 /// The `bisect` verb was removed in the whole-CLI consolidation (heddle#473),
 /// but the operation-status layer still detects a lingering `BISECT_STATE`
@@ -11,8 +12,7 @@ fn seed_heddle_bisect_state(path: &std::path::Path) {
     // overlay, so bootstrap one first — opening a bare `.heddle` that holds
     // only the marker file is not a valid repository.
     heddle(&["init"], Some(path)).expect("heddle init for bisect fixture");
-    std::fs::write(path.join(".heddle").join("BISECT_STATE"), "{}\n")
-        .expect("seed BISECT_STATE");
+    std::fs::write(path.join(".heddle").join("BISECT_STATE"), "{}\n").expect("seed BISECT_STATE");
 }
 
 fn init_git_repo_with_branch(path: &std::path::Path, branch: &str) {
@@ -214,10 +214,7 @@ fn inject_post_verification(cwd: &std::path::Path, args: &[&str], mut value: Val
     } else {
         // Clean verify flattens the proof; reconstruct as a nested
         // object by dropping verify's own wrapper keys.
-        let mut obj_map = parsed
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
+        let mut obj_map = parsed.as_object().cloned().unwrap_or_default();
         obj_map.remove("output_kind");
         obj_map.remove("repository_label");
         obj_map.remove("repository_context");
@@ -859,8 +856,7 @@ fn git_overlay_matrix_commit_no_all_nothing_staged_refuses_before_identity_prefl
         String::from_utf8_lossy(&output.stdout)
     );
     let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: Value =
-        serde_json::from_str(stderr).expect("refusal should emit JSON envelope");
+    let envelope: Value = serde_json::from_str(stderr).expect("refusal should emit JSON envelope");
     assert_eq!(
         envelope["kind"], "nothing_to_commit",
         "--no-all with nothing staged must surface nothing-to-commit before the identity preflight, not an identity refusal: {stderr}"
@@ -970,8 +966,8 @@ fn git_overlay_matrix_plain_git_no_commit_bootstrap_commands() {
     let thread_list = json(temp.path(), &["thread", "list", "--output", "json"]);
     assert_eq!(thread_list["current"], "trunk");
 
-    let workspace = json(temp.path(), &["workspace", "show", "--output", "json"]);
-    assert_eq!(workspace["current_thread"], "trunk");
+    let workspace = json(temp.path(), &["status", "--output", "json"]);
+    assert_eq!(workspace["thread"], "trunk");
 
     let show = json(temp.path(), &["show", "HEAD", "--output", "json"]);
     assert_git_overlay_basics(&show);
@@ -1097,21 +1093,20 @@ fn git_overlay_matrix_verify_tracks_plain_init_import_clean_loop() {
         status_text.contains("heddle adopt --ref main"),
         "initialized-but-unimported status should still name the exact adoption command: {status_text}"
     );
-    let workspace = json(temp.path(), &["workspace", "show", "--output", "json"]);
+    let workspace = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(workspace["verification"]["verified"], false);
     assert_eq!(workspace["verification"]["status"], "needs_import");
     assert_eq!(workspace["recommended_action"], "heddle adopt --ref main");
+    let thread_list = json(temp.path(), &["thread", "list", "--output", "json"]);
     assert!(
-        workspace["groups"]
+        thread_list["threads"]
             .as_array()
             .unwrap()
             .iter()
-            .flat_map(|group| group["threads"].as_array().unwrap().iter())
             .all(|thread| thread["recommended_action"] == "heddle adopt --ref main"),
-        "workspace should keep import repair actions while repository verification is blocked: {workspace}"
+        "thread list should keep import repair actions while repository verification is blocked: {thread_list}"
     );
     assert_verify_check_rows(&workspace["verification"]);
-    let thread_list = json(temp.path(), &["thread", "list", "--output", "json"]);
     assert_eq!(thread_list["verification"]["verified"], false);
     assert_eq!(thread_list["verification"]["status"], "needs_import");
     assert_eq!(thread_list["recommended_action"], "heddle adopt --ref main");
@@ -1189,8 +1184,8 @@ fn git_overlay_matrix_verify_tracks_plain_init_import_clean_loop() {
         0
     );
     assert_verify_check_rows(&status["verification"]);
-    let workspace = json(temp.path(), &["workspace", "show", "--output", "json"]);
-    assert_eq!(workspace["output_kind"], "workspace_summary");
+    let workspace = json(temp.path(), &["status", "--output", "json"]);
+    assert_eq!(workspace["output_kind"], "status");
     assert_eq!(workspace["verification"]["verified"], true);
     assert_eq!(workspace["verification"]["status"], "clean");
     assert_eq!(workspace["recommended_action"], Value::Null);
@@ -1547,7 +1542,7 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
         heddle_argv_json(["land", "--thread", "feature/ready-verify", "--no-push"]),
         "thread list top-level action should be directly executable: {thread_list_before_preview}"
     );
-    let workspace_before_preview = json(temp.path(), &["--output", "json", "workspace", "show"]);
+    let workspace_before_preview = json(temp.path(), &["--output", "json", "status"]);
     assert_eq!(
         workspace_before_preview["recommended_action"],
         "heddle land --thread feature/ready-verify --no-push",
@@ -1666,18 +1661,12 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
         heddle_argv_json(["land", "--thread", "feature/ready-verify", "--no-push"]),
         "thread list item actions should be directly executable: {thread_list}"
     );
-    let workspace = json(temp.path(), &["--output", "json", "workspace", "show"]);
+    let workspace = json(temp.path(), &["--output", "json", "status"]);
     assert_eq!(
         workspace["recommended_action"], "heddle land --thread feature/ready-verify --no-push",
         "workspace top-level action should match verify after preview: {workspace}"
     );
-    let workspace_thread = workspace["groups"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|group| group["threads"].as_array().unwrap().iter())
-        .find(|thread| thread["name"] == "feature/ready-verify")
-        .expect("ready thread should appear in workspace");
+    let workspace_thread = listed;
     assert_eq!(
         workspace_thread["recommended_action"],
         "heddle land --thread feature/ready-verify --no-push",
@@ -2038,7 +2027,7 @@ fn git_overlay_matrix_current_thread_recovery_not_overridden_by_remote_push() {
 
     for (label, args) in [
         ("status", vec!["--output", "json", "status"]),
-        ("workspace", vec!["--output", "json", "workspace", "show"]),
+        ("workspace", vec!["--output", "json", "status"]),
         ("thread list", vec!["--output", "json", "thread", "list"]),
         (
             "thread show",
@@ -2094,7 +2083,7 @@ fn git_overlay_matrix_thread_and_workspace_plain_git_are_observe_only() {
         "thread show in a plain Git repo must be observe-only"
     );
 
-    let workspace = json(temp.path(), &["workspace", "show", "--output", "json"]);
+    let workspace = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(workspace["repository_capability"], "plain-git");
     assert_eq!(workspace["verification"]["status"], "needs_init");
     assert_eq!(workspace["recommended_action"], "heddle adopt --ref main");
@@ -2112,7 +2101,7 @@ fn git_overlay_matrix_thread_and_workspace_plain_git_are_observe_only() {
 #[test]
 fn git_overlay_matrix_observe_only_contract_preserves_plain_git_repo() {
     let catalog: Value =
-        serde_json::from_str(&heddle(&["commands", "--output", "json"], None).unwrap())
+        serde_json::from_str(&heddle(&["help", "--output", "json"], None).unwrap())
             .expect("command catalog should be JSON");
     let commands = catalog["commands"]
         .as_array()
@@ -2131,7 +2120,6 @@ fn git_overlay_matrix_observe_only_contract_preserves_plain_git_repo() {
             "thread show",
             &["thread", "show", "main", "--output", "json"],
         ),
-        ("workspace show", &["workspace", "show", "--output", "json"]),
         ("log", &["log", "--output", "json"]),
         ("show", &["show", "HEAD", "--output", "json"]),
         ("diff", &["diff", "--output", "json"]),
@@ -2693,7 +2681,7 @@ fn git_overlay_matrix_undo_after_push_recommends_publish_undo_not_pull() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|command| command == "heddle redo"),
+            .any(|command| command == "heddle undo --redo"),
         "undo should also name the restore-the-work option: {undo}"
     );
 
@@ -2826,7 +2814,13 @@ fn git_overlay_matrix_merge_git_commit_fast_forward_uses_git_merge_checkpoint_wh
 
     json(
         temp.path(),
-        &["--output", "json", "branch", "feature/merge-sample"],
+        &[
+            "--output",
+            "json",
+            "thread",
+            "create",
+            "feature/merge-sample",
+        ],
     );
     json(
         temp.path(),
@@ -2920,7 +2914,7 @@ fn git_overlay_matrix_push_preserves_merge_git_checkpoint_tip() {
 
     json(
         temp.path(),
-        &["--output", "json", "branch", "feature/audit"],
+        &["--output", "json", "thread", "create", "feature/audit"],
     );
     json(
         temp.path(),
@@ -3271,10 +3265,7 @@ fn git_overlay_matrix_undo_preview_refuses_active_operation_like_real_undo() {
             .is_some_and(|condition| condition.contains("heddle bisect is in-progress")),
         "active-operation preview should name the operation: {preview_stderr}"
     );
-    assert_eq!(
-        preview_envelope["primary_command"],
-        "heddle abort"
-    );
+    assert_eq!(preview_envelope["primary_command"], "heddle abort");
     assert_eq!(
         git_ref_snapshot(temp.path()),
         git_before,
@@ -3475,7 +3466,10 @@ fn git_overlay_matrix_top_level_push_closes_remote_verification_loop() {
     let commit = json(temp.path(), &["--output", "json", "commit", "-m", "change"]);
     assert_eq!(commit["output_kind"], "commit");
     assert_eq!(commit["next_action"], "heddle push");
-    assert_eq!(commit["next_action_template"]["argv_template"], heddle_argv_json(["push"]));
+    assert_eq!(
+        commit["next_action_template"]["argv_template"],
+        heddle_argv_json(["push"])
+    );
     assert_eq!(commit["recommended_action"], "heddle push");
     assert_eq!(
         commit["recommended_action_template"]["argv_template"],
@@ -4102,7 +4096,10 @@ fn git_overlay_matrix_remote_remove_clears_both_sources() {
     git_commit_all(temp.path(), "seed");
     heddle_adopt(temp.path());
 
-    let staging_arg = staging.path().to_str().expect("staging path should be utf8");
+    let staging_arg = staging
+        .path()
+        .to_str()
+        .expect("staging path should be utf8");
     let added = json(
         temp.path(),
         &["--output", "json", "remote", "add", "staging", staging_arg],
@@ -4224,7 +4221,10 @@ fn git_overlay_matrix_remote_set_default_works_for_dual_location_remote() {
     heddle_adopt(temp.path());
 
     let origin_arg = origin.path().to_str().expect("origin path should be utf8");
-    let staging_arg = staging.path().to_str().expect("staging path should be utf8");
+    let staging_arg = staging
+        .path()
+        .to_str()
+        .expect("staging path should be utf8");
     json(
         temp.path(),
         &["--output", "json", "remote", "add", "origin", origin_arg],
@@ -4356,8 +4356,8 @@ fn git_overlay_matrix_subdirectory_dirty_commands() {
     let thread_list = json(&nested, &["thread", "list", "--output", "json"]);
     assert_eq!(thread_list["current"], "feature/drop-in");
 
-    let workspace = json(&nested, &["workspace", "show", "--output", "json"]);
-    assert_eq!(workspace["current_thread"], "feature/drop-in");
+    let workspace = json(&nested, &["status", "--output", "json"]);
+    assert_eq!(workspace["thread"], "feature/drop-in");
 }
 
 #[test]
@@ -4541,9 +4541,9 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
         "diagnose should show the same current Git dirty set as status under needs_import: {dirty_diagnose}"
     );
     let dirty_diff = json(temp.path(), &["diff", "--output", "json", "--stat"]);
-    let dirty_changes = dirty_diff["changes"]
-        .as_object()
-        .unwrap_or_else(|| panic!("worktree diff changes should be a category object: {dirty_diff}"));
+    let dirty_changes = dirty_diff["changes"].as_object().unwrap_or_else(|| {
+        panic!("worktree diff changes should be a category object: {dirty_diff}")
+    });
     let dirty_total: usize = ["modified", "added", "deleted"]
         .iter()
         .filter_map(|key| dirty_changes[*key].as_array())
@@ -4854,14 +4854,18 @@ fn git_overlay_matrix_branch_delete_does_not_recommend_deleted_thread() {
             "materialized",
         ],
     );
-    let text = heddle(&["branch", "-d", "feature/delete-text"], Some(temp.path())).unwrap();
+    let text = heddle(
+        &["thread", "drop", "feature/delete-text"],
+        Some(temp.path()),
+    )
+    .unwrap();
     assert!(
         text.contains("Dropped thread 'feature/delete-text'"),
-        "branch -d should report the dropped thread: {text}"
+        "thread drop should report the dropped thread: {text}"
     );
     assert!(
         !text.contains("heddle ready --thread feature/delete-text") && !text.contains("Next:"),
-        "branch -d must not point at the deleted thread: {text}"
+        "thread drop must not point at the deleted thread: {text}"
     );
 
     json(
@@ -4877,7 +4881,14 @@ fn git_overlay_matrix_branch_delete_does_not_recommend_deleted_thread() {
     );
     let deleted = json(
         temp.path(),
-        &["--output", "json", "branch", "-d", "feature/delete-json"],
+        &[
+            "--output",
+            "json",
+            "thread",
+            "drop",
+            "feature/delete-json",
+            "--delete-thread",
+        ],
     );
     assert_eq!(deleted["status"], "completed");
     assert_eq!(deleted["thread"]["state"], "abandoned");
@@ -4930,14 +4941,8 @@ fn git_overlay_matrix_auto_adopts_local_branch_tips_without_full_import() {
     assert_eq!(beta_show["history_imported"], false);
     assert!(beta_show["git_branch_tip"].as_str().is_some());
 
-    let workspace = json(temp.path(), &["workspace", "show", "--output", "json"]);
-    let workspace_threads = workspace["groups"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|group| group["threads"].as_array().into_iter().flatten())
-        .cloned()
-        .collect::<Vec<_>>();
+    let workspace = json(temp.path(), &["thread", "list", "--output", "json"]);
+    let workspace_threads = workspace["threads"].as_array().unwrap().to_vec();
     assert!(
         workspace_threads
             .iter()
@@ -5004,8 +5009,8 @@ fn git_overlay_matrix_non_main_default_branch_commands() {
     let thread_list = json(temp.path(), &["thread", "list", "--output", "json"]);
     assert_eq!(thread_list["current"], "develop");
 
-    let workspace = json(temp.path(), &["workspace", "show", "--output", "json"]);
-    assert_eq!(workspace["current_thread"], "develop");
+    let workspace = json(temp.path(), &["status", "--output", "json"]);
+    assert_eq!(workspace["thread"], "develop");
 }
 
 #[test]
@@ -5528,7 +5533,7 @@ fn git_overlay_matrix_stale_conflict_thread_resolve_enters_conflict_recovery() {
     assert!(
         resolved["next_action"]
             .as_str()
-            .is_some_and(|action| action.contains("conflict list")),
+            .is_some_and(|action| action.contains("resolve --list")),
         "thread resolve should point at materialized conflict state: {resolved}"
     );
     assert!(
@@ -5583,8 +5588,8 @@ fn git_overlay_matrix_reopen_from_different_cwds_preserves_state_and_git_only_al
 
     let nested = temp.path().join("src/reopen/check");
     std::fs::create_dir_all(&nested).unwrap();
-    let nested_workspace = json(&nested, &["workspace", "show", "--output", "json"]);
-    assert_eq!(nested_workspace["current_thread"], "feature/drop-in");
+    let nested_workspace = json(&nested, &["status", "--output", "json"]);
+    assert_eq!(nested_workspace["thread"], "feature/drop-in");
     let nested_bridge = json(&nested, &["bridge", "git", "status", "--output", "json"]);
     assert_eq!(
         nested_bridge["git_overlay_import_hint"],
@@ -5733,7 +5738,10 @@ fn git_overlay_matrix_diff_status_keeps_cross_type_move_split() {
     // 3321103601 flagged), instead of the heddle-native builder.
     std::fs::write(temp.path().join("filler.txt"), "filler edit\n").unwrap();
     git(&["add", "filler.txt"], temp.path());
-    git(&["commit", "-m", "advance branch outside heddle"], temp.path());
+    git(
+        &["commit", "-m", "advance branch outside heddle"],
+        temp.path(),
+    );
 
     // The cross-type move stays UNCOMMITTED in the worktree: `linked` follows
     // to `anchor.txt`, so the worktree blob read for the added side equals the
@@ -5787,7 +5795,9 @@ fn git_overlay_matrix_diff_added_symlink_renders_link_target() {
         .unwrap()
         .iter()
         .find(|change| change["path"] == "link-to-readme")
-        .unwrap_or_else(|| panic!("diff should include added symlink under the added category: {diff}"));
+        .unwrap_or_else(|| {
+            panic!("diff should include added symlink under the added category: {diff}")
+        });
     assert_eq!(link_change["kind"], "added");
     let added_line = link_change["lines"]
         .as_array()
@@ -6001,8 +6011,7 @@ fn git_overlay_matrix_stale_merge_preview_blocks_ship_recommendation_and_diff() 
         "parent status must refresh a stale ready thread before merge preview is actionable: {parent_status}"
     );
     assert_ne!(
-        parent_status["recommended_action"],
-        "heddle merge feature/stale-preview --preview",
+        parent_status["recommended_action"], "heddle merge feature/stale-preview --preview",
         "parent status must not recommend merge preview for a stale ready thread: {parent_status}"
     );
 
@@ -6200,6 +6209,345 @@ fn git_overlay_matrix_ship_uses_thread_intent_for_git_checkpoint_subject() {
     );
 }
 
+fn setup_two_capture_land_thread(temp: &TempDir, thread: &str) -> (std::path::PathBuf, String) {
+    init_git_repo_with_branch(temp.path(), "main");
+    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
+    git_commit_all(temp.path(), "base");
+    let base = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
+    heddle_adopt(temp.path());
+
+    let checkout = temp.path().with_extension(thread.replace('/', "-"));
+    json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "start",
+            thread,
+            "--path",
+            checkout.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(checkout.join("one.txt"), "one\n").unwrap();
+    json(
+        &checkout,
+        &["--output", "json", "capture", "-m", "first source"],
+    );
+    std::fs::write(checkout.join("two.txt"), "two\n").unwrap();
+    json(
+        &checkout,
+        &["--output", "json", "ready", "-m", "second source"],
+    );
+
+    (checkout, base)
+}
+
+fn collapse_records(path: &std::path::Path) -> Vec<(Vec<String>, String, Option<String>)> {
+    let repo = Repository::open(path).expect("repo should open");
+    repo.oplog()
+        .recent(128)
+        .expect("read oplog")
+        .into_iter()
+        .filter_map(|entry| match entry.operation {
+            OpRecord::Collapse {
+                sources,
+                result,
+                thread,
+                ..
+            } => Some((
+                sources.into_iter().map(|id| id.short()).collect(),
+                result.short(),
+                thread,
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn thread_tip(path: &std::path::Path, thread: &str) -> String {
+    let repo = Repository::open(path).expect("repo should open");
+    repo.refs()
+        .get_thread(&objects::object::ThreadName::new(thread))
+        .expect("thread ref lookup should succeed")
+        .unwrap_or_else(|| panic!("thread {thread} should exist"))
+        .short()
+}
+
+fn assert_latest_undo_batch_has_land_squash_ops(path: &std::path::Path) {
+    let undo_list = json(
+        path,
+        &["--output", "json", "undo", "--list", "--depth", "1"],
+    );
+    let batches = undo_list["batches"]
+        .as_array()
+        .expect("undo list should expose batches");
+    assert_eq!(
+        batches.len(),
+        1,
+        "land should expose one latest undo batch: {undo_list}"
+    );
+    let operations = batches[0]["operations"]
+        .as_array()
+        .expect("undo list should expose operations");
+    let logical_operations: Vec<_> = operations
+        .iter()
+        .filter(|op| {
+            !op["description"]
+                .as_str()
+                .is_some_and(|description| description.starts_with("transaction commit "))
+        })
+        .collect();
+    assert_eq!(
+        logical_operations.len(),
+        3,
+        "squashed land should coalesce collapse + integration + Git checkpoint: {undo_list}"
+    );
+    assert!(
+        logical_operations.iter().any(|op| op["description"]
+            .as_str()
+            .is_some_and(|description| description.starts_with("collapse "))),
+        "squashed land undo batch should include the source collapse: {undo_list}"
+    );
+    assert!(
+        logical_operations.iter().any(|op| op["description"]
+            .as_str()
+            .is_some_and(|description| description.starts_with("fast-forward "))),
+        "squashed land undo batch should include the target integration: {undo_list}"
+    );
+    assert!(
+        logical_operations.iter().any(|op| op["description"]
+            .as_str()
+            .is_some_and(|description| description.starts_with("git checkpoint "))),
+        "squashed land undo batch should include the Git checkpoint: {undo_list}"
+    );
+}
+
+#[test]
+fn git_overlay_matrix_land_squashes_thread_to_one_git_commit_by_default() {
+    let temp = TempDir::new().unwrap();
+    let (_checkout, base) = setup_two_capture_land_thread(&temp, "feature/squash-default");
+
+    let land = json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/squash-default",
+            "--no-push",
+        ],
+    );
+    assert_eq!(land["status"], "landed");
+    assert_eq!(land["checkpointed"], true);
+    assert_eq!(
+        git_stdout(
+            temp.path(),
+            &["rev-list", "--count", &format!("{base}..HEAD")]
+        ),
+        "1",
+        "default land should project the thread as one Git commit"
+    );
+    assert_eq!(git_stdout(temp.path(), &["show", "HEAD:one.txt"]), "one");
+    assert_eq!(git_stdout(temp.path(), &["show", "HEAD:two.txt"]), "two");
+
+    let records = collapse_records(temp.path());
+    let record = records
+        .iter()
+        .find(|(_, _, thread)| thread.as_deref() == Some("feature/squash-default"))
+        .unwrap_or_else(|| panic!("land should record thread collapse: {records:?}"));
+    assert_eq!(
+        record.0.len(),
+        2,
+        "collapse record should retain the full ordered source list"
+    );
+}
+
+#[test]
+fn git_overlay_matrix_squashed_land_undo_restores_git_target_and_source_thread() {
+    let temp = TempDir::new().unwrap();
+    let (_checkout, base_git) = setup_two_capture_land_thread(&temp, "feature/squash-undo");
+    let source_tip_before = thread_tip(temp.path(), "feature/squash-undo");
+    let target_tip_before = thread_tip(temp.path(), "main");
+
+    let land = json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/squash-undo",
+            "--no-push",
+        ],
+    );
+    assert_eq!(land["status"], "landed");
+    assert_eq!(
+        git_stdout(
+            temp.path(),
+            &["rev-list", "--count", &format!("{base_git}..HEAD")]
+        ),
+        "1",
+        "default land should project the multi-state source as one Git commit"
+    );
+    assert_ne!(
+        thread_tip(temp.path(), "feature/squash-undo"),
+        source_tip_before,
+        "land squash should move the source thread to the synthetic collapse state"
+    );
+    assert_ne!(thread_tip(temp.path(), "main"), target_tip_before);
+
+    assert_latest_undo_batch_has_land_squash_ops(temp.path());
+    let undo = json(temp.path(), &["--output", "json", "undo"]);
+    assert_eq!(undo["status"], "completed", "{undo}");
+    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), base_git);
+    assert_eq!(thread_tip(temp.path(), "main"), target_tip_before);
+    assert_eq!(
+        thread_tip(temp.path(), "feature/squash-undo"),
+        source_tip_before,
+        "undo must restore the source thread to its pre-collapse tip"
+    );
+    assert_eq!(git_status_short(temp.path()), "");
+}
+
+#[test]
+fn git_overlay_matrix_manual_resolution_land_squashes_and_undo_restores_source_thread() {
+    let temp = TempDir::new().unwrap();
+    let (_checkout, _base_git) = setup_two_capture_land_thread(&temp, "feature/manual-squash");
+
+    std::fs::write(temp.path().join("main-only.txt"), "main\n").unwrap();
+    let main_commit = json(
+        temp.path(),
+        &["--output", "json", "commit", "-m", "main advance"],
+    );
+    assert_eq!(main_commit["output_kind"], "commit", "{main_commit}");
+    let pre_land_git = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
+    let target_tip_before = thread_tip(temp.path(), "main");
+
+    let refresh = json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "thread",
+            "refresh",
+            "feature/manual-squash",
+        ],
+    );
+    assert_eq!(refresh["status"], "completed", "{refresh}");
+    let source_tip_before_land = thread_tip(temp.path(), "feature/manual-squash");
+
+    let land = json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/manual-squash",
+            "--no-push",
+        ],
+    );
+    assert_eq!(land["status"], "landed", "{land}");
+    assert_eq!(land["checkpointed"], true);
+    assert_eq!(
+        git_stdout(
+            temp.path(),
+            &["rev-list", "--count", &format!("{pre_land_git}..HEAD")]
+        ),
+        "1",
+        "manual-resolution land should squash the refreshed multi-state thread by default"
+    );
+
+    assert_latest_undo_batch_has_land_squash_ops(temp.path());
+    let undo = json(temp.path(), &["--output", "json", "undo"]);
+    assert_eq!(undo["status"], "completed", "{undo}");
+    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), pre_land_git);
+    assert_eq!(thread_tip(temp.path(), "main"), target_tip_before);
+    assert_eq!(
+        thread_tip(temp.path(), "feature/manual-squash"),
+        source_tip_before_land,
+        "undo must restore the refreshed source thread tip that existed before land"
+    );
+    assert_eq!(git_status_short(temp.path()), "");
+}
+
+#[test]
+fn git_overlay_matrix_land_no_squash_preserves_per_state_git_export() {
+    let temp = TempDir::new().unwrap();
+    let (_checkout, base) = setup_two_capture_land_thread(&temp, "feature/no-squash");
+
+    let land = json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/no-squash",
+            "--no-squash",
+            "--no-push",
+        ],
+    );
+    assert_eq!(land["status"], "landed");
+    assert_eq!(
+        git_stdout(
+            temp.path(),
+            &["rev-list", "--count", &format!("{base}..HEAD")]
+        ),
+        "2",
+        "--no-squash should preserve one Git commit per source state"
+    );
+    assert!(
+        collapse_records(temp.path()).is_empty(),
+        "--no-squash land should not mint a collapse result"
+    );
+}
+
+#[test]
+fn git_overlay_matrix_land_config_can_opt_out_of_squash() {
+    let temp = TempDir::new().unwrap();
+    let (_checkout, base) = setup_two_capture_land_thread(&temp, "feature/config-no-squash");
+    let config_dir = TempDir::new().unwrap();
+    let config = config_dir.path().join("land-no-squash-config.toml");
+    std::fs::write(
+        &config,
+        "[principal]\nname = \"Heddle Test\"\nemail = \"heddle@example.com\"\n\n[land]\nsquash = false\n",
+    )
+    .unwrap();
+
+    let output = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "land",
+            "--thread",
+            "feature/config-no-squash",
+            "--no-push",
+        ],
+        Some(temp.path()),
+        &[("HEDDLE_CONFIG", config.to_str().unwrap())],
+    )
+    .expect("land with config should run");
+    assert!(
+        output.status.success(),
+        "config opt-out land should succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let land: Value = serde_json::from_slice(&output.stdout).expect("land JSON should parse");
+    assert_eq!(land["status"], "landed");
+    assert_eq!(
+        git_stdout(
+            temp.path(),
+            &["rev-list", "--count", &format!("{base}..HEAD")]
+        ),
+        "2",
+        "land.squash=false should preserve per-State Git export"
+    );
+    assert!(collapse_records(temp.path()).is_empty());
+}
+
 #[test]
 fn git_overlay_matrix_ship_undo_restores_git_and_heddle_together() {
     let temp = TempDir::new().unwrap();
@@ -6303,12 +6651,14 @@ fn git_overlay_matrix_ship_undo_restores_git_and_heddle_together() {
     );
     let thread_list_after_undo = json(temp.path(), &["--output", "json", "thread", "list"]);
     assert_eq!(
-        thread_list_after_undo["recommended_action"], "heddle land --thread feature/land-undo --no-push",
+        thread_list_after_undo["recommended_action"],
+        "heddle land --thread feature/land-undo --no-push",
         "thread list should restore the ready workflow action after land undo: {thread_list_after_undo}"
     );
-    let workspace_after_undo = json(temp.path(), &["--output", "json", "workspace", "show"]);
+    let workspace_after_undo = json(temp.path(), &["--output", "json", "status"]);
     assert_eq!(
-        workspace_after_undo["recommended_action"], "heddle land --thread feature/land-undo --no-push",
+        workspace_after_undo["recommended_action"],
+        "heddle land --thread feature/land-undo --no-push",
         "workspace should restore the ready workflow action after land undo: {workspace_after_undo}"
     );
     assert_eq!(git_status_short(temp.path()), "");
@@ -6355,8 +6705,8 @@ fn git_overlay_matrix_ship_undo_restores_git_and_heddle_together() {
     assert_eq!(workflow["status"], "stale_integration_metadata");
 
     std::fs::write(temp.path().join("local-dirty.txt"), "local dirty\n").unwrap();
-    let redo_refusal =
-        heddle_output(&["--output", "json", "redo"], Some(temp.path())).expect("redo should run");
+    let redo_refusal = heddle_output(&["--output", "json", "undo", "--redo"], Some(temp.path()))
+        .expect("redo should run");
     assert!(!redo_refusal.status.success(), "dirty redo should refuse");
     let stderr = String::from_utf8_lossy(&redo_refusal.stderr);
     let envelope: Value = serde_json::from_str(stderr.trim())
@@ -6373,7 +6723,7 @@ fn git_overlay_matrix_ship_undo_restores_git_and_heddle_together() {
     );
 
     std::fs::remove_file(temp.path().join("local-dirty.txt")).unwrap();
-    let redo = json(temp.path(), &["--output", "json", "redo"]);
+    let redo = json(temp.path(), &["--output", "json", "undo", "--redo"]);
     assert_eq!(redo["action"], "redo");
     assert_eq!(redo["status"], "completed");
     assert_eq!(redo["verification"]["verified"], true);
@@ -7016,21 +7366,12 @@ fn git_overlay_matrix_side_only_import_is_available_not_next_action() {
         heddle_argv_json(["adopt", "--ref", "side"])
     );
 
-    let workspace = json(temp.path(), &["workspace", "show", "--output", "json"]);
-    assert_eq!(workspace["output_kind"], "workspace_summary");
+    let workspace = json(temp.path(), &["status", "--output", "json"]);
+    assert_eq!(workspace["output_kind"], "status");
     assert_eq!(workspace["recommended_action"], Value::Null);
     assert!(
-        workspace["groups"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|group| group["id"] != "available_git_refs"),
-        "available Git refs should be a typed top-level JSON field, not thread-shaped groups: {workspace}"
-    );
-    assert_eq!(workspace["available_git_refs"][0]["name"], "side");
-    assert_eq!(
-        workspace["available_git_refs"][0]["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["adopt", "--ref", "side"])
+        workspace.get("available_git_refs").is_none(),
+        "status JSON should leave optional Git-only refs on thread list: {workspace}"
     );
 
     let bridge = json(
@@ -7047,25 +7388,20 @@ fn git_overlay_matrix_side_only_import_is_available_not_next_action() {
         "a side branch whose tip was already imported through main should not make the bridge report missing import work: {bridge}"
     );
 
-    for (label, args) in [
-        ("thread list", &["thread", "list", "--output", "text"][..]),
-        ("workspace", &["workspace", "show", "--output", "text"][..]),
-    ] {
-        let text = heddle(args, Some(temp.path())).unwrap();
-        assert!(
-            text.contains("Optional Git-only branch available: side")
-                || text.contains("Optional Git-only branches"),
-            "{label} should use optional Git-only branch language: {text}"
-        );
-        assert!(
-            text.contains("adopt when you want to work on this branch in Heddle"),
-            "{label} should explain optional Git-only branch adoption without sounding blocked: {text}"
-        );
-        assert!(
-            !text.contains("Available Git refs") && !text.contains("optional import:"),
-            "{label} should avoid implementation-shaped Git ref copy: {text}"
-        );
-    }
+    let text = heddle(&["thread", "list", "--output", "text"], Some(temp.path())).unwrap();
+    assert!(
+        text.contains("Optional Git-only branch available: side")
+            || text.contains("Optional Git-only branches"),
+        "thread list should use optional Git-only branch language: {text}"
+    );
+    assert!(
+        text.contains("adopt when you want to work on this branch in Heddle"),
+        "thread list should explain optional Git-only branch adoption without sounding blocked: {text}"
+    );
+    assert!(
+        !text.contains("Available Git refs") && !text.contains("optional import:"),
+        "thread list should avoid implementation-shaped Git ref copy: {text}"
+    );
 
     let status_text = heddle(&["status", "--output", "text", "-v"], Some(temp.path())).unwrap();
     assert!(
@@ -7102,16 +7438,10 @@ fn git_overlay_matrix_side_only_import_is_available_not_next_action() {
         heddle_argv_json(["adopt", "--ref", "side"])
     );
 
-    let dirty_workspace = json(temp.path(), &["workspace", "show", "--output", "json"]);
-    assert_eq!(
-        dirty_workspace["available_git_refs"][0]["recommended_action"],
-        dirty_thread_list["available_git_refs"][0]["recommended_action"],
-        "thread list and workspace show should agree on optional Git ref adoption while blocked: thread={dirty_thread_list} workspace={dirty_workspace}"
-    );
-    assert_eq!(
-        dirty_workspace["available_git_refs"][0]["recommended_action_template"]["argv_template"],
-        dirty_thread_list["available_git_refs"][0]["recommended_action_template"]["argv_template"],
-        "thread list and workspace show argv should match for optional Git ref adoption while blocked: thread={dirty_thread_list} workspace={dirty_workspace}"
+    let dirty_workspace = json(temp.path(), &["status", "--output", "json"]);
+    assert!(
+        dirty_workspace.get("available_git_refs").is_none(),
+        "status JSON should leave optional Git-only refs on thread list even while blocked: {dirty_workspace}"
     );
 }
 
@@ -7300,10 +7630,7 @@ fn git_overlay_matrix_rebase_and_cherry_pick_sequences_remain_coherent() {
     let diagnose = json(rebase_repo.path(), &["doctor", "--output", "json"]);
     assert_eq!(diagnose["repository_capability"], "git-overlay");
 
-    let worktree = json(
-        rebase_repo.path(),
-        &["workspace", "show", "--output", "json"],
-    );
+    let worktree = json(rebase_repo.path(), &["status", "--output", "json"]);
     assert_eq!(worktree["repository_capability"], "git-overlay");
 
     git(&["rebase", "--abort"], rebase_repo.path());
@@ -7715,8 +8042,8 @@ fn git_overlay_matrix_native_git_worktree_bootstraps_cleanly() {
             .any(|value| value == "native.txt")
     );
 
-    let workspace = json(&worktree_path, &["workspace", "show", "--output", "json"]);
-    assert_eq!(workspace["current_thread"], "support/native-worktree");
+    let workspace = json(&worktree_path, &["status", "--output", "json"]);
+    assert_eq!(workspace["thread"], "support/native-worktree");
 
     let ready = json(
         &worktree_path,
@@ -7743,8 +8070,8 @@ fn git_overlay_matrix_current_branch_rename_updates_active_thread_views() {
     let thread_list = json(temp.path(), &["thread", "list", "--output", "json"]);
     assert_eq!(thread_list["current"], "feature/renamed-current");
 
-    let workspace = json(temp.path(), &["workspace", "show", "--output", "json"]);
-    assert_eq!(workspace["current_thread"], "feature/renamed-current");
+    let workspace = json(temp.path(), &["status", "--output", "json"]);
+    assert_eq!(workspace["thread"], "feature/renamed-current");
 }
 
 #[test]
@@ -7828,10 +8155,7 @@ fn git_overlay_matrix_in_progress_operations_surface_consistently() {
     );
     let diagnose = json(rebase_repo.path(), &["doctor", "--output", "json"]);
     assert_eq!(diagnose["operation"]["kind"], "rebase");
-    let workspace = json(
-        rebase_repo.path(),
-        &["workspace", "show", "--output", "json"],
-    );
+    let workspace = json(rebase_repo.path(), &["status", "--output", "json"]);
     assert_eq!(workspace["operation"]["kind"], "rebase");
     let thread_list = json(rebase_repo.path(), &["thread", "list", "--output", "json"]);
     let current = thread_list["threads"]
@@ -7881,10 +8205,7 @@ fn git_overlay_matrix_in_progress_operations_surface_consistently() {
     let bisect_status = json(bisect_repo.path(), &["status", "--output", "json"]);
     assert_eq!(bisect_status["operation"]["scope"], "heddle");
     assert_eq!(bisect_status["operation"]["kind"], "bisect");
-    assert_eq!(
-        bisect_status["operation"]["next_action"],
-        "heddle abort"
-    );
+    assert_eq!(bisect_status["operation"]["next_action"], "heddle abort");
 }
 
 #[test]
@@ -7932,8 +8253,8 @@ fn git_overlay_matrix_native_worktree_branch_switch_and_remote_drift_surface_cle
         &worktree_path,
     );
     std::fs::write(worktree_path.join("renamed.txt"), "renamed branch\n").unwrap();
-    let switched = json(&worktree_path, &["workspace", "show", "--output", "json"]);
-    assert_eq!(switched["current_thread"], "support/renamed-switch");
+    let switched = json(&worktree_path, &["status", "--output", "json"]);
+    assert_eq!(switched["thread"], "support/renamed-switch");
 
     let other = TempDir::new().unwrap();
     git(
@@ -8190,46 +8511,17 @@ fn git_overlay_matrix_continue_handles_each_supported_operation_state() {
 
     let conflict_list = json(
         heddle_merge.path(),
-        &["conflict", "list", "--output", "json"],
+        &["resolve", "--list", "--output", "json"],
     );
     assert_eq!(
-        conflict_list["conflicts"][0]["file"], "conflict.txt",
-        "conflict list should surface active text-merge conflicts, not only structured conflict blobs: {conflict_list}"
+        conflict_list["conflicts"][0], "conflict.txt",
+        "resolve --list should surface active text-merge conflicts, not only structured conflict blobs: {conflict_list}"
     );
-    let conflict_show = json(
-        heddle_merge.path(),
-        &["conflict", "show", "conflict.txt", "--output", "json"],
-    );
-    assert_eq!(conflict_show["kind"], "active_merge_conflict");
-    assert_eq!(conflict_show["file"], "conflict.txt");
-    assert_eq!(
-        conflict_show["recommended_action"],
-        "heddle resolve conflict.txt"
-    );
-    assert_eq!(
-        conflict_show["recommended_action_template"]["argv_template"],
-        heddle_argv_json(["resolve", "conflict.txt"])
-    );
-    assert_eq!(
-        conflict_show["next_action_template"]["argv_template"],
-        heddle_argv_json(["resolve", "conflict.txt"])
-    );
+    let conflict_show_text =
+        std::fs::read_to_string(heddle_merge.path().join("conflict.txt")).unwrap();
     assert!(
-        conflict_show["worktree_content"]
-            .as_str()
-            .is_some_and(|content| content.contains("<<<<<<<") && content.contains(">>>>>>>")),
-        "conflict show should expose the active conflict-marker content: {conflict_show}"
-    );
-    let conflict_show_text = heddle(
-        &["conflict", "show", "conflict.txt", "--output", "text"],
-        Some(heddle_merge.path()),
-    )
-    .expect("conflict show text should render");
-    assert!(
-        conflict_show_text.contains("active text merge")
-            && conflict_show_text.contains("<<<<<<<")
-            && conflict_show_text.contains("next: heddle resolve conflict.txt"),
-        "text conflict show should inspect active merge conflicts instead of reporting not found: {conflict_show_text}"
+        conflict_show_text.contains("<<<<<<<") && conflict_show_text.contains(">>>>>>>"),
+        "conflict file should retain active merge markers: {conflict_show_text}"
     );
 
     let blocked_continue = json(heddle_merge.path(), &["--output", "json", "continue"]);
@@ -8349,10 +8641,7 @@ fn git_overlay_matrix_continue_handles_each_supported_operation_state() {
     seed_heddle_bisect_state(heddle_bisect.path());
     let blocked_heddle_bisect = json(heddle_bisect.path(), &["--output", "json", "continue"]);
     assert_eq!(blocked_heddle_bisect["status"], "blocked");
-    assert_eq!(
-        blocked_heddle_bisect["recommended_action"],
-        "heddle abort"
-    );
+    assert_eq!(blocked_heddle_bisect["recommended_action"], "heddle abort");
 
     let git_bisect = TempDir::new().unwrap();
     init_git_repo_with_branch(git_bisect.path(), "feature/drop-in");
@@ -8533,7 +8822,7 @@ fn git_overlay_matrix_operator_states_survive_reopen_and_keep_guidance_consisten
         temp.path(),
         &["thread", "show", "feature", "--output", "json"],
     );
-    let workspace = json(temp.path(), &["workspace", "show", "--output", "json"]);
+    let workspace = json(temp.path(), &["status", "--output", "json"]);
 
     assert_eq!(status["operation"]["kind"], "merge");
     assert_eq!(diagnose["operation"]["kind"], "merge");
@@ -8547,7 +8836,7 @@ fn git_overlay_matrix_operator_states_survive_reopen_and_keep_guidance_consisten
     let nested = temp.path().join("nested/reopen/path");
     std::fs::create_dir_all(&nested).unwrap();
     let status_reopened = json(&nested, &["status", "--output", "json"]);
-    let workspace_reopened = json(&nested, &["workspace", "show", "--output", "json"]);
+    let workspace_reopened = json(&nested, &["status", "--output", "json"]);
     assert_eq!(status_reopened["operation"]["kind"], "merge");
     assert_eq!(status_reopened["recommended_action"], "heddle continue");
     assert_eq!(workspace_reopened["recommended_action"], "heddle continue");

@@ -538,6 +538,7 @@ fn op_record_variants_roundtrip_and_describe() {
             name: "feat".into(),
             old_state: st2,
             new_state: st,
+            manager_snapshots: None,
         },
         // Fork retrofit: both published-ref shapes (attached thread / detached head).
         OpRecord::Fork {
@@ -557,11 +558,13 @@ fn op_record_variants_roundtrip_and_describe() {
             sources: vec![st, st2],
             result: st,
             thread: Some("trunk".into()),
+            pre_thread_state: None,
         },
         OpRecord::Collapse {
             sources: vec![st],
             result: st2,
             thread: None,
+            pre_thread_state: None,
         },
         OpRecord::MarkerCreate {
             name: "v1".into(),
@@ -688,6 +691,7 @@ fn fork_collapse_published_ref_fields_roundtrip() {
         sources: vec![from, new_state],
         result: new_state,
         thread: Some("trunk".into()),
+        pre_thread_state: Some(from),
     };
     let back: OpRecord = rmp_serde::from_slice(&rmp_serde::to_vec(&collapse).unwrap()).unwrap();
     match back {
@@ -695,9 +699,11 @@ fn fork_collapse_published_ref_fields_roundtrip() {
             sources,
             result,
             thread,
+            pre_thread_state,
         } => {
             assert_eq!(sources, vec![from, new_state]);
             assert_eq!(result, new_state);
+            assert_eq!(pre_thread_state, Some(from));
             assert_eq!(thread.as_deref(), Some("trunk"));
         }
         other => panic!("expected Collapse, got {other:?}"),

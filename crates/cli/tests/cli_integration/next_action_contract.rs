@@ -15,9 +15,8 @@ const BANNED_NEXT_ACTION_FRAGMENTS: &[&str] = &[
 ];
 
 fn json(args: &[&str], cwd: &std::path::Path) -> Value {
-    let output = heddle_output(args, Some(cwd)).unwrap_or_else(|err| {
-        panic!("`heddle {}` should run: {err}", args.join(" "))
-    });
+    let output = heddle_output(args, Some(cwd))
+        .unwrap_or_else(|err| panic!("`heddle {}` should run: {err}", args.join(" ")));
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(&stdout).unwrap_or_else(|err| {
         panic!(
@@ -122,10 +121,19 @@ fn ready_thread_surfaces_land_across_ready_show_and_list() {
     heddle(&["commit", "-m", "feature"], Some(checkout)).unwrap();
 
     let ready = json(
-        &["--output", "json", "ready", "--thread", "feature/ready-land"],
+        &[
+            "--output",
+            "json",
+            "ready",
+            "--thread",
+            "feature/ready-land",
+        ],
         main.path(),
     );
-    assert_eq!(ready["recommended_action"], "heddle land --thread feature/ready-land --no-push");
+    assert_eq!(
+        ready["recommended_action"],
+        "heddle land --thread feature/ready-land --no-push"
+    );
     assert_eq!(
         ready["report"]["recommended_action"],
         "heddle land --thread feature/ready-land --no-push"
@@ -169,7 +177,13 @@ fn stale_managed_thread_suggests_sync_not_refresh_or_merge_preview() {
     heddle(&["commit", "-m", "advance main"], Some(main.path())).unwrap();
 
     let ready = json(
-        &["--output", "json", "ready", "--thread", "feature/stale-sync"],
+        &[
+            "--output",
+            "json",
+            "ready",
+            "--thread",
+            "feature/stale-sync",
+        ],
         main.path(),
     );
     assert_eq!(
@@ -215,10 +229,19 @@ fn sync_conflicting_stale_thread_emits_runnable_resolve_breadcrumb() {
     heddle(&["commit", "-m", "advance main"], Some(main.path())).unwrap();
 
     let sync = json(
-        &["--output", "json", "sync", "--thread", "feature/conflict-sync"],
+        &[
+            "--output",
+            "json",
+            "sync",
+            "--thread",
+            "feature/conflict-sync",
+        ],
         main.path(),
     );
-    assert_eq!(sync["status"], "blocked", "conflicting sync must block: {sync}");
+    assert_eq!(
+        sync["status"], "blocked",
+        "conflicting sync must block: {sync}"
+    );
     let next_action = sync["next_action"]
         .as_str()
         .unwrap_or_else(|| panic!("sync conflict must carry a next_action: {sync}"));

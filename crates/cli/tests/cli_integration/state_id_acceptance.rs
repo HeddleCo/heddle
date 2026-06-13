@@ -173,10 +173,10 @@ fn blame_accepts_short_id() {
     let temp = setup_repo();
     let short = first_short_id(temp.path());
     let _ = heddle(
-        &["blame", "hello.txt", "--state", &short],
+        &["query", "--attribution", "hello.txt", "--state", &short],
         Some(temp.path()),
     )
-    .expect("blame --state should accept short IDs");
+    .expect("query --attribution --state should accept short IDs");
 }
 
 #[test]
@@ -205,7 +205,11 @@ fn marker_then_show_accepts_marker_name() {
     // Marker names are the third resolution form alongside short
     // and full IDs. Pin the contract.
     let temp = setup_repo();
-    heddle(&["marker", "create", "milestone-1"], Some(temp.path())).unwrap();
+    heddle(
+        &["thread", "marker", "create", "milestone-1"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let raw = heddle(
         &["show", "milestone-1", "--output", "json"],
         Some(temp.path()),

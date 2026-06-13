@@ -15,19 +15,15 @@ A *stack* is the descendant tree of related threads formed by walking
 projection used by tooling lives in
 [`repo::stack_snapshot`](../repo/src/stack_snapshot.rs).
 
-### Verbs
+### Current surface
 
-| Command | What it does |
-|---|---|
-| `heddle stack` | Describe the stack containing the current thread (or `--thread <name>`). Renders the root, member count, depth, and indented tree. |
-| `heddle stack ready` | Surface the next stack-level action — `ready` / `blocked by <thread>` / `waiting-on-review (<thread>)`. Pipe-friendly. |
-| `heddle stack snapshot` | Emit the JSON `RepositorySnapshot` projection for agentic tooling. Pretty-printed in TTY mode, compact in pipe mode. |
-
-All three verbs are read-only.
+The stack model is an internal projection over thread records. User-facing
+inspection lives on `heddle thread list` and `heddle thread show`; the removed
+top-level stack verb is intentionally not part of the public CLI surface.
 
 ### Next-action verdicts
 
-`heddle stack ready` walks the stack and emits exactly one of four
+The stack next-action resolver walks the stack and emits exactly one of four
 verdicts. The rules:
 
 1. **`blocked by <thread>`** — at least one member has
@@ -43,7 +39,7 @@ verdicts. The rules:
 
 ### JSON shape
 
-`heddle stack snapshot` emits this shape (additive fields may be added
+The `RepositorySnapshot` projection uses this shape (additive fields may be added
 without bumping `version`; non-additive changes bump it):
 
 ```jsonc

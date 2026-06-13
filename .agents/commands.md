@@ -90,7 +90,7 @@ Internal plumbing:
 
 ```bash
 # Internal bridge protocol entrypoint
-cargo run -- harness-bridge
+cargo run -- run --thread <thread> -- <cmd>
 
 # Internal relay used by installed hooks/plugins
 cargo run -- integration relay claude-code SessionStart

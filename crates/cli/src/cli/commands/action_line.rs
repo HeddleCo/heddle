@@ -35,10 +35,6 @@ pub(crate) fn print_nested_optional(action: &str) {
     print_dim_action("optional", action, 4);
 }
 
-pub(crate) fn print_dim_next_step(action: &str) {
-    print_dim_action("Next step", action, 0);
-}
-
 pub(crate) fn format_next(action: &str, indent: usize) -> Option<String> {
     format_bold_action("Next", action, indent)
 }

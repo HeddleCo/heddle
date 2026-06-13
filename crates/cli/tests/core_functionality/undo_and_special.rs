@@ -27,7 +27,7 @@ fn test_redo_without_undo() {
     heddle_must_succeed(&["init"], temp.path());
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle_must_succeed(&["capture", "-m", "Initial"], temp.path());
-    let result = heddle(&["redo"], Some(temp.path()));
+    let result = heddle(&["undo", "--redo"], Some(temp.path()));
     assert!(result.is_err());
 }
 
@@ -537,7 +537,7 @@ fn test_undo_captures_pre_undo_state_into_recovery_marker() {
     );
 
     // (b) `redo` restores the captured content (round-trips the worktree).
-    heddle_must_succeed(&["redo"], temp.path());
+    heddle_must_succeed(&["undo", "--redo"], temp.path());
     assert_eq!(
         std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
         "FRICTION ONE\nFRICTION TWO\n",
@@ -546,7 +546,7 @@ fn test_undo_captures_pre_undo_state_into_recovery_marker() {
 }
 
 /// The recovery marker makes the pre-undo content recoverable by name,
-/// independent of the (fragile) redo stack: after undo, `heddle goto
+/// independent of the (fragile) redo stack: after undo, `heddle switch
 /// undo-recovery` restores the pre-undo worktree even once a divergent capture
 /// has been layered on top of the reverted state. This is the data-safety
 /// guarantee — nothing absorbed by the undone capture is lost.
@@ -578,7 +578,7 @@ fn test_undo_recovery_marker_survives_divergent_capture() {
     assert_eq!(recovery.short(), friction_state);
 
     // Recover the pre-undo content via the well-known handle.
-    heddle_must_succeed(&["goto", ".undo-recovery"], temp.path());
+    heddle_must_succeed(&["switch", ".undo-recovery"], temp.path());
     assert_eq!(
         std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
         "FRICTION ONE\nFRICTION TWO\n",
@@ -610,7 +610,7 @@ fn test_undo_recovery_lives_outside_user_marker_namespace() {
 
     // (a) recovery must NOT pollute the user marker namespace.
     let markers: Value = serde_json::from_str(&heddle_must_succeed(
-        &["--output", "json", "marker", "list"],
+        &["--output", "json", "thread", "marker", "list"],
         temp.path(),
     ))
     .unwrap();
@@ -639,7 +639,7 @@ fn test_undo_recovery_lives_outside_user_marker_namespace() {
 
     // (c) the recovery UX is preserved: `goto .undo-recovery` resolves the
     // internal ref and restores the pre-undo content.
-    heddle_must_succeed(&["goto", ".undo-recovery"], temp.path());
+    heddle_must_succeed(&["switch", ".undo-recovery"], temp.path());
     assert_eq!(
         std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
         "FRICTION\n",
@@ -650,8 +650,14 @@ fn test_undo_recovery_lives_outside_user_marker_namespace() {
     // marker named `undo-recovery` without colliding with — or disturbing —
     // the internal recovery pointer. This is the closed class: the two
     // namespaces are independent.
-    heddle_must_succeed(&["marker", "create", "undo-recovery"], temp.path());
-    heddle_must_succeed(&["marker", "delete", "undo-recovery"], temp.path());
+    heddle_must_succeed(
+        &["thread", "marker", "create", "undo-recovery"],
+        temp.path(),
+    );
+    heddle_must_succeed(
+        &["thread", "marker", "delete", "undo-recovery"],
+        temp.path(),
+    );
     let repo = Repository::open(temp.path()).unwrap();
     assert_eq!(
         repo.refs()
@@ -680,7 +686,10 @@ fn test_recovery_handle_unshadowable_by_user_marker() {
     let base_state = head_short(temp.path());
 
     // The user owns a marker named `undo-recovery`, pinning the BASE state.
-    heddle_must_succeed(&["marker", "create", "undo-recovery"], temp.path());
+    heddle_must_succeed(
+        &["thread", "marker", "create", "undo-recovery"],
+        temp.path(),
+    );
 
     std::fs::write(temp.path().join("notes.md"), "FRICTION\n").unwrap();
     heddle_must_succeed(&["capture", "-m", "friction"], temp.path());
@@ -698,7 +707,7 @@ fn test_recovery_handle_unshadowable_by_user_marker() {
 
     // The advertised handle must resolve to the INTERNAL pre-undo (friction)
     // state, NOT the user's same-named marker (which pins base).
-    heddle_must_succeed(&["goto", advertised], temp.path());
+    heddle_must_succeed(&["switch", advertised], temp.path());
     assert_eq!(
         std::fs::read_to_string(temp.path().join("notes.md")).unwrap(),
         "FRICTION\n",
@@ -874,7 +883,7 @@ fn test_redo_ff_merge_restores_head_and_thread_ref() {
     heddle_must_succeed(&["undo"], temp.path());
     assert_eq!(head_short(temp.path()), main_tip_before);
 
-    heddle_must_succeed(&["redo"], temp.path());
+    heddle_must_succeed(&["undo", "--redo"], temp.path());
     assert_eq!(
         head_short(temp.path()),
         feature_tip_before,
@@ -947,7 +956,7 @@ fn test_redo_ff_merge_pins_recorded_tip_when_source_advances() {
     );
 
     heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    heddle_must_succeed(&["redo"], temp.path());
+    heddle_must_succeed(&["undo", "--redo"], temp.path());
 
     // The recorded FF target — not feature's current tip — is what redo must
     // restore. HEAD and the `main` thread ref both end at the original FF SHA.
@@ -1012,7 +1021,7 @@ fn test_redo_ff_merge_succeeds_when_source_deleted() {
     // `thread drop <name> --delete-thread` by `translate_legacy_args`.
     heddle_must_succeed(&["thread", "delete", "feature"], temp.path());
 
-    heddle_must_succeed(&["redo"], temp.path());
+    heddle_must_succeed(&["undo", "--redo"], temp.path());
 
     assert_eq!(
         head_short(temp.path()),
@@ -1074,7 +1083,7 @@ fn test_redo_ff_merge_refuses_when_post_target_state_missing() {
     // a live-resolve fallback.)
     heddle_must_succeed(&["thread", "delete", "feature"], temp.path());
 
-    let err = heddle(&["redo"], Some(temp.path()))
+    let err = heddle(&["undo", "--redo"], Some(temp.path()))
         .expect_err("redo must refuse when the FF target state is missing");
     let lower = err.to_lowercase();
     assert!(
@@ -1507,7 +1516,7 @@ fn test_undo_redact_refuses_when_blob_already_purged() {
 #[test]
 fn test_redo_of_undone_redact_refuses() {
     // Counterpart to the undo test: once a `Redact` batch has been
-    // undone with `--allow-redact-undo`, `heddle redo` refuses to
+    // undone with `--allow-redact-undo`, `heddle undo --redo` refuses to
     // re-apply it. The OpRecord doesn't preserve the full `Redaction`
     // (reason, redactor, signature) needed for a faithful re-apply,
     // so we surface a clear error instead of silently no-op'ing.
@@ -1533,8 +1542,8 @@ fn test_redo_of_undone_redact_refuses() {
 
     // Redo refuses with a message that names Redact + points the user
     // at re-running `heddle redact apply`.
-    let err =
-        heddle(&["redo"], Some(temp.path())).expect_err("redo of an undone Redact must refuse");
+    let err = heddle(&["undo", "--redo"], Some(temp.path()))
+        .expect_err("redo of an undone Redact must refuse");
     let lower = err.to_lowercase();
     assert!(
         lower.contains("redact"),
@@ -1787,7 +1796,7 @@ fn test_undo_preview_refuses_redact_when_blob_already_purged() {
 #[test]
 fn test_redo_preview_refuses_redact_chain() {
     // Mirror of the undo `--preview` honesty rule on the redo side:
-    // `heddle redo --preview` against a previously-undone Redact must
+    // `heddle undo --redo --preview` against a previously-undone Redact must
     // surface the same "no re-apply path" refusal the real `redo`
     // would surface, not advertise "Would redo …".
     let (temp, state) = setup_repo_with_secret();
@@ -1807,7 +1816,7 @@ fn test_redo_preview_refuses_redact_chain() {
     heddle(&["undo", "--allow-redact-undo"], Some(temp.path()))
         .expect("undo of Redact must succeed with --allow-redact-undo");
 
-    let err = heddle(&["redo", "--preview"], Some(temp.path()))
+    let err = heddle(&["undo", "--redo", "--preview"], Some(temp.path()))
         .expect_err("redo --preview of an undone Redact must refuse");
     let lower = err.to_lowercase();
     assert!(
@@ -2066,7 +2075,7 @@ fn test_redo_thread_create_restores_manager_record() {
     };
 
     heddle_must_succeed(&["undo"], temp.path());
-    heddle_must_succeed(&["redo"], temp.path());
+    heddle_must_succeed(&["undo", "--redo"], temp.path());
 
     let repo = Repository::open(temp.path()).unwrap();
 
@@ -2102,6 +2111,111 @@ fn test_redo_thread_create_restores_manager_record() {
     assert_eq!(
         restored.target_thread, orig_target_thread,
         "target_thread must round-trip"
+    );
+}
+
+/// heddle#469: `thread refresh` updates both the thread ref and the
+/// ThreadManager record's base metadata. Undo must restore the whole
+/// thread record, including `base_state`, not just the ref pointer.
+#[test]
+fn test_undo_thread_refresh_restores_base_state() {
+    use repo::ThreadManager;
+
+    let temp = bootstrap_repo_with_initial_state();
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("feature.txt"), "feature\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature work"], temp.path());
+    let feature_tip_before_refresh = head_short(temp.path());
+
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    std::fs::write(temp.path().join("main.txt"), "main\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "main advance"], temp.path());
+    let refreshed_base = head_short(temp.path());
+
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+
+    let (base_before_refresh, current_before_refresh) = {
+        let repo = Repository::open(temp.path()).unwrap();
+        let manager = ThreadManager::new(repo.heddle_dir());
+        let record = manager
+            .find_by_thread("feature")
+            .unwrap()
+            .expect("feature record exists before refresh");
+        (
+            record.base_state.clone(),
+            record
+                .current_state
+                .clone()
+                .expect("feature has current state before refresh"),
+        )
+    };
+
+    heddle_must_succeed(&["thread", "refresh", "feature"], temp.path());
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("feature.txt")).unwrap(),
+        "feature\n",
+        "refresh must keep the feature work materialized"
+    );
+    assert!(
+        temp.path().join("main.txt").exists(),
+        "test setup must materialize the refreshed base on disk"
+    );
+
+    {
+        let repo = Repository::open(temp.path()).unwrap();
+        let manager = ThreadManager::new(repo.heddle_dir());
+        let record = manager
+            .find_by_thread("feature")
+            .unwrap()
+            .expect("feature record exists after refresh");
+        assert_eq!(
+            record.base_state, refreshed_base,
+            "refresh must advance feature's recorded base to main"
+        );
+        assert_ne!(
+            record.base_state, base_before_refresh,
+            "test setup must actually change base_state"
+        );
+    }
+
+    heddle_must_succeed(&["undo"], temp.path());
+
+    let repo = Repository::open(temp.path()).unwrap();
+    let feature_ref = repo
+        .refs()
+        .get_thread(&ThreadName::new("feature"))
+        .unwrap()
+        .expect("feature ref survives refresh undo")
+        .short();
+    assert_eq!(
+        feature_ref, feature_tip_before_refresh,
+        "undo of refresh must restore the feature ref"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("feature.txt")).unwrap(),
+        "feature\n",
+        "undo of refresh must restore the pre-refresh worktree content"
+    );
+    assert!(
+        !temp.path().join("main.txt").exists(),
+        "undo of refresh on the checked-out thread must remove files introduced by refresh"
+    );
+
+    let manager = ThreadManager::new(repo.heddle_dir());
+    let restored = manager
+        .find_by_thread("feature")
+        .unwrap()
+        .expect("feature record survives refresh undo");
+    assert_eq!(
+        restored.base_state, base_before_refresh,
+        "undo of refresh must restore the prior base_state"
+    );
+    assert_eq!(
+        restored.current_state.as_deref(),
+        Some(current_before_refresh.as_str()),
+        "undo of refresh must restore the manager record's current_state too"
     );
 }
 
@@ -2527,7 +2641,7 @@ fn test_redo_rebase_pins_recorded_tip_when_source_advances() {
     assert_ne!(feature_at_rebase, feature_advanced);
 
     heddle_must_succeed(&["thread", "switch", "main"], temp.path());
-    heddle_must_succeed(&["redo"], temp.path());
+    heddle_must_succeed(&["undo", "--redo"], temp.path());
     assert_eq!(
         head_short(temp.path()),
         feature_at_rebase,
@@ -2578,7 +2692,7 @@ fn test_redo_pull_pins_recorded_tip_when_source_advances() {
     std::fs::write(source.path().join("a.txt"), "v3").unwrap();
     heddle_must_succeed(&["capture", "-m", "source v3"], source.path());
 
-    heddle_must_succeed(&["redo"], target.path());
+    heddle_must_succeed(&["undo", "--redo"], target.path());
     assert_eq!(
         head_short(target.path()),
         main_after_second_pull,
@@ -2704,7 +2818,7 @@ fn test_redo_rebase_replay_multi_commit_restores_post_rebase_tip() {
     let after_rebase = head_short(temp.path());
 
     heddle_must_succeed(&["undo"], temp.path());
-    heddle_must_succeed(&["redo"], temp.path());
+    heddle_must_succeed(&["undo", "--redo"], temp.path());
     assert_eq!(
         head_short(temp.path()),
         after_rebase,
@@ -2996,7 +3110,7 @@ fn test_redo_rebase_continue_restores_manual_resolution_tip() {
         "single undo of a conflict-paused rebase must restore HEAD to pre-rebase tip"
     );
 
-    heddle_must_succeed(&["redo"], temp.path());
+    heddle_must_succeed(&["undo", "--redo"], temp.path());
     assert_eq!(
         head_short(temp.path()),
         after_rebase,

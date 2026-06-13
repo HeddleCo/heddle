@@ -360,9 +360,8 @@ mod tests {
     fn dirty_worktree_string_sentinel_is_data_err() {
         // Raw-string path (e.g. repository_worktree_apply's refusal) that
         // carries no typed advice still classifies via the legacy sentinel.
-        let err = anyhow::anyhow!(
-            "dirty worktree would be overwritten by full rematerialize (switch)"
-        );
+        let err =
+            anyhow::anyhow!("dirty worktree would be overwritten by full rematerialize (switch)");
         assert_eq!(HeddleExitCode::from_error(&err), HeddleExitCode::DataErr);
     }
 
@@ -376,9 +375,8 @@ mod tests {
         ));
         assert_eq!(HeddleExitCode::from_error(&json), HeddleExitCode::DataErr);
 
-        let compact = anyhow::anyhow!(
-            crate::cli::commands::RecoveryAdvice::json_compact_unsupported("log")
-        );
+        let compact =
+            anyhow::anyhow!(crate::cli::commands::RecoveryAdvice::json_compact_unsupported("log"));
         assert_eq!(
             HeddleExitCode::from_error(&compact),
             HeddleExitCode::DataErr

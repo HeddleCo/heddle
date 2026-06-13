@@ -31,7 +31,7 @@ use std::{
 // render_/write_ helpers.
 //
 // Bumped from 881 → 968 when the redaction primitive
-// (`heddle redact` / `heddle purge`) landed alongside several other
+// (`heddle redact` / `heddle redact purge`) landed alongside several other
 // recent verb additions (`heddle schemas`, the `--shared-target`
 // advisory, GC's redaction-preserved report, the
 // auto-prune thread surface). All of those produce human-output by

@@ -2482,6 +2482,7 @@ mod tests {
             sources: vec![collapse_source, fork_result],
             result: collapse_result,
             thread: None,
+            pre_thread_state: None,
         };
         entries.push(collapse);
 
@@ -2533,7 +2534,7 @@ mod tests {
         ));
         assert!(matches!(
             &loaded.entries[4].operation,
-            OpRecord::Collapse { sources, result, thread: None }
+            OpRecord::Collapse { sources, result, thread: None, pre_thread_state: None }
                 if sources == &vec![collapse_source, fork_result] && *result == collapse_result
         ));
 
@@ -2866,6 +2867,7 @@ mod tests {
             sources: vec![state_4, state_5],
             result: state_6,
             thread: Some("main".to_string()),
+            pre_thread_state: None,
         };
         entries.push(collapse);
 

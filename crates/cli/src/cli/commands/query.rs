@@ -37,6 +37,15 @@ struct HitView {
 }
 
 pub async fn run(cli: &Cli, args: &QueryArgs) -> Result<()> {
+    if let Some(file) = &args.attribution {
+        return super::blame::cmd_query_attribution(
+            cli,
+            file.clone(),
+            args.state.clone(),
+            args.context,
+        );
+    }
+
     let svc = open_service()?;
     let req = QueryOperationsRequest {
         repo_path: String::new(),

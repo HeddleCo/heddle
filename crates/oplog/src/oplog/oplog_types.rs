@@ -94,6 +94,14 @@ pub enum OpRecord {
         name: String,
         old_state: ChangeId,
         new_state: ChangeId,
+        /// rmp-serde-encoded `Thread` record bodies around the update.
+        ///
+        /// This is intentionally one sparse tail field rather than two
+        /// independently-skipped fields: rmp-serde encodes enum variant fields
+        /// positionally, so skipping only the old slot would shift the new
+        /// snapshot into the old position for older readers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        manager_snapshots: Option<ThreadUpdateSnapshots>,
     },
     /// Fork operation.
     ///
@@ -122,6 +130,8 @@ pub enum OpRecord {
         result: ChangeId,
         #[serde(default)]
         thread: Option<String>,
+        #[serde(default)]
+        pre_thread_state: Option<ChangeId>,
     },
     /// Marker creation.
     MarkerCreate { name: String, state: ChangeId },
@@ -315,6 +325,75 @@ pub enum OpRecord {
         #[serde(default)]
         new_sidecar: Option<Vec<u8>>,
     },
+}
+
+/// Optional ThreadManager record snapshots captured around a [`ThreadUpdate`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadUpdateSnapshots {
+    /// rmp-serde-encoded `Thread` record body before the update, or `None`
+    /// when no record existed before the forward path.
+    pub old: Option<Vec<u8>>,
+    /// rmp-serde-encoded `Thread` record body after the update, or `None`
+    /// when the forward path only moved the ref.
+    pub new: Option<Vec<u8>>,
+    /// Complete same-thread record set before the update. Empty for records
+    /// written before duplicate-record convergence needed full-set restore.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub old_records: Vec<Vec<u8>>,
+    /// Complete same-thread record set after the update. Empty for records
+    /// written before duplicate-record convergence needed full-set restore.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub new_records: Vec<Vec<u8>>,
+    /// Whether the thread ref was absent before the update. This lets undo of
+    /// a metadata-only repair remove a recreated ref instead of setting it to a
+    /// fallback state that was only used to identify the record.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub old_ref_absent: bool,
+}
+
+impl ThreadUpdateSnapshots {
+    pub fn from_parts(old: Option<Vec<u8>>, new: Option<Vec<u8>>) -> Option<Self> {
+        if old.is_none() && new.is_none() {
+            None
+        } else {
+            Some(Self {
+                old,
+                new,
+                old_records: Vec::new(),
+                new_records: Vec::new(),
+                old_ref_absent: false,
+            })
+        }
+    }
+
+    pub fn from_record_sets(
+        old: Option<Vec<u8>>,
+        new: Option<Vec<u8>>,
+        old_records: Vec<Vec<u8>>,
+        new_records: Vec<Vec<u8>>,
+        old_ref_absent: bool,
+    ) -> Option<Self> {
+        if old.is_none()
+            && new.is_none()
+            && old_records.is_empty()
+            && new_records.is_empty()
+            && !old_ref_absent
+        {
+            None
+        } else {
+            Some(Self {
+                old,
+                new,
+                old_records,
+                new_records,
+                old_ref_absent,
+            })
+        }
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// The logical isolation keys touched by one committed record.
@@ -961,6 +1040,7 @@ mod verb_catalog_tests {
                 name: "t".into(),
                 old_state: cid(),
                 new_state: cid(),
+                manager_snapshots: None,
             },
             OpRecord::Fork {
                 from: cid(),
@@ -972,6 +1052,7 @@ mod verb_catalog_tests {
                 sources: vec![cid()],
                 result: cid(),
                 thread: None,
+                pre_thread_state: None,
             },
             OpRecord::MarkerCreate {
                 name: "m".into(),

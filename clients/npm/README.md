@@ -77,7 +77,7 @@ HEDDLE_BIN=./bin/heddle npm test   # also runs the real-binary smoke test
 
 The types come straight from `crates/cli/src/cli/commands/schemas.rs` via the
 runtime introspection the CLI already ships (`heddle schemas <verb>`,
-`heddle commands --output json`):
+`heddle help --output json`):
 
 ```sh
 scripts/gen-ts-types.sh
@@ -141,5 +141,5 @@ mutation. The wrapper should:
 All mutating harness ops support `--op-id` (`init`, `adopt`, `commit`,
 `start`, `fetch`, `push`, `bridge git export`, …); read-only ops (`status`,
 `log`, `diff`, `show`) don't mutate and so take none. The authoritative
-per-command list is the command catalog: `heddle commands --output json`,
+per-command list is the command catalog: `heddle help --output json`,
 field `supports_op_id`.

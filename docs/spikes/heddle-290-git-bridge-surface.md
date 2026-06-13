@@ -94,7 +94,7 @@ This is the key finding. The command-contract catalog
 de-emphasis tier for every bridge verb, and a redirect to the native canonical
 command for most of them. The exceptions are `bridge git ingest` and `bridge
 git reason`, which are catalogued `surface(...)`-only and carry no
-`canonical_command` (the `—` rows below). Verified live via `heddle commands
+`canonical_command` (the `—` rows below). Verified live via `heddle help
 --command "bridge git" --output json`:
 
 | bridge verb | tier | canonical → | kind |
@@ -122,7 +122,7 @@ aliased to `push` (`command_catalog.rs:1214-1224`). The two exceptions —
 `git_adapter` visibility but no `canonical_command` (it is `None`).
 `help_visibility: "git_adapter"` falls through to tier `"advanced"`
 (`help_visibility_to_tier`, `command_catalog.rs:3664-3670`) — so none of these
-appear in the `everyday` tier of `heddle commands`.
+appear in the `everyday` tier of `heddle help`.
 
 The native canonicals all exist as top-level commands: `heddle adopt`,
 `heddle pull` ("Pull from a remote repository"), `heddle push` ("Push to a

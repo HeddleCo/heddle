@@ -27,7 +27,7 @@ pub enum Tip {
     /// "tip: `heddle agent serve` runs a local daemon for tight loops."
     /// Emitted after the first state-changing verb in a fresh shell.
     AgentServeForLatency,
-    /// "tip: `heddle conflict show` returns conflicts as structured data."
+    /// "tip: `heddle resolve --output json` returns conflicts as structured data."
     /// Emitted on a conflicted merge.
     ConflictForStructured,
 }
@@ -52,7 +52,7 @@ impl Tip {
                 "tip: `heddle agent serve` runs a local daemon that cuts per-command latency for agent loops"
             }
             Self::ConflictForStructured => {
-                "tip: `heddle conflict show` returns conflicts as structured data agents can resolve programmatically"
+                "tip: `heddle resolve --output json` returns conflicts as structured data agents can resolve programmatically"
             }
         }
     }

@@ -292,7 +292,11 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
 
     let states = match thread {
         Some(thread) => {
-            let Some(state_id) = bridge.heddle_repo.refs().get_thread(&ThreadName::new(thread))? else {
+            let Some(state_id) = bridge
+                .heddle_repo
+                .refs()
+                .get_thread(&ThreadName::new(thread))?
+            else {
                 return Err(GitBridgeError::Git(format!(
                     "thread '{thread}' has no state to export"
                 )));
@@ -543,12 +547,8 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     let note_reachable_vec = reachable_states(bridge.heddle_repo, &note_target_roots)?;
     let note_reachable: HashSet<ChangeId> = note_reachable_vec.iter().copied().collect();
     let note_sorted = bridge.sort_states_topologically(&note_reachable_vec)?;
-    let note_served = served_change_ids(
-        bridge.heddle_repo,
-        &note_sorted,
-        &note_reachable,
-        &audience,
-    )?;
+    let note_served =
+        served_change_ids(bridge.heddle_repo, &note_sorted, &note_reachable, &audience)?;
 
     // For states whose git_oid was already in the mapping (the SHA-stable
     // path above), make sure the note is present too. This covers two
@@ -955,9 +955,11 @@ fn served_change_ids(
 ) -> GitResult<HashSet<ChangeId>> {
     let mut served: HashSet<ChangeId> = HashSet::new();
     for state_id in sorted_states {
-        let tier = heddle_repo.effective_visibility_tier(state_id).map_err(|e| {
-            GitBridgeError::Git(format!("resolve visibility for {state_id}: {e:#}"))
-        })?;
+        let tier = heddle_repo
+            .effective_visibility_tier(state_id)
+            .map_err(|e| {
+                GitBridgeError::Git(format!("resolve visibility for {state_id}: {e:#}"))
+            })?;
         let parents_served = match heddle_repo.store().get_state(state_id)? {
             Some(state) => state
                 .parents
@@ -1007,7 +1009,10 @@ fn project_desired_refs(
 ) -> GitResult<std::collections::HashMap<String, gix::hash::ObjectId>> {
     let mut desired = std::collections::HashMap::new();
     for track_name in threads {
-        let Some(tip) = heddle_repo.refs().get_thread(&ThreadName::new(track_name))? else {
+        let Some(tip) = heddle_repo
+            .refs()
+            .get_thread(&ThreadName::new(track_name))?
+        else {
             continue;
         };
         if let Some(git_oid) = frontier_git_oid(heddle_repo, mapping, tip)? {

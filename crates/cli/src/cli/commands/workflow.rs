@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
+use std::collections::HashSet;
+
 use anyhow::{Context, Result, anyhow};
-use objects::object::{ChangeId, ThreadName};
+use objects::object::{ChangeId, State, ThreadName};
 use objects::store::ObjectStore;
 use oplog::{OpBatch, OpLogBackend, OpRecord};
 use repo::{Repository, Thread, ThreadIntegrationPolicy, thread_flag};
@@ -10,9 +12,10 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     checkpoint::create_git_checkpoint,
+    collapse::{CollapsePublishedRef, collapse_resolved_states},
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     merge::{build_thread_preview_report, merge_thread_into_current},
-    next_action::{NextActionValidationContext, write_command_json, write_full_command_json},
+    next_action::{NextActionValidationContext, write_command_json},
     operator_core::{
         OperatorAction, OperatorCommandOutput, VerificationClaimPolicy,
         exit_if_blocked_operator_status,
@@ -20,7 +23,6 @@ use super::{
     operator_loop::primary_next_action,
     ready_cmd::worktree_dirty,
     snapshot::{SnapshotAgentOverrides, create_snapshot},
-    thread::start_thread,
     thread_cmd::{
         current_thread, load_thread, refresh_thread, thread_manager, thread_not_found_advice,
     },
@@ -28,8 +30,8 @@ use super::{
 };
 use crate::{
     cli::{
-        Cli, ThreadStartArgs, WorkspaceModeArg,
-        cli_args::{DelegateArgs, LandArgs, SyncArgs},
+        Cli,
+        cli_args::{LandArgs, SyncArgs},
         output_is_compact, should_output_json, style, worktree_status_options,
     },
     config::UserConfig,
@@ -66,21 +68,6 @@ struct LandOutput {
     #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
     chosen_path: String,
-}
-
-#[derive(Serialize)]
-struct DelegatedThreadOutput {
-    name: String,
-    task: String,
-    path: Option<String>,
-    execution_path: Option<String>,
-}
-
-#[derive(Serialize)]
-struct DelegateOutput {
-    parent_thread: String,
-    delegated: Vec<DelegatedThreadOutput>,
-    message: String,
 }
 
 pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
@@ -434,7 +421,23 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     let preview = build_thread_preview_report(&repo, &mut merge_thread, true)?;
     let integration_blockers = integration_blockers(&repo, &merge_thread, &preview);
     let manual_resolution_current = manual_resolution_current(&repo, &merge_thread);
+    let squash_land = should_squash_land(&args, &user_config);
     if manual_resolution_current {
+        let land_collapse_state = if squash_land
+            && repo.capability() == repo::RepositoryCapability::GitOverlay
+        {
+            collapse_thread_for_land(&repo, &user_config, &merge_thread, args.message.as_deref())?
+        } else {
+            None
+        };
+        if land_collapse_state.is_some() {
+            merge_thread = resolve_thread(
+                &repo,
+                Some(&merge_thread.id),
+                "land",
+                "heddle land --thread <name>",
+            )?;
+        }
         let merge_state = adopt_manual_resolution(&repo, &merge_thread.id)?;
         let mut checkpointed = false;
         let mut git_commit = None;
@@ -466,6 +469,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             &repo,
             Some(&merge_state),
             git_commit.as_deref(),
+            land_collapse_state.as_ref(),
         )
         .context(
             "land completed but failed to record manual integration and Git checkpoint as one undo batch",
@@ -589,6 +593,21 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         );
     }
 
+    let land_collapse_state =
+        if squash_land && repo.capability() == repo::RepositoryCapability::GitOverlay {
+            collapse_thread_for_land(&repo, &user_config, &merge_thread, args.message.as_deref())?
+        } else {
+            None
+        };
+    if land_collapse_state.is_some() {
+        merge_thread = resolve_thread(
+            &repo,
+            Some(&merge_thread.id),
+            "land",
+            "heddle land --thread <name>",
+        )?;
+    }
+
     let merge_output = merge_thread_into_current(
         &repo,
         &merge_thread.id,
@@ -639,6 +658,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         &repo,
         merge_output.merge_state.as_deref(),
         git_commit.as_deref(),
+        land_collapse_state.as_ref(),
     )
     .context("land completed but failed to record merge and Git checkpoint as one undo batch")?;
 
@@ -735,6 +755,84 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             },
         },
     )
+}
+
+fn should_squash_land(args: &LandArgs, user_config: &UserConfig) -> bool {
+    !args.no_squash && user_config.land.squash
+}
+
+fn collapse_thread_for_land(
+    repo: &Repository,
+    user_config: &UserConfig,
+    thread: &Thread,
+    message: Option<&str>,
+) -> Result<Option<ChangeId>> {
+    let sources = thread_source_states(repo, thread)?;
+    if sources.len() <= 1 {
+        return Ok(None);
+    }
+    let intent = message
+        .map(ToOwned::to_owned)
+        .or_else(|| thread.task.clone())
+        .unwrap_or_else(|| format!("Land {}", thread.id));
+    let result = collapse_resolved_states(
+        repo,
+        user_config,
+        &sources,
+        intent,
+        None,
+        CollapsePublishedRef::Thread(ThreadName::new(&thread.id)),
+    )?;
+    Ok(Some(result.change_id))
+}
+
+fn thread_source_states(repo: &Repository, thread: &Thread) -> Result<Vec<State>> {
+    let Some(tip) = repo.refs().get_thread(&ThreadName::new(&thread.id))? else {
+        return Ok(Vec::new());
+    };
+    let base = repo.resolve_state(&thread.base_state)?;
+    let base_reachable = match base {
+        Some(base) => reachable_state_set(repo, base)?,
+        None => HashSet::new(),
+    };
+    let mut visited = HashSet::new();
+    let mut ordered = Vec::new();
+    collect_thread_sources(repo, tip, &base_reachable, &mut visited, &mut ordered)?;
+    Ok(ordered)
+}
+
+fn collect_thread_sources(
+    repo: &Repository,
+    state_id: ChangeId,
+    excluded: &HashSet<ChangeId>,
+    visited: &mut HashSet<ChangeId>,
+    ordered: &mut Vec<State>,
+) -> Result<()> {
+    if excluded.contains(&state_id) || !visited.insert(state_id) {
+        return Ok(());
+    }
+    let Some(state) = repo.store().get_state(&state_id)? else {
+        return Ok(());
+    };
+    for parent in &state.parents {
+        collect_thread_sources(repo, *parent, excluded, visited, ordered)?;
+    }
+    ordered.push(state);
+    Ok(())
+}
+
+fn reachable_state_set(repo: &Repository, root: ChangeId) -> Result<HashSet<ChangeId>> {
+    let mut reachable = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(state_id) = stack.pop() {
+        if !reachable.insert(state_id) {
+            continue;
+        }
+        if let Some(state) = repo.store().get_state(&state_id)? {
+            stack.extend(state.parents.iter().copied());
+        }
+    }
+    Ok(reachable)
 }
 
 async fn push_after_land(
@@ -901,196 +999,6 @@ fn land_checkpoint_message(repo: &Repository, thread: &Thread, explicit: Option<
     format!("Land {}", thread.id)
 }
 
-pub fn cmd_delegate(cli: &Cli, args: DelegateArgs) -> Result<()> {
-    let repo = cli.open_repo()?;
-    warn_if_path_prefix_inside_repo(&repo, args.path_prefix.as_deref());
-    let parent = resolve_parent_thread(&repo, args.parent.as_deref())?;
-
-    // Warm the canonical loose-uncompressed store for the parent
-    // state once, before we materialize it into N child worktrees.
-    // The first child would otherwise pay
-    // `decompress + atomic write` per blob (lazy promotion inside
-    // `materialize_blob`), and only worktrees 2..N would hardlink.
-    // A single warm pass amortizes promotion cost across all N
-    // children in the common N-agents-on-the-same-parent case.
-    //
-    // Failures are non-fatal: the lazy path inside
-    // `materialize_blob` will still promote on demand, and an empty
-    // or partially-warm store just means the first materialize pays
-    // promotion cost for any blobs we missed.
-    if args.tasks.len() > 1 {
-        let parent_state_spec = parent
-            .current_state
-            .clone()
-            .unwrap_or_else(|| parent.base_state.clone());
-        match repo
-            .resolve_state(&parent_state_spec)
-            .ok()
-            .and_then(|opt| opt)
-        {
-            Some(parent_state_id) => match repo.warm_canonical_store_for_state(&parent_state_id) {
-                Ok(stats) => {
-                    tracing::debug!(
-                        promoted = stats.promoted,
-                        already_loose = stats.already_loose,
-                        errors = stats.errors,
-                        "Warmed canonical store before delegate fan-out"
-                    );
-                }
-                Err(err) => {
-                    tracing::debug!(
-                        ?err,
-                        "Warm canonical store failed; falling back to lazy promotion in materialize"
-                    );
-                }
-            },
-            None => {
-                tracing::debug!(
-                    parent_state = %parent_state_spec,
-                    "Could not resolve parent state for warm pass; falling back to lazy promotion"
-                );
-            }
-        }
-    }
-
-    // Pre-flight: when two specs collapse to the same slug (e.g.
-    // racing three agents on a "modulo" task with all three entries
-    // labelled "modulo:..."), `start_thread` would refuse the duplicate
-    // thread name halfway through and leave a partial workspace
-    // behind. Disambiguate by suffixing the slug with the provider
-    // when collisions exist. Pure heads-up logic — no behavior change
-    // for the single-agent-per-task case.
-    let mut slug_counts: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    for spec in &args.tasks {
-        *slug_counts.entry(slugify(&spec.task)).or_insert(0) += 1;
-    }
-
-    let delegated = args
-        .tasks
-        .iter()
-        .map(|spec| {
-            let base_slug = slugify(&spec.task);
-            let slug = if slug_counts.get(&base_slug).copied().unwrap_or(0) > 1 {
-                match spec.provider.as_deref() {
-                    Some(provider) => format!("{base_slug}-{}", slugify(provider)),
-                    None => base_slug.clone(),
-                }
-            } else {
-                base_slug
-            };
-            let name = format!("{}/{}", parent.id, slug);
-            let path = args.path_prefix.as_ref().map(|prefix| prefix.join(&slug));
-
-            // Per-spec agent override wins; fall back to the
-            // command-wide default (`--agent-provider`/`--agent-model`).
-            let agent_provider = spec
-                .provider
-                .clone()
-                .or_else(|| args.agent_provider.clone());
-            let agent_model = spec.model.clone().or_else(|| args.agent_model.clone());
-
-            let output = start_thread(
-                &repo,
-                ThreadStartArgs {
-                    name: name.clone(),
-                    from: Some(
-                        parent
-                            .current_state
-                            .clone()
-                            .unwrap_or(parent.base_state.clone()),
-                    ),
-                    path,
-                    workspace: args.workspace.unwrap_or(WorkspaceModeArg::Auto),
-                    agent_provider,
-                    agent_model,
-                    task: Some(spec.task.clone()),
-                    parent_thread: Some(parent.id.clone()),
-                    automated: true,
-                    print_cd_path: false,
-                    // Delegated children inherit the in-process mount path
-                    // explicitly: spawning a `heddled` daemon as a side
-                    // effect of `heddle delegate` would surprise the
-                    // caller (delegate is mostly used with materialized /
-                    // lightweight workspaces anyway). If a future caller
-                    // passes `--workspace virtualized` through delegate
-                    // and wants daemon ownership, they can spawn the
-                    // daemon explicitly first.
-                    daemon: false,
-                    no_daemon: true,
-                    // Delegated children inherit the parent's
-                    // implicit per-checkout target/. If a delegate
-                    // user wants the shared-target arrangement they
-                    // can opt in by re-running `heddle start
-                    // --shared-target` against the spawned thread —
-                    // delegate is a thin orchestration verb and
-                    // shouldn't make filesystem-layout decisions for
-                    // the user.
-                    shared_target: false,
-                    // Delegated children don't auto-hydrate: delegate is a
-                    // thin orchestration verb and shouldn't symlink deps
-                    // into a spawned checkout without an explicit ask.
-                    hydrate: false,
-                },
-            )?;
-            Ok(DelegatedThreadOutput {
-                name,
-                task: spec.task.clone(),
-                path: output.path,
-                execution_path: output.execution_path,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    emit_with_next_action_validation(
-        cli,
-        &repo,
-        &DelegateOutput {
-            parent_thread: parent.id,
-            delegated,
-            message: "Delegated child threads created".to_string(),
-        },
-        &["delegate"],
-    )
-}
-
-/// Print a one-line warning when the operator passes
-/// `--path-prefix <path>` and `<path>` (after resolving against CWD)
-/// is a strict descendant of the repo root. The new
-/// nested-thread-worktree exclusion in `repo` makes this layout safe,
-/// but the conventional shape is a sibling directory; flagging the
-/// unconventional choice keeps the demo geometry honest.
-fn warn_if_path_prefix_inside_repo(repo: &Repository, path_prefix: Option<&std::path::Path>) {
-    let Some(prefix) = path_prefix else {
-        return;
-    };
-    let resolved = if prefix.is_absolute() {
-        prefix.to_path_buf()
-    } else {
-        match std::env::current_dir() {
-            Ok(cwd) => cwd.join(prefix),
-            Err(_) => return,
-        }
-    };
-    let canonical_prefix = resolved.canonicalize().unwrap_or(resolved);
-    let canonical_root = repo
-        .root()
-        .canonicalize()
-        .unwrap_or_else(|_| repo.root().to_path_buf());
-    if canonical_prefix == canonical_root {
-        return;
-    }
-    if !canonical_prefix.starts_with(&canonical_root) {
-        return;
-    }
-    eprintln!(
-        "warn: agent worktree at {} is nested inside repo root {}; \
-         the parent thread's scans will exclude it, but a sibling path is more conventional.",
-        canonical_prefix.display(),
-        canonical_root.display(),
-    );
-}
-
 fn resolve_thread(
     repo: &Repository,
     thread: Option<&str>,
@@ -1107,24 +1015,6 @@ fn resolve_thread(
             ))
         }),
     }
-}
-
-fn resolve_parent_thread(repo: &Repository, thread: Option<&str>) -> Result<Thread> {
-    resolve_thread(
-        repo,
-        thread,
-        "delegate",
-        "heddle delegate --parent <THREAD> <task>",
-    )
-    .or_else(|_| {
-        let head = repo.head_ref()?;
-        match head {
-            refs::Head::Attached { thread } => load_thread(repo, &thread),
-            refs::Head::Detached { .. } => {
-                Err(anyhow!(RecoveryAdvice::no_attached_parent_thread()))
-            }
-        }
-    })
 }
 
 fn update_integration_policy(
@@ -1174,6 +1064,7 @@ fn coalesce_land_integration_and_checkpoint(
     repo: &Repository,
     merge_state: Option<&str>,
     git_commit: Option<&str>,
+    collapse_state: Option<&ChangeId>,
 ) -> Result<()> {
     let Some(merge_state) = merge_state else {
         return Ok(());
@@ -1186,7 +1077,30 @@ fn coalesce_land_integration_and_checkpoint(
     let checkpoint_batch = find_recent_land_git_checkpoint_batch(repo, git_commit)?;
     repo.oplog()
         .coalesce_batches(integration_batch.id, checkpoint_batch.id)?;
+    if let Some(collapse_state) = collapse_state {
+        let collapse_batch = find_recent_land_collapse_batch(repo, collapse_state)?;
+        repo.oplog()
+            .coalesce_batches(integration_batch.id, collapse_batch.id)?;
+    }
     Ok(())
+}
+
+fn find_recent_land_collapse_batch(
+    repo: &Repository,
+    collapse_state: &ChangeId,
+) -> Result<OpBatch> {
+    repo.oplog()
+        .recent_batches_scoped(12, Some(&repo.op_scope()))?
+        .into_iter()
+        .find(|batch| {
+            batch.entries.iter().any(|entry| {
+                matches!(
+                    &entry.operation,
+                    OpRecord::Collapse { result, .. } if result == collapse_state
+                )
+            })
+        })
+        .ok_or_else(|| anyhow!("land squash succeeded but its oplog batch was not found"))
 }
 
 fn find_recent_land_integration_batch(repo: &Repository, merge_state: &str) -> Result<OpBatch> {
@@ -1432,38 +1346,6 @@ fn non_staleness_blockers(blockers: &[String]) -> Vec<String> {
         .filter(|blocker| !blocker.contains(" is stale against "))
         .cloned()
         .collect()
-}
-
-fn slugify(input: &str) -> String {
-    let mut out = String::new();
-    let mut last_dash = false;
-    for ch in input.chars().flat_map(|c| c.to_lowercase()) {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch);
-            last_dash = false;
-        } else if !last_dash {
-            out.push('-');
-            last_dash = true;
-        }
-    }
-    out.trim_matches('-').to_string()
-}
-
-fn emit_with_next_action_validation<T: Serialize>(
-    cli: &Cli,
-    repo: &Repository,
-    output: &T,
-    emitting_command: &[&str],
-) -> Result<()> {
-    if should_output_json(cli, None) {
-        write_full_command_json(
-            output,
-            NextActionValidationContext::new(emitting_command, repo.capability()),
-        )
-    } else {
-        println!("{}", serde_json::to_string_pretty(output)?);
-        Ok(())
-    }
 }
 
 impl super::compact::CompactProjection for SyncOutput {

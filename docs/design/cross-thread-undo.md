@@ -29,7 +29,7 @@ layers of state:
 1. **Refs** — thread tip pointers in the ref store (canonical).
 2. **HEAD** — only the originating worktree's, never another worktree's.
 3. **ThreadManager records** — `.heddle/threads/*` (lifecycle metadata read by
-   `heddle thread list`, `heddle thread show`, `heddle delegate`, etc.).
+   `heddle thread list`, `heddle thread show`, child thread workflows, etc.).
 
 Worktree *file contents* — the materialized files on disk — are only rewritten
 when undo restores HEAD. We never reach into another checkout's filesystem.
@@ -233,7 +233,7 @@ The change is concentrated in `crates/cli/src/cli/commands/undo_apply.rs` and
   the OpRecord retains `manager_snapshot` for redo (see below).
 - `apply_redo_entry`'s `ThreadCreate` arm restores **both** the ref
   and the ThreadManager record from `manager_snapshot`. Without the
-  record body restored, record-backed commands (`thread cd`, delegate,
+  record body restored, record-backed commands (`thread cd`, child thread workflows,
   integration policy) silently degrade after an undo→redo round-trip —
   the Codex P1 finding closed under heddle#23 r2 (PR #112, thread
   3254698975). Same hazard class as heddle#99 r2 (FF redo

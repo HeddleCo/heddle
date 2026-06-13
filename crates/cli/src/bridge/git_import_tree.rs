@@ -437,8 +437,12 @@ impl PackImportSink {
             max_delta_size: 0,
             ..CompressionConfig::default()
         };
-        let builder =
-            StreamingPackBuilder::new(pack_file, index_path.clone(), compression, bucket_dir.clone())?;
+        let builder = StreamingPackBuilder::new(
+            pack_file,
+            index_path.clone(),
+            compression,
+            bucket_dir.clone(),
+        )?;
 
         Ok(Self {
             builder,
@@ -501,8 +505,11 @@ impl PackImportSink {
         let data = rmp_serde::to_vec_named(state).map_err(|e| {
             GitBridgeError::InvalidMapping(format!("serialize state for import pack: {e}"))
         })?;
-        self.builder
-            .add_id(PackObjectId::ChangeId(state.change_id), PackObjectType::State, data)?;
+        self.builder.add_id(
+            PackObjectId::ChangeId(state.change_id),
+            PackObjectType::State,
+            data,
+        )?;
         self.object_count += 1;
         Ok(())
     }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Goto command.
+//! State checkout implementation behind `heddle switch`.
 
 use std::time::Instant;
 
@@ -19,17 +19,17 @@ use crate::{
 };
 
 #[derive(Serialize)]
-struct GotoOutput {
+struct SwitchOutput {
     output_kind: &'static str,
     target: String,
     intent: Option<String>,
     message: String,
 }
 
-pub fn cmd_goto(cli: &Cli, target: String, force: bool) -> Result<()> {
+pub fn cmd_switch_state_checkout(cli: &Cli, target: String, force: bool) -> Result<()> {
     let repo_open_start = Instant::now();
-    // `heddle goto X` advances *the active thread's* worktree. After
-    // `thread switch modulo-race` the operator can run goto from any
+    // `heddle switch X` advances *the active thread's* worktree. After
+    // `thread switch modulo-race` the operator can run switch from any
     // directory and we still resolve the right checkout via metadata.
     // See `Repository::active_worktree_path`.
     let cwd_repo = cli.open_repo()?;
@@ -46,13 +46,13 @@ pub fn cmd_goto(cli: &Cli, target: String, force: bool) -> Result<()> {
         ensure_current_state(
             &repo,
             &UserConfig::load_default().unwrap_or_default(),
-            Some("Bootstrap git-overlay before goto HEAD".to_string()),
+            Some("Bootstrap git-overlay before switch HEAD".to_string()),
         )?;
     }
     let target_id = resolve_state_id(&repo, &target)?;
 
     let current_worktree_verified_clean = if !force {
-        ensure_worktree_clean(&repo, "goto")?;
+        ensure_worktree_clean(&repo, "switch")?;
         if let Some(current) = repo.current_state()? {
             let _ = repo.require_tree(&current.tree)?;
             true
@@ -73,8 +73,8 @@ pub fn cmd_goto(cli: &Cli, target: String, force: bool) -> Result<()> {
         repo.goto(&target_id)?;
     }
 
-    let output = GotoOutput {
-        output_kind: "goto",
+    let output = SwitchOutput {
+        output_kind: "thread_switch",
         target: target_id.short(),
         intent: target_state.intent.clone(),
         message: format!("Now at: {}", target_id.short()),
@@ -93,7 +93,7 @@ pub fn cmd_goto(cli: &Cli, target: String, force: bool) -> Result<()> {
         repo_open_ms,
         body_ms = body_start.elapsed().as_millis(),
         total_ms = repo_open_ms + body_start.elapsed().as_millis(),
-        "Goto command complete"
+        "Switch command complete"
     );
 
     Ok(())

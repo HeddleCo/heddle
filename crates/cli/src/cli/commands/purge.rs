@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `heddle purge` — physically remove the bytes referenced by an
+//! `heddle redact purge` — physically remove the bytes referenced by an
 //! existing redaction. Irreversible by design.
 //!
 //! Workspace-owner capability is a documented constraint in the build
@@ -59,7 +59,7 @@ fn cmd_purge_apply(cli: &Cli, repo: &Repository, args: PurgeApplyArgs) -> Result
 
     if !args.force {
         let force_command = format!(
-            "heddle purge apply {} --path {} --force",
+            "heddle redact purge apply {} --path {} --force",
             state.short(),
             args.path
         );

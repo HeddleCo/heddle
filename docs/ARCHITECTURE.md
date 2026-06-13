@@ -197,7 +197,6 @@ Heddle currently supports ambient-follow integration for three harnesses:
 
 Current shipped behavior:
 
-- a local `heddle harness-bridge` JSONL protocol accepts session/progress/usage/report lifecycle events
 - installed hooks/plugins relay into that bridge through an internal `heddle integration relay ...` command
 - session reports are persisted locally under `.heddle/state/session-reports/`
 - actor attach is probe-first and based on harness-native keys when available
@@ -210,7 +209,6 @@ Current install flow:
 Important design direction:
 
 - Heddle should not become a general “run commands through me” wrapper
-- `heddle harness-bridge` is an internal primitive, not the main product abstraction
 - if attach is ambiguous, Heddle should prefer creating a new actor/session over reusing one incorrectly
 
 ## Context Annotations

@@ -36,7 +36,8 @@ mod full_feature {
         let path = generated_dir().join("heddle-schemas.ts");
         let on_disk = std::fs::read_to_string(&path).expect("read heddle-schemas.ts");
         assert_eq!(
-            on_disk, generated.typescript,
+            on_disk,
+            generated.typescript,
             "{} is stale — run `scripts/gen-ts-types.sh` and commit the result",
             path.display()
         );
@@ -48,7 +49,8 @@ mod full_feature {
         let path = generated_dir().join("heddle-schemas.json");
         let on_disk = std::fs::read_to_string(&path).expect("read heddle-schemas.json");
         assert_eq!(
-            on_disk, generated.json,
+            on_disk,
+            generated.json,
             "{} is stale — run `scripts/gen-ts-types.sh` and commit the result",
             path.display()
         );

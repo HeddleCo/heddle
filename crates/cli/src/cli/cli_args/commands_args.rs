@@ -71,46 +71,6 @@ pub struct AdoptArgs {
     pub refs: Vec<String>,
 }
 
-/// Arguments for the `commands` command.
-#[derive(Clone, Debug, clap::Args)]
-pub struct CommandCatalogArgs {
-    /// Include only command paths matching this display name or subtree prefix.
-    ///
-    /// Examples: `--command commit`, `--command "thread"`, or
-    /// `--command "thread show"`. Repeat to include multiple command families.
-    #[arg(long = "command", value_name = "COMMAND")]
-    pub commands: Vec<String>,
-
-    /// Include only commands in the selected discovery tier. Repeat to include multiple tiers.
-    #[arg(long, value_enum)]
-    pub tier: Vec<CommandCatalogTier>,
-
-    /// Include only commands that can mutate repository, worktree, process, or network state.
-    #[arg(long)]
-    pub mutating: bool,
-
-    /// Include only commands that accept caller-supplied `--op-id` replay ids.
-    #[arg(long)]
-    pub supports_op_id: bool,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum CommandCatalogTier {
-    Everyday,
-    Advanced,
-    Hidden,
-}
-
-impl CommandCatalogTier {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Everyday => "everyday",
-            Self::Advanced => "advanced",
-            Self::Hidden => "hidden",
-        }
-    }
-}
-
 /// Arguments for the `diagnose` command.
 #[derive(Clone, Debug, clap::Args)]
 pub struct DiagnoseArgs {
@@ -308,35 +268,6 @@ pub struct CommitArgs {
     pub force: bool,
 }
 
-/// Arguments for the Git-compatible `branch` shim.
-#[derive(Clone, Debug, clap::Args)]
-#[command(after_help = "\
-Examples:
-  heddle branch                  # list threads
-  heddle branch feature/auth     # create a thread at the current state
-  heddle branch -m old new       # rename a thread
-  heddle branch -d feature/auth  # drop a thread checkout/record
-")]
-pub struct BranchArgs {
-    /// Thread/branch name. Omit to list threads.
-    pub name: Option<String>,
-
-    /// New thread/branch name when using `-m/--move`.
-    pub new_name: Option<String>,
-
-    /// Drop the named thread.
-    #[arg(short = 'd', long = "delete", conflicts_with = "move_branch")]
-    pub delete: bool,
-
-    /// Force-delete the named thread, discarding dirty worktree changes.
-    #[arg(short = 'D', conflicts_with = "move_branch")]
-    pub force_delete: bool,
-
-    /// Rename a thread.
-    #[arg(short = 'm', long = "move")]
-    pub move_branch: bool,
-}
-
 /// Arguments for the Git-compatible `switch` shim.
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
@@ -516,17 +447,18 @@ Undoable operations:
   - heddle merge (FF)        (restores HEAD + the merged-into thread ref to
                               the pre-merge tip; the merged-in thread is
                               untouched.)
-  - heddle goto              (restores HEAD to the pre-goto state)
+  - heddle switch            (restores HEAD to the pre-switch state)
   - heddle thread create/drop/rename
-  - heddle marker create/drop
+  - heddle thread marker create/drop
   - heddle redact apply               (with --allow-redact-undo; removes the
                                        redaction record so future materializes
                                        restore the original blob bytes. Refused
                                        when a Purge has destroyed the bytes.)
+  - heddle undo --redo                re-apply the most recently undone operation
 
 Not undoable (file a follow-up if you need one):
   - heddle push / heddle fetch        (remote-affecting; out of scope)
-  - heddle purge                      (destructive by design; irreversible)
+  - heddle redact purge apply         (destructive by design; irreversible)
   - heddle start <name> --path <dir>  (refused while the materialized worktree
                                        still exists — run `heddle thread drop
                                        <name> --delete-thread` first, then
@@ -534,7 +466,7 @@ Not undoable (file a follow-up if you need one):
   - cross-worktree shared-backend undo (no worktree registry yet; single-
                                         worktree usage is the supported
                                         configuration for 0.3)
-  - redo across CLI invocations       (use `heddle redo` in the same shell)
+  - redo across CLI invocations       (use `heddle undo --redo` in the same shell)
 ")]
 pub struct UndoArgs {
     /// Undo N operations.
@@ -554,6 +486,10 @@ pub struct UndoArgs {
     #[arg(long, visible_alias = "dry-run")]
     pub preview: bool,
 
+    /// Re-apply operations that a prior `undo` rewound.
+    #[arg(long, conflicts_with = "list")]
+    pub redo: bool,
+
     /// Explicit opt-in for undoing a `heddle redact apply`. The inverse
     /// removes the redaction record so subsequent materializes restore
     /// the original blob bytes — i.e. previously-hidden content
@@ -563,26 +499,6 @@ pub struct UndoArgs {
     /// a Purge has destroyed the bytes: Purge is irreversible.
     #[arg(long)]
     pub allow_redact_undo: bool,
-}
-
-/// `heddle redo` — the symmetric inverse of `heddle undo`: re-applies
-/// operations that a prior `undo` rewound, within the same shell.
-#[derive(clap::Args, Clone, Debug)]
-#[command(after_help = "\
-Examples:
-  heddle redo                # re-apply the most recently undone operation
-  heddle redo -n 3           # re-apply the last three undone operations
-  heddle redo --dry-run      # show what would change without applying
-")]
-pub struct RedoArgs {
-    /// Redo N operations.
-    #[arg(short = 'n', long, default_value = "1")]
-    pub steps: usize,
-
-    /// Preview operations without redoing. `--dry-run` is an accepted
-    /// alias kept for muscle memory from git/other VCS tooling.
-    #[arg(long, visible_alias = "dry-run")]
-    pub preview: bool,
 }
 
 /// User-facing `--workspace` flag values. Vocabulary is the same as
@@ -800,66 +716,6 @@ pub struct TryArgs {
     pub command: Vec<String>,
 }
 
-/// Arguments for the `attempt` command — best-of-N parallel try.
-///
-/// Implements item 3.2 from the heddle 6→8 plan: spin up N ephemeral
-/// threads in parallel, run `<cmd>` in each, optionally rank with an
-/// `--evaluate` cmd, and surface a comparison table so the user can
-/// pick the winner. Failed attempts are dropped automatically; winning
-/// attempts stay around for the user to merge or drop manually.
-///
-/// `--shared-target` defaults to ON for Rust workspaces because three
-/// non-shared parallel cargo builds in a real workspace consume tens
-/// of GB of `target/`. Pass `--no-shared-target` to opt out.
-#[derive(Clone, Debug, clap::Args)]
-pub struct AttemptArgs {
-    /// Number of parallel attempts to spawn. Capped at 10 to prevent
-    /// fork-bombs on shared CI machines.
-    pub n: u32,
-
-    /// Workspace mode for each ephemeral thread. Defaults to `materialized`
-    /// (a real isolated checkout) so `<cmd>` runs against a proper
-    /// filesystem. Pass `auto`, `virtualized`, or `solid` to use a different
-    /// workspace strategy.
-    #[arg(long, value_enum, default_value_t = WorkspaceModeArg::Materialized)]
-    pub workspace: WorkspaceModeArg,
-
-    /// Redirect cargo's `target/` for each attempt thread to a shared
-    /// workspace-wide path. Default: ON for Rust workspaces (a top-level
-    /// `Cargo.toml` is the trigger), OFF otherwise. Pass
-    /// `--no-shared-target` to disable.
-    #[arg(long = "shared-target", overrides_with = "no_shared_target")]
-    pub shared_target: bool,
-
-    /// Disable the auto-on `--shared-target` behaviour for Rust
-    /// workspaces. Use only when each attempt genuinely needs an
-    /// isolated `target/` (e.g. you're testing the build cache itself).
-    #[arg(long = "no-shared-target", overrides_with = "shared_target")]
-    pub no_shared_target: bool,
-
-    /// Thread name prefix for the spawned attempts. Final names are
-    /// `<prefix>-1`, `<prefix>-2`, …. Defaults to
-    /// `attempt-<short-hash>` derived from the command and a timestamp.
-    #[arg(long = "name-prefix")]
-    pub name_prefix: Option<String>,
-
-    /// Optional secondary command to run inside each attempt thread
-    /// after the primary `<cmd>` succeeds. Used for ranking — e.g.
-    /// `--evaluate "cargo test"` after a primary that applies a fix.
-    /// When absent, ranking uses the primary cmd's exit code, the
-    /// resulting diff size, and the wall-clock duration.
-    ///
-    /// Parsed as a single shell-style string and split on whitespace.
-    /// Wrap in quotes when invoking from the shell.
-    #[arg(long)]
-    pub evaluate: Option<String>,
-
-    /// The command to run inside each attempt thread. Everything after
-    /// `--` lands here.
-    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
-    pub command: Vec<String>,
-}
-
 /// Arguments for the `run` command.
 #[derive(Clone, Debug, clap::Args)]
 pub struct RunArgs {
@@ -907,6 +763,10 @@ pub struct LandArgs {
     #[arg(short = 'm', long)]
     pub message: Option<String>,
 
+    /// Preserve per-State Git export instead of squashing the landed thread.
+    #[arg(long)]
+    pub no_squash: bool,
+
     /// Push after integration completes.
     #[arg(long)]
     pub push: bool,
@@ -918,95 +778,6 @@ pub struct LandArgs {
     /// Remote to push to when `--push` is used.
     #[arg(long)]
     pub remote: Option<String>,
-}
-
-/// One task entry in `heddle delegate <TASKS>...`. Each entry can be:
-///
-/// - `"task"` — task label only; agent comes from `--agent-provider` /
-///   `--agent-model` if set, otherwise no agent attribution.
-/// - `"task:provider:model"` — task label plus a per-task agent
-///   override, used to race **different** agents against the same prompt
-///   (e.g. `delegate "modulo:anthropic:claude-sonnet-4-5"
-///   "modulo:openai:gpt-5-codex" "modulo:custom:opencode"`).
-///
-/// Parsed lazily by clap via [`parse_delegated_task`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DelegatedTaskSpec {
-    pub task: String,
-    pub provider: Option<String>,
-    pub model: Option<String>,
-}
-
-/// clap value parser for `DelegatedTaskSpec`. Splits on `:` left-to-right
-/// with at most two splits, so the task label may not contain a literal
-/// colon — but task labels are slugified downstream anyway (colons would
-/// not survive `slugify`), so this is not a real restriction.
-pub fn parse_delegated_task(s: &str) -> Result<DelegatedTaskSpec, String> {
-    let mut parts = s.splitn(3, ':');
-    let task = parts
-        .next()
-        .ok_or_else(|| "empty task spec".to_string())?
-        .to_string();
-    if task.is_empty() {
-        return Err("delegated task label may not be empty".to_string());
-    }
-    let provider = parts
-        .next()
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty());
-    let model = parts
-        .next()
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty());
-    if model.is_some() && provider.is_none() {
-        // Shouldn't be reachable given the splitn, but guard anyway —
-        // a `task::model` form (empty provider, set model) is ambiguous.
-        return Err(format!(
-            "delegated task spec {s:?} has a model but no provider; \
-             expected `task:provider:model` or `task:provider` or `task`"
-        ));
-    }
-    Ok(DelegatedTaskSpec {
-        task,
-        provider,
-        model,
-    })
-}
-
-/// Arguments for the `delegate` command.
-#[derive(Clone, Debug, clap::Args)]
-pub struct DelegateArgs {
-    /// Child task labels to create under the current parent thread.
-    ///
-    /// Each entry is either `task` or `task:provider:model`. Use the
-    /// latter form to race different agents on the same prompt:
-    ///   heddle delegate "modulo:anthropic:claude-sonnet-4-5" \
-    ///                   "modulo:openai:gpt-5-codex" \
-    ///                   "modulo:custom:opencode"
-    #[arg(required = true, value_parser = parse_delegated_task)]
-    pub tasks: Vec<DelegatedTaskSpec>,
-
-    /// Parent thread to delegate from (default: current thread).
-    #[arg(long)]
-    pub parent: Option<String>,
-
-    /// Workspace mode for delegated child threads.
-    #[arg(long, value_enum)]
-    pub workspace: Option<WorkspaceModeArg>,
-
-    /// Directory under which materialized child workspaces should be created.
-    #[arg(long)]
-    pub path_prefix: Option<std::path::PathBuf>,
-
-    /// Default AI provider for delegated children (overridden per-task
-    /// when a `task:provider:model` form is used).
-    #[arg(long)]
-    pub agent_provider: Option<String>,
-
-    /// Default AI model for delegated children (overridden per-task
-    /// when a `task:provider:model` form is used).
-    #[arg(long)]
-    pub agent_model: Option<String>,
 }
 
 /// Arguments for `thread show`.
@@ -1640,7 +1411,7 @@ pub struct WatchArgs {
 
     /// Comma-separated event kinds to include
     /// (`snapshot,merge,thread_create,thread_update,thread_delete,
-    /// fork,collapse,goto,marker_create,marker_delete`).
+    /// collapse,thread_marker_create,thread_marker_delete`).
     #[arg(long, value_name = "KINDS")]
     pub filter: Option<String>,
 
