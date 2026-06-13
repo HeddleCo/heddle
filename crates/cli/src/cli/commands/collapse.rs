@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use objects::object::State;
+use objects::object::{ChangeId, State, ThreadName};
 use oplog::OpRecord;
 use refs::{Head, RefExpectation, RefUpdate};
 use serde::Serialize;
@@ -62,74 +62,29 @@ pub fn cmd_collapse(
         resolved_states.push(state);
     }
 
-    // The new state uses:
-    // - Tree from the LAST state (most recent content)
-    // - Parents from the FIRST state (preserving history connection)
-    let first_state = &resolved_states[0];
+    // The new state uses the tree from the last state and the parents of the
+    // first state, preserving the history connection.
     let last_state = &resolved_states[resolved_states.len() - 1];
     if !json {
         eprintln!("Using final tree from {}", last_state.change_id.short());
     }
 
-    // Get attribution for the new state
     let user_config = UserConfig::load_default()?;
-    let attribution = resolve_attribution(&repo, &user_config)?;
-
-    // Create the collapsed state
-    let mut new_state =
-        State::new_collapse_of(last_state.tree, first_state.parents.clone(), attribution);
-    new_state = new_state.with_intent(into.clone());
-
-    if let Some(provenance) = repo.get_state_provenance_root(last_state)? {
-        new_state = new_state.with_provenance(provenance);
-    }
-
-    if let Some(conf) = confidence {
-        new_state = new_state.with_confidence(conf);
-    }
-
-    // Store the new state through the authored-state chokepoint (heddle#482):
-    // a collapse mints a new author-created state, so it is auto-signed like a
-    // capture rather than carrying any source state's signature forward.
-    repo.put_authored_state(&mut new_state)?;
+    let published_ref = match repo.refs().read_head()? {
+        Head::Attached { ref thread } => CollapsePublishedRef::Thread(thread.clone()),
+        Head::Detached { .. } => CollapsePublishedRef::DetachedHead,
+    };
+    let new_state = collapse_resolved_states(
+        &repo,
+        &user_config,
+        &resolved_states,
+        into.clone(),
+        confidence,
+        published_ref,
+    )?;
     if !json {
         eprintln!("Writing collapsed state {}...", new_state.change_id.short());
     }
-
-    // Build the published ref batch + its matching `Collapse` record, then
-    // publish record-first through the write chokepoint (heddle#330 §2.2): the
-    // record is the commit point and the ref publish is a post-commit
-    // materialization, replacing the prior publish-then-record order. The
-    // `Collapse` record names the published ref (a thread when HEAD was
-    // attached, or a detached HEAD at the collapse result).
-    let (ref_updates, published_thread): (Vec<RefUpdate>, Option<String>) =
-        match repo.refs().read_head()? {
-            Head::Attached { ref thread } => (
-                vec![RefUpdate::Thread {
-                    name: thread.clone(),
-                    expected: RefExpectation::Any,
-                    new: Some(new_state.change_id),
-                }],
-                Some(thread.to_string()),
-            ),
-            Head::Detached { .. } => (
-                vec![RefUpdate::Head {
-                    expected: RefExpectation::Any,
-                    new: Head::Detached {
-                        state: new_state.change_id,
-                    },
-                }],
-                None,
-            ),
-        };
-
-    let source_ids: Vec<_> = resolved_states.iter().map(|s| s.change_id).collect();
-    let collapse_record = OpRecord::Collapse {
-        sources: source_ids,
-        result: new_state.change_id,
-        thread: published_thread,
-    };
-    repo.commit_and_publish(vec![collapse_record], &ref_updates)?;
 
     let output = CollapseOutput {
         change_id: new_state.change_id.short(),
@@ -154,6 +109,87 @@ pub fn cmd_collapse(
     }
 
     Ok(())
+}
+
+pub(crate) enum CollapsePublishedRef {
+    Thread(ThreadName),
+    DetachedHead,
+}
+
+pub(crate) fn collapse_resolved_states(
+    repo: &repo::Repository,
+    user_config: &UserConfig,
+    resolved_states: &[State],
+    into: String,
+    confidence: Option<f32>,
+    published_ref: CollapsePublishedRef,
+) -> Result<State> {
+    let first_state = &resolved_states[0];
+    let last_state = &resolved_states[resolved_states.len() - 1];
+    let attribution = resolve_attribution(repo, user_config)?;
+
+    let mut new_state =
+        State::new_collapse_of(last_state.tree, first_state.parents.clone(), attribution);
+    new_state = new_state.with_intent(into);
+
+    if let Some(provenance) = repo.get_state_provenance_root(last_state)? {
+        new_state = new_state.with_provenance(provenance);
+    }
+
+    if let Some(conf) = confidence {
+        new_state = new_state.with_confidence(conf);
+    }
+
+    // Store the new state through the authored-state chokepoint (heddle#482):
+    // a collapse mints a new author-created state, so it is auto-signed like a
+    // capture rather than carrying any source state's signature forward.
+    repo.put_authored_state(&mut new_state)?;
+
+    // Build the published ref batch + its matching `Collapse` record, then
+    // publish record-first through the write chokepoint (heddle#330 §2.2): the
+    // record is the commit point and the ref publish is a post-commit
+    // materialization, replacing the prior publish-then-record order. The
+    // `Collapse` record names the published ref (a thread when HEAD was
+    // attached, or a detached HEAD at the collapse result).
+    let (ref_updates, published_thread, pre_thread_state): (
+        Vec<RefUpdate>,
+        Option<String>,
+        Option<ChangeId>,
+    ) = match published_ref {
+        CollapsePublishedRef::Thread(thread) => {
+            let previous = repo.refs().get_thread(&thread)?;
+            (
+                vec![RefUpdate::Thread {
+                    name: thread.clone(),
+                    expected: RefExpectation::Any,
+                    new: Some(new_state.change_id),
+                }],
+                Some(thread.to_string()),
+                previous,
+            )
+        }
+        CollapsePublishedRef::DetachedHead => (
+            vec![RefUpdate::Head {
+                expected: RefExpectation::Any,
+                new: Head::Detached {
+                    state: new_state.change_id,
+                },
+            }],
+            None,
+            None,
+        ),
+    };
+
+    let source_ids: Vec<ChangeId> = resolved_states.iter().map(|s| s.change_id).collect();
+    let collapse_record = OpRecord::Collapse {
+        sources: source_ids,
+        result: new_state.change_id,
+        thread: published_thread,
+        pre_thread_state,
+    };
+    repo.commit_and_publish(vec![collapse_record], &ref_updates)?;
+
+    Ok(new_state)
 }
 
 fn collapse_requires_states_advice() -> RecoveryAdvice {

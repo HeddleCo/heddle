@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
+use std::collections::HashSet;
+
 use anyhow::{Context, Result, anyhow};
-use objects::object::{ChangeId, ThreadName};
+use objects::object::{ChangeId, State, ThreadName};
 use objects::store::ObjectStore;
 use oplog::{OpBatch, OpLogBackend, OpRecord};
 use repo::{Repository, Thread, ThreadIntegrationPolicy, thread_flag};
@@ -10,6 +12,7 @@ use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     checkpoint::create_git_checkpoint,
+    collapse::{CollapsePublishedRef, collapse_resolved_states},
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     merge::{build_thread_preview_report, merge_thread_into_current},
     next_action::{NextActionValidationContext, write_command_json, write_full_command_json},
@@ -434,7 +437,23 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     let preview = build_thread_preview_report(&repo, &mut merge_thread, true)?;
     let integration_blockers = integration_blockers(&repo, &merge_thread, &preview);
     let manual_resolution_current = manual_resolution_current(&repo, &merge_thread);
+    let squash_land = should_squash_land(&args, &user_config);
     if manual_resolution_current {
+        let land_collapse_state = if squash_land
+            && repo.capability() == repo::RepositoryCapability::GitOverlay
+        {
+            collapse_thread_for_land(&repo, &user_config, &merge_thread, args.message.as_deref())?
+        } else {
+            None
+        };
+        if land_collapse_state.is_some() {
+            merge_thread = resolve_thread(
+                &repo,
+                Some(&merge_thread.id),
+                "land",
+                "heddle land --thread <name>",
+            )?;
+        }
         let merge_state = adopt_manual_resolution(&repo, &merge_thread.id)?;
         let mut checkpointed = false;
         let mut git_commit = None;
@@ -466,6 +485,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             &repo,
             Some(&merge_state),
             git_commit.as_deref(),
+            land_collapse_state.as_ref(),
         )
         .context(
             "land completed but failed to record manual integration and Git checkpoint as one undo batch",
@@ -589,6 +609,21 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         );
     }
 
+    let land_collapse_state =
+        if squash_land && repo.capability() == repo::RepositoryCapability::GitOverlay {
+            collapse_thread_for_land(&repo, &user_config, &merge_thread, args.message.as_deref())?
+        } else {
+            None
+        };
+    if land_collapse_state.is_some() {
+        merge_thread = resolve_thread(
+            &repo,
+            Some(&merge_thread.id),
+            "land",
+            "heddle land --thread <name>",
+        )?;
+    }
+
     let merge_output = merge_thread_into_current(
         &repo,
         &merge_thread.id,
@@ -639,6 +674,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         &repo,
         merge_output.merge_state.as_deref(),
         git_commit.as_deref(),
+        land_collapse_state.as_ref(),
     )
     .context("land completed but failed to record merge and Git checkpoint as one undo batch")?;
 
@@ -735,6 +771,84 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             },
         },
     )
+}
+
+fn should_squash_land(args: &LandArgs, user_config: &UserConfig) -> bool {
+    !args.no_squash && user_config.land.squash
+}
+
+fn collapse_thread_for_land(
+    repo: &Repository,
+    user_config: &UserConfig,
+    thread: &Thread,
+    message: Option<&str>,
+) -> Result<Option<ChangeId>> {
+    let sources = thread_source_states(repo, thread)?;
+    if sources.len() <= 1 {
+        return Ok(None);
+    }
+    let intent = message
+        .map(ToOwned::to_owned)
+        .or_else(|| thread.task.clone())
+        .unwrap_or_else(|| format!("Land {}", thread.id));
+    let result = collapse_resolved_states(
+        repo,
+        user_config,
+        &sources,
+        intent,
+        None,
+        CollapsePublishedRef::Thread(ThreadName::new(&thread.id)),
+    )?;
+    Ok(Some(result.change_id))
+}
+
+fn thread_source_states(repo: &Repository, thread: &Thread) -> Result<Vec<State>> {
+    let Some(tip) = repo.refs().get_thread(&ThreadName::new(&thread.id))? else {
+        return Ok(Vec::new());
+    };
+    let base = repo.resolve_state(&thread.base_state)?;
+    let base_reachable = match base {
+        Some(base) => reachable_state_set(repo, base)?,
+        None => HashSet::new(),
+    };
+    let mut visited = HashSet::new();
+    let mut ordered = Vec::new();
+    collect_thread_sources(repo, tip, &base_reachable, &mut visited, &mut ordered)?;
+    Ok(ordered)
+}
+
+fn collect_thread_sources(
+    repo: &Repository,
+    state_id: ChangeId,
+    excluded: &HashSet<ChangeId>,
+    visited: &mut HashSet<ChangeId>,
+    ordered: &mut Vec<State>,
+) -> Result<()> {
+    if excluded.contains(&state_id) || !visited.insert(state_id) {
+        return Ok(());
+    }
+    let Some(state) = repo.store().get_state(&state_id)? else {
+        return Ok(());
+    };
+    for parent in &state.parents {
+        collect_thread_sources(repo, *parent, excluded, visited, ordered)?;
+    }
+    ordered.push(state);
+    Ok(())
+}
+
+fn reachable_state_set(repo: &Repository, root: ChangeId) -> Result<HashSet<ChangeId>> {
+    let mut reachable = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(state_id) = stack.pop() {
+        if !reachable.insert(state_id) {
+            continue;
+        }
+        if let Some(state) = repo.store().get_state(&state_id)? {
+            stack.extend(state.parents.iter().copied());
+        }
+    }
+    Ok(reachable)
 }
 
 async fn push_after_land(
@@ -1174,6 +1288,7 @@ fn coalesce_land_integration_and_checkpoint(
     repo: &Repository,
     merge_state: Option<&str>,
     git_commit: Option<&str>,
+    collapse_state: Option<&ChangeId>,
 ) -> Result<()> {
     let Some(merge_state) = merge_state else {
         return Ok(());
@@ -1186,7 +1301,30 @@ fn coalesce_land_integration_and_checkpoint(
     let checkpoint_batch = find_recent_land_git_checkpoint_batch(repo, git_commit)?;
     repo.oplog()
         .coalesce_batches(integration_batch.id, checkpoint_batch.id)?;
+    if let Some(collapse_state) = collapse_state {
+        let collapse_batch = find_recent_land_collapse_batch(repo, collapse_state)?;
+        repo.oplog()
+            .coalesce_batches(integration_batch.id, collapse_batch.id)?;
+    }
     Ok(())
+}
+
+fn find_recent_land_collapse_batch(
+    repo: &Repository,
+    collapse_state: &ChangeId,
+) -> Result<OpBatch> {
+    repo.oplog()
+        .recent_batches_scoped(12, Some(&repo.op_scope()))?
+        .into_iter()
+        .find(|batch| {
+            batch.entries.iter().any(|entry| {
+                matches!(
+                    &entry.operation,
+                    OpRecord::Collapse { result, .. } if result == collapse_state
+                )
+            })
+        })
+        .ok_or_else(|| anyhow!("land squash succeeded but its oplog batch was not found"))
 }
 
 fn find_recent_land_integration_batch(repo: &Repository, merge_state: &str) -> Result<OpBatch> {

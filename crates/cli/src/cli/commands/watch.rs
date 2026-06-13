@@ -1000,6 +1000,7 @@ mod tests {
                 sources: vec![cid],
                 result: cid,
                 thread: None,
+                pre_thread_state: None,
             },
             OpRecord::MarkerCreate {
                 name: "m".into(),

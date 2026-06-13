@@ -298,6 +298,7 @@ pub trait OpLogBackend: Send + Sync {
                 sources: sources.to_vec(),
                 result: *result,
                 thread: thread.map(str::to_string),
+                pre_thread_state: None,
             }],
             scope,
         )?;

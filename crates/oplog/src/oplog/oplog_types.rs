@@ -122,6 +122,8 @@ pub enum OpRecord {
         result: ChangeId,
         #[serde(default)]
         thread: Option<String>,
+        #[serde(default)]
+        pre_thread_state: Option<ChangeId>,
     },
     /// Marker creation.
     MarkerCreate { name: String, state: ChangeId },
@@ -972,6 +974,7 @@ mod verb_catalog_tests {
                 sources: vec![cid()],
                 result: cid(),
                 thread: None,
+                pre_thread_state: None,
             },
             OpRecord::MarkerCreate {
                 name: "m".into(),
