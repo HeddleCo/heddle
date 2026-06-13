@@ -910,7 +910,28 @@ impl PackedOpLogIndex {
                         ));
                     }
                 }
-                _ => {
+                OpRecord::Snapshot { .. }
+                | OpRecord::Goto { .. }
+                | OpRecord::ThreadCreate { .. }
+                | OpRecord::ThreadDelete { .. }
+                | OpRecord::ThreadUpdate { .. }
+                | OpRecord::Fork { .. }
+                | OpRecord::Collapse { .. }
+                | OpRecord::MarkerCreate { .. }
+                | OpRecord::MarkerDelete { .. }
+                | OpRecord::Checkpoint { .. }
+                | OpRecord::TransactionAbort { .. }
+                | OpRecord::EphemeralThreadCollapse { .. }
+                | OpRecord::ConflictResolved { .. }
+                | OpRecord::Redact { .. }
+                | OpRecord::Purge { .. }
+                | OpRecord::FastForward { .. }
+                | OpRecord::GitCheckpoint { .. }
+                | OpRecord::RemoteThreadUpdate { .. }
+                | OpRecord::RemoteThreadDelete { .. }
+                | OpRecord::UndoRecoveryUpdate { .. }
+                | OpRecord::StateVisibilitySet { .. }
+                | OpRecord::StateVisibilityPromote { .. } => {
                     return Err(HeddleError::InvalidObject(
                         "oplog transaction directory references a non-commit entry".to_string(),
                     ));
