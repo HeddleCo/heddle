@@ -15,7 +15,10 @@
 //! in downstream modules; [`Importer::run`] leaves their seams wired but
 //! stubbed behind TODOs so we can land milestones independently.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use objects::{
     object::{Blob, ChangeId, ContentHash, Tree, TreeEntry},
@@ -170,14 +173,15 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
         // can't steer us into dangling territory.
         let live_shas: Vec<String> = heads.iter().map(|h| h.target_sha.clone()).collect();
         let reflog_shas = self.git.reflog_commit_shas()?;
+        let mut seed_seen: HashSet<String> = live_shas.iter().cloned().collect();
         let reflog_only_commits = reflog_shas
             .iter()
-            .filter(|s| !live_shas.iter().any(|live| live == *s))
+            .filter(|s| !seed_seen.contains(*s))
             .count();
 
         let mut seed = live_shas;
         for s in reflog_shas {
-            if !seed.contains(&s) {
+            if seed_seen.insert(s.clone()) {
                 seed.push(s);
             }
         }
