@@ -78,7 +78,12 @@ __heddle_complete_from() {
 __heddle_thread_value_position() {
     local prev="${COMP_WORDS[COMP_CWORD-1]}"
     case "$prev" in
-        --thread|-t|--into) return 0 ;;
+        --thread) return 0 ;;
+        --into)
+            case "${COMP_WORDS[1]}" in
+                thread|capture) return 0 ;;
+            esac
+            ;;
     esac
     case "${COMP_WORDS[1]}" in
         start|switch|merge) [ "$COMP_CWORD" -eq 2 ] && return 0 ;;
@@ -133,7 +138,12 @@ __heddle_dynamic_values() {
 __heddle_thread_value_position() {
     local prev="${words[$CURRENT-1]}"
     case "$prev" in
-        --thread|-t|--into) return 0 ;;
+        --thread) return 0 ;;
+        --into)
+            case "${words[2]}" in
+                thread|capture) return 0 ;;
+            esac
+            ;;
     esac
     case "${words[2]}" in
         start|switch|merge) [[ "$CURRENT" -eq 3 ]] && return 0 ;;
@@ -185,9 +195,14 @@ function __heddle_dynamic_subject
         set prev $words[-1]
     end
     switch $prev
-        case --thread -t --into
+        case --thread
             printf threads
             return 0
+        case --into
+            if __fish_seen_subcommand_from thread capture
+                printf threads
+                return 0
+            end
     end
     if test (count $words) -eq 2
         switch "$words[2]"
