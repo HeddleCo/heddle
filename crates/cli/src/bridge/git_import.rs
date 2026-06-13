@@ -515,7 +515,9 @@ pub fn backfill_fidelity(bridge: &mut GitBridge<'_>) -> GitResult<BackfillStats>
 
 /// Import Git commits into Heddle states.
 pub fn import_all(bridge: &mut GitBridge, git_path: Option<&Path>) -> GitResult<ImportStats> {
-    import_with_ref_filter(bridge, git_path, None, GitImportOptions::default(), None)
+    bridge.with_mapping_rollback(|bridge| {
+        import_with_ref_filter(bridge, git_path, None, GitImportOptions::default(), None)
+    })
 }
 
 pub fn import_all_with_options(
@@ -523,7 +525,9 @@ pub fn import_all_with_options(
     git_path: Option<&Path>,
     options: GitImportOptions,
 ) -> GitResult<ImportStats> {
-    import_with_ref_filter(bridge, git_path, None, options, None)
+    bridge.with_mapping_rollback(|bridge| {
+        import_with_ref_filter(bridge, git_path, None, options, None)
+    })
 }
 
 /// Like [`import_all`], reporting the running commit count to `progress`
@@ -533,13 +537,15 @@ pub fn import_all_with_progress(
     git_path: Option<&Path>,
     progress: Option<&mut dyn FnMut(usize)>,
 ) -> GitResult<ImportStats> {
-    import_with_ref_filter(
-        bridge,
-        git_path,
-        None,
-        GitImportOptions::default(),
-        progress,
-    )
+    bridge.with_mapping_rollback(|bridge| {
+        import_with_ref_filter(
+            bridge,
+            git_path,
+            None,
+            GitImportOptions::default(),
+            progress,
+        )
+    })
 }
 
 pub fn import_selected_refs(
@@ -548,13 +554,15 @@ pub fn import_selected_refs(
     refs: &[String],
 ) -> GitResult<ImportStats> {
     let wanted = refs.iter().cloned().collect::<HashSet<_>>();
-    import_with_ref_filter(
-        bridge,
-        git_path,
-        Some(&wanted),
-        GitImportOptions::default(),
-        None,
-    )
+    bridge.with_mapping_rollback(|bridge| {
+        import_with_ref_filter(
+            bridge,
+            git_path,
+            Some(&wanted),
+            GitImportOptions::default(),
+            None,
+        )
+    })
 }
 
 pub fn import_selected_refs_with_options(
@@ -564,7 +572,9 @@ pub fn import_selected_refs_with_options(
     options: GitImportOptions,
 ) -> GitResult<ImportStats> {
     let wanted = refs.iter().cloned().collect::<HashSet<_>>();
-    import_with_ref_filter(bridge, git_path, Some(&wanted), options, None)
+    bridge.with_mapping_rollback(|bridge| {
+        import_with_ref_filter(bridge, git_path, Some(&wanted), options, None)
+    })
 }
 
 /// Like [`import_selected_refs`], reporting the running commit count to
@@ -576,13 +586,15 @@ pub fn import_selected_refs_with_progress(
     progress: Option<&mut dyn FnMut(usize)>,
 ) -> GitResult<ImportStats> {
     let wanted = refs.iter().cloned().collect::<HashSet<_>>();
-    import_with_ref_filter(
-        bridge,
-        git_path,
-        Some(&wanted),
-        GitImportOptions::default(),
-        progress,
-    )
+    bridge.with_mapping_rollback(|bridge| {
+        import_with_ref_filter(
+            bridge,
+            git_path,
+            Some(&wanted),
+            GitImportOptions::default(),
+            progress,
+        )
+    })
 }
 
 fn import_with_ref_filter(

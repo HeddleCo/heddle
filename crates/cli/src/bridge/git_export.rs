@@ -279,12 +279,12 @@ pub fn export_tree(
 
 /// Export all Heddle states to Git commits.
 pub fn export_all(bridge: &mut GitBridge) -> GitResult<ExportStats> {
-    export_scoped(bridge, None)
+    bridge.with_mapping_rollback(|bridge| export_scoped(bridge, None))
 }
 
 /// Export one Heddle thread to its matching Git branch.
 pub fn export_current_thread(bridge: &mut GitBridge, thread: &str) -> GitResult<ExportStats> {
-    export_scoped(bridge, Some(thread))
+    bridge.with_mapping_rollback(|bridge| export_scoped(bridge, Some(thread)))
 }
 
 fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<ExportStats> {

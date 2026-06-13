@@ -195,6 +195,18 @@ pub fn mapping_mut<'a>(bridge: &'a mut GitBridge<'_>) -> &'a mut SyncMapping {
     &mut bridge.mapping
 }
 
+pub fn commit_message_overrides<'a>(bridge: &'a GitBridge<'_>) -> &'a HashMap<ChangeId, String> {
+    &bridge.commit_message_overrides
+}
+
+pub fn set_commit_message_override(
+    bridge: &mut GitBridge<'_>,
+    state_id: ChangeId,
+    message: String,
+) {
+    bridge.set_commit_message_override(state_id, message);
+}
+
 pub fn mapping_path(bridge: &GitBridge<'_>) -> PathBuf {
     bridge.mapping_path()
 }
@@ -216,14 +228,6 @@ pub fn open_git_repo(bridge: &GitBridge<'_>) -> GitResult<gix::Repository> {
 
 pub fn heddle_repo<'a>(bridge: &'a GitBridge<'a>) -> &'a HeddleRepository {
     bridge.heddle_repo
-}
-
-pub fn set_commit_message_override(
-    bridge: &mut GitBridge<'_>,
-    state_id: ChangeId,
-    message: String,
-) {
-    bridge.set_commit_message_override(state_id, message);
 }
 
 pub fn open_repo(path: &Path) -> GitResult<gix::Repository> {

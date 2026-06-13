@@ -492,7 +492,7 @@ impl WriteThroughOutcome {
 }
 
 /// Mapping between Heddle ChangeIds and Git commit object IDs.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncMapping {
     /// Maps Heddle ChangeId -> Git object id
     heddle_to_git: HashMap<ChangeId, ObjectId>,
@@ -676,6 +676,39 @@ pub struct GitBridge<'a> {
     pub(crate) commit_message_overrides: HashMap<ChangeId, String>,
 }
 
+struct MappingFileSnapshot {
+    path: PathBuf,
+    contents: Option<Vec<u8>>,
+}
+
+impl MappingFileSnapshot {
+    fn read(path: PathBuf) -> GitResult<Self> {
+        let contents = match fs::read(&path) {
+            Ok(contents) => Some(contents),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        Ok(Self { path, contents })
+    }
+
+    fn restore(self) -> GitResult<()> {
+        match self.contents {
+            Some(contents) => {
+                if let Some(parent) = self.path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&self.path, contents)?;
+            }
+            None => match fs::remove_file(&self.path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            },
+        }
+        Ok(())
+    }
+}
+
 impl<'a> GitBridge<'a> {
     /// Trailer keys used in Git commit messages for Heddle metadata.
     pub(crate) const TRAILER_CHANGE_ID: &'static str = "Heddle-Change-Id";
@@ -816,6 +849,33 @@ impl<'a> GitBridge<'a> {
     /// Import Git commits into Heddle states.
     pub fn import(&mut self, git_path: Option<&Path>) -> GitResult<super::git_util::ImportStats> {
         import_all(self, git_path)
+    }
+
+    pub(crate) fn with_mapping_rollback<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> GitResult<T>,
+    ) -> GitResult<T> {
+        let mapping = self.mapping.clone();
+        let commit_message_overrides = self.commit_message_overrides.clone();
+        let mapping_file = MappingFileSnapshot::read(self.mapping_path())?;
+        let mapping_tmp_file = MappingFileSnapshot::read(self.mapping_tmp_path())?;
+
+        match operation(self) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                self.mapping = mapping;
+                self.commit_message_overrides = commit_message_overrides;
+                if let Err(rollback_error) = mapping_file
+                    .restore()
+                    .and_then(|()| mapping_tmp_file.restore())
+                {
+                    return Err(GitBridgeError::Git(format!(
+                        "operation failed ({error}); additionally failed to roll back git bridge mapping state ({rollback_error})"
+                    )));
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Push to a Git remote. Returns the full names of the refs written
