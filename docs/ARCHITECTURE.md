@@ -163,7 +163,7 @@ An isolated worktree is a normal checkout directory that points at a shared obje
 
 Important current behavior:
 
-- `heddle start <thread> --workspace materialized` creates a filesystem-isolated checkout
+- `heddle start <thread> --path <dir>` creates a filesystem-isolated checkout
 - `heddle start <thread>` records thread and agent metadata while keeping execution roots private by default
 - the oplog is still global across worktrees, so undo/redo semantics are repository-global rather than checkout-local
 

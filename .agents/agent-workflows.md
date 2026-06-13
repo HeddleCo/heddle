@@ -78,10 +78,10 @@ Important current behavior:
 
 - `heddle start` defaults to a private lightweight thread with a Heddle-managed execution root.
 - `heddle thread show/list/refresh/promote/drop` manage thread lifecycle and maintenance.
-- `heddle start --workspace materialized` creates a user-visible isolated checkout when the thread needs a heavier environment.
+- `heddle start <thread> --path <dir>` creates a user-visible isolated checkout when the thread needs its own working directory.
 - `capture` records changed paths, impact categories, freshness, and promotion warnings for the active thread.
 - `merge --preview` shows the semantic integration summary before apply.
-- `start <thread> --path <dir>` creates an isolated checkout with its own working directory.
+- `start <thread> --path <dir>` is the canonical isolated-checkout path.
 - `actor spawn` creates a thread-linked actor registry entry only; it does not create filesystem isolation.
 - `actor spawn` is for explicit Heddle actors; ambient harness integration may create actors automatically.
 - use `start <thread> --path <dir>` when you need a real isolated checkout.

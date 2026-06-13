@@ -5313,7 +5313,7 @@ fn thread_switch_from_worktree_to_shared_thread_uses_typed_advice() {
     assert!(
         envelope["hint"]
             .as_str()
-            .is_some_and(|hint| hint.contains("heddle start --workspace materialized beta/shared")),
+            .is_some_and(|hint| hint.contains("heddle start beta/shared --path <dir>")),
         "switch refusal should name the materialization command: {stderr}"
     );
 }
@@ -7435,7 +7435,7 @@ fn heavy_thread_start_explains_non_empty_workspace_recovery() {
     );
     assert_eq!(
         envelope["primary_command"],
-        "heddle start <name> --workspace materialized"
+        "heddle start <name> --path <empty-path>"
     );
     assert!(
         envelope["recovery_commands"]
@@ -8104,6 +8104,13 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
     // remain discoverable. The first-run surface (everything before the
     // breadcrumb) stays free of the advanced machinery.
     let start_help = heddle_help(&["start", "--help"]);
+    assert!(
+        start_help.contains("heddle start <name> --path <dir>")
+            && start_help.contains("heddle thread create <name>")
+            && start_help.contains("heddle thread promote <name> --path <dir>")
+            && start_help.contains("ref-first, checkout-later staging"),
+        "start help should make start --path canonical and explain the advanced split form: {start_help}"
+    );
     let (start_first_run, start_breadcrumb) = start_help
         .split_once("Advanced (hidden) flags:")
         .expect("start help carries the advanced-flags breadcrumb (heddle#646)");
@@ -8130,6 +8137,20 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
             "start help should avoid mount-internals jargon everywhere: {start_help}"
         );
     }
+    let thread_create_help = heddle_help(&["thread", "create", "--help"]);
+    assert!(
+        thread_create_help.contains("Advanced split form:")
+            && thread_create_help.contains("heddle start <name> --path <dir>")
+            && thread_create_help.contains("heddle thread promote <name> --path <dir>"),
+        "thread create help should point users back to start --path and explain create-ref-now/materialize-later: {thread_create_help}"
+    );
+    let thread_promote_help = heddle_help(&["thread", "promote", "--help"]);
+    assert!(
+        thread_promote_help.contains("Advanced split form:")
+            && thread_promote_help.contains("heddle start <name> --path <dir>")
+            && thread_promote_help.contains("heddle thread create <name>"),
+        "thread promote help should point users back to start --path and explain the split form: {thread_promote_help}"
+    );
     assert!(
         start_help.contains("Copy full files into an isolated checkout")
             && start_help.contains("Create a disk checkout with shared extents"),
@@ -8793,6 +8814,23 @@ fn command_catalog_exposes_public_surface_for_agents() {
         serde_json::json!(["message"])
     );
     assert_eq!(commit["command_action"]["template"]["agent_may_fill"], true);
+    let start = commands
+        .iter()
+        .find(|entry| entry["display"] == "start")
+        .expect("start command should be cataloged");
+    assert_eq!(start["tier"], "everyday");
+    assert_eq!(start["help_visibility"], "everyday");
+    for display in ["thread create", "thread promote"] {
+        let entry = commands
+            .iter()
+            .find(|entry| entry["display"] == display)
+            .unwrap_or_else(|| panic!("{display} command should be cataloged"));
+        assert_eq!(
+            entry["tier"], "advanced",
+            "{display} should stay off the everyday catalog surface: {entry}"
+        );
+        assert_eq!(entry["help_visibility"], "advanced");
+    }
     let merge = commands
         .iter()
         .find(|entry| entry["display"] == "merge")

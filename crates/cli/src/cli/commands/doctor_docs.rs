@@ -1118,7 +1118,7 @@ mod tests {
         let mut issues = Vec::new();
         scan_markdown(
             "test.md",
-            "We use `heddle start <name> --workspace materialized --path <dir>` here.\n\
+            "We use `heddle start <name> --path <dir>` here.\n\
              Also `heddle context set --path X --scope file --kind rationale -m \"y\"`.\n\
              And `heddle thread marker delete failed-build` works fine.\n",
             &cli(),

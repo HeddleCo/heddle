@@ -2721,7 +2721,7 @@ pub(crate) fn cmd_thread_switch(
         // makes it look like edits vanished.
         //
         // Refuse with a clear next step. The user either runs
-        // `heddle start --workspace materialized <target>` to give the
+        // `heddle start <target> --path <dir>` to give the
         // target its own worktree, or cd's to the main repo root
         // first.
         return Err(anyhow!(thread_switch_would_overwrite_worktree_advice(
@@ -2807,7 +2807,7 @@ pub(crate) fn cmd_thread_switch(
 }
 
 fn thread_switch_would_overwrite_worktree_advice(thread: &str) -> RecoveryAdvice {
-    let primary_command = format!("heddle start --workspace materialized {thread}");
+    let primary_command = format!("heddle start {thread} --path <dir>");
     RecoveryAdvice::safety_refusal(
         "thread_switch_would_overwrite_worktree",
         format!("thread '{thread}' has no dedicated worktree"),

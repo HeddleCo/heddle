@@ -50,7 +50,7 @@ fn start_path_non_empty_target_uses_typed_advice() {
     assert_eq!(envelope["kind"], "worktree_target_not_empty");
     assert_eq!(
         envelope["primary_command"],
-        "heddle start <name> --workspace materialized"
+        "heddle start <name> --path <empty-path>"
     );
     assert!(
         envelope["hint"]

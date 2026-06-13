@@ -122,7 +122,7 @@ fn clean_markdown_exits_zero() {
     let md = write_file(
         temp.path(),
         "ok.md",
-        "Use `heddle start probe --workspace materialized --path ./checkout` for isolation.\n\
+        "Use `heddle start probe --path ./checkout` for isolation.\n\
          For status, run `heddle status --output json`.\n\
          Clean up with `heddle thread drop probe --delete-thread`.\n",
     );
@@ -280,7 +280,7 @@ fn all_enumerates_markdown_without_git() {
     write_file(
         root,
         "README.md",
-        "Run `heddle start probe --workspace materialized --path foo`.\n",
+        "Run `heddle start probe --path foo`.\n",
     );
     fs::create_dir_all(root.join("docs")).unwrap();
     write_file(

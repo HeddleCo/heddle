@@ -363,7 +363,6 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     "heddle context get --path <path>",
     "heddle context set --path <path> --scope file -m \"...\"",
     "heddle session start",
-    "heddle start <name> --workspace materialized",
     "heddle start <name> --path <empty-path>",
     "heddle start <name> --path ../<name>",
     "heddle actor show <session>",
@@ -494,12 +493,6 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
             "<model>",
         ],
         &["provider", "model"],
-        true,
-    ),
-    (
-        "heddle start <name> --workspace materialized",
-        &["heddle", "start", "<name>", "--workspace", "materialized"],
-        &["name"],
         true,
     ),
     (
@@ -3863,6 +3856,30 @@ fn dynamic_recommended_action_template(action: &str) -> Option<ActionTemplate> {
                 false,
             ))
         }
+        [heddle, start, thread_name, path_flag, path]
+            if heddle == "heddle"
+                && start == "start"
+                && path_flag == "--path"
+                && is_placeholder_arg(path) =>
+        {
+            let required_inputs = [thread_name, path]
+                .iter()
+                .filter(|arg| is_placeholder_arg(arg))
+                .map(|arg| placeholder_input_name(arg))
+                .collect();
+            Some(action_template_from_owned(
+                action.to_string(),
+                vec![
+                    "heddle".to_string(),
+                    "start".to_string(),
+                    thread_name.clone(),
+                    "--path".to_string(),
+                    path.clone(),
+                ],
+                required_inputs,
+                true,
+            ))
+        }
         [heddle, thread_cmd, absorb, thread_name, into_flag, parent]
             if heddle == "heddle"
                 && thread_cmd == "thread"
@@ -4798,6 +4815,7 @@ mod tests {
             "heddle stash push -m \"...\"",
             "heddle capture -m \"Preserve raw Git operation work\"",
             "heddle switch <branch>",
+            "heddle start feature/auth --path <dir>",
             "heddle clone <remote> <fresh-path>",
             "heddle clone <local-path> <path>",
             "heddle clone /tmp/source <path> --thread main",
@@ -4874,6 +4892,15 @@ mod tests {
         );
         assert_eq!(clone.required_inputs, vec!["remote", "path"]);
         assert!(!clone.agent_may_fill);
+
+        let start = recommended_action_template("heddle start feature/auth --path <dir>")
+            .expect("start path placeholder should resolve");
+        assert_eq!(
+            start.argv_template,
+            vec!["heddle", "start", "feature/auth", "--path", "<dir>"]
+        );
+        assert_eq!(start.required_inputs, vec!["dir"]);
+        assert!(start.agent_may_fill);
 
         let local_clone = recommended_action_template("heddle clone <local-path> <path>")
             .expect("local clone recovery placeholder should resolve");
@@ -6021,6 +6048,24 @@ mod tests {
             ("push", "everyday", "native", "everyday", None, None, false),
             (
                 "capture", "advanced", "native", "advanced", None, None, false,
+            ),
+            (
+                "thread create",
+                "advanced",
+                "native",
+                "advanced",
+                None,
+                None,
+                false,
+            ),
+            (
+                "thread promote",
+                "advanced",
+                "native",
+                "advanced",
+                None,
+                None,
+                false,
             ),
             (
                 "checkpoint",
