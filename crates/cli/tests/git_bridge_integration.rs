@@ -724,6 +724,87 @@ fn import_all_rejects_gitlink_by_default_and_lossy_reports_conversion() {
 }
 
 #[test]
+fn import_all_lossy_does_not_reattribute_cached_shared_subtree_entries() {
+    let (_git_temp, git_repo) = init_git_repo();
+    let shared_tree = gitlink_tree(&git_repo, "vendor");
+
+    let mut first_editor = git_repo
+        .edit_tree(empty_tree_oid(&git_repo))
+        .expect("first tree editor");
+    first_editor
+        .upsert("shared", gix::object::tree::EntryKind::Tree, shared_tree)
+        .expect("insert shared subtree");
+    let first_tree = first_editor.write().expect("write first tree").detach();
+    let first_commit = commit_with_tree(&git_repo, None, first_tree, "add shared subtree", &[]);
+
+    let note_blob = git_repo
+        .write_blob(b"second\n")
+        .expect("note blob")
+        .detach();
+    let mut second_editor = git_repo
+        .edit_tree(empty_tree_oid(&git_repo))
+        .expect("second tree editor");
+    second_editor
+        .upsert("shared", gix::object::tree::EntryKind::Tree, shared_tree)
+        .expect("reuse shared subtree");
+    second_editor
+        .upsert("note.txt", gix::object::tree::EntryKind::Blob, note_blob)
+        .expect("insert unrelated root change");
+    let second_tree = second_editor.write().expect("write second tree").detach();
+    let second_commit = commit_with_tree(
+        &git_repo,
+        Some("refs/heads/main"),
+        second_tree,
+        "reuse shared subtree",
+        &[first_commit],
+    );
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let mut bridge = GitBridge::new(&repo);
+    let stats = import_all_with_options(
+        &mut bridge,
+        Some(git_repo.workdir().expect("workdir")),
+        GitImportOptions { lossy: true },
+    )
+    .expect("lossy import accepts shared gitlink subtree");
+
+    assert_eq!(stats.states_created, 2);
+    assert_eq!(
+        stats.lossy_entries.len(),
+        1,
+        "the cached shared subtree must not inflate lossy stats"
+    );
+    assert_eq!(stats.lossy_entries[0].path, "shared/vendor");
+
+    let mapping =
+        std::fs::read_to_string(test_support::mapping_path(&bridge)).expect("mapping sidecar");
+    let mapping: serde_json::Value = serde_json::from_str(&mapping).expect("mapping json");
+    let entries = mapping["entries"].as_array().expect("mapping entries");
+    let first_entry = entries
+        .iter()
+        .find(|entry| entry["git_oid"] == first_commit.to_string())
+        .expect("first commit mapping");
+    let second_entry = entries
+        .iter()
+        .find(|entry| entry["git_oid"] == second_commit.to_string())
+        .expect("second commit mapping");
+
+    let first_lossy_entries = first_entry["lossy_entries"]
+        .as_array()
+        .expect("first lossy entries");
+    assert_eq!(first_lossy_entries.len(), 1);
+    assert_eq!(first_lossy_entries[0]["path"], "shared/vendor");
+    assert!(
+        second_entry
+            .get("lossy_entries")
+            .and_then(|entries| entries.as_array())
+            .is_none_or(Vec::is_empty),
+        "second commit must not be attributed the parent's shared subtree loss"
+    );
+}
+
+#[test]
 fn import_all_default_fails_on_cached_lossy_commit_from_prior_run() {
     let (_git_temp, git_repo) = init_gitlink_repo();
     let git_path = git_repo.workdir().expect("workdir");
