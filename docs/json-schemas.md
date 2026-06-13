@@ -580,7 +580,27 @@ saves a Heddle state without recommending a Git checkpoint.
   "captured": true,
   "captured_state": "hd-sqr398dvx9ay",
   "thread_state": "ready",
-  "report": {}
+  "readiness": {
+    "status": "ready",
+    "captured": true,
+    "captured_state": "hd-sqr398dvx9ay",
+    "checks": {
+      "status": "completed",
+      "reason": "readiness preview ran"
+    },
+    "integration": "configured",
+    "freshness": "current",
+    "merge_type": "fast-forward",
+    "changed_path_count": 1,
+    "changed_paths": ["src/parser.rs"],
+    "conflict_count": 0,
+    "conflicts": [],
+    "impact": "none",
+    "impact_categories": [],
+    "blockers": []
+  },
+  "report": {},
+  "verification": {}
 }
 ```
 
@@ -626,7 +646,7 @@ saves a Heddle state without recommending a Git checkpoint.
 | `status` | string | required for `capture`/`checkpoint`/`commit`/`ready`/`land` | Machine-stable success status for the operation. |
 | `action` | string | required for `capture`/`checkpoint`/`commit`/`undo`/`undo --redo`/`land` | Logical operation name. |
 | `batches` | array<object> | required for `undo`/`undo --redo` | Oplog batches affected by the operation. Empty if none are reported. |
-| `thread_state`, `report` | string \| null / object | required for `ready` | Readiness result and structured readiness report. |
+| `thread_state`, `readiness`, `report` | string \| null / object / object | required for `ready` | Readiness result, stable human/machine summary, and structured preview report. `readiness` always carries the same fields; non-applicable checks/integration/freshness/merge details are represented with explicit `not_run`, `not checked`, or `n/a` values and reasons rather than omitted. |
 | `thread`, `captured`, `checkpointed`, `synced`, `integrated`, `pushed`, `pushed_remote` | string / bool / string \| null | required for `land` | Thread landed, which local/publish steps completed, and the remote name pushed when publish ran. |
 | `performed_steps`, `skipped_steps`, `merge_state`, `chosen_path` | array<string> / string \| null / string | required for `land` | Machine-readable path through the land loop and the merge state landed, when one exists. |
 | `verification` | object \| null | required | Post-operation verification proof. `null` only for undo / undo --redo paths that cannot compute it. |
