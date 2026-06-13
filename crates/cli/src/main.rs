@@ -23,7 +23,7 @@ use cli::{
             LogCommandOptions, RetroCommandOptions, SnapshotAgentOverrides, build_command_catalog,
             cmd_abort, cmd_actor_done, cmd_actor_explain, cmd_actor_list, cmd_actor_show,
             cmd_actor_spawn, cmd_adopt, cmd_agent, cmd_capture_split, cmd_checkpoint,
-            cmd_cherry_pick, cmd_clean, cmd_clone, cmd_collapse, cmd_commit_compat,
+            cmd_cherry_pick, cmd_clean, cmd_clone, cmd_collapse, cmd_commit_compat, cmd_complete,
             cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get,
             cmd_context_history, cmd_context_list, cmd_context_rm, cmd_context_set,
             cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
@@ -521,7 +521,9 @@ async fn async_main() -> Result<()> {
 
         Commands::Thread { command } => cmd_thread(&cli, command.clone()).await,
 
-        Commands::Shell { command } => cmd_shell(command.clone()),
+        Commands::Shell { command } => cmd_shell(&cli, command.clone()),
+
+        Commands::Complete { subject } => cmd_complete(&cli, *subject),
 
         Commands::Merge(MergeArgs {
             thread,

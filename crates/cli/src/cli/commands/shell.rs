@@ -25,10 +25,10 @@
 
 use anyhow::Result;
 
-use super::cmd_completion;
-use crate::cli::{ShellCommands, ShellKind};
+use super::{cmd_completion, status::prompt_segment};
+use crate::cli::{Cli, ShellCommands, ShellKind};
 
-pub fn cmd_shell(command: ShellCommands) -> Result<()> {
+pub fn cmd_shell(cli: &Cli, command: ShellCommands) -> Result<()> {
     match command {
         ShellCommands::Init { kind } => {
             // Stdout — the caller is expected to redirect / `eval`.
@@ -36,6 +36,12 @@ pub fn cmd_shell(command: ShellCommands) -> Result<()> {
             Ok(())
         }
         ShellCommands::Completion { shell } => cmd_completion(shell),
+        ShellCommands::Prompt => {
+            if let Some(segment) = prompt_segment(cli)? {
+                println!("{segment}");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -53,6 +59,7 @@ fn snippet_for(kind: ShellKind) -> &'static str {
 const ZSH_BASH_SNIPPET: &str = r#"# heddle shell hook — installed via `heddle shell init zsh` (or bash)
 # Wraps `heddle start`, `heddle thread switch`, and `heddle thread cd`
 # so they auto-cd into the target thread's worktree.
+# Also defines `__heddle_ps1`, a compact prompt segment helper.
 heddle() {
     case "$1 $2" in
         "start "*)
@@ -81,12 +88,19 @@ heddle() {
             ;;
     esac
 }
+
+__heddle_ps1() {
+    local segment
+    segment=$(command heddle shell prompt 2>/dev/null) || return 0
+    [ -n "$segment" ] && printf '(%s)' "$segment"
+}
 "#;
 
 /// fish uses a different function syntax. Wrappable via `function … end`.
 const FISH_SNIPPET: &str = r#"# heddle shell hook — installed via `heddle shell init fish`
 # Wraps `heddle start`, `heddle thread switch`, and `heddle thread cd`
 # so they auto-cd into the target thread's worktree.
+# Also defines `__heddle_ps1`, a compact prompt segment helper.
 function heddle
     switch "$argv[1] $argv[2]"
         case 'start *'
@@ -113,6 +127,13 @@ function heddle
             command heddle $argv
     end
 end
+
+function __heddle_ps1
+    set -l segment (command heddle shell prompt 2>/dev/null)
+    if test -n "$segment"
+        printf '(%s)' "$segment"
+    end
+end
 "#;
 
 #[cfg(test)]
@@ -126,6 +147,7 @@ mod tests {
             snippet_for(ShellKind::Bash)
         ));
         assert!(snippet_for(ShellKind::Zsh).contains("heddle() {"));
+        assert!(snippet_for(ShellKind::Zsh).contains("__heddle_ps1()"));
     }
 
     #[test]
@@ -133,12 +155,24 @@ mod tests {
         let body = snippet_for(ShellKind::Fish);
         assert!(body.contains("function heddle"));
         assert!(body.contains("$argv"));
+        assert!(body.contains("function __heddle_ps1"));
     }
 
     #[test]
     fn cmd_shell_init_runs_for_every_shell_kind() {
         for kind in [ShellKind::Zsh, ShellKind::Bash, ShellKind::Fish] {
-            cmd_shell(ShellCommands::Init { kind }).expect("init prints");
+            let cli = Cli {
+                command: crate::cli::Commands::Shell {
+                    command: ShellCommands::Init { kind },
+                },
+                output: None,
+                no_color: false,
+                repo: None,
+                verbose: 0,
+                quiet: false,
+                op_id: None,
+            };
+            cmd_shell(&cli, ShellCommands::Init { kind }).expect("init prints");
         }
     }
 }

@@ -2331,6 +2331,8 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["shell"], category(READ_TEXT, "repo")),
     entry(&["shell", "init"], READ_TEXT),
     entry(&["shell", "completion"], READ_TEXT),
+    entry(&["shell", "prompt"], READ_TEXT),
+    entry(&["complete"], hidden(READ_TEXT)),
     entry(
         &["land"],
         front_door(
@@ -4303,7 +4305,9 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Shell { command } => match command {
             ShellCommands::Init { .. } => vec!["shell", "init"],
             ShellCommands::Completion { .. } => vec!["shell", "completion"],
+            ShellCommands::Prompt => vec!["shell", "prompt"],
         },
+        Commands::Complete { .. } => vec!["complete"],
         Commands::Merge(_) => vec!["merge"],
         Commands::Resolve(_) => vec!["resolve"],
         Commands::Fsck { .. } => vec!["fsck"],
@@ -4722,6 +4726,8 @@ mod tests {
         sample(&["session", "list"], &["session", "list"]),
         sample(&["shell", "init"], &["shell", "init", "bash"]),
         sample(&["shell", "completion"], &["shell", "completion", "bash"]),
+        sample(&["shell", "prompt"], &["shell", "prompt"]),
+        sample(&["complete"], &["__complete", "threads"]),
         sample(&["land"], &["land"]),
         sample(&["show"], &["show", "HEAD"]),
         sample(&["start"], &["start", "feature"]),

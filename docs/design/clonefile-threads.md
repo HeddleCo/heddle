@@ -191,13 +191,35 @@ walk (~91 ms for the heddle workspace).
 
 `heddle shell init zsh|bash|fish` emits a shell function that:
 
-- Wraps `heddle start / heddle thread switch / heddle thread drop` to detect path changes and
+- Wraps `heddle start / heddle thread switch / heddle thread cd` to detect path changes and
   auto-`cd`.
-- Sets `$HEDDLE_THREAD` to the current thread name (drives the
-  prompt).
+- Defines `__heddle_ps1`, a prompt helper that calls `heddle shell prompt`.
+  The prompt segment is compact ASCII: `thread* +A -B`, where `*` means
+  dirty, `+A` is ahead of upstream, and `-B` is behind upstream. It prints
+  nothing outside a Heddle repo.
 - Falls through to the real binary for every other subcommand.
 
-User installs once (`heddle shell init zsh >> ~/.zshrc`). After that:
+User installs once:
+
+```sh
+eval "$(heddle shell init zsh)"   # or bash
+# fish:
+# heddle shell init fish | source
+```
+
+Then add the helper to the shell's prompt, for example:
+
+```sh
+PS1='$(__heddle_ps1) '"$PS1"
+```
+
+`heddle shell completion bash|zsh|fish` emits the static clap-generated
+completion script plus dynamic callbacks for thread and marker names. Install it
+with the shell's normal completion mechanism; the script calls the hidden
+`heddle __complete threads|markers` helper at completion time, so
+`heddle thread switch <TAB>` reflects the repository's current refs.
+
+After that:
 
 ```
 $ heddle start feature-x          # materialize + cd

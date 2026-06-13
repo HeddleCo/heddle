@@ -346,6 +346,39 @@ pub async fn cmd_status(
     Ok(())
 }
 
+pub(crate) fn prompt_segment(cli: &Cli) -> Result<Option<String>> {
+    let Ok(output) = build_status_output(cli, true) else {
+        return Ok(None);
+    };
+    let repo = cli.open_repo().ok();
+    let current_lane = repo
+        .as_ref()
+        .and_then(|repo| repo.current_lane().ok())
+        .flatten();
+    let subject = output
+        .thread
+        .as_deref()
+        .or(current_lane.as_deref())
+        .or_else(|| output.current_state.as_ref().map(|_| "detached"));
+    let Some(subject) = subject else {
+        return Ok(None);
+    };
+
+    let mut segment = subject.to_string();
+    if output.changed_path_count > 0 || !output.changes.is_empty() {
+        segment.push('*');
+    }
+    if let Some(remote) = output.remote_tracking.as_ref() {
+        if remote.ahead > 0 {
+            segment.push_str(&format!(" +{}", remote.ahead));
+        }
+        if remote.behind > 0 {
+            segment.push_str(&format!(" -{}", remote.behind));
+        }
+    }
+    Ok(Some(segment))
+}
+
 fn build_plain_git_status_probe(cli: &Cli) -> Result<Option<PlainGitStatusOutput>> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd);

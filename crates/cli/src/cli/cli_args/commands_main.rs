@@ -8,9 +8,6 @@ use super::BridgeCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
-    AgentCommands, CheckpointArgs, ContextCommands, DiscussCommands, HookCommands,
-    IntegrationCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands, ShellCommands,
-    StashCommands, ThreadCommands, TransactionCommands, VisibilityCommands,
     commands_args::{
         ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AdoptArgs,
         CloneArgs, CollapseArgs, CommitArgs, DiffArgs, DoctorArgs, ExpandArgs, InitArgs, LandArgs,
@@ -19,6 +16,9 @@ use super::{
         SessionStartArgs, SnapshotArgs, SwitchArgs, SyncArgs, ThreadStartArgs, TryArgs, UndoArgs,
         WatchArgs,
     },
+    AgentCommands, CheckpointArgs, CompletionSubject, ContextCommands, DiscussCommands,
+    HookCommands, IntegrationCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands,
+    ShellCommands, StashCommands, ThreadCommands, TransactionCommands, VisibilityCommands,
 };
 #[cfg(feature = "client")]
 use super::{AuthCommands, SupportCommands};
@@ -340,6 +340,14 @@ Examples:
     Shell {
         #[command(subcommand)]
         command: ShellCommands,
+    },
+
+    /// Internal shell-completion candidate helper.
+    #[command(name = "complete", alias = "__complete", hide = true)]
+    Complete {
+        /// Candidate set to print, one candidate per line.
+        #[arg(value_enum)]
+        subject: CompletionSubject,
     },
 
     /// Preview or land a thread into the current thread.

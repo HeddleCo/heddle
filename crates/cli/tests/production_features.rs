@@ -1857,6 +1857,10 @@ mod completion {
             output.contains("heddle") || output.contains("complete"),
             "should generate bash completion"
         );
+        assert!(
+            output.contains("heddle __complete"),
+            "bash completion should include dynamic thread candidates"
+        );
     }
 
     #[test]
@@ -1865,6 +1869,10 @@ mod completion {
 
         let result = heddle(&["shell", "completion", "zsh"], Some(temp.path()));
         assert!(result.is_ok(), "completion zsh failed: {:?}", result.err());
+        assert!(
+            result.unwrap().contains("heddle __complete"),
+            "zsh completion should include dynamic thread candidates"
+        );
     }
 
     #[test]
@@ -1873,6 +1881,10 @@ mod completion {
 
         let result = heddle(&["shell", "completion", "fish"], Some(temp.path()));
         assert!(result.is_ok(), "completion fish failed: {:?}", result.err());
+        assert!(
+            result.unwrap().contains("heddle __complete"),
+            "fish completion should include dynamic thread candidates"
+        );
     }
 }
 
