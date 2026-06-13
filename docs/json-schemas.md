@@ -401,7 +401,7 @@ blocked verification state on stdout.
 | `summary` | string | required | Human-sized explanation of the top verification state. |
 | `checks` | array<object> | required | Public checklist rows for Git, Heddle, Mapping, Worktree, Remote, Operation, Machine contract, and Clone. |
 | `recommended_action` | string \| null | required | Display command for the primary next step. `null` when no action is needed. |
-| `recommended_action_template` | object \| null | required | Fillable template for `recommended_action` — `argv_template` (executable argv, current Heddle executable path as argv[0]), `required_inputs`, `agent_may_fill`. Present for every valid action; `null` only when the display command is null. The canonical machine-readable action shape — the always-null `_argv` sidecar was dropped (HeddleCo/heddle#254). |
+| `recommended_action_template` | object \| null | required | Fillable template for `recommended_action` — `argv_template` (executable argv, current Heddle executable path as argv[0]), `required_inputs`, `agent_may_fill`. Present for every valid action; `null` only when the display command is null. When `agent_may_fill` is false, treat `action`/`argv_template` as display-only: do not substitute `<name>`/`<url>` placeholders; surface the template to a human or discard it. Substituting and running it will pass literal `<name>` to Heddle and fail. The canonical machine-readable action shape — the always-null `_argv` sidecar was dropped (HeddleCo/heddle#254). |
 | `recovery_commands` | array<string> | required | Display commands for recovery, in priority order. Empty when verified. |
 | `recovery_action_templates` | array<object> | required | Fillable templates mirroring `recovery_commands`. |
 | `checks[].recommended_action_template`, `checks[].recovery_action_templates` | object/array/null | required | Structured fillable action metadata scoped to the check row. |
@@ -2022,7 +2022,7 @@ set should filter the returned `commands` array by `display`, `tier`,
 | `commands[].arguments` | array<object> | required | Public positional arguments local to that command. |
 | `global_options` | array<object> | required | Public global flags accepted across commands. Hidden conditional flags such as `--op-id` are described by per-command fields instead of this broad list. |
 | `recommended_action_placeholders` | array<string> | required | Explicit display-only placeholders that cannot parse directly through Clap until the caller supplies the missing value. |
-| `recommended_action_templates` | array<object> | required | Structured fillable forms for display-only recommended actions. Agents may fill templates only when `agent_may_fill` is true. |
+| `recommended_action_templates` | array<object> | required | Structured fillable forms for display-only recommended actions. Agents may fill templates only when `agent_may_fill` is true. When `agent_may_fill` is false, treat `action`/`argv_template` as display-only: do not substitute `<name>`/`<url>` placeholders; surface the template to a human or discard it. Substituting and running it will pass literal `<name>` to Heddle and fail. |
 
 `command_action` is the per-command action contract. For example, `push`
 advertises executable argv `["/path/to/heddle", "push"]`, while `adopt`
@@ -2030,7 +2030,8 @@ advertises the fillable template `["/path/to/heddle", "adopt", "--ref",
 "<branch>"]` and `merge` advertises `["/path/to/heddle", "merge",
 "<thread>", "--preview"]`.
 Agents should execute `argv` directly and fill `template.argv_template`
-only when they can supply every `required_inputs` value.
+only when they can supply every `required_inputs` value and
+`agent_may_fill` is true.
 
 Op-id behavior is deliberately split so agents can avoid assuming more
 than the command provides:
@@ -2992,7 +2993,7 @@ without scraping freeform text.
 | `would_change` | string | required | What could be lost, duplicated, or changed by proceeding blindly. |
 | `preserved` | string | required | What Heddle preserved or left untouched before failing. |
 | `primary_command` | string | required | Main recovery/inspection command. |
-| `primary_command_template` | object \| null | required | Fillable template (`argv_template`/`required_inputs`/`agent_may_fill`) for `primary_command`. The canonical machine-readable shape; the always-null `_argv` sidecar was dropped (HeddleCo/heddle#254). |
+| `primary_command_template` | object \| null | required | Fillable template (`argv_template`/`required_inputs`/`agent_may_fill`) for `primary_command`. When `agent_may_fill` is false, treat `action`/`argv_template` as display-only: do not substitute `<name>`/`<url>` placeholders; surface the template to a human or discard it. Substituting and running it will pass literal `<name>` to Heddle and fail. The canonical machine-readable shape; the always-null `_argv` sidecar was dropped (HeddleCo/heddle#254). |
 | `recovery_commands` | array<string> | required | Recovery commands in priority order. |
 | `recovery_action_templates` | array<object> | required | Fillable templates mirroring `recovery_commands`. |
 | `verification` | object | present for `kind: "verify_failed"` | Nested `RepositoryVerificationState` for the blocked `heddle verify` invocation. JSON callers should read this from stderr; blocked `verify` never writes the verification object to stdout. |

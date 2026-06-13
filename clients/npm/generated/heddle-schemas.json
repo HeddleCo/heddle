@@ -9,6 +9,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -162,6 +163,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -284,6 +286,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -900,6 +903,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -2077,6 +2081,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -2722,6 +2727,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -3108,6 +3114,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -3714,6 +3721,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -4215,6 +4223,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -4963,6 +4972,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -5548,6 +5558,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -5694,6 +5705,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -6339,6 +6351,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -6501,6 +6514,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -6738,6 +6752,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -7242,6 +7257,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -7897,6 +7913,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -8998,6 +9015,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -10091,6 +10109,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -10975,6 +10994,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -11567,6 +11587,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -12051,6 +12072,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -12609,6 +12631,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -14422,6 +14445,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -15436,6 +15460,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -16428,6 +16453,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -17529,6 +17555,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -18070,6 +18097,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -18681,6 +18709,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -18929,6 +18958,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -19504,6 +19534,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -20027,6 +20058,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -21451,6 +21483,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -21974,6 +22007,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -22497,6 +22531,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -23059,6 +23094,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -23288,6 +23324,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -24215,6 +24252,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -24962,6 +25000,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -25147,6 +25186,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -25376,6 +25416,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
@@ -25535,6 +25576,7 @@
               "type": "string"
             },
             "agent_may_fill": {
+              "description": "Whether an agent may replace placeholders in `argv_template`.\n\nWhen `agent_may_fill` is false, treat `action` and `argv_template` as\ndisplay-only: do not substitute `<name>`/`<url>` placeholders. Surface\nthe template to a human or discard it. Substituting and running it will\npass literal `<name>` to Heddle and fail.",
               "type": "boolean"
             },
             "argv_template": {
