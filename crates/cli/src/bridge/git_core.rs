@@ -167,6 +167,21 @@ fn reject_reserved_git_remote_name(remote: &str) -> GitResult<()> {
     Ok(())
 }
 
+fn remote_name_from_remote_ref(ref_name: &str) -> Option<&str> {
+    let remote_and_name = ref_name.strip_prefix("refs/remotes/")?;
+    let remote = remote_and_name
+        .split_once('/')
+        .map_or(remote_and_name, |(remote, _)| remote);
+    (!remote.is_empty()).then_some(remote)
+}
+
+fn validate_refspec_ref(ref_name: &str) -> GitResult<()> {
+    if let Some(remote) = remote_name_from_remote_ref(ref_name) {
+        reject_reserved_git_remote_name(remote)?;
+    }
+    Ok(())
+}
+
 /// The kind of Git ref [`parse_git_ref`] recognizes. Ported from jj's
 /// `GitRefKind` (`lib/src/git.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +213,8 @@ pub struct ParsedGitRef<'a> {
 /// Ported from jj's `parse_git_ref` (`lib/src/git.rs`); like jj, the symbolic
 /// `HEAD` and `refs/remotes/<remote>/HEAD` entries are not treated as refs.
 pub fn parse_git_ref(ref_name: &str) -> Option<ParsedGitRef<'_>> {
+    RefSpec::new(None, ref_name, false).ok()?;
+
     if let Some(name) = ref_name.strip_prefix("refs/heads/") {
         // Git rejects `HEAD` as a branch name.
         (name != "HEAD").then_some(ParsedGitRef {
@@ -213,7 +230,7 @@ pub fn parse_git_ref(ref_name: &str) -> Option<ParsedGitRef<'_>> {
         // it onto local refs would make remote-tracking branches
         // indistinguishable from `refs/heads/*`, so it is rejected here —
         // matching jj's parser and the sentinel ownership contract.
-        (name != "HEAD" && !is_reserved_git_remote_name(remote)).then_some(ParsedGitRef {
+        (name != "HEAD").then_some(ParsedGitRef {
             kind: GitRefKind::Branch,
             name,
             remote,
@@ -231,52 +248,71 @@ pub fn parse_git_ref(ref_name: &str) -> Option<ParsedGitRef<'_>> {
 
 /// A Git refspec: an optional `source`, a `destination`, and a `forced` (`+`)
 /// marker. Ported from jj's `RefSpec` (`lib/src/git.rs`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RefSpec {
-    forced: bool,
-    /// `None` encodes a delete refspec (`:destination`).
-    source: Option<String>,
-    destination: String,
-}
+mod refspec {
+    use super::{GitResult, validate_refspec_ref};
 
-impl RefSpec {
-    /// A forced (`+`) refspec mapping `source` onto `destination`.
-    pub fn forced(source: impl Into<String>, destination: impl Into<String>) -> Self {
-        Self {
-            forced: true,
-            source: Some(source.into()),
-            destination: destination.into(),
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RefSpec {
+        forced: bool,
+        /// `None` encodes a delete refspec (`:destination`).
+        source: Option<String>,
+        destination: String,
+    }
+
+    impl RefSpec {
+        /// Construct a refspec after enforcing reserved-remote-name invariants.
+        pub fn new(
+            source: Option<String>,
+            destination: impl Into<String>,
+            forced: bool,
+        ) -> GitResult<Self> {
+            let destination = destination.into();
+            if let Some(source) = source.as_deref() {
+                validate_refspec_ref(source)?;
+            }
+            validate_refspec_ref(&destination)?;
+            Ok(Self {
+                forced,
+                source,
+                destination,
+            })
+        }
+
+        /// A forced (`+`) refspec mapping `source` onto `destination`.
+        pub fn forced(
+            source: impl Into<String>,
+            destination: impl Into<String>,
+        ) -> GitResult<Self> {
+            Self::new(Some(source.into()), destination, true)
+        }
+
+        /// A delete refspec (`:destination`). Not forced: deleting a destination
+        /// that has no source cannot lose work.
+        pub fn delete(destination: impl Into<String>) -> GitResult<Self> {
+            Self::new(None, destination, false)
+        }
+
+        /// Render in `git` refspec syntax, including the leading `+` when forced.
+        pub fn to_git_format(&self) -> String {
+            format!(
+                "{}{}",
+                if self.forced { "+" } else { "" },
+                self.to_git_format_not_forced()
+            )
+        }
+
+        /// Render in `git` refspec syntax without the leading `+`, even when forced.
+        pub fn to_git_format_not_forced(&self) -> String {
+            format!(
+                "{}:{}",
+                self.source.as_deref().unwrap_or(""),
+                self.destination
+            )
         }
     }
-
-    /// A delete refspec (`:destination`). Not forced: deleting a destination
-    /// that has no source cannot lose work.
-    pub fn delete(destination: impl Into<String>) -> Self {
-        Self {
-            forced: false,
-            source: None,
-            destination: destination.into(),
-        }
-    }
-
-    /// Render in `git` refspec syntax, including the leading `+` when forced.
-    pub fn to_git_format(&self) -> String {
-        format!(
-            "{}{}",
-            if self.forced { "+" } else { "" },
-            self.to_git_format_not_forced()
-        )
-    }
-
-    /// Render in `git` refspec syntax without the leading `+`, even when forced.
-    pub fn to_git_format_not_forced(&self) -> String {
-        format!(
-            "{}:{}",
-            self.source.as_deref().unwrap_or(""),
-            self.destination
-        )
-    }
 }
+
+pub use refspec::RefSpec;
 
 /// A negative refspec (`^source`) excluding refs from a fetch or push. Ported
 /// from jj's `NegativeRefSpec` (`lib/src/git.rs`).
@@ -302,11 +338,11 @@ impl NegativeRefSpec {
 /// The fetch refspecs heddle uses to mirror a remote: every branch and every
 /// heddle note, forced. Built through [`RefSpec`] so the wire format has a
 /// single typed source of truth.
-fn heddle_mirror_fetch_refspecs() -> [String; 2] {
-    [
-        RefSpec::forced("refs/heads/*", "refs/heads/*").to_git_format(),
-        RefSpec::forced("refs/notes/*", "refs/notes/*").to_git_format(),
-    ]
+fn heddle_mirror_fetch_refspecs() -> GitResult<[String; 2]> {
+    Ok([
+        RefSpec::forced("refs/heads/*", "refs/heads/*")?.to_git_format(),
+        RefSpec::forced("refs/notes/*", "refs/notes/*")?.to_git_format(),
+    ])
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3438,9 +3474,10 @@ fn clone_url_to_bare_via_gix(
     fs::create_dir_all(dest)?;
     let repo = gix::init_bare(dest).map_err(git_err)?;
     let mut remote = repo.remote_at(url.clone()).map_err(git_err)?;
+    let refspecs = heddle_mirror_fetch_refspecs()?;
     remote
         .replace_refspecs(
-            heddle_mirror_fetch_refspecs().iter().map(String::as_str),
+            refspecs.iter().map(String::as_str),
             gix::remote::Direction::Fetch,
         )
         .map_err(git_err)?;
@@ -3589,9 +3626,10 @@ fn fetch_network_remote(
     scope: GitFetchScope,
 ) -> GitResult<()> {
     let mut remote = mirror_repo.remote_at(url.clone()).map_err(git_err)?;
+    let refspecs = heddle_mirror_fetch_refspecs()?;
     remote
         .replace_refspecs(
-            heddle_mirror_fetch_refspecs().iter().map(String::as_str),
+            refspecs.iter().map(String::as_str),
             gix::remote::Direction::Fetch,
         )
         .map_err(git_err)?;
@@ -3915,7 +3953,8 @@ mod tests {
 
     #[test]
     fn refspec_forced_round_trips_git_format() {
-        let spec = RefSpec::forced("refs/heads/main", "refs/heads/main");
+        let spec =
+            RefSpec::forced("refs/heads/main", "refs/heads/main").expect("valid forced refspec");
         assert_eq!(spec.to_git_format(), "+refs/heads/main:refs/heads/main");
         assert_eq!(
             spec.to_git_format_not_forced(),
@@ -3924,10 +3963,40 @@ mod tests {
     }
 
     #[test]
+    fn refspec_constructor_rejects_reserved_remote_name() {
+        let err = RefSpec::new(
+            Some("refs/remotes/git/main".to_string()),
+            "refs/heads/main",
+            false,
+        )
+        .expect_err("reserved remote source is rejected");
+        assert!(err.to_string().contains("reserved namespace"));
+
+        let err = RefSpec::new(
+            Some("refs/heads/main".to_string()),
+            "refs/remotes/git/main",
+            false,
+        )
+        .expect_err("reserved remote destination is rejected");
+        assert!(err.to_string().contains("reserved namespace"));
+    }
+
+    #[test]
+    fn refspec_forced_rejects_reserved_remote_name() {
+        assert!(RefSpec::forced("refs/remotes/git/main", "refs/heads/main").is_err());
+        assert!(RefSpec::forced("refs/heads/main", "refs/remotes/git/main").is_err());
+    }
+
+    #[test]
     fn refspec_delete_has_empty_source() {
-        let spec = RefSpec::delete("refs/heads/stale");
+        let spec = RefSpec::delete("refs/heads/stale").expect("valid delete refspec");
         assert_eq!(spec.to_git_format(), ":refs/heads/stale");
         assert_eq!(spec.to_git_format_not_forced(), ":refs/heads/stale");
+    }
+
+    #[test]
+    fn refspec_delete_rejects_reserved_remote_name() {
+        assert!(RefSpec::delete("refs/remotes/git/stale").is_err());
     }
 
     #[test]
@@ -3939,7 +4008,7 @@ mod tests {
     #[test]
     fn mirror_fetch_refspecs_cover_branches_and_notes() {
         assert_eq!(
-            heddle_mirror_fetch_refspecs(),
+            heddle_mirror_fetch_refspecs().expect("mirror refspecs are valid"),
             [
                 "+refs/heads/*:refs/heads/*".to_string(),
                 "+refs/notes/*:refs/notes/*".to_string(),
