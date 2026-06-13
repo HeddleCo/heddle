@@ -12,6 +12,7 @@ for a local Developer ID build.
 - Apple Developer Program team with the `com.apple.developer.fskit.fsmodule`
   entitlement approved.
 - Developer ID Application certificate in the login keychain.
+- Developer ID Installer certificate in the login keychain.
 - Developer ID provisioning profiles for both bundle IDs, with the FSKit
   entitlement enabled:
   - `sh.heddle.HeddleHost`
@@ -30,13 +31,15 @@ Set these shell variables before building:
 ```bash
 export HEDDLE_TEAM_ID="33V6242M8S"
 export HEDDLE_DEVELOPER_ID="Developer ID Application: HeddleCo, LLC (33V6242M8S)"
+export HEDDLE_INSTALLER_ID="Developer ID Installer: HeddleCo, LLC (33V6242M8S)"
 export HEDDLE_NOTARY_PROFILE="HeddleNotary"
 ```
 
-## 1. Build a universal Rust static library
+## 1. Build universal Rust artifacts
 
-The Xcode extension links `target/release/libmount.a`. For a universal app, make
-that archive contain both Apple Silicon and Intel slices.
+The Xcode extension links `target/release/libmount.a`; the macOS installer also
+ships the `heddle` CLI. Build both as universal artifacts so the app, extension,
+and command line stay version-locked.
 
 ```bash
 cd /path/to/heddle
@@ -49,14 +52,26 @@ MACOSX_DEPLOYMENT_TARGET=26.0 CFLAGS="-mmacosx-version-min=26.0" \
 MACOSX_DEPLOYMENT_TARGET=26.0 CFLAGS="-mmacosx-version-min=26.0" \
   cargo build --release -p heddle-mount --features fskit \
   --target x86_64-apple-darwin
+MACOSX_DEPLOYMENT_TARGET=26.0 CFLAGS="-mmacosx-version-min=26.0" \
+  cargo build --release -p heddle-cli --bin heddle \
+  --target aarch64-apple-darwin
+MACOSX_DEPLOYMENT_TARGET=26.0 CFLAGS="-mmacosx-version-min=26.0" \
+  cargo build --release -p heddle-cli --bin heddle \
+  --target x86_64-apple-darwin
 
 mkdir -p target/release
 lipo -create \
   target/aarch64-apple-darwin/release/libmount.a \
   target/x86_64-apple-darwin/release/libmount.a \
   -output target/release/libmount.a
+lipo -create \
+  target/aarch64-apple-darwin/release/heddle \
+  target/x86_64-apple-darwin/release/heddle \
+  -output target/release/heddle
+chmod 0755 target/release/heddle
 
 lipo -info target/release/libmount.a
+lipo -info target/release/heddle
 ```
 
 Expected output includes `x86_64 arm64`.
@@ -103,6 +118,9 @@ If Xcode used the correct Developer ID profiles, verification should pass:
 ```bash
 codesign --verify --strict --verbose=2 "$EXT"
 codesign --verify --strict --verbose=2 "$APP"
+codesign --force --timestamp --options runtime \
+  --sign "$HEDDLE_DEVELOPER_ID" "$PWD/../../../../target/release/heddle"
+codesign --verify --strict --verbose=2 "$PWD/../../../../target/release/heddle"
 codesign -d --entitlements :- "$APP"
 codesign -d --entitlements :- "$EXT"
 ```
@@ -144,18 +162,50 @@ xcrun stapler validate "$APP"
 spctl -a -vvv -t install "$APP"
 ```
 
-## 5. Build the branded DMG
+## 5. Build the one-install package
 
-The DMG window copies the archived product as `Heddle.app`, places the
-Applications symlink, and applies the branded Finder background. The light
-background is the release default; set `HEDDLE_DMG_APPEARANCE=dark` to generate
-the dark variant for review.
+The package is the actual Mac install unit. It places:
+
+- `Heddle.app` in `/Applications/Heddle.app`
+- `heddle` in `/usr/local/bin/heddle`
+
+The package's `postinstall` refreshes LaunchServices so the FSKit extension is
+discoverable before the first `heddle start`.
 
 ```bash
-./dmg/make-dmg.sh "$APP" build/Heddle.dmg
+./pkg/make-pkg.sh "$APP" "$PWD/../../../../target/release/heddle" build/Heddle.pkg
+pkgutil --expand build/Heddle.pkg build/Heddle.pkg.expanded
+pkgutil --check-signature build/Heddle.pkg
+rm -rf build/Heddle.pkg.expanded
+```
+
+For unsigned local previews, omit `HEDDLE_INSTALLER_ID`. For release, the
+script signs the staged CLI with `HEDDLE_DEVELOPER_ID` and signs the package
+with `HEDDLE_INSTALLER_ID` when those variables are set.
+
+Notarize and staple the package:
+
+```bash
+xcrun notarytool submit build/Heddle.pkg \
+  --keychain-profile "$HEDDLE_NOTARY_PROFILE" \
+  --wait
+
+xcrun stapler staple build/Heddle.pkg
+spctl -a -vvv -t install build/Heddle.pkg
+```
+
+## 6. Build the branded DMG wrapper
+
+The release DMG wraps the package in a branded Finder window. It does not ask
+the user to drag an app manually; the `.pkg` is the single installer for both
+the CLI and the macOS host app. The light background is the release default; set
+`HEDDLE_DMG_APPEARANCE=dark` to generate the dark variant for review.
+
+```bash
+./dmg/make-dmg.sh build/Heddle.pkg build/Heddle.dmg
 
 HEDDLE_DMG_APPEARANCE=dark \
-  ./dmg/make-dmg.sh "$APP" build/Heddle-dark.dmg
+  ./dmg/make-dmg.sh build/Heddle.pkg build/Heddle-dark.dmg
 ```
 
 Verify the generated image before publishing:
@@ -172,17 +222,17 @@ xcrun stapler staple build/Heddle.dmg
 spctl -a -vvv -t open --context context:primary-signature build/Heddle.dmg
 ```
 
-## 6. Local install and approval test
+## 7. Local install and approval test
 
-Install the notarized app into `/Applications`, then force LaunchServices to
-scan it:
+Install the package, then confirm both the CLI and app are present:
 
 ```bash
 sudo rm -rf /Applications/Heddle.app
-sudo ditto "$APP" /Applications/Heddle.app
+sudo rm -f /usr/local/bin/heddle
+sudo installer -pkg build/Heddle.pkg -target /
 
-LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Support/lsregister"
-"$LSREGISTER" -f /Applications/Heddle.app
+command -v heddle
+heddle --version
 
 pluginkit -m -p com.apple.fskit.fsmodule | grep sh.heddle.HeddleHost.HeddleFSModule
 open /Applications/Heddle.app

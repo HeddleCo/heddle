@@ -34,29 +34,31 @@
   <path d="M303 266 C353 222 414 219 463 258 C488 278 510 284 535 278" fill="none" stroke="#c89560" stroke-opacity="0.78" stroke-width="1.1" stroke-linecap="round"/>
   <text x="218" y="394" text-anchor="middle" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="12" font-weight="700" letter-spacing="1.2" fill="#b9ada0">HEDDLE.APP</text>
   <text x="562" y="394" text-anchor="middle" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="12" font-weight="700" letter-spacing="1.2" fill="#b9ada0">APPLICATIONS</text>
-  <g transform="translate(645 52)" opacity="0.96">
-    <rect x="0" y="0" width="7" height="70" rx="3.5" fill="#f5f1e8"/>
-    <rect x="16" y="0" width="7" height="70" rx="3.5" fill="#f5f1e8"/>
-    <rect x="32" y="0" width="7" height="70" rx="3.5" fill="#f5f1e8"/>
-    <rect x="48" y="0" width="7" height="70" rx="3.5" fill="#f5f1e8"/>
-    <g transform="translate(65 0)" fill="#c89560">
-      <rect x="5" y="0" width="2.4" height="2.4" rx="1.2"/>
-      <rect x="5" y="4.5" width="2.4" height="2.4" rx="1.2"/>
-      <rect x="5" y="9" width="2.4" height="2.4" rx="1.2"/>
-      <rect x="5" y="13.5" width="2.4" height="2.4" rx="1.2"/>
-      <rect x="5" y="18" width="2.4" height="2.4" rx="1.2"/>
-      <rect x="0" y="22.5" width="12.5" height="2.4" rx="1.2"/>
-      <rect x="5" y="27" width="2.4" height="2.4" rx="1.2"/>
-      <rect x="5" y="31.5" width="2.4" height="2.4" rx="1.2"/>
-      <rect x="0" y="36" width="12.5" height="2.4" rx="1.2"/>
-      <rect x="5" y="40.5" width="2.4" height="2.4" rx="1.2"/>
-      <rect x="5" y="45" width="2.4" height="2.4" rx="1.2"/>
-      <rect x="5" y="49.5" width="2.4" height="2.4" rx="1.2"/>
-      <rect x="0" y="54" width="12.5" height="2.4" rx="1.2"/>
-      <rect x="5" y="58.5" width="2.4" height="2.4" rx="1.2"/>
-      <rect x="5" y="63" width="2.4" height="2.4" rx="1.2"/>
-      <rect x="5" y="67.5" width="2.4" height="2.4" rx="1.2"/>
+  <g transform="translate(632 46) scale(0.145) translate(-255 -232)" opacity="0.96">
+    <g fill="#f5f1e8">
+      <rect x="255" y="232" width="18" height="560"/>
+      <rect x="463" y="232" width="18" height="560"/>
+      <rect x="567" y="232" width="18" height="560"/>
+      <rect x="671" y="232" width="18" height="560"/>
+      <rect x="775" y="232" width="18" height="560"/>
     </g>
-    <rect x="94" y="0" width="7" height="70" rx="3.5" fill="#f5f1e8"/>
+    <g fill="#c89560" transform="matrix(1 0 0 1.3658536 0 -187.31704)">
+      <rect x="361" y="307" width="14" height="10"/>
+      <rect x="361" y="327" width="14" height="10"/>
+      <rect x="361" y="347" width="14" height="10"/>
+      <rect x="361" y="367" width="14" height="10"/>
+      <rect x="361" y="407" width="14" height="10"/>
+      <rect x="347" y="447" width="42" height="10"/>
+      <rect x="361" y="467" width="14" height="10"/>
+      <rect x="361" y="487" width="14" height="10"/>
+      <rect x="347" y="527" width="42" height="10"/>
+      <rect x="361" y="547" width="14" height="10"/>
+      <rect x="361" y="567" width="14" height="10"/>
+      <rect x="361" y="607" width="14" height="10"/>
+      <rect x="347" y="627" width="42" height="10"/>
+      <rect x="361" y="647" width="14" height="10"/>
+      <rect x="361" y="667" width="14" height="10"/>
+      <rect x="361" y="707" width="14" height="10"/>
+    </g>
   </g>
 </svg>

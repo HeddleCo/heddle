@@ -72,7 +72,7 @@ private enum CinematicStage: Int, CaseIterable, Identifiable {
     var subtitle: String {
         switch self {
         case .place:
-            return "Move Heddle into Applications so macOS can register its file-system module."
+            return "Place Heddle in Applications so macOS can register its file-system module."
         case .discover:
             return "LaunchServices scans the bundle and surfaces Heddle inside File System Extensions."
         case .enable:
@@ -90,6 +90,8 @@ private enum CinematicStage: Int, CaseIterable, Identifiable {
                 return 0.19
             case .copying:
                 return 0.30
+            case .preparingShortcut, .shortcutReady:
+                return 0.24
             case .installed:
                 return 0.38
             }
@@ -609,8 +611,8 @@ private struct CinematicInstallPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             PanelHeading(
-                title: "Place the host app",
-                subtitle: "Drag Heddle into Applications, or click once to place it there."
+                title: "Place Heddle in Applications",
+                subtitle: "Drag from the DMG, or open Finder's install window if this copy launched early."
             )
 
             HStack(spacing: 12) {
@@ -622,7 +624,10 @@ private struct CinematicInstallPanel: View {
                 HandDrawnTransferArrow(isActive: isTargeted)
                     .frame(width: 46, height: 28)
 
-                ApplicationsLandingPad(isTargeted: isTargeted)
+                ApplicationsLandingPad(
+                    isTargeted: isTargeted,
+                    openShortcut: manager.openInstallShortcutWindow
+                )
                     .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isTargeted) { providers in
                         handleDrop(providers)
                     }
@@ -634,9 +639,9 @@ private struct CinematicInstallPanel: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             Button {
-                manager.installToApplications()
+                manager.openInstallShortcutWindow()
             } label: {
-                Label("Place Heddle", systemImage: manager.installState.isBusy ? "hourglass" : "square.and.arrow.down")
+                Label("Open Install Window", systemImage: manager.installState.isBusy ? "hourglass" : "folder.badge.plus")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(CinematicPrimaryButtonStyle(color: Color.heddleEmber))
@@ -646,7 +651,7 @@ private struct CinematicInstallPanel: View {
                 Button {
                     manager.revealAppInFinder()
                 } label: {
-                    Label("Reveal in Finder", systemImage: "folder")
+                    Label("Reveal This Copy", systemImage: "folder")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(CinematicSecondaryButtonStyle())
@@ -655,43 +660,17 @@ private struct CinematicInstallPanel: View {
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first(where: {
+        guard providers.contains(where: {
             $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
         }) else {
             return false
         }
 
-        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-            guard let url = fileURL(from: item) else {
-                Task { @MainActor in
-                    manager.noteInstallFailure("Drop the Heddle app here, or click Place Heddle.")
-                }
-                return
-            }
-
-            Task { @MainActor in
-                manager.installToApplications(from: url)
-            }
+        Task { @MainActor in
+            manager.openInstallShortcutWindow()
         }
 
         return true
-    }
-
-    private func fileURL(from item: NSSecureCoding?) -> URL? {
-        if let url = item as? URL {
-            return url
-        }
-
-        if let data = item as? Data,
-           let string = String(data: data, encoding: .utf8) {
-            return URL(string: string)
-        }
-
-        if let string = item as? String {
-            return URL(string: string)
-        }
-
-        return nil
     }
 }
 
@@ -784,6 +763,7 @@ private struct CinematicAppTile: View {
 
 private struct ApplicationsLandingPad: View {
     let isTargeted: Bool
+    let openShortcut: () -> Void
 
     var body: some View {
         VStack(spacing: 10) {
@@ -803,7 +783,7 @@ private struct ApplicationsLandingPad: View {
                     .fontWeight(.bold)
                     .foregroundStyle(Color.heddleInk)
 
-                Text(isTargeted ? "release" : "drop")
+                Text(isTargeted ? "release" : "shortcut")
                     .font(.system(.caption2, design: .monospaced))
                     .foregroundStyle(Color.heddleMist)
                     .textCase(.uppercase)
@@ -819,6 +799,10 @@ private struct ApplicationsLandingPad: View {
                     style: StrokeStyle(lineWidth: 1.2, dash: isTargeted ? [] : [6, 5])
                 )
         }
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .onTapGesture(perform: openShortcut)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel("Open Finder install window with Applications shortcut")
     }
 }
 
@@ -1220,7 +1204,7 @@ private struct AppGlyph: View {
                 solidColor: Color.heddlePaper,
                 morseColor: Color.heddleEmber
             )
-            .padding(15)
+            .padding(12)
         }
         .frame(width: 72, height: 72)
         .accessibilityHidden(true)
@@ -1231,74 +1215,92 @@ private struct HeddleMonogram: View {
     let solidColor: Color
     let morseColor: Color
 
-    private let morseElements: [MorseElement] = [
-        .dot, .dot, .dot, .dot,
-        .dot,
-        .dash, .dot, .dot,
-        .dash, .dot, .dot,
-        .dot, .dash, .dot, .dot,
-        .dot
+    // Canonical geometry from Tapestry's static/brand/morse-mark.svg.
+    private let solidRects: [CGRect] = [
+        CGRect(x: 255, y: 232, width: 18, height: 560),
+        CGRect(x: 463, y: 232, width: 18, height: 560),
+        CGRect(x: 567, y: 232, width: 18, height: 560),
+        CGRect(x: 671, y: 232, width: 18, height: 560),
+        CGRect(x: 775, y: 232, width: 18, height: 560)
     ]
 
+    private let morseRects: [CGRect] = [
+        CGRect(x: 361, y: 307, width: 14, height: 10),
+        CGRect(x: 361, y: 327, width: 14, height: 10),
+        CGRect(x: 361, y: 347, width: 14, height: 10),
+        CGRect(x: 361, y: 367, width: 14, height: 10),
+        CGRect(x: 361, y: 407, width: 14, height: 10),
+        CGRect(x: 347, y: 447, width: 42, height: 10),
+        CGRect(x: 361, y: 467, width: 14, height: 10),
+        CGRect(x: 361, y: 487, width: 14, height: 10),
+        CGRect(x: 347, y: 527, width: 42, height: 10),
+        CGRect(x: 361, y: 547, width: 14, height: 10),
+        CGRect(x: 361, y: 567, width: 14, height: 10),
+        CGRect(x: 361, y: 607, width: 14, height: 10),
+        CGRect(x: 347, y: 627, width: 42, height: 10),
+        CGRect(x: 361, y: 647, width: 14, height: 10),
+        CGRect(x: 361, y: 667, width: 14, height: 10),
+        CGRect(x: 361, y: 707, width: 14, height: 10)
+    ]
+
+    private let visualBounds = CGRect(x: 255, y: 232, width: 538, height: 560)
+    private let morseScaleY: CGFloat = 1.3658536
+    private let morseOffsetY: CGFloat = -187.31704
+
     var body: some View {
         GeometryReader { proxy in
-            let size = min(proxy.size.width, proxy.size.height)
-            let barWidth = max(1.6, size * 0.04)
-            let barHeight = size * 0.68
-            let gap = max(2.4, size * 0.075)
-            let morseWidth = size * 0.14
-            let markWidth = morseWidth + (barWidth * 5) + (gap * 5)
+            let scale = min(
+                proxy.size.width / visualBounds.width,
+                proxy.size.height / visualBounds.height
+            )
+            let xOffset = ((proxy.size.width - visualBounds.width * scale) / 2)
+                - visualBounds.minX * scale
+            let yOffset = ((proxy.size.height - visualBounds.height * scale) / 2)
+                - visualBounds.minY * scale
 
-            HStack(alignment: .center, spacing: gap) {
-                ForEach(0..<4, id: \.self) { _ in
-                    RoundedRectangle(cornerRadius: barWidth / 2, style: .continuous)
-                        .fill(solidColor)
-                        .frame(width: barWidth, height: barHeight)
-                }
-
-                MorseColumn(elements: morseElements, color: morseColor)
-                    .frame(width: morseWidth, height: barHeight)
-
-                RoundedRectangle(cornerRadius: barWidth / 2, style: .continuous)
+            ZStack {
+                path(for: solidRects, scale: scale, xOffset: xOffset, yOffset: yOffset)
                     .fill(solidColor)
-                    .frame(width: barWidth, height: barHeight)
+
+                path(
+                    for: morseRects.map(transformedMorseRect),
+                    scale: scale,
+                    xOffset: xOffset,
+                    yOffset: yOffset
+                )
+                .fill(morseColor)
             }
-            .frame(width: markWidth, height: size)
-            .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
         }
     }
-}
 
-private struct MorseColumn: View {
-    let elements: [MorseElement]
-    let color: Color
+    private func transformedMorseRect(_ rect: CGRect) -> CGRect {
+        CGRect(
+            x: rect.minX,
+            y: rect.minY * morseScaleY + morseOffsetY,
+            width: rect.width,
+            height: rect.height * morseScaleY
+        )
+    }
 
-    var body: some View {
-        GeometryReader { proxy in
-            let unit = proxy.size.height / 34
-            let dotWidth = max(1.2, unit * 1.18)
-            let dashWidth = proxy.size.width
-            let elementHeight = max(1.2, unit)
-            let gap = unit * 1.12
-
-            VStack(spacing: gap) {
-                ForEach(Array(elements.enumerated()), id: \.offset) { _, element in
-                    RoundedRectangle(cornerRadius: elementHeight / 2, style: .continuous)
-                        .fill(color)
-                        .frame(
-                            width: element == .dash ? dashWidth : dotWidth,
-                            height: elementHeight
-                        )
-                }
+    private func path(
+        for rects: [CGRect],
+        scale: CGFloat,
+        xOffset: CGFloat,
+        yOffset: CGFloat
+    ) -> Path {
+        Path { path in
+            for rect in rects {
+                path.addRect(
+                    CGRect(
+                        x: rect.minX * scale + xOffset,
+                        y: rect.minY * scale + yOffset,
+                        width: rect.width * scale,
+                        height: rect.height * scale
+                    )
+                )
             }
-            .frame(width: proxy.size.width, height: proxy.size.height)
         }
     }
-}
-
-private enum MorseElement {
-    case dot
-    case dash
 }
 
 private struct StatusPill: View {
@@ -1469,7 +1471,7 @@ private struct PrimaryActionButton: View {
         Button {
             switch manager.status {
             case .devLocation:
-                manager.installToApplications()
+                manager.openInstallShortcutWindow()
             case .registeredEnabled, .registeredDisabled, .unregistered:
                 manager.openFileSystemExtensionsSettings()
             }
@@ -1491,7 +1493,7 @@ private struct InstallDropZone: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Button {
-                manager.installToApplications()
+                manager.openInstallShortcutWindow()
             } label: {
                 HStack(spacing: 11) {
                     InstallAppSource()
@@ -1534,47 +1536,21 @@ private struct InstallDropZone: View {
                 .foregroundStyle(isTargeted ? Color.heddleEmber.opacity(0.62) : Color.heddleStroke)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Move Heddle to Applications")
+        .accessibilityLabel("Open Finder install window with Applications shortcut")
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first(where: {
+        guard providers.contains(where: {
             $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
         }) else {
             return false
         }
 
-        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-            guard let url = fileURL(from: item) else {
-                Task { @MainActor in
-                    manager.noteInstallFailure("Drop the Heddle app here, or click the installer.")
-                }
-                return
-            }
-
-            Task { @MainActor in
-                manager.installToApplications(from: url)
-            }
+        Task { @MainActor in
+            manager.openInstallShortcutWindow()
         }
 
         return true
-    }
-
-    private func fileURL(from item: NSSecureCoding?) -> URL? {
-        if let url = item as? URL {
-            return url
-        }
-
-        if let data = item as? Data,
-           let string = String(data: data, encoding: .utf8) {
-            return URL(string: string)
-        }
-
-        if let string = item as? String {
-            return URL(string: string)
-        }
-
-        return nil
     }
 }
 
@@ -1611,7 +1587,7 @@ private struct InstallDestination: View {
                     .font(.caption)
                     .fontWeight(.semibold)
                     .foregroundStyle(Color.heddleInk)
-                Text(isTargeted ? "release to copy" : "drop here")
+                Text(isTargeted ? "release to open" : "shortcut")
                     .font(.caption2)
                     .foregroundStyle(Color.heddleMist)
             }
@@ -2035,7 +2011,7 @@ private extension ExtensionManager.Status {
         case .unregistered:
             return "Let macOS find Heddle."
         case .devLocation:
-            return "Move Heddle into Applications."
+            return "Place Heddle in Applications."
         }
     }
 
@@ -2061,14 +2037,14 @@ private extension ExtensionManager.Status {
         case .unregistered:
             return "Keep the app in /Applications, refresh LaunchServices if needed, then check this view again."
         case .devLocation:
-            return "Click to copy Heddle.app into /Applications, or drag the app tile onto the Applications target."
+            return "The DMG window normally handles this. If Heddle opened before being installed, use the Finder install fallback."
         }
     }
 
     var primaryActionTitle: String {
         switch self {
         case .devLocation:
-            return "Move to Applications"
+            return "Open Finder Install Window"
         case .registeredEnabled:
             return "Open System Settings"
         case .registeredDisabled, .unregistered:
@@ -2079,7 +2055,7 @@ private extension ExtensionManager.Status {
     var primaryActionSymbol: String {
         switch self {
         case .devLocation:
-            return "square.and.arrow.down"
+            return "folder.badge.plus"
         case .registeredEnabled, .registeredDisabled, .unregistered:
             return "gearshape"
         }
@@ -2200,6 +2176,9 @@ private extension ExtensionManager.InstallState {
         if case .copying = self {
             return true
         }
+        if case .preparingShortcut = self {
+            return true
+        }
         return false
     }
 
@@ -2213,9 +2192,13 @@ private extension ExtensionManager.InstallState {
     var badgeTitle: String {
         switch self {
         case .idle:
-            return "Copy"
+            return "Open"
         case .copying:
             return "Copying"
+        case .preparingShortcut:
+            return "Preparing"
+        case .shortcutReady:
+            return "Shortcut"
         case .installed:
             return "Copied"
         case .failed:
@@ -2229,6 +2212,10 @@ private extension ExtensionManager.InstallState {
             return .heddleEmber
         case .copying:
             return .heddleMist
+        case .preparingShortcut:
+            return .heddleMist
+        case .shortcutReady:
+            return .heddleTeal
         case .installed:
             return .heddleTeal
         case .failed:
@@ -2239,9 +2226,13 @@ private extension ExtensionManager.InstallState {
     var installMessage: String {
         switch self {
         case .idle:
-            return "Copies this app bundle to /Applications so LaunchServices can register the FSKit extension."
+            return "The DMG window normally handles installation. This fallback opens Heddle.app beside an Applications shortcut."
         case .copying:
             return "Copying Heddle.app into /Applications..."
+        case .preparingShortcut:
+            return "Preparing a Finder install window..."
+        case .shortcutReady:
+            return "Drag Heddle.app onto the Applications shortcut in the Finder install window."
         case .installed(let path):
             return "Copied to \(path). Open the installed copy from /Applications."
         case .failed(let message):

@@ -16,7 +16,7 @@ app from Finder or the CLI deep-links to it after FSKit needs approval.
 ## Target user experience
 
 ```
-$ brew install heddleco/heddle/heddle
+$ brew install --cask heddleco/heddle/heddle
 $ heddle start mybranch --workspace virtualized
    ⚠  Heddle FSKit extension not enabled.
       Opening System Settings — toggle "Heddle" on under
@@ -31,6 +31,11 @@ state, a System Settings button, and an annotated SwiftUI mock of the
 File System Extensions toggle. The toggle in System Settings is the
 only user interaction macOS requires, and we can't bypass it — Apple
 enforces it as a security check for any file-system extension.
+
+The Mac installer is one package, not two manual installs. The release `.pkg`
+places `heddle` in `/usr/local/bin/heddle`, places `Heddle.app` in
+`/Applications/Heddle.app`, and refreshes LaunchServices so the embedded FSKit
+module is discoverable before the first `heddle start`.
 
 ## What's here
 
@@ -125,16 +130,20 @@ macOS 26.0.
 
 ### 3. Package or install
 
-After notarization, `./dmg/make-dmg.sh "$APP" build/Heddle.dmg` creates the
-branded drag-to-Applications window. You can also install the app directly:
-drag `Heddle.app` into `/Applications`. LaunchServices scans the bundle and
-registers the embedded `.appex` with the system.
-Force-refresh with:
+The release path is package-first:
+
 ```bash
-lsregister -f /Applications/Heddle.app
-# (lsregister lives at /System/Library/Frameworks/CoreServices.framework/\
-#   Versions/A/Frameworks/LaunchServices.framework/Support/lsregister)
+./pkg/make-pkg.sh "$APP" "$REPO_ROOT/target/release/heddle" build/Heddle.pkg
+./dmg/make-dmg.sh build/Heddle.pkg build/Heddle.dmg
 ```
+
+`Heddle.pkg` installs both the CLI and `/Applications/Heddle.app`; its
+`postinstall` runs `lsregister -f /Applications/Heddle.app`. The DMG is only a
+branded wrapper around that package for website downloads.
+
+For local app-only testing, `./dmg/make-dmg.sh "$APP" build/Heddle-app.dmg`
+still creates the old drag-to-Applications window, but that is no longer the
+end-user distribution shape.
 
 ### 4. Approve once
 
@@ -268,10 +277,9 @@ wrong one.
 
 ## Homebrew distribution (the target)
 
-The eventual `brew install heddleco/heddle/heddle` should:
+The eventual `brew install --cask heddleco/heddle/heddle` should:
 
-1. Install `heddle` to `/opt/homebrew/bin/heddle` (or
-   `/usr/local/bin` on Intel).
+1. Install `heddle` to `/usr/local/bin/heddle`.
 2. Install the host app to `/Applications/Heddle.app`.
 3. Run `lsregister -f /Applications/Heddle.app` in
    `post_install` so the extension is discoverable on the first
@@ -289,25 +297,22 @@ cask "heddle" do
   desc "AI-native version control system"
   homepage "https://heddle.sh"
 
-  pkg "Heddle-#{version}.pkg"
+  pkg "Heddle.pkg"
 
-  postflight do
-    system_command "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Support/lsregister",
-      args: ["-f", "/Applications/Heddle.app"]
-  end
-
-  uninstall pkgutil: "sh.heddle.HeddleHost"
+  uninstall pkgutil: "sh.heddle.Heddle"
 end
 ```
 
-The `.pkg` payload contains both `heddle` (CLI) and
-the Heddle host app. Building the pkg + signing + notarizing is the
-release-engineering step that depends on:
+The `.pkg` payload contains both `heddle` (CLI) and the Heddle host app.
+`pkg/scripts/postinstall` owns the LaunchServices refresh, so website downloads
+and Homebrew installs exercise the same path. Building, signing, and notarizing
+the package depends on:
 
 - Apple Developer Program enrollment ($99/year)
 - The `com.apple.developer.fskit.fsmodule` entitlement (request
   via the Developer portal — Apple gates this)
 - Developer ID Application certificate
+- Developer ID Installer certificate
 - A notarization workflow (`xcrun notarytool` + `xcrun stapler`)
 
 The CLI code in `mount_lifecycle.rs` is already brew-ready — it
@@ -330,5 +335,7 @@ shipping the cask is the signing/notarization pipeline.
 | `mtime` on returned items | Wired through the C ABI; shows mount bootstrap time in `ls -l` |
 | `-o t=<thread>` option parsing | Parsed from `FSTaskOptions.taskOptions` in `loadResource`; defaults to `"main"` |
 | Entitlement request | Not yet filed |
+| macOS package | `pkg/make-pkg.sh` builds CLI + app payload |
+| Branded DMG | `dmg/make-dmg.sh` wraps the package by default |
 | Homebrew cask | Not yet published |
 | Code signing + notarization | Not yet set up |

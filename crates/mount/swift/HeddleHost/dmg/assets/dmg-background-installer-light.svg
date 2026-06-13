@@ -5,9 +5,9 @@
       <stop offset="0.55" stop-color="#f0eadf"/>
       <stop offset="1" stop-color="#ded5c6"/>
     </linearGradient>
-    <radialGradient id="warm" cx="0.36" cy="0.18" r="0.84">
-      <stop offset="0" stop-color="#f6dcc0" stop-opacity="0.6"/>
-      <stop offset="0.52" stop-color="#f6dcc0" stop-opacity="0.16"/>
+    <radialGradient id="warm" cx="0.42" cy="0.2" r="0.82">
+      <stop offset="0" stop-color="#f6dcc0" stop-opacity="0.62"/>
+      <stop offset="0.54" stop-color="#f6dcc0" stop-opacity="0.16"/>
       <stop offset="1" stop-color="#f6dcc0" stop-opacity="0"/>
     </radialGradient>
     <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
@@ -16,24 +16,21 @@
   </defs>
   <rect width="780" height="480" rx="22" fill="url(#paper)"/>
   <rect width="780" height="480" rx="22" fill="url(#warm)"/>
-  <path d="M65 402 C167 374 241 394 321 423 S505 462 690 404" stroke="#fbf8f0" stroke-opacity="0.55" stroke-width="18" fill="none" filter="url(#soft)"/>
+  <path d="M90 414 C185 380 278 400 358 424 S530 458 688 404" stroke="#fbf8f0" stroke-opacity="0.56" stroke-width="18" fill="none" filter="url(#soft)"/>
   <g transform="translate(48 40)">
     <text x="0" y="0" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="14" font-weight="800" letter-spacing="1.8" fill="#171410">HEDDLE.</text>
-    <text x="0" y="44" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="36" font-weight="800" letter-spacing="0" fill="#171410">Place Heddle in Applications.</text>
-    <text x="0" y="76" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="18" font-weight="500" letter-spacing="0" fill="#776f64">Drag once. macOS registers the file-system extension from there.</text>
+    <text x="0" y="48" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="44" font-weight="800" letter-spacing="0" fill="#171410">Install Heddle.</text>
+    <text x="0" y="84" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="18" font-weight="500" letter-spacing="0" fill="#776f64">One installer places the CLI and the macOS file-system host together.</text>
   </g>
-  <g opacity="0.94">
-    <circle cx="218" cy="265" r="88" fill="#fffaf2" fill-opacity="0.62"/>
-    <circle cx="218" cy="265" r="88" fill="none" stroke="#d5cabb" stroke-width="1.5"/>
-    <circle cx="218" cy="265" r="108" fill="none" stroke="#c89560" stroke-opacity="0.2" stroke-width="1"/>
-    <circle cx="562" cy="265" r="88" fill="#fffaf2" fill-opacity="0.52"/>
-    <circle cx="562" cy="265" r="88" fill="none" stroke="#d5cabb" stroke-width="1.5"/>
-    <circle cx="562" cy="265" r="108" fill="none" stroke="#c89560" stroke-opacity="0.2" stroke-width="1"/>
+  <g opacity="0.95">
+    <circle cx="390" cy="278" r="102" fill="#fffaf2" fill-opacity="0.58"/>
+    <circle cx="390" cy="278" r="102" fill="none" stroke="#d5cabb" stroke-width="1.5"/>
+    <circle cx="390" cy="278" r="126" fill="none" stroke="#c89560" stroke-opacity="0.22" stroke-width="1"/>
+    <circle cx="390" cy="278" r="148" fill="none" stroke="#171410" stroke-opacity="0.055" stroke-width="1"/>
   </g>
-  <path d="M303 266 C353 222 414 219 463 258 C491 280 518 285 548 273 M548 273 C541 274 532 273 526 270 M548 273 C544 281 540 287 535 292" fill="none" stroke="#171410" stroke-opacity="0.72" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M303 266 C353 222 414 219 463 258 C488 278 510 284 535 278" fill="none" stroke="#c89560" stroke-opacity="0.72" stroke-width="1.1" stroke-linecap="round"/>
-  <text x="218" y="394" text-anchor="middle" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="12" font-weight="700" letter-spacing="1.2" fill="#81786d">HEDDLE.APP</text>
-  <text x="562" y="394" text-anchor="middle" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="12" font-weight="700" letter-spacing="1.2" fill="#81786d">APPLICATIONS</text>
+  <path d="M262 285 C310 238 363 232 411 272 C438 294 469 300 518 276" fill="none" stroke="#171410" stroke-opacity="0.34" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M262 285 C310 238 363 232 411 272 C434 291 459 298 495 286" fill="none" stroke="#c89560" stroke-opacity="0.54" stroke-width="1.1" stroke-linecap="round"/>
+  <text x="390" y="424" text-anchor="middle" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="12" font-weight="700" letter-spacing="1.2" fill="#81786d">DOUBLE-CLICK TO INSTALL</text>
   <g transform="translate(632 46) scale(0.145) translate(-255 -232)" opacity="0.96">
     <g fill="#171410">
       <rect x="255" y="232" width="18" height="560"/>
