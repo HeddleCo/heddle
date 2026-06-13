@@ -620,7 +620,11 @@ impl PackedOpLogIndex {
             .last()
             .map(|entry| entry.id)
             .unwrap_or(self.header.head_id);
-        let new_count = self.header.entry_count + new_entries.len() as u64;
+        let new_count = self
+            .header
+            .entry_count
+            .checked_add(new_entries.len() as u64)
+            .ok_or_else(|| HeddleError::InvalidObject("oplog entry count overflow".to_string()))?;
         let mut tmp_new_entry_bytes = Vec::new();
         let mut new_entry_offsets = Vec::with_capacity(new_entries.len());
         let mut offset = self.footer.entry_data_end;
@@ -630,9 +634,16 @@ impl PackedOpLogIndex {
                 entry_offset: offset,
             });
             encode_entry(entry, &mut tmp_new_entry_bytes)?;
-            offset += u64::try_from(tmp_new_entry_bytes.len()).map_err(|_| {
+            let encoded_new_len = u64::try_from(tmp_new_entry_bytes.len()).map_err(|_| {
                 HeddleError::InvalidObject("oplog entry stream too large".to_string())
-            })? - (offset - self.footer.entry_data_end);
+            })?;
+            offset = self
+                .footer
+                .entry_data_end
+                .checked_add(encoded_new_len)
+                .ok_or_else(|| {
+                    HeddleError::InvalidObject("oplog entry stream too large".to_string())
+                })?;
         }
 
         let mut old_offsets = self.read_entry_offsets()?;
@@ -890,10 +901,41 @@ impl PackedOpLogIndex {
             let mut cursor =
                 Cursor::new(&bytes[*offset as usize..self.footer.entry_data_end as usize]);
             let entry = parse_entry_with_schema(&mut cursor, self.record_schema()?)?;
-            if !super::oplog_types::is_transaction_commit(&entry.operation) {
-                return Err(HeddleError::InvalidObject(
-                    "oplog transaction directory references a non-commit entry".to_string(),
-                ));
+            match &entry.operation {
+                OpRecord::TransactionCommit { transaction_id, .. } => {
+                    if transaction_id.as_bytes() != key {
+                        return Err(HeddleError::InvalidObject(
+                            "oplog transaction directory key disagrees with commit transaction_id"
+                                .to_string(),
+                        ));
+                    }
+                }
+                OpRecord::Snapshot { .. }
+                | OpRecord::Goto { .. }
+                | OpRecord::ThreadCreate { .. }
+                | OpRecord::ThreadDelete { .. }
+                | OpRecord::ThreadUpdate { .. }
+                | OpRecord::Fork { .. }
+                | OpRecord::Collapse { .. }
+                | OpRecord::MarkerCreate { .. }
+                | OpRecord::MarkerDelete { .. }
+                | OpRecord::Checkpoint { .. }
+                | OpRecord::TransactionAbort { .. }
+                | OpRecord::EphemeralThreadCollapse { .. }
+                | OpRecord::ConflictResolved { .. }
+                | OpRecord::Redact { .. }
+                | OpRecord::Purge { .. }
+                | OpRecord::FastForward { .. }
+                | OpRecord::GitCheckpoint { .. }
+                | OpRecord::RemoteThreadUpdate { .. }
+                | OpRecord::RemoteThreadDelete { .. }
+                | OpRecord::UndoRecoveryUpdate { .. }
+                | OpRecord::StateVisibilitySet { .. }
+                | OpRecord::StateVisibilityPromote { .. } => {
+                    return Err(HeddleError::InvalidObject(
+                        "oplog transaction directory references a non-commit entry".to_string(),
+                    ));
+                }
             }
         }
         Ok(())
@@ -3128,6 +3170,41 @@ mod tests {
         assert_eq!(index.transaction_commit("tx-1").unwrap(), Some((2, 1)));
         assert_eq!(index.committed_batch_records("tx-1").unwrap().len(), 1);
         assert!(index.committed_batch_records("missing").unwrap().is_empty());
+    }
+
+    #[test]
+    fn transaction_index_rejects_key_that_disagrees_with_commit_transaction_id() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("oplog.bin");
+        let mut op = make_entry(1, Some("lane"));
+        op.operation = OpRecord::Snapshot {
+            new_state: ChangeId::generate(),
+            prev_head: None,
+            head: None,
+            thread: Some("main".into()),
+        };
+        op.batch_id = 1;
+        let mut commit = make_batch_entry(2, 1, 1, Some("lane"));
+        commit.operation = OpRecord::TransactionCommit {
+            transaction_id: "tx-1".into(),
+            op_count: 1,
+        };
+        let mut log = PackedOpLog::new(path.clone());
+        log.append(vec![op, commit]);
+        log.head_id = 2;
+        log.save().unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let (_offsets, footer) = read_current_entry_offsets(&bytes);
+        let key_start = usize::try_from(footer.tx_key_bytes_offset).unwrap();
+        bytes[key_start..key_start + 4].copy_from_slice(b"tx-2");
+        std::fs::write(&path, bytes).unwrap();
+
+        let err = PackedOpLogIndex::open(&path).unwrap_err();
+        assert!(
+            matches!(err, HeddleError::InvalidObject(ref message) if message.contains("key disagrees with commit transaction_id")),
+            "expected mismatched tx_dir key to fail validation, got {err:?}"
+        );
     }
 
     #[test]
