@@ -44,6 +44,39 @@ fn assert_invalid_object_message_contains(error: StoreError, expected: &str) {
 }
 
 #[test]
+fn test_pack_container_header_codec_matches_legacy_bytes() {
+    let mut legacy = Vec::new();
+    legacy.extend_from_slice(b"LMPK");
+    legacy.extend_from_slice(&2_u32.to_be_bytes());
+    legacy.extend_from_slice(&0_u64.to_be_bytes());
+    let checksum = blake3::hash(&legacy);
+    legacy.extend_from_slice(checksum.as_bytes());
+
+    let mut encoded = Vec::new();
+    super::write_container_header(&mut encoded, pack_container_spec(), 0);
+    super::append_container_checksum(&mut encoded);
+
+    assert_eq!(encoded, legacy);
+    assert_eq!(
+        super::verify_container(&legacy, pack_container_spec()).unwrap(),
+        (0, 16, 16)
+    );
+}
+
+#[test]
+fn test_pack_index_header_codec_matches_legacy_bytes() {
+    let legacy = b"LMI\0\
+        \0\0\0\x02\
+        \0\0\0\0\0\0\0\0"
+        .to_vec();
+
+    let encoded = PackIndex::new().to_bytes();
+
+    assert_eq!(encoded, legacy);
+    assert!(PackIndex::from_bytes(&legacy).unwrap().ids().is_empty());
+}
+
+#[test]
 fn test_pack_index_roundtrip() {
     let mut index = PackIndex::new();
     index.add(PackObjectId::Hash(create_test_hash(1)), 100);

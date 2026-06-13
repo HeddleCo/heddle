@@ -63,7 +63,7 @@ use std::{
     path::PathBuf,
 };
 
-use super::{ObjectType, PackObjectId, PackStats, pack_container_spec, write_container_header};
+use super::{pack_container_spec, write_container_header, ObjectType, PackObjectId, PackStats};
 
 /// How many bytes to reserve for the compressed-size varint in the
 /// streaming path. 10 is enough to encode any `u64` (max 9 7-bit
@@ -74,7 +74,7 @@ use super::{ObjectType, PackObjectId, PackStats, pack_container_spec, write_cont
 const CSIZE_PLACEHOLDER_LEN: usize = 10;
 use crate::{
     object::ContentHash,
-    store::{Result, StoreError, compression::CompressionConfig},
+    store::{compression::CompressionConfig, Result, StoreError},
 };
 
 /// Number of buckets per id variant. 256 = one bucket per first byte
@@ -479,13 +479,7 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
 /// big-endian version, 8-byte big-endian count) so a reader written
 /// against the existing format works without modification.
 fn write_index_header<W: Write>(out: &mut W, count: u64) -> Result<()> {
-    out.write_all(super::pack_index::INDEX_MAGIC)
-        .map_err(StoreError::from)?;
-    out.write_all(&super::pack_index::INDEX_VERSION.to_be_bytes())
-        .map_err(StoreError::from)?;
-    out.write_all(&count.to_be_bytes())
-        .map_err(StoreError::from)?;
-    Ok(())
+    super::pack_index::index_header().write_to(out, count)
 }
 
 /// Append one `(id, offset)` index entry to `out`. The encoding

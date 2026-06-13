@@ -11,6 +11,7 @@ mod pack_reader;
 mod shared;
 mod streaming_builder;
 pub(crate) mod varint;
+mod versioned_header;
 
 #[cfg(test)]
 mod pack_tests;
@@ -20,10 +21,10 @@ pub use pack_builder::PackBuilder;
 pub use pack_index::PackIndex;
 pub use pack_reader::PackReader;
 pub use shared::{
-    PACK_CHECKSUM_LEN, PackContainerSpec, PackEntryHeader, PackObjectId, PackObjectRecord,
     append_container_checksum, compress_pack_payload, decode_tagged_entry_header,
     decompress_pack_payload, encode_tagged_entry, encode_tagged_entry_parts, has_zstd_magic,
-    try_decode_tagged_entry_header, verify_container, write_container_header,
+    try_decode_tagged_entry_header, verify_container, write_container_header, PackContainerSpec,
+    PackEntryHeader, PackObjectId, PackObjectRecord, PACK_CHECKSUM_LEN,
 };
 pub use streaming_builder::StreamingPackBuilder;
 
