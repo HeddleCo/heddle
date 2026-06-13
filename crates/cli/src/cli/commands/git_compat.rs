@@ -39,6 +39,7 @@ use super::{
     next_action::{NextActionValidationContext, write_full_command_json},
     snapshot::{
         SnapshotAgentOverrides, create_snapshot, create_snapshot_from_tree,
+        is_placeholder_principal, placeholder_principal_warning,
         preflight_large_capture_for_compat_commit, resolve_principal,
     },
     thread_cmd::cmd_thread,
@@ -68,6 +69,8 @@ struct CommitCompatOutput {
     included_pending_capture: Option<String>,
     principal: CommitPrincipalOutput,
     agent: Option<CommitAgentOutput>,
+    #[serde(skip)]
+    placeholder_principal_warning: Option<String>,
     next_action: Option<String>,
     next_action_template: Option<ActionTemplate>,
     recommended_action: Option<String>,
@@ -137,6 +140,8 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
         return Err(anyhow!(advice));
     }
     let user_config = UserConfig::load_default().unwrap_or_default();
+    let placeholder_principal_warning =
+        placeholder_principal_first_commit_warning(&repo, &user_config)?;
     if let Some(state) = repo.current_state()? {
         let tree = repo.require_tree(&state.tree)?;
         let status = repo.compare_worktree_cached_with_options(
@@ -184,6 +189,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
                     included_pending_capture: Some(state.change_id.short()),
                     principal: state.attribution.principal.into(),
                     agent: state.attribution.agent.map(CommitAgentOutput::from),
+                    placeholder_principal_warning: placeholder_principal_warning.clone(),
                     next_action: commit_next_action(&trust),
                     next_action_template: None,
                     recommended_action: None,
@@ -240,6 +246,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
                 .attribution
                 .agent
                 .map(CommitAgentOutput::from),
+            placeholder_principal_warning: placeholder_principal_warning.clone(),
             next_action: commit_next_action(&trust),
             next_action_template: None,
             recommended_action: None,
@@ -346,6 +353,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
             .attribution
             .agent
             .map(CommitAgentOutput::from),
+        placeholder_principal_warning: placeholder_principal_warning.clone(),
         next_action: commit_next_action(&trust),
         next_action_template: None,
         recommended_action: None,
@@ -431,6 +439,10 @@ fn commit_staged_index(
             .attribution
             .agent
             .map(CommitAgentOutput::from),
+        placeholder_principal_warning: placeholder_principal_first_commit_warning(
+            repo,
+            user_config,
+        )?,
         next_action: commit_next_action(&trust),
         next_action_template: None,
         recommended_action: None,
@@ -1214,6 +1226,30 @@ fn git_head_oid(root: &Path) -> Option<String> {
     git.head_id().ok().map(|id| id.to_string())
 }
 
+fn placeholder_principal_first_commit_warning(
+    repo: &Repository,
+    user_config: &UserConfig,
+) -> Result<Option<String>> {
+    if !current_state_is_bootstrap(repo)? {
+        return Ok(None);
+    }
+    let principal = resolve_principal(repo, user_config)?;
+    if is_placeholder_principal(&principal) {
+        return Ok(Some(placeholder_principal_warning(&principal)));
+    }
+    Ok(None)
+}
+
+fn current_state_is_bootstrap(repo: &Repository) -> Result<bool> {
+    let Some(state) = repo.current_state()? else {
+        return Ok(true);
+    };
+    Ok(state
+        .intent
+        .as_deref()
+        .is_none_or(|intent| intent.trim().is_empty()))
+}
+
 fn render_commit_compat(
     output: &CommitCompatOutput,
     json: bool,
@@ -1264,6 +1300,9 @@ fn render_commit_compat(
                 style::bold(&agent.provider),
                 style::dim(&agent.model)
             );
+        }
+        if let Some(warning) = output.placeholder_principal_warning.as_deref() {
+            eprintln!("{}", style::warn(warning));
         }
         if let Some(plan) = &output.git_index {
             println!("Commit scope: {}", commit_scope_text(plan));
