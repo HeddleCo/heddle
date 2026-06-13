@@ -62,7 +62,11 @@ pub(crate) fn land_push_command(thread_id: &str) -> String {
 pub(crate) fn land_push_remote_command(thread_id: &str, remote: &str) -> String {
     let mut argv = vec!["land".to_string()];
     argv.extend(thread_flag_args(thread_id));
-    argv.extend(["--push".to_string(), "--remote".to_string(), remote.to_string()]);
+    argv.extend([
+        "--push".to_string(),
+        "--remote".to_string(),
+        remote.to_string(),
+    ]);
     heddle_action(argv)
 }
 
@@ -180,7 +184,10 @@ mod tests {
         // `=` as unsafe, so `--thread=-foo` renders single-quoted — still
         // runnable (the shell strips the quotes, clap binds the value) and, as
         // the loop above asserts, accepted by the validator.
-        assert_eq!(land_local_command(id), "heddle land '--thread=-foo' --no-push");
+        assert_eq!(
+            land_local_command(id),
+            "heddle land '--thread=-foo' --no-push"
+        );
         assert_eq!(land_push_command(id), "heddle land '--thread=-foo' --push");
         assert_eq!(
             land_push_remote_command(id, "origin"),
@@ -192,7 +199,10 @@ mod tests {
 
     #[test]
     fn switch_thread_command_is_stable_and_copy_pasteable() {
-        assert_eq!(switch_thread_command("feature/demo"), "heddle switch feature/demo");
+        assert_eq!(
+            switch_thread_command("feature/demo"),
+            "heddle switch feature/demo"
+        );
         assert_eq!(
             switch_thread_command("feature with spaces"),
             "heddle switch 'feature with spaces'"

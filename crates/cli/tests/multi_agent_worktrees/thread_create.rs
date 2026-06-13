@@ -19,41 +19,45 @@ use serde_json::Value;
 
 use super::*;
 
-/// The original repro: `thread create` followed by `delegate` should
+/// The original repro: `thread create` followed by child `start` should
 /// not fail with "Thread '<name>' not found". Before the fix, the
-/// missing Thread record left `delegate` (which routes through
+/// missing Thread record left child creation (which routes through
 /// `ThreadManager::load`) unable to discover the parent.
 #[test]
-fn test_thread_create_then_delegate() {
+fn test_thread_create_then_child_start() {
     let main = setup_repo("main.rs", "fn main() {}");
 
     heddle(&["thread", "create", "modulo-race"], Some(main.path())).unwrap();
 
-    // Switch to the new thread so `delegate --parent modulo-race` has
-    // a valid parent on disk. (The repro uses `--parent`; we mirror
-    // it.)
-    let delegate_out = heddle(
+    let child_out = heddle(
         &[
             "--output",
             "json",
-            "delegate",
-            "--parent",
+            "start",
+            "modulo-race/task",
+            "--parent-thread",
             "modulo-race",
+            "--task",
             "task:anthropic:claude-sonnet-4-6",
         ],
         Some(main.path()),
     )
     .expect(
-        "delegate must succeed once `thread create` writes a record; \
+        "child start must succeed once `thread create` writes a record; \
          pre-fix this errored with `Thread 'modulo-race' not found`",
     );
 
-    let delegated: Value = serde_json::from_str(&delegate_out).unwrap();
-    let children = delegated["delegated"].as_array().unwrap();
-    assert!(
-        !children.is_empty(),
-        "delegate should create at least one child thread, got: {delegated}"
-    );
+    let child: Value = serde_json::from_str(&child_out).unwrap();
+    assert_eq!(child["name"], "modulo-race/task");
+    let child_show: Value = serde_json::from_str(
+        &heddle(
+            &["--output", "json", "thread", "show", "modulo-race/task"],
+            Some(main.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(child_show["parent_thread"], "modulo-race");
 }
 
 /// `thread create` must produce a ThreadManager-loadable record. We
@@ -142,11 +146,11 @@ fn test_thread_create_then_show_via_record() {
     );
 }
 
-/// Full happy path: create, switch, capture changes, delegate. Each
+/// Full happy path: create, switch, capture changes, child start. Each
 /// step should work and produce sensible state. This is the workflow
 /// the bug originally broke.
 #[test]
-fn test_thread_create_then_switch_then_capture_then_delegate() {
+fn test_thread_create_then_switch_then_capture_then_child_start() {
     let main = setup_repo("main.rs", "fn main() {}");
     let parent = "feature/parent";
 
@@ -161,26 +165,32 @@ fn test_thread_create_then_switch_then_capture_then_delegate() {
     let track = head_track(main.path());
     assert_eq!(track, parent, "HEAD should still be attached to {parent}");
 
-    // Delegate from the parent. Pre-fix this errored even though the
-    // ref existed, because the record was missing.
-    let delegate_out = heddle(
+    // Start a child from the parent. Pre-fix this errored even though
+    // the ref existed, because the record was missing.
+    let child_out = heddle(
         &[
             "--output",
             "json",
-            "delegate",
-            "--parent",
+            "start",
+            "feature/parent/task",
+            "--parent-thread",
             parent,
+            "--task",
             "task:anthropic:claude-sonnet-4-6",
         ],
         Some(main.path()),
     )
     .unwrap();
 
-    let delegated: Value = serde_json::from_str(&delegate_out).unwrap();
-    let children = delegated["delegated"].as_array().unwrap();
-    assert!(
-        !children.is_empty(),
-        "delegate from a switched-and-captured thread should produce \
-         a child, got: {delegated}"
-    );
+    let child: Value = serde_json::from_str(&child_out).unwrap();
+    assert_eq!(child["name"], "feature/parent/task");
+    let child_show: Value = serde_json::from_str(
+        &heddle(
+            &["--output", "json", "thread", "show", "feature/parent/task"],
+            Some(main.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(child_show["parent_thread"], parent);
 }

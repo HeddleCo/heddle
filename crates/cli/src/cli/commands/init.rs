@@ -873,9 +873,7 @@ fn resolve_quickstart_principal(root: &Path, is_git_overlay: bool) -> Principal 
     }
     // Git config: `resolve_principal` falls through when Git's identity is the
     // sentinel, so only a non-sentinel Git identity stops here.
-    if is_git_overlay
-        && let Ok(Some(identity)) = git_config_identity_with_global_fallback(root)
-    {
+    if is_git_overlay && let Ok(Some(identity)) = git_config_identity_with_global_fallback(root) {
         let principal = Principal::new(&identity.name, &identity.email);
         if !principal_is_unconfigured(&principal) {
             return principal;
@@ -1189,9 +1187,7 @@ fn ensure_quickstart_thread(repo: &Repository, name: &str) -> Result<()> {
     let target = ThreadName::new(name);
     let already_attached =
         matches!(repo.head_ref()?, Head::Attached { thread } if thread == target);
-    if !already_attached
-        && let Some(state) = repo.current_state()?
-    {
+    if !already_attached && let Some(state) = repo.current_state()? {
         repo.refs().set_thread(&target, &state.change_id)?;
     }
     if !already_attached {
@@ -1236,10 +1232,18 @@ fn quickstart_needs_confirmation_advice() -> RecoveryAdvice {
 fn quickstart_thread_branch_collision_advice(thread: &str) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "quickstart_thread_branch_collision",
-        format!("Refusing to run --quickstart: a Git branch named '{thread}' already exists at a different commit than the current checkout"),
-        format!("Pass `--quickstart-thread <name>` to use a different thread name, or switch to '{thread}' (`git switch {thread}`) and run the normal capture flow."),
-        format!("a Git branch '{thread}' already exists and points at history unrelated to the current branch"),
-        format!("quickstart would attach the '{thread}' thread to the current branch's state and move refs/heads/{thread} onto it, silently discarding the existing branch's history"),
+        format!(
+            "Refusing to run --quickstart: a Git branch named '{thread}' already exists at a different commit than the current checkout"
+        ),
+        format!(
+            "Pass `--quickstart-thread <name>` to use a different thread name, or switch to '{thread}' (`git switch {thread}`) and run the normal capture flow."
+        ),
+        format!(
+            "a Git branch '{thread}' already exists and points at history unrelated to the current branch"
+        ),
+        format!(
+            "quickstart would attach the '{thread}' thread to the current branch's state and move refs/heads/{thread} onto it, silently discarding the existing branch's history"
+        ),
         "no repository objects, refs, metadata, or worktree files were changed",
         "heddle init --quickstart --quickstart-thread <name>",
         vec![

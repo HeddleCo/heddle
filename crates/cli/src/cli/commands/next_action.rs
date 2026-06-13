@@ -178,10 +178,12 @@ pub(crate) fn validate_next_action(
     if action.is_empty() {
         return Ok(());
     }
-    validate_recommended_action(action)
-        .map_err(|err| next_action_validation_error(format!("action is not a valid heddle command: {err}")))?;
-    let argv = split_recommended_action(action)
-        .map_err(|err| next_action_validation_error(format!("action cannot be tokenized: {err}")))?;
+    validate_recommended_action(action).map_err(|err| {
+        next_action_validation_error(format!("action is not a valid heddle command: {err}"))
+    })?;
+    let argv = split_recommended_action(action).map_err(|err| {
+        next_action_validation_error(format!("action cannot be tokenized: {err}"))
+    })?;
     let Some(command_path) = next_action_command_path(&argv) else {
         return Ok(());
     };
@@ -373,9 +375,10 @@ fn default_next_action(input: NextActionInput<'_>) -> String {
         return operation.next_action.clone();
     }
     if let Some(remote_tracking) = input.remote_tracking
-        && let Some(action) = remote_tracking_next_action(remote_tracking) {
-            return action;
-        }
+        && let Some(action) = remote_tracking_next_action(remote_tracking)
+    {
+        return action;
+    }
     if let Some(action) = non_empty_action(input.fallback) {
         return action.to_string();
     }
@@ -554,6 +557,9 @@ mod tests {
         });
         let err = validate_next_actions_in_value(&payload, ctx(&["status"]))
             .expect_err("nested demoted breadcrumbs must fail validation");
-        assert!(err.to_string().contains("$.verification.checks[0].recommended_action"));
+        assert!(
+            err.to_string()
+                .contains("$.verification.checks[0].recommended_action")
+        );
     }
 }

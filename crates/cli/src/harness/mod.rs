@@ -15,11 +15,11 @@ use objects::{
     object::{DiffKind, Session, ThreadName, Tree},
     store::{AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary},
 };
+use oplog::OpLogBackend;
 use proto::{
     HarnessIdentity, ProgressCheckpoint, SessionDiffSummary, SessionReportEnvelope,
     TranscriptAttachmentRef, UsageTotals, WorktreeChangeBaseline,
 };
-use oplog::OpLogBackend;
 use refs::Head;
 use repo::{
     Repository, SessionManager, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
@@ -2143,7 +2143,10 @@ fn allocate_thread_name(repo: &Repository, base: &str) -> Result<String> {
         if ThreadManager::new(repo.heddle_dir())
             .load(&candidate)?
             .is_none()
-            && repo.refs().get_thread(&ThreadName::new(&candidate))?.is_none()
+            && repo
+                .refs()
+                .get_thread(&ThreadName::new(&candidate))?
+                .is_none()
         {
             return Ok(candidate);
         }
@@ -2822,8 +2825,7 @@ mod tests {
         let (_temp, repo) = init_repo();
         for id in ["foo", "parent/task", "feature/foo", "team@scope"] {
             let harness_path = default_private_thread_path(&repo, id);
-            let canonical =
-                repo::thread_manifest::thread_dir(repo.heddle_dir(), id).join("root");
+            let canonical = repo::thread_manifest::thread_dir(repo.heddle_dir(), id).join("root");
             assert_eq!(
                 harness_path, canonical,
                 "harness default must match the canonical thread_dir for {id:?}"

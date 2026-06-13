@@ -85,7 +85,7 @@ Goal: make the CLI surface ready for agent-native collaboration before changing 
 
 Exit criteria:
 
-- `heddle commands --output json` exposes side-effect and op-id metadata for discussion writes.
+- `heddle help --output json` exposes side-effect and op-id metadata for discussion writes.
 - `heddle doctor schemas` can validate the new collaboration JSON samples.
 - Existing state-attached `discuss` commands still work until M4 migration replaces them.
 

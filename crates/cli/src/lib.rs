@@ -10,8 +10,8 @@ compile_error!(
      The OSS CLI ships as git-overlay-only, native-only, or both."
 );
 
-pub mod bench;
 pub(crate) mod attribution;
+pub mod bench;
 // The bridge module stays always-compiled so light consumers (fsck,
 // clone, fetch, remote, checkpoint, operator_loop, gc) keep working in
 // native-only builds without fanning #[cfg] through their use blocks.

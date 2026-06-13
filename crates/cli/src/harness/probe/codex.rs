@@ -3,7 +3,7 @@ use anyhow::Result;
 
 use super::{
     HarnessActorProbe, HarnessAttachHints, HarnessProbeInput, HarnessProbeResult, ProbeSource,
-    attribution_env_hint, argv_value, csv_paths, parse_u64,
+    argv_value, attribution_env_hint, csv_paths, parse_u64,
 };
 
 pub(crate) struct CodexProbe;

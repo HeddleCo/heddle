@@ -38,7 +38,7 @@ use crate::cli::{Cli, should_output_json, style};
 /// doing so coupled recovery to a user-writable name and let the `MarkerDelete`
 /// undo inverse collide with it.
 /// `apply_undo_batch` replays only user-marker/thread inverses, so it can never
-/// see or clobber this internal pointer. `heddle goto .undo-recovery` resolves
+/// see or clobber this internal pointer. `heddle switch .undo-recovery` resolves
 /// it via the reserved [`refs::UNDO_RECOVERY_HANDLE`], which `resolve_refspec`
 /// routes to the internal pointer BEFORE any user ref — and whose leading `.`
 /// makes it uncreatable as a user ref, so it is unshadowable in both directions.
@@ -257,7 +257,7 @@ pub fn cmd_undo(
         print_head(&post_undo_repo)?;
         if let Some(state) = &output.recovery_state {
             println!(
-                "Preserved pre-undo state {} as `{}` (recover with `heddle goto {}`)",
+                "Preserved pre-undo state {} as `{}` (recover with `heddle switch {}`)",
                 style::change_id(state),
                 UNDO_RECOVERY_MARKER,
                 UNDO_RECOVERY_MARKER,
@@ -740,7 +740,7 @@ fn ensure_redaction_undo_safe(
         return Err(anyhow!(RecoveryAdvice::safety_refusal(
             "irreversible_purge_undo",
             format!(
-                "Refusing to undo: `heddle purge` is irreversible by design — the blob bytes have been physically removed from local storage and cannot be reconstructed. Affected op(s): {}",
+                "Refusing to undo: `heddle redact purge apply` is irreversible by design — the blob bytes have been physically removed from local storage and cannot be reconstructed. Affected op(s): {}",
                 shorts.join(", ")
             ),
             "Restore the bytes from a backup if you need them, or run `heddle undo --list` and target an earlier op past the purge.",
@@ -813,7 +813,7 @@ fn ensure_redaction_undo_safe(
     Ok(())
 }
 
-/// Pre-flight for `heddle redo`: refuse when the batch chain contains a
+/// Pre-flight for `heddle undo --redo`: refuse when the batch chain contains a
 /// `Redact` or `Purge` op. Neither has a faithful re-apply path today —
 /// `OpRecord::Redact` doesn't carry the full `Redaction` (reason,
 /// redactor, signature, etc.), so a re-application would invent fields,
@@ -841,14 +841,14 @@ fn ensure_redaction_redo_supported(batches: &[OpBatch]) -> Result<()> {
             "Refusing to redo: `Redact` and `Purge` ops do not have a re-apply path. Affected op(s): {}",
             shorts.join(", ")
         ),
-        "Re-run `heddle redact apply` (or `heddle purge apply`) to re-establish the operation.",
+        "Re-run `heddle redact apply` (or `heddle redact purge apply`) to re-establish the operation.",
         "the oplog entry doesn't preserve the full Redaction record (reason, redactor, signature) needed to recreate it, and Purge is irreversible by design",
         "redo would invent redaction metadata or claim to recreate purged bytes",
         "no redo mutation was applied",
         "heddle redact apply",
         vec![
             "heddle redact apply".to_string(),
-            "heddle purge apply".to_string(),
+            "heddle redact purge apply".to_string(),
         ],
     )))
 }

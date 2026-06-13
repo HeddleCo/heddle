@@ -17,7 +17,7 @@ pub use oplog_backend::{OpLogBackend, VisibilitySidecarSnapshots};
 pub use oplog_core::OpLog;
 pub use oplog_types::{
     ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
-    RedactionUndoClass, isolation_keys_for_record,
+    RedactionUndoClass, ThreadUpdateSnapshots, isolation_keys_for_record,
 };
 #[cfg(feature = "postgres")]
 pub use pg_oplog::PgOpLogBackend;

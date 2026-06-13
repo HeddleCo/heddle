@@ -120,8 +120,7 @@ fn command_contract_table_drives_op_id_and_read_only_classification() {
     for read_only in [
         "thread list",
         "thread show",
-        "workspace",
-        "workspace show",
+        "status",
         "bridge git status",
         "hook list",
         "remote list",

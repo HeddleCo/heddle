@@ -44,16 +44,3 @@ pub struct TransactionAbortArgs {
     #[arg(long, default_value = "user-requested abort")]
     pub reason: String,
 }
-
-#[derive(Clone, Debug, Subcommand)]
-pub enum ConflictCommands {
-    /// List structured conflicts on the current state.
-    List,
-    /// Show a single conflict by id.
-    Show(ConflictShowArgs),
-}
-
-#[derive(Clone, Debug, Args)]
-pub struct ConflictShowArgs {
-    pub conflict_id: String,
-}

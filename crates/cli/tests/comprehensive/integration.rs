@@ -44,7 +44,7 @@ fn test_undo_redo_workflow() {
     let content = fs::read_to_string(temp.path().join("file.txt")).unwrap();
     assert_eq!(content, "v2", "undo should restore v2");
 
-    heddle(&["redo"], Some(temp.path())).unwrap();
+    heddle(&["undo", "--redo"], Some(temp.path())).unwrap();
     let content = fs::read_to_string(temp.path().join("file.txt")).unwrap();
     assert_eq!(content, "v3", "redo should restore v3");
 }

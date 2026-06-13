@@ -194,7 +194,7 @@ fn git_replacement_matrix_fresh_git_read_commands_without_git_on_path() {
         &["doctor", "--output", "json"],
         &["bridge", "git", "status", "--output", "json"],
         &["thread", "list", "--output", "json"],
-        &["workspace", "show", "--output", "json"],
+        &["status", "--output", "json"],
     ] {
         let stdout = heddle_without_git(args, temp.path())
             .unwrap_or_else(|err| panic!("{args:?} should not require git on PATH: {err}"));
@@ -227,7 +227,7 @@ fn git_replacement_matrix_fresh_git_read_commands_without_git_on_path() {
         "verify failure must remain observe-only in a plain Git repo"
     );
 
-    let catalog = assert_clean_json_without_git(&["--output", "json", "commands"], temp.path());
+    let catalog = assert_clean_json_without_git(&["help", "--output", "json"], temp.path());
     let commands = catalog["commands"]
         .as_array()
         .expect("command catalog should expose commands");
@@ -249,7 +249,7 @@ fn git_replacement_matrix_fresh_git_read_commands_without_git_on_path() {
     );
     assert!(
         !temp.path().join(".heddle").exists(),
-        "commands catalog must stay observe-only in a plain Git repo"
+        "help catalog must stay observe-only in a plain Git repo"
     );
 
     let committed = TempDir::new().unwrap();
@@ -477,21 +477,21 @@ fn git_replacement_matrix_native_repo_read_commands_without_git_on_path() {
     );
 
     let state_inspect =
-        assert_clean_json_without_git(&["--output", "json", "inspect", &first_id], temp.path());
+        assert_clean_json_without_git(&["--output", "json", "show", &first_id], temp.path());
     assert_eq!(
         state_inspect["change_id"], first_id,
-        "inspect <state> should route to native state show without git: {state_inspect}"
+        "show <state> should route to native state show without git: {state_inspect}"
     );
 
     let thread_inspect =
-        assert_clean_json_without_git(&["--output", "json", "inspect", "main"], temp.path());
+        assert_clean_json_without_git(&["--output", "json", "thread", "show", "main"], temp.path());
     assert_eq!(
         thread_inspect["output_kind"], "thread_show",
         "{thread_inspect}"
     );
     assert_eq!(
         thread_inspect["current_state"], second_id,
-        "inspect <thread> should route to thread show without git: {thread_inspect}"
+        "thread show <thread> should route to thread show without git: {thread_inspect}"
     );
 
     let state_diff = assert_clean_json_without_git(
@@ -509,7 +509,7 @@ fn git_replacement_matrix_native_repo_read_commands_without_git_on_path() {
         &["--output", "json", "status"][..],
         &["--output", "json", "log"],
         &["--output", "json", "thread", "show", "main"],
-        &["--output", "json", "workspace", "show"],
+        &["--output", "json", "status"],
     ] {
         let parsed = assert_clean_json_without_git(args, temp.path());
         assert!(
@@ -899,17 +899,18 @@ fn git_replacement_matrix_undo_preserves_recovery_marker_for_absorbed_edit() {
 
     // An edit that lived only in the worktree, then absorbed by `commit`.
     std::fs::write(work.join("story.txt"), "FRICTION ONE\nFRICTION TWO\n").unwrap();
-    let commit = assert_clean_json_without_git(
-        &["--output", "json", "commit", "-m", "friction"],
-        &work,
-    );
+    let commit =
+        assert_clean_json_without_git(&["--output", "json", "commit", "-m", "friction"], &work);
     assert_eq!(commit["output_kind"], "commit");
     let friction_state = commit["change_id"]
         .as_str()
         .expect("commit emits the absorbed heddle change-id")
         .to_string();
     let friction_commit = git_head_oid(&work);
-    assert_ne!(friction_commit, base, "commit advances the checkout Git ref");
+    assert_ne!(
+        friction_commit, base,
+        "commit advances the checkout Git ref"
+    );
 
     let undo = assert_clean_json_without_git(&["--output", "json", "undo"], &work);
     assert_eq!(undo["action"], "undo");
@@ -937,7 +938,8 @@ fn git_replacement_matrix_undo_preserves_recovery_marker_for_absorbed_edit() {
     // The pre-undo state is preserved in heddle's thread history via the
     // internal recovery handle, even though Git was hard-reset. heddle#305 r2:
     // it must NOT leak into the user marker namespace.
-    let markers = assert_clean_json_without_git(&["--output", "json", "marker", "list"], &work);
+    let markers =
+        assert_clean_json_without_git(&["--output", "json", "thread", "marker", "list"], &work);
     assert!(
         markers["markers"]
             .as_array()
@@ -953,7 +955,7 @@ fn git_replacement_matrix_undo_preserves_recovery_marker_for_absorbed_edit() {
     );
 
     // And `redo` round-trips the absorbed content back into the worktree.
-    let redo = assert_clean_json_without_git(&["--output", "json", "redo"], &work);
+    let redo = assert_clean_json_without_git(&["--output", "json", "undo", "--redo"], &work);
     assert_eq!(redo["action"], "redo");
     assert_eq!(
         std::fs::read_to_string(work.join("story.txt")).unwrap(),
@@ -1116,7 +1118,10 @@ fn git_replacement_matrix_merge_git_commit_pushes_checkpoint_without_git_on_path
     .unwrap();
     configure_repo_local_git_identity(&work);
 
-    assert_clean_json_without_git(&["--output", "json", "branch", "feature/no-git"], &work);
+    assert_clean_json_without_git(
+        &["--output", "json", "thread", "create", "feature/no-git"],
+        &work,
+    );
     assert_clean_json_without_git(&["--output", "json", "switch", "feature/no-git"], &work);
     std::fs::write(work.join("feature.txt"), "merged without git\n").unwrap();
     assert_clean_json_without_git(
@@ -1204,7 +1209,10 @@ fn git_replacement_matrix_branch_like_thread_refresh_without_git_on_path() {
     .unwrap();
     configure_repo_local_git_identity(&work);
 
-    assert_clean_json_without_git(&["--output", "json", "branch", "feature/refresh"], &work);
+    assert_clean_json_without_git(
+        &["--output", "json", "thread", "create", "feature/refresh"],
+        &work,
+    );
     assert_clean_json_without_git(&["--output", "json", "switch", "feature/refresh"], &work);
     std::fs::write(work.join("feature.txt"), "feature refresh\n").unwrap();
     assert_clean_json_without_git(

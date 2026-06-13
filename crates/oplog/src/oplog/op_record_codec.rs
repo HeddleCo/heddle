@@ -30,7 +30,7 @@ use objects::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::oplog_types::OpRecord;
+use super::oplog_types::{OpRecord, ThreadUpdateSnapshots};
 
 pub(crate) const LATEST_RECORD_SCHEMA_VERSION: u32 = LatestOpRecordSchema::VERSION;
 
@@ -187,6 +187,8 @@ enum StrictCurrentOpRecord {
         name: String,
         old_state: ChangeId,
         new_state: ChangeId,
+        #[serde(default)]
+        manager_snapshots: Option<ThreadUpdateSnapshots>,
     },
     Fork {
         from: ChangeId,
@@ -198,6 +200,7 @@ enum StrictCurrentOpRecord {
         sources: Vec<ChangeId>,
         result: ChangeId,
         thread: Option<String>,
+        pre_thread_state: Option<ChangeId>,
     },
     MarkerCreate {
         name: String,
@@ -321,10 +324,12 @@ impl StrictCurrentOpRecord {
                 name,
                 old_state,
                 new_state,
+                manager_snapshots,
             } => OpRecord::ThreadUpdate {
                 name,
                 old_state,
                 new_state,
+                manager_snapshots,
             },
             Self::Fork {
                 from,
@@ -341,10 +346,12 @@ impl StrictCurrentOpRecord {
                 sources,
                 result,
                 thread,
+                pre_thread_state,
             } => OpRecord::Collapse {
                 sources,
                 result,
                 thread,
+                pre_thread_state,
             },
             Self::MarkerCreate { name, state } => OpRecord::MarkerCreate { name, state },
             Self::MarkerDelete { name, state } => OpRecord::MarkerDelete { name, state },
@@ -594,6 +601,7 @@ impl PreAtomicOpRecord {
                 name,
                 old_state,
                 new_state,
+                manager_snapshots: None,
             },
             Self::Fork { from, new_state } => {
                 // The pre-Atomic CLI was the only caller and recorded these two
@@ -609,6 +617,7 @@ impl PreAtomicOpRecord {
                 sources,
                 result,
                 thread: None,
+                pre_thread_state: None,
             },
             Self::MarkerCreate { name, state } => OpRecord::MarkerCreate { name, state },
             Self::MarkerDelete { name, state } => OpRecord::MarkerDelete { name, state },
@@ -828,6 +837,7 @@ impl AtomicNoHeadOpRecord {
                 name,
                 old_state,
                 new_state,
+                manager_snapshots: None,
             },
             Self::Fork {
                 from,
@@ -848,6 +858,7 @@ impl AtomicNoHeadOpRecord {
                 sources,
                 result,
                 thread,
+                pre_thread_state: None,
             },
             Self::MarkerCreate { name, state } => OpRecord::MarkerCreate { name, state },
             Self::MarkerDelete { name, state } => OpRecord::MarkerDelete { name, state },
@@ -993,6 +1004,7 @@ mod tests {
                 name: "main".into(),
                 old_state: cid(6),
                 new_state: cid(7),
+                manager_snapshots: None,
             },
             OpRecord::Fork {
                 from: cid(8),
@@ -1004,6 +1016,7 @@ mod tests {
                 sources: vec![cid(8), cid(9)],
                 result: cid(10),
                 thread: None,
+                pre_thread_state: None,
             },
             OpRecord::MarkerCreate {
                 name: "release".into(),
@@ -1071,6 +1084,7 @@ mod tests {
             sources: vec![cid(22)],
             result: cid(23),
             thread: Some("main".into()),
+            pre_thread_state: None,
         });
         records.push(OpRecord::RemoteThreadUpdate {
             remote: "origin".into(),
@@ -1161,6 +1175,7 @@ mod tests {
                 sources: vec![cid(4), cid(5)],
                 result: cid(6),
                 thread: None,
+                pre_thread_state: None,
             },
         ];
         for legacy in pre_atomic_reshaped {
@@ -1212,6 +1227,7 @@ mod tests {
                 sources: vec![cid(1), cid(2)],
                 result: cid(3),
                 thread: None,
+                pre_thread_state: None,
             },
         ];
 
@@ -1239,11 +1255,6 @@ mod tests {
                 thread: None,
                 head: Some(cid(13)),
             },
-            OpRecord::Collapse {
-                sources: vec![cid(10), cid(11)],
-                result: cid(14),
-                thread: Some("main".into()),
-            },
             OpRecord::RemoteThreadUpdate {
                 remote: "origin".into(),
                 thread: "main".into(),
@@ -1262,6 +1273,56 @@ mod tests {
             let decoded = CurrentOpRecordSchema::decode(&bytes).unwrap();
             assert_same_record(&decoded, &expected);
         }
+    }
+
+    #[test]
+    fn atomic_no_head_legacy_collapse_payload_decodes_with_no_pre_thread_state() {
+        let legacy_payload = [
+            129, 168, 67, 111, 108, 108, 97, 112, 115, 101, 147, 146, 220, 0, 16, 10, 10, 10, 10,
+            10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 220, 0, 16, 11, 11, 11, 11, 11, 11, 11,
+            11, 11, 11, 11, 11, 11, 11, 11, 11, 220, 0, 16, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
+            12, 12, 12, 12, 12, 12, 164, 109, 97, 105, 110,
+        ];
+        let expected = OpRecord::Collapse {
+            sources: vec![cid(10), cid(11)],
+            result: cid(12),
+            thread: Some("main".into()),
+            pre_thread_state: None,
+        };
+
+        assert!(CurrentOpRecordSchema::decode(&legacy_payload).is_err());
+        let decoded = AtomicNoHeadOpRecordSchema::decode(&legacy_payload).unwrap();
+        assert_same_record(&decoded, &expected);
+        let decoded =
+            decode_versioned_record(&legacy_payload, OpRecordSchemaVersion::AtomicNoHead).unwrap();
+        assert_same_record(&decoded, &expected);
+    }
+
+    #[test]
+    fn current_collapse_payload_round_trips_with_pre_thread_state() {
+        let expected = OpRecord::Collapse {
+            sources: vec![cid(10), cid(11)],
+            result: cid(12),
+            thread: Some("main".into()),
+            pre_thread_state: Some(cid(9)),
+        };
+        let bytes = encode_latest_record(&expected).unwrap();
+        assert_eq!(
+            bytes,
+            vec![
+                129, 168, 67, 111, 108, 108, 97, 112, 115, 101, 148, 146, 220, 0, 16, 10, 10, 10,
+                10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 220, 0, 16, 11, 11, 11, 11, 11,
+                11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 220, 0, 16, 12, 12, 12, 12, 12, 12, 12,
+                12, 12, 12, 12, 12, 12, 12, 12, 12, 164, 109, 97, 105, 110, 220, 0, 16, 9, 9, 9, 9,
+                9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9,
+            ]
+        );
+
+        let decoded = CurrentOpRecordSchema::decode(&bytes).unwrap();
+        assert_same_record(&decoded, &expected);
+        let decoded = decode_versioned_record(&bytes, OpRecordSchemaVersion::Current).unwrap();
+        assert_same_record(&decoded, &expected);
+        assert!(AtomicNoHeadOpRecordSchema::decode(&bytes).is_err());
     }
 
     #[test]
@@ -1313,6 +1374,83 @@ mod tests {
             let decoded = decode_versioned_record(&bytes, OpRecordSchemaVersion::Current).unwrap();
             assert_same_record(&decoded, &expected);
         }
+    }
+
+    #[test]
+    fn current_schema_round_trips_thread_update_manager_snapshots() {
+        let records = [
+            OpRecord::ThreadUpdate {
+                name: "main".into(),
+                old_state: cid(6),
+                new_state: cid(7),
+                manager_snapshots: ThreadUpdateSnapshots::from_parts(Some(vec![6]), Some(vec![7])),
+            },
+            OpRecord::ThreadUpdate {
+                name: "main".into(),
+                old_state: cid(6),
+                new_state: cid(7),
+                manager_snapshots: ThreadUpdateSnapshots::from_parts(None, Some(vec![7])),
+            },
+            OpRecord::ThreadUpdate {
+                name: "main".into(),
+                old_state: cid(6),
+                new_state: cid(7),
+                manager_snapshots: ThreadUpdateSnapshots::from_record_sets(
+                    Some(vec![6]),
+                    Some(vec![7]),
+                    vec![vec![60], vec![61]],
+                    vec![vec![70], vec![71]],
+                    true,
+                ),
+            },
+        ];
+        for expected in records {
+            let bytes = encode_latest_record(&expected).unwrap();
+            let decoded = CurrentOpRecordSchema::decode(&bytes).unwrap();
+            assert_same_record(&decoded, &expected);
+            let decoded = decode_versioned_record(&bytes, OpRecordSchemaVersion::Current).unwrap();
+            assert_same_record(&decoded, &expected);
+        }
+    }
+
+    #[test]
+    fn thread_update_without_snapshots_keeps_legacy_bytes() {
+        let expected = OpRecord::ThreadUpdate {
+            name: "main".into(),
+            old_state: cid(6),
+            new_state: cid(7),
+            manager_snapshots: None,
+        };
+        let bytes = encode_latest_record(&expected).unwrap();
+        let legacy_bytes = tests_support::encode_atomic_no_head(&expected).unwrap();
+
+        assert_eq!(bytes, legacy_bytes);
+        assert_eq!(
+            bytes,
+            vec![
+                129, 172, 84, 104, 114, 101, 97, 100, 85, 112, 100, 97, 116, 101, 147, 164, 109,
+                97, 105, 110, 220, 0, 16, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 220, 0,
+                16, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+            ]
+        );
+        let decoded = AtomicNoHeadOpRecordSchema::decode(&bytes).unwrap();
+        assert_same_record(&decoded, &expected);
+    }
+
+    #[test]
+    fn old_thread_update_reader_refuses_snapshot_tail() {
+        let expected = OpRecord::ThreadUpdate {
+            name: "main".into(),
+            old_state: cid(6),
+            new_state: cid(7),
+            manager_snapshots: ThreadUpdateSnapshots::from_parts(None, Some(vec![7])),
+        };
+        let bytes = encode_latest_record(&expected).unwrap();
+        let error = rmp_serde::from_slice::<AtomicNoHeadOpRecord>(&bytes).unwrap_err();
+        assert!(
+            format!("{error:?}").contains("LengthMismatch"),
+            "expected positional length refusal, got {error}"
+        );
     }
 
     #[test]
@@ -1377,6 +1515,7 @@ pub(crate) mod tests_support {
                     name,
                     old_state,
                     new_state,
+                    ..
                 } => Self::ThreadUpdate {
                     name: name.clone(),
                     old_state: *old_state,
@@ -1527,6 +1666,7 @@ pub(crate) mod tests_support {
                     name,
                     old_state,
                     new_state,
+                    ..
                 } => Self::ThreadUpdate {
                     name: name.clone(),
                     old_state: *old_state,
@@ -1547,6 +1687,7 @@ pub(crate) mod tests_support {
                     sources,
                     result,
                     thread,
+                    pre_thread_state: _,
                 } => Self::Collapse {
                     sources: sources.clone(),
                     result: *result,

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Stash command implementation.
 
-use objects::store::ObjectStore;
 use anyhow::{Result, anyhow};
 use objects::object::ContentHash;
+use objects::store::ObjectStore;
 use repo::{DiffKind, Repository};
 use serde::Serialize;
 

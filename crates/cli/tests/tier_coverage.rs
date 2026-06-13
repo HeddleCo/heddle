@@ -13,7 +13,7 @@
 
 use std::{collections::BTreeSet, path::PathBuf};
 
-use cli::cli::commands::command_contract_root_commands;
+use cli::cli::commands::{command_contract_removed_alias_root, command_contract_root_commands};
 
 #[test]
 fn every_commands_variant_has_explicit_root_contract() {
@@ -45,6 +45,9 @@ fn every_commands_variant_has_explicit_root_contract() {
             continue;
         }
         let kebab = variant_to_verb(variant);
+        if command_contract_removed_alias_root(&kebab) {
+            continue;
+        }
         if !contracted.contains(&kebab) {
             missing.push(format!("{variant} (verb name `{kebab}`)"));
         }

@@ -223,9 +223,12 @@ fn is_inside_existing_thread(
         // outside `threads_root` (a sibling-dir checkout, or the repo root for
         // a non-isolated thread) can never be an ancestor of a `threads_root`
         // candidate, so filtering both avoids false positives.
-        for recorded in [Some(&thread.execution_path), thread.materialized_path.as_ref()]
-            .into_iter()
-            .flatten()
+        for recorded in [
+            Some(&thread.execution_path),
+            thread.materialized_path.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
         {
             if recorded.as_os_str().is_empty() || !recorded.starts_with(threads_root) {
                 continue;
@@ -468,7 +471,8 @@ pub(crate) fn write_isolated_checkout(
     // WITHHELD-consistent manifest instead of stat-ing the unmaterialized real
     // tree, so `heddle start` on a Private base yields a withheld checkout rather
     // than erroring (#316 / PR #528 r9 Finding 3).
-    let outcome = repo.checkout_state_gated(base_state, &state, abs_path, &AudienceTier::Internal)?;
+    let outcome =
+        repo.checkout_state_gated(base_state, &state, abs_path, &AudienceTier::Internal)?;
     Ok(outcome)
 }
 

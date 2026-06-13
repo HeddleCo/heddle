@@ -815,7 +815,7 @@ fn build_attribution_with_env(
     // `heddle capture` propagates it onto the resulting state's
     // `attribution.agent` — otherwise every captured state on an agent
     // thread would show `Principal: Unknown`, which broke the
-    // provenance demo and the `heddle blame --context` story.
+    // provenance demo and the `heddle query --attribution --context` story.
     //
     // Precedence: explicit CLI overrides and `HEDDLE_AGENT_*` env are
     // user-supplied attribution for this capture, so they must not be
@@ -925,15 +925,11 @@ fn build_attribution_with_env(
         .clone()
         .or(env.session)
         .or_else(|| current_session.as_ref().map(|session| session.id.clone()));
-    let segment_id = agent
-        .segment
-        .clone()
-        .or(env.segment)
-        .or_else(|| {
-            current_session
-                .as_ref()
-                .and_then(|session| session.current_segment_id.clone())
-        });
+    let segment_id = agent.segment.clone().or(env.segment).or_else(|| {
+        current_session
+            .as_ref()
+            .and_then(|session| session.current_segment_id.clone())
+    });
     let policy = if agent.no_policy {
         None
     } else {
@@ -1192,7 +1188,9 @@ mod tests {
         )
         .unwrap();
 
-        let agent = attribution.agent.expect("detected harness actor should set agent");
+        let agent = attribution
+            .agent
+            .expect("detected harness actor should set agent");
         assert_eq!(agent.provider, "anthropic");
         assert_eq!(agent.model, "claude-opus-4-8[1m]");
     }

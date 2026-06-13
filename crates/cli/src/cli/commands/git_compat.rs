@@ -12,7 +12,10 @@ use anyhow::{Context, Result, anyhow};
 use gix::bstr::{BStr, ByteSlice};
 use gix_index::entry::{Mode, Stage};
 use objects::{
-    object::{Agent, Blob, ChangeId, ContentHash, EntryType, FileMode, Principal, ThreadName, Tree, TreeEntry},
+    object::{
+        Agent, Blob, ChangeId, ContentHash, EntryType, FileMode, Principal, ThreadName, Tree,
+        TreeEntry,
+    },
     worktree::should_ignore as should_ignore_path,
 };
 use oplog::{OpBatch, OpLogBackend, OpRecord};
@@ -43,8 +46,8 @@ use super::{
 use crate::{
     bridge::git_core::{git_config_identity_with_global_fallback, principal_is_default_unknown},
     cli::{
-        BranchArgs, Cli, CommitArgs, SwitchArgs, ThreadCommands, ThreadDropArgs, ThreadListArgs,
-        ThreadRenameArgs, should_output_json, style, worktree_status_options,
+        Cli, CommitArgs, SwitchArgs, ThreadCommands, should_output_json, style,
+        worktree_status_options,
     },
     config::UserConfig,
 };
@@ -1041,7 +1044,9 @@ fn commit_safe_trust(mut trust: RepositoryVerificationState) -> RepositoryVerifi
 fn is_commit_action(action: &str) -> bool {
     matches!(
         action.trim(),
-        "heddle commit" | "heddle commit -m \"...\"" | "heddle commit -m \"...\" --confidence <confidence>"
+        "heddle commit"
+            | "heddle commit -m \"...\""
+            | "heddle commit -m \"...\" --confidence <confidence>"
     ) || action.trim().starts_with("heddle commit ")
 }
 
@@ -1294,46 +1299,6 @@ fn commit_scope_text(plan: &GitIndexPlan) -> &'static str {
     }
 }
 
-pub async fn cmd_branch_compat(cli: &Cli, args: BranchArgs) -> Result<()> {
-    let delete = args.delete || args.force_delete;
-    let command = match (args.name, args.new_name, delete, args.move_branch) {
-        (None, None, false, false) => ThreadCommands::List(ThreadListArgs::default()),
-        (Some(name), None, true, false) => ThreadCommands::Drop(ThreadDropArgs {
-            thread: name,
-            delete_thread: true,
-            force: args.force_delete,
-        }),
-        (Some(old), Some(new), false, true) => {
-            ThreadCommands::Rename(ThreadRenameArgs { old, new })
-        }
-        (Some(name), None, false, false) => ThreadCommands::Create {
-            name,
-            ephemeral: false,
-            ttl_secs: None,
-        },
-        _ => return Err(anyhow!(branch_usage_alternatives_advice())),
-    };
-    cmd_thread(cli, command).await
-}
-
-fn branch_usage_alternatives_advice() -> RecoveryAdvice {
-    RecoveryAdvice::safety_refusal(
-        "branch_usage_alternatives",
-        "unsupported branch arguments",
-        "Use one supported shape: `heddle branch`, `heddle branch <name>`, `heddle branch -m <old> <new>`, or `heddle branch -d <name>`.",
-        "the supplied branch flags and positionals do not match a supported Heddle thread operation",
-        "accepting unsupported Git branch syntax could create, rename, or delete the wrong thread",
-        "Heddle did not create, rename, or delete a thread; refs, metadata, and worktree files were left unchanged",
-        "heddle branch",
-        vec![
-            "heddle branch".to_string(),
-            "heddle branch <name>".to_string(),
-            "heddle branch -m <old> <new>".to_string(),
-            "heddle branch -d <name>".to_string(),
-        ],
-    )
-}
-
 pub async fn cmd_switch_compat(cli: &Cli, args: SwitchArgs) -> Result<()> {
     if args.create {
         let path = args.target.replace('/', "-");
@@ -1352,7 +1317,12 @@ pub async fn cmd_switch_compat(cli: &Cli, args: SwitchArgs) -> Result<()> {
         )));
     }
     let repo = cli.open_repo()?;
-    if repo.refs().get_thread(&ThreadName::new(&args.target))?.is_some() {
+    if refs::validate_ref_name(&args.target).is_ok()
+        && repo
+            .refs()
+            .get_thread(&ThreadName::new(&args.target))?
+            .is_some()
+    {
         return cmd_thread(
             cli,
             ThreadCommands::Switch {
@@ -1378,7 +1348,7 @@ pub async fn cmd_switch_compat(cli: &Cli, args: SwitchArgs) -> Result<()> {
             ],
         )));
     }
-    super::goto::cmd_goto(cli, args.target, args.force)
+    super::goto::cmd_switch_state_checkout(cli, args.target, args.force)
 }
 
 #[cfg(test)]
@@ -1415,7 +1385,10 @@ mod tests {
         let advice =
             commit_checkpoint_failed_advice("change-456", Some("index only"), &error, true);
 
-        assert_eq!(advice.primary_command, "heddle commit --no-all -m \"index only\"");
+        assert_eq!(
+            advice.primary_command,
+            "heddle commit --no-all -m \"index only\""
+        );
         assert_eq!(
             advice.recovery_commands,
             vec!["heddle commit --no-all -m \"index only\""]
@@ -1473,23 +1446,5 @@ mod tests {
         assert_eq!(advice.recovery_commands, vec!["heddle continue"]);
         assert!(advice.error.contains("repository verification is blocked"));
         assert!(advice.unsafe_condition.contains("Git merge is in progress"));
-    }
-
-    #[test]
-    fn branch_usage_alternatives_advice_is_typed() {
-        let advice = branch_usage_alternatives_advice();
-
-        assert_eq!(advice.kind, "branch_usage_alternatives");
-        assert_eq!(advice.primary_command, "heddle branch");
-        assert!(advice.primary_hint().contains("heddle branch -m"));
-        assert!(advice.unsafe_condition.contains("branch flags"));
-        assert!(advice.would_change.contains("wrong thread"));
-        assert!(advice.preserved.contains("did not create"));
-        assert!(
-            advice
-                .recovery_commands
-                .iter()
-                .any(|command| command == "heddle branch -d <name>")
-        );
     }
 }

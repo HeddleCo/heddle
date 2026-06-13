@@ -214,6 +214,7 @@ impl<'a, O: OpLogBackend> OplogEmitter<'a, O> {
                             name: short_name.to_string(),
                             old_state: old_cid,
                             new_state: new_cid,
+                            manager_snapshots: None,
                         }],
                         scope,
                     )
@@ -394,7 +395,12 @@ mod tests {
         );
         assert!(matches!(
             &ops[1],
-            OpRecord::ThreadUpdate { name, old_state, new_state }
+            OpRecord::ThreadUpdate {
+                name,
+                old_state,
+                new_state,
+                ..
+            }
                 if name == "main" && *old_state == cid_a && *new_state == cid_b
         ));
         assert!(

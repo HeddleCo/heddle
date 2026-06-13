@@ -5,13 +5,13 @@ FSKit module. It exists alongside (not inside) the `heddle` CLI:
 the CLI is platform-agnostic Rust, this project is the per-OS
 surface required by Apple for FSKit.
 
-On macOS 26+, FSKit modules ship as **ExtensionKit** extensions
+On macOS 15.4+, FSKit modules ship as **ExtensionKit** extensions
 (not the legacy System Extension model). The host app's only job
 is to be a discoverable bundle in `/Applications` so LaunchServices
-can register the embedded `.appex`. It has no UI: the
+can register the embedded `.appex`. The app remains quiet by default: the
 `LSUIElement = YES` Info.plist key suppresses the Dock icon, and
 no window opens on launch unless the user explicitly opens the
-app from Finder.
+app from Finder or the CLI deep-links to it after FSKit needs approval.
 
 ## Target user experience
 
@@ -25,18 +25,20 @@ $ heddle start mybranch --workspace virtualized
    ✓ mounted at .repo-heddle-mounts/mybranch (via FSKit)
 ```
 
-Zero windows to dismiss, zero buttons to click in the host app.
-The toggle in System Settings is the only user interaction macOS
-requires, and we can't bypass it — Apple enforces it as a
-security check for any file-system extension.
+Zero windows to dismiss in the normal CLI path. If the host app is
+opened directly, it shows an onboarding card with the live pluginkit
+state, a System Settings button, and an annotated SwiftUI mock of the
+File System Extensions toggle. The toggle in System Settings is the
+only user interaction macOS requires, and we can't bypass it — Apple
+enforces it as a security check for any file-system extension.
 
 ## What's here
 
 ```
 HeddleHost/                  ← macOS host app target (invisible)
   HeddleHostApp.swift         App entry (SwiftUI, no Dock icon)
-  ContentView.swift           Diagnostic window (only visible if user opens .app)
-  ExtensionManager.swift      Status probe + Settings deeplink
+  ContentView.swift           Onboarding window (only visible if user opens .app)
+  ExtensionManager.swift      pluginkit status probe + Settings deeplink
   HeddleHost.entitlements     Sandbox only — no programmatic activation needed
   Assets.xcassets/            Stock icon + accent color
 HeddleFSModule/              ← ExtensionKit extension target (.appex)
@@ -51,7 +53,21 @@ HeddleFSModule/              ← ExtensionKit extension target (.appex)
 HeddleHost.xcodeproj/        ← Xcode project (synced folder groups)
   xcshareddata/xcschemes/     ← Shared scheme: Run = HeddleHost.app
 README.md                    ← this file
+BUILD.md                     ← Manual Mac build/sign/notarize/test recipe
 ```
+
+## Compatibility and build shape
+
+- Host app deployment target: macOS 15.4.
+- HeddleFSModule deployment target: macOS 15.4.
+- Build SDK: macOS 15.4 or newer; do not require unguarded APIs above 15.4.
+- Archive architecture: universal `arm64` + `x86_64`.
+- Tahoe-only code must stay behind `if #available(macOS 26, *)`; the
+  current host UI only uses that guard for Settings URL selection.
+- The user-facing Settings path is the compatibility contract:
+  `System Settings > General > Login Items & Extensions > File System Extensions`.
+  The `x-apple.systempreferences:` anchors are best-effort conveniences and
+  fall back to the parent Login Items & Extensions pane if Apple changes them.
 
 ## How the CLI knows whether FSKit is ready
 
@@ -66,6 +82,16 @@ Possible results:
 | `NeedsApproval` (line starts with `-`) | Prints a setup block with `System Settings → General → Login Items & Extensions → File System Extensions → enable 'Heddle'`, opens System Settings with a version-aware deep link, polls readiness for about 60 seconds, then mounts via FSKit as soon as the probe reports `Ready`; if the timer elapses, falls back to NFS for this run |
 | `NotInstalled` (no line for our ID) | Prints a one-line host-app install hint, then falls back to NFS |
 | `Unknown` (`pluginkit` failed) | Silent fallback to NFS |
+
+The host app's `ExtensionManager` now uses the same pluginkit signal and polls
+about every two seconds while the onboarding window is open:
+
+| Host state | Source |
+|---|---|
+| `FSKit enabled` | line for `sh.heddle.HeddleHost.HeddleFSModule` starts with `+` |
+| `Toggle required` | line for the bundle ID starts with `-` |
+| `Extension not registered` | no line for the bundle ID, app appears installed |
+| `Move to /Applications` | no line and this copy is running from a dev location |
 
 The integration lives in
 [`crates/cli/src/cli/commands/mount_lifecycle.rs`](../../../../cli/src/cli/commands/mount_lifecycle.rs)
@@ -91,13 +117,10 @@ Open `HeddleHost.xcodeproj` in Xcode, ensure the "HeddleHost"
 scheme is selected in the toolbar, and Run (or Archive for a
 release build).
 
-For headless / CI builds:
-```bash
-xcodebuild -project HeddleHost.xcodeproj \
-  -scheme HeddleHost -configuration Release \
-  CODE_SIGN_IDENTITY="Developer ID Application: …" \
-  build
-```
+For the Developer ID archive, signing, notarization, and local smoke test,
+follow [`BUILD.md`](BUILD.md). The release archive is universal
+`arm64` + `x86_64` and keeps both app and extension deployment targets at
+macOS 15.4.
 
 ### 3. Install
 
@@ -293,12 +316,12 @@ shipping the cask is the signing/notarization pipeline.
 | Piece | State |
 |---|---|
 | Xcode project | Clean, builds host + extension |
-| Host app | Invisible (`LSUIElement`), diagnostic window only |
+| Host app | Invisible (`LSUIElement`), onboarding window only |
 | Extension entry point | `@main UnaryFileSystemExtension` wired |
 | `FSUnaryFileSystem` ops | `probeResource` + `loadResource` working |
 | `FSVolume.Operations` | Conformed — lookup, getattr, read, write, enumerate, flush dispatch into Rust |
 | Rust C ABI bridge | `heddle_fskit_open_thread` connects extension → mount core |
-| Readiness probe | `pluginkit`-based, wired into `mount_lifecycle.rs` |
+| Readiness probe | `pluginkit`-based, wired into `mount_lifecycle.rs` and host onboarding |
 | NFS fallback | Always-available, picks up when FSKit isn't ready |
 | End-to-end mount + read | Working on macOS 26.4 (`mount -t heddle … && cat <mp>/file` succeeds) |
 | `mtime` on returned items | Wired through the C ABI; shows mount bootstrap time in `ls -l` |

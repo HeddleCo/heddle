@@ -6,7 +6,7 @@
 use objects::store::ObjectStore;
 use std::{collections::HashSet, path::Path};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use objects::object::{ChangeId, ContentHash};
 use repo::Repository;
 

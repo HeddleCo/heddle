@@ -504,16 +504,16 @@ fn doctor_schemas_doc_missing_advice(repo_root: &Path) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "doctor_schemas_source_docs_missing",
         "Cannot run schema docs drift check outside a Heddle source checkout",
-        "Run this from the Heddle source checkout, pass `--repo <source-root>`, or use `heddle commands --output json` and `heddle schemas status` for installed CLI introspection.",
+        "Run this from the Heddle source checkout, pass `--repo <source-root>`, or use `heddle help --output json` and `heddle schemas status` for installed CLI introspection.",
         format!(
             "docs/json-schemas.md was not found under {}",
             repo_root.display()
         ),
         "`doctor schemas` compares runtime schemas to source documentation and cannot prove docs drift without that markdown file",
         "no repository objects, refs, metadata, or worktree files were changed",
-        "heddle commands --output json",
+        "heddle help --output json",
         vec![
-            "heddle commands --output json".to_string(),
+            "heddle help --output json".to_string(),
             "heddle schemas status".to_string(),
             "heddle doctor schemas --output json".to_string(),
         ],
@@ -703,7 +703,7 @@ struct DocSample {
     /// verb when no inline `heddle <verb>` reference is present.
     heading: String,
     /// Inline verb reference parsed from the most recent paragraph
-    /// before the fence (e.g. `` `heddle marker create|delete|show`
+    /// before the fence (e.g. `` `heddle thread marker create|delete|show`
     /// emit: ``). When present, this overrides the section heading.
     inline_verb: Option<String>,
     /// 1-based line number where the ```json fence opens.
@@ -735,7 +735,7 @@ fn extract_samples(doc: &str) -> Vec<DocSample> {
         }
         if !in_fence {
             // Look for inline verb mentions in normal prose, e.g.
-            // `` `heddle marker create|delete|show` emit: ``.
+            // `` `heddle thread marker create|delete|show` emit: ``.
             // Also reset the hint on a blank line that isn't immediately
             // before a fence — that way only references in the
             // paragraph adjacent to the fence stick.
@@ -786,7 +786,7 @@ fn extract_samples(doc: &str) -> Vec<DocSample> {
 /// for a catalog-advertised discriminator verb carries the right
 /// discriminator. Returning the full bound-verb set (not one verb at a
 /// time) lets the invariant accept a grouped sample, e.g. the single
-/// `heddle undo|redo` sample binds to both `undo` and `redo` and may
+/// `heddle undo|undo --redo` sample binds to both undo modes and may
 /// legitimately show either variant's discriminator. Sharing the binding
 /// keeps the invariant and the production drift gate agreeing on which
 /// sample documents which verb.
@@ -813,9 +813,9 @@ fn sample_matches_verb_with_hints(sample: &DocSample, verb: &str) -> bool {
         }
         // When an inline hint is present, do *not* fall back to the
         // section heading — the inline hint is more specific and
-        // overrides. Otherwise the same `marker create|delete|show`
-        // sample would be claimed by both `marker list` (heading) and
-        // `marker create` (inline), which is exactly the bug.
+        // overrides. Otherwise the same `thread marker create|delete|show`
+        // sample would be claimed by both `thread marker list` (heading) and
+        // `thread marker create` (inline), which is exactly the bug.
         return false;
     }
     sample_matches_verb(&sample.heading, verb)
@@ -825,8 +825,8 @@ fn sample_matches_verb_with_hints(sample: &DocSample, verb: &str) -> bool {
 /// create|delete|show` (the pipe-separated form is canonical in this
 /// doc). Each pipe-delimited variant is compared verb-equal.
 fn inline_verb_matches(inline: &str, verb: &str) -> bool {
-    // Normalize: an inline hint of "marker create|delete|show" with
-    // verb "marker create" should match. The hint is a sub-verb
+    // Normalize: an inline hint of "thread marker create|delete|show" with
+    // verb "thread marker create" should match. The hint is a sub-verb
     // expansion: split the LAST whitespace-separated token on `|`
     // and try each form.
     let trimmed = inline.trim();

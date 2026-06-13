@@ -36,12 +36,11 @@ multiple threads, leaves one dirty file, then times the core loop:
 
 - `heddle`
 - `heddle help`
-- `heddle commands --output json`
+- `heddle help --output json`
 - `heddle status`
 - `heddle status --short`
 - `heddle status --output json`
-- `heddle workspace`
-- `heddle workspace --output json`
+- `heddle status --output json`
 - `heddle thread list --output json`
 - `heddle log --output json`
 - `heddle diff --output json`

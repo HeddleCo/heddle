@@ -33,7 +33,7 @@ fn test_goto_nonexistent_state() {
     let temp = TempDir::new().unwrap();
     setup_repo_with_file(&temp, "file.txt", "content");
 
-    let result = heddle(&["goto", "hd-deadbeef1234"], Some(temp.path()));
+    let result = heddle(&["switch", "hd-deadbeef1234"], Some(temp.path()));
     assert!(result.is_err(), "goto nonexistent state should fail");
 }
 
@@ -42,7 +42,7 @@ fn test_goto_invalid_state_format() {
     let temp = TempDir::new().unwrap();
     setup_repo_with_file(&temp, "file.txt", "content");
 
-    let result = heddle(&["goto", "not-a-valid-id"], Some(temp.path()));
+    let result = heddle(&["switch", "not-a-valid-id"], Some(temp.path()));
     assert!(result.is_err(), "goto invalid format should fail");
 }
 

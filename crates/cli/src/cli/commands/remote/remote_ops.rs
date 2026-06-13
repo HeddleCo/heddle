@@ -201,7 +201,9 @@ pub async fn cmd_pull(
 ) -> Result<()> {
     let repo = cli.open_repo()?;
     if remote.is_none() && resolved_default_remote_name(&repo)?.is_none() {
-        return Err(anyhow::anyhow!(RecoveryAdvice::remote_not_configured("pull")));
+        return Err(anyhow::anyhow!(RecoveryAdvice::remote_not_configured(
+            "pull"
+        )));
     }
     if repo.capability() == RepositoryCapability::GitOverlay && !repo.hosted_enabled() {
         ensure_worktree_clean(&repo, "pull")?;
@@ -710,8 +712,7 @@ pub fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
             // readers (including `resolve_remote_with_key`) can resolve
             // it, then set the default explicitly.
             if cfg.get(&name).is_err() {
-                cfg.add(&name, Remote { url })
-                    .map_err(anyhow::Error::msg)?;
+                cfg.add(&name, Remote { url }).map_err(anyhow::Error::msg)?;
             }
             cfg.set_default(&name).map_err(anyhow::Error::msg)?;
             render_remote_mutation(
@@ -821,9 +822,10 @@ pub(crate) fn resolve_default_remote_name(
         return Ok(default.to_string());
     }
     if repo.capability() == RepositoryCapability::GitOverlay
-        && let Some(default) = git_overlay_default_remote_name(repo) {
-            return Ok(default);
-        }
+        && let Some(default) = git_overlay_default_remote_name(repo)
+    {
+        return Ok(default);
+    }
     Ok("origin".to_string())
 }
 
@@ -863,7 +865,6 @@ fn git_upstream_remote_name(repo: &Repository) -> Option<String> {
         .and_then(|name| name.as_symbol().map(str::to_string))
         .filter(|remote| !remote.is_empty())
 }
-
 
 fn merged_remote_items(repo: &Repository) -> Result<BTreeMap<String, (String, String)>> {
     let cfg = RemoteConfig::open(repo).map_err(anyhow::Error::msg)?;
@@ -1300,11 +1301,7 @@ mod tests {
             "[remote \"upstream\"]\n\turl = https://example.com/upstream\n",
         )
         .unwrap();
-        fs::write(
-            git_dir.join("config"),
-            "[include]\n\tpath = extra.config\n",
-        )
-        .unwrap();
+        fs::write(git_dir.join("config"), "[include]\n\tpath = extra.config\n").unwrap();
 
         let remotes = plain_git_remote_items(tmp.path());
 
@@ -1418,7 +1415,9 @@ mod tests {
         // lives and wins on read); writing to common would leave the
         // stale per-worktree url winning, a silent read/write divergence.
         assert_eq!(
-            plain_git_remote_items(tmp.path()).get("origin").map(String::as_str),
+            plain_git_remote_items(tmp.path())
+                .get("origin")
+                .map(String::as_str),
             Some("https://example.com/new"),
         );
     }
@@ -1510,7 +1509,10 @@ mod tests {
         let ctx = GitConfigContext::discover(tmp.path()).unwrap();
         // A brand-new remote (no layer defines it yet) follows git's
         // default: the common config.
-        assert_eq!(ctx.write_file_for("origin").unwrap(), git_dir.join("config"));
+        assert_eq!(
+            ctx.write_file_for("origin").unwrap(),
+            git_dir.join("config")
+        );
         upsert_git_remote_config(
             &ctx.write_file_for("origin").unwrap(),
             "origin",
@@ -1518,7 +1520,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            plain_git_remote_items(tmp.path()).get("origin").map(String::as_str),
+            plain_git_remote_items(tmp.path())
+                .get("origin")
+                .map(String::as_str),
             Some("https://example.com/new"),
         );
     }

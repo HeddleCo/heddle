@@ -108,11 +108,7 @@ fn cmd_visibility_set(cli: &Cli, repo: &Repository, args: VisibilitySetArgs) -> 
     emit_mutation(cli, repo, &output, "set")
 }
 
-fn cmd_visibility_promote(
-    cli: &Cli,
-    repo: &Repository,
-    args: VisibilityPromoteArgs,
-) -> Result<()> {
+fn cmd_visibility_promote(cli: &Cli, repo: &Repository, args: VisibilityPromoteArgs) -> Result<()> {
     let state = resolve_state(repo, &args.state)?;
     let tier = args
         .tier

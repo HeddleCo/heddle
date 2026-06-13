@@ -222,7 +222,7 @@ test("run() rejects every jsonl-capable verb", async () => {
   const call = heddle.run as (verb: string, args?: readonly string[]) => Promise<unknown>;
 
   // Always-streaming verbs (json_kind "jsonl") are refused unconditionally.
-  for (const verb of ["watch", "harness-bridge"]) {
+  for (const verb of ["watch"]) {
     await assert.rejects(() => call(verb), (err: unknown) => {
       assert.ok(err instanceof HeddleStreamingVerbError);
       assert.equal(err.verb, verb);
@@ -232,7 +232,7 @@ test("run() rejects every jsonl-capable verb", async () => {
 
   // Watch-mode verbs (json_kind "json_or_jsonl") are refused ONLY when a
   // watch flag flips them into a stream.
-  for (const verb of ["status", "thread show", "workspace show"]) {
+  for (const verb of ["status", "thread show"]) {
     await assert.rejects(() => call(verb, ["--watch"]), (err: unknown) => {
       assert.ok(err instanceof HeddleStreamingVerbError);
       assert.equal(err.verb, verb);
@@ -266,12 +266,12 @@ const ECHO_ARGV = join(process.cwd(), "test", "fixtures", "echo-argv.cjs");
 const STREAM_FOREVER = join(process.cwd(), "test", "fixtures", "stream-forever.cjs");
 
 test("buildArgv puts global flags before verb tokens (value-taking verb flags)", async () => {
-  // Regression: `marker delete --prefix` ends in a value-taking flag; with
+  // Regression: `thread marker delete --prefix` ends in a value-taking flag; with
   // globals appended after the verb, `--output` was consumed as the
   // --prefix value and the verb could not run through the API at all.
   const exec = new SpawnExecutor({ binaryPath: ECHO_ARGV });
   const result = await exec.exec({
-    verb: "marker delete --prefix",
+    verb: "thread marker delete --prefix",
     args: ["foo"],
     repoPath: "/repos/demo",
     opId: "op-9",
