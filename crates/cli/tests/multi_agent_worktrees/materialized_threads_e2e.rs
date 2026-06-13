@@ -16,9 +16,9 @@ use super::*;
 ///
 /// The shape mirrors how an agent would drive this from a shell:
 ///
-/// 1. `heddle start <thread> --workspace materialized --path <dir>`
-///    materialises the captured tree into `<dir>` and writes a
-///    sidecar manifest at `<heddle_dir>/threads/<thread>/manifest.toml`.
+/// 1. A materialized-mode `heddle start <thread> --path <dir>` materialises
+///    the captured tree into `<dir>` and writes a sidecar manifest at
+///    `<heddle_dir>/threads/<thread>/manifest.toml`.
 /// 2. Editing a file inside `<dir>` is visible to `heddle capture`
 ///    when run from `<dir>` — `Repository::snapshot` auto-detects
 ///    the materialised-thread context (HEAD attached + manifest
@@ -44,7 +44,7 @@ fn materialized_thread_full_lifecycle() {
     let thread_dir = TempDir::new().unwrap();
     let thread_path = thread_dir.path();
 
-    // ── 1. start --workspace materialized ───────────────────────────
+    // ── 1. start with materialized storage mode ─────────────────────
     let started_json = heddle(
         &[
             "--output",
@@ -223,7 +223,7 @@ fn short_status_surfaces_stale_materialized_thread_advisory() {
         repo::thread_manifest::manifest_path(&main.path().join(".heddle"), "feature/short-stale");
     assert!(
         manifest_path.is_file(),
-        "manifest expected at {} after start --workspace materialized",
+        "manifest expected at {} after materialized start",
         manifest_path.display()
     );
     let manifest = fs::read_to_string(&manifest_path).unwrap();

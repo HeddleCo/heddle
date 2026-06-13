@@ -606,12 +606,13 @@ pub enum WorkspaceModeArg {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Examples:
-  heddle start feature/auth                       # create or resume a thread
-  heddle start feature/auth --workspace materialized     # real checkout on disk
-  heddle start scratch --path ../scratch          # place the checkout explicitly
-  heddle start fix-flake --task 'fix CI flake'    # attach a task description
+  heddle start feature/auth --path ../feature-auth  # create an isolated checkout
+  heddle start scratch --path ../scratch            # place the checkout explicitly
+  heddle start fix-flake --task 'fix CI flake'      # attach a task description
 
 Isolated checkouts are Heddle-managed working directories. They do not contain a .git directory; use Heddle commands inside them, and run raw Git commands from the parent Git-overlay repo when needed.
+
+`heddle start <name> --path <dir>` is the one-step form of the advanced split flow: `heddle thread create <name>` creates the ref now, and `heddle thread promote <name> --path <dir>` materializes it later. Use the split form only when you intentionally need ref-first, checkout-later staging.
 
 Advanced (hidden) flags:
   --agent-provider/--agent-model (agent attribution for the registered thread), --parent-thread (delegated child work), --print-cd-path (print only the checkout path for shell wrappers), --daemon/--no-daemon (virtualized-mount ownership), --shared-target (workspace-shared cargo target dir). All are accepted here; they stay out of the flag list to keep everyday help terse.

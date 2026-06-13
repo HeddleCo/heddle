@@ -12,6 +12,13 @@ use super::{
 #[derive(Subcommand, Clone)]
 pub enum ThreadCommands {
     /// Create a thread ref at the current state.
+    #[command(after_help = "\
+Advanced split form:
+  heddle start <name> --path <dir> is the normal one-step isolated-checkout path.
+  heddle thread create <name> only creates the thread ref. Pair it later with
+  heddle thread promote <name> --path <dir> when you intentionally need to
+  create the ref now and materialize the checkout later.
+")]
     Create {
         /// Thread identifier.
         name: String,
@@ -83,7 +90,14 @@ pub enum ThreadCommands {
     /// Guide a blocked or stale thread toward its next clean state.
     Resolve(ThreadResolveArgs),
 
-    /// Promote a thread to a materialized checkout at a chosen path.
+    /// Materialize an existing thread ref at a chosen path.
+    #[command(after_help = "\
+Advanced split form:
+  heddle start <name> --path <dir> creates the thread ref and isolated checkout
+  in one step. `thread promote` is the second step after
+  `heddle thread create <name>` when you intentionally created the ref first
+  and want to materialize it later.
+")]
     Promote(ThreadPromoteArgs),
 
     /// Drop a thread and mark it abandoned.

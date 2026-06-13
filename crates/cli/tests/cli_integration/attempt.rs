@@ -409,9 +409,8 @@ fn attempt_shared_target_default_on_for_rust_workspace() {
 
     // The thread checkouts should each contain a `.cargo/config.toml`
     // that redirects to the shared target dir. The thread path layout
-    // for `--workspace materialized` is
-    // `<repo>/.heddle/threads/<thread>/root/`; we assert the cargo
-    // config exists there.
+    // for materialized attempts is `<repo>/.heddle/threads/<thread>/root/`;
+    // we assert the cargo config exists there.
     let attempts = value["attempts"].as_array().unwrap();
     let threads_dir = temp.path().join(".heddle").join("threads");
     for attempt in attempts {

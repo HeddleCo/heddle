@@ -242,18 +242,15 @@ fn worktree_target_symlink_advice(path: &Path) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "worktree_target_symlink",
         format!("worktree target '{}' cannot be a symlink", path.display()),
-        "Choose an empty real directory for `--path`, or let Heddle create a managed materialized checkout.",
+        "Choose an empty real directory for `--path`.",
         format!(
             "target path '{}' resolves through a symlink",
             path.display()
         ),
         "writing an isolated checkout through a symlink could target a different location than the caller sees",
         "no thread, checkout, repository object, ref, or worktree file was changed",
-        "heddle start <name> --workspace materialized",
-        vec![
-            "heddle start <name> --workspace materialized".to_string(),
-            "heddle start <name> --path <empty-path>".to_string(),
-        ],
+        "heddle start <name> --path <empty-path>",
+        vec!["heddle start <name> --path <empty-path>".to_string()],
     )
 }
 
@@ -264,15 +261,12 @@ fn worktree_target_prepare_failed_advice(path: &Path, error: std::io::Error) -> 
             "Could not prepare isolated thread workspace '{}': {error}",
             path.display()
         ),
-        "Choose an empty writable path with `--path`, or let Heddle create a managed materialized checkout.",
+        "Choose an empty writable path with `--path`.",
         format!("target path '{}' could not be created", path.display()),
         "continuing would leave the isolated checkout only partially prepared",
         "no thread, checkout, repository object, ref, or worktree file was changed",
-        "heddle start <name> --workspace materialized",
-        vec![
-            "heddle start <name> --workspace materialized".to_string(),
-            "heddle start <name> --path <empty-path>".to_string(),
-        ],
+        "heddle start <name> --path <empty-path>",
+        vec!["heddle start <name> --path <empty-path>".to_string()],
     )
 }
 
@@ -280,15 +274,12 @@ fn worktree_target_invalid_path_advice(path: &Path) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "worktree_target_invalid_path",
         format!("invalid worktree path '{}'", path.display()),
-        "Choose an empty writable path for `--path`, or let Heddle create a managed materialized checkout.",
+        "Choose an empty writable path for `--path`.",
         format!("target path '{}' has no usable ancestor", path.display()),
         "continuing would make checkout placement ambiguous",
         "no thread, checkout, repository object, ref, or worktree file was changed",
-        "heddle start <name> --workspace materialized",
-        vec![
-            "heddle start <name> --workspace materialized".to_string(),
-            "heddle start <name> --path <empty-path>".to_string(),
-        ],
+        "heddle start <name> --path <empty-path>",
+        vec!["heddle start <name> --path <empty-path>".to_string()],
     )
 }
 
@@ -334,18 +325,15 @@ fn worktree_target_nested_thread_advice(path: &Path) -> RecoveryAdvice {
             "worktree target '{}' is nested inside an existing thread's checkout",
             path.display()
         ),
-        "Choose a fresh `.heddle/threads/<name>` slot or a sibling directory outside the repository.",
+        "Choose a sibling directory outside the repository.",
         format!(
             "target path '{}' falls under another thread's reserved `.heddle/threads/<name>` subtree",
             path.display()
         ),
         "writing a checkout there would land it inside another thread's worktree",
         "no thread, checkout, repository object, ref, or worktree file was changed",
-        "heddle start <name> --workspace materialized",
-        vec![
-            "heddle start <name> --workspace materialized".to_string(),
-            "heddle start <name> --path ../<name>".to_string(),
-        ],
+        "heddle start <name> --path ../<name>",
+        vec!["heddle start <name> --path ../<name>".to_string()],
     )
 }
 
@@ -356,18 +344,15 @@ fn worktree_target_managed_needs_leaf_advice(path: &Path) -> RecoveryAdvice {
             "managed worktree target '{}' must be a per-thread checkout leaf, not the per-thread directory itself",
             path.display()
         ),
-        "Append a `root` leaf, e.g. `<path>/root`, or let Heddle pick the default `.heddle/threads/<name>/root`.",
+        "Append a `root` leaf, e.g. `<path>/root`, or choose a sibling directory outside the repository.",
         format!(
             "target path '{}' is the bare `.heddle/threads/<name>` directory, where the per-thread manifest sidecar lives",
             path.display()
         ),
         "checking out onto the per-thread directory would write Heddle's `manifest.toml` sidecar inside the worktree, starting it dirty",
         "no thread, checkout, repository object, ref, or worktree file was changed",
-        "heddle start <name> --workspace materialized",
-        vec![
-            "heddle start <name> --workspace materialized".to_string(),
-            "heddle start <name> --path <path>/root".to_string(),
-        ],
+        "heddle start <name> --path <path>/root",
+        vec!["heddle start <name> --path <path>/root".to_string()],
     )
 }
 
@@ -375,18 +360,15 @@ fn worktree_target_not_directory_advice(path: &Path) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "worktree_target_not_directory",
         format!("worktree target '{}' must be a directory", path.display()),
-        "Choose an empty directory path for `--path`, or let Heddle create a managed materialized checkout.",
+        "Choose an empty directory path for `--path`.",
         format!(
             "target path '{}' exists but is not a directory",
             path.display()
         ),
         "continuing would overwrite a non-directory path",
         "no thread, checkout, repository object, ref, or worktree file was changed",
-        "heddle start <name> --workspace materialized",
-        vec![
-            "heddle start <name> --workspace materialized".to_string(),
-            "heddle start <name> --path <empty-path>".to_string(),
-        ],
+        "heddle start <name> --path <empty-path>",
+        vec!["heddle start <name> --path <empty-path>".to_string()],
     )
 }
 
@@ -394,13 +376,12 @@ fn worktree_target_not_empty_advice(path: &Path) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "worktree_target_not_empty",
         format!("worktree target '{}' is not empty", path.display()),
-        "Use an empty path, capture current work with `heddle capture`, or let Heddle create a managed materialized checkout.",
+        "Use an empty path, or capture current work with `heddle capture`.",
         format!("target path '{}' already contains files", path.display()),
         "writing an isolated checkout there could overwrite or mix with existing work",
         "no thread, checkout, repository object, ref, or worktree file was changed",
-        "heddle start <name> --workspace materialized",
+        "heddle start <name> --path <empty-path>",
         vec![
-            "heddle start <name> --workspace materialized".to_string(),
             "heddle start <name> --path <empty-path>".to_string(),
             "heddle capture -m \"...\"".to_string(),
         ],

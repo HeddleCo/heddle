@@ -665,7 +665,7 @@ const THREADS_TOPIC: &str = "Threads — Heddle's unit of in-progress work.\n\
 A thread is a named line of work with its own checkout, its own captured\n\
 history, and a target it eventually merges into. It is *not* a git branch:\n\
 the git-overlay branch is downstream plumbing (created at checkpoint),\n\
-not the primary object. You start work with `heddle start <name>`, switch\n\
+not the primary object. You start isolated work with `heddle start <name> --path <dir>`, switch\n\
 between threads with `heddle thread switch <name>`, and integrate with\n\
 `heddle land` (or check readiness without merging via `heddle ready`).\n\
 \n\
@@ -704,16 +704,17 @@ A `solid` thread and a `materialized` thread are interchangeable from\n\
 the workflow's point of view — `capture`, `land`, `goto`, etc. behave\n\
 identically. The mode only controls bytes-on-disk semantics.\n\
 \n\
-# Materialize vs. promote\n\
+# Isolated checkout path\n\
 \n\
-- Choose a workspace mode at `heddle start` time: pass `--workspace\n\
-  materialized` (or rely on `auto`) when you want real bytes on disk\n\
-  from the start.\n\
-- `heddle thread promote <name> --path <dir>` upgrades an existing\n\
-  thread to an isolated materialized checkout at a chosen path. Use it when a thread\n\
-  that started lightweight (`virtualized`, or no on-disk checkout)\n\
-  needs to become a real working tree — for example, to hand it to a\n\
-  tool that can't read through the mount.\n\
+- Use `heddle start <name> --path <dir>` when you want an isolated\n\
+  checkout. It creates the thread ref and materializes the checkout in\n\
+  one step.\n\
+- Advanced split form: `heddle thread create <name>` creates only the\n\
+  ref, and `heddle thread promote <name> --path <dir>` materializes it\n\
+  later. Use this only when you intentionally need to create the ref\n\
+  now and materialize the checkout later.\n\
+- `--workspace` on `heddle start` selects byte storage for that checkout;\n\
+  it is not a separate workflow path.\n\
 \n\
 # Sync: stale\n\
 \n\
