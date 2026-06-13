@@ -228,7 +228,10 @@ pub fn parse_git_ref(ref_name: &str) -> Option<ParsedGitRef<'_>> {
         // real remote-tracking branch. A remote literally named `git` collides
         // with the local sentinel ([`REMOTE_NAME_FOR_LOCAL_GIT_REPO`]); aliasing
         // it onto local refs would make remote-tracking branches
-        // indistinguishable from `refs/heads/*`, so it is rejected here —
+        // indistinguishable from `refs/heads/*`. Such a remote is already
+        // rejected by the `RefSpec::new` validation at the top of this function
+        // (`validate_refspec_ref` → `reject_reserved_git_remote_name`), so by the
+        // time we reach this branch `remote` is guaranteed not to collide —
         // matching jj's parser and the sentinel ownership contract.
         (name != "HEAD").then_some(ParsedGitRef {
             kind: GitRefKind::Branch,
