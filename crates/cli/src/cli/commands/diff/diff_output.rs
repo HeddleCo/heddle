@@ -1443,7 +1443,7 @@ mod tests {
     use super::{
         SIGNATURE_CHANGE_SEPARATOR, aligned_added_tokens, group_semantic_changes, paint_line,
         paint_signature_change_item_lines, quote_path_for_patch, render_diff_patch,
-        signature_change_display_segments,
+        render_diff_patch_bytes, signature_change_display_segments,
     };
     use crate::cli::commands::diff::diff_types::{
         DiffOutput, FileChange, FileEolState, LineDiff, SemanticChangeEntry, change_line_counts,
@@ -1462,6 +1462,98 @@ mod tests {
 
     fn diff_output_with(changes: Vec<FileChange>) -> DiffOutput {
         DiffOutput::new(None, None, changes, None, None, None)
+    }
+
+    #[cfg(unix)]
+    fn hermetic_git_command(dir: &std::path::Path, args: &[&str]) -> std::process::Command {
+        let mut command = std::process::Command::new("git");
+        command
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "Heddle Test")
+            .env("GIT_AUTHOR_EMAIL", "heddle@example.com")
+            .env("GIT_COMMITTER_NAME", "Heddle Test")
+            .env("GIT_COMMITTER_EMAIL", "heddle@example.com");
+        command
+    }
+
+    #[cfg(unix)]
+    fn hermetic_git(dir: &std::path::Path, args: &[&str]) {
+        let status = hermetic_git_command(dir, args)
+            .status()
+            .unwrap_or_else(|err| panic!("git {args:?} should spawn: {err}"));
+        assert!(status.success(), "git {args:?} should succeed");
+    }
+
+    #[cfg(unix)]
+    fn pipe_git_apply(dir: &std::path::Path, args: &[&str], patch: &[u8]) -> std::process::Output {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        let mut child = hermetic_git_command(dir, args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|err| panic!("git {args:?} should spawn: {err}"));
+        child.stdin.as_mut().unwrap().write_all(patch).unwrap();
+        child
+            .wait_with_output()
+            .unwrap_or_else(|err| panic!("git {args:?} should finish: {err}"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn render_diff_patch_bytes_applies_non_utf8_symlink_target_byte_exactly() {
+        use std::os::unix::ffi::OsStrExt;
+
+        use crate::cli::commands::diff::diff_types::SymlinkChange;
+
+        let target = b"target-\xff\xfe";
+        let change = FileChange {
+            path: "linky".to_string(),
+            kind: "added".to_string(),
+            mode: Some(FileMode::Symlink),
+            symlink: Some(SymlinkChange {
+                old: None,
+                new: Some(target.to_vec()),
+            }),
+            ..Default::default()
+        };
+        let patch = render_diff_patch_bytes(&diff_output_with(vec![change]));
+        assert!(
+            patch.windows(target.len()).any(|window| window == target),
+            "patch must carry the raw non-UTF-8 target bytes:\n{}",
+            String::from_utf8_lossy(&patch)
+        );
+
+        let scratch = tempfile::TempDir::new().unwrap();
+        hermetic_git(scratch.path(), &["init", "-q"]);
+        hermetic_git(scratch.path(), &["checkout", "-q", "-b", "main"]);
+
+        let check = pipe_git_apply(scratch.path(), &["apply", "--check"], &patch);
+        assert!(
+            check.status.success(),
+            "git apply --check rejected patch;\nstderr={}\npatch=\n{}",
+            String::from_utf8_lossy(&check.stderr),
+            String::from_utf8_lossy(&patch)
+        );
+        let applied = pipe_git_apply(scratch.path(), &["apply"], &patch);
+        assert!(
+            applied.status.success(),
+            "git apply rejected patch;\nstderr={}\npatch=\n{}",
+            String::from_utf8_lossy(&applied.stderr),
+            String::from_utf8_lossy(&patch)
+        );
+
+        let applied_target = std::fs::read_link(scratch.path().join("linky")).unwrap();
+        assert_eq!(
+            applied_target.as_os_str().as_bytes(),
+            target,
+            "applied symlink target must be byte-exact"
+        );
     }
 
     /// A mode-only modify (exec-bit flip, no content change) must render
