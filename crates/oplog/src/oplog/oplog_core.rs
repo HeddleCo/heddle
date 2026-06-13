@@ -17,20 +17,10 @@ use super::{
     oplog_backend::OpLogBackend,
     oplog_types::{
         ConditionalCommitOutcome, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
-        isolation_keys_for_record,
+        is_transaction_commit, is_transaction_commit_for, isolation_keys_for_record,
     },
     packed_oplog::{PackedOpLog, PackedOpLogIndex},
 };
-
-/// A `TransactionCommit` marker carries no user-facing operation: it is the
-/// atomic commit sentinel, not a forward op. The undo/redo eligibility scans
-/// ignore it so a record-less transaction (e.g. an `undo`/`redo` whose commit
-/// batch holds only the marker) is never itself selected as an undoable or
-/// redoable unit. A batch with at least one *non-marker* entry (the common
-/// `[op, …, TransactionCommit]` shape) still qualifies on that entry.
-fn is_transaction_commit(op: &OpRecord) -> bool {
-    matches!(op, OpRecord::TransactionCommit { .. })
-}
 
 /// Operation log for tracking operations and enabling undo.
 pub struct OpLog {
@@ -302,13 +292,10 @@ impl OpLog {
 
         let recent = index.collect_batches_scoped(recent_window, |_| true, scope)?;
         if recent.iter().any(|batch| {
-            batch.entries.iter().any(|entry| {
-                matches!(
-                    &entry.operation,
-                    OpRecord::TransactionCommit { transaction_id: id, .. }
-                        if id == transaction_id
-                )
-            })
+            batch
+                .entries
+                .iter()
+                .any(|entry| is_transaction_commit_for(&entry.operation, transaction_id))
         }) {
             return Ok(None);
         }
@@ -445,7 +432,6 @@ impl OpLog {
             .unwrap()
             .committed_batch_records(transaction_id)
     }
-
 
     fn update_batch_undone_state(&self, batch: &OpBatch, undone: bool) -> Result<OpBatch> {
         let _lock = self.write_lock()?;

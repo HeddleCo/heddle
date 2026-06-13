@@ -605,7 +605,7 @@ impl PackedOpLogIndex {
         Ok(batch
             .entries
             .into_iter()
-            .filter(|entry| !matches!(entry.operation, OpRecord::TransactionCommit { .. }))
+            .filter(|entry| !super::oplog_types::is_transaction_commit(&entry.operation))
             .map(|entry| entry.operation)
             .collect())
     }
@@ -890,7 +890,7 @@ impl PackedOpLogIndex {
             let mut cursor =
                 Cursor::new(&bytes[*offset as usize..self.footer.entry_data_end as usize]);
             let entry = parse_entry_with_schema(&mut cursor, self.record_schema()?)?;
-            if !matches!(entry.operation, OpRecord::TransactionCommit { .. }) {
+            if !super::oplog_types::is_transaction_commit(&entry.operation) {
                 return Err(HeddleError::InvalidObject(
                     "oplog transaction directory references a non-commit entry".to_string(),
                 ));

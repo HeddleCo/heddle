@@ -327,6 +327,29 @@ pub enum OpRecord {
     },
 }
 
+/// True when `record` is the atomic transaction commit marker.
+///
+/// A `TransactionCommit` marker carries no user-facing operation: it is the
+/// atomic commit sentinel, not a forward op. Undo/redo eligibility scans ignore
+/// it so a record-less transaction is never itself selected as an undoable or
+/// redoable unit. A batch with at least one non-marker entry still qualifies on
+/// that entry.
+pub fn is_transaction_commit(record: &OpRecord) -> bool {
+    matches!(record, OpRecord::TransactionCommit { .. })
+}
+
+/// True when `record` is the atomic transaction commit marker for
+/// `transaction_id`.
+pub fn is_transaction_commit_for(record: &OpRecord, transaction_id: &str) -> bool {
+    matches!(
+        record,
+        OpRecord::TransactionCommit {
+            transaction_id: id,
+            ..
+        } if id == transaction_id
+    )
+}
+
 /// Optional ThreadManager record snapshots captured around a [`ThreadUpdate`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadUpdateSnapshots {
@@ -965,7 +988,7 @@ impl OpBatch {
             && self
                 .entries
                 .iter()
-                .all(|entry| matches!(entry.operation, OpRecord::TransactionCommit { .. }))
+                .all(|entry| is_transaction_commit(&entry.operation))
     }
 }
 
