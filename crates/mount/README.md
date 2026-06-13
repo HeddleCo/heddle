@@ -165,11 +165,10 @@ that drives the 2-day milestone.
 
 The FSKit shell needs:
 
-1. **macOS 15.4+** at runtime. The Swift adapter compiles against
-   the 14.0 SDK and weak-links FSKit, so the build works on older
-   SDKs too — but `mount_background` will fail at runtime on
-   anything below 15.4. Use `FSKitShell::is_runtime_available()`
-   to probe.
+1. **macOS 26.0+** for native FSKit path-backed mounts. The Swift
+   adapter now uses FSKit V2 URL resources, so the CLI falls back
+   to NFS on older macOS releases with a clear notice instead of
+   attempting the native FSKit path.
 
 2. **Xcode command line tools** (`xcode-select --install`). The
    `build.rs` invokes `swiftc` to compile
@@ -203,7 +202,7 @@ The unit tests in `src/fskit/mod.rs` and the smoke test in
 # Unit lifecycle test (no real mount; just constructor + drop)
 cargo test -p mount --features fskit fskit::tests -- --ignored
 
-# Full mount smoke test (requires macOS 15.4 + entitlements)
+# Full mount smoke test (requires macOS 26.0 + entitlements)
 HEDDLE_FSKIT_AVAILABLE=1 \
   cargo test -p mount --features fskit --test fskit_smoke -- --ignored
 ```

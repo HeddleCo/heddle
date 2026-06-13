@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="shell" x1="150" y1="80" x2="840" y2="920" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fbf8f0"/>
+      <stop offset="0.58" stop-color="#eee8db"/>
+      <stop offset="1" stop-color="#d7cdbc"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="170" y1="116" x2="840" y2="900" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.84"/>
+      <stop offset="0.52" stop-color="#b7a996" stop-opacity="0.36"/>
+      <stop offset="1" stop-color="#2a2520" stop-opacity="0.2"/>
+    </linearGradient>
+    <filter id="shadow" x="-16%" y="-14%" width="132%" height="132%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="28" stdDeviation="36" flood-color="#3f372e" flood-opacity="0.22"/>
+    </filter>
+  </defs>
+  <rect width="1024" height="1024" fill="none"/>
+  <rect x="126" y="126" width="772" height="772" rx="172" fill="#f5f0e6" filter="url(#shadow)"/>
+  <rect x="143" y="143" width="738" height="738" rx="156" fill="none" stroke="url(#rim)" stroke-width="18"/>
+  <g transform="translate(228 238)" fill="#15130f">
+    <rect x="0" y="0" width="30" height="548" rx="15"/>
+    <rect x="104" y="0" width="30" height="548" rx="15"/>
+    <rect x="208" y="0" width="30" height="548" rx="15"/>
+    <rect x="312" y="0" width="30" height="548" rx="15"/>
+    <rect x="554" y="0" width="30" height="548" rx="15"/>
+  </g>
+  <g transform="translate(640 238)" fill="#b57945">
+    <rect x="21" y="0" width="9" height="9" rx="4.5"/>
+    <rect x="21" y="34" width="9" height="9" rx="4.5"/>
+    <rect x="21" y="68" width="9" height="9" rx="4.5"/>
+    <rect x="21" y="102" width="9" height="9" rx="4.5"/>
+    <rect x="21" y="136" width="9" height="9" rx="4.5"/>
+    <rect x="0" y="170" width="51" height="9" rx="4.5"/>
+    <rect x="21" y="204" width="9" height="9" rx="4.5"/>
+    <rect x="21" y="238" width="9" height="9" rx="4.5"/>
+    <rect x="0" y="272" width="51" height="9" rx="4.5"/>
+    <rect x="21" y="306" width="9" height="9" rx="4.5"/>
+    <rect x="21" y="340" width="9" height="9" rx="4.5"/>
+    <rect x="21" y="374" width="9" height="9" rx="4.5"/>
+    <rect x="0" y="408" width="51" height="9" rx="4.5"/>
+    <rect x="21" y="442" width="9" height="9" rx="4.5"/>
+    <rect x="21" y="476" width="9" height="9" rx="4.5"/>
+    <rect x="21" y="510" width="9" height="9" rx="4.5"/>
+  </g>
+</svg>

@@ -6,8 +6,9 @@ for a local Developer ID build.
 
 ## Requirements
 
-- macOS 15.4 or newer with Xcode installed. The project deployment target is
-  15.4; newer SDKs are fine as long as APIs above 15.4 stay availability-guarded.
+- macOS 26.0 or newer with Xcode installed. The project deployment target is
+  26.0 because Heddle's native FSKit path mounts use the FSKit V2 URL resource
+  APIs.
 - Apple Developer Program team with the `com.apple.developer.fskit.fsmodule`
   entitlement approved.
 - Developer ID Application certificate in the login keychain.
@@ -42,9 +43,11 @@ cd /path/to/heddle
 
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
-cargo build --release -p heddle-mount --features fskit \
+MACOSX_DEPLOYMENT_TARGET=26.0 CFLAGS="-mmacosx-version-min=26.0" \
+  cargo build --release -p heddle-mount --features fskit \
   --target aarch64-apple-darwin
-cargo build --release -p heddle-mount --features fskit \
+MACOSX_DEPLOYMENT_TARGET=26.0 CFLAGS="-mmacosx-version-min=26.0" \
+  cargo build --release -p heddle-mount --features fskit \
   --target x86_64-apple-darwin
 
 mkdir -p target/release
@@ -79,7 +82,7 @@ xcodebuild archive \
   SKIP_INSTALL=NO \
   ARCHS="arm64 x86_64" \
   ONLY_ACTIVE_ARCH=NO \
-  MACOSX_DEPLOYMENT_TARGET=15.4 \
+  MACOSX_DEPLOYMENT_TARGET=26.0 \
   DEVELOPMENT_TEAM="$HEDDLE_TEAM_ID" \
   CODE_SIGN_STYLE=Manual \
   CODE_SIGN_IDENTITY="$HEDDLE_DEVELOPER_ID" \
@@ -141,20 +144,48 @@ xcrun stapler validate "$APP"
 spctl -a -vvv -t install "$APP"
 ```
 
-## 5. Local install and approval test
+## 5. Build the branded DMG
+
+The DMG window copies the archived product as `Heddle.app`, places the
+Applications symlink, and applies the branded Finder background. The light
+background is the release default; set `HEDDLE_DMG_APPEARANCE=dark` to generate
+the dark variant for review.
+
+```bash
+./dmg/make-dmg.sh "$APP" build/Heddle.dmg
+
+HEDDLE_DMG_APPEARANCE=dark \
+  ./dmg/make-dmg.sh "$APP" build/Heddle-dark.dmg
+```
+
+Verify the generated image before publishing:
+
+```bash
+hdiutil verify build/Heddle.dmg
+codesign --force --sign "$HEDDLE_DEVELOPER_ID" build/Heddle.dmg
+
+xcrun notarytool submit build/Heddle.dmg \
+  --keychain-profile "$HEDDLE_NOTARY_PROFILE" \
+  --wait
+
+xcrun stapler staple build/Heddle.dmg
+spctl -a -vvv -t open --context context:primary-signature build/Heddle.dmg
+```
+
+## 6. Local install and approval test
 
 Install the notarized app into `/Applications`, then force LaunchServices to
 scan it:
 
 ```bash
-sudo rm -rf /Applications/HeddleHost.app
-sudo ditto "$APP" /Applications/HeddleHost.app
+sudo rm -rf /Applications/Heddle.app
+sudo ditto "$APP" /Applications/Heddle.app
 
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Support/lsregister"
-"$LSREGISTER" -f /Applications/HeddleHost.app
+"$LSREGISTER" -f /Applications/Heddle.app
 
 pluginkit -m -p com.apple.fskit.fsmodule | grep sh.heddle.HeddleHost.HeddleFSModule
-open /Applications/HeddleHost.app
+open /Applications/Heddle.app
 ```
 
 Open:

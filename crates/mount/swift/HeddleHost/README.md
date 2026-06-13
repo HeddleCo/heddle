@@ -5,7 +5,7 @@ FSKit module. It exists alongside (not inside) the `heddle` CLI:
 the CLI is platform-agnostic Rust, this project is the per-OS
 surface required by Apple for FSKit.
 
-On macOS 15.4+, FSKit modules ship as **ExtensionKit** extensions
+On macOS 26.0+, Heddle's path-backed FSKit module ships as **ExtensionKit** extensions
 (not the legacy System Extension model). The host app's only job
 is to be a discoverable bundle in `/Applications` so LaunchServices
 can register the embedded `.appex`. The app remains quiet by default: the
@@ -58,12 +58,11 @@ BUILD.md                     ← Manual Mac build/sign/notarize/test recipe
 
 ## Compatibility and build shape
 
-- Host app deployment target: macOS 15.4.
-- HeddleFSModule deployment target: macOS 15.4.
-- Build SDK: macOS 15.4 or newer; do not require unguarded APIs above 15.4.
+- Host app deployment target: macOS 26.0.
+- HeddleFSModule deployment target: macOS 26.0.
+- Build SDK: macOS 26.0 or newer; FSKit V2 URL resources are required for native path-backed mounts.
 - Archive architecture: universal `arm64` + `x86_64`.
-- Tahoe-only code must stay behind `if #available(macOS 26, *)`; the
-  current host UI only uses that guard for Settings URL selection.
+- Macs below macOS 26.0 stay on the CLI's NFS fallback and get a clear notice instead of a broken FSKit prompt.
 - The user-facing Settings path is the compatibility contract:
   `System Settings > General > Login Items & Extensions > File System Extensions`.
   The `x-apple.systempreferences:` anchors are best-effort conveniences and
@@ -81,6 +80,7 @@ Possible results:
 | `Ready` (line starts with `+`) | Runs `mount -t heddle -o t=<thread> <repo> <mp>` via the kernel route |
 | `NeedsApproval` (line starts with `-`) | Prints a setup block with `System Settings → General → Login Items & Extensions → File System Extensions → enable 'Heddle'`, opens System Settings with a version-aware deep link, polls readiness for about 60 seconds, then mounts via FSKit as soon as the probe reports `Ready`; if the timer elapses, falls back to NFS for this run |
 | `NotInstalled` (no line for our ID) | Prints a one-line host-app install hint, then falls back to NFS |
+| `UnsupportedMacOS` (macOS < 26.0) | Prints an older-macOS notice, then falls back to NFS because URL-backed FSKit resources are unavailable |
 | `Unknown` (`pluginkit` failed) | Silent fallback to NFS |
 
 The host app's `ExtensionManager` now uses the same pluginkit signal and polls
@@ -105,7 +105,8 @@ available path per call.
 
 ```bash
 cd ../../../..       # heddle repo root
-cargo build --release -p heddle-mount --features fskit
+MACOSX_DEPLOYMENT_TARGET=26.0 CFLAGS="-mmacosx-version-min=26.0" \
+  cargo build --release -p heddle-mount --features fskit,nfs
 ```
 
 Produces `target/release/libmount.a` (the staticlib the extension
@@ -120,15 +121,17 @@ release build).
 For the Developer ID archive, signing, notarization, and local smoke test,
 follow [`BUILD.md`](BUILD.md). The release archive is universal
 `arm64` + `x86_64` and keeps both app and extension deployment targets at
-macOS 15.4.
+macOS 26.0.
 
-### 3. Install
+### 3. Package or install
 
-Drag `HeddleHost.app` into `/Applications`. LaunchServices scans
-the bundle and registers the embedded `.appex` with the system.
+After notarization, `./dmg/make-dmg.sh "$APP" build/Heddle.dmg` creates the
+branded drag-to-Applications window. You can also install the app directly:
+drag `Heddle.app` into `/Applications`. LaunchServices scans the bundle and
+registers the embedded `.appex` with the system.
 Force-refresh with:
 ```bash
-lsregister -f /Applications/HeddleHost.app
+lsregister -f /Applications/Heddle.app
 # (lsregister lives at /System/Library/Frameworks/CoreServices.framework/\
 #   Versions/A/Frameworks/LaunchServices.framework/Support/lsregister)
 ```
@@ -269,8 +272,8 @@ The eventual `brew install heddleco/heddle/heddle` should:
 
 1. Install `heddle` to `/opt/homebrew/bin/heddle` (or
    `/usr/local/bin` on Intel).
-2. Install `HeddleHost.app` to `/Applications/HeddleHost.app`.
-3. Run `lsregister -f /Applications/HeddleHost.app` in
+2. Install the host app to `/Applications/Heddle.app`.
+3. Run `lsregister -f /Applications/Heddle.app` in
    `post_install` so the extension is discoverable on the first
    `heddle start`.
 
@@ -290,7 +293,7 @@ cask "heddle" do
 
   postflight do
     system_command "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Support/lsregister",
-      args: ["-f", "/Applications/HeddleHost.app"]
+      args: ["-f", "/Applications/Heddle.app"]
   end
 
   uninstall pkgutil: "sh.heddle.HeddleHost"
@@ -298,7 +301,7 @@ end
 ```
 
 The `.pkg` payload contains both `heddle` (CLI) and
-`HeddleHost.app`. Building the pkg + signing + notarizing is the
+the Heddle host app. Building the pkg + signing + notarizing is the
 release-engineering step that depends on:
 
 - Apple Developer Program enrollment ($99/year)

@@ -71,9 +71,9 @@ fn main() {
     // `-emit-object`: produce a .o, not a .swiftmodule.
     // `-static`: emit code for a static lib (no `_swift_FORCE_LOAD_*`
     //   weak refs that need a Swift dylib at runtime).
-    // `-target arm64-apple-macos14.0`: FSKit needs >= 14.0 SDK to
-    //   compile (the actual runtime needs 15.4 — handled at runtime
-    //   via `heddle_fskit_is_available`).
+    // `-target arm64-apple-macos26.0`: Heddle's FSKit path-resource
+    //   mount uses FSKit V2 URL resource APIs, which are available
+    //   from macOS 26.0 in the local SDK.
     // `-import-objc-header`: import the cbindgen-generated bridging
     //   header so Swift's call sites and the C ABI declared in
     //   `c_abi.rs` are co-resolved by the Swift compiler. Note that
@@ -127,8 +127,8 @@ fn main() {
     println!("cargo:rustc-link-search=native={toolchain}");
     println!("cargo:rustc-link-arg=-Wl,-rpath,{toolchain}");
 
-    // FSKit weak-links so a build on 15.0 still loads (the runtime
-    // gate above blocks actual mounts on < 15.4).
+    // FSKit weak-links for non-host binaries. The HeddleHost app
+    // itself ships with a macOS 26.0 deployment target.
     println!("cargo:rustc-link-arg=-weak_framework");
     println!("cargo:rustc-link-arg=FSKit");
     println!("cargo:rustc-link-arg=-framework");
@@ -179,7 +179,7 @@ fn swift_target_triple() -> String {
         "x86_64" => "x86_64",
         other => other,
     };
-    format!("{normalized}-apple-macos14.0")
+    format!("{normalized}-apple-macos26.0")
 }
 
 fn swift_runtime_path() -> String {

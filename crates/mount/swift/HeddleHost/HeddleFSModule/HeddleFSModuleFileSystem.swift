@@ -24,7 +24,7 @@
 // `threadID(from:)` below parses the argv shape FSKit hands us
 // based on `FSActivateOptionSyntax.shortOptions = "t:"` in
 // Info.plist. The `crates/cli/src/cli/commands/mount_lifecycle.rs`
-// macOS path now issues real `mount -t heddle -o t=<thread> …`
+// macOS path now issues real `mount -t heddle -o t=<thread> ...`
 // commands, so this lookup is live.
 
 import CryptoKit
@@ -50,7 +50,13 @@ final class HeddleFSModuleFileSystem: FSUnaryFileSystem,
         // requires the container UUID returned here to MATCH the
         // volume UUID returned by `loadResource`. We derive both
         // from the resource path so they're stable.
-        let id = HeddleFSModuleFileSystem.stableUUID(for: resource)
+        guard let resourceKey = HeddleFSModuleFileSystem.resourceKey(for: resource) else {
+            log.error("probeResource: unsupported FSResource")
+            replyHandler(.notRecognized, nil)
+            return
+        }
+
+        let id = HeddleFSModuleFileSystem.stableUUID(forResourceKey: resourceKey)
         replyHandler(
             .usable(
                 name: "heddle",
@@ -66,12 +72,10 @@ final class HeddleFSModuleFileSystem: FSUnaryFileSystem,
     /// bytes treated as a UUID. Two different repos get different
     /// UUIDs; the same repo opened twice gets the same UUID.
     static func stableUUID(for resource: FSResource) -> UUID {
-        var key = "heddle://unknown"
-        if let pathURL = resource as? FSPathURLResource {
-            key = "heddle://path/\(pathURL.url.path)"
-        } else if let generic = resource as? FSGenericURLResource {
-            key = "heddle://url/\(generic.url.absoluteString)"
-        }
+        stableUUID(forResourceKey: resourceKey(for: resource) ?? "heddle://unsupported")
+    }
+
+    private static func stableUUID(forResourceKey key: String) -> UUID {
         let digest = SHA256.hash(data: Data(key.utf8))
         let bytes = Array(digest.prefix(16))
         return UUID(uuid: (
@@ -92,8 +96,8 @@ final class HeddleFSModuleFileSystem: FSUnaryFileSystem,
         // on it. Per `FSRequiresSecurityScopedPathURLResources=true`
         // in our Info.plist, FSKit hands us a security-scoped URL
         // that the sandbox honors for the duration of the access.
-        guard let resourceURL = repoURL(from: resource) else {
-            log.error("loadResource: resource is not a path URL")
+        guard let resourceURL = Self.repoURL(from: resource) else {
+            log.error("loadResource: resource is not a file URL")
             replyHandler(nil, POSIXError(.EINVAL))
             return
         }
@@ -194,10 +198,22 @@ final class HeddleFSModuleFileSystem: FSUnaryFileSystem,
         return nil
     }
 
+    /// Extract a stable resource key from path-flavoured resources.
+    /// Returns nil for block-device resources we don't support today.
+    private static func resourceKey(for resource: FSResource) -> String? {
+        if let pathURL = resource as? FSPathURLResource {
+            return "heddle://path/\(pathURL.url.path)"
+        }
+        if let generic = resource as? FSGenericURLResource {
+            return "heddle://url/\(generic.url.absoluteString)"
+        }
+        return nil
+    }
+
     /// Extract a filesystem URL from any of the path-flavoured
-    /// `FSResource` subclasses. Returns nil for block-device or
-    /// non-file resources we don't support today.
-    private func repoURL(from resource: FSResource) -> URL? {
+    /// `FSResource` subclasses. Returns nil for block-device,
+    /// non-file, or unsupported resources.
+    private static func repoURL(from resource: FSResource) -> URL? {
         if let pathURL = resource as? FSPathURLResource {
             return pathURL.url
         }

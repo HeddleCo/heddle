@@ -13,6 +13,8 @@
 
 use std::process::Command;
 
+const MIN_NATIVE_FSKIT_MAJOR_VERSION: u32 = 26;
+
 /// Bundle identifier of the embedded FSKit extension. Must match
 /// the `PRODUCT_BUNDLE_IDENTIFIER` on the `HeddleFSModule` target
 /// in `crates/mount/swift/HeddleHost/HeddleHost.xcodeproj`.
@@ -33,14 +35,25 @@ pub enum Readiness {
     /// the System Extension distribution piece. Caller should
     /// fall through to NFS.
     NotInstalled,
-    /// `pluginkit` failed for some other reason (older macOS,
-    /// missing binary, etc.). Treat as NotInstalled.
+    /// The host is below Heddle's native FSKit deployment floor.
+    /// Caller should tell the user and fall through to NFS.
+    UnsupportedMacOS,
+    /// `sw_vers` or `pluginkit` failed for some other reason.
+    /// Treat as NotInstalled.
     Unknown,
 }
 
 /// Probe the system for our FSKit extension's state. Synchronous
 /// — `pluginkit` returns in <100ms on a warm system.
 pub fn probe() -> Readiness {
+    match macos_major_version() {
+        Some(major) if major < MIN_NATIVE_FSKIT_MAJOR_VERSION => {
+            return Readiness::UnsupportedMacOS;
+        }
+        Some(_) => {}
+        None => return Readiness::Unknown,
+    }
+
     // `pluginkit -m -p com.apple.fskit.fsmodule` lists every
     // registered FSKit extension, one per line. Format:
     //     +    sh.heddle.HeddleHost.HeddleFSModule(1.0)
@@ -88,4 +101,40 @@ pub fn setup_hint() -> &'static str {
     "Heddle FSKit extension not enabled.\n\
      Opening System Settings — toggle \"Heddle\" on under \
      File System Extensions, then re-run."
+}
+
+/// One-line notice when a Mac is too old for Heddle's native FSKit
+/// path-resource mount, but can still use the universal NFS fallback.
+pub fn unsupported_macos_hint() -> &'static str {
+    "Heddle native FSKit mounts require macOS 26.0 or newer.\n\
+     Using the NFS fallback for this virtualized workspace."
+}
+
+fn macos_major_version() -> Option<u32> {
+    let output = Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8(output.stdout).ok()?;
+    parse_macos_major_version(&version)
+}
+
+fn parse_macos_major_version(version: &str) -> Option<u32> {
+    version.trim().split('.').next()?.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_macos_major_version;
+
+    #[test]
+    fn parses_macos_major_versions() {
+        assert_eq!(parse_macos_major_version("15.4"), Some(15));
+        assert_eq!(parse_macos_major_version("26.5.1"), Some(26));
+        assert_eq!(parse_macos_major_version(""), None);
+        assert_eq!(parse_macos_major_version("not-a-version"), None);
+    }
 }

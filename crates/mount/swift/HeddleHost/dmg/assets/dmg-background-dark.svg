@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="780" height="480" viewBox="0 0 780 480">
+  <defs>
+    <linearGradient id="char" x1="38" y1="12" x2="730" y2="462" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#171511"/>
+      <stop offset="0.54" stop-color="#0a0908"/>
+      <stop offset="1" stop-color="#27221c"/>
+    </linearGradient>
+    <radialGradient id="ember" cx="0.38" cy="0.2" r="0.84">
+      <stop offset="0" stop-color="#c89560" stop-opacity="0.34"/>
+      <stop offset="0.52" stop-color="#c89560" stop-opacity="0.1"/>
+      <stop offset="1" stop-color="#c89560" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="20"/>
+    </filter>
+  </defs>
+  <rect width="780" height="480" rx="22" fill="url(#char)"/>
+  <rect width="780" height="480" rx="22" fill="url(#ember)"/>
+  <path d="M65 402 C167 374 241 394 321 423 S505 462 690 404" stroke="#c89560" stroke-opacity="0.2" stroke-width="18" fill="none" filter="url(#soft)"/>
+  <g transform="translate(48 40)">
+    <text x="0" y="0" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="14" font-weight="800" letter-spacing="1.8" fill="#f5f1e8">HEDDLE.</text>
+    <text x="0" y="44" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="36" font-weight="800" letter-spacing="0" fill="#f5f1e8">Place Heddle in Applications.</text>
+    <text x="0" y="76" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="18" font-weight="500" letter-spacing="0" fill="#b9ada0">Drag once. macOS registers the file-system extension from there.</text>
+  </g>
+  <g opacity="0.94">
+    <circle cx="218" cy="265" r="88" fill="#f5f1e8" fill-opacity="0.06"/>
+    <circle cx="218" cy="265" r="88" fill="none" stroke="#f5f1e8" stroke-opacity="0.22" stroke-width="1.5"/>
+    <circle cx="218" cy="265" r="108" fill="none" stroke="#c89560" stroke-opacity="0.28" stroke-width="1"/>
+    <circle cx="562" cy="265" r="88" fill="#f5f1e8" fill-opacity="0.05"/>
+    <circle cx="562" cy="265" r="88" fill="none" stroke="#f5f1e8" stroke-opacity="0.22" stroke-width="1.5"/>
+    <circle cx="562" cy="265" r="108" fill="none" stroke="#c89560" stroke-opacity="0.28" stroke-width="1"/>
+  </g>
+  <path d="M303 266 C353 222 414 219 463 258 C491 280 518 285 548 273 M548 273 C541 274 532 273 526 270 M548 273 C544 281 540 287 535 292" fill="none" stroke="#f5f1e8" stroke-opacity="0.75" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M303 266 C353 222 414 219 463 258 C488 278 510 284 535 278" fill="none" stroke="#c89560" stroke-opacity="0.78" stroke-width="1.1" stroke-linecap="round"/>
+  <text x="218" y="394" text-anchor="middle" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="12" font-weight="700" letter-spacing="1.2" fill="#b9ada0">HEDDLE.APP</text>
+  <text x="562" y="394" text-anchor="middle" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="12" font-weight="700" letter-spacing="1.2" fill="#b9ada0">APPLICATIONS</text>
+  <g transform="translate(645 52)" opacity="0.96">
+    <rect x="0" y="0" width="7" height="70" rx="3.5" fill="#f5f1e8"/>
+    <rect x="16" y="0" width="7" height="70" rx="3.5" fill="#f5f1e8"/>
+    <rect x="32" y="0" width="7" height="70" rx="3.5" fill="#f5f1e8"/>
+    <rect x="48" y="0" width="7" height="70" rx="3.5" fill="#f5f1e8"/>
+    <g transform="translate(65 0)" fill="#c89560">
+      <rect x="5" y="0" width="2.4" height="2.4" rx="1.2"/>
+      <rect x="5" y="4.5" width="2.4" height="2.4" rx="1.2"/>
+      <rect x="5" y="9" width="2.4" height="2.4" rx="1.2"/>
+      <rect x="5" y="13.5" width="2.4" height="2.4" rx="1.2"/>
+      <rect x="5" y="18" width="2.4" height="2.4" rx="1.2"/>
+      <rect x="0" y="22.5" width="12.5" height="2.4" rx="1.2"/>
+      <rect x="5" y="27" width="2.4" height="2.4" rx="1.2"/>
+      <rect x="5" y="31.5" width="2.4" height="2.4" rx="1.2"/>
+      <rect x="0" y="36" width="12.5" height="2.4" rx="1.2"/>
+      <rect x="5" y="40.5" width="2.4" height="2.4" rx="1.2"/>
+      <rect x="5" y="45" width="2.4" height="2.4" rx="1.2"/>
+      <rect x="5" y="49.5" width="2.4" height="2.4" rx="1.2"/>
+      <rect x="0" y="54" width="12.5" height="2.4" rx="1.2"/>
+      <rect x="5" y="58.5" width="2.4" height="2.4" rx="1.2"/>
+      <rect x="5" y="63" width="2.4" height="2.4" rx="1.2"/>
+      <rect x="5" y="67.5" width="2.4" height="2.4" rx="1.2"/>
+    </g>
+    <rect x="94" y="0" width="7" height="70" rx="3.5" fill="#f5f1e8"/>
+  </g>
+</svg>

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// On macOS 15.4+, FSKit modules ship as ExtensionKit extensions
+// On macOS 26.0+, Heddle's path-backed FSKit module ships as an
+// ExtensionKit extension
 // (productType `extensionkit-extension`, marked by
 // `EXAppExtensionAttributes` in Info.plist). Unlike legacy System
 // Extensions, ExtensionKit doesn't expose a programmatic
@@ -30,6 +31,7 @@ import Observation
 @Observable
 final class ExtensionManager {
     nonisolated static let bundleIdentifier = "sh.heddle.HeddleHost.HeddleFSModule"
+    nonisolated static let installAppName = "Heddle.app"
     nonisolated static let settingsPath =
         "System Settings > General > Login Items & Extensions > File System Extensions"
 
@@ -48,7 +50,15 @@ final class ExtensionManager {
         case devLocation(String)
     }
 
+    enum InstallState: Equatable {
+        case idle
+        case copying
+        case installed(String)
+        case failed(String)
+    }
+
     private(set) var status: Status = .unregistered
+    private(set) var installState: InstallState = .idle
     private(set) var lastMessage: String = ""
     private(set) var lastRefreshed: Date?
 
@@ -58,14 +68,16 @@ final class ExtensionManager {
     init() {
         refresh()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 self?.refresh()
             }
         }
     }
 
     deinit {
-        pollTimer?.invalidate()
+        MainActor.assumeIsolated {
+            pollTimer?.invalidate()
+        }
     }
 
     var statusLabel: String {
@@ -88,9 +100,9 @@ final class ExtensionManager {
         case .registeredDisabled:
             return "Heddle is installed but macOS has it turned off. Toggle the Heddle row on in File System Extensions."
         case .unregistered:
-            return "macOS has not registered the bundled FSKit module yet. Confirm HeddleHost.app is in /Applications, then refresh LaunchServices."
+            return "macOS has not registered the bundled FSKit module yet. Confirm Heddle.app is in /Applications, then refresh LaunchServices."
         case .devLocation(let path):
-            return "This copy is running from \(path). Move HeddleHost.app to /Applications so macOS can register the embedded extension."
+            return "This copy is running from \(path). Move Heddle.app to /Applications so macOS can register the embedded extension."
         }
     }
 
@@ -142,6 +154,55 @@ final class ExtensionManager {
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
+    /// Copy this host app into /Applications. This makes the embedded
+    /// ExtensionKit FSKit module discoverable by LaunchServices.
+    func installToApplications(from sourceURL: URL? = nil) {
+        guard installState != .copying else {
+            return
+        }
+
+        let source = (sourceURL ?? Bundle.main.bundleURL).standardizedFileURL
+
+        guard source.pathExtension == "app" else {
+            noteInstallFailure("Drop the Heddle app here, not \(source.lastPathComponent).")
+            return
+        }
+
+        if let bundleIdentifier = Bundle(url: source)?.bundleIdentifier,
+           bundleIdentifier != Bundle.main.bundleIdentifier {
+            noteInstallFailure("Drop the Heddle app here, not \(source.lastPathComponent).")
+            return
+        }
+
+        installState = .copying
+        lastMessage = "Copying \(Self.installAppName) to /Applications..."
+
+        Task {
+            let result = await Self.copyAppToApplications(sourceURL: source)
+
+            switch result {
+            case .success(let destination):
+                installState = .installed(destination.path)
+                lastMessage =
+                    "Copied \(Self.installAppName) to /Applications. " +
+                    "Open that copy so macOS can register the embedded FSKit extension."
+                NSWorkspace.shared.activateFileViewerSelecting([destination])
+                refresh()
+            case .failure(let error):
+                noteInstallFailure(
+                    "Could not copy automatically: \(error.localizedDescription). " +
+                    "Reveal the app in Finder and drag it to /Applications."
+                )
+                revealAppInFinder()
+            }
+        }
+    }
+
+    func noteInstallFailure(_ message: String) {
+        installState = .failed(message)
+        lastMessage = message
+    }
+
     private func apply(probe: PluginKitProbe, bundlePath: String) {
         lastRefreshed = Date()
 
@@ -156,12 +217,13 @@ final class ExtensionManager {
             if isLikelyDevLocation(bundlePath) {
                 status = .devLocation(bundlePath)
                 lastMessage =
-                    "Drag HeddleHost.app into /Applications, relaunch it from there, " +
+                    installState.installStatusMessage ??
+                    "Drag Heddle.app into /Applications, relaunch it from there, " +
                     "then open System Settings."
             } else {
                 status = .unregistered
                 lastMessage =
-                    "pluginkit did not list \(Self.bundleIdentifier). Run lsregister for /Applications/HeddleHost.app if the app was just copied."
+                    "pluginkit did not list \(Self.bundleIdentifier). Run lsregister for /Applications/Heddle.app if the app was just copied."
             }
         case .failed(let message):
             if isLikelyDevLocation(bundlePath) {
@@ -219,6 +281,35 @@ final class ExtensionManager {
         }
 
         return true
+    }
+
+    private nonisolated static func copyAppToApplications(sourceURL: URL) async -> Result<URL, Error> {
+        await Task.detached(priority: .userInitiated) {
+            let fileManager = FileManager.default
+            let applicationsURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+            let destinationURL = applicationsURL.appendingPathComponent(
+                installAppName,
+                isDirectory: true
+            )
+
+            do {
+                let sourcePath = sourceURL.resolvingSymlinksInPath().path
+                let destinationPath = destinationURL.resolvingSymlinksInPath().path
+
+                if sourcePath == destinationPath {
+                    return .success(destinationURL)
+                }
+
+                if fileManager.fileExists(atPath: destinationURL.path) {
+                    try fileManager.removeItem(at: destinationURL)
+                }
+
+                try fileManager.copyItem(at: sourceURL, to: destinationURL)
+                return .success(destinationURL)
+            } catch {
+                return .failure(error)
+            }
+        }.value
     }
 
     private nonisolated static func runPluginKitProbe() async -> PluginKitProbe {
@@ -281,6 +372,21 @@ final class ExtensionManager {
 
 private struct SettingsDestination {
     let url: URL?
+}
+
+private extension ExtensionManager.InstallState {
+    var installStatusMessage: String? {
+        switch self {
+        case .idle:
+            return nil
+        case .copying:
+            return "Copying Heddle.app to /Applications..."
+        case .installed(let path):
+            return "Copied Heddle.app to \(path). Open that copy so macOS can register the embedded FSKit extension."
+        case .failed(let message):
+            return message
+        }
+    }
 }
 
 private enum PluginKitProbe: Sendable {
