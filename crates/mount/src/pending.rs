@@ -24,28 +24,25 @@
 //!   the marker exists so a witness can prove "no entry at this id"
 //!   for the `BrandedPending::witness_*` constructors that need it.
 //!
-//! # What this module is **not**
+//! # Where core.rs uses it
 //!
-//! Substrate-only — the witness-gated method signatures and the
-//! callsite retrofits that fix the four r11 P1 bugs land in the
-//! follow-up issues (heddle#209/#210/#211/#212). Nothing in
-//! [`crate::core`] consumes the substrate in this PR; every existing
-//! method keeps its current signature. The substrate is `pub(crate)`-
-//! visible from `core.rs` but unused there.
+//! The substrate is wired into [`crate::core`] today:
+//!
+//! * `unlink_entry` and rename-over both call
+//!   [`BrandedPending::transition_to_orphan`] before retiring a
+//!   path-level binding.
+//! * `MountInner::invalidate` calls
+//!   [`BrandedPending::kernel_forget_inode`] before dropping
+//!   inode-side hot bytes.
+//! * `MountInner::capture` calls [`Pending::drain_for_capture`]
+//!   after the new tree is written.
 //!
 //! See [`docs/design/mount-pending-api-contracts.md`][doc] §2.2.1 for
 //! the witness-type idiom rationale and §3 for the bug-by-bug
-//! impossibility analysis the retrofits will realise.
+//! impossibility analysis the integrated retrofits enforce.
 //!
 //! [doc]: ../../../docs/design/mount-pending-api-contracts.md
 //! [posix]: ../../../docs/design/mount-posix-semantics.md
-
-// The substrate is intentionally unused by `core.rs` in this PR — the
-// callsite retrofits that consume it land in heddle#209 / #210 / #211
-// / #212. Test coverage exercises every witness constructor, so the
-// types are not dead, but lints don't see through `#[cfg(test)]`-only
-// use sites.
-#![allow(dead_code)]
 
 use std::marker::PhantomData;
 
@@ -68,8 +65,7 @@ pub trait Lifecycle: sealed::Sealed {}
 /// Marker: `Live { open_count >= 1 }`.
 ///
 /// At least one kernel fd holds this NodeId. The only state from
-/// which `transition_to_orphan` is sound (closing the r11 #1 bug
-/// once the retrofit lands).
+/// which `transition_to_orphan` is sound.
 #[derive(Debug, Clone, Copy)]
 #[doc(hidden)]
 pub struct LiveNonZero;
@@ -395,11 +391,11 @@ impl<'p, 'brand> BrandedPending<'p, 'brand> {
     /// borrowed witness branded to this [`BrandedPending`]'s `'brand`
     /// and returns its NodeId without doing anything else.
     ///
-    /// Retrofit issues (heddle#209/#210/#211/#212) will introduce
-    /// the real witness-gated transitions, which need to mutate
-    /// `self` and consume the witness; those signatures live there,
-    /// not here. For the substrate PR we only need a non-consuming
-    /// brand-matching method so the
+    /// The integrated witness-gated transitions fold their witness
+    /// checks into the mutating call because the original two-step
+    /// consume shape does not compile without weakening the borrow
+    /// invariant. This helper remains a non-consuming brand-matching
+    /// method so the
     /// [`crate::__pending_substrate_for_doctest`] `compile_fail`
     /// proof can demonstrate that a witness minted under a different
     /// `with_brand` closure fails to type-check (the brand lifetimes
@@ -409,10 +405,9 @@ impl<'p, 'brand> BrandedPending<'p, 'brand> {
     /// keeps the proof orthogonal to the separate borrow-checker
     /// constraint introduced by the witness's `_borrow:
     /// PhantomData<&'p mut ()>` field — the consume pattern
-    /// `p.transition_to_orphan(w)` that retrofit issues will need
-    /// is a pre-existing substrate design question (the `'p` field
-    /// makes it not compile today; see the spike doc §2.2.1) and
-    /// isn't this PR's scope.
+    /// `p.transition_to_orphan(w)` remains a spike-doc shape rather
+    /// than the live API (the `'p` field makes it not compile today;
+    /// see the spike doc §2.2.1).
     #[doc(hidden)]
     pub fn peek_witness<S: Lifecycle>(&self, w: &Witness<'_, 'brand, S>) -> u64 {
         let _ = self;
@@ -475,10 +470,9 @@ impl<'p, 'brand> BrandedPending<'p, 'brand> {
     /// `None` for any other state, including `Live { open_count == 0 }`,
     /// any `Orphan`, and `Released` (no entry). This is the
     /// constructor that closes
-    /// [r11 #1][doc] — the
-    /// `transition_to_orphan` retrofit will accept only
-    /// [`Witness<LiveNonZero>`], so a `LiveZero` node cannot be
-    /// orphaned by construction.
+    /// [r11 #1][doc]: the live `transition_to_orphan` path performs
+    /// this same `LiveNonZero` check before mutating state, so a
+    /// `LiveZero` node cannot be orphaned by construction.
     ///
     /// [doc]: ../../../docs/design/mount-pending-api-contracts.md
     #[doc(hidden)]
@@ -608,10 +602,10 @@ impl<'p, 'brand> BrandedPending<'p, 'brand> {
     /// The spike doc ([§2.3][doc]) sketched the API as
     /// `kernel_forget_inode(&mut self, w: KernelForgetWitness<'_, 'brand>) -> ...`,
     /// with the caller pre-minting `w` via
-    /// [`Self::witness_kernel_forget`] and threading it in. heddle#209
-    /// (the analogous `transition_to_orphan` retrofit) found — and
-    /// this issue confirms — that the two-step shape does not compile
-    /// against the substrate: [`KernelForgetWitness`]'s
+    /// [`Self::witness_kernel_forget`] and threading it in. The
+    /// analogous `transition_to_orphan` retrofit found the same
+    /// constraint: the two-step shape does not compile against the
+    /// substrate because [`KernelForgetWitness`]'s
     /// `_borrow: PhantomData<&'p mut ()>` field is invariant over
     /// `'p`, so the prior `&mut BrandedPending` reborrow that minted
     /// `w` cannot shrink to admit the second `&mut self` call that
@@ -783,6 +777,7 @@ mod tests {
             fn some() {}
         }
         impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+        // Sentinel type is named only in the competing impl below.
         #[allow(dead_code)]
         struct Invalid;
         impl<T: ?Sized + Send> AmbiguousIfSend<Invalid> for T {}
@@ -799,6 +794,7 @@ mod tests {
             fn some() {}
         }
         impl<T: ?Sized> AmbiguousIfSync<()> for T {}
+        // Sentinel type is named only in the competing impl below.
         #[allow(dead_code)]
         struct Invalid;
         impl<T: ?Sized + Sync> AmbiguousIfSync<Invalid> for T {}
@@ -868,8 +864,7 @@ mod tests {
     /// [`crate::__pending_substrate_for_doctest`]. Cross-instance
     /// is the *only* shape the substrate proves compile-rejects
     /// here; the same-instance consume pattern
-    /// (`p.transition_to_orphan(w)`) that retrofit issues
-    /// (heddle#209-#212) want is a separate spike-doc question
+    /// (`p.transition_to_orphan(w)`) remains a separate spike-doc question
     /// — the witness's `_borrow: PhantomData<&'p mut ()>` field
     /// already prevents it independent of brand. Verify the
     /// cross-instance positive path: `peek_witness` on a *third*
