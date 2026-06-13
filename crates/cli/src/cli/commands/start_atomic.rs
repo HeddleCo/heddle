@@ -636,6 +636,11 @@ pub(crate) struct StartThread {
     pub record: Thread,
 }
 
+pub(crate) struct StartThreadOutput {
+    pub linked: Vec<String>,
+    pub fskit_readiness: Option<mount_lifecycle::FskitReadinessReport>,
+}
+
 impl StartThread {
     /// Create the materialization target directory as the FIRST transaction
     /// step, so it lands on the rewind ledger and a self-created dir is removed
@@ -946,7 +951,10 @@ impl StartThread {
     /// Establish the FUSE mount for a virtualized thread, registering an unmount
     /// inverse so an outer failure tears the mount down (it would otherwise
     /// outlive the failed start — the daemon owns it across process exit).
-    fn stage_mount(&self, tx: &mut Tx<'_>) -> HeddleResult<()> {
+    fn stage_mount(
+        &self,
+        tx: &mut Tx<'_>,
+    ) -> HeddleResult<Option<mount_lifecycle::FskitReadinessReport>> {
         let repo = tx.repo();
         let root = repo.root().to_path_buf();
         let abs = self.abs_path.clone();
@@ -986,7 +994,7 @@ impl StartThread {
 }
 
 impl AtomicMutation for StartThread {
-    type Output = Vec<String>;
+    type Output = StartThreadOutput;
 
     fn transaction_id(&self) -> String {
         self.transaction_id.clone()
@@ -1004,7 +1012,7 @@ impl AtomicMutation for StartThread {
         Ok(keys)
     }
 
-    fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<Vec<String>>> {
+    fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<StartThreadOutput>> {
         let mut oplog: Vec<OpRecord> = Vec::new();
 
         // The single [`TargetDir`] claim, decided atomically by
@@ -1030,6 +1038,7 @@ impl AtomicMutation for StartThread {
         self.stage_ref(tx, &mut oplog)?;
 
         // 2. Mode-specific materialization.
+        let mut fskit_readiness = None;
         let linked = match self.thread_mode {
             ThreadMode::Solid | ThreadMode::Materialized => {
                 self.stage_checkout(tx, Rc::clone(&target_claim), Rc::clone(&checkout_outcome))?;
@@ -1055,7 +1064,7 @@ impl AtomicMutation for StartThread {
                 }
             }
             ThreadMode::Virtualized => {
-                self.stage_mount(tx)?;
+                fskit_readiness = self.stage_mount(tx)?;
                 Vec::new()
             }
         };
@@ -1063,7 +1072,13 @@ impl AtomicMutation for StartThread {
         // 3. Thread record (sole record under the name), via converge_records.
         self.stage_record(tx)?;
 
-        Ok(StagedCommit::new(linked, oplog))
+        Ok(StagedCommit::new(
+            StartThreadOutput {
+                linked,
+                fskit_readiness,
+            },
+            oplog,
+        ))
     }
 }
 

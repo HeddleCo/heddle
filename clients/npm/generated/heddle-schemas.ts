@@ -985,6 +985,13 @@ export interface FetchSchema {
   tags_included?: boolean | null;
 }
 
+export interface FsKitReadinessSchema {
+  action: string;
+  backend: string;
+  settings_url?: string | null;
+  state: string;
+}
+
 export interface FsckErrorSchema {
   kind: string;
   message: string;
@@ -1838,6 +1845,7 @@ export interface ShowSchema {
 export interface StartSchema {
   action?: string | null;
   execution_path?: string | null;
+  fskit_readiness?: FsKitReadinessSchema | null;
   idempotency_status?: string | null;
   message: string;
   name: string;
@@ -2121,6 +2129,7 @@ export interface ThreadCleanupSkippedSchema {
 export interface ThreadCreateSchema {
   action?: string | null;
   execution_path?: string | null;
+  fskit_readiness?: FsKitReadinessSchema | null;
   idempotency_status?: string | null;
   message: string;
   name: string;
@@ -2306,6 +2315,7 @@ export interface ThreadRefreshSchema {
 export interface ThreadRenameSchema {
   action?: string | null;
   execution_path?: string | null;
+  fskit_readiness?: FsKitReadinessSchema | null;
   idempotency_status?: string | null;
   message: string;
   name: string;
@@ -2470,6 +2480,7 @@ export interface ThreadSummarySchema {
 export interface ThreadSwitchSchema {
   action?: string | null;
   execution_path?: string | null;
+  fskit_readiness?: FsKitReadinessSchema | null;
   idempotency_status?: string | null;
   message: string;
   name: string;

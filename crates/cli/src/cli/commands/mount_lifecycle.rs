@@ -18,6 +18,23 @@
 use std::path::Path;
 
 use anyhow::anyhow;
+use serde::Serialize;
+
+/// Machine-readable FSKit readiness detail surfaced by `heddle start
+/// --workspace virtualized --output json` on macOS when the CLI took an
+/// FSKit-specific decision.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct FskitReadinessReport {
+    pub state: &'static str,
+    pub backend: &'static str,
+    pub action: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings_url: Option<&'static str>,
+}
+
+pub(crate) struct SpawnedMount {
+    pub fskit_readiness: Option<FskitReadinessReport>,
+}
 
 /// Anchored error for any build that has no native mount adapter
 /// active. Surfaced when none of (linux+fuse, macos+fskit,
@@ -112,7 +129,7 @@ mod linux {
         repo: Repository,
         thread_id: &str,
         mountpoint: &Path,
-    ) -> Result<std::sync::Arc<MountHandle>> {
+    ) -> Result<super::SpawnedMount> {
         std::fs::create_dir_all(mountpoint)
             .with_context(|| format!("create mount point {}", mountpoint.display()))?;
 
@@ -149,7 +166,9 @@ mod linux {
             mountpoint: mountpoint.to_path_buf(),
         });
         REGISTRY.insert(thread_id.to_string(), std::sync::Arc::clone(&handle));
-        Ok(handle)
+        Ok(super::SpawnedMount {
+            fskit_readiness: None,
+        })
     }
 
     /// Resolve the worker binary, then drive
@@ -186,6 +205,7 @@ mod macos {
         path::{Path, PathBuf},
         process::Command,
         sync::Mutex,
+        time::{Duration, Instant},
     };
 
     use anyhow::{Context, Result, anyhow};
@@ -194,9 +214,27 @@ mod macos {
         fskit::readiness::{self, Readiness},
     };
     use repo::Repository;
-    use tracing::{info, warn};
+    use tracing::{debug, info, warn};
 
-    use crate::util::OnceMap;
+    use crate::{cli::commands::mount_lifecycle::FskitReadinessReport, util::OnceMap};
+
+    const MIN_FSKIT_MACOS_MAJOR: u64 = 15;
+    const MIN_FSKIT_MACOS_MINOR: u64 = 4;
+    const SETTINGS_PATH: &str = "System Settings → General → Login Items & Extensions → File System Extensions → enable 'Heddle'";
+    const SETTINGS_LOGIN_ITEMS_URL: &str =
+        "x-apple.systempreferences:com.apple.LoginItems-Settings.extension";
+    const SETTINGS_SEQUOIA_FILE_EXTENSIONS_URL: &str =
+        "x-apple.systempreferences:com.apple.LoginItems-Settings.extension?Extensions";
+    const FSKIT_INSTALL_HINT: &str = "FSKit fast path available — install the host app: brew install --cask heddle (or download from https://github.com/HeddleCo/heddle/releases)";
+    const FSKIT_POLL_INTERVAL: Duration = Duration::from_millis(1_500);
+    const FSKIT_POLL_CAP: Duration = Duration::from_secs(60);
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct MacOsVersion {
+        major: u64,
+        minor: u64,
+        patch: u64,
+    }
 
     /// Which backend is actually live behind a [`MountHandle`] on
     /// macOS.
@@ -282,47 +320,93 @@ mod macos {
 
     static REGISTRY: OnceMap<String, std::sync::Arc<MountHandle>> = OnceMap::new();
 
-    /// Mount `thread_id` into `mountpoint`. Probes FSKit
-    /// readiness first; if the extension is enabled, mounts via
-    /// `mount -t heddle`. Otherwise falls back to the NFS shell
-    /// — and on the `NeedsApproval` path, opens System Settings
-    /// + prints a one-line hint so the user can enable the
-    /// extension for next time.
+    /// Mount `thread_id` into `mountpoint`. On macOS 15.4+ this
+    /// probes FSKit readiness first; if the extension is enabled,
+    /// mounts via `mount -t heddle`. If the extension is installed
+    /// but disabled, the CLI opens System Settings and polls briefly
+    /// so the moment the user enables it this same start continues
+    /// through FSKit. Other states fall back to NFS.
     pub fn spawn_mount_for_thread(
         repo: Repository,
         thread_id: &str,
         mountpoint: &Path,
-    ) -> Result<std::sync::Arc<MountHandle>> {
+    ) -> Result<super::SpawnedMount> {
         std::fs::create_dir_all(mountpoint)
             .with_context(|| format!("create mount point {}", mountpoint.display()))?;
 
         let root = repo.root().to_path_buf();
-        let session = match readiness::probe() {
-            Readiness::Ready => {
-                info!(
-                    thread = thread_id,
-                    "FSKit extension ready; using `mount -t heddle`"
-                );
-                // Don't construct an in-process ContentAddressedMount
-                // — the extension owns the mount lifetime.
-                BackingSession::FsKit(
-                    FsKitMount::mount(&root, thread_id, mountpoint)
-                        .context("FSKit mount via /sbin/mount")?,
-                )
+        let mut fskit_readiness = None;
+        let session = if macos_supports_fskit() {
+            match readiness::probe() {
+                Readiness::Ready => {
+                    info!(
+                        thread = thread_id,
+                        "FSKit extension ready; using `mount -t heddle`"
+                    );
+                    fskit_readiness = Some(FskitReadinessReport {
+                        state: "ready",
+                        backend: "fskit",
+                        action: "mounted",
+                        settings_url: None,
+                    });
+                    // Don't construct an in-process ContentAddressedMount
+                    // — the extension owns the mount lifetime.
+                    BackingSession::FsKit(
+                        FsKitMount::mount(&root, thread_id, mountpoint)
+                            .context("FSKit mount via /sbin/mount")?,
+                    )
+                }
+                Readiness::NeedsApproval => {
+                    let settings_url = settings_deep_link().url;
+                    print_needs_approval_block(settings_url);
+                    open_settings(settings_url);
+                    if wait_for_fskit_ready() {
+                        info!(
+                            thread = thread_id,
+                            "FSKit extension enabled during poll; using `mount -t heddle`"
+                        );
+                        fskit_readiness = Some(FskitReadinessReport {
+                            state: "ready_after_approval",
+                            backend: "fskit",
+                            action: "mounted_after_poll",
+                            settings_url: Some(settings_url),
+                        });
+                        BackingSession::FsKit(
+                            FsKitMount::mount(&root, thread_id, mountpoint)
+                                .context("FSKit mount via /sbin/mount")?,
+                        )
+                    } else {
+                        eprintln!(
+                            "Heddle FSKit extension still disabled after 60s; using NFS for this run. Enable it and re-run for the fast path."
+                        );
+                        fskit_readiness = Some(FskitReadinessReport {
+                            state: "needs_approval",
+                            backend: "nfs",
+                            action: "poll_timeout_fell_back",
+                            settings_url: Some(settings_url),
+                        });
+                        mount_via_nfs(&root, thread_id, mountpoint)?
+                    }
+                }
+                Readiness::NotInstalled => {
+                    eprintln!("{FSKIT_INSTALL_HINT}");
+                    fskit_readiness = Some(FskitReadinessReport {
+                        state: "not_installed",
+                        backend: "nfs",
+                        action: "fell_back",
+                        settings_url: None,
+                    });
+                    mount_via_nfs(&root, thread_id, mountpoint)?
+                }
+                Readiness::Unknown => {
+                    // Probe failed for an environmental reason. Preserve the
+                    // existing quiet NFS fallback.
+                    mount_via_nfs(&root, thread_id, mountpoint)?
+                }
             }
-            Readiness::NeedsApproval => {
-                // One-shot nudge: open Settings so the user can
-                // toggle the extension on for next time. Falling
-                // through to NFS keeps THIS mount working.
-                eprintln!("{}", readiness::setup_hint());
-                readiness::open_settings();
-                mount_via_nfs(&root, thread_id, mountpoint)?
-            }
-            Readiness::NotInstalled | Readiness::Unknown => {
-                // Host app isn't installed (or older macOS); NFS
-                // is the only path. No nudge — silent fallback.
-                mount_via_nfs(&root, thread_id, mountpoint)?
-            }
+        } else {
+            debug!("macOS version is below FSKit's supported runtime floor; using NFS fallback");
+            mount_via_nfs(&root, thread_id, mountpoint)?
         };
 
         let handle = std::sync::Arc::new(MountHandle {
@@ -330,7 +414,100 @@ mod macos {
             mountpoint: mountpoint.to_path_buf(),
         });
         REGISTRY.insert(thread_id.to_string(), std::sync::Arc::clone(&handle));
-        Ok(handle)
+        Ok(super::SpawnedMount { fskit_readiness })
+    }
+
+    fn macos_supports_fskit() -> bool {
+        let Some(version) = current_macos_version() else {
+            return false;
+        };
+        version.major > MIN_FSKIT_MACOS_MAJOR
+            || (version.major == MIN_FSKIT_MACOS_MAJOR && version.minor >= MIN_FSKIT_MACOS_MINOR)
+    }
+
+    fn current_macos_version() -> Option<MacOsVersion> {
+        let output = Command::new("sw_vers")
+            .arg("-productVersion")
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        parse_macos_version(text.trim())
+    }
+
+    fn parse_macos_version(text: &str) -> Option<MacOsVersion> {
+        let mut parts = text.split('.');
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next().unwrap_or("0").parse().ok()?;
+        let patch = parts.next().unwrap_or("0").parse().ok()?;
+        Some(MacOsVersion {
+            major,
+            minor,
+            patch,
+        })
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct SettingsDeepLink {
+        url: &'static str,
+    }
+
+    fn settings_deep_link() -> SettingsDeepLink {
+        let Some(version) = current_macos_version() else {
+            return SettingsDeepLink {
+                url: SETTINGS_LOGIN_ITEMS_URL,
+            };
+        };
+        settings_deep_link_for_version(version)
+    }
+
+    fn settings_deep_link_for_version(version: MacOsVersion) -> SettingsDeepLink {
+        let url = match version.major {
+            // macOS Sequoia exposes the extension controls under the
+            // Login Items & Extensions pane. This anchor lands closer
+            // to the Extensions table than the plain pane URL.
+            15 => SETTINGS_SEQUOIA_FILE_EXTENSIONS_URL,
+            // macOS Tahoe moved FSKit modules to ExtensionKit. Keep the
+            // version split explicit; until a stable File System
+            // Extensions anchor is known, land on the pane and rely on
+            // the precise text path above.
+            26 => SETTINGS_LOGIN_ITEMS_URL,
+            _ => SETTINGS_LOGIN_ITEMS_URL,
+        };
+        SettingsDeepLink { url }
+    }
+
+    fn print_needs_approval_block(settings_url: &'static str) {
+        eprintln!(
+            "\nHeddle FSKit extension is installed but disabled.\n\
+             \n\
+             Enable the fast path:\n\
+             1. {SETTINGS_PATH}\n\
+             2. Return here; this command will continue automatically when FSKit is ready.\n\
+             \n\
+             Opening System Settings: {settings_url}\n"
+        );
+    }
+
+    fn open_settings(url: &str) {
+        let _ = Command::new("open").arg(url).status();
+    }
+
+    fn wait_for_fskit_ready() -> bool {
+        let started = Instant::now();
+        loop {
+            if readiness::probe() == Readiness::Ready {
+                return true;
+            }
+            let elapsed = started.elapsed();
+            if elapsed >= FSKIT_POLL_CAP {
+                return false;
+            }
+            let remaining = FSKIT_POLL_CAP - elapsed;
+            std::thread::sleep(std::cmp::min(FSKIT_POLL_INTERVAL, remaining));
+        }
     }
 
     fn mount_via_nfs(
@@ -433,7 +610,7 @@ mod windows {
         repo: Repository,
         thread_id: &str,
         mountpoint: &Path,
-    ) -> Result<std::sync::Arc<MountHandle>> {
+    ) -> Result<super::SpawnedMount> {
         std::fs::create_dir_all(mountpoint)
             .with_context(|| format!("create mount point {}", mountpoint.display()))?;
 
@@ -509,7 +686,9 @@ mod windows {
             mountpoint: mountpoint.to_path_buf(),
         });
         REGISTRY.insert(thread_id.to_string(), std::sync::Arc::clone(&handle));
-        Ok(handle)
+        Ok(super::SpawnedMount {
+            fskit_readiness: None,
+        })
     }
 
     pub fn unmount_thread_if_mounted(thread_id: &str) -> bool {
@@ -562,7 +741,7 @@ mod stub {
         _repo: repo::Repository,
         _thread_id: &str,
         _mountpoint: &Path,
-    ) -> Result<std::sync::Arc<MountHandle>> {
+    ) -> Result<super::SpawnedMount> {
         Err(super::virtualized_unsupported_error())
     }
 
@@ -638,26 +817,26 @@ pub(crate) fn establish_virtualized_mount(
     thread_id: &str,
     mountpoint: &Path,
     ownership: MountOwnership,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<FskitReadinessReport>> {
     match ownership {
         MountOwnership::PreferDaemon => {
             let attempt = crate::cli::commands::daemon_client::mount_via_daemon_classified(
                 repo_root, thread_id, mountpoint,
             );
             match classify_daemon_attempt(attempt, thread_id) {
-                DaemonAttemptResolution::Daemon => Ok(()),
+                DaemonAttemptResolution::Daemon => Ok(None),
                 DaemonAttemptResolution::FallbackInProcess => {
                     let mount_repo = repo::Repository::open(repo_root)?;
-                    spawn_mount_for_thread(mount_repo, thread_id, mountpoint)?;
-                    Ok(())
+                    let mounted = spawn_mount_for_thread(mount_repo, thread_id, mountpoint)?;
+                    Ok(mounted.fskit_readiness)
                 }
                 DaemonAttemptResolution::Fatal(err) => Err(err),
             }
         }
         MountOwnership::InProcess => {
             let mount_repo = repo::Repository::open(repo_root)?;
-            spawn_mount_for_thread(mount_repo, thread_id, mountpoint)?;
-            Ok(())
+            let mounted = spawn_mount_for_thread(mount_repo, thread_id, mountpoint)?;
+            Ok(mounted.fskit_readiness)
         }
     }
 }

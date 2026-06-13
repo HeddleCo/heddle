@@ -15486,6 +15486,31 @@
           ],
           "type": "string"
         },
+        "FsKitReadinessSchema": {
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "backend": {
+              "type": "string"
+            },
+            "settings_url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "backend",
+            "action"
+          ],
+          "type": "object"
+        },
         "ThreadFreshnessSchema": {
           "enum": [
             "current",
@@ -15830,6 +15855,16 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "fskit_readiness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FsKitReadinessSchema"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "idempotency_status": {
@@ -18944,6 +18979,31 @@
           ],
           "type": "string"
         },
+        "FsKitReadinessSchema": {
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "backend": {
+              "type": "string"
+            },
+            "settings_url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "backend",
+            "action"
+          ],
+          "type": "object"
+        },
         "ThreadFreshnessSchema": {
           "enum": [
             "current",
@@ -19288,6 +19348,16 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "fskit_readiness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FsKitReadinessSchema"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "idempotency_status": {
@@ -22477,6 +22547,31 @@
           ],
           "type": "string"
         },
+        "FsKitReadinessSchema": {
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "backend": {
+              "type": "string"
+            },
+            "settings_url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "backend",
+            "action"
+          ],
+          "type": "object"
+        },
         "ThreadFreshnessSchema": {
           "enum": [
             "current",
@@ -22821,6 +22916,16 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "fskit_readiness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FsKitReadinessSchema"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "idempotency_status": {
@@ -24160,6 +24265,31 @@
           ],
           "type": "string"
         },
+        "FsKitReadinessSchema": {
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "backend": {
+              "type": "string"
+            },
+            "settings_url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "backend",
+            "action"
+          ],
+          "type": "object"
+        },
         "ThreadFreshnessSchema": {
           "enum": [
             "current",
@@ -24504,6 +24634,16 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "fskit_readiness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FsKitReadinessSchema"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "idempotency_status": {

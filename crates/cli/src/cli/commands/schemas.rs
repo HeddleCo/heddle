@@ -1264,6 +1264,15 @@ pub struct ThreadStartSchema {
     pub thread: Option<ThreadSummarySchema>,
     pub path: Option<String>,
     pub execution_path: Option<String>,
+    pub fskit_readiness: Option<FsKitReadinessSchema>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct FsKitReadinessSchema {
+    pub state: String,
+    pub backend: String,
+    pub action: String,
+    pub settings_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

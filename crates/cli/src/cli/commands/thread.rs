@@ -324,6 +324,8 @@ pub(crate) struct ThreadOpOutput {
     pub thread: Option<ThreadSummary>,
     pub path: Option<String>,
     pub execution_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fskit_readiness: Option<mount_lifecycle::FskitReadinessReport>,
     #[allow(dead_code)]
     #[serde(skip_serializing)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1930,7 +1932,7 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // `scope` + `transaction_id` were resolved above the commit-detection gate.
     let hydrate_requested =
         args.hydrate && matches!(thread_mode, ThreadMode::Solid | ThreadMode::Materialized);
-    let linked = repo::atomic::execute(
+    let start_output = repo::atomic::execute(
         repo,
         start_atomic::StartThread {
             transaction_id,
@@ -1958,7 +1960,8 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
         &base_root,
         &actor_identity,
         hydrate_requested,
-        linked,
+        start_output.linked,
+        start_output.fskit_readiness,
     )
 }
 
@@ -2002,6 +2005,7 @@ fn finalize_committed_start(
         // post-commit bookkeeping.
         false,
         Vec::new(),
+        None,
     )
 }
 
@@ -2024,6 +2028,7 @@ fn finalize_thread_start(
     actor_identity: &StartActorIdentity,
     hydrate_requested: bool,
     linked: Vec<String>,
+    fskit_readiness: Option<mount_lifecycle::FskitReadinessReport>,
 ) -> Result<ThreadOpOutput> {
     // Post-commit hydrate note (stderr; JSON consumers on stdout unaffected).
     if hydrate_requested {
@@ -2118,7 +2123,7 @@ fn finalize_thread_start(
         }
     };
 
-    Ok(thread_op_output(
+    let mut output = thread_op_output(
         "thread_start",
         "start",
         args.name.clone(),
@@ -2130,7 +2135,9 @@ fn finalize_thread_start(
             thread.session_id = Some(entry.session_id.clone());
             thread
         }),
-    ))
+    );
+    output.fskit_readiness = fskit_readiness;
+    Ok(output)
 }
 
 #[derive(Debug, Clone)]
@@ -3393,6 +3400,7 @@ fn thread_op_output(
         thread,
         path,
         execution_path,
+        fskit_readiness: None,
         trust,
     }
 }
