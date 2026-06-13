@@ -98,6 +98,7 @@ schema_registry! {
     (&["pull"], PullSchema),
     (&["push"], PushSchema),
     (&["bridge git status"], BridgeGitStatusSchema),
+    (&["expand"], ExpandSchema),
     (&["log"], LogSchema),
     (&["log --reflog"], LogReflogSchema),
     (&["show"], ShowSchema),
@@ -2238,6 +2239,44 @@ pub struct StateEntrySchema {
     pub created_at: String,
     pub parents: Vec<String>,
     pub git_checkpoint: Option<String>,
+    pub collapsed: Option<CollapsedEntrySchema>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct CollapsedEntrySchema {
+    pub expandable: bool,
+    pub source_count: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ExpandSchema {
+    pub output_kind: String,
+    pub status: String,
+    pub requested: String,
+    pub collapsed: ExpandedCollapseSchema,
+    pub captures: Vec<ExpandedCaptureSchema>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ExpandedCollapseSchema {
+    pub change_id: String,
+    pub change_id_full: String,
+    pub git_commit: Option<String>,
+    pub thread: Option<String>,
+    pub source_count: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ExpandedCaptureSchema {
+    pub change_id: String,
+    pub change_id_full: String,
+    pub content_hash: String,
+    pub intent: Option<String>,
+    pub principal: String,
+    pub agent: Option<String>,
+    pub confidence: Option<f32>,
+    pub created_at: String,
+    pub parents: Vec<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

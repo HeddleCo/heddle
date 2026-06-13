@@ -26,6 +26,7 @@ mod discuss;
 mod doctor_docs;
 mod doctor_schemas;
 mod error_envelope;
+mod expand;
 mod fetch;
 mod ff_record;
 mod fsck;
@@ -142,6 +143,7 @@ pub use doctor_schemas::{cmd_doctor_schemas, documented_samples_with_bound_verbs
 pub use error_envelope::{
     print_error_with_hint, print_error_with_hint_with_config, print_parse_error_json_envelope,
 };
+pub use expand::cmd_expand;
 pub use fetch::cmd_fetch;
 pub use fsck::cmd_fsck;
 pub use gc::cmd_gc;

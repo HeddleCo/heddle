@@ -575,6 +575,11 @@ export interface CollapseSchema {
   [key: string]: unknown;
 }
 
+export interface CollapsedEntrySchema {
+  expandable: boolean;
+  source_count: number;
+}
+
 export interface CommandContractSchemaCoverageSchema {
   accepted_opaque_schema_examples: string[];
   accepted_opaque_schema_verbs_total: number;
@@ -968,6 +973,34 @@ export interface ErrorEnvelopeSchema {
   replayed?: boolean | null;
   unsafe_condition: string;
   would_change: string;
+}
+
+export interface ExpandSchema {
+  captures: ExpandedCaptureSchema[];
+  collapsed: ExpandedCollapseSchema;
+  output_kind: "expand";
+  requested: string;
+  status: string;
+}
+
+export interface ExpandedCaptureSchema {
+  agent?: string | null;
+  change_id: string;
+  change_id_full: string;
+  confidence?: number | null;
+  content_hash: string;
+  created_at: string;
+  intent?: string | null;
+  parents: string[];
+  principal: string;
+}
+
+export interface ExpandedCollapseSchema {
+  change_id: string;
+  change_id_full: string;
+  git_commit?: string | null;
+  source_count: number;
+  thread?: string | null;
 }
 
 export interface ExportedRefSchema {
@@ -1955,6 +1988,7 @@ export interface StashShowSchema {
 export interface StateEntrySchema {
   agent?: string | null;
   change_id: string;
+  collapsed?: CollapsedEntrySchema | null;
   confidence?: number | null;
   content_hash: string;
   created_at: string;
@@ -2764,6 +2798,7 @@ export interface HeddleVerbOutputs {
   "doctor docs": DoctorDocsSchema;
   "doctor schemas": DoctorSchemasSchema;
   error: ErrorEnvelopeSchema;
+  expand: ExpandSchema;
   fetch: FetchSchema;
   fsck: FsckSchema;
   "git-overlay": GitOverlayGuideSchema;
@@ -2933,6 +2968,7 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "doctor docs",
   "doctor schemas",
   "error",
+  "expand",
   "fetch",
   "fsck",
   "git-overlay",

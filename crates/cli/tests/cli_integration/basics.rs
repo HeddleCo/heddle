@@ -2316,13 +2316,15 @@ fn test_parallel_heddle_threads_capture_independently_and_checkpoint_via_git_ove
         "expected at least two git checkpoint records after shipping both threads: {checkpoint_records}"
     );
     assert!(
-        records.iter().any(|record| record["summary"] == "auth v2"),
+        records
+            .iter()
+            .any(|record| record["summary"] == "Land feature/auth"),
         "shipping auth should create its own git checkpoint record: {checkpoint_records}"
     );
     assert!(
         records
             .iter()
-            .any(|record| record["summary"] == "search v2"),
+            .any(|record| record["summary"] == "Land feature/search"),
         "shipping search should create its own git checkpoint record: {checkpoint_records}"
     );
     assert_ne!(

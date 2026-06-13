@@ -13,10 +13,11 @@ use super::{
     StashCommands, ThreadCommands, TransactionCommands, VisibilityCommands,
     commands_args::{
         ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AdoptArgs,
-        CloneArgs, CollapseArgs, CommitArgs, DiffArgs, DoctorArgs, InitArgs, LandArgs, LogArgs,
-        MergeArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs,
-        SessionEndArgs, SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs,
-        SnapshotArgs, SwitchArgs, SyncArgs, ThreadStartArgs, TryArgs, UndoArgs, WatchArgs,
+        CloneArgs, CollapseArgs, CommitArgs, DiffArgs, DoctorArgs, ExpandArgs, InitArgs, LandArgs,
+        LogArgs, MergeArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs,
+        RunArgs, SessionEndArgs, SessionListArgs, SessionSegmentArgs, SessionShowArgs,
+        SessionStartArgs, SnapshotArgs, SwitchArgs, SyncArgs, ThreadStartArgs, TryArgs, UndoArgs,
+        WatchArgs,
     },
 };
 #[cfg(feature = "client")]
@@ -325,6 +326,9 @@ Examples:
 
     /// Collapse (squash) multiple states into one.
     Collapse(CollapseArgs),
+
+    /// Expand a squashed land into the captures it collapsed.
+    Expand(ExpandArgs),
 
     /// Manage threads.
     Thread {

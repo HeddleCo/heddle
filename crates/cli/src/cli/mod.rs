@@ -16,9 +16,9 @@ pub use cli_args::PresenceCommands;
 pub use cli_args::{
     ActorCommands, AdoptArgs, AgentCommands, CheckpointArgs, Cli, CloneArgs, CollapseArgs,
     Commands, CommitArgs, ContextCommands, DaemonCommands, DiagnoseArgs, DiffArgs, DoctorArgs,
-    DoctorCommands, DoctorDocsArgs, HookCommands, HookInstallSource, InitArgs, IntegrationCommands,
-    IntegrationInstallArgs, IntegrationRelayArgs, IntegrationTargetArgs, LogArgs,
-    MaintenanceCommands, MergeArgs, OutputMode, PullArgs, PurgeApplyArgs, PurgeCommands,
+    DoctorCommands, DoctorDocsArgs, ExpandArgs, HookCommands, HookInstallSource, InitArgs,
+    IntegrationCommands, IntegrationInstallArgs, IntegrationRelayArgs, IntegrationTargetArgs,
+    LogArgs, MaintenanceCommands, MergeArgs, OutputMode, PullArgs, PurgeApplyArgs, PurgeCommands,
     PurgeListArgs, PushArgs, ReadyArgs, RedactApplyArgs, RedactCommands, RedactListArgs,
     RedactShowArgs, RedactTrustAddArgs, RedactTrustCommands, RedactTrustListArgs,
     RedactTrustRemoveArgs, RemoteCommands, ResolveArgs, RetroArgs, RevertArgs, RunArgs,

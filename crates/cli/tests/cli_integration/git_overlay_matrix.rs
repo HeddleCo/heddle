@@ -6364,6 +6364,56 @@ fn git_overlay_matrix_land_squashes_thread_to_one_git_commit_by_default() {
 }
 
 #[test]
+fn git_overlay_matrix_expand_squashed_land_by_state_and_git_oid() {
+    let temp = TempDir::new().unwrap();
+    let (_checkout, _base) = setup_two_capture_land_thread(&temp, "feature/expand");
+
+    let land = json(
+        temp.path(),
+        &["land", "--thread", "feature/expand", "--no-push"],
+    );
+    assert_eq!(land["status"], "landed");
+
+    let expanded = json(temp.path(), &["expand", "HEAD"]);
+    assert_eq!(expanded["output_kind"], "expand");
+    assert_eq!(expanded["status"], "completed");
+    assert_eq!(expanded["collapsed"]["source_count"], 2);
+    assert_eq!(expanded["collapsed"]["thread"], "feature/expand");
+    let captures = expanded["captures"].as_array().expect("captures array");
+    assert_eq!(captures.len(), 2, "{expanded}");
+    assert_eq!(captures[0]["intent"], "first source");
+    assert_eq!(captures[1]["intent"], "second source");
+
+    let git_commit = git_stdout(temp.path(), &["rev-parse", "HEAD"]);
+    let expanded_by_git = json(temp.path(), &["expand", &git_commit]);
+    assert_eq!(
+        expanded_by_git["collapsed"]["change_id"],
+        expanded["collapsed"]["change_id"]
+    );
+
+    let log = json(temp.path(), &["log", "-n", "1"]);
+    let first = &log["states"].as_array().expect("log states")[0];
+    assert_eq!(first["collapsed"]["expandable"], true, "{log}");
+    assert_eq!(first["collapsed"]["source_count"], 2, "{log}");
+}
+
+#[test]
+fn git_overlay_matrix_squashed_land_default_subject_is_land_thread() {
+    let temp = TempDir::new().unwrap();
+    let (_checkout, _base) = setup_two_capture_land_thread(&temp, "feature/default-subject");
+
+    let land = json(
+        temp.path(),
+        &["land", "--thread", "feature/default-subject", "--no-push"],
+    );
+    assert_eq!(land["status"], "landed");
+    assert_eq!(
+        git_stdout(temp.path(), &["log", "-1", "--pretty=%s"]),
+        "Land feature/default-subject"
+    );
+}
+
+#[test]
 fn git_overlay_matrix_squashed_land_undo_restores_git_target_and_source_thread() {
     let temp = TempDir::new().unwrap();
     let (_checkout, base_git) = setup_two_capture_land_thread(&temp, "feature/squash-undo");
@@ -6462,7 +6512,10 @@ fn git_overlay_matrix_manual_resolution_land_squashes_and_undo_restores_source_t
     assert_latest_undo_batch_has_land_squash_ops(temp.path());
     let undo = json(temp.path(), &["--output", "json", "undo"]);
     assert_eq!(undo["status"], "completed", "{undo}");
-    assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), pre_land_git);
+    assert_eq!(
+        git_stdout(temp.path(), &["rev-parse", "HEAD"]),
+        pre_land_git
+    );
     assert_eq!(thread_tip(temp.path(), "main"), target_tip_before);
     assert_eq!(
         thread_tip(temp.path(), "feature/manual-squash"),

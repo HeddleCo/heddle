@@ -198,19 +198,19 @@ in-progress operation.
       "status": "available",
       "verified_scope": "everyday_and_agent",
       "advanced_scope": "advanced_internal_admin",
-      "summary": "185 command(s), 158 JSON command(s), 98 mutating command(s), 97 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 50 accepted opaque schema(s) outside clean verification",
-      "catalog_commands_total": 185,
+      "summary": "186 command(s), 159 JSON command(s), 98 mutating command(s), 97 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 50 accepted opaque schema(s) outside clean verification",
+      "catalog_commands_total": 186,
       "catalog_mutating_commands_total": 98,
-      "json_commands_total": 158,
+      "json_commands_total": 159,
       "json_mutating_commands_total": 97,
-      "json_commands_with_schema": 108,
+      "json_commands_with_schema": 109,
       "json_commands_with_accepted_opaque_schema": 50,
       "json_commands_without_schema": 0,
       "verified_scope_json_commands_total": 37,
       "verified_scope_json_commands_with_schema": 37,
       "verified_scope_json_commands_with_accepted_opaque_schema": 0,
       "verified_scope_json_commands_without_schema": 0,
-      "advanced_scope_json_commands_total": 121,
+      "advanced_scope_json_commands_total": 122,
       "advanced_scope_json_commands_with_accepted_opaque_schema": 50,
       "mutating_commands_total": 97,
       "mutating_commands_with_schema": 69,
@@ -222,8 +222,8 @@ in-progress operation.
       "verified_scope_mutating_commands_without_schema": 0,
       "advanced_scope_mutating_commands_total": 74,
       "advanced_scope_mutating_commands_with_accepted_opaque_schema": 28,
-      "schema_verbs_total": 163,
-      "documented_schema_verbs_total": 163,
+      "schema_verbs_total": 164,
+      "documented_schema_verbs_total": 164,
       "undocumented_schema_verbs_total": 0,
       "opaque_schema_verbs_total": 50,
       "accepted_opaque_schema_verbs_total": 50,
@@ -2434,7 +2434,7 @@ catalog-wide schema coverage.
   "output_kind": "doctor_schemas",
   "status": "available",
   "verified": true,
-  "summary": "185 command(s), 158 JSON command(s), 98 mutating command(s), 97 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 50 accepted opaque schema(s) outside clean verification",
+  "summary": "186 command(s), 159 JSON command(s), 98 mutating command(s), 97 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 50 accepted opaque schema(s) outside clean verification",
   "recommended_action": null,
   "recovery_commands": [],
   "registered_verbs": ["status", "verify", "try"],
@@ -2447,19 +2447,19 @@ catalog-wide schema coverage.
     "status": "available",
     "verified_scope": "everyday_and_agent",
     "advanced_scope": "advanced_internal_admin",
-    "summary": "185 command(s), 158 JSON command(s), 98 mutating command(s), 97 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 50 accepted opaque schema(s) outside clean verification",
-    "catalog_commands_total": 185,
+    "summary": "186 command(s), 159 JSON command(s), 98 mutating command(s), 97 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 50 accepted opaque schema(s) outside clean verification",
+    "catalog_commands_total": 186,
     "catalog_mutating_commands_total": 98,
-    "json_commands_total": 158,
+    "json_commands_total": 159,
     "json_mutating_commands_total": 97,
-    "json_commands_with_schema": 108,
+    "json_commands_with_schema": 109,
     "json_commands_with_accepted_opaque_schema": 50,
     "json_commands_without_schema": 0,
     "verified_scope_json_commands_total": 37,
     "verified_scope_json_commands_with_schema": 37,
     "verified_scope_json_commands_with_accepted_opaque_schema": 0,
     "verified_scope_json_commands_without_schema": 0,
-    "advanced_scope_json_commands_total": 121,
+    "advanced_scope_json_commands_total": 122,
     "advanced_scope_json_commands_with_accepted_opaque_schema": 50,
     "mutating_commands_total": 97,
     "mutating_commands_with_schema": 69,
@@ -2780,6 +2780,12 @@ true` and `status` is `"applied"`:
 {"change_id": "hd-collapsed123", "collapsed": 3, "message": "collapse feature checkpoints", "parents": ["hd-base123"]}
 ```
 
+`heddle expand --output json` emits the ordered captures recorded by a squashed land collapse:
+
+```json
+{"output_kind": "expand", "status": "completed", "requested": "HEAD", "collapsed": {"change_id": "hd-collapsed123", "change_id_full": "hd-collapsed123000000000000000000", "git_commit": "abc123def456abc123def456abc123def456abcd", "thread": "feature/parser", "source_count": 2}, "captures": [{"change_id": "hd-source111", "change_id_full": "hd-source1110000000000000000000", "content_hash": "h1-source", "intent": "first parser checkpoint", "principal": "A. Engineer <a@example.com>", "agent": null, "confidence": null, "created_at": "2026-01-01 00:00:00", "parents": ["hd-base123"]}, {"change_id": "hd-source222", "change_id_full": "hd-source2220000000000000000000", "content_hash": "h1-source2", "intent": "second parser checkpoint", "principal": "A. Engineer <a@example.com>", "agent": "codex/gpt-5", "confidence": 0.91, "created_at": "2026-01-01 00:05:00", "parents": ["hd-source111"]}]}
+```
+
 `heddle context set|get|list|history|edit|supersede|rm|check|suggest|audit --output json` emit per-subcommand shapes (each carries `output_kind` set to the snake-cased subcommand, e.g. `context_set`, `context_get`) — there is no single shared shape. For example, `context set` (and `edit`/`supersede`/`rm`) reports the mutated target and the new state:
 
 ```json
@@ -2956,7 +2962,7 @@ discipline; see the corresponding handler in `crates/cli/src/cli/commands/`:
 
 `heddle checkpoint`, `heddle cherry-pick`,
 `heddle clean`, `heddle clone`, `heddle collapse`,
-`heddle context get/set`, `heddle diff`,
+`heddle context get/set`, `heddle diff`, `heddle expand`,
 `heddle discuss`, `heddle doctor docs`, `heddle fetch`,
 `heddle fsck`, `heddle init`, `heddle integration`,
 `heddle maintenance`, `heddle merge`, `heddle ready`,

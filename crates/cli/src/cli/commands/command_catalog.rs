@@ -1468,6 +1468,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
         category(opaque_schemas(MUTATING, &["collapse"]), "states"),
     ),
     entry(
+        &["expand"],
+        category(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["expand"]),
+                &[json_discriminator(Some("expand"), "output_kind", "expand")],
+            ),
+            "states",
+        ),
+    ),
+    entry(
         &["commit"],
         exits(
             front_door(
@@ -4258,6 +4268,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Revert(_) => vec!["revert"],
         Commands::Undo(_) => vec!["undo"],
         Commands::Collapse(_) => vec!["collapse"],
+        Commands::Expand(_) => vec!["expand"],
         Commands::Thread { command } => match command {
             ThreadCommands::Create { .. } => vec!["thread", "create"],
             ThreadCommands::Current => vec!["thread", "current"],
@@ -4525,6 +4536,7 @@ mod tests {
         ),
         sample(&["commit"], &["commit"]),
         sample(&["continue"], &["continue"]),
+        sample(&["expand"], &["expand", "HEAD"]),
         sample(
             &["context", "set"],
             &["context", "set", "--path", "src/lib.rs"],
@@ -5648,7 +5660,7 @@ mod tests {
         // cherry-pick, bisect); heddle#641 swept the remaining verbs whose
         // runtime JSON already emits `output_kind` (abort, adopt, the agent
         // session verbs, bridge git push/pull, continue, daemon stop,
-        // doctor, fetch, land, log,
+        // doctor, expand, fetch, land, log,
         // maintenance gc/index, merge --preview, pull, push, query, ready,
         // the remote family, start, switch, sync, and the thread lifecycle
         // verbs). Any further sweep MUST extend this list and document the
@@ -5691,6 +5703,7 @@ mod tests {
                 "clean",
                 "clone",
                 "clone",
+                "expand",
                 "commit",
                 "continue",
                 "context set",

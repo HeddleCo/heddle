@@ -10782,6 +10782,129 @@
       "title": "ErrorEnvelopeSchema",
       "type": "object"
     },
+    "expand": {
+      "$defs": {
+        "ExpandedCaptureSchema": {
+          "properties": {
+            "agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "change_id": {
+              "type": "string"
+            },
+            "change_id_full": {
+              "type": "string"
+            },
+            "confidence": {
+              "format": "float",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "content_hash": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "string"
+            },
+            "intent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "parents": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "principal": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "change_id",
+            "change_id_full",
+            "content_hash",
+            "principal",
+            "created_at",
+            "parents"
+          ],
+          "type": "object"
+        },
+        "ExpandedCollapseSchema": {
+          "properties": {
+            "change_id": {
+              "type": "string"
+            },
+            "change_id_full": {
+              "type": "string"
+            },
+            "git_commit": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "thread": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "change_id",
+            "change_id_full",
+            "source_count"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "captures": {
+          "items": {
+            "$ref": "#/$defs/ExpandedCaptureSchema"
+          },
+          "type": "array"
+        },
+        "collapsed": {
+          "$ref": "#/$defs/ExpandedCollapseSchema"
+        },
+        "output_kind": {
+          "enum": [
+            "expand"
+          ],
+          "type": "string"
+        },
+        "requested": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "status",
+        "requested",
+        "collapsed",
+        "captures"
+      ],
+      "title": "ExpandSchema",
+      "type": "object"
+    },
     "fetch": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
@@ -11765,6 +11888,23 @@
     },
     "log": {
       "$defs": {
+        "CollapsedEntrySchema": {
+          "properties": {
+            "expandable": {
+              "type": "boolean"
+            },
+            "source_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "expandable",
+            "source_count"
+          ],
+          "type": "object"
+        },
         "StateEntrySchema": {
           "properties": {
             "agent": {
@@ -11775,6 +11915,16 @@
             },
             "change_id": {
               "type": "string"
+            },
+            "collapsed": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CollapsedEntrySchema"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "confidence": {
               "format": "float",
