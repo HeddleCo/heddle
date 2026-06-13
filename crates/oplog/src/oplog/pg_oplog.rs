@@ -577,7 +577,9 @@ mod current_thread_runtime_tests {
     }
 
     async fn create_attribution_fixture(database_url: &str) -> (PgPool, String) {
-        let schema = format!("pg_oplog_attr_{}", Uuid::new_v4().simple());
+        // NB: Postgres reserves the `pg_` schema-name prefix (SQLSTATE 42939), so the
+        // test schema must not start with it.
+        let schema = format!("oplog_attr_test_{}", Uuid::new_v4().simple());
         let quoted_schema = quoted_ident(&schema);
         let admin = PgPoolOptions::new()
             .max_connections(1)
