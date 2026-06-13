@@ -2,6 +2,7 @@ use std::{
     net::ToSocketAddrs,
     sync::{Arc, Mutex, OnceLock, mpsc},
     thread,
+    time::Duration,
 };
 
 use objects::{
@@ -12,6 +13,13 @@ use proto::ProtocolError;
 use repo::{BlobHydrator, Repository};
 
 use super::{HostedAuthMode, HostedGrpcClient, HostedSession};
+
+/// Default hosted lazy-hydration deadline.
+///
+/// This matches the hosted client config's 30s default connection timeout and
+/// gives lazy reads a bounded failure mode when a gRPC request stalls without a
+/// transport-level TCP timeout.
+const DEFAULT_HOSTED_HYDRATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PullMaterialization {
@@ -261,12 +269,26 @@ impl HydrationBridge {
                     // (clone, fetch, push, pull, support, approval) opens
                     // through — so a process whose cached token has slipped
                     // past expiry recovers on first lazy hydrate.
-                    let client = session.connect(addr).await.map_err(|err: ProtocolError| {
-                        HeddleError::Config(format!(
-                            "lazy hosted hydrator: connect to '{endpoint_for_thread}' \
-                             (resolved to {addr}): {err}",
-                        ))
-                    })?;
+                    let client = match tokio::time::timeout(
+                        DEFAULT_HOSTED_HYDRATION_TIMEOUT,
+                        session.connect(addr),
+                    )
+                    .await
+                    {
+                        Ok(result) => result.map_err(|err: ProtocolError| {
+                            HeddleError::Config(format!(
+                                "lazy hosted hydrator: connect to '{endpoint_for_thread}' \
+                                     (resolved to {addr}): {err}",
+                            ))
+                        })?,
+                        Err(_) => {
+                            return Err(HeddleError::Config(format!(
+                                "lazy hosted hydrator: connect to '{endpoint_for_thread}' \
+                                     (resolved to {addr}) timed out after {}",
+                                format_duration(DEFAULT_HOSTED_HYDRATION_TIMEOUT)
+                            )));
+                        }
+                    };
                     Ok::<_, HeddleError>(client)
                 });
                 let mut client = match connect_result {
@@ -300,14 +322,15 @@ impl HydrationBridge {
                                 target_state,
                                 reply,
                             } => {
-                                let result = client
-                                    .hydrate_pulled_state(
-                                        repo.as_ref(),
-                                        &repo_path,
-                                        &remote_thread,
-                                        target_state,
-                                    )
-                                    .await;
+                                let result = hydrate_with_rpc_timeout(
+                                    &mut client,
+                                    repo.as_ref(),
+                                    &repo_path,
+                                    &remote_thread,
+                                    target_state,
+                                    DEFAULT_HOSTED_HYDRATION_TIMEOUT,
+                                )
+                                .await;
                                 let _ = reply.send(result);
                             }
                         }
@@ -319,14 +342,19 @@ impl HydrationBridge {
             })?;
 
         // Wait for the worker to either confirm connect or report an
-        // error. recv() blocks until the worker calls send() above.
-        match ready_rx.recv() {
+        // error. The wait is bounded so a stalled first-use connect cannot
+        // wedge the sync read path.
+        match ready_rx.recv_timeout(DEFAULT_HOSTED_HYDRATION_TIMEOUT) {
             Ok(Ok(())) => Ok(Self {
                 tx,
                 _worker: worker,
             }),
             Ok(Err(err)) => Err(err),
-            Err(_) => Err(HeddleError::Config(
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(HeddleError::Config(format!(
+                "lazy hosted hydrator: worker did not signal readiness within {}",
+                format_duration(DEFAULT_HOSTED_HYDRATION_TIMEOUT)
+            ))),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(HeddleError::Config(
                 "lazy hosted hydrator: worker thread exited before signalling readiness"
                     .to_string(),
             )),
@@ -339,6 +367,23 @@ impl HydrationBridge {
         repo_path: &str,
         remote_thread: &str,
         target_state: ChangeId,
+    ) -> Result<usize, ProtocolError> {
+        self.hydrate_with_timeout(
+            repo,
+            repo_path,
+            remote_thread,
+            target_state,
+            DEFAULT_HOSTED_HYDRATION_TIMEOUT,
+        )
+    }
+
+    fn hydrate_with_timeout(
+        &self,
+        repo: &Repository,
+        repo_path: &str,
+        remote_thread: &str,
+        target_state: ChangeId,
+        timeout: Duration,
     ) -> Result<usize, ProtocolError> {
         let repo = Arc::new(Repository::open(repo.root()).map_err(ProtocolError::from)?);
 
@@ -358,11 +403,68 @@ impl HydrationBridge {
                     "lazy hosted hydrator: worker channel closed: {err}",
                 )))
             })?;
-        reply_rx.recv().map_err(|err| {
-            ProtocolError::Io(std::io::Error::other(format!(
-                "lazy hosted hydrator: worker reply channel closed: {err}",
-            )))
-        })?
+        match reply_rx.recv_timeout(timeout) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(hydration_timeout_error(
+                timeout,
+                repo_path,
+                remote_thread,
+                target_state,
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(ProtocolError::Io(std::io::Error::other(
+                    "lazy hosted hydrator: worker reply channel closed before hydration completed",
+                )))
+            }
+        }
+    }
+}
+
+async fn hydrate_with_rpc_timeout(
+    client: &mut HostedGrpcClient,
+    repo: &Repository,
+    repo_path: &str,
+    remote_thread: &str,
+    target_state: ChangeId,
+    timeout: Duration,
+) -> Result<usize, ProtocolError> {
+    match tokio::time::timeout(
+        timeout,
+        client.hydrate_pulled_state(repo, repo_path, remote_thread, target_state),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(hydration_timeout_error(
+            timeout,
+            repo_path,
+            remote_thread,
+            target_state,
+        )),
+    }
+}
+
+fn hydration_timeout_error(
+    timeout: Duration,
+    repo_path: &str,
+    remote_thread: &str,
+    target_state: ChangeId,
+) -> ProtocolError {
+    ProtocolError::Io(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!(
+            "lazy hosted hydrator: blob hydration timed out after {} \
+             (repo={repo_path}, remote_thread={remote_thread}, target_state={target_state})",
+            format_duration(timeout)
+        ),
+    ))
+}
+
+fn format_duration(duration: Duration) -> String {
+    if duration.subsec_nanos() == 0 {
+        format!("{}s", duration.as_secs())
+    } else {
+        format!("{duration:?}")
     }
 }
 
@@ -416,7 +518,7 @@ mod tests {
             mpsc,
         },
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use cli_shared::ClientConfig;
@@ -689,6 +791,63 @@ mod tests {
         assert_eq!(total, N, "every concurrent caller must receive a reply");
     }
 
+    #[test]
+    fn hydrate_times_out_when_worker_never_replies() {
+        let (_temp, repo) = temp_repo();
+        let target = repo
+            .refs()
+            .get_thread(&ThreadName::from("main"))
+            .unwrap()
+            .unwrap();
+        let (tx, rx) = mpsc::channel::<super::HydrateMessage>();
+        let (release_tx, release_rx) = mpsc::sync_channel::<()>(0);
+        let (done_tx, done_rx) = mpsc::sync_channel::<()>(0);
+        let worker = thread::Builder::new()
+            .name("stalling-hydrator".into())
+            .spawn(move || {
+                match rx.recv() {
+                    Ok(super::HydrateMessage::Run { reply, .. }) => {
+                        let _ = release_rx.recv();
+                        drop(reply);
+                    }
+                    Err(_) => {}
+                }
+                let _ = done_tx.send(());
+            })
+            .expect("spawn stalling worker");
+        let bridge = HydrationBridge {
+            tx,
+            _worker: worker,
+        };
+
+        let started = Instant::now();
+        let err = bridge
+            .hydrate_with_timeout(
+                &repo,
+                "org/acme/repo",
+                "main",
+                target,
+                Duration::from_millis(50),
+            )
+            .expect_err("stalled worker must time out");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "hydrate timeout must return promptly; elapsed {elapsed:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("blob hydration timed out after") && msg.contains("org/acme/repo"),
+            "timeout error must name the operation and repo context; got: {msg}"
+        );
+
+        release_tx.send(()).expect("release stalled worker");
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker exits after release");
+    }
+
     /// Drop the bridge → worker exits cleanly. Catches the case where a
     /// future refactor leaks the worker forever.
     #[test]
@@ -891,7 +1050,8 @@ mod connect_path_tests {
     fn lazy_hosted_connect_opens_session_through_rotating_seam() {
         let source = include_str!("hydration.rs");
         assert!(
-            source.contains("HostedSession::build(&user_config, None, HostedAuthMode::ConfigToken)"),
+            source
+                .contains("HostedSession::build(&user_config, None, HostedAuthMode::ConfigToken)"),
             "hydration.rs must build its session through the shared HostedSession seam",
         );
         assert!(
