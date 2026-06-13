@@ -15,9 +15,9 @@ use cli::cli::{
 use cli::{
     cli::{
         ActorCommands, AgentCommands, Cli, CloneArgs, CollapseArgs, Commands, ContextCommands,
-        DaemonCommands, DiagnoseArgs, DiffArgs, LogArgs, MergeArgs, ResolveArgs, RetroArgs,
-        RevertArgs, RunArgs, SessionCommands, SessionEndArgs, SessionListArgs, SessionSegmentArgs,
-        SessionShowArgs, SessionStartArgs, UndoArgs,
+        DaemonCommands, DiagnoseArgs, DiffArgs, IntegrationCommands, LogArgs, MergeArgs,
+        ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionCommands, SessionEndArgs,
+        SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, UndoArgs,
         cli_args::{LandArgs, SyncArgs},
         commands::{
             LogCommandOptions, RetroCommandOptions, SnapshotAgentOverrides, build_command_catalog,
@@ -207,6 +207,10 @@ async fn async_main() -> Result<()> {
     // would propagate to `main` and print via anyhow's Debug impl.
     let user_config = match UserConfig::load_default() {
         Ok(config) => config,
+        // Hidden harness relay hooks must reach harness init so that a bad
+        // user config is reported as a warning and the hook can continue.
+        // Normal foreground commands keep the strict typed error path.
+        Err(_) if is_harness_relay_invocation(&cli.command) => UserConfig::default(),
         Err(err) => {
             let code = HeddleExitCode::from_error(&err);
             print_error_with_hint(&cli, &err);
@@ -843,6 +847,15 @@ async fn async_main() -> Result<()> {
             std::process::exit(code.into());
         }
     }
+}
+
+fn is_harness_relay_invocation(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Integration {
+            command: IntegrationCommands::Relay(_),
+        }
+    )
 }
 
 fn rewrite_phase_2_alias_argv(argv: &[String]) -> Option<Vec<String>> {
