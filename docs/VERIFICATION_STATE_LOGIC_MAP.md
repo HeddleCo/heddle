@@ -29,8 +29,12 @@ Target rows describe the next model and must not be cited as shipped behavior.
 - `recommended_action` is human display text. `recommended_action_template` is
   the canonical machine-readable form: `argv_template` is the executable argv
   (always present for a valid action), and `required_inputs`/`agent_may_fill`
-  describe placeholders such as a commit message or thread name. (The always-null
-  `recommended_action_argv` sidecar was dropped — see HeddleCo/heddle#254.)
+  describe placeholders such as a commit message or thread name. When
+  `agent_may_fill` is false, treat `action` and `argv_template` as
+  display-only: do not substitute `<name>`/`<url>` placeholders. Surface the
+  template to a human or discard it; substituting and running it will pass
+  literal `<name>` to Heddle and fail. (The always-null `recommended_action_argv`
+  sidecar was dropped - see HeddleCo/heddle#254.)
 
 ## Verification State Dimensions
 

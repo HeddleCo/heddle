@@ -2129,6 +2129,12 @@ pub struct ActionTemplateSchema {
     pub action: String,
     pub argv_template: Vec<String>,
     pub required_inputs: Vec<String>,
+    /// Whether an agent may replace placeholders in `argv_template`.
+    ///
+    /// When `agent_may_fill` is false, treat `action` and `argv_template` as
+    /// display-only: do not substitute `<name>`/`<url>` placeholders. Surface
+    /// the template to a human or discard it. Substituting and running it will
+    /// pass literal `<name>` to Heddle and fail.
     pub agent_may_fill: bool,
 }
 
@@ -3153,6 +3159,33 @@ mod tests {
                 "status schema missing property '{required}'"
             );
         }
+    }
+
+    #[test]
+    fn action_template_agent_may_fill_schema_describes_false_semantics() {
+        let schema = schema_for_verb("verify").expect("verify schema");
+        let action_template = schema
+            .get("$defs")
+            .or_else(|| schema.get("definitions"))
+            .and_then(|defs| defs.get("ActionTemplateSchema"))
+            .expect("verify schema includes ActionTemplateSchema definition");
+        let description = property_schema(action_template, "agent_may_fill")
+            .get("description")
+            .and_then(Value::as_str)
+            .expect("agent_may_fill schema description is present");
+
+        assert!(
+            description.contains("When `agent_may_fill` is false"),
+            "agent_may_fill schema description must document false semantics: {description}"
+        );
+        assert!(
+            description.contains("display-only"),
+            "agent_may_fill schema description must warn agents not to execute display-only templates: {description}"
+        );
+        assert!(
+            description.contains("do not substitute `<name>`/`<url>` placeholders"),
+            "agent_may_fill schema description must prohibit placeholder substitution when false: {description}"
+        );
     }
 
     /// HeddleCo/heddle#645 conformance: the action-field presence contract.
