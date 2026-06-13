@@ -39,7 +39,7 @@ use crate::{
             snapshot::{summarize_confidence, summarize_verification},
             worktree_cmd::helpers::{prepare_worktree_target, write_isolated_checkout},
         },
-        worktree_status_options,
+        style, worktree_status_options,
     },
     config::{
         HarnessMode, HarnessTranscriptMode, HarnessTransport, UserConfig, UserHarnessOverride,
@@ -161,11 +161,10 @@ pub(crate) fn relay_harness_event(
     payload: &str,
 ) -> Result<()> {
     let mut runtime = init_harness_runtime(repo)?;
-    let json = if payload.trim().is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_str::<Value>(payload).unwrap_or(Value::Null)
-    };
+    let (json, warning) = parse_relay_payload(payload);
+    if let Some(warning) = warning {
+        eprintln!("{}", style::warn(&warning));
+    }
     match harness {
         "codex" => relay_codex(&mut runtime, event, &json),
         "claude-code" => relay_claude(&mut runtime, event, &json),
@@ -175,11 +174,51 @@ pub(crate) fn relay_harness_event(
 }
 
 fn init_harness_runtime(repo: &Repository) -> Result<HarnessBridgeRuntime> {
-    let user_config = UserConfig::load_default().unwrap_or_default();
+    let (user_config, warning) = load_harness_user_config(UserConfig::default_path());
+    if let Some(warning) = warning {
+        eprintln!("{}", style::warn(&warning));
+    }
     Ok(HarnessBridgeRuntime::new(
         Repository::open(repo.root())?,
         user_config,
     ))
+}
+
+fn load_harness_user_config(default_path: Option<PathBuf>) -> (UserConfig, Option<String>) {
+    let Some(path) = default_path else {
+        return (UserConfig::default(), None);
+    };
+    match UserConfig::load(&path) {
+        Ok(config) => (config, None),
+        Err(err) if is_not_found(&err) => (UserConfig::default(), None),
+        Err(err) => {
+            let warning = format!(
+                "warning: failed to load user config from {}: {err}; continuing with defaults",
+                path.display()
+            );
+            (UserConfig::default(), Some(warning))
+        }
+    }
+}
+
+fn is_not_found(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<std::io::Error>()
+        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn parse_relay_payload(payload: &str) -> (Value, Option<String>) {
+    if payload.trim().is_empty() {
+        return (Value::Null, None);
+    }
+    match serde_json::from_str::<Value>(payload) {
+        Ok(value) => (value, None),
+        Err(err) => (
+            Value::Null,
+            Some(format!(
+                "warning: failed to parse harness relay payload as JSON: {err}; continuing with null payload"
+            )),
+        ),
+    }
 }
 
 struct HarnessBridgeRuntime {
@@ -2816,6 +2855,75 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         (temp, repo)
+    }
+
+    #[test]
+    fn harness_config_load_missing_path_defaults_without_warning() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let missing = temp.path().join("missing-config.toml");
+
+        let (config, warning) = load_harness_user_config(Some(missing));
+
+        assert_eq!(config.harness.transport, HarnessTransport::Spool);
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn harness_config_load_malformed_path_warns_and_defaults() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("config.toml");
+        std::fs::write(&path, "[harness\ntransport = \"direct\"\n").unwrap();
+
+        let (config, warning) = load_harness_user_config(Some(path.clone()));
+
+        assert_eq!(config.harness.transport, HarnessTransport::Spool);
+        let warning = warning.expect("malformed config should produce a warning");
+        assert!(warning.contains("failed to load user config"));
+        assert!(warning.contains(&path.display().to_string()));
+        assert!(warning.contains("continuing with defaults"));
+    }
+
+    #[test]
+    fn harness_config_load_valid_path_loads_without_warning() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[harness]\ntransport = \"direct\"\ntranscript = \"summary\"\n",
+        )
+        .unwrap();
+
+        let (config, warning) = load_harness_user_config(Some(path));
+
+        assert_eq!(config.harness.transport, HarnessTransport::Direct);
+        assert_eq!(config.harness.transcript, HarnessTranscriptMode::Summary);
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn relay_payload_parse_invalid_json_warns_and_uses_null() {
+        let (value, warning) = parse_relay_payload("{not-json");
+
+        assert_eq!(value, Value::Null);
+        let warning = warning.expect("invalid JSON should produce a warning");
+        assert!(warning.contains("failed to parse harness relay payload as JSON"));
+        assert!(warning.contains("continuing with null payload"));
+    }
+
+    #[test]
+    fn relay_payload_parse_empty_payload_uses_null_without_warning() {
+        let (value, warning) = parse_relay_payload("  \n");
+
+        assert_eq!(value, Value::Null);
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn relay_payload_parse_valid_json_without_warning() {
+        let (value, warning) = parse_relay_payload(r#"{"message":"hello"}"#);
+
+        assert_eq!(value["message"], "hello");
+        assert!(warning.is_none());
     }
 
     /// Harness subagent/root-actor checkout paths must use the SAME canonical

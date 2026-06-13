@@ -52,6 +52,8 @@ mod git_overlay_remote_ref_import;
 mod git_overlay_sync_adoption;
 #[path = "cli_integration/git_replacement_matrix.rs"]
 mod git_replacement_matrix;
+#[path = "cli_integration/harness_error_surface.rs"]
+mod harness_error_surface;
 #[path = "cli_integration/hooks.rs"]
 mod hooks;
 #[path = "cli_integration/hydrate.rs"]
