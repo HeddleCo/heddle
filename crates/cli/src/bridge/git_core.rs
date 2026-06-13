@@ -3634,42 +3634,55 @@ pub(crate) fn copy_reachable_objects(
         )));
     }
 
-    for oid in collect_reachable_object_ids(source, roots)? {
-        let object = source.find_object(oid).map_err(git_err)?;
-        let object_ref =
-            gix::objs::ObjectRef::from_bytes(&object.data, object.kind, source.object_hash())
-                .map_err(git_err)?;
-        target.write_object(object_ref).map_err(git_err)?;
-    }
-
-    Ok(())
+    let entries = collect_reachable_entries(source, roots)?;
+    install_objects_pack(target, entries)
 }
 
-fn collect_reachable_object_ids(
+/// Walk every object reachable from `roots` in `source`, reading each object
+/// once and serializing it into a base pack entry.
+pub(crate) fn collect_reachable_entries(
     source: &gix::Repository,
     roots: impl IntoIterator<Item = ObjectId>,
-) -> GitResult<Vec<ObjectId>> {
-    let mut stack: Vec<ObjectId> = roots.into_iter().collect();
+) -> GitResult<Vec<gix_pack::data::output::Entry>> {
     let mut seen = HashSet::new();
-    let mut ordered = Vec::new();
+    collect_reachable_entries_excluding(source, roots, &mut seen)
+}
+
+pub(crate) fn collect_reachable_entries_excluding(
+    source: &gix::Repository,
+    roots: impl IntoIterator<Item = ObjectId>,
+    seen: &mut HashSet<ObjectId>,
+) -> GitResult<Vec<gix_pack::data::output::Entry>> {
+    let object_hash = source.object_hash();
+    let mut stack: Vec<ObjectId> = roots.into_iter().collect();
+    let mut entries = Vec::new();
 
     while let Some(oid) = stack.pop() {
         if !seen.insert(oid) {
             continue;
         }
-        ordered.push(oid);
 
         let object = source.find_object(oid).map_err(git_err)?;
-        match object.kind {
+        let kind = object.kind;
+        let data = gix::objs::Data {
+            kind,
+            data: &object.data,
+            object_hash,
+        };
+        let count = gix_pack::data::output::Count::from_data(oid, None);
+        let entry = gix_pack::data::output::Entry::from_data(&count, &data).map_err(git_err)?;
+        entries.push(entry);
+
+        match kind {
             gix::objs::Kind::Commit => {
-                let commit = source.find_commit(oid).map_err(git_err)?;
+                let commit = object.into_commit();
                 stack.push(commit.tree_id().map_err(git_err)?.detach());
                 for parent in commit.parent_ids() {
                     stack.push(parent.detach());
                 }
             }
             gix::objs::Kind::Tree => {
-                let tree = source.find_tree(oid).map_err(git_err)?;
+                let tree = object.into_tree();
                 for entry in tree.iter() {
                     let entry = entry.map_err(git_err)?;
                     // Gitlink (mode 160000) entries point at a commit
@@ -3694,14 +3707,70 @@ fn collect_reachable_object_ids(
                 }
             }
             gix::objs::Kind::Tag => {
-                let tag = source.find_tag(oid).map_err(git_err)?;
+                let tag = object.into_tag();
                 stack.push(tag.target_id().map_err(git_err)?.detach());
             }
             gix::objs::Kind::Blob => {}
         }
     }
 
-    Ok(ordered)
+    Ok(entries)
+}
+
+/// Install reachable objects into `target` as one packfile instead of N loose
+/// object writes. Packed objects keep the same OIDs and are read transparently
+/// by Git/gix, so mirror fidelity is unchanged.
+pub(crate) fn install_objects_pack(
+    target: &gix::Repository,
+    entries: Vec<gix_pack::data::output::Entry>,
+) -> GitResult<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    let object_hash = target.object_hash();
+    let num_entries: u32 = entries.len().try_into().map_err(|_| {
+        GitBridgeError::Git(format!(
+            "mirror pack has too many objects to encode: {}",
+            entries.len()
+        ))
+    })?;
+
+    let mut pack = Vec::new();
+    {
+        let input = std::iter::once(Ok::<_, GitBridgeError>(entries));
+        let mut writer = gix_pack::data::output::bytes::FromEntriesIter::new(
+            input,
+            &mut pack,
+            num_entries,
+            gix_pack::data::Version::V2,
+            object_hash,
+        );
+        for result in writer.by_ref() {
+            result.map_err(git_err)?;
+        }
+    }
+
+    let pack_dir = target.git_dir().join("objects").join("pack");
+    fs::create_dir_all(&pack_dir)?;
+    let outcome = gix_pack::Bundle::write_to_directory(
+        &mut std::io::Cursor::new(pack.as_slice()),
+        Some(&pack_dir),
+        &mut gix::progress::Discard,
+        &AtomicBool::new(false),
+        None::<gix::objs::find::Never>,
+        gix_pack::bundle::write::Options {
+            object_hash,
+            ..Default::default()
+        },
+    )
+    .map_err(git_err)?;
+
+    if let Some(keep) = outcome.keep_path {
+        let _ = fs::remove_file(keep);
+    }
+
+    Ok(())
 }
 
 fn fetch_network_remote(
@@ -3898,33 +3967,22 @@ fn pack_reachable_objects(
     repo: &gix::Repository,
     roots: impl IntoIterator<Item = ObjectId>,
 ) -> GitResult<Vec<u8>> {
-    let oids = collect_reachable_object_ids(repo, roots)?;
-    let mut entries = Vec::with_capacity(oids.len());
-    for oid in &oids {
-        let object = repo.find_object(*oid).map_err(git_err)?;
-        let data = gix::objs::Data {
-            kind: object.kind,
-            data: &object.data,
-            object_hash: repo.object_hash(),
-        };
-        let count = gix_pack::data::output::Count::from_data(*oid, None);
-        let entry = gix_pack::data::output::Entry::from_data(&count, &data).map_err(git_err)?;
-        entries.push(entry);
-    }
+    let entries = collect_reachable_entries(repo, roots)?;
+    let num_entries: u32 = entries.len().try_into().map_err(|_| {
+        GitBridgeError::Git(format!(
+            "push pack has too many objects to encode: {}",
+            entries.len()
+        ))
+    })?;
 
     let mut pack = Vec::new();
     let input = std::iter::once(Ok::<_, GitBridgeError>(entries));
     let mut writer = gix_pack::data::output::bytes::FromEntriesIter::new(
         input,
         &mut pack,
-        oids.len().try_into().map_err(|_| {
-            GitBridgeError::Git(format!(
-                "push pack has too many objects to encode: {}",
-                oids.len()
-            ))
-        })?,
+        num_entries,
         gix_pack::data::Version::V2,
-        ObjectHashKind::Sha1,
+        repo.object_hash(),
     );
     for result in writer.by_ref() {
         result.map_err(git_err)?;
