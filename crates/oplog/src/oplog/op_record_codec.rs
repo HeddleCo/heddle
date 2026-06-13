@@ -1248,12 +1248,6 @@ mod tests {
                 thread: None,
                 head: Some(cid(13)),
             },
-            OpRecord::Collapse {
-                sources: vec![cid(10), cid(11)],
-                result: cid(14),
-                thread: Some("main".into()),
-                pre_thread_state: None,
-            },
             OpRecord::RemoteThreadUpdate {
                 remote: "origin".into(),
                 thread: "main".into(),
@@ -1272,6 +1266,56 @@ mod tests {
             let decoded = CurrentOpRecordSchema::decode(&bytes).unwrap();
             assert_same_record(&decoded, &expected);
         }
+    }
+
+    #[test]
+    fn atomic_no_head_legacy_collapse_payload_decodes_with_no_pre_thread_state() {
+        let legacy_payload = [
+            129, 168, 67, 111, 108, 108, 97, 112, 115, 101, 147, 146, 220, 0, 16, 10, 10, 10, 10,
+            10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 220, 0, 16, 11, 11, 11, 11, 11, 11, 11,
+            11, 11, 11, 11, 11, 11, 11, 11, 11, 220, 0, 16, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
+            12, 12, 12, 12, 12, 12, 164, 109, 97, 105, 110,
+        ];
+        let expected = OpRecord::Collapse {
+            sources: vec![cid(10), cid(11)],
+            result: cid(12),
+            thread: Some("main".into()),
+            pre_thread_state: None,
+        };
+
+        assert!(CurrentOpRecordSchema::decode(&legacy_payload).is_err());
+        let decoded = AtomicNoHeadOpRecordSchema::decode(&legacy_payload).unwrap();
+        assert_same_record(&decoded, &expected);
+        let decoded =
+            decode_versioned_record(&legacy_payload, OpRecordSchemaVersion::AtomicNoHead).unwrap();
+        assert_same_record(&decoded, &expected);
+    }
+
+    #[test]
+    fn current_collapse_payload_round_trips_with_pre_thread_state() {
+        let expected = OpRecord::Collapse {
+            sources: vec![cid(10), cid(11)],
+            result: cid(12),
+            thread: Some("main".into()),
+            pre_thread_state: Some(cid(9)),
+        };
+        let bytes = encode_latest_record(&expected).unwrap();
+        assert_eq!(
+            bytes,
+            vec![
+                129, 168, 67, 111, 108, 108, 97, 112, 115, 101, 148, 146, 220, 0, 16, 10, 10, 10,
+                10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 220, 0, 16, 11, 11, 11, 11, 11,
+                11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 220, 0, 16, 12, 12, 12, 12, 12, 12, 12,
+                12, 12, 12, 12, 12, 12, 12, 12, 12, 164, 109, 97, 105, 110, 220, 0, 16, 9, 9, 9, 9,
+                9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9,
+            ]
+        );
+
+        let decoded = CurrentOpRecordSchema::decode(&bytes).unwrap();
+        assert_same_record(&decoded, &expected);
+        let decoded = decode_versioned_record(&bytes, OpRecordSchemaVersion::Current).unwrap();
+        assert_same_record(&decoded, &expected);
+        assert!(AtomicNoHeadOpRecordSchema::decode(&bytes).is_err());
     }
 
     #[test]
