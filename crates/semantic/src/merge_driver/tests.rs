@@ -2760,38 +2760,87 @@ fn foo() { 2 }
     );
 }
 
+#[test]
+fn resolve_conflict_sides_recognizes_indented_markers() {
+    let start = "<<<<<<<";
+    let sep = "=======";
+    let end = ">>>>>>>";
+    let text = format!(
+        "\
+mod m {{
+    {start} OURS
+    fn f() {{
+    {sep}
+    fn f() {{}}
+    {end} THEIRS
+}}
+"
+    );
+    let (ours, theirs) =
+        super::resolve_conflict_sides(&text).expect("indented conflict markers must resolve");
+
+    assert!(
+        !ours.contains("<<<<<<<") && !ours.contains("=======") && !ours.contains(">>>>>>>"),
+        "ours side must not retain conflict markers:\n{ours}"
+    );
+    assert!(
+        !theirs.contains("<<<<<<<") && !theirs.contains("=======") && !theirs.contains(">>>>>>>"),
+        "theirs side must not retain conflict markers:\n{theirs}"
+    );
+    assert!(
+        !super::conflict_well_formed(text.as_bytes(), crate::parser::Language::Rust),
+        "indented markers must route through structural side parsing, where the broken ours side fails"
+    );
+}
+
+#[test]
+fn resolve_conflict_sides_does_not_treat_marker_like_data_as_markers() {
+    let start = "<<<<<<<";
+    let sep = "=======";
+    let end = ">>>>>>>";
+    let text = format!(
+        "\
+fn f() {{
+    {start}not a marker
+    {sep}not a marker
+    {end}not a marker
+}}
+"
+    );
+    let (ours, theirs) =
+        super::resolve_conflict_sides(&text).expect("marker-like content must remain content");
+
+    assert_eq!(ours, text);
+    assert_eq!(theirs, text);
+}
+
+#[test]
+fn resolve_conflict_sides_preserves_column_zero_conflicts() {
+    let start = "<<<<<<<";
+    let sep = "=======";
+    let end = ">>>>>>>";
+    let text = format!(
+        "\
+{start} OURS
+fn f() {{ 1 }}
+{sep}
+fn f() {{ 2 }}
+{end} THEIRS
+"
+    );
+    let (ours, theirs) =
+        super::resolve_conflict_sides(&text).expect("column-zero conflict must resolve");
+
+    assert_eq!(ours, "fn f() { 1 }\n");
+    assert_eq!(theirs, "fn f() { 2 }\n");
+}
+
 // Resolve a conflict-marked text into its two sides (take-ours, take-theirs) by
 // dropping the markers and the opposite side's hunks. Mirrors the marker shape
 // emitted by `heddle-merge::markers` / `emit_addadd_conflict`.
 fn resolve_both_sides(text: &str) -> [String; 2] {
-    #[derive(PartialEq)]
-    enum S {
-        Normal,
-        Ours,
-        Theirs,
-    }
-    let mut ours = String::new();
-    let mut theirs = String::new();
-    let mut state = S::Normal;
-    for line in text.split_inclusive('\n') {
-        let trimmed = line.strip_suffix('\n').unwrap_or(line);
-        if trimmed.starts_with("<<<<<<<") {
-            state = S::Ours;
-        } else if trimmed == "=======" {
-            state = S::Theirs;
-        } else if trimmed.starts_with(">>>>>>>") {
-            state = S::Normal;
-        } else {
-            match state {
-                S::Normal => {
-                    ours.push_str(line);
-                    theirs.push_str(line);
-                }
-                S::Ours => ours.push_str(line),
-                S::Theirs => theirs.push_str(line),
-            }
-        }
-    }
+    let (ours, theirs) =
+        super::resolve_conflict_sides(text).expect("conflict markers must resolve in test output");
     [ours, theirs]
 }
 
