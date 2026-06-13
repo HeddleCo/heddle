@@ -13,6 +13,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use objects::error::{HeddleError, Result};
+use objects::object::{OperationId, Principal};
 use runtime_bridge::RuntimeBridge;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
@@ -42,6 +43,8 @@ fn sqlx_err(e: sqlx::Error) -> HeddleError {
 pub struct PgOpLogBackend {
     pool: Arc<PgPool>,
     repo_id: Uuid,
+    actor: Arc<Principal>,
+    operation_id: Option<OperationId>,
     /// Lazy worker-thread + private Tokio runtime that drives the sync
     /// `OpLogBackend` surface. Wrapped in `Arc<OnceLock<_>>` so every
     /// clone of `PgOpLogBackend` shares one bridge (one worker thread),
@@ -51,9 +54,21 @@ pub struct PgOpLogBackend {
 
 impl PgOpLogBackend {
     pub fn new(pool: Arc<PgPool>, repo_id: Uuid) -> Self {
+        Self::new_attributed(Principal::new("<unknown>", ""), None, pool, repo_id)
+    }
+
+    /// Construct a Postgres-backed oplog with caller-provided attribution.
+    pub fn new_attributed(
+        actor: Principal,
+        operation_id: Option<OperationId>,
+        pool: Arc<PgPool>,
+        repo_id: Uuid,
+    ) -> Self {
         Self {
             pool,
             repo_id,
+            actor: Arc::new(actor),
+            operation_id,
             bridge: Arc::new(OnceLock::new()),
         }
     }
@@ -112,16 +127,20 @@ impl PgOpLogBackend {
         let op_data: serde_json::Value = r.try_get("op_data").map_err(sqlx_err)?;
         let undone: bool = r.try_get("undone").map_err(sqlx_err)?;
         let created_at: DateTime<Utc> = r.try_get("created_at").map_err(sqlx_err)?;
+        let actor_value: Option<serde_json::Value> = r.try_get("actor").map_err(sqlx_err)?;
+        let operation_uuid: Option<Uuid> = r.try_get("operation_id").map_err(sqlx_err)?;
 
         let operation: OpRecord = serde_json::from_value(op_data)
             .map_err(|e| HeddleError::Serialization(e.to_string()))?;
         let scope: Option<String> = r.try_get("scope").map_err(sqlx_err)?;
+        let actor = match actor_value {
+            Some(value) => Arc::new(
+                serde_json::from_value(value)
+                    .map_err(|e| HeddleError::Serialization(e.to_string()))?,
+            ),
+            None => Arc::new(Principal::new("<unknown>", "")),
+        };
 
-        // The Postgres `oplog` table doesn't yet carry actor/operation_id
-        // columns; that schema migration lands with the per-call principal
-        // threading work. Until then, hosted reads surface a placeholder
-        // attribution. This is the only remaining placeholder after the
-        // cleanup pass — file-backed oplog already plumbs the real actor.
         Ok(OpEntry {
             id: id as u64,
             timestamp: created_at,
@@ -130,8 +149,8 @@ impl PgOpLogBackend {
             batch_id: batch_id as u64,
             batch_index: batch_index as u32,
             scope,
-            actor: std::sync::Arc::new(objects::object::Principal::new("<unknown>", "")),
-            operation_id: None,
+            actor,
+            operation_id: operation_uuid.map(OperationId::from_uuid),
         })
     }
 
@@ -163,7 +182,8 @@ impl PgOpLogBackend {
         }
         let order = if asc { "ASC" } else { "DESC" };
         let sql = format!(
-            "SELECT id, batch_id, batch_index, op_data, undone, created_at, scope
+            "SELECT id, batch_id, batch_index, op_data, undone, created_at, scope,
+                    actor, operation_id
              FROM oplog WHERE repo_id = $1 AND batch_id = ANY($2)
              ORDER BY batch_id {order}, batch_index ASC"
         );
@@ -248,19 +268,26 @@ impl OpLogBackend for PgOpLogBackend {
         }
         let pool = Arc::clone(&self.pool);
         let repo_id = self.repo_id;
+        let actor = Arc::clone(&self.actor);
+        let operation_id = self.operation_id;
         let scope = scope.map(str::to_string);
         self.block(async move {
             let mut tx = pool.begin().await.map_err(sqlx_err)?;
 
             let batch_id = Self::allocate_batch_id(&pool, repo_id).await?;
+            let actor_data = serde_json::to_value(actor.as_ref())
+                .map_err(|e| HeddleError::Serialization(e.to_string()))?;
+            let operation_uuid = operation_id.map(|id| id.as_uuid());
 
             let mut ids = Vec::with_capacity(operations.len());
             for (index, op) in operations.iter().enumerate() {
                 let op_data = serde_json::to_value(op)
                     .map_err(|e| HeddleError::Serialization(e.to_string()))?;
                 let id: i64 = sqlx::query_scalar::<_, i64>(
-                    "INSERT INTO oplog (repo_id, batch_id, batch_index, op_data, undone, scope)
-                     VALUES ($1, $2, $3, $4, false, $5)
+                    "INSERT INTO oplog (
+                         repo_id, batch_id, batch_index, op_data, undone, scope, actor, operation_id
+                     )
+                     VALUES ($1, $2, $3, $4, false, $5, $6, $7)
                      RETURNING id",
                 )
                 .bind(repo_id)
@@ -268,6 +295,8 @@ impl OpLogBackend for PgOpLogBackend {
                 .bind(index as i32)
                 .bind(op_data)
                 .bind(scope.as_deref())
+                .bind(actor_data.clone())
+                .bind(operation_uuid)
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(sqlx_err)?;
@@ -292,6 +321,8 @@ impl OpLogBackend for PgOpLogBackend {
 
         let pool = Arc::clone(&self.pool);
         let repo_id = self.repo_id;
+        let actor = Arc::clone(&self.actor);
+        let operation_id = self.operation_id;
         let scope = scope.map(str::to_string);
         let transaction_id = transaction_id.to_string();
         let precondition = precondition.clone();
@@ -320,7 +351,8 @@ impl OpLogBackend for PgOpLogBackend {
 
             if let Some(batch_id) = committed_batch_id {
                 let rows = sqlx::query(
-                    "SELECT id, batch_id, batch_index, op_data, undone, created_at, scope
+                    "SELECT id, batch_id, batch_index, op_data, undone, created_at, scope,
+                            actor, operation_id
                      FROM oplog
                      WHERE repo_id = $1 AND batch_id = $2
                      ORDER BY batch_index ASC",
@@ -352,7 +384,8 @@ impl OpLogBackend for PgOpLogBackend {
             if !precondition.keys.is_empty() && current_head_id as u64 != precondition.since_head_id
             {
                 let rows = sqlx::query(
-                    "SELECT id, batch_id, batch_index, op_data, undone, created_at, scope
+                    "SELECT id, batch_id, batch_index, op_data, undone, created_at, scope,
+                            actor, operation_id
                      FROM oplog
                      WHERE repo_id = $1 AND id > $2
                      ORDER BY id ASC",
@@ -393,14 +426,19 @@ impl OpLogBackend for PgOpLogBackend {
             .fetch_one(&mut *tx)
             .await
             .map_err(sqlx_err)?;
+            let actor_data = serde_json::to_value(actor.as_ref())
+                .map_err(|e| HeddleError::Serialization(e.to_string()))?;
+            let operation_uuid = operation_id.map(|id| id.as_uuid());
 
             let mut ids = Vec::with_capacity(operations.len());
             for (index, op) in operations.iter().enumerate() {
                 let op_data = serde_json::to_value(op)
                     .map_err(|e| HeddleError::Serialization(e.to_string()))?;
                 let id: i64 = sqlx::query_scalar::<_, i64>(
-                    "INSERT INTO oplog (repo_id, batch_id, batch_index, op_data, undone, scope)
-                     VALUES ($1, $2, $3, $4, false, $5)
+                    "INSERT INTO oplog (
+                         repo_id, batch_id, batch_index, op_data, undone, scope, actor, operation_id
+                     )
+                     VALUES ($1, $2, $3, $4, false, $5, $6, $7)
                      RETURNING id",
                 )
                 .bind(repo_id)
@@ -408,6 +446,8 @@ impl OpLogBackend for PgOpLogBackend {
                 .bind(index as i32)
                 .bind(op_data)
                 .bind(scope.as_deref())
+                .bind(actor_data.clone())
+                .bind(operation_uuid)
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(sqlx_err)?;
@@ -424,7 +464,8 @@ impl OpLogBackend for PgOpLogBackend {
         let repo_id = self.repo_id;
         self.block(async move {
             let row = sqlx::query(
-                "SELECT id, batch_id, batch_index, op_data, undone, created_at, scope
+                "SELECT id, batch_id, batch_index, op_data, undone, created_at, scope,
+                        actor, operation_id
                  FROM oplog WHERE repo_id = $1 ORDER BY id DESC LIMIT 1",
             )
             .bind(repo_id)
@@ -440,7 +481,8 @@ impl OpLogBackend for PgOpLogBackend {
         let repo_id = self.repo_id;
         self.block(async move {
             let rows = sqlx::query(
-                "SELECT id, batch_id, batch_index, op_data, undone, created_at, scope
+                "SELECT id, batch_id, batch_index, op_data, undone, created_at, scope,
+                        actor, operation_id
                  FROM oplog WHERE repo_id = $1 ORDER BY id DESC LIMIT $2",
             )
             .bind(repo_id)
@@ -515,7 +557,8 @@ impl OpLogBackend for PgOpLogBackend {
 // ── Issue #62 regression: current-thread runtime panic ──────────────────────
 #[cfg(test)]
 mod current_thread_runtime_tests {
-    use sqlx::postgres::PgPoolOptions;
+    use objects::object::ChangeId;
+    use sqlx::{Executor, PgPool, postgres::PgPoolOptions};
 
     use super::*;
 
@@ -527,6 +570,84 @@ mod current_thread_runtime_tests {
     fn test_database_url() -> String {
         std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://heddle-test@127.0.0.1:1/heddle_test".to_string())
+    }
+
+    fn quoted_ident(ident: &str) -> String {
+        format!("\"{}\"", ident.replace('"', "\"\""))
+    }
+
+    async fn create_attribution_fixture(database_url: &str) -> (PgPool, String) {
+        let schema = format!("pg_oplog_attr_{}", Uuid::new_v4().simple());
+        let quoted_schema = quoted_ident(&schema);
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(2))
+            .connect(database_url)
+            .await
+            .expect("connect to postgres for pg oplog fixture");
+        sqlx::query(&format!("CREATE SCHEMA {quoted_schema}"))
+            .execute(&admin)
+            .await
+            .expect("create pg oplog fixture schema");
+
+        let search_path_sql = format!("SET search_path TO {quoted_schema}");
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .after_connect(move |conn, _meta| {
+                let search_path_sql = search_path_sql.clone();
+                Box::pin(async move {
+                    conn.execute(search_path_sql.as_str()).await?;
+                    Ok(())
+                })
+            })
+            .connect(database_url)
+            .await
+            .expect("connect to postgres fixture schema");
+
+        sqlx::query(
+            "CREATE TABLE oplog_batch_counters (
+                 repo_id UUID PRIMARY KEY,
+                 next_batch_id BIGINT NOT NULL,
+                 updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create oplog_batch_counters fixture");
+        sqlx::query(
+            "CREATE TABLE oplog (
+                 id BIGSERIAL PRIMARY KEY,
+                 repo_id UUID NOT NULL,
+                 batch_id BIGINT NOT NULL,
+                 batch_index INTEGER NOT NULL,
+                 op_data JSONB NOT NULL,
+                 undone BOOLEAN NOT NULL DEFAULT FALSE,
+                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                 scope TEXT,
+                 actor JSONB,
+                 operation_id UUID
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create oplog fixture");
+
+        drop(admin);
+        (pool, schema)
+    }
+
+    async fn drop_fixture_schema(database_url: &str, schema: &str) {
+        let quoted_schema = quoted_ident(schema);
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(2))
+            .connect(database_url)
+            .await
+            .expect("connect to postgres for pg oplog fixture cleanup");
+        sqlx::query(&format!("DROP SCHEMA {quoted_schema} CASCADE"))
+            .execute(&admin)
+            .await
+            .expect("drop pg oplog fixture schema");
     }
 
     /// Issue #62: `PgOpLogBackend`'s sync methods must not panic when the
@@ -556,5 +677,44 @@ mod current_thread_runtime_tests {
         // can be `Ok(None)` or `Err(...)` — only the absence of a panic
         // matters here.
         let _ = backend.last();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "postgres integration: needs DATABASE_URL (CI postgres-tests job)"]
+    async fn new_attributed_round_trips_actor_and_operation_id() {
+        let database_url = test_database_url();
+        let (pool, schema) = create_attribution_fixture(&database_url).await;
+        let repo_id = Uuid::new_v4();
+        let actor = Principal::new("Signed Provenance", "signed@example.com");
+        let operation_id = OperationId::new();
+        let backend = PgOpLogBackend::new_attributed(
+            actor.clone(),
+            Some(operation_id),
+            Arc::new(pool.clone()),
+            repo_id,
+        );
+
+        let ids = backend
+            .record_batch_scoped(
+                vec![OpRecord::Snapshot {
+                    new_state: ChangeId::generate(),
+                    prev_head: None,
+                    head: None,
+                    thread: Some("main".to_string()),
+                }],
+                Some("lane"),
+            )
+            .expect("record attributed pg oplog batch");
+        assert_eq!(ids.len(), 1);
+
+        let entry = backend
+            .last()
+            .expect("read attributed pg oplog entry")
+            .expect("recorded entry exists");
+        assert_eq!(entry.actor.as_ref(), &actor);
+        assert_eq!(entry.operation_id, Some(operation_id));
+
+        pool.close().await;
+        drop_fixture_schema(&database_url, &schema).await;
     }
 }
