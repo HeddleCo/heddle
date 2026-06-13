@@ -199,20 +199,19 @@ fn capture_help_keeps_help_agent_hidden_but_keeps_the_pointer() {
 }
 
 /// heddle#646. The hidden `--lazy`/`--filter` clone flags need a discovery
-/// affordance: a git veteran who knows `git clone --filter` must be able to
-/// learn from `clone --help` that the flags exist, where they work today
-/// (hosted/network remotes), and the Git-transport timeline (v0.3.1) —
-/// before a failure teaches them.
+/// affordance without bloating first-run help: human `clone --help` carries a
+/// one-line breadcrumb to the topic, while the machine catalog names the
+/// hidden flags.
 #[test]
 fn clone_help_carries_hidden_flag_breadcrumb() {
     let help = heddle_help(&["clone", "--help"]);
     assert!(
-        help.contains("--lazy") && help.contains("--filter blob:none"),
-        "clone help should name the hidden lazy/filter flags: {help}"
+        help.contains("Advanced/planned flags: see `heddle help clone`."),
+        "clone help should point to the advanced/planned flag topic: {help}"
     );
     assert!(
-        help.contains("planned for v0.3.1"),
-        "clone help should state the Git-transport timeline for lazy clones: {help}"
+        !help.contains("--lazy") && !help.contains("--filter"),
+        "clone help should keep hidden flags out of the human options/body: {help}"
     );
 }
 

@@ -2018,9 +2018,9 @@ set should filter the returned `commands` array by `display`, `tier`,
 | `commands[].json_kind` | string | required | JSON output class (`json`, `jsonl`, `json_or_jsonl`, or `none`). |
 | `commands[].schema_verbs` | array<string> | required | Runtime schema verb(s) registered for this command. |
 | `commands[].documented_schema_verbs` | array<string> | required | Schema verb(s) checked against samples in this document. |
-| `commands[].options` | array<object> | required | Public flags/options local to that command. |
+| `commands[].options` | array<object> | required | Flags/options local to that command, including hidden advanced or plumbing flags marked with `hidden: true`. |
 | `commands[].arguments` | array<object> | required | Public positional arguments local to that command. |
-| `global_options` | array<object> | required | Public global flags accepted across commands. Hidden conditional flags such as `--op-id` are described by per-command fields instead of this broad list. |
+| `global_options` | array<object> | required | Global flags accepted across commands, including hidden globals marked with `hidden: true`. Conditional behavior such as `--op-id` support is still described by per-command fields. |
 | `recommended_action_placeholders` | array<string> | required | Explicit display-only placeholders that cannot parse directly through Clap until the caller supplies the missing value. |
 | `recommended_action_templates` | array<object> | required | Structured fillable forms for display-only recommended actions. Agents may fill templates only when `agent_may_fill` is true. When `agent_may_fill` is false, treat `action`/`argv_template` as display-only: do not substitute `<name>`/`<url>` placeholders; surface the template to a human or discard it. Substituting and running it will pass literal `<name>` to Heddle and fail. |
 
