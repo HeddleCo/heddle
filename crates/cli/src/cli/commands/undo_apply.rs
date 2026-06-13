@@ -301,6 +301,24 @@ impl<'a> EntrySteps<'_, 'a> {
         )
     }
 
+    /// Re-materialize the currently attached thread at `target`, preserving its
+    /// attached HEAD. No-op when undo/redo is replaying a different thread's ref.
+    fn restore_active_thread_worktree(&mut self, name: &str, target: ChangeId) -> HeddleResult<()> {
+        let repo = self.repo();
+        let head_ref = repo.head_ref()?;
+        let Head::Attached { thread } = &head_ref else {
+            return Ok(());
+        };
+        if thread != name {
+            return Ok(());
+        }
+        self.step_nonatomic(
+            move || Ok((repo.head()?, repo.head_ref()?)),
+            move |(prev_state, prev_head_ref)| restore_head(repo, prev_state, &prev_head_ref),
+            move || repo.fast_forward_attached_without_record_discard_local(&target),
+        )
+    }
+
     /// Write HEAD to `head`; inverse restores the prior HEAD ref. A single ref
     /// write — genuinely all-or-nothing.
     fn write_head(&mut self, head: Head) -> HeddleResult<()> {
@@ -437,7 +455,12 @@ impl<'a> EntrySteps<'_, 'a> {
     /// a non-fatal warning that writes nothing — the on-disk set stays the
     /// captured prior set (a no-op converge), preserving the pre-migration
     /// ref-only fallback.
-    fn restore_thread_record(&mut self, name: &str, bytes: &[u8]) -> HeddleResult<()> {
+    fn restore_thread_record(
+        &mut self,
+        name: &str,
+        bytes: &[u8],
+        op_label: &'static str,
+    ) -> HeddleResult<()> {
         let repo = self.repo();
         let forward_name = name.to_string();
         let restore_name = name.to_string();
@@ -457,11 +480,11 @@ impl<'a> EntrySteps<'_, 'a> {
                     }
                     Err(e) => {
                         eprintln!(
-                            "warning: redo of `ThreadCreate` for '{}' restored the ref but failed \
+                            "warning: replay of `{}` for '{}' restored the ref but failed \
                              to decode the ThreadManager record snapshot ({}). Record-backed \
                              commands (`thread cd`, delegate) may degrade on this thread — run \
                              `heddle thread start {}` to recreate the record.",
-                            warn_name, e, warn_name
+                            op_label, warn_name, e, warn_name
                         );
                         // Write nothing: the on-disk set is unchanged (== the
                         // captured prior set), i.e. a no-op converge.
@@ -470,6 +493,30 @@ impl<'a> EntrySteps<'_, 'a> {
                 }
             },
         )
+    }
+
+    fn restore_thread_record_set(
+        &mut self,
+        name: &str,
+        snapshots: &[Vec<u8>],
+        op_label: &'static str,
+    ) -> HeddleResult<()> {
+        let manager = ThreadManager::new(self.repo().heddle_dir());
+        let mut restored = Vec::with_capacity(snapshots.len());
+        for bytes in snapshots {
+            match manager.decode_thread_record_snapshot(bytes) {
+                Ok(record) => restored.push(record),
+                Err(e) => {
+                    eprintln!(
+                        "warning: replay of `{}` for '{}' skipped ThreadManager record-set \
+                         restore because one snapshot failed to decode ({}).",
+                        op_label, name, e
+                    );
+                    return Ok(());
+                }
+            }
+        }
+        self.converge_thread_records(name, restored)
     }
 
     /// Remove a redaction record from its per-blob sidecar. NON-atomic and
@@ -654,9 +701,31 @@ fn apply_undo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
             steps.set_thread(name.as_str(), *state)?;
         }
         OpRecord::ThreadUpdate {
-            name, old_state, ..
+            name,
+            old_state,
+            manager_snapshots,
+            ..
         } => {
-            steps.set_thread(name.as_str(), *old_state)?;
+            if manager_snapshots
+                .as_ref()
+                .is_some_and(|snapshots| snapshots.old_ref_absent)
+            {
+                steps.delete_thread(name.as_str())?;
+            } else {
+                steps.set_thread(name.as_str(), *old_state)?;
+                steps.restore_active_thread_worktree(name.as_str(), *old_state)?;
+            }
+            if let Some(snapshots) = manager_snapshots.as_ref() {
+                if !snapshots.old_records.is_empty() || !snapshots.new_records.is_empty() {
+                    steps.restore_thread_record_set(
+                        name,
+                        &snapshots.old_records,
+                        "ThreadUpdate",
+                    )?;
+                } else if let Some(bytes) = snapshots.old.as_ref() {
+                    steps.restore_thread_record(name, bytes, "ThreadUpdate")?;
+                }
+            }
         }
         OpRecord::MarkerCreate { name, .. } => {
             steps.delete_marker(name.as_str())?;
@@ -830,16 +899,31 @@ fn apply_redo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         } => {
             steps.set_thread(name.as_str(), *state)?;
             if let Some(bytes) = manager_snapshot {
-                steps.restore_thread_record(name, bytes)?;
+                steps.restore_thread_record(name, bytes, "ThreadCreate")?;
             }
         }
         OpRecord::ThreadDelete { name, .. } => {
             delete_thread_safely(steps, &ThreadName::new(name.as_str()))?;
         }
         OpRecord::ThreadUpdate {
-            name, new_state, ..
+            name,
+            new_state,
+            manager_snapshots,
+            ..
         } => {
             steps.set_thread(name.as_str(), *new_state)?;
+            steps.restore_active_thread_worktree(name.as_str(), *new_state)?;
+            if let Some(snapshots) = manager_snapshots.as_ref() {
+                if !snapshots.old_records.is_empty() || !snapshots.new_records.is_empty() {
+                    steps.restore_thread_record_set(
+                        name,
+                        &snapshots.new_records,
+                        "ThreadUpdate",
+                    )?;
+                } else if let Some(bytes) = snapshots.new.as_ref() {
+                    steps.restore_thread_record(name, bytes, "ThreadUpdate")?;
+                }
+            }
         }
         OpRecord::MarkerCreate { name, state } => {
             steps.create_marker(name.as_str(), *state)?;
@@ -2012,6 +2096,7 @@ impl AtomicMutation for RedoOp {
 #[cfg(test)]
 mod atomic_tests {
     use super::*;
+    use oplog::ThreadUpdateSnapshots;
     use tempfile::TempDir;
 
     /// Init a repo and create two snapshots on `main`. The worktree at `s2`
@@ -2438,6 +2523,7 @@ mod atomic_tests {
                         name: "main".to_string(),
                         old_state: main_state,
                         new_state: main_state,
+                        manager_snapshots: None,
                     },
                     OpRecord::MarkerCreate {
                         name: "mc".to_string(),
@@ -2497,6 +2583,7 @@ mod atomic_tests {
                         name: "main".to_string(),
                         old_state: main_state,
                         new_state: main_state,
+                        manager_snapshots: None,
                     },
                     OpRecord::ThreadCreate {
                         name: "old".to_string(),
@@ -2867,6 +2954,203 @@ mod atomic_tests {
         }
     }
 
+    fn encode_thread_record_set(manager: &ThreadManager, records: &[Thread]) -> Vec<Vec<u8>> {
+        records
+            .iter()
+            .map(|record| manager.encode_thread_record_snapshot(record).unwrap())
+            .collect()
+    }
+
+    fn apply_undo_once(repo: &Repository, scope: &str) {
+        let batches = repo.oplog().undo_batches_scoped(1, Some(scope)).unwrap();
+        let recovery_head = repo.head().unwrap();
+        let generation = repo.oplog().head_id().unwrap();
+        let txid = undo_redo_transaction_id("undo", scope, generation, &batches);
+        repo::atomic::execute(repo, UndoOp::new(batches, recovery_head, txid)).unwrap();
+    }
+
+    fn apply_redo_once(repo: &Repository, scope: &str) {
+        let batches = repo.oplog().redo_batches_scoped(1, Some(scope)).unwrap();
+        let generation = repo.oplog().head_id().unwrap();
+        let txid = undo_redo_transaction_id("redo", scope, generation, &batches);
+        repo::atomic::execute(repo, RedoOp::new(batches, txid)).unwrap();
+    }
+
+    #[test]
+    fn thread_update_undo_preserves_missing_ref_fallback_absence() {
+        let (_temp, repo, s1, s2) = repo_with_two_snapshots();
+        let scope = repo.op_scope();
+        let manager = ThreadManager::new(repo.heddle_dir());
+        let mut old_record = sample_main_thread(&s1.short(), "/work/missing-ref");
+        old_record.id = "missing-ref".to_string();
+        old_record.thread = "missing-ref".to_string();
+        old_record.base_state = s1.short();
+        old_record.current_state = Some(s1.short());
+        let mut new_record = old_record.clone();
+        new_record.current_state = Some(s2.short());
+        new_record.updated_at = old_record.updated_at + chrono::Duration::seconds(1);
+        manager.save(&new_record).unwrap();
+        repo.refs()
+            .delete_thread(&ThreadName::new("missing-ref"))
+            .unwrap();
+
+        repo.oplog()
+            .record_batch_scoped(
+                vec![OpRecord::ThreadUpdate {
+                    name: "missing-ref".to_string(),
+                    old_state: s1,
+                    new_state: s2,
+                    manager_snapshots: ThreadUpdateSnapshots::from_record_sets(
+                        Some(manager.encode_thread_record_snapshot(&old_record).unwrap()),
+                        Some(manager.encode_thread_record_snapshot(&new_record).unwrap()),
+                        encode_thread_record_set(&manager, std::slice::from_ref(&old_record)),
+                        encode_thread_record_set(&manager, std::slice::from_ref(&new_record)),
+                        true,
+                    ),
+                }],
+                Some(&scope),
+            )
+            .unwrap();
+
+        apply_undo_once(&repo, &scope);
+        assert_eq!(
+            repo.refs()
+                .get_thread(&ThreadName::new("missing-ref"))
+                .unwrap(),
+            None,
+            "undo restores the pre-update absence instead of fabricating a ref"
+        );
+        assert_eq!(
+            manager
+                .find_by_thread("missing-ref")
+                .unwrap()
+                .unwrap()
+                .current_state
+                .as_deref(),
+            Some(s1.short().as_str()),
+            "undo restores the old ThreadManager record"
+        );
+
+        apply_redo_once(&repo, &scope);
+        assert_eq!(
+            repo.refs()
+                .get_thread(&ThreadName::new("missing-ref"))
+                .unwrap(),
+            Some(s2),
+            "redo recreates the post-update thread ref"
+        );
+        assert_eq!(
+            manager
+                .find_by_thread("missing-ref")
+                .unwrap()
+                .unwrap()
+                .current_state
+                .as_deref(),
+            Some(s2.short().as_str()),
+            "redo restores the new ThreadManager record"
+        );
+    }
+
+    #[test]
+    fn thread_update_undo_redo_restores_duplicate_same_name_record_sets() {
+        let (_temp, repo, s1, s2) = repo_with_two_snapshots();
+        let scope = repo.op_scope();
+        let manager = ThreadManager::new(repo.heddle_dir());
+        let mut winner_old = sample_main_thread(&s1.short(), "/work/winner-old");
+        winner_old.id = "rec-winner".to_string();
+        winner_old.updated_at = chrono::Utc::now();
+        let mut duplicate = sample_main_thread(&s1.short(), "/work/duplicate");
+        duplicate.id = "rec-duplicate".to_string();
+        duplicate.updated_at = winner_old.updated_at - chrono::Duration::seconds(30);
+        let mut winner_new = winner_old.clone();
+        winner_new.current_state = Some(s2.short());
+        winner_new.materialized_path = Some(PathBuf::from("/work/winner-new"));
+        winner_new.updated_at = winner_old.updated_at + chrono::Duration::seconds(30);
+        manager.save(&winner_new).unwrap();
+        manager.save(&duplicate).unwrap();
+        repo.refs()
+            .set_thread(&ThreadName::new("main"), &s2)
+            .unwrap();
+
+        let old_records = vec![winner_old.clone(), duplicate.clone()];
+        let new_records = vec![winner_new.clone(), duplicate.clone()];
+        repo.oplog()
+            .record_batch_scoped(
+                vec![OpRecord::ThreadUpdate {
+                    name: "main".to_string(),
+                    old_state: s1,
+                    new_state: s2,
+                    manager_snapshots: ThreadUpdateSnapshots::from_record_sets(
+                        Some(manager.encode_thread_record_snapshot(&winner_old).unwrap()),
+                        Some(manager.encode_thread_record_snapshot(&winner_new).unwrap()),
+                        encode_thread_record_set(&manager, &old_records),
+                        encode_thread_record_set(&manager, &new_records),
+                        false,
+                    ),
+                }],
+                Some(&scope),
+            )
+            .unwrap();
+
+        apply_undo_once(&repo, &scope);
+        let undone = manager.snapshot_records("main").unwrap();
+        let undone_ids: std::collections::HashSet<_> =
+            undone.iter().map(|record| record.id.as_str()).collect();
+        assert_eq!(
+            undone_ids,
+            std::collections::HashSet::from(["rec-winner", "rec-duplicate"]),
+            "undo preserves every same-name record"
+        );
+        assert_eq!(
+            manager
+                .load("rec-winner")
+                .unwrap()
+                .unwrap()
+                .current_state
+                .as_deref(),
+            Some(s1.short().as_str()),
+            "undo restores the winner's old body"
+        );
+        assert_eq!(
+            manager
+                .load("rec-duplicate")
+                .unwrap()
+                .unwrap()
+                .materialized_path,
+            Some(PathBuf::from("/work/duplicate")),
+            "undo keeps the non-winner duplicate worktree metadata"
+        );
+
+        apply_redo_once(&repo, &scope);
+        let redone = manager.snapshot_records("main").unwrap();
+        let redone_ids: std::collections::HashSet<_> =
+            redone.iter().map(|record| record.id.as_str()).collect();
+        assert_eq!(
+            redone_ids,
+            std::collections::HashSet::from(["rec-winner", "rec-duplicate"]),
+            "redo preserves every same-name record"
+        );
+        assert_eq!(
+            manager
+                .load("rec-winner")
+                .unwrap()
+                .unwrap()
+                .current_state
+                .as_deref(),
+            Some(s2.short().as_str()),
+            "redo restores the winner's new body"
+        );
+        assert_eq!(
+            manager
+                .load("rec-duplicate")
+                .unwrap()
+                .unwrap()
+                .materialized_path,
+            Some(PathBuf::from("/work/duplicate")),
+            "redo keeps the non-winner duplicate worktree metadata"
+        );
+    }
+
     /// Test-only deferred mutation that saves ONE thread record through the
     /// `EntrySteps` applier — exercises the real `save_thread_record`
     /// (`step_nonatomic`) capture-restore path.
@@ -3035,7 +3319,7 @@ mod atomic_tests {
 
         fn apply(&mut self, tx: &mut Tx<'_>) -> HeddleResult<StagedCommit<()>> {
             let mut steps = EntrySteps::new(tx);
-            steps.restore_thread_record(&self.name, &self.bytes)?;
+            steps.restore_thread_record(&self.name, &self.bytes, "ThreadCreate")?;
             Ok(StagedCommit::pure(()))
         }
     }
@@ -3362,6 +3646,7 @@ mod atomic_tests {
                     name: "main".to_string(),
                     old_state: main_state,
                     new_state: main_state,
+                    manager_snapshots: None,
                 }],
                 Some(&scope),
             )

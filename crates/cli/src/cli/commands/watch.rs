@@ -989,6 +989,7 @@ mod tests {
                 name: "x".into(),
                 old_state: cid,
                 new_state: cid,
+                manager_snapshots: None,
             },
             OpRecord::Fork {
                 from: cid,

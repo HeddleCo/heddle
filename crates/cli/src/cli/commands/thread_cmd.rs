@@ -9,7 +9,12 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use objects::{fs_ops::remove_path_recursively, object::ThreadName, store::AgentRegistry};
+use objects::{
+    fs_ops::remove_path_recursively,
+    object::{ChangeId, ThreadName},
+    store::AgentRegistry,
+};
+use oplog::{OpLogBackend, ThreadUpdateSnapshots};
 use refs::Head;
 use repo::{
     Repository, Thread, ThreadFreshness, ThreadManager, ThreadMode, ThreadState,
@@ -46,8 +51,109 @@ struct ThreadOutput {
     changed_path_count: usize,
 }
 
+pub(crate) struct ThreadRefState {
+    pub state: ChangeId,
+    pub ref_absent: bool,
+}
+
+pub(crate) struct ThreadUpdateBefore {
+    pub state: ChangeId,
+    pub ref_absent: bool,
+    pub manager_snapshot: Option<Vec<u8>>,
+    pub manager_records: Vec<Thread>,
+}
+
 pub(crate) fn thread_manager(repo: &Repository) -> ThreadManager {
     ThreadManager::new(repo.heddle_dir())
+}
+
+pub(crate) fn current_thread_ref_state_with_presence(
+    repo: &Repository,
+    thread: &Thread,
+) -> Result<ThreadRefState> {
+    if let Some(state) = repo.refs().get_thread(&ThreadName::new(&thread.thread))? {
+        return Ok(ThreadRefState {
+            state,
+            ref_absent: false,
+        });
+    }
+    let state = if let Some(current_state) = thread.current_state.as_deref() {
+        repo.resolve_state(current_state)?
+            .ok_or_else(|| anyhow!("current state not found for thread '{}'", thread.thread))?
+    } else {
+        repo.resolve_state(&thread.base_state)?
+            .ok_or_else(|| anyhow!("base state not found for thread '{}'", thread.thread))?
+    };
+    Ok(ThreadRefState {
+        state,
+        ref_absent: true,
+    })
+}
+
+pub(crate) fn current_thread_ref_state(repo: &Repository, thread: &Thread) -> Result<ChangeId> {
+    Ok(current_thread_ref_state_with_presence(repo, thread)?.state)
+}
+
+pub(crate) fn capture_thread_update_before(
+    repo: &Repository,
+    manager: &ThreadManager,
+    thread: &Thread,
+) -> Result<ThreadUpdateBefore> {
+    let ref_state = current_thread_ref_state_with_presence(repo, thread)?;
+    Ok(ThreadUpdateBefore {
+        state: ref_state.state,
+        ref_absent: ref_state.ref_absent,
+        manager_snapshot: manager.snapshot_thread_record(&thread.thread)?,
+        manager_records: manager.snapshot_records(&thread.thread)?,
+    })
+}
+
+pub(crate) fn save_thread_update_with_oplog(
+    repo: &Repository,
+    manager: &ThreadManager,
+    thread: &Thread,
+    before: ThreadUpdateBefore,
+    new_state: ChangeId,
+) -> Result<()> {
+    let new_manager_snapshot = Some(manager.encode_thread_record_snapshot(thread)?);
+    let mut new_manager_records = before.manager_records.clone();
+    if let Some(existing) = new_manager_records
+        .iter_mut()
+        .find(|record| record.id == thread.id)
+    {
+        *existing = thread.clone();
+    } else {
+        new_manager_records.push(thread.clone());
+    }
+    let old_manager_records = encode_thread_records(manager, &before.manager_records)?;
+    let new_manager_records = encode_thread_records(manager, &new_manager_records)?;
+    objects::fault_inject::maybe_fail_at("thread_manager_save_in_thread_update")?;
+    manager.save(thread)?;
+    repo.oplog().record_thread_update(
+        &ThreadName::new(&thread.thread),
+        &before.state,
+        &new_state,
+        ThreadUpdateSnapshots::from_record_sets(
+            before.manager_snapshot,
+            new_manager_snapshot,
+            old_manager_records,
+            new_manager_records,
+            before.ref_absent,
+        ),
+        Some(&repo.op_scope()),
+    )?;
+    Ok(())
+}
+
+fn encode_thread_records(manager: &ThreadManager, records: &[Thread]) -> Result<Vec<Vec<u8>>> {
+    records
+        .iter()
+        .map(|record| {
+            manager
+                .encode_thread_record_snapshot(record)
+                .map_err(Into::into)
+        })
+        .collect()
 }
 
 /// Resolve an optional positional thread identifier to a concrete
@@ -441,6 +547,7 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
             thread_repo.root(),
         )));
     }
+    let before_update = capture_thread_update_before(repo, &manager, &thread)?;
     let rebase_state_path = thread_repo.heddle_dir().join("REBASE_STATE");
     if rebase_state_path.exists() {
         super::rebase::cmd_rebase_silent(thread_repo, None, false, true)?;
@@ -535,7 +642,7 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
     thread.integration_policy_result.manual_resolution_state = Some(current_state.short());
     thread.updated_at = Utc::now();
     thread.freshness = ThreadFreshness::Current;
-    manager.save(&thread)?;
+    save_thread_update_with_oplog(repo, &manager, &thread, before_update, current_state)?;
     Ok(thread)
 }
 
@@ -1915,5 +2022,48 @@ mod cleanup_tests {
         assert_eq!(format_bytes(512), "512 B");
         assert_eq!(format_bytes(2048), "2.0 KB");
         assert_eq!(format_bytes(1024 * 1024 * 5), "5.0 MB");
+    }
+
+    #[test]
+    fn current_thread_ref_state_resolves_persisted_short_state() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init_default(dir.path()).unwrap();
+        fs::write(dir.path().join("file.txt"), "content\n").unwrap();
+        let state = repo.snapshot(Some("content".to_string()), None).unwrap();
+
+        let thread = Thread {
+            id: "feature".to_string(),
+            thread: "feature".to_string(),
+            target_thread: Some("main".to_string()),
+            parent_thread: Some("main".to_string()),
+            mode: ThreadMode::Materialized,
+            state: ThreadState::Active,
+            base_state: state.change_id.short(),
+            base_root: state.tree.short(),
+            current_state: Some(state.change_id.short()),
+            merged_state: None,
+            task: None,
+            execution_path: dir.path().to_path_buf(),
+            materialized_path: None,
+            changed_paths: Vec::new(),
+            impact_categories: Vec::new(),
+            heavy_impact_paths: Vec::new(),
+            promotion_suggested: false,
+            freshness: ThreadFreshness::Unknown,
+            verification_summary: Default::default(),
+            confidence_summary: Default::default(),
+            integration_policy_result: Default::default(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            ephemeral: None,
+            auto: false,
+            shared_target_dir: None,
+        };
+
+        let resolved = current_thread_ref_state(&repo, &thread).unwrap();
+        assert_eq!(
+            resolved, state.change_id,
+            "fallback must resolve thread-record short current_state values"
+        );
     }
 }

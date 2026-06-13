@@ -507,6 +507,7 @@ fn complete_current_thread_manual_resolution(repo: &Repository) -> Result<Option
     let Some(target_state_obj) = repo.store().get_state(&target_state)? else {
         return Ok(None);
     };
+    let before_update = super::thread_cmd::capture_thread_update_before(repo, &manager, &thread)?;
 
     thread.base_state = target_state.short();
     thread.base_root = target_state_obj.tree.short();
@@ -521,7 +522,13 @@ fn complete_current_thread_manual_resolution(repo: &Repository) -> Result<Option
     thread.updated_at = Utc::now();
     let thread_id = thread.id.clone();
     let target = thread.target_thread.clone();
-    manager.save(&thread)?;
+    super::thread_cmd::save_thread_update_with_oplog(
+        repo,
+        &manager,
+        &thread,
+        before_update,
+        current_state,
+    )?;
 
     let action = super::thread_landing::land_command_for_thread(repo, &thread_id);
     Ok(Some(super::thread::contextual_thread_action(

@@ -2114,6 +2114,111 @@ fn test_redo_thread_create_restores_manager_record() {
     );
 }
 
+/// heddle#469: `thread refresh` updates both the thread ref and the
+/// ThreadManager record's base metadata. Undo must restore the whole
+/// thread record, including `base_state`, not just the ref pointer.
+#[test]
+fn test_undo_thread_refresh_restores_base_state() {
+    use repo::ThreadManager;
+
+    let temp = bootstrap_repo_with_initial_state();
+
+    heddle_must_succeed(&["thread", "create", "feature"], temp.path());
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+    std::fs::write(temp.path().join("feature.txt"), "feature\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "feature work"], temp.path());
+    let feature_tip_before_refresh = head_short(temp.path());
+
+    heddle_must_succeed(&["thread", "switch", "main"], temp.path());
+    std::fs::write(temp.path().join("main.txt"), "main\n").unwrap();
+    heddle_must_succeed(&["capture", "-m", "main advance"], temp.path());
+    let refreshed_base = head_short(temp.path());
+
+    heddle_must_succeed(&["thread", "switch", "feature"], temp.path());
+
+    let (base_before_refresh, current_before_refresh) = {
+        let repo = Repository::open(temp.path()).unwrap();
+        let manager = ThreadManager::new(repo.heddle_dir());
+        let record = manager
+            .find_by_thread("feature")
+            .unwrap()
+            .expect("feature record exists before refresh");
+        (
+            record.base_state.clone(),
+            record
+                .current_state
+                .clone()
+                .expect("feature has current state before refresh"),
+        )
+    };
+
+    heddle_must_succeed(&["thread", "refresh", "feature"], temp.path());
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("feature.txt")).unwrap(),
+        "feature\n",
+        "refresh must keep the feature work materialized"
+    );
+    assert!(
+        temp.path().join("main.txt").exists(),
+        "test setup must materialize the refreshed base on disk"
+    );
+
+    {
+        let repo = Repository::open(temp.path()).unwrap();
+        let manager = ThreadManager::new(repo.heddle_dir());
+        let record = manager
+            .find_by_thread("feature")
+            .unwrap()
+            .expect("feature record exists after refresh");
+        assert_eq!(
+            record.base_state, refreshed_base,
+            "refresh must advance feature's recorded base to main"
+        );
+        assert_ne!(
+            record.base_state, base_before_refresh,
+            "test setup must actually change base_state"
+        );
+    }
+
+    heddle_must_succeed(&["undo"], temp.path());
+
+    let repo = Repository::open(temp.path()).unwrap();
+    let feature_ref = repo
+        .refs()
+        .get_thread(&ThreadName::new("feature"))
+        .unwrap()
+        .expect("feature ref survives refresh undo")
+        .short();
+    assert_eq!(
+        feature_ref, feature_tip_before_refresh,
+        "undo of refresh must restore the feature ref"
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("feature.txt")).unwrap(),
+        "feature\n",
+        "undo of refresh must restore the pre-refresh worktree content"
+    );
+    assert!(
+        !temp.path().join("main.txt").exists(),
+        "undo of refresh on the checked-out thread must remove files introduced by refresh"
+    );
+
+    let manager = ThreadManager::new(repo.heddle_dir());
+    let restored = manager
+        .find_by_thread("feature")
+        .unwrap()
+        .expect("feature record survives refresh undo");
+    assert_eq!(
+        restored.base_state, base_before_refresh,
+        "undo of refresh must restore the prior base_state"
+    );
+    assert_eq!(
+        restored.current_state.as_deref(),
+        Some(current_before_refresh.as_str()),
+        "undo of refresh must restore the manager record's current_state too"
+    );
+}
+
 /// `heddle undo --preview` (alias `--dry-run`) must surface the
 /// worktree-attached refusal pre-mutation, matching the same
 /// preview-honesty rule used by the redaction gate at undo.rs:88.

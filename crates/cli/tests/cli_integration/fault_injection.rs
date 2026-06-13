@@ -16,6 +16,7 @@
 use std::process::Command;
 
 use super::*;
+use oplog::{OpLogBackend, OpRecord};
 
 /// R9: bridge mapping persistence.
 ///
@@ -174,6 +175,34 @@ fn current_head_tip(repo: &std::path::Path) -> String {
         .as_str()
         .expect("tip change_id")
         .to_string()
+}
+
+fn thread_update_count(repo: &std::path::Path) -> usize {
+    let repo = Repository::open(repo).expect("open repo");
+    repo.oplog()
+        .recent(512)
+        .expect("read oplog")
+        .iter()
+        .filter(|entry| matches!(entry.operation, OpRecord::ThreadUpdate { .. }))
+        .count()
+}
+
+fn scoped_undo_redo_thread_update_count(repo: &std::path::Path) -> usize {
+    let repo = Repository::open(repo).expect("open repo");
+    let scope = repo.op_scope();
+    let undo = repo
+        .oplog()
+        .undo_batches_scoped(16, Some(&scope))
+        .expect("read undo queue");
+    let redo = repo
+        .oplog()
+        .redo_batches_scoped(16, Some(&scope))
+        .expect("read redo queue");
+    undo.iter()
+        .chain(redo.iter())
+        .flat_map(|batch| batch.entries.iter())
+        .filter(|entry| matches!(entry.operation, OpRecord::ThreadUpdate { .. }))
+        .count()
 }
 
 fn assert_intentional_snapshot_crash(crashed: std::process::Output, checkpoint: &str) {
@@ -339,5 +368,59 @@ fn goto_after_commit_crash_recovers_detached_head_once() {
         current_main_tip(temp.path()),
         second_tip,
         "goto recovery must not move the source thread ref",
+    );
+}
+
+#[test]
+#[ignore = "fault-injection: spawns child processes with HEDDLE_FAULT_INJECT"]
+fn thread_update_save_failure_does_not_commit_undoable_record() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).expect("init");
+    std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();
+    heddle(&["capture", "-m", "base"], Some(temp.path())).expect("base capture");
+
+    let thread_path = temp.path().join("feature-checkout");
+    heddle(
+        &[
+            "start",
+            "feature/atomic-save",
+            "--path",
+            thread_path.to_str().unwrap(),
+        ],
+        Some(temp.path()),
+    )
+    .expect("start feature thread");
+    std::fs::write(thread_path.join("feature.txt"), "feature\n").unwrap();
+    heddle(&["capture", "-m", "feature work"], Some(&thread_path)).expect("feature capture");
+
+    let before_count = thread_update_count(temp.path());
+    let failed = heddle_output_with_env(
+        &["thread", "resolve", "feature/atomic-save"],
+        Some(temp.path()),
+        &[("HEDDLE_FAULT_INJECT", "thread_manager_save_in_thread_update")],
+    )
+    .expect("spawn injected thread resolve");
+    assert!(
+        !failed.status.success(),
+        "thread resolve should fail at the ThreadUpdate manager.save fault point: stdout={} stderr={}",
+        String::from_utf8_lossy(&failed.stdout),
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        stderr.contains("HEDDLE_FAULT_INJECT")
+            && stderr.contains("thread_manager_save_in_thread_update"),
+        "thread resolve should report the intentional manager.save failure: stderr={stderr}"
+    );
+
+    assert_eq!(
+        thread_update_count(temp.path()),
+        before_count,
+        "failed manager.save must not leave a committed ThreadUpdate record"
+    );
+    assert_eq!(
+        scoped_undo_redo_thread_update_count(&thread_path),
+        0,
+        "undo/redo queues must not expose a ThreadUpdate whose manager body failed to save"
     );
 }

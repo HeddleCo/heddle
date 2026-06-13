@@ -13,6 +13,7 @@ use objects::{
 
 use super::oplog_types::{
     ConditionalCommitOutcome, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
+    ThreadUpdateSnapshots,
 };
 
 /// Before/after snapshots of a per-state visibility sidecar, captured around a
@@ -222,6 +223,26 @@ pub trait OpLogBackend: Send + Sync {
             vec![OpRecord::ThreadDelete {
                 name: name.to_string(),
                 state: *state,
+            }],
+            scope,
+        )?;
+        Ok(ids[0])
+    }
+
+    fn record_thread_update(
+        &self,
+        name: &ThreadName,
+        old_state: &ChangeId,
+        new_state: &ChangeId,
+        manager_snapshots: Option<ThreadUpdateSnapshots>,
+        scope: Option<&str>,
+    ) -> Result<u64> {
+        let ids = self.record_batch_scoped(
+            vec![OpRecord::ThreadUpdate {
+                name: name.to_string(),
+                old_state: *old_state,
+                new_state: *new_state,
+                manager_snapshots,
             }],
             scope,
         )?;
