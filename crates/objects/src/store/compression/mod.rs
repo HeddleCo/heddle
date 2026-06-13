@@ -121,20 +121,26 @@ pub enum CompressionError {
 
 #[cfg(feature = "zstd")]
 /// Compress data using zstd.
-pub fn compress_zstd(data: &[u8], level: i32) -> Result<Vec<u8>, CompressionError> {
+fn compress_zstd_impl(data: &[u8], level: i32) -> Result<Vec<u8>, CompressionError> {
     zstd::encode_all(data, level).map_err(|e| CompressionError::CompressionFailed(e.to_string()))
 }
 
 #[cfg(not(feature = "zstd"))]
-pub fn compress_zstd(_data: &[u8], _level: i32) -> Result<Vec<u8>, CompressionError> {
+fn compress_zstd_impl(_data: &[u8], _level: i32) -> Result<Vec<u8>, CompressionError> {
     Err(CompressionError::InvalidOperation(
         "zstd compression support not compiled into this build".to_string(),
     ))
 }
 
+#[cfg(feature = "bench")]
+/// Compress data using zstd.
+pub fn compress_zstd(data: &[u8], level: i32) -> Result<Vec<u8>, CompressionError> {
+    compress_zstd_impl(data, level)
+}
+
 #[cfg(feature = "zstd")]
 /// Decompress zstd data while enforcing the recorded output size.
-pub fn decompress_zstd(data: &[u8], expected_size: u64) -> Result<Vec<u8>, CompressionError> {
+fn decompress_zstd_impl(data: &[u8], expected_size: u64) -> Result<Vec<u8>, CompressionError> {
     validate_size(expected_size)?;
     let expected_capacity = checked_size_to_usize("zstd expected size", expected_size)?;
 
@@ -170,11 +176,17 @@ pub fn decompress_zstd(data: &[u8], expected_size: u64) -> Result<Vec<u8>, Compr
 }
 
 #[cfg(not(feature = "zstd"))]
-pub fn decompress_zstd(_data: &[u8], expected_size: u64) -> Result<Vec<u8>, CompressionError> {
+fn decompress_zstd_impl(_data: &[u8], expected_size: u64) -> Result<Vec<u8>, CompressionError> {
     validate_size(expected_size)?;
     Err(CompressionError::InvalidOperation(
         "zstd-compressed data is unsupported in this build".to_string(),
     ))
+}
+
+#[cfg(feature = "bench")]
+/// Decompress zstd data while enforcing the recorded output size.
+pub fn decompress_zstd(data: &[u8], expected_size: u64) -> Result<Vec<u8>, CompressionError> {
+    decompress_zstd_impl(data, expected_size)
 }
 
 /// Compress data with automatic algorithm selection.
@@ -192,7 +204,7 @@ pub fn compress(
     validate_size(data.len() as u64)?;
 
     // Try zstd compression
-    let compressed = compress_zstd(data, config.level)?;
+    let compressed = compress_zstd_impl(data, config.level)?;
 
     // Only use compression if it actually helps
     if compressed.len() >= data.len() {
@@ -361,7 +373,7 @@ where
     F: Fn(&[u8]) -> Result<u64, CompressionError>,
 {
     let uncompressed_size = read_size(data)?;
-    let decompressed = decompress_zstd(&data[header_len..], uncompressed_size)?;
+    let decompressed = decompress_zstd_impl(&data[header_len..], uncompressed_size)?;
     validate_decompressed_len(uncompressed_size, decompressed.len())?;
     Ok(decompressed)
 }

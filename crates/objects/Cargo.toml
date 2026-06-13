@@ -38,6 +38,7 @@ aws-smithy-async = { workspace = true, optional = true }
 runtime-bridge = { path = "../runtime-bridge", package = "heddle-runtime-bridge", version = "0.2", optional = true }
 
 [features]
+bench = []
 s3 = ["dep:aws-sdk-s3", "dep:aws-smithy-async", "dep:tokio", "dep:runtime-bridge"]
 memory-backend = []
 zstd = ["dep:zstd"]
@@ -58,19 +59,24 @@ name = "objects"
 [[bench]]
 name = "hashing"
 harness = false
+required-features = ["bench"]
 
 [[bench]]
 name = "compression"
 harness = false
+required-features = ["bench"]
 
 [[bench]]
 name = "pack_io"
 harness = false
+required-features = ["bench"]
 
 [[bench]]
 name = "tree_diff"
 harness = false
+required-features = ["bench"]
 
 [[bench]]
 name = "delta"
 harness = false
+required-features = ["bench"]
