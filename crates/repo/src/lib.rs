@@ -47,6 +47,7 @@ mod thread_model;
 mod thread_record_store;
 mod thread_stack;
 mod thread_storage;
+mod thread_worktree_target;
 mod worktree_ignore;
 pub mod worktree_index;
 pub mod visibility;
@@ -116,6 +117,9 @@ pub use thread_model::{
 };
 pub use thread_record_store::{FilesystemThreadRecordStore, ThreadRecordStore};
 pub use thread_storage::{SyncedThreadMetadata, Thread, ThreadManager};
+pub use thread_worktree_target::{
+    ThreadWorktreeTargetDisposition, ThreadWorktreeTargetError, validate_thread_worktree_target,
+};
 pub use worktree_index::{DirectoryCacheEntry, IndexEntry, WorktreeIndex};
 pub use worktree_state::WorktreeState;
 pub use worktree_status_options::{

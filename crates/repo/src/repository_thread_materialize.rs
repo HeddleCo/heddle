@@ -31,6 +31,9 @@ use tracing::{debug, instrument};
 use super::{HeddleError, Repository, Result};
 use crate::thread_manifest::{ManifestFile, ThreadManifest, read_manifest, write_manifest};
 use crate::visibility::{AudienceTier, visible};
+use crate::{
+    ThreadWorktreeTargetDisposition, ThreadWorktreeTargetError, validate_thread_worktree_target,
+};
 use objects::object::VisibilityTier;
 
 /// Filename of the operator-local courtesy placeholder written when a
@@ -60,6 +63,77 @@ pub enum ThreadCaptureOutcome {
     NoOp,
     /// A new state was written and the thread head advanced.
     Captured { state_id: ChangeId },
+}
+
+fn thread_worktree_target_error(error: ThreadWorktreeTargetError) -> HeddleError {
+    match error {
+        ThreadWorktreeTargetError::Io { source, .. } => HeddleError::Io(source),
+        ThreadWorktreeTargetError::Symlink { path } => HeddleError::Conflict(format!(
+            "thread worktree target '{}' cannot be a symlink",
+            path.display()
+        )),
+        ThreadWorktreeTargetError::NotDirectory { path } => HeddleError::Conflict(format!(
+            "thread worktree target '{}' must be a directory",
+            path.display()
+        )),
+        ThreadWorktreeTargetError::NotEmpty { path } => HeddleError::Conflict(format!(
+            "thread worktree target '{}' is not empty",
+            path.display()
+        )),
+    }
+}
+
+fn prepare_thread_worktree_target(dest: &Path) -> Result<ThreadWorktreeTargetDisposition> {
+    let disposition =
+        validate_thread_worktree_target(dest).map_err(thread_worktree_target_error)?;
+    if disposition == ThreadWorktreeTargetDisposition::Absent {
+        fs::create_dir_all(dest).map_err(HeddleError::Io)?;
+        validate_thread_worktree_target(dest).map_err(thread_worktree_target_error)?;
+    }
+    Ok(disposition)
+}
+
+fn clear_dir_contents(dir: &Path) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(dir)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            fs::remove_dir_all(&path)?;
+        } else {
+            fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_thread_worktree_target(
+    dest: &Path,
+    disposition: ThreadWorktreeTargetDisposition,
+) -> Result<()> {
+    match clear_dir_contents(dest) {
+        Ok(()) => {}
+        Err(err)
+            if err.kind() == std::io::ErrorKind::NotFound
+                || err.kind() == std::io::ErrorKind::NotADirectory => {}
+        Err(err) => return Err(HeddleError::Io(err)),
+    }
+
+    if disposition == ThreadWorktreeTargetDisposition::Absent {
+        match fs::remove_dir(dest) {
+            Ok(()) => {}
+            Err(err)
+                if err.kind() == std::io::ErrorKind::NotFound
+                    || err.kind() == std::io::ErrorKind::NotADirectory => {}
+            Err(err) => return Err(HeddleError::Io(err)),
+        }
+    }
+
+    Ok(())
 }
 
 impl Repository {
@@ -96,6 +170,7 @@ impl Repository {
             .store()
             .get_state(&change_id)?
             .ok_or_else(|| HeddleError::Config(format!("state for {thread} missing")))?;
+        let target_disposition = prepare_thread_worktree_target(dest)?;
 
         // Route through the single visibility-gated checkout chokepoint, which
         // either materializes the real tree or writes the operator-local
@@ -103,44 +178,54 @@ impl Repository {
         // outside the checkout dir), so it is written here based on the gate
         // outcome — not in the chokepoint, which `write_isolated_checkout` also
         // calls without wanting a thread manifest.
-        match self.checkout_state_gated(&change_id, &state, dest, audience)? {
-            CheckoutMaterialization::Withheld { tier } => {
-                // Manifest reflects disk truth: no tracked files were
-                // materialized (the placeholder is untracked). `tree_hash`
-                // still names the real embargoed state's tree so the sidecar
-                // identifies which state this checkout stands in for. The
-                // `withheld` flag here is diagnostic only — it records that the
-                // *last* materialize of this thread was withheld, but the
-                // per-thread manifest is clobbered by a sibling worktree of the
-                // same thread. The authoritative, per-worktree non-capturable
-                // signal is the withheld marker written by
-                // `checkout_state_gated`, keyed on the worktree root (heddle#316).
-                let mut manifest =
-                    ThreadManifest::new(change_id, state.tree, canonical_worktree_path(dest));
-                manifest.withheld = true;
-                write_manifest(self.heddle_dir(), thread, &manifest).map_err(HeddleError::Io)?;
-                debug!(
-                    thread = %thread,
-                    state_id = %change_id,
-                    tier = tier.as_str(),
-                    "thread checkout rendered courtesy stub (under-tier for audience)"
-                );
-                Ok(manifest)
+        let result = (|| -> Result<ThreadManifest> {
+            match self.checkout_state_gated(&change_id, &state, dest, audience)? {
+                CheckoutMaterialization::Withheld { tier } => {
+                    // Manifest reflects disk truth: no tracked files were
+                    // materialized (the placeholder is untracked). `tree_hash`
+                    // still names the real embargoed state's tree so the sidecar
+                    // identifies which state this checkout stands in for. The
+                    // `withheld` flag here is diagnostic only — it records that the
+                    // *last* materialize of this thread was withheld, but the
+                    // per-thread manifest is clobbered by a sibling worktree of the
+                    // same thread. The authoritative, per-worktree non-capturable
+                    // signal is the withheld marker written by
+                    // `checkout_state_gated`, keyed on the worktree root (heddle#316).
+                    let mut manifest =
+                        ThreadManifest::new(change_id, state.tree, canonical_worktree_path(dest));
+                    manifest.withheld = true;
+                    write_manifest(self.heddle_dir(), thread, &manifest)
+                        .map_err(HeddleError::Io)?;
+                    debug!(
+                        thread = %thread,
+                        state_id = %change_id,
+                        tier = tier.as_str(),
+                        "thread checkout rendered courtesy stub (under-tier for audience)"
+                    );
+                    Ok(manifest)
+                }
+                CheckoutMaterialization::Materialized { tree } => {
+                    let mut manifest =
+                        ThreadManifest::new(change_id, state.tree, canonical_worktree_path(dest));
+                    populate_manifest_from_tree(self, &tree, dest, "", &mut manifest.files)?;
+                    write_manifest(self.heddle_dir(), thread, &manifest)
+                        .map_err(HeddleError::Io)?;
+                    debug!(
+                        thread = %thread,
+                        state_id = %change_id,
+                        files = manifest.files.len(),
+                        "thread materialized"
+                    );
+                    Ok(manifest)
+                }
             }
-            CheckoutMaterialization::Materialized { tree } => {
-                let mut manifest =
-                    ThreadManifest::new(change_id, state.tree, canonical_worktree_path(dest));
-                populate_manifest_from_tree(self, &tree, dest, "", &mut manifest.files)?;
-                write_manifest(self.heddle_dir(), thread, &manifest).map_err(HeddleError::Io)?;
-                debug!(
-                    thread = %thread,
-                    state_id = %change_id,
-                    files = manifest.files.len(),
-                    "thread materialized"
-                );
-                Ok(manifest)
-            }
+        })();
+
+        if result.is_err() {
+            cleanup_thread_worktree_target(dest, target_disposition)?;
         }
+
+        result
     }
 
     /// THE visibility-gated checkout chokepoint. Resolve `change_id`'s
@@ -1176,6 +1261,14 @@ mod tests {
     use super::*;
     use crate::thread_manifest::read_manifest;
 
+    fn seeded_repo() -> (TempDir, Repository) {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("file.txt"), b"tracked\n").unwrap();
+        repo.snapshot(Some("seed".into()), None).unwrap();
+        (repo_dir, repo)
+    }
+
     #[test]
     fn materialize_thread_writes_manifest_with_files() {
         let repo_dir = TempDir::new().unwrap();
@@ -1221,6 +1314,92 @@ mod tests {
         );
     }
 
+    #[test]
+    fn materialize_thread_creates_absent_target() {
+        let (_repo_dir, repo) = seeded_repo();
+        let dest_holder = TempDir::new().unwrap();
+        let dest = dest_holder.path().join("out");
+
+        repo.materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
+
+        assert!(dest.is_dir());
+        assert_eq!(
+            fs::read_to_string(dest.join("file.txt")).unwrap(),
+            "tracked\n"
+        );
+    }
+
+    #[test]
+    fn materialize_thread_adopts_empty_directory() {
+        let (_repo_dir, repo) = seeded_repo();
+        let dest_holder = TempDir::new().unwrap();
+        let dest = dest_holder.path().join("out");
+        fs::create_dir(&dest).unwrap();
+
+        repo.materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap();
+
+        assert!(dest.is_dir());
+        assert_eq!(
+            fs::read_to_string(dest.join("file.txt")).unwrap(),
+            "tracked\n"
+        );
+    }
+
+    #[test]
+    fn materialize_thread_rejects_non_empty_directory() {
+        let (_repo_dir, repo) = seeded_repo();
+        let dest_holder = TempDir::new().unwrap();
+        let dest = dest_holder.path().join("out");
+        fs::create_dir(&dest).unwrap();
+        fs::write(dest.join("existing.txt"), b"user data\n").unwrap();
+
+        let err = repo
+            .materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("is not empty"), "{err}");
+        assert_eq!(
+            fs::read_to_string(dest.join("existing.txt")).unwrap(),
+            "user data\n"
+        );
+        assert!(!dest.join("file.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialize_thread_rejects_symlink_target() {
+        let (_repo_dir, repo) = seeded_repo();
+        let dest_holder = TempDir::new().unwrap();
+        let real = dest_holder.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let dest = dest_holder.path().join("link");
+        std::os::unix::fs::symlink(&real, &dest).unwrap();
+
+        let err = repo
+            .materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("cannot be a symlink"), "{err}");
+        assert!(!real.join("file.txt").exists());
+    }
+
+    #[test]
+    fn materialize_thread_rejects_file_target() {
+        let (_repo_dir, repo) = seeded_repo();
+        let dest_holder = TempDir::new().unwrap();
+        let dest = dest_holder.path().join("file");
+        fs::write(&dest, b"user data\n").unwrap();
+
+        let err = repo
+            .materialize_thread("main", &dest, &AudienceTier::Internal)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("must be a directory"), "{err}");
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "user data\n");
+    }
+
     fn embargo_state_with_tier(repo: &Repository, tier: VisibilityTier) -> ChangeId {
         use chrono::Utc;
         use objects::object::{Principal, StateVisibility};
@@ -1243,6 +1422,25 @@ mod tests {
         })
         .expect("put visibility");
         state_id
+    }
+
+    fn checkout_main(
+        repo: &Repository,
+        dest: &Path,
+        audience: &AudienceTier,
+    ) -> CheckoutMaterialization {
+        let change_id = repo
+            .refs()
+            .resolve("main")
+            .unwrap()
+            .expect("main thread exists");
+        let state = repo
+            .store()
+            .get_state(&change_id)
+            .unwrap()
+            .expect("main state exists");
+        repo.checkout_state_gated(&change_id, &state, dest, audience)
+            .unwrap()
     }
 
     #[test]
@@ -1334,8 +1532,7 @@ mod tests {
         let dest = dest_holder.path().join("out");
 
         // First: under-tier materialize of the root → only the stub lands.
-        repo.materialize_thread("main", &dest, &AudienceTier::Internal)
-            .unwrap();
+        checkout_main(&repo, &dest, &AudienceTier::Internal);
         assert!(
             dest.join(COURTESY_STUB_FILENAME).exists(),
             "under-tier materialize must write the stub"
@@ -1343,19 +1540,16 @@ mod tests {
         assert!(!dest.join("secret.rs").exists());
 
         // Then: re-materialize the SAME root for an authorized audience.
-        let manifest = repo
-            .materialize_thread(
-                "main",
-                &dest,
-                &AudienceTier::Restricted("sec-embargo".into()),
-            )
-            .unwrap();
+        checkout_main(
+            &repo,
+            &dest,
+            &AudienceTier::Restricted("sec-embargo".into()),
+        );
 
         assert!(
             dest.join("secret.rs").exists(),
             "authorized re-materialize must write the real tree"
         );
-        assert!(manifest.files.contains_key("secret.rs"));
         assert!(
             !dest.join(COURTESY_STUB_FILENAME).exists(),
             "the stale courtesy stub must be removed on the authorized re-materialize"
@@ -1389,18 +1583,16 @@ mod tests {
 
         // Visible materialize: the real tree lands — the very bytes a later
         // under-tier materialize must withhold.
-        repo.materialize_thread(
-            "main",
+        checkout_main(
+            &repo,
             &dest,
             &AudienceTier::Restricted("sec-embargo".into()),
-        )
-        .unwrap();
+        );
         assert!(dest.join("secret.rs").exists());
         assert!(dest.join("nested/inner.rs").exists());
 
         // Under-tier re-materialize of the SAME root — the leak case.
-        repo.materialize_thread("main", &dest, &AudienceTier::Internal)
-            .unwrap();
+        checkout_main(&repo, &dest, &AudienceTier::Internal);
 
         assert!(
             dest.join(COURTESY_STUB_FILENAME).exists(),
@@ -1447,23 +1639,19 @@ mod tests {
         let dest_holder = TempDir::new().unwrap();
         let dest = dest_holder.path().join("out");
 
-        repo.materialize_thread("main", &dest, &AudienceTier::Internal)
-            .unwrap();
+        checkout_main(&repo, &dest, &AudienceTier::Internal);
         assert!(dest.join(COURTESY_STUB_FILENAME).exists());
         assert!(!dest.join("secret.rs").exists());
 
-        let manifest = repo
-            .materialize_thread(
-                "main",
-                &dest,
-                &AudienceTier::Restricted("sec-embargo".into()),
-            )
-            .unwrap();
+        checkout_main(
+            &repo,
+            &dest,
+            &AudienceTier::Restricted("sec-embargo".into()),
+        );
         assert!(
             dest.join("secret.rs").exists(),
             "authorized re-materialize must write the real tree"
         );
-        assert!(manifest.files.contains_key("secret.rs"));
         assert!(
             !dest.join(COURTESY_STUB_FILENAME).exists(),
             "the stale courtesy stub must be removed on the authorized re-materialize"
@@ -1485,8 +1673,7 @@ mod tests {
 
         let dest_holder = TempDir::new().unwrap();
         let dest = dest_holder.path().join("out");
-        repo.materialize_thread("main", &dest, &AudienceTier::Internal)
-            .unwrap();
+        checkout_main(&repo, &dest, &AudienceTier::Internal);
         assert!(dest.join("keep.rs").exists());
         assert!(dest.join("stale.rs").exists());
 
@@ -1498,8 +1685,7 @@ mod tests {
         repo.snapshot(Some("advance".into()), None).unwrap();
 
         // Re-materialize the SAME root at the new (still visible) head.
-        repo.materialize_thread("main", &dest, &AudienceTier::Internal)
-            .unwrap();
+        checkout_main(&repo, &dest, &AudienceTier::Internal);
         assert!(dest.join("keep.rs").exists(), "an unchanged leaf stays");
         assert!(dest.join("fresh.rs").exists(), "the new leaf is written");
         assert!(
@@ -1531,14 +1717,12 @@ mod tests {
         let dest_holder = TempDir::new().unwrap();
         let dest = dest_holder.path().join("out");
 
-        repo.materialize_thread("main", &dest, &AudienceTier::Internal)
-            .unwrap();
+        checkout_main(&repo, &dest, &AudienceTier::Internal);
         assert!(dest.join(COURTESY_STUB_FILENAME).exists());
         assert!(!dest.join("secret.rs").exists());
 
-        // Second under-tier materialize of the same root: still only the stub.
-        repo.materialize_thread("main", &dest, &AudienceTier::Internal)
-            .unwrap();
+        // Second under-tier checkout of the same root: still only the stub.
+        checkout_main(&repo, &dest, &AudienceTier::Internal);
         let remaining: Vec<_> = fs::read_dir(&dest)
             .unwrap()
             .map(|e| e.unwrap().file_name())
@@ -1627,8 +1811,7 @@ mod tests {
         // clobber-proof per-root record for A captures `old-secret.txt`.
         let a_holder = TempDir::new().unwrap();
         let root_a = a_holder.path().join("root-a");
-        repo.materialize_thread("main", &root_a, &AudienceTier::Internal)
-            .unwrap();
+        checkout_main(&repo, &root_a, &AudienceTier::Internal);
         assert!(root_a.join("old-secret.txt").exists());
 
         // Advance the thread to S2: the secret is REMOVED before this state, a
@@ -1674,8 +1857,7 @@ mod tests {
         // S2's tree does not contain `old-secret.txt`, and the per-thread
         // manifest no longer names A — only the clobber-proof per-root record can
         // drive its removal.
-        repo.materialize_thread("main", &root_a, &AudienceTier::Internal)
-            .unwrap();
+        checkout_main(&repo, &root_a, &AudienceTier::Internal);
 
         assert!(
             root_a.join(COURTESY_STUB_FILENAME).exists(),
@@ -1720,8 +1902,7 @@ mod tests {
         // .leaves(R) = {a.txt}.
         let holder = TempDir::new().unwrap();
         let root = holder.path().join("root");
-        repo.materialize_thread("main", &root, &AudienceTier::Internal)
-            .unwrap();
+        checkout_main(&repo, &root, &AudienceTier::Internal);
         assert!(root.join("a.txt").exists());
 
         // User adds `b.txt` in R and captures → head advances to S2 = {a, b}.
@@ -1758,8 +1939,7 @@ mod tests {
         // Re-materialize R WITHHELD (Internal under-tier for the Private S3). S3's
         // own tree has no b.txt, so the withheld reduction can only remove the
         // capture-added b.txt by sourcing the refreshed per-root record.
-        repo.materialize_thread("main", &root, &AudienceTier::Internal)
-            .unwrap();
+        checkout_main(&repo, &root, &AudienceTier::Internal);
 
         assert!(
             root.join(COURTESY_STUB_FILENAME).exists(),

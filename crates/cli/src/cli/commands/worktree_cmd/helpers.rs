@@ -155,21 +155,24 @@ fn validate_worktree_target(
         return Err(anyhow::anyhow!(worktree_target_storage_advice(path)));
     }
 
-    if let Ok(metadata) = std::fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() {
-            return Err(anyhow::anyhow!(worktree_target_symlink_advice(path)));
-        }
-
-        if !metadata.is_dir() {
-            return Err(anyhow::anyhow!(worktree_target_not_directory_advice(path)));
-        }
-
-        if std::fs::read_dir(path)?.next().transpose()?.is_some() {
-            return Err(anyhow::anyhow!(worktree_target_not_empty_advice(path)));
-        }
-    }
+    repo::validate_thread_worktree_target(path).map_err(worktree_target_shape_advice)?;
 
     Ok(())
+}
+
+fn worktree_target_shape_advice(error: repo::ThreadWorktreeTargetError) -> anyhow::Error {
+    match error {
+        repo::ThreadWorktreeTargetError::Symlink { path } => {
+            anyhow::anyhow!(worktree_target_symlink_advice(&path))
+        }
+        repo::ThreadWorktreeTargetError::NotDirectory { path } => {
+            anyhow::anyhow!(worktree_target_not_directory_advice(&path))
+        }
+        repo::ThreadWorktreeTargetError::NotEmpty { path } => {
+            anyhow::anyhow!(worktree_target_not_empty_advice(&path))
+        }
+        repo::ThreadWorktreeTargetError::Io { source, .. } => anyhow::anyhow!(source),
+    }
 }
 
 /// True if `candidate` (already known to live under `threads_root`) falls
