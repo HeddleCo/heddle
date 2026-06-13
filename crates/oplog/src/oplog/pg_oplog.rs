@@ -21,7 +21,7 @@ use super::{
     oplog_backend::OpLogBackend,
     oplog_types::{
         ConditionalCommitOutcome, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
-        isolation_keys_for_record,
+        is_transaction_commit, isolation_keys_for_record,
     },
 };
 
@@ -335,7 +335,7 @@ impl OpLogBackend for PgOpLogBackend {
                     .map(Self::row_to_entry)
                     .collect::<Result<Vec<_>>>()?
                     .into_iter()
-                    .filter(|entry| !matches!(entry.operation, OpRecord::TransactionCommit { .. }))
+                    .filter(|entry| !is_transaction_commit(&entry.operation))
                     .map(|entry| entry.operation)
                     .collect();
                 tx.rollback().await.map_err(sqlx_err)?;

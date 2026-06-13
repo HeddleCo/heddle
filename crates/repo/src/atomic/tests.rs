@@ -3,21 +3,21 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::rc::Rc;
 
 use objects::error::{HeddleError, Result};
 use objects::object::{ChangeId, ContentHash, MarkerName, ThreadName, VisibilityTier};
 use oplog::{
-    ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpLogBackend, OpRecord,
-    isolation_keys_for_record,
+    isolation_keys_for_record, ConditionalCommitOutcome, IsolationKey, IsolationPrecondition,
+    OpLogBackend, OpRecord, ThreadUpdateSnapshots,
 };
 use refs::{Head, RefExpectation, RefManager, RefUpdate};
 use tempfile::TempDir;
 
 use super::{
-    AtomicMutation, Compensator, DeferredMutation, EagerMutation, RewindLedger, StagedCommit, Tx,
-    execute,
+    execute, AtomicMutation, Compensator, DeferredMutation, EagerMutation, RewindLedger,
+    StagedCommit, Tx,
 };
 use crate::Repository;
 
@@ -681,22 +681,19 @@ fn all_ten_readers_reconcile() {
             .unwrap(),
         Some(remote_state)
     );
-    assert!(
-        refs.list_threads()
-            .unwrap()
-            .contains(&ThreadName::new("ft"))
-    );
-    assert!(
-        refs.list_markers()
-            .unwrap()
-            .contains(&MarkerName::new("mk"))
-    );
+    assert!(refs
+        .list_threads()
+        .unwrap()
+        .contains(&ThreadName::new("ft")));
+    assert!(refs
+        .list_markers()
+        .unwrap()
+        .contains(&MarkerName::new("mk")));
     assert!(refs.list_remotes().unwrap().contains(&"origin".to_string()));
-    assert!(
-        refs.list_remote_threads("origin")
-            .unwrap()
-            .contains(&ThreadName::new("rt"))
-    );
+    assert!(refs
+        .list_remote_threads("origin")
+        .unwrap()
+        .contains(&ThreadName::new("rt")));
     assert_eq!(refs.resolve("ft").unwrap(), Some(thread_state));
 }
 
@@ -1159,33 +1156,278 @@ fn retry_cap_returns_structured_conflict() {
 #[test]
 fn staged_record_keys_are_covered_by_declared_root_keys() {
     let scope = "lane-a";
-    let mut declared = BTreeSet::new();
-    declared.insert(IsolationKey::Thread("main".to_string()));
-    declared.insert(IsolationKey::Thread("feature".to_string()));
-    declared.insert(IsolationKey::LocalHead {
-        scope: scope.to_string(),
-    });
-    let records = vec![
-        snapshot_on("main"),
-        OpRecord::FastForward {
-            source_thread: "feature".to_string(),
-            target_thread: "main".to_string(),
-            pre_target_id: ChangeId::generate(),
-            post_target_id: ChangeId::generate(),
-        },
-        OpRecord::Goto {
-            target: ChangeId::generate(),
-            prev_head: None,
-            head: ChangeId::generate(),
-        },
-    ];
+    let cases = staged_record_coverage_cases(scope);
+    let declared = cases
+        .iter()
+        .flat_map(|(_, expected)| expected.iter().cloned())
+        .collect::<BTreeSet<_>>();
 
-    for record in records {
+    for (record, expected) in cases {
+        let variant = op_record_variant_name(&record);
         let touched = isolation_keys_for_record(&record, Some(scope));
+        assert_eq!(
+            touched, expected,
+            "coverage fixture for {variant} drifted: staged record {record:?}"
+        );
         assert!(
             touched.is_subset(&declared),
-            "staged record {record:?} touched {touched:?}, outside {declared:?}"
+            "staged record {variant} {record:?} touched {touched:?}, outside declared root keys {declared:?}"
         );
+    }
+}
+
+fn staged_record_coverage_cases(scope: &str) -> Vec<(OpRecord, BTreeSet<IsolationKey>)> {
+    let local_head = IsolationKey::LocalHead {
+        scope: scope.to_string(),
+    };
+    let main = IsolationKey::Thread("main".to_string());
+    let feature = IsolationKey::Thread("feature".to_string());
+    let visibility_state = ChangeId::generate();
+    let promoted_state = ChangeId::generate();
+
+    vec![
+        (snapshot_on("main"), keys([main.clone()])),
+        (
+            OpRecord::Snapshot {
+                new_state: ChangeId::generate(),
+                prev_head: None,
+                head: Some(ChangeId::generate()),
+                thread: None,
+            },
+            keys([local_head.clone()]),
+        ),
+        (
+            OpRecord::Goto {
+                target: ChangeId::generate(),
+                prev_head: None,
+                head: ChangeId::generate(),
+            },
+            keys([local_head.clone()]),
+        ),
+        (
+            OpRecord::ThreadCreate {
+                name: "main".to_string(),
+                state: ChangeId::generate(),
+                manager_snapshot: Some(vec![1]),
+            },
+            keys([main.clone()]),
+        ),
+        (
+            OpRecord::ThreadDelete {
+                name: "feature".to_string(),
+                state: ChangeId::generate(),
+            },
+            keys([feature.clone()]),
+        ),
+        (
+            OpRecord::ThreadUpdate {
+                name: "main".to_string(),
+                old_state: ChangeId::generate(),
+                new_state: ChangeId::generate(),
+                manager_snapshots: ThreadUpdateSnapshots::from_parts(Some(vec![1]), Some(vec![2])),
+            },
+            keys([main.clone()]),
+        ),
+        (
+            OpRecord::Fork {
+                from: ChangeId::generate(),
+                new_state: ChangeId::generate(),
+                thread: Some("main".to_string()),
+                head: None,
+            },
+            keys([main.clone()]),
+        ),
+        (
+            OpRecord::Fork {
+                from: ChangeId::generate(),
+                new_state: ChangeId::generate(),
+                thread: None,
+                head: Some(ChangeId::generate()),
+            },
+            keys([local_head.clone()]),
+        ),
+        (
+            OpRecord::Fork {
+                from: ChangeId::generate(),
+                new_state: ChangeId::generate(),
+                thread: None,
+                head: None,
+            },
+            BTreeSet::new(),
+        ),
+        (
+            OpRecord::Collapse {
+                sources: vec![ChangeId::generate(), ChangeId::generate()],
+                result: ChangeId::generate(),
+                thread: Some("feature".to_string()),
+                pre_thread_state: Some(ChangeId::generate()),
+            },
+            keys([feature.clone()]),
+        ),
+        (
+            OpRecord::Collapse {
+                sources: vec![ChangeId::generate()],
+                result: ChangeId::generate(),
+                thread: None,
+                pre_thread_state: None,
+            },
+            keys([local_head.clone()]),
+        ),
+        (
+            OpRecord::MarkerCreate {
+                name: "release".to_string(),
+                state: ChangeId::generate(),
+            },
+            BTreeSet::new(),
+        ),
+        (
+            OpRecord::MarkerDelete {
+                name: "release".to_string(),
+                state: ChangeId::generate(),
+            },
+            BTreeSet::new(),
+        ),
+        (
+            OpRecord::Checkpoint {
+                parent: None,
+                state: ChangeId::generate(),
+                thread: Some("main".to_string()),
+            },
+            keys([main.clone()]),
+        ),
+        (
+            OpRecord::Checkpoint {
+                parent: None,
+                state: ChangeId::generate(),
+                thread: None,
+            },
+            keys([local_head.clone()]),
+        ),
+        (
+            OpRecord::TransactionAbort {
+                transaction_id: "tx-abort".to_string(),
+                reason: "test".to_string(),
+            },
+            BTreeSet::new(),
+        ),
+        (
+            OpRecord::EphemeralThreadCollapse {
+                thread: "main".to_string(),
+                final_state: ChangeId::generate(),
+            },
+            keys([main.clone()]),
+        ),
+        (
+            OpRecord::ConflictResolved {
+                conflict_id: "conflict-1".to_string(),
+                resolution: "ours".to_string(),
+            },
+            BTreeSet::new(),
+        ),
+        (commit_marker("tx-commit", 1), BTreeSet::new()),
+        (
+            OpRecord::Redact {
+                redaction_id: ContentHash::from_bytes([1u8; 32]),
+                blob: ContentHash::from_bytes([2u8; 32]),
+                state: ChangeId::generate(),
+                path: "secret.txt".to_string(),
+            },
+            BTreeSet::new(),
+        ),
+        (
+            OpRecord::Purge {
+                redaction_id: ContentHash::from_bytes([3u8; 32]),
+                blob: ContentHash::from_bytes([4u8; 32]),
+            },
+            BTreeSet::new(),
+        ),
+        (
+            OpRecord::FastForward {
+                source_thread: "feature".to_string(),
+                target_thread: "main".to_string(),
+                pre_target_id: ChangeId::generate(),
+                post_target_id: ChangeId::generate(),
+            },
+            keys([feature.clone(), main.clone()]),
+        ),
+        (
+            OpRecord::GitCheckpoint {
+                branch: "main".to_string(),
+                state: ChangeId::generate(),
+                previous_git_oid: None,
+                new_git_oid: "abc123".to_string(),
+            },
+            keys([main.clone()]),
+        ),
+        (
+            OpRecord::RemoteThreadUpdate {
+                remote: "origin".to_string(),
+                thread: "main".to_string(),
+                state: ChangeId::generate(),
+            },
+            keys([main.clone()]),
+        ),
+        (
+            OpRecord::RemoteThreadDelete {
+                remote: "origin".to_string(),
+                thread: "main".to_string(),
+                state: ChangeId::generate(),
+            },
+            keys([main.clone()]),
+        ),
+        (
+            OpRecord::UndoRecoveryUpdate {
+                state: ChangeId::generate(),
+            },
+            keys([local_head.clone()]),
+        ),
+        (
+            visibility_set_on(visibility_state),
+            keys([IsolationKey::StateVisibility(visibility_state)]),
+        ),
+        (
+            OpRecord::StateVisibilityPromote {
+                state: promoted_state,
+                superseded: ContentHash::from_bytes([5u8; 32]),
+                record_id: ContentHash::from_bytes([6u8; 32]),
+                tier: VisibilityTier::Public,
+                prior_sidecar: Some(vec![1]),
+                new_sidecar: Some(vec![2]),
+            },
+            keys([IsolationKey::StateVisibility(promoted_state)]),
+        ),
+    ]
+}
+
+fn keys<const N: usize>(keys: [IsolationKey; N]) -> BTreeSet<IsolationKey> {
+    keys.into_iter().collect()
+}
+
+fn op_record_variant_name(record: &OpRecord) -> &'static str {
+    match record {
+        OpRecord::Snapshot { .. } => "Snapshot",
+        OpRecord::Goto { .. } => "Goto",
+        OpRecord::ThreadCreate { .. } => "ThreadCreate",
+        OpRecord::ThreadDelete { .. } => "ThreadDelete",
+        OpRecord::ThreadUpdate { .. } => "ThreadUpdate",
+        OpRecord::Fork { .. } => "Fork",
+        OpRecord::Collapse { .. } => "Collapse",
+        OpRecord::MarkerCreate { .. } => "MarkerCreate",
+        OpRecord::MarkerDelete { .. } => "MarkerDelete",
+        OpRecord::Checkpoint { .. } => "Checkpoint",
+        OpRecord::TransactionAbort { .. } => "TransactionAbort",
+        OpRecord::EphemeralThreadCollapse { .. } => "EphemeralThreadCollapse",
+        OpRecord::ConflictResolved { .. } => "ConflictResolved",
+        OpRecord::TransactionCommit { .. } => "TransactionCommit",
+        OpRecord::Redact { .. } => "Redact",
+        OpRecord::Purge { .. } => "Purge",
+        OpRecord::FastForward { .. } => "FastForward",
+        OpRecord::GitCheckpoint { .. } => "GitCheckpoint",
+        OpRecord::RemoteThreadUpdate { .. } => "RemoteThreadUpdate",
+        OpRecord::RemoteThreadDelete { .. } => "RemoteThreadDelete",
+        OpRecord::UndoRecoveryUpdate { .. } => "UndoRecoveryUpdate",
+        OpRecord::StateVisibilitySet { .. } => "StateVisibilitySet",
+        OpRecord::StateVisibilityPromote { .. } => "StateVisibilityPromote",
     }
 }
 
@@ -1324,11 +1566,10 @@ fn reconcile_folds_every_record_shape() {
     let threads = refs.list_threads().unwrap();
     assert!(threads.contains(&ThreadName::new("t_coll")));
     assert!(threads.contains(&ThreadName::new("t_ff")));
-    assert!(
-        refs.list_markers()
-            .unwrap()
-            .contains(&MarkerName::new("mk2"))
-    );
+    assert!(refs
+        .list_markers()
+        .unwrap()
+        .contains(&MarkerName::new("mk2")));
     let remotes = refs.list_remotes().unwrap();
     assert!(remotes.contains(&"origin".to_string()));
     let remote_threads = refs.list_remote_threads("origin").unwrap();

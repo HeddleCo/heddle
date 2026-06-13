@@ -13,7 +13,7 @@ use objects::{
 
 use super::oplog_types::{
     ConditionalCommitOutcome, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
-    ThreadUpdateSnapshots,
+    ThreadUpdateSnapshots, is_transaction_commit_for,
 };
 
 /// Before/after snapshots of a per-state visibility sidecar, captured around a
@@ -73,13 +73,10 @@ pub trait OpLogBackend: Send + Sync {
         async move {
             let recent = self.recent_batches_scoped(recent_window, scope).await?;
             if recent.iter().any(|batch| {
-                batch.entries.iter().any(|entry| {
-                    matches!(
-                        &entry.operation,
-                        OpRecord::TransactionCommit { transaction_id: id, .. }
-                            if id == transaction_id
-                    )
-                })
+                batch
+                    .entries
+                    .iter()
+                    .any(|entry| is_transaction_commit_for(&entry.operation, transaction_id))
             }) {
                 return Ok(None);
             }
