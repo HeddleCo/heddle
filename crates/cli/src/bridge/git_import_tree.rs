@@ -28,7 +28,6 @@ pub struct GitTreeImporter<'a> {
     blob_cache: HashMap<gix::hash::ObjectId, ContentHash>,
     options: GitImportOptions,
     lossy_entries: Vec<LossyGitImportEntry>,
-    lossy_by_tree: HashMap<gix::hash::ObjectId, Vec<LossyGitImportEntry>>,
     /// When set, imported blobs/trees/states stream into a single native
     /// pack instead of N loose objects (heddle#555). `None` keeps the
     /// legacy loose-write path for callers like [`import_git_tree`].
@@ -52,7 +51,6 @@ impl<'a> GitTreeImporter<'a> {
             blob_cache: HashMap::new(),
             options,
             lossy_entries: Vec::new(),
-            lossy_by_tree: HashMap::new(),
             pack: None,
         }
     }
@@ -74,7 +72,6 @@ impl<'a> GitTreeImporter<'a> {
             blob_cache: HashMap::new(),
             options,
             lossy_entries: Vec::new(),
-            lossy_by_tree: HashMap::new(),
             pack: Some(sink),
         }
     }
@@ -163,13 +160,6 @@ impl<'a> GitTreeImporter<'a> {
         path_prefix: &str,
     ) -> GitResult<ContentHash> {
         if let Some(hash) = self.tree_cache.get(&tree_oid) {
-            if let Some(entries) = self.lossy_by_tree.get(&tree_oid) {
-                self.lossy_entries.extend(
-                    entries
-                        .iter()
-                        .map(|entry| rebase_lossy_entry(path_prefix, entry)),
-                );
-            }
             return Ok(*hash);
         }
 
@@ -179,7 +169,6 @@ impl<'a> GitTreeImporter<'a> {
             .map_err(|err| GitBridgeError::Git(err.to_string()))?;
 
         let mut entries = Vec::new();
-        let before_lossy = self.lossy_entries.len();
 
         for entry in git_tree.iter() {
             let entry = entry.map_err(|err| GitBridgeError::Git(err.to_string()))?;
@@ -252,16 +241,10 @@ impl<'a> GitTreeImporter<'a> {
                 }
             }
         }
-        let tree_lossy_entries = self.lossy_entries[before_lossy..]
-            .iter()
-            .map(|entry| entry_relative_to_prefix(path_prefix, entry))
-            .collect::<Vec<_>>();
-
         let tree = Tree::from_entries(entries);
         let hash = tree.hash();
         self.write_tree(hash, &tree)?;
         self.tree_cache.insert(tree_oid, hash);
-        self.lossy_by_tree.insert(tree_oid, tree_lossy_entries);
         Ok(hash)
     }
 
@@ -367,26 +350,6 @@ fn display_tree_name(name: &str) -> String {
     } else {
         name.to_string()
     }
-}
-
-fn rebase_lossy_entry(prefix: &str, entry: &LossyGitImportEntry) -> LossyGitImportEntry {
-    let mut rebased = entry.clone();
-    if !prefix.is_empty() {
-        rebased.path = format!("{prefix}/{}", entry.path);
-    }
-    rebased
-}
-
-fn entry_relative_to_prefix(prefix: &str, entry: &LossyGitImportEntry) -> LossyGitImportEntry {
-    if prefix.is_empty() {
-        return entry.clone();
-    }
-
-    let mut relative = entry.clone();
-    if let Some(stripped) = entry.path.strip_prefix(prefix) {
-        relative.path = stripped.trim_start_matches('/').to_string();
-    }
-    relative
 }
 
 /// Per-process counter so concurrent imports stage to distinct pack basenames.
