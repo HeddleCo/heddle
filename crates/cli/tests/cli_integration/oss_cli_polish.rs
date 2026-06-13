@@ -6826,10 +6826,36 @@ fn ready_text_names_ready_and_already_ready_noop_states() {
         "ready text should name the clean no-target state: {first_stdout}"
     );
     assert!(
-        first_stdout.contains("integration: none configured")
+        first_stdout.contains("integration: n/a (no integration target configured)")
             && !first_stdout.contains("semantic: no_target")
             && !first_stdout.contains("state: ready"),
         "ready text should translate no-target internals into human workflow language: {first_stdout}"
+    );
+    for field in [
+        "thread:",
+        "status:",
+        "captured:",
+        "checks:",
+        "integration:",
+        "freshness:",
+        "merge type:",
+        "changed paths:",
+        "conflicts:",
+        "impact:",
+    ] {
+        assert!(
+            first_stdout.contains(field),
+            "ready text should always show stable field `{field}`: {first_stdout}"
+        );
+    }
+    assert!(
+        first_stdout.contains("checks: completed (readiness preview ran)")
+            && first_stdout.contains("captured: no")
+            && first_stdout.contains("freshness: n/a (no integration target configured)")
+            && first_stdout.contains("merge type: n/a (no integration target configured)")
+            && first_stdout.contains("conflicts: 0")
+            && first_stdout.contains("impact: none"),
+        "ready no-target text should make non-applicable fields explicit: {first_stdout}"
     );
     assert!(
         !first_stdout.contains("heddle merge main"),
@@ -6850,7 +6876,7 @@ fn ready_text_names_ready_and_already_ready_noop_states() {
         "ready no-op text should explicitly name the clean no-target state: {second_stdout}"
     );
     assert!(
-        second_stdout.contains("integration: none configured")
+        second_stdout.contains("integration: n/a (no integration target configured)")
             && !second_stdout.contains("semantic: no_target")
             && !second_stdout.contains("state: ready"),
         "ready no-op text should keep no-target internals out of the human surface: {second_stdout}"
@@ -6885,7 +6911,7 @@ fn ready_capture_is_visible_and_carries_confidence() {
     assert!(text.status.success(), "ready should succeed");
     let stdout = String::from_utf8_lossy(&text.stdout);
     assert!(
-        stdout.contains("captured: state hd-"),
+        stdout.contains("captured: yes (state hd-"),
         "ready text should explicitly name the captured state when it saves work: {stdout}"
     );
 
@@ -6931,6 +6957,33 @@ fn ready_refuses_dirty_capture_without_intent() {
     assert_eq!(ready["output_kind"], "ready");
     assert_eq!(ready["status"], "blocked");
     assert_eq!(ready["captured"], false);
+    assert_eq!(ready["captured_state"], serde_json::Value::Null);
+    assert_eq!(ready["blockers"].as_array().unwrap().len(), 1);
+    assert_eq!(ready["warnings"], serde_json::json!([]));
+    assert_eq!(ready["readiness"]["captured"], false);
+    assert_eq!(
+        ready["readiness"]["captured_state"],
+        serde_json::Value::Null
+    );
+    assert_eq!(ready["readiness"]["checks"]["status"], "not_run");
+    assert_eq!(
+        ready["readiness"]["checks"]["reason"],
+        "commit intent is required before readiness checks can run"
+    );
+    assert_eq!(
+        ready["readiness"]["integration"],
+        "not checked (readiness checks did not run)"
+    );
+    assert_eq!(
+        ready["readiness"]["freshness"],
+        "not checked (readiness checks did not run)"
+    );
+    assert_eq!(
+        ready["readiness"]["merge_type"],
+        "not checked (readiness checks did not run)"
+    );
+    assert_eq!(ready["readiness"]["conflict_count"], 0);
+    assert_eq!(ready["readiness"]["impact"], "none");
     assert_eq!(ready["recommended_action"], "heddle commit -m \"...\"");
     assert_eq!(
         ready["recommended_action_template"]["argv_template"],

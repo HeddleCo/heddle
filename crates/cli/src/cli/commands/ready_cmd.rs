@@ -8,7 +8,10 @@ use repo::{
     GitOverlayImportHint, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus,
     ThreadState,
 };
-use serde::Serialize;
+use serde::{
+    Serialize, Serializer,
+    ser::{Error as SerError, SerializeStruct},
+};
 
 use super::{
     action_line::print_next,
@@ -36,18 +39,105 @@ use crate::{
     config::UserConfig,
 };
 
-#[derive(Serialize)]
 struct ReadyOutput {
-    #[serde(flatten)]
     operator: OperatorCommandOutput,
     captured: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
     captured_state: Option<String>,
     thread_state: String,
-    #[serde(skip_serializing)]
-    #[serde(rename = "verification")]
     trust: RepositoryVerificationState,
     report: ThreadPreviewReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ReadyReadinessSummary {
+    status: String,
+    captured: bool,
+    captured_state: Option<String>,
+    checks: ReadyChecksSummary,
+    integration: String,
+    freshness: String,
+    merge_type: String,
+    changed_path_count: usize,
+    changed_paths: Vec<String>,
+    conflict_count: usize,
+    conflicts: Vec<String>,
+    impact: String,
+    impact_categories: Vec<String>,
+    blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ReadyChecksSummary {
+    status: String,
+    reason: String,
+}
+
+impl ReadyOutput {
+    fn readiness_summary(&self) -> ReadyReadinessSummary {
+        let checks = ready_checks_summary(self);
+        let integration = ready_integration_summary(&self.report);
+        let freshness = ready_freshness_summary(&self.report);
+        let merge_type = ready_merge_type_summary(&self.report);
+        let impact = if self.report.impact_categories.is_empty() {
+            "none".to_string()
+        } else {
+            self.report.impact_categories.join(", ")
+        };
+        ReadyReadinessSummary {
+            status: ready_status_summary(&self.report),
+            captured: self.captured,
+            captured_state: self.captured_state.clone(),
+            checks,
+            integration,
+            freshness,
+            merge_type,
+            changed_path_count: self.report.changed_path_count,
+            changed_paths: self.report.changed_paths.clone(),
+            conflict_count: self.report.conflict_count,
+            conflicts: self.report.conflicts.clone(),
+            impact,
+            impact_categories: self.report.impact_categories.clone(),
+            blockers: self.report.blockers.clone(),
+        }
+    }
+}
+
+impl Serialize for ReadyOutput {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let next_action = normalized_action(self.operator.next_action.clone().unwrap_or_default());
+        let recommended_action =
+            normalized_action(self.operator.recommended_action.clone().unwrap_or_default());
+        let next_action_template = next_action
+            .as_deref()
+            .and_then(super::git_overlay_health::action_template);
+        let recommended_action_template = recommended_action
+            .as_deref()
+            .and_then(super::git_overlay_health::action_template);
+        let verification = serde_json::to_value(&self.trust).map_err(S::Error::custom)?;
+        let readiness = self.readiness_summary();
+
+        let mut state = serializer.serialize_struct("ReadyOutput", 18)?;
+        state.serialize_field("output_kind", "ready")?;
+        state.serialize_field("status", &self.operator.status)?;
+        state.serialize_field("action", &self.operator.action)?;
+        state.serialize_field("message", &self.operator.message)?;
+        state.serialize_field("blockers", &self.operator.blockers)?;
+        state.serialize_field("warnings", &self.operator.warnings)?;
+        state.serialize_field("next_action", &next_action)?;
+        state.serialize_field("next_action_template", &next_action_template)?;
+        state.serialize_field("recommended_action", &recommended_action)?;
+        state.serialize_field("recommended_action_template", &recommended_action_template)?;
+        state.serialize_field("captured", &self.captured)?;
+        state.serialize_field("captured_state", &self.captured_state)?;
+        state.serialize_field("thread_state", &self.thread_state)?;
+        state.serialize_field("readiness", &readiness)?;
+        state.serialize_field("report", &self.report)?;
+        state.serialize_field("verification", &verification)?;
+        state.end()
+    }
 }
 
 pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
@@ -394,23 +484,11 @@ fn write_ready_output_inner(
                 style::warn_marker()
             };
             println!("{marker} {}", output.operator.message);
-            if output.captured {
-                match output.captured_state.as_deref() {
-                    Some(state) => println!(
-                        "  {}",
-                        style::field("captured", &format!("state {}", style::change_id(state)))
-                    ),
-                    None => println!("  {}", style::field("captured", "yes")),
-                }
-            }
         }
         if !output.trust.verified && !missing_intent {
             write_trust_blocked_setup(output.operator.recommended_action.as_deref());
         } else {
-            write_preview_report(
-                &output.report,
-                output.operator.recommended_action.as_deref(),
-            );
+            write_preview_report(output, output.operator.recommended_action.as_deref());
         }
     }
     exit_if_blocked_operator_status(&output.operator.status);
@@ -438,7 +516,10 @@ fn write_trust_blocked_setup(recommended_action: Option<&str>) {
         "  {}",
         style::field("status", &style::thread_state("blocked"))
     );
-    println!("  {}", style::field("checks", "not run"));
+    println!(
+        "  {}",
+        style::field("checks", "not run (repository verification is blocked)")
+    );
     if let Some(recommended_action) = non_empty_action(recommended_action) {
         println!();
         print_next(recommended_action);
@@ -601,50 +682,42 @@ fn missing_ready_capture_intent_report_for(
     }
 }
 
-fn write_preview_report(report: &ThreadPreviewReport, recommended_action: Option<&str>) {
-    let no_target = report.merge_relation == "no_target";
+fn write_preview_report(output: &ReadyOutput, recommended_action: Option<&str>) {
+    let report = &output.report;
+    let summary = output.readiness_summary();
     println!();
     println!("{}", style::section("Readiness"));
     println!("  {}", style::field("thread", &style::bold(&report.thread)));
-    if no_target {
-        println!(
-            "  {}",
-            style::field("status", &style::thread_state("clean"))
-        );
-        println!("  {}", style::field("integration", "none configured"));
-    } else {
-        println!(
-            "  {}",
-            style::field("state", &style::thread_state(&report.thread_state))
-        );
-        println!(
-            "  {}",
-            style::field(
-                "freshness",
-                &style::thread_state(&report.freshness.replace('_', " "))
-            )
-        );
-        println!(
-            "  {}",
-            style::field(
-                "merge type",
-                &style::thread_state(&ready_merge_type_label(&report.merge_relation))
-            )
-        );
-    }
+    println!(
+        "  {}",
+        style::field("status", &style::thread_state(&summary.status))
+    );
+    println!(
+        "  {}",
+        style::field("captured", &ready_captured_label(&summary))
+    );
+    println!(
+        "  {}",
+        style::field("checks", &ready_checks_label(&summary.checks))
+    );
+    println!("  {}", style::field("integration", &summary.integration));
+    println!("  {}", style::field("freshness", &summary.freshness));
+    println!("  {}", style::field("merge type", &summary.merge_type));
     println!(
         "  {}",
         style::field(
             "changed paths",
-            &style::bold(&report.changed_path_count.to_string())
+            &style::bold(&summary.changed_path_count.to_string())
         )
     );
-    if !report.impact_categories.is_empty() {
-        println!(
-            "  {}",
-            style::field("impact", &report.impact_categories.join(", "))
-        );
-    }
+    println!(
+        "  {}",
+        style::field(
+            "conflicts",
+            &style::bold(&summary.conflict_count.to_string())
+        )
+    );
+    println!("  {}", style::field("impact", &summary.impact));
     if !report.blockers.is_empty() {
         println!();
         println!("{}", style::warn("Blocked by"));
@@ -656,6 +729,80 @@ fn write_preview_report(report: &ThreadPreviewReport, recommended_action: Option
         println!();
         print_next(recommended_action);
     }
+}
+
+fn ready_status_summary(report: &ThreadPreviewReport) -> String {
+    if report.merge_relation == "no_target" && report.blockers.is_empty() {
+        "clean".to_string()
+    } else {
+        report.thread_health.replace('_', " ")
+    }
+}
+
+fn ready_checks_summary(output: &ReadyOutput) -> ReadyChecksSummary {
+    if ready_blocked_by_missing_intent(output) {
+        ReadyChecksSummary {
+            status: "not_run".to_string(),
+            reason: "commit intent is required before readiness checks can run".to_string(),
+        }
+    } else if !output.trust.verified {
+        ReadyChecksSummary {
+            status: "not_run".to_string(),
+            reason: "repository verification is blocked".to_string(),
+        }
+    } else if output.report.merge_relation == "not_checked" {
+        ReadyChecksSummary {
+            status: "not_run".to_string(),
+            reason: "readiness preview was not reached".to_string(),
+        }
+    } else {
+        ReadyChecksSummary {
+            status: "completed".to_string(),
+            reason: "readiness preview ran".to_string(),
+        }
+    }
+}
+
+fn ready_integration_summary(report: &ThreadPreviewReport) -> String {
+    if report.merge_relation == "no_target" {
+        "n/a (no integration target configured)".to_string()
+    } else if report.merge_relation == "not_checked" {
+        "not checked (readiness checks did not run)".to_string()
+    } else if report.merge_relation == "blocked" {
+        "not checked (repository verification is blocked)".to_string()
+    } else {
+        "configured".to_string()
+    }
+}
+
+fn ready_freshness_summary(report: &ThreadPreviewReport) -> String {
+    match report.merge_relation.as_str() {
+        "no_target" => "n/a (no integration target configured)".to_string(),
+        "not_checked" => "not checked (readiness checks did not run)".to_string(),
+        "blocked" => "not checked (repository verification is blocked)".to_string(),
+        _ => report.freshness.replace('_', " "),
+    }
+}
+
+fn ready_merge_type_summary(report: &ThreadPreviewReport) -> String {
+    match report.merge_relation.as_str() {
+        "no_target" => "n/a (no integration target configured)".to_string(),
+        "not_checked" => "not checked (readiness checks did not run)".to_string(),
+        "blocked" => "not checked (repository verification is blocked)".to_string(),
+        other => ready_merge_type_label(other),
+    }
+}
+
+fn ready_captured_label(summary: &ReadyReadinessSummary) -> String {
+    match summary.captured_state.as_deref() {
+        Some(state) => format!("yes (state {})", style::change_id(state)),
+        None if summary.captured => "yes".to_string(),
+        None => "no".to_string(),
+    }
+}
+
+fn ready_checks_label(checks: &ReadyChecksSummary) -> String {
+    format!("{} ({})", checks.status.replace('_', " "), checks.reason)
 }
 
 fn ready_merge_type_label(result: &str) -> String {

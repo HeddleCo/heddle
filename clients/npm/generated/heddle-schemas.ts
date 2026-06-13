@@ -196,7 +196,7 @@ export interface AgentHeartbeatSchema {
 
 export interface AgentReadySchema {
   action: string;
-  blockers?: string[] | null;
+  blockers: string[];
   captured: boolean;
   captured_state?: string | null;
   idempotency_status?: string | null;
@@ -206,13 +206,15 @@ export interface AgentReadySchema {
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
   output_kind: "ready";
+  readiness: ReadyReadinessSchema;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   replayed?: boolean | null;
   report: unknown;
   status: string;
   thread_state?: string | null;
-  warnings?: string[] | null;
+  verification: RepositoryVerificationStateSchema;
+  warnings: string[];
 }
 
 export interface AgentReleaseSchema {
@@ -1418,9 +1420,31 @@ export interface QuerySchema {
   output_kind: "query";
 }
 
+export interface ReadyChecksSchema {
+  reason: string;
+  status: string;
+}
+
+export interface ReadyReadinessSchema {
+  blockers: string[];
+  captured: boolean;
+  captured_state?: string | null;
+  changed_path_count: number;
+  changed_paths: string[];
+  checks: ReadyChecksSchema;
+  conflict_count: number;
+  conflicts: string[];
+  freshness: string;
+  impact: string;
+  impact_categories: string[];
+  integration: string;
+  merge_type: string;
+  status: string;
+}
+
 export interface ReadySchema {
   action: string;
-  blockers?: string[] | null;
+  blockers: string[];
   captured: boolean;
   captured_state?: string | null;
   idempotency_status?: string | null;
@@ -1430,13 +1454,15 @@ export interface ReadySchema {
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
   output_kind: "ready";
+  readiness: ReadyReadinessSchema;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   replayed?: boolean | null;
   report: unknown;
   status: string;
   thread_state?: string | null;
-  warnings?: string[] | null;
+  verification: RepositoryVerificationStateSchema;
+  warnings: string[];
 }
 
 export interface RebaseSchema {

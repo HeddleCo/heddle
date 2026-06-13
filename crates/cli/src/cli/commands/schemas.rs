@@ -1203,8 +1203,8 @@ pub struct ReadySchema {
     pub status: String,
     pub action: String,
     pub message: String,
-    pub blockers: Option<Vec<String>>,
-    pub warnings: Option<Vec<String>>,
+    pub blockers: Vec<String>,
+    pub warnings: Vec<String>,
     pub next_action: Option<String>,
     pub next_action_template: Option<ActionTemplateSchema>,
     pub recommended_action: Option<String>,
@@ -1212,7 +1212,34 @@ pub struct ReadySchema {
     pub captured: bool,
     pub captured_state: Option<String>,
     pub thread_state: Option<String>,
+    pub readiness: ReadyReadinessSchema,
     pub report: Value,
+    #[serde(rename = "verification")]
+    pub verification: RepositoryVerificationStateSchema,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ReadyReadinessSchema {
+    pub status: String,
+    pub captured: bool,
+    pub captured_state: Option<String>,
+    pub checks: ReadyChecksSchema,
+    pub integration: String,
+    pub freshness: String,
+    pub merge_type: String,
+    pub changed_path_count: usize,
+    pub changed_paths: Vec<String>,
+    pub conflict_count: usize,
+    pub conflicts: Vec<String>,
+    pub impact: String,
+    pub impact_categories: Vec<String>,
+    pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ReadyChecksSchema {
+    pub status: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -3321,7 +3348,7 @@ mod tests {
     }
 
     #[test]
-    fn ready_schema_does_not_require_omitted_empty_operator_lists() {
+    fn ready_schema_requires_stable_operator_and_readiness_fields() {
         let schema = schema_for_verb("ready").expect("ready schema");
         let properties = schema
             .get("properties")
@@ -3335,14 +3362,26 @@ mod tests {
             properties.contains_key("warnings"),
             "ready schema should still document warnings when emitted"
         );
+        assert!(
+            properties.contains_key("readiness"),
+            "ready schema should document the stable readiness summary"
+        );
+        assert!(
+            properties.contains_key("verification"),
+            "ready schema should document the repository verification proof"
+        );
 
         let required = required_fields(&schema);
-        for omitted_when_empty in ["blockers", "warnings"] {
+        for stable_field in ["blockers", "warnings", "readiness", "verification"] {
             assert!(
-                !required.contains(&omitted_when_empty),
-                "ready schema must not require `{omitted_when_empty}` because successful JSON output omits empty operator lists: {schema}"
+                required.contains(&stable_field),
+                "ready schema must require `{stable_field}` because ready JSON always emits the stable field set: {schema}"
             );
         }
+        assert!(
+            properties.contains_key("captured_state"),
+            "ready schema should document captured_state even though schemars models nullable Option fields as optional"
+        );
     }
 
     #[test]
