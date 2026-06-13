@@ -204,19 +204,18 @@ fn resolve_conflict_sides(text: &str) -> Option<(String, String)> {
     let mut theirs = String::new();
     let mut state = State::Normal;
     for line in text.split_inclusive('\n') {
-        let body = line.strip_suffix('\n').unwrap_or(line);
-        let body = body.strip_suffix('\r').unwrap_or(body);
-        if body.starts_with("<<<<<<<") {
+        let marker = conflict_marker(line);
+        if matches!(marker, Some(ConflictMarker::Start)) {
             match state {
                 State::Normal => state = State::Ours,
                 _ => return None,
             }
-        } else if body == "=======" {
+        } else if matches!(marker, Some(ConflictMarker::Separator)) {
             match state {
                 State::Ours => state = State::Theirs,
                 _ => return None,
             }
-        } else if body.starts_with(">>>>>>>") {
+        } else if matches!(marker, Some(ConflictMarker::End)) {
             match state {
                 State::Theirs => state = State::Normal,
                 _ => return None,
@@ -236,6 +235,35 @@ fn resolve_conflict_sides(text: &str) -> Option<(String, String)> {
         State::Normal => Some((ours, theirs)),
         _ => None,
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConflictMarker {
+    Start,
+    Separator,
+    End,
+}
+
+fn conflict_marker(line: &str) -> Option<ConflictMarker> {
+    let body = line.strip_suffix('\n').unwrap_or(line);
+    let body = body.strip_suffix('\r').unwrap_or(body).trim_start();
+
+    if marker_body_matches(body, "<<<<<<<") {
+        Some(ConflictMarker::Start)
+    } else if marker_body_matches(body, "=======") {
+        Some(ConflictMarker::Separator)
+    } else if marker_body_matches(body, ">>>>>>>") {
+        Some(ConflictMarker::End)
+    } else {
+        None
+    }
+}
+
+fn marker_body_matches(body: &str, marker: &str) -> bool {
+    let Some(rest) = body.strip_prefix(marker) else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with(' ')
 }
 
 /// Whether a clean `output` conserves the structure of its inputs. Re-parses
