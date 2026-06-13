@@ -45,7 +45,7 @@ zstd = ["dep:zstd"]
 [dev-dependencies]
 criterion = "0.8"
 tempfile.workspace = true
-tokio = { workspace = true, features = ["full"] }
+tokio.workspace = true
 s3s.workspace = true
 s3s-fs.workspace = true
 hyper-util.workspace = true
