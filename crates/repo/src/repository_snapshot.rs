@@ -269,6 +269,21 @@ impl SnapshotMutation<'_> {
                     tracing::warn!(error = %err, "risk signal computation failed; continuing without signals");
                 }
             }
+
+            if let Some(parent_state) = prior_state.as_ref() {
+                match self
+                    .repo
+                    .compute_and_persist_discussion_anchor_travel(parent_state, &tree)
+                {
+                    Ok(Some(hash)) => {
+                        state = state.with_discussions(hash);
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!(error = %err, "discussion anchor travel failed; continuing without discussions");
+                    }
+                }
+            }
         }
 
         // Auto-sign every captured state (heddle#482) via the capture-path

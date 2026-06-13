@@ -9,6 +9,10 @@ compile_error!(
 
 pub mod atomic;
 pub mod daemon;
+#[cfg(feature = "tree-sitter-symbols")]
+mod discussion_anchor_travel;
+#[cfg(feature = "tree-sitter-symbols")]
+mod discussion_snapshot_travel;
 mod ephemeral_thread;
 mod fsmonitor;
 pub mod git_worktree_status;
