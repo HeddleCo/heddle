@@ -69,7 +69,7 @@ pub use commands_review::{
 };
 #[cfg(feature = "semantic")]
 pub use commands_semantic::{HotEventKindArg, HotSpotKeyArg, SemanticCommands};
-pub use commands_shell::{ShellCommands, ShellKind};
+pub use commands_shell::{CompletionSubject, ShellCommands, ShellKind};
 pub use commands_stash::StashCommands;
 pub use commands_thread::{
     ThreadCleanupArgs, ThreadCommands, ThreadListArgs, ThreadMarkerCommands,

@@ -10,6 +10,12 @@ pub enum ShellKind {
     Fish,
 }
 
+#[derive(Clone, Copy, Debug, clap::ValueEnum, PartialEq, Eq)]
+pub enum CompletionSubject {
+    Threads,
+    Markers,
+}
+
 #[derive(Subcommand, Clone)]
 pub enum ShellCommands {
     /// Emit a shell wrapper function on stdout. Source it from your
@@ -30,4 +36,11 @@ pub enum ShellCommands {
         /// Shell to generate completion for.
         shell: String,
     },
+
+    /// Print a compact prompt segment: current thread, dirty marker,
+    /// and remote divergence. Intended for PS1 helpers.
+    ///
+    /// Example:
+    ///   PS1='$(__heddle_ps1) '" after sourcing `heddle shell init bash`
+    Prompt,
 }

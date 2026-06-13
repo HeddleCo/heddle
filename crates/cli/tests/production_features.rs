@@ -1845,6 +1845,10 @@ mod hooks {
 mod completion {
     use super::*;
 
+    fn completion_lines(output: &str) -> Vec<&str> {
+        output.lines().filter(|line| !line.is_empty()).collect()
+    }
+
     #[test]
     fn test_completion_bash() {
         let temp = TempDir::new().unwrap();
@@ -1857,6 +1861,18 @@ mod completion {
             output.contains("heddle") || output.contains("complete"),
             "should generate bash completion"
         );
+        assert!(
+            output.contains("heddle __complete"),
+            "bash completion should include dynamic thread candidates"
+        );
+        assert!(
+            !output.contains("--thread|-t|--into"),
+            "bash dynamic completion must not offer dead -t thread values"
+        );
+        assert!(
+            output.contains("thread|capture"),
+            "bash --into thread completion must be gated to existing-thread subcommands"
+        );
     }
 
     #[test]
@@ -1865,6 +1881,19 @@ mod completion {
 
         let result = heddle(&["shell", "completion", "zsh"], Some(temp.path()));
         assert!(result.is_ok(), "completion zsh failed: {:?}", result.err());
+        let output = result.unwrap();
+        assert!(
+            output.contains("heddle __complete"),
+            "zsh completion should include dynamic thread candidates"
+        );
+        assert!(
+            !output.contains("--thread|-t|--into"),
+            "zsh dynamic completion must not offer dead -t thread values"
+        );
+        assert!(
+            output.contains("thread|capture"),
+            "zsh --into thread completion must be gated to existing-thread subcommands"
+        );
     }
 
     #[test]
@@ -1873,6 +1902,67 @@ mod completion {
 
         let result = heddle(&["shell", "completion", "fish"], Some(temp.path()));
         assert!(result.is_ok(), "completion fish failed: {:?}", result.err());
+        let output = result.unwrap();
+        assert!(
+            output.contains("heddle __complete"),
+            "fish completion should include dynamic thread candidates"
+        );
+        assert!(
+            !output.contains("case --thread -t --into"),
+            "fish dynamic completion must not offer dead -t thread values"
+        );
+        assert!(
+            output.contains("__fish_seen_subcommand_from thread capture"),
+            "fish --into thread completion must be gated to existing-thread subcommands"
+        );
+    }
+
+    #[test]
+    fn test_complete_threads_lists_sorted_repo_threads_only() {
+        let temp = TempDir::new().unwrap();
+        setup_repo_with_file(&temp, "base.txt", "base\n");
+        heddle(&["thread", "create", "zeta"], Some(temp.path())).unwrap();
+        heddle(&["thread", "create", "alpha"], Some(temp.path())).unwrap();
+
+        let output = heddle(&["__complete", "threads"], Some(temp.path())).unwrap();
+        assert_eq!(
+            completion_lines(&output),
+            vec!["alpha", "main", "zeta"],
+            "thread completion should print sorted, deduped thread names"
+        );
+
+        let outside = TempDir::new().unwrap();
+        let output = heddle(&["__complete", "threads"], Some(outside.path())).unwrap();
+        assert_eq!(
+            output, "",
+            "thread completion outside a repo should succeed quietly"
+        );
+    }
+
+    #[test]
+    fn test_shell_prompt_reports_thread_and_dirty_marker_only_in_repo() {
+        let temp = TempDir::new().unwrap();
+        setup_repo_with_file(&temp, "tracked.txt", "clean\n");
+
+        let clean = heddle(&["shell", "prompt"], Some(temp.path())).unwrap();
+        assert!(
+            clean.lines().any(|line| line.contains("main")),
+            "prompt should include the current lane/thread: {clean:?}"
+        );
+
+        fs::write(temp.path().join("tracked.txt"), "dirty\n").unwrap();
+        let dirty = heddle(&["shell", "prompt"], Some(temp.path())).unwrap();
+        assert!(
+            dirty.lines().any(|line| line.contains("main*")),
+            "prompt should mark dirty worktrees with '*': {dirty:?}"
+        );
+
+        let outside = TempDir::new().unwrap();
+        let output = heddle(&["shell", "prompt"], Some(outside.path())).unwrap();
+        assert_eq!(
+            output, "",
+            "prompt outside a repo should succeed with empty output"
+        );
     }
 }
 
