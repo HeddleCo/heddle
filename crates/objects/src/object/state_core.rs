@@ -1214,6 +1214,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pre_fidelity_hash_matches_legacy_golden_vector() {
+        let state = State::new_snapshot(
+            ContentHash::compute(b"issue-633-tree"),
+            vec![ChangeId::from_bytes([0x11; 16])],
+            Attribution::with_agent(
+                Principal::new("Legacy Author", "legacy@example.com"),
+                crate::object::Agent::new("openai", "gpt-5")
+                    .with_session("session-633", "segment-001")
+                    .with_policy("policy-legacy"),
+            ),
+        )
+        .with_logical_change_id(ChangeId::from_bytes([0x63; 16]))
+        .with_intent("freeze pre-565 hash")
+        .with_confidence(0.875)
+        .with_timestamp(DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp"))
+        .with_committer(Principal::new("Legacy Committer", "committer@example.com"))
+        .with_tz_offsets(3600, -18000)
+        .with_authored_at(DateTime::from_timestamp(1_699_999_000, 0).expect("valid timestamp"))
+        .with_raw_message(b"legacy commit message\n")
+        .with_extra_headers(vec![(b"encoding".to_vec(), b"UTF-8".to_vec())])
+        .with_status(Status::Published);
+
+        let legacy_hash = state.compute_hash_pre_fidelity();
+        // Golden vector for the pre-#565 state hash format. Legacy
+        // StateSignature verification depends on `compute_hash_pre_fidelity`
+        // staying byte-identical to that old format; if `hash_len_core` and
+        // `update_hash_core` drift, real pre-#565 signatures become
+        // unverifiable even though round-trip tests can still pass.
+        assert_eq!(
+            legacy_hash.to_hex(),
+            "b89e1b40e681a1bf88679db7cfcacdafb1f370bc40ed5d50760dae1d4ab49dab",
+        );
+        assert_ne!(
+            legacy_hash,
+            state.compute_hash(),
+            "fixture must distinguish the pre-#565 legacy path from the current hash",
+        );
+    }
+
     /// extra_headers order is load-bearing (#566): the same pairs in a
     /// different order must hash differently.
     #[test]
