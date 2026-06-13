@@ -33,9 +33,9 @@ Speculation has no cost. `heddle try -- <cmd>` spins up an ephemeral
 thread with an isolated checkout, runs the command, and either captures
 the result on success or drops the thread on failure — the parent
 worktree is never touched ([`crates/cli/src/cli/commands/try_cmd.rs`](../crates/cli/src/cli/commands/try_cmd.rs)).
-`heddle attempt N -- <cmd>` is the same primitive run N times in parallel,
-with the failures auto-dropped and the survivors ranked by exit, diff
-size, and duration ([`crates/cli/src/cli/commands/attempt.rs`](../crates/cli/src/cli/commands/attempt.rs)).
+For parallel speculation, create isolated child threads with
+`heddle start <name> --parent-thread <parent> --task <task>` and run each
+experiment in its own checkout.
 
 Disposability is what makes those verbs possible. Threads are cheap, the
 oplog is reliable, and rolling back is `heddle undo` — not a manual file
@@ -46,7 +46,7 @@ agent's strategy changes. We design for that.
 
 The same primitives appear in multiple verbs because the right ones were
 chosen first. A thread is a thread whether it came from `heddle start`,
-`heddle try`, `heddle attempt`, or `heddle delegate`. A capture is a capture
+`heddle try`, or a child `heddle start --parent-thread` workflow. A capture is a capture
 whether you triggered it explicitly or the verify hook fired it after a
 green test run.
 
@@ -54,7 +54,7 @@ green test run.
 ([`crates/cli/src/cli/commands/retro.rs`](../crates/cli/src/cli/commands/retro.rs)).
 Before retro, reconstructing "what happened this turn" meant
 cross-referencing `heddle log`, `heddle agent list`,
-`heddle context history`, and `heddle marker list` separately, then
+`heddle context history`, and `heddle thread marker list` separately, then
 aligning timestamps by hand. Retro folds those four reads into one trip on
 a single time window. It isn't new data — it's an idiom that emerged often
 enough to deserve a name.
@@ -65,7 +65,7 @@ Less to remember. The everyday `heddle help` follows the core loop:
 inspect, adopt or clone, save work, isolate a thread, prove readiness,
 preview advanced integration, land or push, undo, inspect history, and recover.
 The exact verb list comes from the command contract table so human help
-and `heddle commands --output json` do not drift. Collaboration and
+and `heddle help --output json` do not drift. Collaboration and
 annotation surfaces such as `review`, `discuss`, and `context` stay
 behind `heddle help advanced` and their topic pages for the moments you
 need them. First-time users see the smallest surface that explains where
@@ -75,14 +75,13 @@ State IDs follow the same logic. Every state-taking verb accepts the same
 specifiers — full change ID, 4-character-or-longer prefix, marker name,
 `HEAD`, `HEAD~N`, thread name — so the muscle memory you build on
 `heddle show` carries to `heddle diff`, `heddle revert`,
-`heddle goto`, `heddle blame --state`, `heddle review show`,
+`heddle switch`, `heddle query --attribution --state`, `heddle review show`,
 and `heddle retro --since`. One acceptance rule, every state-taking verb.
 
-Restraint in defaults: `heddle attempt` defaults `--shared-target` ON
-whenever the workspace has a `Cargo.toml`, because ten parallel
+Restraint in defaults: child thread workflows can share a Cargo target
+directory whenever the workspace has a `Cargo.toml`, because ten parallel
 `cargo build` invocations against this codebase would otherwise eat tens
-of GB of disk. The footgun is closed by default; you opt out with
-`--no-shared-target` when you're benchmarking the cache itself.
+of GB of disk.
 
 ## 5. Honesty
 

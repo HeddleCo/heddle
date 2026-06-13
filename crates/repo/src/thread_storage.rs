@@ -279,6 +279,7 @@ impl ThreadManager {
     pub fn save(&self, thread: &Thread) -> Result<()> {
         let _lock = self.write_lock()?;
         self.save_record_file(&thread.to_record())?;
+        objects::fault_inject::maybe_fail_at("thread_manager_save_before_workspace")?;
         self.save_workspace_file(&thread.id, &thread.workspace_state())
     }
 
@@ -434,17 +435,22 @@ impl ThreadManager {
         let Some(thread) = self.find_by_thread(thread_name)? else {
             return Ok(None);
         };
-        let bytes = rmp_serde::to_vec_named(&thread).map_err(|e| {
+        self.encode_thread_record_snapshot(&thread).map(Some)
+    }
+
+    /// Encode a concrete `Thread` record using the same opaque snapshot format
+    /// as [`snapshot_thread_record`](Self::snapshot_thread_record).
+    pub fn encode_thread_record_snapshot(&self, thread: &Thread) -> Result<Vec<u8>> {
+        rmp_serde::to_vec_named(thread).map_err(|e| {
             HeddleError::Serialization(format!(
                 "encode thread record snapshot for '{}': {}",
-                thread_name, e
+                thread.thread, e
             ))
-        })?;
-        Ok(Some(bytes))
+        })
     }
 
     /// Decode a `Thread` record from rmp-serde bytes produced by
-    /// `snapshot_thread_record`. Used by `heddle redo` of a
+    /// `snapshot_thread_record`. Used by `heddle undo --redo` of a
     /// `ThreadCreate` to reconstruct the record body that undo destroyed
     /// (heddle#23 r2 Codex P1, mirroring the FastForward pattern from
     /// heddle#99 r2 — record what redo needs).

@@ -31,6 +31,8 @@ pub struct UserConfig {
     pub remote: UserRemoteConfig,
     #[serde(default)]
     pub harness: UserHarnessConfig,
+    #[serde(default)]
+    pub land: UserLandConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +137,12 @@ pub struct UserRemoteConfig {
     pub auth_proof_key_pem_path: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserLandConfig {
+    #[serde(default = "default_land_squash")]
+    pub squash: bool,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum HarnessMode {
@@ -232,6 +240,10 @@ fn default_auto_infer() -> bool {
     true
 }
 
+fn default_land_squash() -> bool {
+    true
+}
+
 impl Default for UserDisplayConfig {
     fn default() -> Self {
         Self {
@@ -250,6 +262,14 @@ impl Default for UserHarnessConfig {
             auto_infer: default_auto_infer(),
             threading: UserHarnessThreadingConfig::default(),
             harnesses: BTreeMap::new(),
+        }
+    }
+}
+
+impl Default for UserLandConfig {
+    fn default() -> Self {
+        Self {
+            squash: default_land_squash(),
         }
     }
 }

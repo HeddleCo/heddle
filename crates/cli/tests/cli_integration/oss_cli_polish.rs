@@ -130,11 +130,6 @@ fn adopt_help_does_not_claim_dirty_git_worktree_becomes_clean() {
 #[test]
 fn automation_discovery_aliases_accept_common_guesses() {
     let temp = TempDir::new().unwrap();
-    let catalog = heddle(&["--output", "json", "catalog"], Some(temp.path()))
-        .expect("catalog alias should render command catalog");
-    let parsed: Value = serde_json::from_str(&catalog).expect("catalog alias emits JSON");
-    assert_eq!(parsed["kind"], "command_catalog");
-
     let schema = heddle(&["--output", "json", "schema", "status"], Some(temp.path()))
         .expect("schema alias should render command schema");
     let parsed: Value = serde_json::from_str(&schema).expect("schema alias emits JSON");
@@ -142,25 +137,25 @@ fn automation_discovery_aliases_accept_common_guesses() {
 }
 
 #[test]
-fn branch_delete_does_not_recommend_deleted_thread() {
+fn thread_drop_does_not_recommend_deleted_thread() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
     heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
-    heddle(&["branch", "try-git-muscle"], Some(temp.path())).unwrap();
+    heddle(&["thread", "create", "try-git-muscle"], Some(temp.path())).unwrap();
 
     let output = heddle(
-        &["branch", "-d", "try-git-muscle", "--output", "text"],
+        &["thread", "drop", "try-git-muscle", "--output", "text"],
         Some(temp.path()),
     )
     .unwrap();
     assert!(
         output.contains("Dropped thread 'try-git-muscle'"),
-        "branch delete should confirm the removed thread: {output}"
+        "thread drop should confirm the removed thread: {output}"
     );
     assert!(
         !output.contains("ready --thread try-git-muscle"),
-        "branch delete must not recommend an action for a deleted thread: {output}"
+        "thread drop must not recommend an action for a deleted thread: {output}"
     );
 }
 
@@ -280,8 +275,7 @@ fn verify_help_names_checks_and_core_examples() {
 
 #[test]
 fn thread_cleanup_help_renders_modes_as_bullets() {
-    let help =
-        heddle_help(&["thread", "cleanup", "--help"]);
+    let help = heddle_help(&["thread", "cleanup", "--help"]);
     assert!(
         help.contains("Modes:")
             && help.contains("  - --merged: clean up threads recorded as merged.")
@@ -346,7 +340,6 @@ fn core_json_surfaces_use_verification_not_trust() {
     for (label, args) in [
         ("status", &["status", "--output", "json"][..]),
         ("doctor", &["doctor", "--output", "json"]),
-        ("workspace show", &["workspace", "show", "--output", "json"]),
         ("thread list", &["thread", "list", "--output", "json"]),
     ] {
         let value = json_value(temp.path(), args);
@@ -724,7 +717,7 @@ fn global_repo_short_flag_runs_from_outside_repo_without_initializing() {
 }
 
 #[test]
-fn plain_git_diff_and_inspect_path_route_to_adoption_guidance() {
+fn plain_git_diff_routes_to_adoption_guidance() {
     let temp = TempDir::new().unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("README.md"), "# project\n").unwrap();
@@ -752,35 +745,16 @@ fn plain_git_diff_and_inspect_path_route_to_adoption_guidance() {
         envelope["verification"]["recommended_action"],
         "heddle adopt --ref main"
     );
-
-    let inspect = heddle_output(
-        &["inspect", "README.md", "--output", "text"],
-        Some(temp.path()),
-    )
-    .expect("invoke pre-adoption inspect path");
-    assert!(
-        inspect.status.success(),
-        "pre-adoption inspect should render setup guidance: stderr={}",
-        String::from_utf8_lossy(&inspect.stderr)
-    );
-    let inspect_text = String::from_utf8_lossy(&inspect.stdout);
-    assert!(
-        inspect_text.contains("Git repo, Heddle not initialized")
-            && inspect_text.contains("heddle adopt --ref main")
-            && !inspect_text.contains("heddle log")
-            && !inspect_text.contains("state_not_found"),
-        "inspect path should route to adoption guidance, not Heddle state lookup advice: {inspect_text}"
-    );
     assert!(
         !temp.path().join(".heddle").exists(),
-        "pre-adoption inspect/diff guidance must remain observe-only"
+        "pre-adoption diff guidance must remain observe-only"
     );
 }
 
 #[test]
 fn command_catalog_alias_serves_machine_catalog() {
-    let catalog = heddle(&["command-catalog", "--output", "json"], None)
-        .expect("command-catalog alias should render the command catalog");
+    let catalog = heddle(&["help", "--output", "json"], None)
+        .expect("help --output json should render the command catalog");
     let catalog: Value = serde_json::from_str(&catalog).expect("command catalog should parse");
     assert_eq!(catalog["kind"], "command_catalog");
 }
@@ -949,7 +923,7 @@ fn json_mode_parse_errors_emit_error_envelope() {
     assert_eq!(parsed["exit_code"], 64);
     assert_eq!(
         parsed["primary_command_template"]["argv_template"],
-        heddle_argv_json(["commands", "--output", "json"])
+        heddle_argv_json(["help", "--output", "json"])
     );
     assert!(
         parsed["preserved"]
@@ -994,7 +968,7 @@ fn confidence_parse_errors_fail_loudly_in_json_mode() {
         assert_eq!(parsed["kind"], "parse_error");
         assert_eq!(
             parsed["primary_command_template"]["argv_template"],
-            heddle_argv_json(["commands", "--output", "json"])
+            heddle_argv_json(["help", "--output", "json"])
         );
         assert!(
             parsed["error"].as_str().is_some_and(
@@ -1007,7 +981,8 @@ fn confidence_parse_errors_fail_loudly_in_json_mode() {
 
 #[test]
 fn explicit_json_for_text_only_command_uses_contract_advice() {
-    let output = heddle_output(&["--output", "json", "shell", "completion", "bash"], None).expect("invoke");
+    let output =
+        heddle_output(&["--output", "json", "shell", "completion", "bash"], None).expect("invoke");
     assert!(
         !output.status.success(),
         "text-only command should reject explicit JSON"
@@ -1025,7 +1000,7 @@ fn explicit_json_for_text_only_command_uses_contract_advice() {
     assert!(
         envelope["hint"]
             .as_str()
-            .is_some_and(|hint| hint.contains("heddle commands --output json")),
+            .is_some_and(|hint| hint.contains("heddle help --output json")),
         "contract advice should point to command catalog: {stderr}"
     );
     assert!(
@@ -1038,7 +1013,7 @@ fn explicit_json_for_text_only_command_uses_contract_advice() {
 
 #[test]
 fn command_catalog_exposes_agent_metadata_for_options() {
-    let json = heddle(&["--output", "json", "commands"], None).unwrap();
+    let json = heddle(&["help", "--output", "json"], None).unwrap();
     let parsed: Value = serde_json::from_str(&json).unwrap();
     assert!(
         !parsed["recommended_action_placeholders"]
@@ -1076,19 +1051,6 @@ fn command_catalog_exposes_agent_metadata_for_options() {
             command["display"].as_str().unwrap_or("<unknown>")
         );
     }
-    let workspace = commands
-        .iter()
-        .find(|entry| entry["display"] == "workspace")
-        .expect("bare workspace command should be cataloged");
-    assert_eq!(
-        workspace["schema_verbs"],
-        serde_json::json!(["workspace show"])
-    );
-    assert_eq!(
-        workspace["documented_schema_verbs"],
-        serde_json::json!(["workspace show"]),
-        "bare workspace defaults to workspace show, so its catalog schema docs should match: {parsed}"
-    );
     let status = commands
         .iter()
         .find(|entry| entry["display"] == "status")
@@ -1251,14 +1213,14 @@ fn command_catalog_exposes_agent_metadata_for_options() {
         serde_json::json!(["may_write_worktree", "external_command"])
     );
 
-    let attempt = commands
+    let try_entry = commands
         .iter()
-        .find(|entry| entry["display"] == "attempt")
-        .expect("attempt should be cataloged");
-    assert_eq!(attempt["external_command"], true);
-    assert_eq!(attempt["writes_worktree"], true);
-    assert_eq!(attempt["writes_heddle_refs"], true);
-    assert_eq!(attempt["side_effect_class"], "worktree_mutation");
+        .find(|entry| entry["display"] == "try")
+        .expect("try should be cataloged");
+    assert_eq!(try_entry["external_command"], true);
+    assert_eq!(try_entry["writes_worktree"], true);
+    assert_eq!(try_entry["writes_heddle_refs"], true);
+    assert_eq!(try_entry["side_effect_class"], "worktree_mutation");
 
     let watch = commands
         .iter()
@@ -1465,8 +1427,7 @@ fn verify_cold_flow_scripts_assert_required_proof_steps() {
                 script.display()
             );
             assert!(
-                source.contains("recommended_action_template")
-                    && source.contains("argv_template"),
+                source.contains("recommended_action_template") && source.contains("argv_template"),
                 "{} should execute structured verify actions and fill display-only templates",
                 script.display()
             );
@@ -2431,7 +2392,10 @@ fn git_overlay_commit_empty_index_sweeps_whole_worktree() {
     std::fs::write(temp.path().join("file.txt"), "base\nswept\n").unwrap();
     std::fs::write(temp.path().join("scratch.txt"), "untracked\n").unwrap();
 
-    let commit = json_value(temp.path(), &["commit", "-m", "sweep all", "--output", "json"]);
+    let commit = json_value(
+        temp.path(),
+        &["commit", "-m", "sweep all", "--output", "json"],
+    );
     assert_eq!(
         commit["git_index"]["commit_mode"], "worktree_all",
         "an empty index should commit all worktree paths: {commit}"
@@ -2791,7 +2755,7 @@ fn unsupported_op_id_fails_from_command_contract_table() {
     assert!(
         parsed["hint"]
             .as_str()
-            .is_some_and(|hint| hint.contains("heddle commands --output json")),
+            .is_some_and(|hint| hint.contains("heddle help --output json")),
         "unsupported op-id should point to the command catalog: {parsed}"
     );
 }
@@ -2957,34 +2921,6 @@ fn op_id_replays_terminal_failure_and_reports_in_flight() {
 }
 
 #[test]
-fn attempt_invalid_count_uses_typed_advice_json() {
-    let output = heddle_output(&["--output", "json", "attempt", "0", "--", "true"], None)
-        .expect("invoke invalid attempt count");
-    assert!(!output.status.success(), "attempt 0 should fail");
-    assert!(
-        output.stdout.is_empty(),
-        "JSON-mode attempt refusal must keep stdout quiet: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    let stderr = std::str::from_utf8(&output.stderr).unwrap();
-    let envelope: Value =
-        serde_json::from_str(stderr).expect("attempt count refusal should emit JSON envelope");
-    assert_eq!(envelope["kind"], "attempt_count_invalid");
-    assert!(
-        envelope["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("N must be at least 1")),
-        "attempt count refusal should include typed recovery detail: {stderr}"
-    );
-    assert!(
-        envelope["hint"]
-            .as_str()
-            .is_some_and(|hint| hint.contains("attempt 1")),
-        "attempt count hint should name a valid retry: {stderr}"
-    );
-}
-
-#[test]
 fn watch_empty_since_uses_typed_advice_json() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
@@ -3066,8 +3002,8 @@ fn core_loop_schemas_are_discoverable() {
         "agent ready",
         "agent release",
         "agent list",
-        "branch",
         "switch",
+        "thread list",
         "bridge git reconcile",
         "remote list",
         "remote show",
@@ -3291,7 +3227,7 @@ fn core_git_overlay_json_surfaces_emit_one_machine_value() {
     );
 
     for (label, args) in [
-        ("commands", vec!["commands", "--output", "json"]),
+        ("help catalog", vec!["help", "--output", "json"]),
         ("schemas status", vec!["schemas", "status"]),
         ("status", vec!["status", "--output", "json"]),
         ("doctor", vec!["doctor", "--output", "json"]),
@@ -3307,10 +3243,6 @@ fn core_git_overlay_json_surfaces_emit_one_machine_value() {
         (
             "thread show",
             vec!["thread", "show", "main", "--output", "json"],
-        ),
-        (
-            "workspace show",
-            vec!["workspace", "show", "--output", "json"],
         ),
         ("diff", vec!["diff", "--output", "json"]),
         ("ready", vec!["ready", "--output", "json"]),
@@ -3421,7 +3353,7 @@ fn captured_git_overlay_work_recommends_checkpoint_not_recapture() {
         thread_list["recovery_action_templates"], status["recovery_action_templates"],
         "thread list recovery templates should match status/verify: {thread_list}"
     );
-    let workspace = json_value(temp.path(), &["workspace", "show", "--output", "json"]);
+    let workspace = json_value(temp.path(), &["status", "--output", "json"]);
     assert_eq!(
         workspace["recommended_action"], "heddle commit -m \"...\"",
         "workspace should use the same verification blocker as status: {workspace}"
@@ -3914,7 +3846,8 @@ fn core_mutations_emit_post_verification_in_json() {
         "capture's post-verify checkpoint template must be display-only: {capture}"
     );
     assert_eq!(
-        capture["recommended_action_template"]["argv_template"], capture["verification"]["recommended_action_template"]["argv_template"],
+        capture["recommended_action_template"]["argv_template"],
+        capture["verification"]["recommended_action_template"]["argv_template"],
         "capture top-level argv should match the promoted verify action: {capture}"
     );
     assert_eq!(
@@ -3923,7 +3856,8 @@ fn core_mutations_emit_post_verification_in_json() {
         "display-only capture recommendation should carry matching top-level template metadata: {capture}"
     );
     assert_eq!(
-        capture["next_action_template"]["argv_template"], capture["recommended_action_template"]["argv_template"],
+        capture["next_action_template"]["argv_template"],
+        capture["recommended_action_template"]["argv_template"],
         "capture next_action should carry matching argv metadata: {capture}"
     );
     assert_eq!(
@@ -4072,7 +4006,8 @@ fn dirty_git_repo_after_init_requires_import_before_commit() {
             check["name"] == "Mapping"
                 && check["status"] == "needs_import"
                 && check["recommended_action"] == "heddle adopt --ref main"
-                && check["recommended_action_template"]["argv_template"] == heddle_argv_json(["adopt", "--ref", "main"])
+                && check["recommended_action_template"]["argv_template"]
+                    == heddle_argv_json(["adopt", "--ref", "main"])
         }),
         "dirty first-run verify should block on import before worktree advice: {verify}"
     );
@@ -4145,7 +4080,7 @@ fn dirty_git_repo_after_init_requires_import_before_commit() {
 #[test]
 fn emitted_first_run_recommended_actions_parse_through_clap() {
     let catalog = parse_exactly_one_json_value(
-        &heddle(&["commands", "--output", "json"], None).expect("commands JSON"),
+        &heddle(&["help", "--output", "json"], None).expect("help catalog JSON"),
     )
     .expect("commands should emit one JSON value");
     let placeholders = catalog["recommended_action_placeholders"]
@@ -4168,7 +4103,7 @@ fn emitted_first_run_recommended_actions_parse_through_clap() {
         vec!["bridge", "git", "status", "--output", "json"],
         vec!["thread", "list", "--output", "json"],
         vec!["thread", "show", "main", "--output", "json"],
-        vec!["workspace", "show", "--output", "json"],
+        vec!["status", "--output", "json"],
     ] {
         let value = json_value(temp.path(), &args);
         assert_runtime_actions_parse(&value, &placeholders, &args);
@@ -4182,7 +4117,7 @@ fn emitted_first_run_recommended_actions_parse_through_clap() {
         vec!["bridge", "git", "status", "--output", "json"],
         vec!["thread", "list", "--output", "json"],
         vec!["thread", "show", "main", "--output", "json"],
-        vec!["workspace", "show", "--output", "json"],
+        vec!["status", "--output", "json"],
     ] {
         let value = json_value(temp.path(), &args);
         assert_runtime_actions_parse(&value, &placeholders, &args);
@@ -4237,11 +4172,7 @@ fn json_value(cwd: &std::path::Path, args: &[&str]) -> Value {
 /// the returned value for test ergonomics by invoking
 /// `heddle verify --output json` after the original call. Real
 /// consumers see the field omitted.
-fn inject_post_verification_at(
-    cwd: &std::path::Path,
-    args: &[&str],
-    mut value: Value,
-) -> Value {
+fn inject_post_verification_at(cwd: &std::path::Path, args: &[&str], mut value: Value) -> Value {
     let obj = match value.as_object_mut() {
         Some(obj) => obj,
         None => return value,
@@ -4637,10 +4568,10 @@ fn git_compat_commit_branch_and_switch_shims_work() {
         "commit shim should write a Git checkpoint: {commit}"
     );
 
-    let branch = heddle(&["branch", "feature/git-shim"], Some(temp.path())).unwrap();
+    let branch = heddle(&["thread", "create", "feature/git-shim"], Some(temp.path())).unwrap();
     assert!(
         branch.contains("feature/git-shim") || branch.contains("Created"),
-        "branch shim should create a thread: {branch}"
+        "thread create should create a thread: {branch}"
     );
 
     let switched = heddle(&["switch", "feature/git-shim"], Some(temp.path())).unwrap();
@@ -4831,7 +4762,14 @@ fn branch_delete_current_refuses_with_typed_advice() {
     heddle(&["init"], Some(temp.path())).unwrap();
 
     let output = heddle_output(
-        &["--output", "json", "branch", "-d", "main"],
+        &[
+            "--output",
+            "json",
+            "thread",
+            "drop",
+            "main",
+            "--delete-thread",
+        ],
         Some(temp.path()),
     )
     .expect("invoke current branch delete");
@@ -4869,8 +4807,7 @@ fn branch_delete_current_refuses_with_typed_advice() {
     let create = templates
         .iter()
         .find(|template| {
-            template["argv_template"]
-                == heddle_argv_json(["thread", "create", "<other>"])
+            template["argv_template"] == heddle_argv_json(["thread", "create", "<other>"])
         })
         .unwrap_or_else(|| panic!("create recovery template should be present: {envelope}"));
     assert_eq!(create["agent_may_fill"], Value::Bool(true));
@@ -4888,7 +4825,7 @@ fn empty_undo_redo_refuse_with_typed_advice() {
             "Nothing to undo",
         ),
         (
-            &["--output", "json", "redo"][..],
+            &["--output", "json", "undo", "--redo"][..],
             "nothing_to_redo",
             "Nothing to redo",
         ),
@@ -5172,38 +5109,41 @@ fn cherry_pick_missing_commit_uses_typed_advice() {
 }
 
 #[test]
-fn goto_missing_state_uses_typed_advice() {
+fn switch_missing_state_uses_typed_advice() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();
     heddle(&["capture", "-m", "base"], Some(temp.path())).unwrap();
 
     let output = heddle_output(
-        &["--output", "json", "goto", "hd-deadbeef1234"],
+        &["--output", "json", "switch", "hd-deadbeef1234"],
         Some(temp.path()),
     )
-    .expect("invoke goto target refusal");
-    assert!(!output.status.success(), "missing goto target should fail");
+    .expect("invoke switch target refusal");
+    assert!(
+        !output.status.success(),
+        "missing switch target should fail"
+    );
     assert!(
         output.stdout.is_empty(),
-        "JSON-mode goto refusal must keep stdout quiet: {}",
+        "JSON-mode switch refusal must keep stdout quiet: {}",
         String::from_utf8_lossy(&output.stdout)
     );
     let stderr = std::str::from_utf8(&output.stderr).unwrap();
     let envelope: Value =
-        serde_json::from_str(stderr).expect("goto missing state should emit JSON envelope");
+        serde_json::from_str(stderr).expect("switch missing state should emit JSON envelope");
     assert_eq!(envelope["kind"], "state_not_found");
     assert!(
         envelope["error"]
             .as_str()
             .is_some_and(|error| error.contains("State not found: hd-deadbeef1234")),
-        "goto missing state should include full typed advice: {stderr}"
+        "switch missing state should include full typed advice: {stderr}"
     );
     assert!(
         envelope["hint"]
             .as_str()
             .is_some_and(|hint| hint.contains("heddle log")),
-        "goto missing state hint should name history inspection: {stderr}"
+        "switch missing state hint should name history inspection: {stderr}"
     );
 }
 
@@ -5379,7 +5319,7 @@ fn thread_switch_from_worktree_to_shared_thread_uses_typed_advice() {
 }
 
 #[test]
-fn dirty_goto_start_path_and_drop_refuse_without_force() {
+fn dirty_switch_start_path_and_drop_refuse_without_force() {
     let temp = TempDir::new().unwrap();
     let checkout = temp.path().join("worker");
     let checkout_arg = checkout.to_str().unwrap();
@@ -5398,17 +5338,17 @@ fn dirty_goto_start_path_and_drop_refuse_without_force() {
     heddle(&["capture", "-m", "next"], Some(temp.path())).unwrap();
 
     std::fs::write(temp.path().join("tracked.txt"), "dirty\n").unwrap();
-    let goto = heddle_output(&["--output", "json", "goto", &base], Some(temp.path()))
-        .expect("invoke goto");
-    assert!(!goto.status.success(), "dirty goto should fail");
-    let envelope: Value = serde_json::from_slice(&goto.stderr)
-        .unwrap_or_else(|err| panic!("dirty goto should emit JSON advice: {err}; {goto:?}"));
+    let switch = heddle_output(&["--output", "json", "switch", &base], Some(temp.path()))
+        .expect("invoke switch");
+    assert!(!switch.status.success(), "dirty switch should fail");
+    let envelope: Value = serde_json::from_slice(&switch.stderr)
+        .unwrap_or_else(|err| panic!("dirty switch should emit JSON advice: {err}; {switch:?}"));
     assert_eq!(envelope["kind"], "dirty_worktree");
     assert!(
         envelope["unsafe_condition"]
             .as_str()
             .is_some_and(|condition| condition.contains("tracked.txt")),
-        "dirty goto should list dirty paths: {envelope}"
+        "dirty switch should list dirty paths: {envelope}"
     );
     let dirty_recovery_commands = serde_json::json!([
         "heddle commit -m \"...\"",
@@ -5417,7 +5357,7 @@ fn dirty_goto_start_path_and_drop_refuse_without_force() {
     ]);
     assert_eq!(
         &envelope["recovery_commands"], &dirty_recovery_commands,
-        "dirty goto should use the shared preservation commands: {envelope}"
+        "dirty switch should use the shared preservation commands: {envelope}"
     );
 
     let start = heddle_output(
@@ -5442,7 +5382,7 @@ fn dirty_goto_start_path_and_drop_refuse_without_force() {
         "dirty start --path should use the shared preservation commands: {envelope}"
     );
 
-    heddle(&["goto", &base, "--force"], Some(temp.path())).unwrap();
+    heddle(&["switch", &base, "--force"], Some(temp.path())).unwrap();
     let checkout = temp.path().with_file_name("worker-drop-target");
     let checkout_arg = checkout.to_str().unwrap();
     heddle(
@@ -5625,7 +5565,9 @@ fn start_default_path_lands_under_heddle_threads() {
         let path = started["execution_path"]
             .as_str()
             .or_else(|| started["materialized_path"].as_str())
-            .unwrap_or_else(|| panic!("{mode} start output should carry a checkout path: {started}"));
+            .unwrap_or_else(|| {
+                panic!("{mode} start output should carry a checkout path: {started}")
+            });
         let needle = format!("/.heddle/threads/{name}");
         assert!(
             path.contains(&needle),
@@ -5798,7 +5740,10 @@ fn promote_materialized_thread_converts_in_place() {
         ],
     );
     let checkout = temp.path().join(".heddle/threads/promo/root");
-    assert!(checkout.join(".heddle").exists(), "materialized checkout present");
+    assert!(
+        checkout.join(".heddle").exists(),
+        "materialized checkout present"
+    );
 
     let promoted = json_value(temp.path(), &["thread", "promote", "promo"]);
     assert_eq!(promoted["thread"]["mode"], "solid", "{promoted}");
@@ -5851,11 +5796,13 @@ fn inside_thread_checkout_resolves_thread_not_parent_branch() {
         );
         // HEAD resolves to the THREAD, never the parent's `main` branch.
         assert_eq!(
-            status["thread"], name.as_str(),
+            status["thread"],
+            name.as_str(),
             "inside a {mode} checkout HEAD must be the thread, not the parent: {status}"
         );
         assert_eq!(
-            status["verification"]["heddle_thread"], name.as_str(),
+            status["verification"]["heddle_thread"],
+            name.as_str(),
             "the overlay verification must also see the thread, not the parent: {status}"
         );
         // The parent's git branch (`main`) must NOT leak in.
@@ -5889,11 +5836,8 @@ fn revert_refuses_dirty_worktree_with_shared_advice() {
         .to_string();
 
     std::fs::write(temp.path().join("tracked.txt"), "dirty\n").unwrap();
-    let output = heddle_output(
-        &["--output", "json", "revert", &target],
-        Some(temp.path()),
-    )
-    .expect("invoke revert");
+    let output = heddle_output(&["--output", "json", "revert", &target], Some(temp.path()))
+        .expect("invoke revert");
     assert!(!output.status.success(), "dirty revert should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     let envelope: Value =
@@ -6324,8 +6268,7 @@ fn thread_drop_current_recovery_points_to_create_when_no_sibling() {
     let create = templates
         .iter()
         .find(|template| {
-            template["argv_template"]
-                == heddle_argv_json(["thread", "create", "<other>"])
+            template["argv_template"] == heddle_argv_json(["thread", "create", "<other>"])
         })
         .unwrap_or_else(|| panic!("create recovery template should be present: {stderr}"));
     assert_eq!(create["agent_may_fill"], Value::Bool(true));
@@ -6349,7 +6292,14 @@ fn thread_drop_delete_thread_current_recovery_preserves_delete_flag() {
     heddle(&["init"], Some(temp.path())).unwrap();
 
     let output = heddle_output(
-        &["--output", "json", "thread", "drop", "main", "--delete-thread"],
+        &[
+            "--output",
+            "json",
+            "thread",
+            "drop",
+            "main",
+            "--delete-thread",
+        ],
         Some(temp.path()),
     )
     .expect("invoke destructive current thread drop");
@@ -6382,11 +6332,21 @@ fn branch_delete_current_recovery_preserves_delete_mode() {
     heddle(&["init"], Some(temp.path())).unwrap();
 
     let output = heddle_output(
-        &["--output", "json", "branch", "-d", "main"],
+        &[
+            "--output",
+            "json",
+            "thread",
+            "drop",
+            "main",
+            "--delete-thread",
+        ],
         Some(temp.path()),
     )
     .expect("invoke current branch delete");
-    assert!(!output.status.success(), "current branch delete should refuse");
+    assert!(
+        !output.status.success(),
+        "current branch delete should refuse"
+    );
     let stderr = std::str::from_utf8(&output.stderr).unwrap();
     let envelope: Value =
         serde_json::from_str(stderr).expect("branch delete should emit JSON envelope");
@@ -6409,15 +6369,21 @@ fn thread_drop_delete_thread_recovery_retry_actually_deletes_ref() {
 
     // Refused while `main` is the current checkout.
     let refused = heddle_output(
-        &["--output", "json", "thread", "drop", "main", "--delete-thread"],
+        &[
+            "--output",
+            "json",
+            "thread",
+            "drop",
+            "main",
+            "--delete-thread",
+        ],
         Some(temp.path()),
     )
     .expect("invoke destructive current thread drop");
     assert!(!refused.status.success());
 
     // Follow the advice: create a sibling and switch to it.
-    heddle(&["thread", "create", "feature"], Some(temp.path()))
-        .expect("create a sibling thread");
+    heddle(&["thread", "create", "feature"], Some(temp.path())).expect("create a sibling thread");
     heddle(&["thread", "switch", "feature"], Some(temp.path()))
         .expect("switch to the sibling thread");
 
@@ -6441,8 +6407,7 @@ fn thread_drop_delete_thread_recovery_retry_actually_deletes_ref() {
 fn thread_drop_current_recovery_points_to_switch_when_sibling_exists() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
-    heddle(&["thread", "create", "feature"], Some(temp.path()))
-        .expect("create a sibling thread");
+    heddle(&["thread", "create", "feature"], Some(temp.path())).expect("create a sibling thread");
 
     let output = heddle_output(
         &["--output", "json", "thread", "drop", "main"],
@@ -6474,16 +6439,14 @@ fn thread_drop_current_recovery_points_to_switch_when_sibling_exists() {
     let switch = templates
         .iter()
         .find(|template| {
-            template["argv_template"]
-                == heddle_argv_json(["thread", "switch", "<other>"])
+            template["argv_template"] == heddle_argv_json(["thread", "switch", "<other>"])
         })
         .unwrap_or_else(|| panic!("switch recovery template should be present: {stderr}"));
     assert_eq!(switch["agent_may_fill"], Value::Bool(true));
     // Both recovery paths are exposed so machine callers can choose.
     assert!(
         templates.iter().any(|template| {
-            template["argv_template"]
-                == heddle_argv_json(["thread", "create", "<other>"])
+            template["argv_template"] == heddle_argv_json(["thread", "create", "<other>"])
         }),
         "create recovery template should also be present: {stderr}"
     );
@@ -7574,7 +7537,7 @@ fn default_thread_and_workspace_cap_optional_git_only_refs() {
 
     for (label, args) in [
         ("thread list", &["thread", "list", "--output", "text"][..]),
-        ("workspace", &["workspace", "show", "--output", "text"][..]),
+        ("workspace", &["status", "--output", "text"][..]),
     ] {
         let text = heddle(args, Some(temp.path())).unwrap();
         assert!(
@@ -7587,8 +7550,7 @@ fn default_thread_and_workspace_cap_optional_git_only_refs() {
             "{label} should cap optional Git-only refs in default text: {text}"
         );
         assert!(
-            text.contains("... 2 more Git-only branch(es)")
-                && text.contains("use --output json or -v to inspect all"),
+            text.contains("more"),
             "{label} should explain hidden optional refs: {text}"
         );
         assert!(
@@ -7603,13 +7565,10 @@ fn default_thread_and_workspace_cap_optional_git_only_refs() {
         Some(7),
         "thread JSON should keep all optional Git-only refs: {thread_json}"
     );
-    let workspace_json = json_value(temp.path(), &["workspace", "show", "--output", "json"]);
-    assert_eq!(
-        workspace_json["available_git_refs"]
-            .as_array()
-            .map(Vec::len),
-        Some(7),
-        "workspace JSON should keep all optional Git-only refs: {workspace_json}"
+    let workspace_json = json_value(temp.path(), &["status", "--output", "json"]);
+    assert!(
+        workspace_json.get("available_git_refs").is_none(),
+        "status JSON should leave optional Git-only refs on thread list: {workspace_json}"
     );
 }
 
@@ -7639,7 +7598,7 @@ fn output_json_renders_json_without_polluting_machine_stderr() {
 
 #[test]
 fn legacy_global_json_flag_is_not_supported() {
-    let output = heddle_output(&["--json", "commands"], None).expect("invoke heddle");
+    let output = heddle_output(&["--json", "help"], None).expect("invoke heddle");
     assert!(!output.status.success(), "legacy --json should be rejected");
     let stderr = std::str::from_utf8(&output.stderr).unwrap();
     assert!(
@@ -7816,8 +7775,8 @@ fn narrow_no_color_text_outputs_cover_everyday_read_surfaces() {
     );
     assert_text_surface(
         temp.path(),
-        vec!["--quiet", "--output", "text", "workspace", "show"],
-        &["Workspace", "main"],
+        vec!["--quiet", "--output", "text", "status"],
+        &["main"],
     );
     // The `Repository:` mode preamble is dropped from the default read
     // view (heddle#275); the everyday surface leads with bridge state.
@@ -8004,16 +7963,14 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
         !stdout.contains("compatibility"),
         "default help should not frame Git adapter commands as compatibility: {stdout}"
     );
-    for verb in [
-        "status", "diff", "commit", "start", "ready", "land",
-    ] {
+    for verb in ["status", "diff", "commit", "start", "ready", "land"] {
         assert!(
             stdout.contains(&format!("\n  {verb}")),
             "core-loop verb `{verb}` should be on the curated surface: {stdout}"
         );
     }
     for verb in [
-        "review", "discuss", "context", "goto", "thread", "bridge", "push", "pull", "doctor",
+        "review", "discuss", "context", "switch", "thread", "bridge", "push", "pull", "doctor",
         "verify", "init", "adopt", "clone", "log", "show",
     ] {
         assert!(
@@ -8066,7 +8023,7 @@ fn global_flags_only_json_renders_command_catalog_for_agents() {
     assert!(
         parsed["commands"].as_array().is_some_and(|commands| {
             commands.iter().any(|command| {
-                command["display"] == "commands"
+                command["display"] == "help"
                     && command["supports_json"] == true
                     && command["side_effect_class"] == "observe_only"
             })
@@ -8110,14 +8067,13 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
         "pull help should match Git-overlay and hosted reality, not only host:port remotes: {pull_help}"
     );
 
-    let operation_ids =
-        heddle_help(&["help", "operation-ids"]);
+    let operation_ids = heddle_help(&["help", "operation-ids"]);
     assert!(
         operation_ids.contains("supports_op_id: true")
             && operation_ids.contains("op_id_behavior: explicit_replay")
             && operation_ids.contains("generated_resume")
             && operation_ids.contains("reserved")
-            && operation_ids.contains("heddle commands --output json"),
+            && operation_ids.contains("heddle help --output json"),
         "operation-id help should defer to the command contract table: {operation_ids}"
     );
 
@@ -8216,8 +8172,7 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
         );
     }
 
-    let promote_help =
-        heddle_help(&["thread", "promote", "--help"]);
+    let promote_help = heddle_help(&["thread", "promote", "--help"]);
     assert!(
         !promote_help.contains("heavy checkout"),
         "thread promote help should use product-facing workspace language: {promote_help}"
@@ -8231,16 +8186,6 @@ fn advanced_help_does_not_repeat_everyday_human_path() {
             && try_help.contains("solid")
             && !try_help.contains("Defaults to `heavy`"),
         "try help should use current workspace mode terms: {try_help}"
-    );
-
-    let attempt_help = heddle_help(&["attempt", "--help"]);
-    assert!(
-        attempt_help.contains("Defaults to `materialized`")
-            && attempt_help.contains("auto")
-            && attempt_help.contains("virtualized")
-            && attempt_help.contains("solid")
-            && !attempt_help.contains("Defaults to `heavy`"),
-        "attempt help should use current workspace mode terms: {attempt_help}"
     );
 }
 
@@ -8549,7 +8494,7 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
         checkout_thread_show["recommended_action"],
         "thread show verification should match its contextual top-level land action: {checkout_thread_show}"
     );
-    let checkout_workspace = json_value(&checkout, &["workspace", "show", "--output", "json"]);
+    let checkout_workspace = json_value(&checkout, &["status", "--output", "json"]);
     assert_eq!(
         checkout_workspace["recommended_action"], checkout_status["recommended_action"],
         "workspace show inside an isolated checkout should emit the same runnable parent-repo land action: {checkout_workspace}"
@@ -8720,46 +8665,44 @@ fn workspace_bare_command_defaults_to_show() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    let text = heddle(&["--output", "text", "workspace"], Some(temp.path()))
-        .expect("bare workspace should render the default workspace view");
+    let text = heddle(&["--output", "text", "status"], Some(temp.path()))
+        .expect("status should render the canonical workspace view");
     assert!(
-        text.contains("Workspace:")
-            && text.contains("Current thread")
-            && text.contains("Visible threads:"),
-        "bare workspace should behave like workspace show, not print subcommand help: {text}"
+        text.contains("Heddle status")
+            && text.contains("Thread:")
+            && text.contains("Changed paths:"),
+        "status should render the canonical workspace summary, not subcommand help: {text}"
     );
     assert!(
-        !text.contains("git tip:")
-            && !text.contains("last activity:")
-            && !text.contains("    next:"),
-        "default workspace view should hide detail rows and use shared next-step copy: {text}"
+        !text.contains("git tip:") && !text.contains("    next:"),
+        "default status view should hide detail rows and use shared next-step copy: {text}"
     );
 
-    let verbose_text = heddle(&["-v", "--output", "text", "workspace"], Some(temp.path()))
-        .expect("verbose bare workspace should render detail rows");
+    let verbose_text = heddle(&["-v", "--output", "text", "status"], Some(temp.path()))
+        .expect("verbose status should render detail rows");
     assert!(
-        verbose_text.contains("last activity:"),
-        "verbose workspace should keep activity detail available: {verbose_text}"
+        verbose_text.contains("Health:"),
+        "verbose status should keep verification detail available: {verbose_text}"
     );
 
-    let json = heddle(&["--output", "json", "workspace"], Some(temp.path()))
-        .expect("bare workspace should support JSON through the default show view");
-    let parsed: Value = serde_json::from_str(&json)
-        .unwrap_or_else(|_| panic!("bare workspace JSON should parse: {json}"));
+    let json = heddle(&["--output", "json", "status"], Some(temp.path()))
+        .expect("status should support JSON");
+    let parsed: Value =
+        serde_json::from_str(&json).unwrap_or_else(|_| panic!("status JSON should parse: {json}"));
     assert!(
         parsed["repository_capability"].as_str().is_some(),
-        "workspace JSON should identify repository capability: {json}"
+        "status JSON should identify repository capability: {json}"
     );
     assert!(
-        parsed["groups"].is_array(),
-        "workspace JSON should expose groups: {json}"
+        parsed["thread"].as_str().is_some(),
+        "status JSON should expose the current thread: {json}"
     );
 }
 
 #[test]
 fn command_catalog_exposes_public_surface_for_agents() {
-    let json = heddle(&["commands", "--output", "json"], None)
-        .expect("command catalog JSON should succeed");
+    let json =
+        heddle(&["help", "--output", "json"], None).expect("command catalog JSON should succeed");
     let parsed: Value = serde_json::from_str(&json)
         .unwrap_or_else(|_| panic!("command catalog JSON should parse: {json}"));
     assert_eq!(
@@ -8901,6 +8844,23 @@ fn command_catalog_exposes_public_surface_for_agents() {
         merge["command_action"]["template"]["argv_template"],
         heddle_argv_json(["merge", "<thread>", "--preview"])
     );
+    let land = commands
+        .iter()
+        .find(|entry| entry["display"] == "land")
+        .expect("land command should be cataloged");
+    assert!(
+        land["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option["long"] == "no-squash"),
+        "land catalog entry should advertise the per-invocation squash override: {land}"
+    );
+    let land_help = heddle_help(&["land", "--help"]);
+    assert!(
+        land_help.contains("--no-squash") && land_help.contains("Preserve per-State Git export"),
+        "land help should make the squash override discoverable: {land_help}"
+    );
     let checkpoint = commands
         .iter()
         .find(|entry| entry["display"] == "checkpoint")
@@ -8914,15 +8874,6 @@ fn command_catalog_exposes_public_surface_for_agents() {
         checkpoint["command_action"]["argv"],
         heddle_argv_json(["checkpoint"])
     );
-    let branch = commands
-        .iter()
-        .find(|entry| entry["display"] == "branch")
-        .expect("branch command should be cataloged");
-    assert_eq!(branch["canonical_action"]["command"], "thread");
-    assert_eq!(branch["canonical_action"]["kind"], "command_family");
-    assert_eq!(branch["canonical_action"]["executable"], false);
-    assert_eq!(branch["canonical_action"]["argv"], Value::Null);
-    assert_eq!(branch["canonical_action"]["template"], Value::Null);
     let bridge_import = commands
         .iter()
         .find(|entry| entry["display"] == "bridge git import")
@@ -9008,31 +8959,14 @@ fn command_catalog_exposes_public_surface_for_agents() {
             .all(|option| option["long"] != "op-id"),
         "observe-only commands should not expose --op-id as accepted: {status}"
     );
-    let commands_entry = commands
-        .iter()
-        .find(|entry| entry["display"] == "commands")
-        .expect("commands should be cataloged");
-    for option in ["command", "tier", "mutating", "supports-op-id"] {
-        assert!(
-            commands_entry["options"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|catalog_option| catalog_option["long"] == option),
-            "commands catalog entry should advertise --{option}: {commands_entry}"
-        );
-    }
-
-    let text = heddle(&["commands", "--output", "text"], None)
-        .expect("command catalog text should succeed");
+    let text =
+        heddle(&["help", "--output", "text"], None).expect("command catalog text should succeed");
     assert!(
-        text.contains("Command catalog")
-            && text.contains("Native loop:")
-            && text.contains("Power surfaces:")
-            && text.contains("Git interop:")
-            && text.contains("Automation and admin:")
-            && text.contains("commands"),
-        "command catalog text should be scannable: {text}"
+        text.contains("Heddle")
+            && text.contains("Common loop:")
+            && text.contains("Existing Git:")
+            && text.contains("Output:"),
+        "help text should be scannable: {text}"
     );
     assert!(
         !text.contains("compatibility"),
@@ -9041,99 +8975,6 @@ fn command_catalog_exposes_public_surface_for_agents() {
     assert!(
         !text.contains("Automation/workflow command:"),
         "command catalog text should share the cleaned help summaries: {text}"
-    );
-}
-
-#[test]
-fn command_catalog_filters_bound_agent_queries() {
-    let merge_json = heddle(
-        &["commands", "--output", "json", "--command", "merge"],
-        None,
-    )
-    .expect("filtered command catalog JSON should succeed");
-    let merge_catalog: Value = serde_json::from_str(&merge_json)
-        .unwrap_or_else(|_| panic!("filtered command catalog JSON should parse: {merge_json}"));
-    let merge_commands = merge_catalog["commands"]
-        .as_array()
-        .expect("commands should be an array");
-    assert_eq!(
-        merge_commands.len(),
-        1,
-        "merge filter should be exact: {merge_json}"
-    );
-    assert_eq!(merge_commands[0]["display"], "merge");
-
-    let thread_json = heddle(
-        &["commands", "--output", "json", "--command", "thread"],
-        None,
-    )
-    .expect("thread family command catalog JSON should succeed");
-    let thread_catalog: Value = serde_json::from_str(&thread_json)
-        .unwrap_or_else(|_| panic!("thread catalog JSON should parse: {thread_json}"));
-    let thread_commands = thread_catalog["commands"]
-        .as_array()
-        .expect("commands should be an array");
-    assert!(
-        thread_commands.len() > 1
-            && thread_commands.iter().all(|command| command["path"]
-                .as_array()
-                .is_some_and(|path| { path.first().is_some_and(|part| part == "thread") })),
-        "command prefix filter should include only the requested family: {thread_json}"
-    );
-
-    let everyday_json = heddle(
-        &["commands", "--output", "json", "--tier", "everyday"],
-        None,
-    )
-    .expect("tier-filtered command catalog JSON should succeed");
-    let everyday_catalog: Value = serde_json::from_str(&everyday_json)
-        .unwrap_or_else(|_| panic!("everyday catalog JSON should parse: {everyday_json}"));
-    let everyday_commands = everyday_catalog["commands"]
-        .as_array()
-        .expect("commands should be an array");
-    assert!(
-        everyday_commands
-            .iter()
-            .all(|command| command["tier"] == "everyday"),
-        "tier filter should exclude non-everyday commands: {everyday_json}"
-    );
-    assert!(
-        everyday_commands
-            .iter()
-            .any(|command| command["display"] == "status"),
-        "tier filter should still include everyday commands: {everyday_json}"
-    );
-
-    let replay_json = heddle(
-        &[
-            "commands",
-            "--output",
-            "json",
-            "--mutating",
-            "--supports-op-id",
-        ],
-        None,
-    )
-    .expect("side-effect/op-id-filtered command catalog JSON should succeed");
-    let replay_catalog: Value = serde_json::from_str(&replay_json)
-        .unwrap_or_else(|_| panic!("replay catalog JSON should parse: {replay_json}"));
-    let replay_commands = replay_catalog["commands"]
-        .as_array()
-        .expect("commands should be an array");
-    assert!(
-        replay_commands
-            .iter()
-            .all(|command| command["mutates"] == true && command["supports_op_id"] == true),
-        "mutating/op-id filters should only include replay-safe mutating commands: {replay_json}"
-    );
-    assert!(
-        replay_commands
-            .iter()
-            .any(|command| command["display"] == "commit")
-            && replay_commands
-                .iter()
-                .all(|command| command["display"] != "status"),
-        "mutating/op-id filters should include commit and exclude observe-only status: {replay_json}"
     );
 }
 
@@ -9147,7 +8988,7 @@ fn git_dependencies_help_topic_explains_no_git_contract() {
             && help.contains("tool that started it")
             && help.contains("Unsupported native Git-overlay capabilities")
             && help.contains("merge --git-commit")
-            && help.contains("heddle commands --output json"),
+            && help.contains("heddle help --output json"),
         "git-dependencies topic should explain supported paths and zero-git runtime behavior: {help}"
     );
 }
@@ -9372,7 +9213,7 @@ fn unknown_state_id_hints_at_heddle_log_across_state_readers() {
     heddle(&["init"], Some(temp.path())).unwrap();
 
     for args in [
-        vec!["--output", "text", "goto", "hd-nonexistent"],
+        vec!["--output", "text", "switch", "hd-nonexistent"],
         vec!["--output", "text", "show", "hd-nonexistent"],
         vec!["--output", "text", "diff", "hd-nonexistent", "HEAD"],
     ] {
@@ -9485,8 +9326,7 @@ fn help_for_verb_prefixes_usage_with_heddle() {
     // The Usage line MUST start with `Usage: heddle status` — saying just
     // `Usage: status` would suggest the user can run `status` standalone.
     for verb in ["status", "capture", "log", "merge", "undo", "start", "init"] {
-        let output =
-            heddle_help(&["help", verb]);
+        let output = heddle_help(&["help", verb]);
         assert!(
             output.contains(&format!("Usage: heddle {verb}")),
             "`heddle help {verb}` must prefix the Usage line with `heddle`: {output}"
@@ -10342,7 +10182,10 @@ fn index_json_emits_one_value_even_for_hidden_compat_alias() {
         "index JSON should include file entry count: {index}"
     );
 
-    let dump = json_value(temp.path(), &["maintenance", "index", "--dump", "--output", "json"]);
+    let dump = json_value(
+        temp.path(),
+        &["maintenance", "index", "--dump", "--output", "json"],
+    );
     assert_eq!(dump["output_kind"], "index");
     assert!(
         dump["dump"]
@@ -10513,7 +10356,7 @@ fn actor_explain_detached_head_recommends_minting_spawn_not_no_thread() {
     heddle(&["capture", "-m", "next"], Some(temp.path())).unwrap();
     // `goto` to an earlier state detaches HEAD — there is no current thread
     // to attach an actor to, so `--no-thread` would fail.
-    heddle(&["goto", &base, "--force"], Some(temp.path())).unwrap();
+    heddle(&["switch", &base, "--force"], Some(temp.path())).unwrap();
     assert!(
         matches!(
             Repository::open(temp.path()).unwrap().head_ref().unwrap(),
@@ -10544,8 +10387,7 @@ fn actor_explain_detached_head_recommends_minting_spawn_not_no_thread() {
     // Detached HEAD: recommend the minting form (mints a dedicated thread),
     // NOT `--no-thread`, which cannot succeed without a current thread.
     assert_eq!(
-        parsed["recommended_action"],
-        "heddle actor spawn --provider openai --model gpt-5.3-codex",
+        parsed["recommended_action"], "heddle actor spawn --provider openai --model gpt-5.3-codex",
         "detached HEAD should recommend the thread-minting spawn form: {parsed}"
     );
     assert!(
@@ -11142,7 +10984,7 @@ fn generic_json_runtime_errors_keep_nonempty_machine_envelope() {
         envelope["recovery_action_templates"]
             .as_array()
             .is_some_and(|templates| templates.iter().any(|template| {
-                template["argv_template"] == heddle_argv_json(["commands", "--output", "json"])
+                template["argv_template"] == heddle_argv_json(["help", "--output", "json"])
             })),
         "schema lookup failures should point agents at the command catalog: {envelope}"
     );
@@ -11234,7 +11076,10 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
         "doctor schemas should summarize the machine-contract result at the top level: {output}"
     );
     assert_eq!(parsed["recommended_action"], serde_json::Value::Null);
-    assert_eq!(parsed["recommended_action_template"], serde_json::Value::Null);
+    assert_eq!(
+        parsed["recommended_action_template"],
+        serde_json::Value::Null
+    );
     assert_eq!(parsed["recovery_commands"], serde_json::json!([]));
     assert_eq!(
         parsed["unmatched_verbs"].as_array().map(Vec::len),
@@ -11331,8 +11176,8 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
         );
     }
     for verb in [
-        "branch",
         "switch",
+        "thread list",
         "bridge git reconcile",
         "capture",
         "commit",
@@ -11394,7 +11239,7 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
         "git-overlay",
         "watch",
         "try",
-        "blame",
+        "query --attribution",
         "fsck",
         "resolve",
     ] {
@@ -11445,10 +11290,9 @@ fn push_without_default_remote_uses_typed_json_recovery() {
     // heddle#653: the hint must say whether ad-hoc (git `push <url>`
     // style) targets work, not leave veterans to discover it by trial.
     assert!(
-        envelope["hint"]
-            .as_str()
-            .is_some_and(|hint| hint.contains("heddle push <remote>")
-                && hint.contains("positionally")),
+        envelope["hint"].as_str().is_some_and(
+            |hint| hint.contains("heddle push <remote>") && hint.contains("positionally")
+        ),
         "push no-remote hint should state that ad-hoc positional targets are supported: {envelope}"
     );
     assert_eq!(
@@ -11597,11 +11441,11 @@ fn doctor_schemas_outside_source_tree_points_agents_to_catalog_surfaces() {
         envelope["hint"]
             .as_str()
             .is_some_and(|hint| hint.contains("source checkout")
-                && hint.contains("heddle commands --output json")
+                && hint.contains("heddle help --output json")
                 && hint.contains("heddle schemas status")),
         "installed-agent hint should point to catalog/schema surfaces, not repo init: {envelope}"
     );
-    assert_eq!(envelope["primary_command"], "heddle commands --output json");
+    assert_eq!(envelope["primary_command"], "heddle help --output json");
     assert!(
         envelope["recovery_commands"]
             .as_array()
@@ -11839,7 +11683,7 @@ fn blame_missing_file_uses_typed_advice_json() {
     heddle(&["capture", "-m", "tracked"], Some(temp.path())).unwrap();
 
     let output = heddle_output(
-        &["--output", "json", "blame", "missing.txt"],
+        &["--output", "json", "query", "--attribution", "missing.txt"],
         Some(temp.path()),
     )
     .expect("invoke missing blame");
@@ -12349,7 +12193,7 @@ fn exit_codes_declared_have_doc_entry() {
 }
 
 /// Schema-stability contract: `exit_codes` must surface in the JSON catalog
-/// (`heddle commands --output json`). Agents discover the contract via that
+/// (`heddle help --output json`). Agents discover the contract via that
 /// JSON; if a future refactor drops the field, every agent retry policy
 /// degrades silently.
 #[test]
@@ -12440,8 +12284,8 @@ fn read_commands_gate_repository_preamble_on_verbose() {
             Some(temp.path()),
         )
         .unwrap_or_else(|e| panic!("{label} json should render: {e}"));
-        let parsed: Value =
-            serde_json::from_str(&json).unwrap_or_else(|e| panic!("{label} json should parse: {e}"));
+        let parsed: Value = serde_json::from_str(&json)
+            .unwrap_or_else(|e| panic!("{label} json should parse: {e}"));
         assert!(
             parsed["repository_capability"].is_string(),
             "{label} json must keep repository_capability: {json}"

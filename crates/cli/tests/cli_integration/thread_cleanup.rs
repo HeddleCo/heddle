@@ -317,7 +317,10 @@ fn thread_cleanup_merged_drops_matching_threads() {
         dropped.state
     );
     assert!(
-        repo.refs().get_thread(&ThreadName::new("feat/done")).unwrap().is_none(),
+        repo.refs()
+            .get_thread(&ThreadName::new("feat/done"))
+            .unwrap()
+            .is_none(),
         "merged cleanup should remove the live thread ref so default surfaces stop treating it as active"
     );
     let default_view = list_thread_names(temp.path(), &[]);

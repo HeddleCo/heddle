@@ -135,6 +135,53 @@ Examples:
 "
     )]
     Cleanup(ThreadCleanupArgs),
+
+    /// Manage named state markers under the thread namespace.
+    Marker {
+        #[command(subcommand)]
+        command: ThreadMarkerCommands,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum ThreadMarkerCommands {
+    /// List markers, optionally filtered by name prefix.
+    ///
+    /// Pass `--filter <PREFIX>` to return only markers whose name
+    /// starts with the given prefix. The match is a literal
+    /// `starts_with` check, not a glob.
+    List {
+        /// Return only markers whose name starts with this prefix.
+        #[arg(long, value_name = "PREFIX")]
+        filter: Option<String>,
+    },
+
+    /// Create marker at current state.
+    Create {
+        /// Marker name.
+        name: String,
+    },
+
+    /// Delete marker(s).
+    ///
+    /// Pass an exact marker name, or `--prefix <PFX>` to delete every marker
+    /// whose name starts with the given prefix. Exactly one of `<NAME>` or
+    /// `--prefix` must be supplied.
+    Delete {
+        /// Marker name (exact match). Mutually exclusive with `--prefix`.
+        #[arg(required_unless_present = "prefix", conflicts_with = "prefix")]
+        name: Option<String>,
+
+        /// Delete every marker whose name starts with this prefix.
+        #[arg(long)]
+        prefix: Option<String>,
+    },
+
+    /// Show marker details.
+    Show {
+        /// Marker name.
+        name: String,
+    },
 }
 
 /// Arguments for `heddle thread list`.

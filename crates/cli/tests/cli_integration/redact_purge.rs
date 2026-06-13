@@ -7,9 +7,9 @@
 //! 1. `heddle redact apply <state> --path <file>` writes a `Redaction`
 //!    record and the state's `read_file` returns the stub on
 //!    subsequent materialization.
-//! 2. `heddle purge apply ... --force` removes the loose blob bytes
+//! 2. `heddle redact purge apply ... --force` removes the loose blob bytes
 //!    and writes a `Purge` oplog entry. The `Redaction` record stays.
-//! 3. `heddle redact list` / `heddle purge list` enumerate what's on
+//! 3. `heddle redact list` / `heddle redact purge list` enumerate what's on
 //!    disk; `heddle redact show` resolves by short id.
 //!
 //! These tests drive the CLI binary as a subprocess so they exercise
@@ -226,6 +226,7 @@ fn purge_apply_refuses_without_force() {
         &[
             "--output",
             "json",
+            "redact",
             "purge",
             "apply",
             &state,
@@ -263,7 +264,7 @@ fn purge_apply_refuses_without_force() {
             && err["hint"]
                 .as_str()
                 .is_some_and(|hint| hint.contains("heddle redact list")
-                    && hint.contains("heddle purge apply")
+                    && hint.contains("heddle redact purge apply")
                     && hint.contains("--force")),
         "refusal must use the shared destructive-force advice: {stderr}"
     );
@@ -335,6 +336,7 @@ fn purge_apply_with_force_records_and_marks_redaction_purged() {
         &[
             "--output",
             "json",
+            "redact",
             "purge",
             "apply",
             &state,
@@ -356,13 +358,53 @@ fn purge_apply_with_force_records_and_marks_redaction_purged() {
         "after purge, the redaction must surface as purged in list output"
     );
 
-    let purge_list_raw = heddle(&["--output", "json", "purge", "list"], Some(temp.path())).unwrap();
+    let purge_list_raw = heddle(
+        &["--output", "json", "redact", "purge", "list"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let purge_list: Value = serde_json::from_str(&purge_list_raw).unwrap();
     assert_eq!(
         purge_list["count"].as_u64().unwrap(),
         1,
         "purge list must surface exactly one entry after one purge"
     );
+}
+
+#[test]
+fn purge_alias_routes_to_redact_purge_apply_output() {
+    let (temp, state) = setup_repo_with_secret();
+    heddle(
+        &[
+            "redact",
+            "apply",
+            &state,
+            "--path",
+            "config/secrets.toml",
+            "--reason",
+            "leaked credential",
+        ],
+        Some(temp.path()),
+    )
+    .unwrap();
+
+    let raw = heddle(
+        &[
+            "--output",
+            "json",
+            "purge",
+            "apply",
+            &state,
+            "--path",
+            "config/secrets.toml",
+            "--force",
+        ],
+        Some(temp.path()),
+    )
+    .expect("purge alias should route through redact purge apply");
+    let value: Value = serde_json::from_str(&raw).expect("purge alias should emit JSON");
+    assert_eq!(value["output_kind"], "purge_apply");
+    assert_eq!(value["redactions_marked"].as_u64().unwrap(), 1);
 }
 
 #[test]
@@ -542,6 +584,7 @@ fn purge_without_prior_redact_is_refused() {
     let (temp, state) = setup_repo_with_secret();
     let err = heddle(
         &[
+            "redact",
             "purge",
             "apply",
             &state,
@@ -719,6 +762,7 @@ fn purge_apply_signed_propagates_byte_removal_to_cloned_replica() {
 
     heddle(
         &[
+            "redact",
             "purge",
             "apply",
             &state,
@@ -755,7 +799,11 @@ fn purge_apply_signed_propagates_byte_removal_to_cloned_replica() {
         .expect("fetch propagates signed redaction + purge to B");
 
     // B must record the purge.
-    let purge_list_raw = heddle(&["--output", "json", "purge", "list"], Some(&b_path)).unwrap();
+    let purge_list_raw = heddle(
+        &["--output", "json", "redact", "purge", "list"],
+        Some(&b_path),
+    )
+    .unwrap();
     let purge_list: Value = serde_json::from_str(&purge_list_raw).unwrap();
     let purges = purge_list["purges"].as_array().expect("purges array");
     assert_eq!(
@@ -980,7 +1028,7 @@ fn redact_apply_emits_no_hint_when_repo_config_ignore_covers_path() {
 
 #[test]
 fn purge_apply_also_emits_ignore_hint() {
-    // `heddle purge apply` carries the same hint as redact — the
+    // `heddle redact purge apply` carries the same hint as redact — the
     // working-tree leak is the same problem regardless of which
     // verb you reach for.
     let (temp, state) = setup_repo_with_secret();
@@ -1002,6 +1050,7 @@ fn purge_apply_also_emits_ignore_hint() {
         &[
             "--output",
             "json",
+            "redact",
             "purge",
             "apply",
             &state,

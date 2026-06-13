@@ -97,13 +97,13 @@ fn merged_thread_list_reads_integrated_not_actionable() {
 }
 
 #[test]
-fn branch_create_reports_ref_only_not_isolated_checkout() {
+fn thread_create_reports_ref_only_not_isolated_checkout() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
     let created: Value = serde_json::from_str(
         &heddle(
-            &["--output", "json", "branch", "feature/ref-only"],
+            &["--output", "json", "thread", "create", "feature/ref-only"],
             Some(temp.path()),
         )
         .unwrap(),
@@ -195,18 +195,13 @@ fn human_thread_and_status_output_use_polished_labels() {
     )
     .unwrap();
     let list = heddle(&["--output", "text", "thread", "list"], Some(temp.path())).unwrap();
-    let workspace = heddle(
-        &["--output", "text", "workspace", "show"],
-        Some(temp.path()),
-    )
-    .unwrap();
     let doctor = heddle(&["--output", "text", "doctor"], Some(temp.path())).unwrap();
     let captures = heddle(
         &["--output", "text", "thread", "captures", "feature/visible"],
         Some(temp.path()),
     )
     .unwrap();
-    let combined = format!("{status}\n{show}\n{list}\n{workspace}\n{doctor}\n{captures}");
+    let combined = format!("{status}\n{show}\n{list}\n{doctor}\n{captures}");
     for leaked in [
         " materialized",
         "[materialized",

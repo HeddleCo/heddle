@@ -557,15 +557,13 @@ impl SyncMapping {
             .heddle_to_git
             .iter()
             .filter_map(|(change_id, git_oid)| {
-                repo.find_object(*git_oid)
-                    .ok()
-                    .map(|_| {
-                        (
-                            *change_id,
-                            *git_oid,
-                            self.git_lossy_entries.get(git_oid).cloned(),
-                        )
-                    })
+                repo.find_object(*git_oid).ok().map(|_| {
+                    (
+                        *change_id,
+                        *git_oid,
+                        self.git_lossy_entries.get(git_oid).cloned(),
+                    )
+                })
             })
             .collect();
 
@@ -2659,9 +2657,8 @@ fn exported_refs_manifest_path(target_repo: &gix::Repository) -> PathBuf {
 /// to a fixed-length, filesystem-safe filename. Stored under heddle's own dir
 /// (the remote is not local, so there is no destination git dir to host it).
 fn network_exported_refs_path(heddle_dir: &Path, url: &gix::Url) -> PathBuf {
-    let key =
-        ContentHash::compute_typed("git-network-exported-refs", url.to_string().as_bytes())
-            .to_hex();
+    let key = ContentHash::compute_typed("git-network-exported-refs", url.to_string().as_bytes())
+        .to_hex();
     heddle_dir
         .join(HEDDLE_NETWORK_EXPORTED_REFS_DIR)
         .join(format!("{key}.refs"))
@@ -2714,8 +2711,10 @@ fn write_exported_refs_at(path: &Path, refs: &HashMap<String, ObjectId>) -> GitR
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut sorted: Vec<(&str, &ObjectId)> =
-        refs.iter().map(|(name, tip)| (name.as_str(), tip)).collect();
+    let mut sorted: Vec<(&str, &ObjectId)> = refs
+        .iter()
+        .map(|(name, tip)| (name.as_str(), tip))
+        .collect();
     sorted.sort_unstable_by(|a, b| a.0.cmp(b.0));
     let body = sorted
         .iter()
@@ -3050,8 +3049,7 @@ fn creatable_ref_names(
                 served_frontier
                     .iter()
                     .filter(|update| {
-                        (matches!(update.namespace, RefNamespace::Branch)
-                            && update.name == branch)
+                        (matches!(update.namespace, RefNamespace::Branch) && update.name == branch)
                             || matches!(update.namespace, RefNamespace::Note)
                     })
                     .map(full_ref_name)
@@ -3121,8 +3119,10 @@ pub(crate) fn plan_destination_reconcile(
     // wants it published now — there is no scope-filtered subset (heddle#316 r16),
     // so an out-of-scope ref the mirror rewound for embargo is here at its NEW
     // target rather than silently kept at its old (embargoed) tip.
-    let desired: HashMap<String, &RefUpdate> =
-        served_frontier.iter().map(|u| (full_ref_name(u), u)).collect();
+    let desired: HashMap<String, &RefUpdate> = served_frontier
+        .iter()
+        .map(|u| (full_ref_name(u), u))
+        .collect();
 
     // ONE pass over the union of (desired ∪ previously-exported) names — the
     // complete desired-vs-actual diff. For each ref the op is derived from the
@@ -3164,12 +3164,13 @@ pub(crate) fn plan_destination_reconcile(
             // an annotated-tag-object OID, not a commit) with the SAME ownership
             // gate baked into [`classify_tag_move`]. An out-of-band destination tip
             // heddle never recorded is spared at EVERY namespace unless `--force`.
-            let verdict = match update.namespace {
-                RefNamespace::Branch | RefNamespace::Note => {
-                    verdict_from_move(classify_ref_move(mirror_repo, old, update.target, recorded)?)
-                }
-                RefNamespace::Tag => classify_tag_move(old, update.target, recorded),
-            };
+            let verdict =
+                match update.namespace {
+                    RefNamespace::Branch | RefNamespace::Note => verdict_from_move(
+                        classify_ref_move(mirror_repo, old, update.target, recorded)?,
+                    ),
+                    RefNamespace::Tag => classify_tag_move(old, update.target, recorded),
+                };
             let proceed = match verdict {
                 WriteVerdict::Skip => false,
                 WriteVerdict::Write => true,

@@ -258,7 +258,7 @@ fn test_clean_force_missing_tree_fails_loud_not_wipe_tracked_files() {
     );
 }
 
-/// `heddle goto <state>` — mutation path that loads the *current*
+/// `heddle switch <state>` — mutation path that loads the *current*
 /// state's tree to verify the worktree is clean before switching.
 /// Pre-#93 a missing current tree silently became `Tree::default()`,
 /// so the cleanliness check compared the worktree to an empty baseline
@@ -299,7 +299,7 @@ fn test_goto_missing_current_tree_fails_loud_not_silent_dirty() {
     // Try to goto the first state — the cleanliness check on the
     // current tree must fail loud, not bail with a misleading
     // "uncommitted changes" message.
-    let err = heddle(&["goto", &first_state_id], Some(temp.path())).expect_err(
+    let err = heddle(&["switch", &first_state_id], Some(temp.path())).expect_err(
         "goto against a corrupt current tree must fail loud; \
          pre-#93 it silently treated the worktree as dirty against an empty baseline",
     );

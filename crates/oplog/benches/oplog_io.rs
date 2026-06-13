@@ -94,6 +94,7 @@ fn update_record(i: usize) -> OpRecord {
         name: thread_name(i),
         old_state: cid_for(i),
         new_state: cid_for(i + 1),
+        manager_snapshots: None,
     }
 }
 

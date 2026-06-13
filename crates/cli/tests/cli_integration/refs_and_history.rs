@@ -52,11 +52,11 @@ fn test_cli_marker_operations() {
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle(&["capture", "-m", "Marked state"], Some(temp.path())).unwrap();
 
-    assert!(heddle(&["marker", "create", "v1.0.0"], Some(temp.path())).is_ok());
+    assert!(heddle(&["thread", "marker", "create", "v1.0.0"], Some(temp.path())).is_ok());
 
-    let output = heddle(&["marker", "list"], Some(temp.path())).unwrap();
+    let output = heddle(&["thread", "marker", "list"], Some(temp.path())).unwrap();
     assert!(output.contains("v1.0.0"), "Should list marker: {}", output);
-    assert!(heddle(&["marker", "show", "v1.0.0"], Some(temp.path())).is_ok());
+    assert!(heddle(&["thread", "marker", "show", "v1.0.0"], Some(temp.path())).is_ok());
 }
 
 #[test]
@@ -69,12 +69,22 @@ fn test_cli_marker_list_filter_prefix_match() {
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle(&["capture", "-m", "Marked"], Some(temp.path())).unwrap();
 
-    heddle(&["marker", "create", "failed-test-1"], Some(temp.path())).unwrap();
-    heddle(&["marker", "create", "failed-test-2"], Some(temp.path())).unwrap();
-    heddle(&["marker", "create", "keepme"], Some(temp.path())).unwrap();
+    heddle(
+        &["thread", "marker", "create", "failed-test-1"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    heddle(
+        &["thread", "marker", "create", "failed-test-2"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    heddle(&["thread", "marker", "create", "keepme"], Some(temp.path())).unwrap();
 
     let json = heddle(
-        &["--output", "json", "marker", "list", "--filter", "failed-"],
+        &[
+            "--output", "json", "thread", "marker", "list", "--filter", "failed-",
+        ],
         Some(temp.path()),
     )
     .unwrap();
@@ -96,7 +106,11 @@ fn test_cli_marker_list_filter_prefix_match() {
     }
 
     // Unfiltered listing should still return all three.
-    let json_all = heddle(&["--output", "json", "marker", "list"], Some(temp.path())).unwrap();
+    let json_all = heddle(
+        &["--output", "json", "thread", "marker", "list"],
+        Some(temp.path()),
+    )
+    .unwrap();
     let parsed_all: Value = serde_json::from_str(&json_all).unwrap();
     assert_eq!(parsed_all["markers"].as_array().unwrap().len(), 3);
 }
@@ -111,10 +125,12 @@ fn test_cli_marker_list_filter_no_match_is_empty_array() {
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle(&["capture", "-m", "Marked"], Some(temp.path())).unwrap();
-    heddle(&["marker", "create", "alpha"], Some(temp.path())).unwrap();
+    heddle(&["thread", "marker", "create", "alpha"], Some(temp.path())).unwrap();
 
     let json = heddle(
-        &["--output", "json", "marker", "list", "--filter", "nope-"],
+        &[
+            "--output", "json", "thread", "marker", "list", "--filter", "nope-",
+        ],
         Some(temp.path()),
     )
     .unwrap();
@@ -134,9 +150,9 @@ fn test_cli_marker_delete_single_back_compat() {
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle(&["capture", "-m", "Marked"], Some(temp.path())).unwrap();
-    heddle(&["marker", "create", "v1"], Some(temp.path())).unwrap();
+    heddle(&["thread", "marker", "create", "v1"], Some(temp.path())).unwrap();
 
-    let output = heddle(&["marker", "delete", "v1"], Some(temp.path())).unwrap();
+    let output = heddle(&["thread", "marker", "delete", "v1"], Some(temp.path())).unwrap();
     assert!(
         output.contains("Deleted marker 'v1'"),
         "Single delete output: {}",
@@ -144,7 +160,10 @@ fn test_cli_marker_delete_single_back_compat() {
     );
 
     // Deleting a non-existent name should error.
-    let err = heddle(&["marker", "delete", "does-not-exist"], Some(temp.path()));
+    let err = heddle(
+        &["thread", "marker", "delete", "does-not-exist"],
+        Some(temp.path()),
+    );
     assert!(err.is_err(), "Deleting unknown marker should error");
 }
 
@@ -156,13 +175,25 @@ fn test_cli_marker_delete_prefix_matches_multiple() {
     heddle(&["capture", "-m", "Marked"], Some(temp.path())).unwrap();
 
     // Three failing-test markers and one keeper.
-    heddle(&["marker", "create", "failed-test-1"], Some(temp.path())).unwrap();
-    heddle(&["marker", "create", "failed-test-2"], Some(temp.path())).unwrap();
-    heddle(&["marker", "create", "failed-test-3"], Some(temp.path())).unwrap();
-    heddle(&["marker", "create", "keepme"], Some(temp.path())).unwrap();
+    heddle(
+        &["thread", "marker", "create", "failed-test-1"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    heddle(
+        &["thread", "marker", "create", "failed-test-2"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    heddle(
+        &["thread", "marker", "create", "failed-test-3"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    heddle(&["thread", "marker", "create", "keepme"], Some(temp.path())).unwrap();
 
     let output = heddle(
-        &["marker", "delete", "--prefix", "failed-"],
+        &["thread", "marker", "delete", "--prefix", "failed-"],
         Some(temp.path()),
     )
     .unwrap();
@@ -173,7 +204,7 @@ fn test_cli_marker_delete_prefix_matches_multiple() {
     );
 
     // Confirm only the keeper remains.
-    let listing = heddle(&["marker", "list"], Some(temp.path())).unwrap();
+    let listing = heddle(&["thread", "marker", "list"], Some(temp.path())).unwrap();
     assert!(
         listing.contains("keepme"),
         "keepme should remain: {}",
@@ -194,10 +225,10 @@ fn test_cli_marker_delete_prefix_no_match_is_noop() {
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle(&["capture", "-m", "Marked"], Some(temp.path())).unwrap();
-    heddle(&["marker", "create", "alpha"], Some(temp.path())).unwrap();
+    heddle(&["thread", "marker", "create", "alpha"], Some(temp.path())).unwrap();
 
     let output = heddle(
-        &["marker", "delete", "--prefix", "nope-"],
+        &["thread", "marker", "delete", "--prefix", "nope-"],
         Some(temp.path()),
     )
     .unwrap();
@@ -208,7 +239,7 @@ fn test_cli_marker_delete_prefix_no_match_is_noop() {
     );
 
     // alpha must still be present.
-    let listing = heddle(&["marker", "list"], Some(temp.path())).unwrap();
+    let listing = heddle(&["thread", "marker", "list"], Some(temp.path())).unwrap();
     assert!(
         listing.contains("alpha"),
         "alpha should remain: {}",
@@ -225,7 +256,14 @@ fn test_cli_marker_delete_prefix_and_name_conflict() {
     heddle(&["capture", "-m", "Marked"], Some(temp.path())).unwrap();
 
     let result = heddle(
-        &["marker", "delete", "some-name", "--prefix", "failed-"],
+        &[
+            "thread",
+            "marker",
+            "delete",
+            "some-name",
+            "--prefix",
+            "failed-",
+        ],
         Some(temp.path()),
     );
     assert!(result.is_err(), "Clap should reject NAME + --prefix");
@@ -237,7 +275,7 @@ fn test_cli_marker_delete_requires_arg() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    let result = heddle(&["marker", "delete"], Some(temp.path()));
+    let result = heddle(&["thread", "marker", "delete"], Some(temp.path()));
     assert!(result.is_err(), "Empty marker delete should error");
 }
 
@@ -248,10 +286,16 @@ fn test_cli_marker_delete_prefix_empty_rejected() {
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle(&["capture", "-m", "Marked"], Some(temp.path())).unwrap();
-    heddle(&["marker", "create", "important"], Some(temp.path())).unwrap();
+    heddle(
+        &["thread", "marker", "create", "important"],
+        Some(temp.path()),
+    )
+    .unwrap();
 
     let output = heddle_output(
-        &["--output", "json", "marker", "delete", "--prefix", ""],
+        &[
+            "--output", "json", "thread", "marker", "delete", "--prefix", "",
+        ],
         Some(temp.path()),
     )
     .expect("marker delete should run");
@@ -276,7 +320,7 @@ fn test_cli_marker_delete_prefix_empty_rejected() {
     );
 
     // Sanity-check: marker still exists.
-    let listing = heddle(&["marker", "list"], Some(temp.path())).unwrap();
+    let listing = heddle(&["thread", "marker", "list"], Some(temp.path())).unwrap();
     assert!(
         listing.contains("important"),
         "important should remain: {}",
@@ -285,22 +329,26 @@ fn test_cli_marker_delete_prefix_empty_rejected() {
 }
 
 #[test]
-fn test_cli_fork_creates_exploration_branch() {
+fn test_cli_start_creates_exploration_thread() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("file.txt"), "main content").unwrap();
     heddle(&["capture", "-m", "Main state"], Some(temp.path())).unwrap();
 
-    let output = heddle(&["fork", "--name", "experiment"], Some(temp.path())).unwrap();
+    let output = heddle(
+        &["start", "experiment", "--workspace", "solid"],
+        Some(temp.path()),
+    )
+    .unwrap();
     assert!(
-        output.contains("Created fork") || output.contains("experiment"),
-        "Should show fork created: {}",
+        output.contains("experiment"),
+        "Should show thread created: {}",
         output
     );
 }
 
 #[test]
-fn test_cli_fork_bootstraps_current_state_with_user_config() {
+fn test_cli_start_bootstraps_current_state_with_user_config() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).expect("init repo");
 
@@ -314,7 +362,7 @@ fn test_cli_fork_bootstraps_current_state_with_user_config() {
         "fresh repo should have no current state after clearing main"
     );
 
-    let config_path = temp.path().join("fork-config.toml");
+    let config_path = temp.path().join("start-config.toml");
     std::fs::write(
         &config_path,
         "[principal]\nname = \"Fork Tester\"\nemail = \"fork@example.com\"\n",
@@ -323,14 +371,14 @@ fn test_cli_fork_bootstraps_current_state_with_user_config() {
     let config = config_path.to_string_lossy().to_string();
 
     let output = heddle_output_with_env(
-        &["fork", "--name", "bootstrap-fork"],
+        &["thread", "create", "bootstrap-start"],
         Some(temp.path()),
         &[("HEDDLE_CONFIG", &config)],
     )
-    .expect("invoke fork");
+    .expect("invoke start");
     assert!(
         output.status.success(),
-        "fork should succeed\nstdout: {}\nstderr: {}",
+        "thread create should succeed\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -343,18 +391,12 @@ fn test_cli_fork_bootstraps_current_state_with_user_config() {
         .expect("fork should bootstrap main before creating fork");
     let forked = repo
         .refs()
-        .get_thread(&ThreadName::new("bootstrap-fork"))
+        .get_thread(&ThreadName::new("bootstrap-start"))
         .unwrap()
         .expect("fork should create named thread");
-    let fork_state = repo
-        .store()
-        .get_state(&forked)
-        .unwrap()
-        .expect("fork state should be stored");
     assert_eq!(
-        fork_state.first_parent(),
-        Some(&bootstrapped),
-        "fork should be based on the bootstrapped current state"
+        forked, bootstrapped,
+        "thread create should create the named thread at the bootstrapped current state"
     );
 }
 
@@ -432,7 +474,6 @@ fn test_cli_help_shows_thread_surface() {
 
     let advanced = heddle(&["help", "advanced"], Some(temp.path())).unwrap();
     assert!(advanced.contains("\n  thread"));
-    assert!(advanced.contains("\n  workspace"));
     assert!(advanced.contains("review"));
     assert!(!advanced.contains("\n  worktree"));
     assert!(!advanced.contains("\n  lane"));

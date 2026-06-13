@@ -105,7 +105,10 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 fn count(haystack: &[u8], needle: &[u8]) -> usize {
-    haystack.windows(needle.len()).filter(|w| *w == needle).count()
+    haystack
+        .windows(needle.len())
+        .filter(|w| *w == needle)
+        .count()
 }
 
 fn all_commit_shas(source: &Path) -> Vec<String> {
@@ -364,7 +367,8 @@ fn assert_all_commits_export_from_state(case: &str, source: &Path) {
             .find_object(written)
             .unwrap_or_else(|e| panic!("[{case}] find regenerated {sha} failed: {e}"));
         assert_eq!(
-            object.data, golden,
+            object.data,
+            golden,
             "[{case}] commit {sha} regenerated to DIFFERENT bytes\n  \
              reconstructed: {:?}\n  golden:        {:?}",
             String::from_utf8_lossy(&object.data),
@@ -387,7 +391,9 @@ fn commit_conformance_plain_corpus() {
         .map(|sha| cat_commit(dir, sha))
         .collect();
     assert!(
-        bodies.iter().any(|b| contains(b, b"\nencoding ISO-8859-1\n")),
+        bodies
+            .iter()
+            .any(|b| contains(b, b"\nencoding ISO-8859-1\n")),
         "C6 non-UTF8 encoding case missing"
     );
     assert!(

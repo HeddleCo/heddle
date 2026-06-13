@@ -48,7 +48,7 @@ pub struct DocsIssue {
 pub enum IssueKind {
     /// The top-level verb (e.g. `heddle foo`) is not in the CLI.
     UnknownVerb,
-    /// The subverb (e.g. `heddle marker fizz`) is not under that verb.
+    /// The subverb (e.g. `heddle thread marker fizz`) is not under that verb.
     UnknownSubverb,
     /// A long flag (`--xyz`) is not defined on the resolved (sub)verb.
     UnknownFlag,
@@ -884,8 +884,7 @@ mod tests {
                 // fragment (e.g. `heddle help\n\`). That's a scan
                 // artifact on an otherwise-valid reference, not a stale
                 // verb — a real CLI verb never contains a backslash.
-                if matches!(issue.kind, IssueKind::UnknownVerb)
-                    && !issue.invocation.contains('\\')
+                if matches!(issue.kind, IssueKind::UnknownVerb) && !issue.invocation.contains('\\')
                 {
                     stale.push(format!("{}:{} — {}", issue.file, issue.line, issue.detail));
                 }
@@ -1057,9 +1056,9 @@ mod tests {
         let mut issues = Vec::new();
         scan_markdown(
             "test.md",
-            // `--bogus-flag` doesn't exist anywhere; `marker delete`
+            // `--bogus-flag` doesn't exist anywhere; `thread marker delete`
             // only takes a positional name plus a `--prefix`.
-            "Use `heddle marker delete --bogus-flag failed-` to clean.",
+            "Use `heddle thread marker delete --bogus-flag failed-` to clean.",
             &cli(),
             &mut issues,
         );
@@ -1121,7 +1120,7 @@ mod tests {
             "test.md",
             "We use `heddle start <name> --path <dir>` here.\n\
              Also `heddle context set --path X --scope file --kind rationale -m \"y\"`.\n\
-             And `heddle marker delete failed-build` works fine.\n",
+             And `heddle thread marker delete failed-build` works fine.\n",
             &cli(),
             &mut issues,
         );

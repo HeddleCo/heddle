@@ -186,8 +186,9 @@ fn parse_json_envelope(stderr: &str, label: &str) -> Value {
         .map(str::trim)
         .find(|line| !line.is_empty())
         .unwrap_or_else(|| panic!("[{label}] empty stderr; expected a JSON envelope"));
-    serde_json::from_str(line)
-        .unwrap_or_else(|err| panic!("[{label}] stderr is not a JSON envelope: {err}\n  line: {line}"))
+    serde_json::from_str(line).unwrap_or_else(|err| {
+        panic!("[{label}] stderr is not a JSON envelope: {err}\n  line: {line}")
+    })
 }
 
 #[test]
@@ -348,8 +349,7 @@ fn status_success_payload_omits_argv_siblings() {
         "status should exit 0 on a clean committed repo"
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let payload: Value =
-        serde_json::from_str(stdout.trim()).expect("status payload is JSON");
+    let payload: Value = serde_json::from_str(stdout.trim()).expect("status payload is JSON");
 
     let mut offending = Vec::new();
     collect_keys(&payload, &mut |key| {
@@ -383,8 +383,10 @@ fn collect_keys(value: &Value, visit: &mut impl FnMut(&str)) {
 
 #[test]
 fn swept_commands_have_envelope_coverage() {
-    let covered: std::collections::BTreeSet<&str> =
-        cases().iter().flat_map(|case| case.covers.iter().copied()).collect();
+    let covered: std::collections::BTreeSet<&str> = cases()
+        .iter()
+        .flat_map(|case| case.covers.iter().copied())
+        .collect();
     let missing: Vec<&str> = SWEPT_COVERAGE
         .iter()
         .copied()

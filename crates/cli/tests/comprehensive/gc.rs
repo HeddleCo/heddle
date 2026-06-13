@@ -29,7 +29,7 @@ fn test_gc_removes_unreachable_objects() {
     }
 
     let count_before = count_objects(&temp);
-    heddle(&["goto", "HEAD~3"], Some(temp.path())).unwrap();
+    heddle(&["switch", "HEAD~3"], Some(temp.path())).unwrap();
 
     let result = heddle(&["maintenance", "gc"], Some(temp.path()));
     assert!(result.is_ok(), "gc failed: {:?}", result.err());
@@ -76,7 +76,7 @@ fn test_gc_dry_run_accurate() {
         .unwrap();
     }
 
-    heddle(&["goto", "HEAD~2"], Some(temp.path())).unwrap();
+    heddle(&["switch", "HEAD~2"], Some(temp.path())).unwrap();
 
     let dry_run = heddle(&["maintenance", "gc", "--dry-run"], Some(temp.path()));
     assert!(dry_run.is_ok());

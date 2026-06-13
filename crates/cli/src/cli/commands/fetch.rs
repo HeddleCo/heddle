@@ -9,9 +9,9 @@ use std::collections::HashSet;
 #[cfg(feature = "client")]
 use anyhow::Context;
 use anyhow::Result;
-use objects::object::{MarkerName, ThreadName};
 #[cfg(feature = "client")]
 use objects::object::ChangeId;
+use objects::object::{MarkerName, ThreadName};
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 
@@ -315,8 +315,11 @@ async fn fetch_network(
     // Update remote refs
     let refs_fetched = refs_to_update.len();
     for (track_name, change_id) in refs_to_update {
-        repo.refs()
-            .set_remote_thread(options.remote_name, &ThreadName::new(&track_name), &change_id)?;
+        repo.refs().set_remote_thread(
+            options.remote_name,
+            &ThreadName::new(&track_name),
+            &change_id,
+        )?;
     }
 
     for (marker_name, change_id) in markers_to_create {

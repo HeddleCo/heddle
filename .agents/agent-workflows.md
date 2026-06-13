@@ -35,7 +35,7 @@ Common write flow:
 ```bash
 heddle capture -m "Implement feature X"
 heddle diff --semantic --output json
-heddle blame src/file.rs --output json
+heddle query --attribution src/file.rs --output json
 ```
 
 ## Harness And Actor Model
@@ -62,7 +62,7 @@ Important current behavior:
 
 - `heddle actor explain` is the first place to inspect why Heddle attached activity to a given actor/session
 - `heddle integration install` is the explicit opt-in path for supported harnesses on an existing repo
-- `heddle harness-bridge` and `heddle integration relay` are internal plumbing surfaces, not the main user story
+- `heddle integration relay` are internal plumbing surfaces, not the main user story
 
 ## Multi-Agent Isolation
 

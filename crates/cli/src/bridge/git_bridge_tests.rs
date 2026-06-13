@@ -775,11 +775,7 @@ fn import_all_lossy_reports_cached_lossy_commit_from_prior_run() {
     assert_eq!(second.states_created, 0);
     assert_eq!(second.lossy_entries.len(), 1);
     assert_eq!(second.lossy_entries[0].path, "vendor");
-    assert!(
-        second.lossy_entries[0]
-            .summary_line()
-            .contains("converted")
-    );
+    assert!(second.lossy_entries[0].summary_line().contains("converted"));
 }
 
 #[cfg(feature = "ingest")]
@@ -800,7 +796,10 @@ impl ImportEngine {
 }
 
 fn assert_lossy_default_rerun_error(engine: &str, message: &str) {
-    assert!(message.contains("vendor"), "{engine} error names entry: {message}");
+    assert!(
+        message.contains("vendor"),
+        "{engine} error names entry: {message}"
+    );
     assert!(
         message.contains("losslessly"),
         "{engine} error explains policy: {message}"
@@ -923,7 +922,11 @@ fn bridge_import_lossy_state_carries_canonical_git_lossy_marker() {
         GitImportOptions { lossy: true },
     )
     .expect("lossy bridge import succeeds");
-    assert_eq!(stats.lossy_entries.len(), 1, "gitlink is the one lossy entry");
+    assert_eq!(
+        stats.lossy_entries.len(),
+        1,
+        "gitlink is the one lossy entry"
+    );
 
     assert_only_state_is_lossy_with_fidelity(&repo, "bridge import --lossy");
 }
@@ -947,7 +950,11 @@ fn ingest_lossy_state_carries_canonical_git_lossy_marker() {
         import_git_into_with_options(git_path, heddle_temp.path(), ImportOptions { lossy: true })
             .expect("lossy ingest succeeds");
     drop(map);
-    assert_eq!(stats.lossy_entries.len(), 1, "gitlink is the one lossy entry");
+    assert_eq!(
+        stats.lossy_entries.len(),
+        1,
+        "gitlink is the one lossy entry"
+    );
 
     let repo = Repository::open(heddle_temp.path()).expect("open heddle repo");
     assert_only_state_is_lossy_with_fidelity(&repo, "bridge git ingest --lossy");
@@ -975,7 +982,11 @@ fn export_mints_lossy_ingest_state_from_raw_metadata() {
         import_git_into_with_options(git_path, heddle_temp.path(), ImportOptions { lossy: true })
             .expect("lossy ingest succeeds");
     drop(map);
-    assert_eq!(stats.lossy_entries.len(), 1, "gitlink is the one lossy entry");
+    assert_eq!(
+        stats.lossy_entries.len(),
+        1,
+        "gitlink is the one lossy entry"
+    );
 
     let repo = Repository::open(heddle_temp.path()).expect("open heddle repo");
     let state = {
@@ -986,7 +997,10 @@ fn export_mints_lossy_ingest_state_from_raw_metadata() {
             .expect("get state")
             .expect("state present")
     };
-    let raw_message = state.raw_message.clone().expect("ingest records raw_message");
+    let raw_message = state
+        .raw_message
+        .clone()
+        .expect("ingest records raw_message");
 
     // The bridge mapping is empty after ingest (ingest populates no SyncMapping),
     // so this is exactly the unmapped lossy case that export must MINT, not reject.
@@ -3080,7 +3094,10 @@ fn export_retracts_branch_when_public_commit_is_later_embargoed() {
         .iter()
         .find(|b| b.name == "main")
         .expect("main exported");
-    assert_eq!(run1_main.tip, oid_b, "run 1 branch advertises the public tip B");
+    assert_eq!(
+        run1_main.tip, oid_b,
+        "run 1 branch advertises the public tip B"
+    );
 
     // B is embargoed AFTER it was already exported public.
     repo.put_state_visibility(StateVisibility {
@@ -3122,8 +3139,14 @@ fn export_retracts_branch_when_public_commit_is_later_embargoed() {
         .find_reference("refs/heads/main")
         .expect("main ref present");
     let tip = main_ref.peel_to_id().unwrap().detach();
-    assert_eq!(tip, oid_a, "refs/heads/main must point at A after retraction");
-    assert_ne!(tip, oid_b, "refs/heads/main must not keep serving embargoed B");
+    assert_eq!(
+        tip, oid_a,
+        "refs/heads/main must point at A after retraction"
+    );
+    assert_ne!(
+        tip, oid_b,
+        "refs/heads/main must not keep serving embargoed B"
+    );
 }
 
 /// #316 / PR #528 r3 Finding 2: when a public commit is later embargoed, the
@@ -3508,10 +3531,22 @@ fn scoped_push_propagates_cross_thread_embargo_to_destination() {
     bridge
         .export_to_path(&dest_path)
         .expect("first full export+push publishes alpha, beta, gamma");
-    let oid_a1 = bridge.mapping.get_git(&state_a1.change_id).expect("A1 minted");
-    let oid_b0 = bridge.mapping.get_git(&state_b0.change_id).expect("B0 minted");
-    let oid_b2 = bridge.mapping.get_git(&state_b2.change_id).expect("B2 minted");
-    let oid_g0 = bridge.mapping.get_git(&state_g0.change_id).expect("G0 minted");
+    let oid_a1 = bridge
+        .mapping
+        .get_git(&state_a1.change_id)
+        .expect("A1 minted");
+    let oid_b0 = bridge
+        .mapping
+        .get_git(&state_b0.change_id)
+        .expect("B0 minted");
+    let oid_b2 = bridge
+        .mapping
+        .get_git(&state_b2.change_id)
+        .expect("B2 minted");
+    let oid_g0 = bridge
+        .mapping
+        .get_git(&state_g0.change_id)
+        .expect("G0 minted");
     {
         let dest = gix::open(&dest_path).expect("open dest");
         assert_eq!(
@@ -3701,9 +3736,7 @@ fn export_deletes_branch_when_whole_line_is_later_embargoed() {
 #[test]
 fn export_deletes_branch_when_thread_reset_to_private_root() {
     use chrono::Utc;
-    use objects::object::{
-        Attribution, Principal, State, StateVisibility, VisibilityTier,
-    };
+    use objects::object::{Attribution, Principal, State, StateVisibility, VisibilityTier};
 
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
@@ -3794,9 +3827,7 @@ fn export_deletes_branch_when_thread_reset_to_private_root() {
 #[test]
 fn export_deletes_tag_when_marker_retargeted_to_private() {
     use chrono::Utc;
-    use objects::object::{
-        Attribution, Principal, State, StateVisibility, VisibilityTier,
-    };
+    use objects::object::{Attribution, Principal, State, StateVisibility, VisibilityTier};
 
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
@@ -4134,7 +4165,9 @@ fn matrix_plant_foreign_branch(bridge: &GitBridge, name: &str, target: gix::hash
 /// #316 / PR #528 — the mirror's name-keyed managed-refs record (full ref name →
 /// last-published tip), the ownership boundary the reconcile and the push frontier
 /// both read.
-fn matrix_managed_record(bridge: &GitBridge) -> std::collections::HashMap<String, gix::hash::ObjectId> {
+fn matrix_managed_record(
+    bridge: &GitBridge,
+) -> std::collections::HashMap<String, gix::hash::ObjectId> {
     let mirror = bridge.open_git_repo().expect("open mirror");
     read_mirror_managed_refs(&mirror).expect("read mirror managed record")
 }
@@ -4188,8 +4221,12 @@ fn tag_reconcile_conformance_matrix() {
                 let temp = TempDir::new().unwrap();
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
-                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
-                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .unwrap();
+                repo.refs()
+                    .create_marker(&MarkerName::new("v"), &a.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 export_all(&mut bridge).unwrap();
                 let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
@@ -4204,14 +4241,22 @@ fn tag_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 let b = matrix_put_state(&repo, b"B\n", Vec::new());
-                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
-                repo.refs().set_thread(&ThreadName::new("rel"), &b.change_id).unwrap();
-                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("rel"), &b.change_id)
+                    .unwrap();
+                repo.refs()
+                    .create_marker(&MarkerName::new("v"), &a.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 export_all(&mut bridge).unwrap();
                 let oid_b = bridge.mapping.get_git(&b.change_id).expect("B minted");
                 repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
-                repo.refs().create_marker(&MarkerName::new("v"), &b.change_id).unwrap();
+                repo.refs()
+                    .create_marker(&MarkerName::new("v"), &b.change_id)
+                    .unwrap();
                 export_all(&mut bridge).unwrap();
                 (matrix_mirror_tag(&bridge, "v"), Some(oid_b))
             }),
@@ -4225,15 +4270,23 @@ fn tag_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 let b = matrix_put_state(&repo, b"B\n", Vec::new());
-                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
-                repo.refs().set_thread(&ThreadName::new("rel"), &b.change_id).unwrap();
-                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("rel"), &b.change_id)
+                    .unwrap();
+                repo.refs()
+                    .create_marker(&MarkerName::new("v"), &a.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 export_all(&mut bridge).unwrap();
                 let oid_b = bridge.mapping.get_git(&b.change_id).expect("B minted");
                 matrix_embargo(&repo, a.change_id);
                 repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
-                repo.refs().create_marker(&MarkerName::new("v"), &b.change_id).unwrap();
+                repo.refs()
+                    .create_marker(&MarkerName::new("v"), &b.change_id)
+                    .unwrap();
                 export_all(&mut bridge).unwrap();
                 (matrix_mirror_tag(&bridge, "v"), Some(oid_b))
             }),
@@ -4245,8 +4298,12 @@ fn tag_reconcile_conformance_matrix() {
                 let temp = TempDir::new().unwrap();
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
-                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
-                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .unwrap();
+                repo.refs()
+                    .create_marker(&MarkerName::new("v"), &a.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 export_all(&mut bridge).unwrap();
                 let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
@@ -4263,9 +4320,15 @@ fn tag_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 let b = matrix_put_state(&repo, b"B\n", Vec::new());
-                repo.refs().set_thread(&ThreadName::new("alpha"), &a.change_id).unwrap();
-                repo.refs().set_thread(&ThreadName::new("beta"), &b.change_id).unwrap();
-                repo.refs().create_marker(&MarkerName::new("v"), &b.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("alpha"), &a.change_id)
+                    .unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("beta"), &b.change_id)
+                    .unwrap();
+                repo.refs()
+                    .create_marker(&MarkerName::new("v"), &b.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 export_current_thread(&mut bridge, "beta").unwrap();
                 (matrix_mirror_tag(&bridge, "v"), None)
@@ -4279,9 +4342,15 @@ fn tag_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 let b = matrix_put_state(&repo, b"B\n", Vec::new());
-                repo.refs().set_thread(&ThreadName::new("alpha"), &a.change_id).unwrap();
-                repo.refs().set_thread(&ThreadName::new("beta"), &b.change_id).unwrap();
-                repo.refs().create_marker(&MarkerName::new("v"), &b.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("alpha"), &a.change_id)
+                    .unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("beta"), &b.change_id)
+                    .unwrap();
+                repo.refs()
+                    .create_marker(&MarkerName::new("v"), &b.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 export_all(&mut bridge).unwrap();
                 let oid_b = bridge.mapping.get_git(&b.change_id).expect("B minted");
@@ -4289,9 +4358,13 @@ fn tag_reconcile_conformance_matrix() {
                 // exported, so it stays unminted and the scoped run takes the
                 // served-but-unminted path.
                 let c = matrix_put_state(&repo, b"C\n", vec![b.change_id]);
-                repo.refs().set_thread(&ThreadName::new("beta"), &c.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("beta"), &c.change_id)
+                    .unwrap();
                 repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
-                repo.refs().create_marker(&MarkerName::new("v"), &c.change_id).unwrap();
+                repo.refs()
+                    .create_marker(&MarkerName::new("v"), &c.change_id)
+                    .unwrap();
                 export_current_thread(&mut bridge, "alpha").unwrap();
                 (matrix_mirror_tag(&bridge, "v"), Some(oid_b))
             }),
@@ -4306,9 +4379,15 @@ fn tag_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 let p = matrix_put_state(&repo, b"P\n", Vec::new());
-                repo.refs().set_thread(&ThreadName::new("alpha"), &a.change_id).unwrap();
-                repo.refs().set_thread(&ThreadName::new("rel"), &p.change_id).unwrap();
-                repo.refs().create_marker(&MarkerName::new("v"), &p.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("alpha"), &a.change_id)
+                    .unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("rel"), &p.change_id)
+                    .unwrap();
+                repo.refs()
+                    .create_marker(&MarkerName::new("v"), &p.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 export_all(&mut bridge).unwrap();
                 // New, never-exported public state C → served-but-unminted in the
@@ -4317,7 +4396,9 @@ fn tag_reconcile_conformance_matrix() {
                 let c = matrix_put_state(&repo, b"C\n", Vec::new());
                 matrix_embargo(&repo, p.change_id);
                 repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
-                repo.refs().create_marker(&MarkerName::new("v"), &c.change_id).unwrap();
+                repo.refs()
+                    .create_marker(&MarkerName::new("v"), &c.change_id)
+                    .unwrap();
                 export_current_thread(&mut bridge, "alpha").unwrap();
                 (matrix_mirror_tag(&bridge, "v"), None)
             }),
@@ -4330,8 +4411,12 @@ fn tag_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 let c = matrix_put_state(&repo, b"C\n", Vec::new());
-                repo.refs().set_thread(&ThreadName::new("alpha"), &a.change_id).unwrap();
-                repo.refs().create_marker(&MarkerName::new("v"), &c.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("alpha"), &a.change_id)
+                    .unwrap();
+                repo.refs()
+                    .create_marker(&MarkerName::new("v"), &c.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 export_current_thread(&mut bridge, "alpha").unwrap();
                 (matrix_mirror_tag(&bridge, "v"), None)
@@ -4346,14 +4431,20 @@ fn tag_reconcile_conformance_matrix() {
                 let temp = TempDir::new().unwrap();
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
-                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
-                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .unwrap();
+                repo.refs()
+                    .create_marker(&MarkerName::new("v"), &a.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 export_all(&mut bridge).unwrap();
                 let b = matrix_put_state(&repo, b"B\n", Vec::new());
                 matrix_embargo(&repo, b.change_id);
                 repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
-                repo.refs().create_marker(&MarkerName::new("v"), &b.change_id).unwrap();
+                repo.refs()
+                    .create_marker(&MarkerName::new("v"), &b.change_id)
+                    .unwrap();
                 export_all(&mut bridge).unwrap();
                 (matrix_mirror_tag(&bridge, "v"), None)
             }),
@@ -4366,8 +4457,12 @@ fn tag_reconcile_conformance_matrix() {
                 let temp = TempDir::new().unwrap();
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
-                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
-                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .unwrap();
+                repo.refs()
+                    .create_marker(&MarkerName::new("v"), &a.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 export_all(&mut bridge).unwrap();
                 matrix_embargo(&repo, a.change_id);
@@ -4384,8 +4479,12 @@ fn tag_reconcile_conformance_matrix() {
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 let b = matrix_put_state(&repo, b"B\n", Vec::new());
                 matrix_embargo(&repo, b.change_id);
-                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
-                repo.refs().create_marker(&MarkerName::new("v"), &b.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .unwrap();
+                repo.refs()
+                    .create_marker(&MarkerName::new("v"), &b.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 export_all(&mut bridge).unwrap();
                 (matrix_mirror_tag(&bridge, "v"), None)
@@ -4400,8 +4499,12 @@ fn tag_reconcile_conformance_matrix() {
                 let temp = TempDir::new().unwrap();
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
-                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
-                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .unwrap();
+                repo.refs()
+                    .create_marker(&MarkerName::new("v"), &a.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 export_all(&mut bridge).unwrap();
                 repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
@@ -4417,8 +4520,12 @@ fn tag_reconcile_conformance_matrix() {
                 let temp = TempDir::new().unwrap();
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
-                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
-                repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .unwrap();
+                repo.refs()
+                    .create_marker(&MarkerName::new("v"), &a.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 export_all(&mut bridge).unwrap();
                 (matrix_mirror_tag(&bridge, "ghost"), None)
@@ -4438,7 +4545,9 @@ fn tag_reconcile_conformance_matrix() {
                 let temp = TempDir::new().unwrap();
                 let repo = Repository::init(temp.path()).unwrap();
                 let p = matrix_put_state(&repo, b"P\n", Vec::new());
-                repo.refs().create_marker(&MarkerName::new("v"), &p.change_id).unwrap();
+                repo.refs()
+                    .create_marker(&MarkerName::new("v"), &p.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 // Run 1 mints P (every store state is minted by export_all) and
                 // materializes the mirror tag v → P.
@@ -4449,10 +4558,14 @@ fn tag_reconcile_conformance_matrix() {
                 // purge drop-set, yet v's existing tag still points at P's OID.
                 matrix_embargo(&repo, p.change_id);
                 let alpha = matrix_put_state(&repo, b"A\n", Vec::new());
-                repo.refs().set_thread(&ThreadName::new("alpha"), &alpha.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("alpha"), &alpha.change_id)
+                    .unwrap();
                 let c = matrix_put_state(&repo, b"C\n", Vec::new());
                 repo.refs().delete_marker(&MarkerName::new("v")).unwrap();
-                repo.refs().create_marker(&MarkerName::new("v"), &c.change_id).unwrap();
+                repo.refs()
+                    .create_marker(&MarkerName::new("v"), &c.change_id)
+                    .unwrap();
                 export_current_thread(&mut bridge, "alpha").unwrap();
                 (matrix_mirror_tag(&bridge, "v"), None)
             }),
@@ -4467,7 +4580,9 @@ fn tag_reconcile_conformance_matrix() {
                 let temp = TempDir::new().unwrap();
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
-                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 export_all(&mut bridge).unwrap();
                 // Plant a FOREIGN tag in the mirror: a commit heddle never minted,
@@ -4499,7 +4614,9 @@ fn tag_reconcile_conformance_matrix() {
                 let temp = TempDir::new().unwrap();
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
-                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 export_all(&mut bridge).unwrap();
                 let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
@@ -4551,11 +4668,15 @@ fn head_reconcile_conformance_matrix() {
                 let temp = TempDir::new().unwrap();
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
-                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 export_all(&mut bridge).unwrap();
                 let b = matrix_put_state(&repo, b"B\n", vec![a.change_id]);
-                repo.refs().set_thread(&ThreadName::new("main"), &b.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("main"), &b.change_id)
+                    .unwrap();
                 export_all(&mut bridge).unwrap();
                 let oid_b = bridge.mapping.get_git(&b.change_id).expect("B minted");
                 HeadOutcome {
@@ -4574,7 +4695,9 @@ fn head_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 let b = matrix_put_state(&repo, b"B\n", vec![a.change_id]);
-                repo.refs().set_thread(&ThreadName::new("main"), &b.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("main"), &b.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 export_all(&mut bridge).unwrap();
                 let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
@@ -4595,7 +4718,9 @@ fn head_reconcile_conformance_matrix() {
                 let temp = TempDir::new().unwrap();
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
-                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 export_all(&mut bridge).unwrap();
                 let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
@@ -4622,7 +4747,9 @@ fn head_reconcile_conformance_matrix() {
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
                 let b = matrix_put_state(&repo, b"B\n", vec![a.change_id]);
-                repo.refs().set_thread(&ThreadName::new("main"), &b.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("main"), &b.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 export_all(&mut bridge).unwrap();
                 let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
@@ -4632,7 +4759,9 @@ fn head_reconcile_conformance_matrix() {
                 // frontier, so it is NOT in this run's purge drop-set — only the
                 // served-OID classification rewinds the head off B.
                 matrix_embargo(&repo, b.change_id);
-                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .unwrap();
                 export_current_thread(&mut bridge, "main").unwrap();
                 HeadOutcome {
                     observed: matrix_mirror_head(&bridge, "main"),
@@ -4652,7 +4781,9 @@ fn head_reconcile_conformance_matrix() {
                 let temp = TempDir::new().unwrap();
                 let repo = Repository::init(temp.path()).unwrap();
                 let a = matrix_put_state(&repo, b"A\n", Vec::new());
-                repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
+                repo.refs()
+                    .set_thread(&ThreadName::new("main"), &a.change_id)
+                    .unwrap();
                 let mut bridge = GitBridge::new(&repo);
                 export_all(&mut bridge).unwrap();
                 let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
@@ -4694,15 +4825,25 @@ fn mirror_managed_record_claims_written_drops_deleted_excludes_foreign() {
     let temp = TempDir::new().unwrap();
     let repo = Repository::init(temp.path()).unwrap();
     let a = matrix_put_state(&repo, b"A\n", Vec::new());
-    repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
-    repo.refs().create_marker(&MarkerName::new("v"), &a.change_id).unwrap();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &a.change_id)
+        .unwrap();
+    repo.refs()
+        .create_marker(&MarkerName::new("v"), &a.change_id)
+        .unwrap();
     let mut bridge = GitBridge::new(&repo);
     export_all(&mut bridge).unwrap();
 
     // CLAIM: the written head and tag are recorded.
     let record = matrix_managed_record(&bridge);
-    assert!(record.contains_key("refs/heads/main"), "written head claimed: {record:?}");
-    assert!(record.contains_key("refs/tags/v"), "written tag claimed: {record:?}");
+    assert!(
+        record.contains_key("refs/heads/main"),
+        "written head claimed: {record:?}"
+    );
+    assert!(
+        record.contains_key("refs/tags/v"),
+        "written tag claimed: {record:?}"
+    );
 
     // EXCLUDE FOREIGN: a foreign tag at a heddle OID never enters the record.
     let oid_a = bridge.mapping.get_git(&a.change_id).expect("A minted");
@@ -4740,7 +4881,10 @@ fn mirror_managed_record_survives_round_trip() {
     write_mirror_managed_refs(&mirror, &record).expect("write record");
 
     let read_back = read_mirror_managed_refs(&mirror).expect("read record");
-    assert_eq!(read_back, record, "managed record must round-trip byte-for-byte");
+    assert_eq!(
+        read_back, record,
+        "managed record must round-trip byte-for-byte"
+    );
 }
 
 /// #316 / PR #528 — the #1 first-run risk: the FIRST export after this code lands
@@ -4756,8 +4900,12 @@ fn first_export_after_upgrade_seeds_record_and_still_retracts() {
     let repo = Repository::init(temp.path()).unwrap();
     let a = matrix_put_state(&repo, b"A\n", Vec::new());
     let p = matrix_put_state(&repo, b"P\n", Vec::new());
-    repo.refs().set_thread(&ThreadName::new("main"), &a.change_id).unwrap();
-    repo.refs().create_marker(&MarkerName::new("v"), &p.change_id).unwrap();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &a.change_id)
+        .unwrap();
+    repo.refs()
+        .create_marker(&MarkerName::new("v"), &p.change_id)
+        .unwrap();
     let mut bridge = GitBridge::new(&repo);
     export_all(&mut bridge).unwrap();
     assert!(
@@ -4886,7 +5034,9 @@ fn export_propagates_tag_and_note_deletion() {
     // touching main's tip.
     let r = {
         let store = repo.store();
-        let blob = store.put_blob(&Blob::from_slice(b"release\n")).expect("blob");
+        let blob = store
+            .put_blob(&Blob::from_slice(b"release\n"))
+            .expect("blob");
         let tree = store
             .put_tree(&Tree::from_entries(vec![
                 TreeEntry::file("release.txt".to_string(), blob, false).expect("entry"),
@@ -5387,7 +5537,9 @@ fn foreign_ref_on_url_remote_survives() {
 
     let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
     assert!(
-        remote.find_reference("refs/heads/other-user-branch").is_ok(),
+        remote
+            .find_reference("refs/heads/other-user-branch")
+            .is_ok(),
         "a foreign branch heddle never exported must NOT be deleted on the URL/network remote"
     );
     assert!(
@@ -5443,8 +5595,13 @@ fn out_of_band_destination_descendant_not_force_overwritten() {
     // branch moves to C). Identical inputs ⇒ identical oid in both repos.
     let oid_c = {
         let mirror = bridge.open_git_repo().expect("open mirror");
-        let in_mirror =
-            commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "out-of-band", &[oid_b]);
+        let in_mirror = commit_with_tree(
+            &mirror,
+            None,
+            empty_tree_oid(&mirror),
+            "out-of-band",
+            &[oid_b],
+        );
         let dest = gix::open(&dest_path).expect("open dest");
         let in_dest = commit_with_tree(
             &dest,
@@ -5533,13 +5690,16 @@ fn out_of_band_destination_descendant_not_force_overwritten() {
             "out-of-band",
             &[oid_b],
         );
-        assert_eq!(in_remote, oid_c, "C must be the same commit on the wire remote");
+        assert_eq!(
+            in_remote, oid_c,
+            "C must be the same commit on the wire remote"
+        );
     }
 
     // Plain network push must likewise refuse to clobber C.
-    let err = bridge.push(&url).expect_err(
-        "out-of-band descendant must be FF-rejected on the URL/network remote too",
-    );
+    let err = bridge
+        .push(&url)
+        .expect_err("out-of-band descendant must be FF-rejected on the URL/network remote too");
     assert!(
         matches!(err, GitBridgeError::NonFastForwardRef { .. }),
         "expected a non-fast-forward rejection on the wire, got: {err:?}"
@@ -5757,8 +5917,13 @@ fn out_of_band_advance_after_embargo_not_deleted() {
     // the wire remote. Identical inputs ⇒ identical oid in all three.
     let oid_c = {
         let mirror = bridge.open_git_repo().expect("open mirror");
-        let in_mirror =
-            commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "out-of-band", &[oid_b]);
+        let in_mirror = commit_with_tree(
+            &mirror,
+            None,
+            empty_tree_oid(&mirror),
+            "out-of-band",
+            &[oid_b],
+        );
         let dest = gix::open(&dest_path).expect("open dest");
         let in_dest = commit_with_tree(
             &dest,
@@ -5775,8 +5940,14 @@ fn out_of_band_advance_after_embargo_not_deleted() {
             "out-of-band",
             &[oid_b],
         );
-        assert_eq!(in_mirror, in_dest, "C identical in mirror and local destination");
-        assert_eq!(in_mirror, in_remote, "C identical in mirror and wire remote");
+        assert_eq!(
+            in_mirror, in_dest,
+            "C identical in mirror and local destination"
+        );
+        assert_eq!(
+            in_mirror, in_remote,
+            "C identical in mirror and wire remote"
+        );
         in_mirror
     };
 
@@ -5869,7 +6040,9 @@ fn out_of_band_advance_after_embargo_not_deleted() {
 /// `find_commit` (which would error on a tag object).
 #[test]
 fn reconcile_ownership_conformance_matrix() {
-    use crate::bridge::git_core::{GitBridgeError, RefNamespace, RefUpdate, plan_destination_reconcile};
+    use crate::bridge::git_core::{
+        GitBridgeError, RefNamespace, RefUpdate, plan_destination_reconcile,
+    };
     use std::collections::HashMap;
 
     let (_mirror_temp, mirror) = init_git_repo();
@@ -5908,41 +6081,293 @@ fn reconcile_ownership_conformance_matrix() {
 
     let cells = vec![
         // ---- branch: fast-forward move-classification + uniform ownership ----
-        Cell { label: "branch/create", ns: RefNamespace::Branch, old: None, target: b, recorded: None, desired: true, force: false, expect: Outcome::Write(None, b) },
-        Cell { label: "branch/no-op", ns: RefNamespace::Branch, old: Some(b), target: b, recorded: Some(b), desired: true, force: false, expect: Outcome::Absent },
-        Cell { label: "branch/fast-forward/owned", ns: RefNamespace::Branch, old: Some(a), target: b, recorded: Some(a), desired: true, force: false, expect: Outcome::Write(Some(a), b) },
-        Cell { label: "branch/fast-forward/out-of-band", ns: RefNamespace::Branch, old: Some(a), target: b, recorded: None, desired: true, force: false, expect: Outcome::Write(Some(a), b) },
-        Cell { label: "branch/rewind/owned", ns: RefNamespace::Branch, old: Some(b), target: a, recorded: Some(b), desired: true, force: false, expect: Outcome::Write(Some(b), a) },
-        Cell { label: "branch/rewind/out-of-band/force-off", ns: RefNamespace::Branch, old: Some(b), target: a, recorded: None, desired: true, force: false, expect: Outcome::NonFastForward },
-        Cell { label: "branch/rewind/out-of-band/force-on", ns: RefNamespace::Branch, old: Some(b), target: a, recorded: None, desired: true, force: true, expect: Outcome::Write(Some(b), a) },
-        Cell { label: "branch/retract/owned", ns: RefNamespace::Branch, old: Some(b), target: b, recorded: Some(b), desired: false, force: false, expect: Outcome::Delete(b) },
+        Cell {
+            label: "branch/create",
+            ns: RefNamespace::Branch,
+            old: None,
+            target: b,
+            recorded: None,
+            desired: true,
+            force: false,
+            expect: Outcome::Write(None, b),
+        },
+        Cell {
+            label: "branch/no-op",
+            ns: RefNamespace::Branch,
+            old: Some(b),
+            target: b,
+            recorded: Some(b),
+            desired: true,
+            force: false,
+            expect: Outcome::Absent,
+        },
+        Cell {
+            label: "branch/fast-forward/owned",
+            ns: RefNamespace::Branch,
+            old: Some(a),
+            target: b,
+            recorded: Some(a),
+            desired: true,
+            force: false,
+            expect: Outcome::Write(Some(a), b),
+        },
+        Cell {
+            label: "branch/fast-forward/out-of-band",
+            ns: RefNamespace::Branch,
+            old: Some(a),
+            target: b,
+            recorded: None,
+            desired: true,
+            force: false,
+            expect: Outcome::Write(Some(a), b),
+        },
+        Cell {
+            label: "branch/rewind/owned",
+            ns: RefNamespace::Branch,
+            old: Some(b),
+            target: a,
+            recorded: Some(b),
+            desired: true,
+            force: false,
+            expect: Outcome::Write(Some(b), a),
+        },
+        Cell {
+            label: "branch/rewind/out-of-band/force-off",
+            ns: RefNamespace::Branch,
+            old: Some(b),
+            target: a,
+            recorded: None,
+            desired: true,
+            force: false,
+            expect: Outcome::NonFastForward,
+        },
+        Cell {
+            label: "branch/rewind/out-of-band/force-on",
+            ns: RefNamespace::Branch,
+            old: Some(b),
+            target: a,
+            recorded: None,
+            desired: true,
+            force: true,
+            expect: Outcome::Write(Some(b), a),
+        },
+        Cell {
+            label: "branch/retract/owned",
+            ns: RefNamespace::Branch,
+            old: Some(b),
+            target: b,
+            recorded: Some(b),
+            desired: false,
+            force: false,
+            expect: Outcome::Delete(b),
+        },
         // Out-of-band retract: heddle published `a`, the destination drifted to `b`
         // (recorded != old) — spared unless forced.
-        Cell { label: "branch/retract/out-of-band/force-off", ns: RefNamespace::Branch, old: Some(b), target: b, recorded: Some(a), desired: false, force: false, expect: Outcome::Absent },
-        Cell { label: "branch/retract/out-of-band/force-on", ns: RefNamespace::Branch, old: Some(b), target: b, recorded: Some(a), desired: false, force: true, expect: Outcome::Delete(b) },
+        Cell {
+            label: "branch/retract/out-of-band/force-off",
+            ns: RefNamespace::Branch,
+            old: Some(b),
+            target: b,
+            recorded: Some(a),
+            desired: false,
+            force: false,
+            expect: Outcome::Absent,
+        },
+        Cell {
+            label: "branch/retract/out-of-band/force-on",
+            ns: RefNamespace::Branch,
+            old: Some(b),
+            target: b,
+            recorded: Some(a),
+            desired: false,
+            force: true,
+            expect: Outcome::Delete(b),
+        },
         // ---- tag: free move-classification + the SAME uniform ownership gate ----
-        Cell { label: "tag/create", ns: RefNamespace::Tag, old: None, target: b, recorded: None, desired: true, force: false, expect: Outcome::Write(None, b) },
-        Cell { label: "tag/no-op", ns: RefNamespace::Tag, old: Some(b), target: b, recorded: Some(b), desired: true, force: false, expect: Outcome::Absent },
-        Cell { label: "tag/owned-overwrite", ns: RefNamespace::Tag, old: Some(a), target: b, recorded: Some(a), desired: true, force: false, expect: Outcome::Write(Some(a), b) },
+        Cell {
+            label: "tag/create",
+            ns: RefNamespace::Tag,
+            old: None,
+            target: b,
+            recorded: None,
+            desired: true,
+            force: false,
+            expect: Outcome::Write(None, b),
+        },
+        Cell {
+            label: "tag/no-op",
+            ns: RefNamespace::Tag,
+            old: Some(b),
+            target: b,
+            recorded: Some(b),
+            desired: true,
+            force: false,
+            expect: Outcome::Absent,
+        },
+        Cell {
+            label: "tag/owned-overwrite",
+            ns: RefNamespace::Tag,
+            old: Some(a),
+            target: b,
+            recorded: Some(a),
+            desired: true,
+            force: false,
+            expect: Outcome::Write(Some(a), b),
+        },
         // THE r17 fix: an out-of-band tag (recorded != old) is no longer clobbered.
-        Cell { label: "tag/out-of-band-overwrite/unrecorded/force-off", ns: RefNamespace::Tag, old: Some(a), target: b, recorded: None, desired: true, force: false, expect: Outcome::NonFastForward },
-        Cell { label: "tag/out-of-band-overwrite/mismatched-record/force-off", ns: RefNamespace::Tag, old: Some(a), target: b, recorded: Some(b), desired: true, force: false, expect: Outcome::NonFastForward },
-        Cell { label: "tag/out-of-band-overwrite/force-on", ns: RefNamespace::Tag, old: Some(a), target: b, recorded: None, desired: true, force: true, expect: Outcome::Write(Some(a), b) },
+        Cell {
+            label: "tag/out-of-band-overwrite/unrecorded/force-off",
+            ns: RefNamespace::Tag,
+            old: Some(a),
+            target: b,
+            recorded: None,
+            desired: true,
+            force: false,
+            expect: Outcome::NonFastForward,
+        },
+        Cell {
+            label: "tag/out-of-band-overwrite/mismatched-record/force-off",
+            ns: RefNamespace::Tag,
+            old: Some(a),
+            target: b,
+            recorded: Some(b),
+            desired: true,
+            force: false,
+            expect: Outcome::NonFastForward,
+        },
+        Cell {
+            label: "tag/out-of-band-overwrite/force-on",
+            ns: RefNamespace::Tag,
+            old: Some(a),
+            target: b,
+            recorded: None,
+            desired: true,
+            force: true,
+            expect: Outcome::Write(Some(a), b),
+        },
         // annotated-tag-object as the NEW target: proves no find_commit on a tag obj.
-        Cell { label: "tag/owned-overwrite/annotated-object-target", ns: RefNamespace::Tag, old: Some(a), target: tag_obj, recorded: Some(a), desired: true, force: false, expect: Outcome::Write(Some(a), tag_obj) },
+        Cell {
+            label: "tag/owned-overwrite/annotated-object-target",
+            ns: RefNamespace::Tag,
+            old: Some(a),
+            target: tag_obj,
+            recorded: Some(a),
+            desired: true,
+            force: false,
+            expect: Outcome::Write(Some(a), tag_obj),
+        },
         // annotated-tag-object as the OLD tip: still gated by OID compare only.
-        Cell { label: "tag/out-of-band-overwrite/annotated-object-old/force-off", ns: RefNamespace::Tag, old: Some(tag_obj), target: b, recorded: None, desired: true, force: false, expect: Outcome::NonFastForward },
-        Cell { label: "tag/retract/owned", ns: RefNamespace::Tag, old: Some(b), target: b, recorded: Some(b), desired: false, force: false, expect: Outcome::Delete(b) },
-        Cell { label: "tag/retract/out-of-band/force-off", ns: RefNamespace::Tag, old: Some(b), target: b, recorded: Some(a), desired: false, force: false, expect: Outcome::Absent },
-        Cell { label: "tag/retract/out-of-band/force-on", ns: RefNamespace::Tag, old: Some(b), target: b, recorded: Some(a), desired: false, force: true, expect: Outcome::Delete(b) },
+        Cell {
+            label: "tag/out-of-band-overwrite/annotated-object-old/force-off",
+            ns: RefNamespace::Tag,
+            old: Some(tag_obj),
+            target: b,
+            recorded: None,
+            desired: true,
+            force: false,
+            expect: Outcome::NonFastForward,
+        },
+        Cell {
+            label: "tag/retract/owned",
+            ns: RefNamespace::Tag,
+            old: Some(b),
+            target: b,
+            recorded: Some(b),
+            desired: false,
+            force: false,
+            expect: Outcome::Delete(b),
+        },
+        Cell {
+            label: "tag/retract/out-of-band/force-off",
+            ns: RefNamespace::Tag,
+            old: Some(b),
+            target: b,
+            recorded: Some(a),
+            desired: false,
+            force: false,
+            expect: Outcome::Absent,
+        },
+        Cell {
+            label: "tag/retract/out-of-band/force-on",
+            ns: RefNamespace::Tag,
+            old: Some(b),
+            target: b,
+            recorded: Some(a),
+            desired: false,
+            force: true,
+            expect: Outcome::Delete(b),
+        },
         // ---- note: classified exactly like a branch (uniform ownership) ----
-        Cell { label: "note/create", ns: RefNamespace::Note, old: None, target: b, recorded: None, desired: true, force: false, expect: Outcome::Write(None, b) },
-        Cell { label: "note/no-op", ns: RefNamespace::Note, old: Some(b), target: b, recorded: Some(b), desired: true, force: false, expect: Outcome::Absent },
-        Cell { label: "note/fast-forward/owned", ns: RefNamespace::Note, old: Some(a), target: b, recorded: Some(a), desired: true, force: false, expect: Outcome::Write(Some(a), b) },
-        Cell { label: "note/rewind/owned", ns: RefNamespace::Note, old: Some(b), target: a, recorded: Some(b), desired: true, force: false, expect: Outcome::Write(Some(b), a) },
-        Cell { label: "note/rewind/out-of-band/force-off", ns: RefNamespace::Note, old: Some(b), target: a, recorded: None, desired: true, force: false, expect: Outcome::NonFastForward },
-        Cell { label: "note/rewind/out-of-band/force-on", ns: RefNamespace::Note, old: Some(b), target: a, recorded: None, desired: true, force: true, expect: Outcome::Write(Some(b), a) },
-        Cell { label: "note/retract/owned", ns: RefNamespace::Note, old: Some(b), target: b, recorded: Some(b), desired: false, force: false, expect: Outcome::Delete(b) },
+        Cell {
+            label: "note/create",
+            ns: RefNamespace::Note,
+            old: None,
+            target: b,
+            recorded: None,
+            desired: true,
+            force: false,
+            expect: Outcome::Write(None, b),
+        },
+        Cell {
+            label: "note/no-op",
+            ns: RefNamespace::Note,
+            old: Some(b),
+            target: b,
+            recorded: Some(b),
+            desired: true,
+            force: false,
+            expect: Outcome::Absent,
+        },
+        Cell {
+            label: "note/fast-forward/owned",
+            ns: RefNamespace::Note,
+            old: Some(a),
+            target: b,
+            recorded: Some(a),
+            desired: true,
+            force: false,
+            expect: Outcome::Write(Some(a), b),
+        },
+        Cell {
+            label: "note/rewind/owned",
+            ns: RefNamespace::Note,
+            old: Some(b),
+            target: a,
+            recorded: Some(b),
+            desired: true,
+            force: false,
+            expect: Outcome::Write(Some(b), a),
+        },
+        Cell {
+            label: "note/rewind/out-of-band/force-off",
+            ns: RefNamespace::Note,
+            old: Some(b),
+            target: a,
+            recorded: None,
+            desired: true,
+            force: false,
+            expect: Outcome::NonFastForward,
+        },
+        Cell {
+            label: "note/rewind/out-of-band/force-on",
+            ns: RefNamespace::Note,
+            old: Some(b),
+            target: a,
+            recorded: None,
+            desired: true,
+            force: true,
+            expect: Outcome::Write(Some(b), a),
+        },
+        Cell {
+            label: "note/retract/owned",
+            ns: RefNamespace::Note,
+            old: Some(b),
+            target: b,
+            recorded: Some(b),
+            desired: false,
+            force: false,
+            expect: Outcome::Delete(b),
+        },
     ];
 
     for cell in &cells {
@@ -5953,7 +6378,11 @@ fn reconcile_ownership_conformance_matrix() {
             RefNamespace::Note => format!("refs/notes/{short}"),
         };
         let served: Vec<RefUpdate> = if cell.desired {
-            vec![RefUpdate { name: short.to_string(), target: cell.target, namespace: cell.ns }]
+            vec![RefUpdate {
+                name: short.to_string(),
+                target: cell.target,
+                namespace: cell.ns,
+            }]
         } else {
             Vec::new()
         };
@@ -5970,8 +6399,10 @@ fn reconcile_ownership_conformance_matrix() {
             plan_destination_reconcile(&mirror, &served, None, &old_map, &recorded_map, cell.force);
 
         if let Outcome::NonFastForward = cell.expect {
-            let err = result
-                .expect_err(&format!("cell `{}`: expected Err(NonFastForwardRef)", cell.label));
+            let err = result.expect_err(&format!(
+                "cell `{}`: expected Err(NonFastForwardRef)",
+                cell.label
+            ));
             assert!(
                 matches!(err, GitBridgeError::NonFastForwardRef { .. }),
                 "cell `{}`: expected NonFastForwardRef, got {err:?}",
@@ -5980,27 +6411,53 @@ fn reconcile_ownership_conformance_matrix() {
             continue;
         }
 
-        let plan = result
-            .unwrap_or_else(|e| panic!("cell `{}`: expected Ok, got {e:?}", cell.label));
+        let plan =
+            result.unwrap_or_else(|e| panic!("cell `{}`: expected Ok, got {e:?}", cell.label));
         match cell.expect {
             Outcome::Write(exp_old, exp_new) => {
-                assert!(plan.deletes.is_empty(), "cell `{}`: expected no deletes", cell.label);
-                assert_eq!(plan.writes.len(), 1, "cell `{}`: expected exactly one write", cell.label);
+                assert!(
+                    plan.deletes.is_empty(),
+                    "cell `{}`: expected no deletes",
+                    cell.label
+                );
+                assert_eq!(
+                    plan.writes.len(),
+                    1,
+                    "cell `{}`: expected exactly one write",
+                    cell.label
+                );
                 let w = &plan.writes[0];
                 assert_eq!(w.full_name, full, "cell `{}`: write name", cell.label);
                 assert_eq!(w.old, exp_old, "cell `{}`: write old", cell.label);
                 assert_eq!(w.new, exp_new, "cell `{}`: write new", cell.label);
             }
             Outcome::Delete(exp_old) => {
-                assert!(plan.writes.is_empty(), "cell `{}`: expected no writes", cell.label);
-                assert_eq!(plan.deletes.len(), 1, "cell `{}`: expected exactly one delete", cell.label);
+                assert!(
+                    plan.writes.is_empty(),
+                    "cell `{}`: expected no writes",
+                    cell.label
+                );
+                assert_eq!(
+                    plan.deletes.len(),
+                    1,
+                    "cell `{}`: expected exactly one delete",
+                    cell.label
+                );
                 let d = &plan.deletes[0];
                 assert_eq!(d.full_name, full, "cell `{}`: delete name", cell.label);
                 assert_eq!(d.old, exp_old, "cell `{}`: delete old", cell.label);
             }
             Outcome::Absent => {
-                assert!(plan.writes.is_empty(), "cell `{}`: expected no writes", cell.label);
-                assert!(plan.deletes.is_empty(), "cell `{}`: expected no deletes", cell.label);
+                assert!(
+                    plan.writes.is_empty(),
+                    "cell `{}`: expected no writes",
+                    cell.label
+                );
+                assert!(
+                    plan.deletes.is_empty(),
+                    "cell `{}`: expected no deletes",
+                    cell.label
+                );
             }
             Outcome::NonFastForward => unreachable!("handled above"),
         }
@@ -6036,8 +6493,14 @@ fn foreign_destination_ref_spared() {
 
     let plan =
         plan_destination_reconcile(&mirror, &served, None, &old_map, &recorded_map, false).unwrap();
-    assert!(plan.writes.is_empty(), "a coincidental match must not be written");
-    assert!(plan.deletes.is_empty(), "a coincidental match must not be deleted");
+    assert!(
+        plan.writes.is_empty(),
+        "a coincidental match must not be written"
+    );
+    assert!(
+        plan.deletes.is_empty(),
+        "a coincidental match must not be deleted"
+    );
     assert!(
         !plan.new_manifest.contains_key(&full),
         "heddle must NOT claim ownership of a foreign destination ref it never recorded"
@@ -6045,8 +6508,8 @@ fn foreign_destination_ref_spared() {
 
     // The consequence: a LATER export that no longer serves user-v1 must NOT delete
     // it, because it was never claimed (the manifest carries no record for it).
-    let plan2 =
-        plan_destination_reconcile(&mirror, &[], None, &old_map, &plan.new_manifest, false).unwrap();
+    let plan2 = plan_destination_reconcile(&mirror, &[], None, &old_map, &plan.new_manifest, false)
+        .unwrap();
     assert!(
         plan2.deletes.is_empty(),
         "the foreign ref must survive a later retraction — it was never heddle's to delete"
@@ -6079,7 +6542,9 @@ fn out_of_band_destination_tag_not_overwritten() {
     repo.snapshot(Some("trunk".into()), None).unwrap();
     let r = {
         let store = repo.store();
-        let blob = store.put_blob(&Blob::from_slice(b"release\n")).expect("blob");
+        let blob = store
+            .put_blob(&Blob::from_slice(b"release\n"))
+            .expect("blob");
         let tree = store
             .put_tree(&Tree::from_entries(vec![
                 TreeEntry::file("release.txt".to_string(), blob, false).expect("entry"),
@@ -6117,16 +6582,25 @@ fn out_of_band_destination_tag_not_overwritten() {
     let oid_x = {
         let dest = gix::open(&dest_path).expect("open dest");
         let x = commit_with_tree(&dest, None, empty_tree_oid(&dest), "out-of-band-tag", &[]);
-        set_reference(&dest, "refs/tags/v1.0", x, PreviousValue::Any, "test: out-of-band tag")
-            .expect("move tag out of band");
+        set_reference(
+            &dest,
+            "refs/tags/v1.0",
+            x,
+            PreviousValue::Any,
+            "test: out-of-band tag",
+        )
+        .expect("move tag out of band");
         x
     };
-    assert_ne!(oid_x, served_tag, "the out-of-band tag tip must differ from the served tip");
+    assert_ne!(
+        oid_x, served_tag,
+        "the out-of-band tag tip must differ from the served tip"
+    );
 
     // A plain export must NOT clobber X: heddle does not own that tip.
-    let err = bridge
-        .export_to_path(&dest_path)
-        .expect_err("out-of-band tag must be FF-rejected at the local destination, not overwritten");
+    let err = bridge.export_to_path(&dest_path).expect_err(
+        "out-of-band tag must be FF-rejected at the local destination, not overwritten",
+    );
     assert!(
         matches!(err, GitBridgeError::NonFastForwardRef { .. }),
         "expected a non-fast-forward rejection, got: {err:?}"
@@ -6139,12 +6613,19 @@ fn out_of_band_destination_tag_not_overwritten() {
             .try_id()
             .map(|id| id.detach())
             .expect("tag id");
-        assert_eq!(tip, oid_x, "the out-of-band tag must survive — heddle must not overwrite it");
+        assert_eq!(
+            tip, oid_x,
+            "the out-of-band tag must survive — heddle must not overwrite it"
+        );
     }
 
     // `--force` is the explicit escape hatch: it DOES overwrite back to the tip.
     bridge
-        .push_with_scope_force(dest_path.to_str().expect("dest path"), GitPushScope::AllThreads, true)
+        .push_with_scope_force(
+            dest_path.to_str().expect("dest path"),
+            GitPushScope::AllThreads,
+            true,
+        )
         .expect("--force overrides the tag ownership gate at the local destination");
     {
         let dest = gix::open(&dest_path).expect("reopen dest");
@@ -6154,7 +6635,10 @@ fn out_of_band_destination_tag_not_overwritten() {
             .try_id()
             .map(|id| id.detach())
             .expect("tag id");
-        assert_eq!(tip, served_tag, "--force rewinds the local destination tag to the served tip");
+        assert_eq!(
+            tip, served_tag,
+            "--force rewinds the local destination tag to the served tip"
+        );
     }
 
     // ---- URL/network destination ----
@@ -6168,7 +6652,9 @@ fn out_of_band_destination_tag_not_overwritten() {
     let daemon = GitDaemon::spawn_push(remote_root.path());
     let url = daemon.url("remote.git");
 
-    bridge.push(&url).expect("first network push publishes the tag");
+    bridge
+        .push(&url)
+        .expect("first network push publishes the tag");
     let remote_served_tag = {
         let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
         remote
@@ -6181,12 +6667,27 @@ fn out_of_band_destination_tag_not_overwritten() {
 
     let remote_oid_x = {
         let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
-        let x = commit_with_tree(&remote, None, empty_tree_oid(&remote), "out-of-band-tag", &[]);
-        set_reference(&remote, "refs/tags/v1.0", x, PreviousValue::Any, "test: out-of-band tag")
-            .expect("move remote tag out of band");
+        let x = commit_with_tree(
+            &remote,
+            None,
+            empty_tree_oid(&remote),
+            "out-of-band-tag",
+            &[],
+        );
+        set_reference(
+            &remote,
+            "refs/tags/v1.0",
+            x,
+            PreviousValue::Any,
+            "test: out-of-band tag",
+        )
+        .expect("move remote tag out of band");
         x
     };
-    assert_ne!(remote_oid_x, remote_served_tag, "the out-of-band remote tag tip must differ");
+    assert_ne!(
+        remote_oid_x, remote_served_tag,
+        "the out-of-band remote tag tip must differ"
+    );
 
     let err = bridge
         .push(&url)
@@ -6203,7 +6704,10 @@ fn out_of_band_destination_tag_not_overwritten() {
             .try_id()
             .map(|id| id.detach())
             .expect("tag id");
-        assert_eq!(tip, remote_oid_x, "the out-of-band tag must survive on the URL/network remote");
+        assert_eq!(
+            tip, remote_oid_x,
+            "the out-of-band tag must survive on the URL/network remote"
+        );
     }
 
     bridge
@@ -6217,7 +6721,10 @@ fn out_of_band_destination_tag_not_overwritten() {
             .try_id()
             .map(|id| id.detach())
             .expect("tag id");
-        assert_eq!(tip, remote_served_tag, "--force rewinds the remote tag to the served tip");
+        assert_eq!(
+            tip, remote_served_tag,
+            "--force rewinds the remote tag to the served tip"
+        );
     }
 }
 
@@ -6232,7 +6739,9 @@ fn out_of_band_destination_tag_not_overwritten() {
 /// inputs land a write when owned, and demand `--force` when not.
 #[test]
 fn heddle_owned_tag_overwrite_still_lands() {
-    use crate::bridge::git_core::{GitBridgeError, RefNamespace, RefUpdate, plan_destination_reconcile};
+    use crate::bridge::git_core::{
+        GitBridgeError, RefNamespace, RefUpdate, plan_destination_reconcile,
+    };
     use std::collections::HashMap;
 
     let (_mirror_temp, mirror) = init_git_repo();
@@ -6240,26 +6749,49 @@ fn heddle_owned_tag_overwrite_still_lands() {
     let b = commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "B", &[a]);
 
     let full = "refs/tags/v1.0".to_string();
-    let served = vec![RefUpdate { name: "v1.0".to_string(), target: b, namespace: RefNamespace::Tag }];
+    let served = vec![RefUpdate {
+        name: "v1.0".to_string(),
+        target: b,
+        namespace: RefNamespace::Tag,
+    }];
     let old_at_destination: HashMap<String, gix::hash::ObjectId> =
         [(full.clone(), a)].into_iter().collect();
 
     // Owned: heddle recorded the destination tip `a` it is overwriting → the move
     // to `b` lands as a plain write, no `--force` needed.
     let owned: HashMap<String, gix::hash::ObjectId> = [(full.clone(), a)].into_iter().collect();
-    let plan = plan_destination_reconcile(&mirror, &served, None, &old_at_destination, &owned, false)
-        .expect("a heddle-owned tag move must reconcile without --force");
-    assert_eq!(plan.writes.len(), 1, "owned tag move must produce exactly one write");
+    let plan =
+        plan_destination_reconcile(&mirror, &served, None, &old_at_destination, &owned, false)
+            .expect("a heddle-owned tag move must reconcile without --force");
+    assert_eq!(
+        plan.writes.len(),
+        1,
+        "owned tag move must produce exactly one write"
+    );
     assert_eq!(plan.writes[0].full_name, full);
-    assert_eq!(plan.writes[0].old, Some(a), "write carries the owned old tip");
+    assert_eq!(
+        plan.writes[0].old,
+        Some(a),
+        "write carries the owned old tip"
+    );
     assert_eq!(plan.writes[0].new, b, "write lands the served target");
-    assert!(plan.deletes.is_empty(), "an owned overwrite is a write, not a delete");
+    assert!(
+        plan.deletes.is_empty(),
+        "an owned overwrite is a write, not a delete"
+    );
 
     // Contrast: the SAME move with no ownership record (out-of-band tip) is the r17
     // gate — FF-rejected unless `--force`.
     let unrecorded: HashMap<String, gix::hash::ObjectId> = HashMap::new();
-    let err = plan_destination_reconcile(&mirror, &served, None, &old_at_destination, &unrecorded, false)
-        .expect_err("an unowned tag overwrite must be FF-rejected without --force");
+    let err = plan_destination_reconcile(
+        &mirror,
+        &served,
+        None,
+        &old_at_destination,
+        &unrecorded,
+        false,
+    )
+    .expect_err("an unowned tag overwrite must be FF-rejected without --force");
     assert!(
         matches!(err, GitBridgeError::NonFastForwardRef { .. }),
         "expected NonFastForwardRef, got {err:?}"
@@ -6341,7 +6873,10 @@ fn import_preserves_commit_git_fidelity_fields() {
     let mut bridge = GitBridge::new(&repo);
     import_all(&mut bridge, Some(git_repo.workdir().expect("workdir"))).expect("import");
 
-    let change_id = bridge.mapping.get_heddle(commit_oid).expect("commit mapped");
+    let change_id = bridge
+        .mapping
+        .get_heddle(commit_oid)
+        .expect("commit mapped");
     let state = repo
         .store()
         .get_state(&change_id)
@@ -6362,7 +6897,11 @@ fn import_preserves_commit_git_fidelity_fields() {
     // ingest unit test. Here we verify gpgsig stays INLINE in extra_headers at
     // its captured position (not split into a separate field) and the headers
     // keep their original order.
-    assert_eq!(state.extra_headers.len(), 2, "gpgsig + mergetag, both inline");
+    assert_eq!(
+        state.extra_headers.len(),
+        2,
+        "gpgsig + mergetag, both inline"
+    );
     assert_eq!(state.extra_headers[0].0, b"gpgsig".to_vec());
     assert_eq!(
         String::from_utf8_lossy(&state.extra_headers[0].1).trim_end(),
@@ -6417,7 +6956,10 @@ fn backfill_fidelity_matches_fresh_adopt_and_is_idempotent() {
     // Fresh post-#565 adopt: this populates the fidelity fields AND the mirror.
     let mut bridge = GitBridge::new(&repo);
     import_all(&mut bridge, Some(git_repo.workdir().expect("workdir"))).expect("import");
-    let change_id = bridge.mapping.get_heddle(commit_oid).expect("commit mapped");
+    let change_id = bridge
+        .mapping
+        .get_heddle(commit_oid)
+        .expect("commit mapped");
     let fresh = repo
         .store()
         .get_state(&change_id)
@@ -6449,8 +6991,11 @@ fn backfill_fidelity_matches_fresh_adopt_and_is_idempotent() {
     pre_bump.raw_message = None;
     pre_bump.extra_headers = Vec::new();
     pre_bump.created_at = chrono::DateTime::from_timestamp(42, 0).expect("stale created_at");
-    pre_bump.authored_at = Some(chrono::DateTime::from_timestamp(99, 0).expect("stale authored_at"));
-    repo.store().put_state(&pre_bump).expect("write pre-bump state");
+    pre_bump.authored_at =
+        Some(chrono::DateTime::from_timestamp(99, 0).expect("stale authored_at"));
+    repo.store()
+        .put_state(&pre_bump)
+        .expect("write pre-bump state");
 
     // Backfill re-derives the fields from the mirror.
     let mut bridge = GitBridge::new(&repo);
@@ -6535,7 +7080,10 @@ fn backfill_skips_states_with_foreign_signatures() {
 
     let mut bridge = GitBridge::new(&repo);
     import_all(&mut bridge, Some(git_repo.workdir().expect("workdir"))).expect("import");
-    let change_id = bridge.mapping.get_heddle(commit_oid).expect("commit mapped");
+    let change_id = bridge
+        .mapping
+        .get_heddle(commit_oid)
+        .expect("commit mapped");
 
     // Simulate a pre-#565 adopt: strip the fidelity fields, THEN sign the
     // stripped state with a FOREIGN key (one this repo's identity does not
@@ -6567,7 +7115,10 @@ fn backfill_skips_states_with_foreign_signatures() {
         stats.backfilled, 0,
         "a foreign-signed state must not be rewritten into an invalid signature"
     );
-    assert_eq!(stats.signature_unreproducible, 1, "it is surfaced, not silently dropped");
+    assert_eq!(
+        stats.signature_unreproducible, 1,
+        "it is surfaced, not silently dropped"
+    );
 
     // The state on disk is the untouched stripped form — its foreign signature
     // still verifies against ITS hash; the migration never produced an invalid
@@ -6582,7 +7133,10 @@ fn backfill_skips_states_with_foreign_signatures() {
         .get_state(&change_id)
         .expect("load")
         .expect("state");
-    assert!(after.committer.is_none(), "fidelity fields were NOT rewritten");
+    assert!(
+        after.committer.is_none(),
+        "fidelity fields were NOT rewritten"
+    );
 }
 
 /// #570 r1 (Codex P2): a state signed by THIS repo's own identity is re-signed
@@ -6625,7 +7179,10 @@ fn backfill_resigns_owned_signed_states() {
 
     let mut bridge = GitBridge::new(&repo);
     import_all(&mut bridge, Some(git_repo.workdir().expect("workdir"))).expect("import");
-    let change_id = bridge.mapping.get_heddle(commit_oid).expect("commit mapped");
+    let change_id = bridge
+        .mapping
+        .get_heddle(commit_oid)
+        .expect("commit mapped");
 
     // Reproduce a real pre-#565 adopt: strip the fidelity fields FIRST (the
     // fields never existed pre-bump), THEN sign the stripped state with THIS
@@ -6644,7 +7201,8 @@ fn backfill_resigns_owned_signed_states() {
     pre_bump.committer_tz_offset = 0;
     pre_bump.raw_message = None;
     pre_bump.extra_headers = Vec::new();
-    repo.put_authored_state(&mut pre_bump).expect("author-sign stripped");
+    repo.put_authored_state(&mut pre_bump)
+        .expect("author-sign stripped");
     if pre_bump.signature.is_none() {
         // No signing identity resolvable in this environment; the re-sign path
         // isn't exercised. The foreign-skip test covers the safety guarantee.
@@ -6713,7 +7271,10 @@ fn backfill_reports_states_missing_from_mirror() {
     );
     let mut bridge = GitBridge::new(&repo);
     import_all(&mut bridge, Some(git_repo.workdir().expect("workdir"))).expect("import");
-    assert!(bridge.mapping.get_heddle(real_oid).is_some(), "real commit mapped");
+    assert!(
+        bridge.mapping.get_heddle(real_oid).is_some(),
+        "real commit mapped"
+    );
 
     // Inject a sidecar entry pointing at an object that is NOT in the mirror,
     // then persist it so the backfill's mapping rebuild loads it back.
@@ -6722,7 +7283,9 @@ fn backfill_reports_states_missing_from_mirror() {
         .parse()
         .expect("valid-looking oid absent from the mirror");
     bridge.mapping.insert(missing_change_id, bogus_oid);
-    bridge.save_mapping_to_disk().expect("persist injected sidecar entry");
+    bridge
+        .save_mapping_to_disk()
+        .expect("persist injected sidecar entry");
 
     let mut bridge = GitBridge::new(&repo);
     let stats = backfill_fidelity(&mut bridge).expect("backfill");
@@ -6789,7 +7352,10 @@ fn non_utf8_git_fidelity_is_byte_identical_across_bridge_and_ingest() {
             ("mergetag".into(), mergetag_value.clone().into()),
         ],
     };
-    let commit_oid = git_repo.write_object(&commit).expect("write commit").detach();
+    let commit_oid = git_repo
+        .write_object(&commit)
+        .expect("write commit")
+        .detach();
     set_reference(
         &git_repo,
         "refs/heads/main",

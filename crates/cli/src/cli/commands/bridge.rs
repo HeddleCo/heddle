@@ -671,7 +671,10 @@ pub fn cmd_bridge_backfill_fidelity(cli: &Cli) -> Result<()> {
         if output.states_resigned > 0 {
             println!(
                 "  {}",
-                style::field("re-signed", &style::bold(&output.states_resigned.to_string()))
+                style::field(
+                    "re-signed",
+                    &style::bold(&output.states_resigned.to_string())
+                )
             );
         }
         if output.states_signature_unreproducible > 0 {

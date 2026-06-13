@@ -7,7 +7,7 @@
 //! happened in the working session. It replaces the
 //! reconstruct-from-`heddle log` boilerplate that agents wrote before:
 //! today they cross-reference `heddle log`, `heddle agent list`,
-//! `heddle context history`, and `heddle marker list` separately, then
+//! `heddle context history`, and `heddle thread marker list` separately, then
 //! diff the timestamps by hand. This verb folds those four reads into
 //! one trip, aligned on a single time window.
 //!

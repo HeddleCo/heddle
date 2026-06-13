@@ -58,13 +58,13 @@ fn core_loop_command_surface_perf_smoke() {
         },
         PerfCase {
             name: "workspace text",
-            args: &["workspace"],
+            args: &["status"],
             release_budget: Duration::from_millis(650),
             expect_json: false,
         },
         PerfCase {
             name: "workspace json",
-            args: &["--output", "json", "workspace"],
+            args: &["--output", "json", "status"],
             release_budget: Duration::from_millis(850),
             expect_json: true,
         },

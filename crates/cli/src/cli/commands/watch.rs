@@ -989,6 +989,7 @@ mod tests {
                 name: "x".into(),
                 old_state: cid,
                 new_state: cid,
+                manager_snapshots: None,
             },
             OpRecord::Fork {
                 from: cid,
@@ -1000,6 +1001,7 @@ mod tests {
                 sources: vec![cid],
                 result: cid,
                 thread: None,
+                pre_thread_state: None,
             },
             OpRecord::MarkerCreate {
                 name: "m".into(),

@@ -14,23 +14,21 @@ pub mod transaction_sentinel;
 #[cfg(feature = "client")]
 pub use cli_args::PresenceCommands;
 pub use cli_args::{
-    ActorCommands, AdoptArgs, AgentCommands, AttemptArgs, BranchArgs,
-    CheckpointArgs, Cli, CloneArgs, CollapseArgs, Commands, CommitArgs, ContextCommands,
-    DaemonCommands, DiagnoseArgs, DiffArgs, DoctorArgs, DoctorCommands, DoctorDocsArgs,
-    HookCommands, HookInstallSource, InitArgs, IntegrationCommands, IntegrationInstallArgs,
-    IntegrationRelayArgs, IntegrationTargetArgs, LogArgs, MaintenanceCommands, MarkerCommands,
-    MergeArgs, OutputMode, PullArgs, PurgeApplyArgs, PurgeCommands, PurgeListArgs, PushArgs,
-    ReadyArgs, RedactApplyArgs, RedactCommands, RedactListArgs, RedactShowArgs, RedactTrustAddArgs,
-    RedactTrustCommands, RedactTrustListArgs, RedactTrustRemoveArgs, RedoArgs, RemoteCommands,
-    ResolveArgs,
-    RetroArgs, RevertArgs, RunArgs, SessionCommands, SessionEndArgs, SessionListArgs,
-    SessionSegmentArgs, SessionShowArgs, SessionStartArgs, ShellCommands, ShellKind, SnapshotArgs,
-    StackArgs, StackCommands, StashCommands, SwitchArgs, ThreadAbsorbArgs,
-    ThreadCleanupArgs, ThreadCommands, ThreadDropArgs, ThreadListArgs, ThreadMoveArgs,
-    ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs, ThreadResolveArgs, ThreadShowArgs,
-    ThreadStartArgs, TryArgs, UndoArgs, VisibilityCommands, VisibilityListArgs,
-    VisibilityPromoteArgs, VisibilitySetArgs, VisibilityShowArgs, VisibilityTierArg, WatchArgs,
-    WorkspaceCommands, WorkspaceModeArg, WorkspaceShowArgs,
+    ActorCommands, AdoptArgs, AgentCommands, CheckpointArgs, Cli, CloneArgs, CollapseArgs,
+    Commands, CommitArgs, ContextCommands, DaemonCommands, DiagnoseArgs, DiffArgs, DoctorArgs,
+    DoctorCommands, DoctorDocsArgs, HookCommands, HookInstallSource, InitArgs, IntegrationCommands,
+    IntegrationInstallArgs, IntegrationRelayArgs, IntegrationTargetArgs, LogArgs,
+    MaintenanceCommands, MergeArgs, OutputMode, PullArgs, PurgeApplyArgs, PurgeCommands,
+    PurgeListArgs, PushArgs, ReadyArgs, RedactApplyArgs, RedactCommands, RedactListArgs,
+    RedactShowArgs, RedactTrustAddArgs, RedactTrustCommands, RedactTrustListArgs,
+    RedactTrustRemoveArgs, RemoteCommands, ResolveArgs, RetroArgs, RevertArgs, RunArgs,
+    SessionCommands, SessionEndArgs, SessionListArgs, SessionSegmentArgs, SessionShowArgs,
+    SessionStartArgs, ShellCommands, ShellKind, SnapshotArgs, StashCommands, SwitchArgs,
+    ThreadAbsorbArgs, ThreadCleanupArgs, ThreadCommands, ThreadDropArgs, ThreadListArgs,
+    ThreadMarkerCommands, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs,
+    ThreadResolveArgs, ThreadShowArgs, ThreadStartArgs, TryArgs, UndoArgs, VisibilityCommands,
+    VisibilityListArgs, VisibilityPromoteArgs, VisibilitySetArgs, VisibilityShowArgs,
+    VisibilityTierArg, WatchArgs, WorkspaceModeArg,
 };
 #[cfg(feature = "client")]
 pub use cli_args::{AuthCommands, SupportCommands};

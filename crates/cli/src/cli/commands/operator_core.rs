@@ -7,24 +7,24 @@ use chrono::Utc;
 use gix::bstr::ByteSlice;
 use objects::object::ThreadName;
 use repo::{
-    shell_quote, update_thread_state_from_state, GitOverlayImportHint, GitRemoteTrackingStatus,
-    OperationKind, OperationScope, Repository, RepositoryOperationStatus, ThreadFreshness,
-    ThreadIntegrationPolicy, ThreadManager, ThreadState,
+    GitOverlayImportHint, GitRemoteTrackingStatus, OperationKind, OperationScope, Repository,
+    RepositoryOperationStatus, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
+    ThreadState, shell_quote, update_thread_state_from_state,
 };
-use serde::{ser::SerializeStruct, Serialize, Serializer};
+use serde::{Serialize, Serializer, ser::SerializeStruct};
 
 use super::{
     git_overlay_health::{
-        action_template, repository_verification_blockers, repository_verification_primary_command,
-        RepositoryVerificationState,
+        RepositoryVerificationState, action_template, repository_verification_blockers,
+        repository_verification_primary_command,
     },
-    next_action::{effective_next_action, NextActionInput},
+    next_action::{NextActionInput, effective_next_action},
     rebase::{
-        cmd_rebase_silent, continue_rebase_for_operator, has_persisted_rebase_state,
-        OperatorContinueStatus,
+        OperatorContinueStatus, cmd_rebase_silent, continue_rebase_for_operator,
+        has_persisted_rebase_state,
     },
     resolve::abort_merge_state,
-    snapshot::{create_snapshot, SnapshotAgentOverrides},
+    snapshot::{SnapshotAgentOverrides, create_snapshot},
 };
 use crate::config::UserConfig;
 
@@ -507,6 +507,7 @@ fn complete_current_thread_manual_resolution(repo: &Repository) -> Result<Option
     let Some(target_state_obj) = repo.store().get_state(&target_state)? else {
         return Ok(None);
     };
+    let before_update = super::thread_cmd::capture_thread_update_before(repo, &manager, &thread)?;
 
     thread.base_state = target_state.short();
     thread.base_root = target_state_obj.tree.short();
@@ -521,7 +522,13 @@ fn complete_current_thread_manual_resolution(repo: &Repository) -> Result<Option
     thread.updated_at = Utc::now();
     let thread_id = thread.id.clone();
     let target = thread.target_thread.clone();
-    manager.save(&thread)?;
+    super::thread_cmd::save_thread_update_with_oplog(
+        repo,
+        &manager,
+        &thread,
+        before_update,
+        current_state,
+    )?;
 
     let action = super::thread_landing::land_command_for_thread(repo, &thread_id);
     Ok(Some(super::thread::contextual_thread_action(
@@ -728,7 +735,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::cli::commands::git_overlay_health::{machine_contract_coverage, VerificationCheck};
+    use crate::cli::commands::git_overlay_health::{VerificationCheck, machine_contract_coverage};
 
     // heddle#464 close-the-class (paths): a conflict path can contain spaces.
     // `continue` builds `recommended_action = heddle resolve <path>`, a VALIDATED
@@ -738,7 +745,7 @@ mod tests {
     #[test]
     fn validated_resolve_action_with_spaced_path_passes_only_when_quoted() {
         use crate::cli::commands::next_action::{
-            validated_json_string, NextActionValidationContext,
+            NextActionValidationContext, validated_json_string,
         };
         use repo::shell_quote;
 
@@ -787,7 +794,7 @@ mod tests {
     #[test]
     fn blocked_land_with_unvalidated_thread_id_passes_only_when_quoted() {
         use crate::cli::commands::next_action::{
-            validated_json_string, NextActionValidationContext,
+            NextActionValidationContext, validated_json_string,
         };
         use repo::shell_quote;
 
@@ -846,14 +853,18 @@ mod tests {
         );
         assert!(output.message.contains("no-git runtime"));
         assert!(output.message.contains("conflict.txt"));
-        assert!(output
-            .blockers
-            .iter()
-            .any(|path| path == "unresolved: conflict.txt"));
-        assert!(!output
-            .recommended_action
-            .as_deref()
-            .is_some_and(|action| action.starts_with("git ")));
+        assert!(
+            output
+                .blockers
+                .iter()
+                .any(|path| path == "unresolved: conflict.txt")
+        );
+        assert!(
+            !output
+                .recommended_action
+                .as_deref()
+                .is_some_and(|action| action.starts_with("git "))
+        );
     }
 
     #[test]
@@ -880,9 +891,11 @@ mod tests {
             output.recommended_action.as_deref(),
             Some("heddle commit -m \"...\"")
         );
-        assert!(output
-            .message
-            .contains("repository verification is blocked"));
+        assert!(
+            output
+                .message
+                .contains("repository verification is blocked")
+        );
     }
 
     #[test]

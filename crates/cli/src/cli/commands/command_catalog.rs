@@ -3,7 +3,6 @@
 
 use std::sync::OnceLock;
 
-use anyhow::Result;
 use clap::{ArgAction, CommandFactory};
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -12,14 +11,11 @@ use serde::Serialize;
 use crate::cli::SemanticCommands;
 use crate::cli::{
     ActorCommands, AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands,
-    HookCommands, IntegrationCommands, MaintenanceCommands, MarkerCommands, PurgeCommands,
-    RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands, ShellCommands,
-    StackCommands, StashCommands, ThreadCommands, VisibilityCommands, WorkspaceCommands,
-    cli_args::{
-        CommandCatalogArgs, ConflictCommands, DiscussCommands, ReviewCommands, TransactionCommands,
-    },
-    render::{shell_quote, write_json_stdout, write_stdout},
-    should_output_json, style,
+    HookCommands, IntegrationCommands, MaintenanceCommands, PurgeCommands, RedactCommands,
+    RedactTrustCommands, RemoteCommands, SessionCommands, ShellCommands, StashCommands,
+    ThreadCommands, ThreadMarkerCommands, VisibilityCommands,
+    cli_args::{DiscussCommands, ReviewCommands, TransactionCommands},
+    render::shell_quote,
 };
 #[cfg(feature = "client")]
 use crate::cli::{AuthCommands, PresenceCommands, SupportCommands};
@@ -570,8 +566,8 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         true,
     ),
     (
-        "heddle delegate --parent <THREAD> <task>",
-        &["heddle", "delegate", "--parent", "<thread>", "<task>"],
+        "heddle start <task> --parent-thread <THREAD>",
+        &["heddle", "start", "<task>", "--parent-thread", "<thread>"],
         &["thread", "task"],
         false,
     ),
@@ -1182,13 +1178,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["agent", "list"],
         surface(documented_schemas(READ_JSON, &["agent list"]), "automation"),
     ),
-    entry(
-        &["attempt"],
-        category(
-            documented_schemas(EXTERNAL_WORKTREE_MUTATION, &["attempt"]),
-            "threads",
-        ),
-    ),
     #[cfg(feature = "client")]
     entry(&["auth"], category(GROUP, "repo")),
     #[cfg(feature = "client")]
@@ -1199,57 +1188,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(&["auth", "status"], READ_JSON),
     #[cfg(feature = "client")]
     entry(&["auth", "create-service-token"], MUTATING_NO_OP_ID),
-    entry(
-        &["blame"],
-        category(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["blame"]),
-                &[json_discriminator(Some("blame"), "output_kind", "blame")],
-            ),
-            "states",
-        ),
-    ),
-    entry(
-        &["branch"],
-        git_adapter_action(
-            json_discriminators(
-                documented_schemas(MUTATING, &["branch"]),
-                &[
-                    // No-arg `branch` emits the thread-list contract; this
-                    // is the shape the registered `branch` schema mirrors.
-                    json_discriminator(Some("branch"), "output_kind", "thread_list"),
-                    // `branch <name>` (create/rename/delete) delegates to
-                    // the thread family and emits the delegate's record
-                    // (e.g. `thread_create`). Advertised without a schema
-                    // verb — only the listing shape is schema-backed —
-                    // mirroring how hosted `clone` advertises its
-                    // preliminary `clone_connection` envelope.
-                    json_discriminator_no_schema(
-                        "branch mutations delegate to the thread family; the \
-                         registered `branch` schema mirrors only the no-arg \
-                         listing shape",
-                        "output_kind",
-                        "thread_create",
-                    ),
-                    json_discriminator_no_schema(
-                        "branch -m delegates to `thread rename`; the registered \
-                         `branch` schema mirrors only the no-arg listing shape",
-                        "output_kind",
-                        "thread_rename",
-                    ),
-                    json_discriminator_no_schema(
-                        "branch -d delegates to `thread drop`; the registered \
-                         `branch` schema mirrors only the no-arg listing shape",
-                        "output_kind",
-                        "thread_drop",
-                    ),
-                ],
-            ),
-            "thread",
-            "command_family",
-            "Use the thread command family for branch listing, creation, rename, and deletion.",
-        ),
-    ),
     entry(&["bridge"], surface(GROUP, "git_adapter")),
     entry(&["bridge", "git"], surface(GROUP, "git_adapter")),
     entry(
@@ -1553,36 +1491,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["commands"],
-        surface(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["commands"]),
-                &[json_discriminator(
-                    Some("commands"),
-                    "kind",
-                    "command_catalog",
-                )],
-            ),
-            "automation",
-        ),
-    ),
-    entry(&["conflict"], category(GROUP, "recovery")),
-    entry(
-        &["conflict", "list"],
-        opaque_schemas(READ_JSON, &["conflict list"]),
-    ),
-    entry(
-        &["conflict", "show"],
-        json_discriminators(
-            opaque_schemas(READ_JSON, &["conflict show"]),
-            &[json_discriminator(
-                Some("conflict show"),
-                "output_kind",
-                "conflict_show",
-            )],
-        ),
-    ),
-    entry(
         &["continue"],
         category(
             json_discriminators(
@@ -1731,13 +1639,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["delegate"],
-        category(
-            documented_schemas(WORKTREE_MUTATION, &["delegate"]),
-            "threads",
-        ),
-    ),
-    entry(
         &["diff"],
         front_door(
             json_discriminators(
@@ -1859,16 +1760,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["fork"],
-        category(
-            json_discriminators(
-                opaque_schemas(MUTATING, &["fork"]),
-                &[json_discriminator(Some("fork"), "output_kind", "fork")],
-            ),
-            "threads",
-        ),
-    ),
-    entry(
         &["fsck"],
         category(documented_schemas(MUTATING, &["fsck"]), "recovery"),
     ),
@@ -1877,20 +1768,15 @@ const CONTRACTS: &[CommandContractEntry] = &[
         category(documented_schemas(READ_JSON, &["git-overlay"]), "repo"),
     ),
     entry(
-        &["goto"],
+        &["help"],
         category(
             json_discriminators(
-                documented_schemas(WORKTREE_MUTATION, &["goto"]),
-                &[json_discriminator(Some("goto"), "output_kind", "goto")],
+                opaque_schemas(READ_JSON, &["help"]),
+                &[json_discriminator(Some("help"), "kind", "command_catalog")],
             ),
-            "threads",
+            "repo",
         ),
     ),
-    entry(
-        &["harness-bridge"],
-        hidden(opaque_schemas(READ_JSONL, &["harness-bridge"])),
-    ),
-    entry(&["help"], category(READ_TEXT, "repo")),
     entry(&["hook"], surface(GROUP, "automation")),
     entry(
         &["hook", "list"],
@@ -1929,19 +1815,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 (73, "cannot create state directory"),
                 (78, "workspace config invalid"),
             ],
-        ),
-    ),
-    entry(
-        &["inspect"],
-        category(
-            json_discriminators(
-                documented_schemas(READ_JSON, &["inspect", "thread show"]),
-                &[
-                    json_discriminator(Some("inspect"), "output_kind", "inspect_state"),
-                    json_discriminator(Some("thread show"), "output_kind", "thread_show"),
-                ],
-            ),
-            "states",
         ),
     ),
     entry(&["integration"], surface(GROUP, "admin")),
@@ -2029,23 +1902,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["maintenance", "monitor"],
         surface(opaque_schemas(READ_JSON, &["maintenance monitor"]), "admin"),
     ),
-    entry(&["marker"], category(GROUP, "collab")),
-    entry(
-        &["marker", "list"],
-        documented_schemas(READ_JSON, &["marker list"]),
-    ),
-    entry(
-        &["marker", "create"],
-        documented_schemas(MUTATING, &["marker create"]),
-    ),
-    entry(
-        &["marker", "delete"],
-        documented_schemas(MUTATING, &["marker delete", "marker delete --prefix"]),
-    ),
-    entry(
-        &["marker", "show"],
-        documented_schemas(READ_JSON, &["marker show"]),
-    ),
     entry(
         &["merge"],
         category(
@@ -2081,38 +1937,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["stack"],
-        category(
-            json_discriminators(
-                opaque_schemas(READ_JSON, &["stack"]),
-                &[json_discriminator(Some("stack"), "output_kind", "stack")],
-            ),
-            "threads",
-        ),
-    ),
-    entry(
-        &["stack", "ready"],
-        json_discriminators(
-            opaque_schemas(READ_JSON, &["stack ready"]),
-            &[json_discriminator(
-                Some("stack ready"),
-                "output_kind",
-                "stack_ready",
-            )],
-        ),
-    ),
-    entry(
-        &["stack", "snapshot"],
-        json_discriminators(
-            opaque_schemas(READ_JSON, &["stack snapshot"]),
-            &[json_discriminator(
-                Some("stack snapshot"),
-                "output_kind",
-                "stack_snapshot",
-            )],
-        ),
-    ),
-    entry(
         &["presence"],
         category(feature_gated(READ_JSON, "client"), "collab"),
     ),
@@ -2140,35 +1964,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 (76, "upstream protocol error"),
                 (78, "no upstream configured"),
             ],
-        ),
-    ),
-    entry(&["purge"], category(GROUP, "recovery")),
-    entry(
-        &["purge", "apply"],
-        json_discriminators(
-            opaque_schemas(
-                CommandContract {
-                    destructive_requires_force: true,
-                    ..DESTRUCTIVE_DATA_MUTATION
-                },
-                &["purge apply"],
-            ),
-            &[json_discriminator(
-                Some("purge apply"),
-                "output_kind",
-                "purge_apply",
-            )],
-        ),
-    ),
-    entry(
-        &["purge", "list"],
-        json_discriminators(
-            opaque_schemas(READ_JSON, &["purge list"]),
-            &[json_discriminator(
-                Some("purge list"),
-                "output_kind",
-                "purge_list",
-            )],
         ),
     ),
     entry(
@@ -2210,8 +2005,15 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["query"],
         category(
             json_discriminators(
-                documented_schemas(READ_JSON, &["query"]),
-                &[json_discriminator(Some("query"), "output_kind", "query")],
+                documented_schemas(READ_JSON, &["query", "query --attribution"]),
+                &[
+                    json_discriminator(Some("query"), "output_kind", "query"),
+                    json_discriminator(
+                        Some("query --attribution"),
+                        "output_kind",
+                        "query_attribution",
+                    ),
+                ],
             ),
             "states",
         ),
@@ -2274,6 +2076,35 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
+    entry(&["redact", "purge"], GROUP),
+    entry(
+        &["redact", "purge", "apply"],
+        json_discriminators(
+            opaque_schemas(
+                CommandContract {
+                    destructive_requires_force: true,
+                    ..DESTRUCTIVE_DATA_MUTATION
+                },
+                &["redact purge apply"],
+            ),
+            &[json_discriminator(
+                Some("redact purge apply"),
+                "output_kind",
+                "purge_apply",
+            )],
+        ),
+    ),
+    entry(
+        &["redact", "purge", "list"],
+        json_discriminators(
+            opaque_schemas(READ_JSON, &["redact purge list"]),
+            &[json_discriminator(
+                Some("redact purge list"),
+                "output_kind",
+                "purge_list",
+            )],
+        ),
+    ),
     entry(&["redact", "trust"], GROUP),
     entry(
         &["redact", "trust", "add"],
@@ -2306,20 +2137,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 "output_kind",
                 "redact_trust_remove",
             )],
-        ),
-    ),
-    entry(
-        // `redo` is the symmetric inverse of `undo`, a standalone top-level verb
-        // again after the heddle#473 phase-1 re-split. It emits exactly one
-        // output_kind — `redo` — schema-backed by `UndoSchema` (shared payload
-        // shape with `undo`).
-        &["redo"],
-        category(
-            json_discriminators(
-                documented_schemas(WORKTREE_MUTATION, &["redo"]),
-                &[json_discriminator(Some("redo"), "output_kind", "redo")],
-            ),
-            "recovery",
         ),
     ),
     entry(&["remote"], category(surface(GROUP, "native"), "repo")),
@@ -2659,23 +2476,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
         git_adapter_alias(
             json_discriminators(
                 documented_schemas(WORKTREE_MUTATION, &["switch"]),
-                &[
-                    // Thread targets delegate to `thread switch` and emit
-                    // its record; this is the shape the registered
-                    // `switch` schema mirrors.
-                    json_discriminator(Some("switch"), "output_kind", "thread_switch"),
-                    // State targets fall through to the state-checkout
-                    // (`goto`) shape — advertised without a schema verb,
-                    // mirroring the `branch` / hosted-`clone` precedent.
-                    json_discriminator_no_schema(
-                        "switch falls through to the state-checkout (goto) \
-                         shape when the target resolves as a state; the \
-                         registered `switch` schema mirrors only the thread \
-                         path",
-                        "output_kind",
-                        "goto",
-                    ),
-                ],
+                &[json_discriminator(
+                    Some("switch"),
+                    "output_kind",
+                    "thread_switch",
+                )],
             ),
             "thread switch",
         ),
@@ -2841,6 +2646,51 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
+    entry(&["thread", "marker"], GROUP),
+    entry(
+        &["thread", "marker", "list"],
+        json_discriminators(
+            documented_schemas(READ_JSON, &["thread marker list"]),
+            &[json_discriminator(
+                Some("thread marker list"),
+                "output_kind",
+                "thread_marker_list",
+            )],
+        ),
+    ),
+    entry(
+        &["thread", "marker", "create"],
+        json_discriminators(
+            documented_schemas(MUTATING, &["thread marker create"]),
+            &[json_discriminator(
+                Some("thread marker create"),
+                "output_kind",
+                "thread_marker_create",
+            )],
+        ),
+    ),
+    entry(
+        &["thread", "marker", "delete"],
+        json_discriminators(
+            documented_schemas(DESTRUCTIVE_DATA_MUTATION, &["thread marker delete"]),
+            &[json_discriminator(
+                Some("thread marker delete"),
+                "output_kind",
+                "thread_marker_delete",
+            )],
+        ),
+    ),
+    entry(
+        &["thread", "marker", "show"],
+        json_discriminators(
+            documented_schemas(READ_JSON, &["thread marker show"]),
+            &[json_discriminator(
+                Some("thread marker show"),
+                "output_kind",
+                "thread_marker_show",
+            )],
+        ),
+    ),
     entry(&["transaction"], hidden(GROUP)),
     entry(
         &["transaction", "begin"],
@@ -2931,19 +2781,17 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["undo"],
         front_door(
             json_discriminators(
-                // `undo` keeps its own `--list` history view, so this one command
-                // path emits TWO output_kinds: `undo` (the default rewind /
-                // `--preview`) and `undo_list` (`--list`). The former `redo` verb
-                // is its own top-level command again (heddle#473 phase 1 re-split),
-                // so `redo` is advertised on the `redo` entry below, not here.
+                // `undo` keeps its own `--list` history view and owns
+                // redo-mode after the top-level `redo` deletion.
                 // Every kind the handler can emit must be advertised or an agent
-                // validating responses via `heddle commands --output json` rejects
+                // validating responses via `heddle help --output json` rejects
                 // the off-contract record. `undo --list` has its own
                 // `UndoListSchema`.
-                documented_schemas(WORKTREE_MUTATION, &["undo", "undo --list"]),
+                documented_schemas(WORKTREE_MUTATION, &["undo", "undo --list", "undo --redo"]),
                 &[
                     json_discriminator(Some("undo"), "output_kind", "undo"),
                     json_discriminator(Some("undo --list"), "output_kind", "undo_list"),
+                    json_discriminator(Some("undo --redo"), "output_kind", "redo"),
                 ],
             ),
             100,
@@ -2953,24 +2801,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["watch"],
         surface(documented_schemas(READ_JSONL, &["watch"]), "automation"),
     ),
-    entry(
-        &["workspace"],
-        category(
-            documented_schemas(READ_JSON, &["workspace show"]),
-            "threads",
-        ),
-    ),
-    entry(
-        &["workspace", "show"],
-        json_discriminators(
-            documented_schemas(READ_JSON_OR_JSONL, &["workspace show"]),
-            &[json_discriminator(
-                Some("workspace show"),
-                "output_kind",
-                "workspace_summary",
-            )],
-        ),
-    ),
 ];
 
 static ACTIVE_COMMAND_CONTRACT_ENTRIES: OnceLock<Vec<&'static CommandContractEntry>> =
@@ -2978,101 +2808,6 @@ static ACTIVE_COMMAND_CONTRACT_ENTRIES: OnceLock<Vec<&'static CommandContractEnt
 
 const fn entry(path: &'static [&'static str], contract: CommandContract) -> CommandContractEntry {
     CommandContractEntry { path, contract }
-}
-
-pub fn cmd_commands(cli: &Cli, args: &CommandCatalogArgs) -> Result<()> {
-    let mut output = build_command_catalog();
-    apply_command_catalog_filters(&mut output, args);
-    if should_output_json(cli, None) {
-        write_json_stdout(&output)?;
-        return Ok(());
-    }
-
-    let mut rendered = String::new();
-    rendered.push_str(&format!("{}\n", style::bold("Command catalog")));
-    rendered.push_str(
-        "Use `heddle commands --output json` for flags, arguments, side effects, schemas, and canonical command mappings.\n\n",
-    );
-    for title in [
-        "Native loop",
-        "Power surfaces",
-        "Git interop",
-        "Automation and admin",
-    ] {
-        rendered.push_str(&format!("{}:\n", style::bold(title)));
-        let mut section_commands = output
-            .commands
-            .iter()
-            .filter(|command| command_in_text_section(command, title))
-            .collect::<Vec<_>>();
-        section_commands.sort_by_key(|command| (command.help_rank, command.display.as_str()));
-        for command in section_commands {
-            let canonical = command
-                .canonical_action
-                .as_ref()
-                .map_or_else(String::new, canonical_action_text_suffix);
-            rendered.push_str(&format!(
-                "  {:<14}  {}{}\n",
-                command.display, command.summary, canonical
-            ));
-        }
-        rendered.push('\n');
-    }
-    write_stdout(&rendered)?;
-    Ok(())
-}
-
-fn apply_command_catalog_filters(output: &mut CommandCatalogOutput, args: &CommandCatalogArgs) {
-    if args.commands.is_empty() && args.tier.is_empty() && !args.mutating && !args.supports_op_id {
-        return;
-    }
-
-    let command_filters = args
-        .commands
-        .iter()
-        .map(|command| normalize_command_filter(command))
-        .filter(|command| !command.is_empty())
-        .collect::<Vec<_>>();
-    let tier_filters = args
-        .tier
-        .iter()
-        .map(|tier| tier.as_str())
-        .collect::<Vec<_>>();
-
-    output.commands.retain(|command| {
-        (command_filters.is_empty()
-            || command_filters
-                .iter()
-                .any(|filter| command_matches_filter(command, filter)))
-            && (tier_filters.is_empty() || tier_filters.contains(&command.tier.as_str()))
-            && (!args.mutating || command.mutates)
-            && (!args.supports_op_id || command.supports_op_id)
-    });
-}
-
-fn normalize_command_filter(command: &str) -> Vec<String> {
-    command
-        .split_whitespace()
-        .map(|part| part.trim().to_string())
-        .filter(|part| !part.is_empty())
-        .collect()
-}
-
-fn command_matches_filter(command: &CommandCatalogEntry, filter: &[String]) -> bool {
-    command.path == filter || command.path.starts_with(filter)
-}
-
-fn command_in_text_section(command: &CommandCatalogEntry, title: &str) -> bool {
-    if command.path.len() != 1 {
-        return false;
-    }
-    match title {
-        "Native loop" => command.help_visibility == "everyday",
-        "Power surfaces" => command.help_visibility == "advanced" && command.surface == "native",
-        "Git interop" => command.surface == "git_adapter",
-        "Automation and admin" => matches!(command.surface.as_str(), "automation" | "admin"),
-        _ => false,
-    }
 }
 
 pub fn build_command_catalog() -> CommandCatalogOutput {
@@ -3146,10 +2881,44 @@ fn walk_commands(
 ) {
     for subcommand in command.get_subcommands() {
         prefix.push(subcommand.get_name().to_string());
-        out.push(catalog_entry(subcommand, prefix, op_id_option));
-        walk_commands(subcommand, prefix, out, op_id_option);
+        if !removed_phase_1_2_catalog_path(prefix) {
+            out.push(catalog_entry(subcommand, prefix, op_id_option));
+            walk_commands(subcommand, prefix, out, op_id_option);
+        }
         prefix.pop();
     }
+}
+
+fn removed_phase_1_2_catalog_path(path: &[String]) -> bool {
+    path.first()
+        .is_some_and(|root| removed_phase_1_2_root(root.as_str()))
+}
+
+fn removed_phase_1_2_root(root: &str) -> bool {
+    matches!(
+        root,
+        "attempt"
+            | "blame"
+            | "branch"
+            | "conflict"
+            | "delegate"
+            | "fork"
+            | "goto"
+            | "inspect"
+            | "marker"
+            | "purge"
+            | "stack"
+            | "workspace"
+    )
+}
+
+pub fn command_contract_removed_alias_root(root: &str) -> bool {
+    removed_phase_1_2_root(root)
+}
+
+fn removed_phase_1_2_contract_path(path: &[&str]) -> bool {
+    path.first()
+        .is_some_and(|root| removed_phase_1_2_root(root))
 }
 
 fn catalog_entry(
@@ -3430,17 +3199,6 @@ fn action_template_from_owned(
         required_inputs,
         agent_may_fill,
     }
-}
-
-fn canonical_action_text_suffix(action: &CanonicalAction) -> String {
-    let verb = match action.kind.as_str() {
-        "direct_command" => "use",
-        "command_family" => "see",
-        "workflow" => "start with",
-        "conceptual_home" => "see",
-        _ => "see",
-    };
-    format!(" ({verb} `{}`)", action.command)
 }
 
 fn clean_catalog_summary(summary: String) -> String {
@@ -3734,6 +3492,7 @@ pub fn command_json_discriminators() -> Vec<CommandJsonDiscriminator> {
     active_command_contract_entries()
         .iter()
         .copied()
+        .filter(|entry| !removed_phase_1_2_contract_path(entry.path))
         .flat_map(|entry| {
             entry
                 .contract
@@ -3778,18 +3537,19 @@ pub fn command_json_discriminators_for_schema_verb(
         .flat_map(|entry| {
             let include_same_command_siblings = entry.contract.schema_verbs.len() == 1
                 && entry.contract.schema_verbs[0] == schema_verb;
-            entry.contract.json_discriminators.iter().filter_map(
-                move |discriminator| {
+            entry
+                .contract
+                .json_discriminators
+                .iter()
+                .filter_map(move |discriminator| {
                     if discriminator.schema_verb == Some(schema_verb)
-                        || (include_same_command_siblings
-                            && discriminator.schema_verb.is_none())
+                        || (include_same_command_siblings && discriminator.schema_verb.is_none())
                     {
                         Some(json_discriminator_metadata(entry.path, discriminator))
                     } else {
                         None
                     }
-                },
-            )
+                })
         })
         .collect()
 }
@@ -3801,6 +3561,7 @@ fn json_discriminators_for_path<'a>(
     active_command_contract_entries()
         .iter()
         .copied()
+        .filter(|entry| !removed_phase_1_2_contract_path(entry.path))
         .filter(|entry| entry.path == path.as_slice())
         .flat_map(|entry| {
             entry
@@ -4404,6 +4165,9 @@ fn collect_schema_verbs(
 ) -> Vec<&'static str> {
     let mut verbs = Vec::new();
     for entry in active_command_contract_entries().iter().copied() {
+        if removed_phase_1_2_contract_path(entry.path) {
+            continue;
+        }
         for verb in select(entry.contract) {
             if !verbs.contains(verb) {
                 verbs.push(*verb);
@@ -4429,16 +4193,13 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         #[cfg(feature = "git-overlay")]
         Commands::GitOverlay => vec!["git-overlay"],
         Commands::Schemas { .. } => vec!["schemas"],
-        Commands::Commands(_) => vec!["commands"],
         Commands::Start(_) => vec!["start"],
         Commands::Try(_) => vec!["try"],
-        Commands::Attempt(_) => vec!["attempt"],
         Commands::Run(_) => vec!["run"],
         Commands::Sync(_) => vec!["sync"],
         Commands::Continue => vec!["continue"],
         Commands::Abort => vec!["abort"],
         Commands::Land(_) => vec!["land"],
-        Commands::Delegate(_) => vec!["delegate"],
         Commands::Ready(_) => vec!["ready"],
         Commands::Capture(_) => vec!["capture"],
         Commands::Commit(_) => vec!["commit"],
@@ -4446,11 +4207,8 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Log(_) => vec!["log"],
         Commands::Show { .. } => vec!["show"],
         Commands::Retro(_) => vec!["retro"],
-        Commands::Inspect { .. } => vec!["inspect"],
-        Commands::Goto { .. } => vec!["goto"],
         Commands::Clean { .. } => vec!["clean"],
         Commands::Diff(_) => vec!["diff"],
-        Commands::Branch(_) => vec!["branch"],
         Commands::Switch(_) => vec!["switch"],
         Commands::Discuss { command } => match command {
             DiscussCommands::Open(_) => vec!["discuss", "open"],
@@ -4465,10 +4223,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             TransactionCommands::Commit(_) => vec!["transaction", "commit"],
             TransactionCommands::Abort(_) => vec!["transaction", "abort"],
             TransactionCommands::Status(_) => vec!["transaction", "status"],
-        },
-        Commands::Conflict { command } => match command {
-            ConflictCommands::List => vec!["conflict", "list"],
-            ConflictCommands::Show(_) => vec!["conflict", "show"],
         },
         Commands::Review { command } => match command {
             ReviewCommands::Show(_) => vec!["review", "show"],
@@ -4485,10 +4239,10 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 RedactTrustCommands::List(_) => vec!["redact", "trust", "list"],
                 RedactTrustCommands::Remove(_) => vec!["redact", "trust", "remove"],
             },
-        },
-        Commands::Purge { command } => match command {
-            PurgeCommands::Apply(_) => vec!["purge", "apply"],
-            PurgeCommands::List(_) => vec!["purge", "list"],
+            RedactCommands::Purge(command) => match command {
+                PurgeCommands::Apply(_) => vec!["redact", "purge", "apply"],
+                PurgeCommands::List(_) => vec!["redact", "purge", "list"],
+            },
         },
         Commands::Visibility { command } => match command {
             VisibilityCommands::Set(_) => vec!["visibility", "set"],
@@ -4498,15 +4252,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         },
         Commands::Revert(_) => vec!["revert"],
         Commands::Undo(_) => vec!["undo"],
-        Commands::Redo(_) => vec!["redo"],
-        Commands::Fork { .. } => vec!["fork"],
         Commands::Collapse(_) => vec!["collapse"],
-        Commands::Marker { command } => match command {
-            MarkerCommands::List { .. } => vec!["marker", "list"],
-            MarkerCommands::Create { .. } => vec!["marker", "create"],
-            MarkerCommands::Delete { .. } => vec!["marker", "delete"],
-            MarkerCommands::Show { .. } => vec!["marker", "show"],
-        },
         Commands::Thread { command } => match command {
             ThreadCommands::Create { .. } => vec!["thread", "create"],
             ThreadCommands::Current => vec!["thread", "current"],
@@ -4527,21 +4273,22 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             ThreadCommands::RevokeApproval(_) => vec!["thread", "revoke-approval"],
             ThreadCommands::CheckMerge(_) => vec!["thread", "check-merge"],
             ThreadCommands::Cleanup(_) => vec!["thread", "cleanup"],
+            ThreadCommands::Marker { command } => match command {
+                ThreadMarkerCommands::List { .. } => vec!["thread", "marker", "list"],
+                ThreadMarkerCommands::Create { .. } => {
+                    vec!["thread", "marker", "create"]
+                }
+                ThreadMarkerCommands::Delete { .. } => {
+                    vec!["thread", "marker", "delete"]
+                }
+                ThreadMarkerCommands::Show { .. } => vec!["thread", "marker", "show"],
+            },
         },
         Commands::Shell { command } => match command {
             ShellCommands::Init { .. } => vec!["shell", "init"],
             ShellCommands::Completion { .. } => vec!["shell", "completion"],
         },
-        Commands::Workspace { command } => match command {
-            None => vec!["workspace"],
-            Some(WorkspaceCommands::Show(_)) => vec!["workspace", "show"],
-        },
         Commands::Merge(_) => vec!["merge"],
-        Commands::Stack(args) => match &args.command {
-            None => vec!["stack"],
-            Some(StackCommands::Ready { .. }) => vec!["stack", "ready"],
-            Some(StackCommands::Snapshot { .. }) => vec!["stack", "snapshot"],
-        },
         Commands::Resolve(_) => vec!["resolve"],
         Commands::Fsck { .. } => vec!["fsck"],
         Commands::Fetch { .. } => vec!["fetch"],
@@ -4641,7 +4388,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             MaintenanceCommands::Index { .. } => vec!["maintenance", "index"],
             MaintenanceCommands::Monitor { .. } => vec!["maintenance", "monitor"],
         },
-        Commands::Blame { .. } => vec!["blame"],
         Commands::CherryPick { .. } => vec!["cherry-pick"],
         Commands::Clone(_) => vec!["clone"],
         Commands::Rebase { .. } => vec!["rebase"],
@@ -4651,7 +4397,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             HookCommands::Uninstall { .. } => vec!["hook", "uninstall"],
             HookCommands::Events { .. } => vec!["hook", "events"],
         },
-        Commands::HarnessBridge => vec!["harness-bridge"],
         Commands::Actor { command } => match command {
             ActorCommands::Spawn(_) => vec!["actor", "spawn"],
             ActorCommands::List(_) => vec!["actor", "list"],
@@ -4722,9 +4467,6 @@ mod tests {
             &["agent", "release", "--session", "session-1"],
         ),
         sample(&["agent", "list"], &["agent", "list"]),
-        sample(&["attempt"], &["attempt", "1", "true"]),
-        sample(&["blame"], &["blame", "src/lib.rs"]),
-        sample(&["branch"], &["branch"]),
         #[cfg(feature = "git-overlay")]
         sample(
             &["bridge", "backfill-fidelity"],
@@ -4777,9 +4519,6 @@ mod tests {
             &["collapse", "s1", "s2", "--into", "squashed"],
         ),
         sample(&["commit"], &["commit"]),
-        sample(&["commands"], &["commands"]),
-        sample(&["conflict", "list"], &["conflict", "list"]),
-        sample(&["conflict", "show"], &["conflict", "show", "conflict-1"]),
         sample(&["continue"], &["continue"]),
         sample(
             &["context", "set"],
@@ -4806,7 +4545,6 @@ mod tests {
         sample(&["daemon", "serve"], &["daemon", "serve"]),
         sample(&["daemon", "status"], &["daemon", "status"]),
         sample(&["daemon", "stop"], &["daemon", "stop"]),
-        sample(&["delegate"], &["delegate", "task"]),
         sample(&["diff"], &["diff"]),
         sample(
             &["discuss", "open"],
@@ -4826,12 +4564,9 @@ mod tests {
         sample(&["doctor", "docs"], &["doctor", "docs"]),
         sample(&["doctor", "schemas"], &["doctor", "schemas"]),
         sample(&["fetch"], &["fetch"]),
-        sample(&["fork"], &["fork"]),
         sample(&["fsck"], &["fsck"]),
         #[cfg(feature = "git-overlay")]
         sample(&["git-overlay"], &["git-overlay"]),
-        sample(&["goto"], &["goto", "HEAD"]),
-        sample(&["harness-bridge"], &["harness-bridge"]),
         sample(&["help"], &["help"]),
         sample(&["hook", "list"], &["hook", "list"]),
         sample(&["hook", "install"], &["hook", "install", "pre-snapshot"]),
@@ -4841,7 +4576,6 @@ mod tests {
         ),
         sample(&["hook", "events"], &["hook", "events"]),
         sample(&["init"], &["init"]),
-        sample(&["inspect"], &["inspect"]),
         sample(&["integration", "list"], &["integration", "list"]),
         sample(&["integration", "install"], &["integration", "install"]),
         sample(&["integration", "doctor"], &["integration", "doctor"]),
@@ -4857,24 +4591,12 @@ mod tests {
         sample(&["maintenance", "gc"], &["maintenance", "gc"]),
         sample(&["maintenance", "index"], &["maintenance", "index"]),
         sample(&["maintenance", "monitor"], &["maintenance", "monitor"]),
-        sample(&["marker", "list"], &["marker", "list"]),
-        sample(&["marker", "create"], &["marker", "create", "mark-1"]),
-        sample(&["marker", "delete"], &["marker", "delete", "mark-1"]),
-        sample(&["marker", "show"], &["marker", "show", "mark-1"]),
         sample(&["merge"], &["merge", "feature"]),
         sample(&["pull"], &["pull"]),
-        sample(
-            &["purge", "apply"],
-            &["purge", "apply", "HEAD", "--path", "secret.txt", "--force"],
-        ),
-        sample(&["purge", "list"], &["purge", "list"]),
         sample(&["push"], &["push"]),
         sample(&["query"], &["query"]),
         sample(&["ready"], &["ready"]),
         sample(&["rebase"], &["rebase"]),
-        sample(&["stack"], &["stack"]),
-        sample(&["stack", "ready"], &["stack", "ready"]),
-        sample(&["stack", "snapshot"], &["stack", "snapshot"]),
         sample(
             &["redact", "apply"],
             &[
@@ -4889,6 +4611,19 @@ mod tests {
         ),
         sample(&["redact", "list"], &["redact", "list"]),
         sample(&["redact", "show"], &["redact", "show", "redaction-1"]),
+        sample(
+            &["redact", "purge", "apply"],
+            &[
+                "redact",
+                "purge",
+                "apply",
+                "HEAD",
+                "--path",
+                "secret.txt",
+                "--force",
+            ],
+        ),
+        sample(&["redact", "purge", "list"], &["redact", "purge", "list"]),
         sample(
             &["redact", "trust", "add"],
             &[
@@ -4906,7 +4641,6 @@ mod tests {
             &["redact", "trust", "remove"],
             &["redact", "trust", "remove", "abcd"],
         ),
-        sample(&["redo"], &["redo"]),
         sample(&["remote", "list"], &["remote", "list"]),
         sample(
             &["remote", "add"],
@@ -5025,6 +4759,19 @@ mod tests {
             &["thread", "check-merge", "source", "target"],
         ),
         sample(&["thread", "cleanup"], &["thread", "cleanup", "--merged"]),
+        sample(&["thread", "marker", "list"], &["thread", "marker", "list"]),
+        sample(
+            &["thread", "marker", "create"],
+            &["thread", "marker", "create", "checkpoint"],
+        ),
+        sample(
+            &["thread", "marker", "delete"],
+            &["thread", "marker", "delete", "checkpoint"],
+        ),
+        sample(
+            &["thread", "marker", "show"],
+            &["thread", "marker", "show", "checkpoint"],
+        ),
         sample(&["transaction", "begin"], &["transaction", "begin"]),
         sample(
             &["transaction", "commit"],
@@ -5049,8 +4796,6 @@ mod tests {
         sample(&["try"], &["try", "true"]),
         sample(&["undo"], &["undo"]),
         sample(&["watch"], &["watch"]),
-        sample(&["workspace"], &["workspace"]),
-        sample(&["workspace", "show"], &["workspace", "show"]),
     ];
 
     const fn sample(
@@ -5398,6 +5143,10 @@ mod tests {
 
         let missing_contracts = clap_paths
             .difference(&active_contract_paths)
+            .filter(|path| {
+                let parts = path.iter().map(String::as_str).collect::<Vec<_>>();
+                !removed_phase_1_2_contract_path(&parts)
+            })
             .map(|path| path.join(" "))
             .collect::<Vec<_>>();
         assert!(
@@ -5518,7 +5267,7 @@ mod tests {
             "every JSON-output command must either project json-compact or reject it before execution"
         );
         assert!(
-            compact_rejections.contains("commands"),
+            compact_rejections.contains("query"),
             "the harness must include commands that accept --output json but reject json-compact"
         );
 
@@ -5796,7 +5545,6 @@ mod tests {
             ("rebase", "jsonl"),
             ("status", "json_or_jsonl"),
             ("thread show", "json_or_jsonl"),
-            ("workspace show", "json_or_jsonl"),
         ] {
             let entry = catalog
                 .commands
@@ -5817,8 +5565,8 @@ mod tests {
         // revert, purge, redact, stash, clean, discuss, context, review,
         // cherry-pick, bisect); heddle#641 swept the remaining verbs whose
         // runtime JSON already emits `output_kind` (abort, adopt, the agent
-        // session verbs, blame, branch, bridge git push/pull, conflict show,
-        // continue, daemon stop, doctor, fetch, inspect, land, log,
+        // session verbs, bridge git push/pull, continue, daemon stop,
+        // doctor, fetch, land, log,
         // maintenance gc/index, merge --preview, pull, push, query, ready,
         // the remote family, start, switch, sync, and the thread lifecycle
         // verbs). Any further sweep MUST extend this list and document the
@@ -5848,11 +5596,6 @@ mod tests {
                 "agent stop",
                 "agent capture",
                 "agent ready",
-                "blame",
-                "branch",
-                "branch",
-                "branch",
-                "branch",
                 "bridge git status",
                 "bridge git import",
                 "bridge git sync",
@@ -5867,8 +5610,6 @@ mod tests {
                 "clone",
                 "clone",
                 "commit",
-                "commands",
-                "conflict show",
                 "continue",
                 "context set",
                 "context get",
@@ -5891,11 +5632,8 @@ mod tests {
                 "doctor docs",
                 "doctor schemas",
                 "fetch",
-                "fork",
-                "goto",
+                "help",
                 "init",
-                "inspect",
-                "inspect",
                 // `log` appears twice: the entry advertises both `log` and the
                 // `log --reflog` variant (`log_reflog`), mirroring `undo`/`clone`.
                 "log",
@@ -5903,23 +5641,20 @@ mod tests {
                 "maintenance gc",
                 "maintenance index",
                 "merge",
-                "stack",
-                "stack ready",
-                "stack snapshot",
                 "pull",
-                "purge apply",
-                "purge list",
                 "push",
+                "query",
                 "query",
                 "ready",
                 "rebase",
                 "redact apply",
                 "redact list",
                 "redact show",
+                "redact purge apply",
+                "redact purge list",
                 "redact trust add",
                 "redact trust list",
                 "redact trust remove",
-                "redo",
                 "remote list",
                 "remote add",
                 "remote remove",
@@ -5938,7 +5673,6 @@ mod tests {
                 "stash show",
                 "status",
                 "switch",
-                "switch",
                 "sync",
                 "thread create",
                 "thread switch",
@@ -5951,6 +5685,10 @@ mod tests {
                 "thread drop",
                 "thread revoke-approval",
                 "thread cleanup",
+                "thread marker list",
+                "thread marker create",
+                "thread marker delete",
+                "thread marker show",
                 "verify",
                 "visibility set",
                 "visibility promote",
@@ -5958,7 +5696,7 @@ mod tests {
                 "visibility list",
                 "undo",
                 "undo",
-                "workspace show",
+                "undo",
             ]
         );
     }
@@ -6097,9 +5835,9 @@ mod tests {
             mismatched.join("\n  - ")
         );
         assert!(
-            checked >= 100,
+            checked >= 90,
             "expected the conformance sweep to inspect the full discriminator \
-             surface (~107 schema verbs declare `output_kind`); only {checked} \
+             surface (~95 schema verbs declare `output_kind` after #473 phases 1-2); only {checked} \
              were checked — the schema injection or verb collection likely regressed"
         );
     }
@@ -6377,7 +6115,6 @@ mod tests {
             assert_eq!(command_canonical_command(display), canonical);
         }
         for (display, canonical, kind) in [
-            ("branch", "thread", "command_family"),
             ("stash pop", "undo", "conceptual_home"),
             ("fetch", "pull", "workflow"),
         ] {
@@ -6436,7 +6173,7 @@ mod tests {
     fn parsed_command_json_support_reads_contract_table() {
         for (argv, expected) in [
             (vec!["heddle", "status"], true),
-            (vec!["heddle", "commands"], true),
+            (vec!["heddle", "help"], true),
             (vec!["heddle", "shell", "completion", "bash"], false),
             (vec!["heddle", "thread", "cd", "feature"], false),
         ] {
