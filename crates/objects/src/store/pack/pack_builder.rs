@@ -4,14 +4,14 @@
 use std::collections::{HashMap, VecDeque};
 
 use super::{
-    ObjectType, PackObjectId, PackObjectRecord, PackStats, append_container_checksum,
-    compress_pack_payload, encode_tagged_entry, pack_container_spec, pack_index::PackIndex,
-    write_container_header,
+    append_container_checksum, compress_pack_payload, encode_tagged_entry,
+    encode_tagged_entry_parts, pack_container_spec, pack_index::PackIndex, write_container_header,
+    ObjectType, PackObjectId, PackObjectRecord, PackStats,
 };
 use crate::{
     delta::DeltaEncoder,
     object::ContentHash,
-    store::{Result, compression::CompressionConfig},
+    store::{compression::CompressionConfig, Result},
 };
 
 const MIN_DELTA_SIZE: usize = 64;
@@ -278,14 +278,14 @@ impl PackBuilder {
 
             *total_compressed += final_data.len() as u64;
 
-            let record = PackObjectRecord {
-                id: PackObjectId::Hash(hash),
-                obj_type,
-                data: data.clone(),
-                delta_base: base_hash.map(PackObjectId::Hash),
-                path_hint: None,
-            };
-            Self::write_entry(pack_data, &record, entry_type, &final_data)?;
+            Self::write_entry_parts(
+                pack_data,
+                PackObjectId::Hash(hash),
+                entry_type,
+                data.len(),
+                base_hash.map(PackObjectId::Hash),
+                &final_data,
+            )?;
 
             // Add to window (build index once, reuse for all future comparisons)
             let entry_index = DeltaEncoder::build_index(&data);
@@ -330,5 +330,23 @@ impl PackBuilder {
         compressed: &[u8],
     ) -> Result<()> {
         encode_tagged_entry(pack, record, obj_type, compressed)
+    }
+
+    fn write_entry_parts(
+        pack: &mut Vec<u8>,
+        id: PackObjectId,
+        obj_type: ObjectType,
+        uncompressed_size: usize,
+        delta_base: Option<PackObjectId>,
+        compressed: &[u8],
+    ) -> Result<()> {
+        encode_tagged_entry_parts(
+            pack,
+            id,
+            obj_type,
+            uncompressed_size,
+            delta_base,
+            compressed,
+        )
     }
 }

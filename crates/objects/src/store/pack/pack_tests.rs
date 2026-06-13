@@ -3,11 +3,11 @@
 
 use tempfile::TempDir;
 
-use super::{ObjectType, PackBuilder, PackObjectId, PackReader, pack_index::PackIndex};
+use super::{pack_index::PackIndex, ObjectType, PackBuilder, PackObjectId, PackReader};
 use crate::{
     delta::MAX_DELTA_OUTPUT_SIZE,
     object::{ChangeId, ContentHash},
-    store::{StoreError, compression::CompressionConfig, pack::pack_container_spec},
+    store::{compression::CompressionConfig, pack::pack_container_spec, StoreError},
 };
 
 fn create_test_hash(n: u8) -> ContentHash {
@@ -512,7 +512,7 @@ fn test_pack_reader_missing_object_returns_none() {
 /// with the expected diagnostic phrase.
 #[test]
 fn stale_index_swapped_offsets_surfaces_as_invalid_object() {
-    use crate::store::{StoreError, pack::pack_index::PackIndex};
+    use crate::store::{pack::pack_index::PackIndex, StoreError};
 
     let blob_a = b"alpha-payload alpha-payload alpha-payload alpha".to_vec();
     let blob_b = b"bravo-payload bravo-payload bravo-payload bravo".to_vec();
@@ -658,6 +658,39 @@ fn test_delta_chain_produces_deltas() {
         stats.delta_count >= 1,
         "expected deltas, got {}",
         stats.delta_count
+    );
+}
+
+#[test]
+fn test_delta_window_pack_bytes_are_stable() {
+    let shared = b"Stable pack bytes fixture. ".repeat(16);
+    let mut builder = PackBuilder::new(CompressionConfig {
+        enabled: false,
+        level: 0,
+        min_size: usize::MAX,
+        max_delta_size: 10_000_000,
+    });
+
+    for i in 0..4u8 {
+        let mut data = shared.clone();
+        data.extend_from_slice(format!("version {i} suffix").as_bytes());
+        builder.add_with_path(
+            ContentHash::compute(&data),
+            ObjectType::Blob,
+            data,
+            Some("src/stable.rs".to_string()),
+        );
+    }
+
+    let (pack_data, index_data, stats) = builder.build().unwrap();
+    assert!(stats.delta_count > 0);
+    assert_eq!(
+        blake3::hash(&pack_data).to_string(),
+        "4dc15365d17fbdf22ee4c1a8a44ee3414dda6dbdcb93c583536a4629c575e8ca"
+    );
+    assert_eq!(
+        blake3::hash(&index_data).to_string(),
+        "60f164bdc2dbb696c68f1c07a0b84e18f678fe915d7d446e43b1966f365b74f9"
     );
 }
 
