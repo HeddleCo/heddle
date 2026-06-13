@@ -2959,8 +2959,9 @@ impl<S: ObjectStore> MountInner<S> {
     /// the per-NodeId lifecycle: decrement the open count carried on
     /// `state[node]`; on the final close of an Orphan, drop bytes
     /// and remove the state entry; on the final close of a Live
-    /// (or untracked) node, promote any hot buffer to warm via
-    /// `flush_node`.
+    /// node, promote any hot buffer to warm via `flush_node`. A
+    /// release for an untracked but real node is a safe no-op; a
+    /// release for an unknown NodeId is rejected with `NotFound`.
     ///
     /// The orphan branch never warm-promotes — an orphan's bytes are
     /// unreachable by path post-T1/T3, so promoting them would leak
@@ -2974,19 +2975,29 @@ impl<S: ObjectStore> MountInner<S> {
             /// is a no-op for Orphan, so the mid-life Orphan case is
             /// also safe to forward.)
             Flush,
-            /// Final close of an Orphan. Bytes were dropped under the
-            /// lock; nothing else to do (no warm promotion — see the
-            /// doc comment above).
-            OrphanFinalDone,
+            /// Final close of an Orphan. Dirty hot bytes must still
+            /// cross the durability boundary before the anonymous
+            /// inode is retired, but they must not be warm-promoted
+            /// into the path-indexed pending tree.
+            OrphanFinal { hot: Option<(PathBuf, Vec<u8>)> },
+            /// No lifecycle state and no hot buffer. We validate
+            /// outside the pending lock so double-release of a real
+            /// inode is a no-op, while a bogus NodeId is rejected.
+            MaybeUntrackedNoop,
         }
         let outcome = {
             let mut pending = self.pending.lock().expect("pending lock");
             match pending.state.get(&node.0).copied() {
                 None => {
                     // Untracked release (no on_open was ever
-                    // recorded). Treat as Live final-close — flush
-                    // any hot buffer.
-                    Outcome::Flush
+                    // recorded). Treat a tracked hot buffer as Live
+                    // final-close; otherwise validate the NodeId
+                    // outside this lock.
+                    if pending.hot.contains_key(&node.0) {
+                        Outcome::Flush
+                    } else {
+                        Outcome::MaybeUntrackedNoop
+                    }
                 }
                 Some(NodeState::Live { open_count }) => {
                     let n = open_count.saturating_sub(1);
@@ -3003,12 +3014,14 @@ impl<S: ObjectStore> MountInner<S> {
                     let n = open_count.saturating_sub(1);
                     if n == 0 {
                         // Final release of an Orphan — POSIX "inode
-                        // lives until last close" ends here. Drop
-                        // bytes and the state entry.
-                        pending.state.remove(&node.0);
-                        pending.hot.remove(&node.0);
-                        pending.warm.remove(&node.0);
-                        Outcome::OrphanFinalDone
+                        // lives until last close" ends here. Snapshot
+                        // hot bytes so they can be persisted outside
+                        // the lock before retiring the anonymous state.
+                        let hot = pending
+                            .hot
+                            .get(&node.0)
+                            .map(|buf| (buf.path.clone(), buf.bytes.clone()));
+                        Outcome::OrphanFinal { hot }
                     } else {
                         pending
                             .state
@@ -3022,7 +3035,35 @@ impl<S: ObjectStore> MountInner<S> {
         };
         match outcome {
             Outcome::Flush => self.flush_node(node),
-            Outcome::OrphanFinalDone => Ok(()),
+            Outcome::MaybeUntrackedNoop => {
+                if !self
+                    .inodes
+                    .lock()
+                    .expect("inode lock")
+                    .by_id
+                    .contains_key(&node.0)
+                {
+                    return Err(MountError::NotFound(format!("node {}", node.0)));
+                }
+                Ok(())
+            }
+            Outcome::OrphanFinal { hot } => {
+                if let Some((path, bytes)) = hot {
+                    let size = bytes.len() as u64;
+                    let blob = Blob::new(bytes);
+                    let blob_oid = self
+                        .repo
+                        .store()
+                        .put_blob(&blob)
+                        .map_err(MountError::Store)?;
+                    debug!(?path, %blob_oid, size, "persisted orphan hot buffer to CAS");
+                }
+                let mut pending = self.pending.lock().expect("pending lock");
+                pending.state.remove(&node.0);
+                pending.hot.remove(&node.0);
+                pending.warm.remove(&node.0);
+                Ok(())
+            }
         }
     }
 }
