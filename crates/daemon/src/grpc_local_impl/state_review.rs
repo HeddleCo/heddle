@@ -1004,7 +1004,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(principal_env)]
+    #[serial_test::serial(process_global)]
     async fn sign_state_persists_to_review_signatures_blob() {
         let (svc, repo, _tmp) = fresh_service();
         let state_id = capture_state(&repo);
@@ -1037,7 +1037,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(principal_env)]
+    #[serial_test::serial(process_global)]
     async fn sign_state_idempotent() {
         let (svc, repo, _tmp) = fresh_service();
         let state_id = capture_state(&repo);
@@ -1075,7 +1075,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(principal_env)]
+    #[serial_test::serial(process_global)]
     async fn sign_state_rejects_forged_signature() {
         let (svc, repo, _tmp) = fresh_service();
         let state_id = capture_state(&repo);
@@ -1097,7 +1097,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(principal_env)]
+    #[serial_test::serial(process_global)]
     async fn sign_state_rejects_skewed_timestamp() {
         let (svc, repo, _tmp) = fresh_service();
         let state_id = capture_state(&repo);
@@ -1116,7 +1116,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(principal_env)]
+    #[serial_test::serial(process_global)]
     async fn sign_state_attributes_to_caller_not_state_author() {
         // Regression for the codex-flagged bug: sign_state used to
         // attribute the signature to the state's author. Bob signing
@@ -1164,7 +1164,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(principal_env)]
+    #[serial_test::serial(process_global)]
     async fn sign_state_serializes_concurrent_appends() {
         // Regression for the codex-flagged race: two SignStates with
         // different operation ids could both read the same base
@@ -1213,7 +1213,7 @@ mod tests {
     /// both states report a non-empty diff summary plus a populated
     /// `diff_summary` signal anchored on the changed file.
     #[tokio::test]
-    #[serial_test::serial(principal_env)]
+    #[serial_test::serial(process_global)]
     async fn get_review_payload_populates_diff_summary_and_signals() {
         let (svc, repo, _tmp) = fresh_service();
 
@@ -1330,7 +1330,7 @@ mod tests {
     /// branches and the top-level diff_trees call did not — surfaces
     /// of pruned object stores all errored out inconsistently.)
     #[tokio::test]
-    #[serial_test::serial(principal_env)]
+    #[serial_test::serial(process_global)]
     async fn get_review_payload_tolerates_missing_tree() {
         let (svc, repo, _tmp) = fresh_service();
         let state_id = capture_state(&repo);

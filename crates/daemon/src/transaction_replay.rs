@@ -394,6 +394,7 @@ buffered_ops = {buffered}
     }
 
     #[test]
+    #[serial_test::serial(process_global)]
     fn empty_directory_is_a_no_op() {
         let (_t, repo) = fresh_repo();
         let report = replay_active_transactions(&repo);
@@ -401,6 +402,7 @@ buffered_ops = {buffered}
     }
 
     #[test]
+    #[serial_test::serial(process_global)]
     fn aborts_active_sentinel_from_prior_run() {
         let (_t, repo) = fresh_repo();
         let dir = sentinel_dir(&repo);
@@ -437,6 +439,7 @@ buffered_ops = {buffered}
     }
 
     #[test]
+    #[serial_test::serial(process_global)]
     fn leaves_terminal_sentinels_alone() {
         let (_t, repo) = fresh_repo();
         let dir = sentinel_dir(&repo);
@@ -454,6 +457,7 @@ buffered_ops = {buffered}
     }
 
     #[test]
+    #[serial_test::serial(process_global)]
     fn removes_orphan_temp_files() {
         let (_t, repo) = fresh_repo();
         let dir = sentinel_dir(&repo);
@@ -470,6 +474,7 @@ buffered_ops = {buffered}
     }
 
     #[test]
+    #[serial_test::serial(process_global)]
     fn is_idempotent() {
         let (_t, repo) = fresh_repo();
         let dir = sentinel_dir(&repo);
@@ -488,6 +493,7 @@ buffered_ops = {buffered}
     }
 
     #[test]
+    #[serial_test::serial(process_global)]
     fn scan_error_set_when_sentinel_dir_is_not_a_directory() {
         // read_dir on a non-directory path returns a non-NotFound
         // error. Replay must surface it on the report rather than
@@ -510,6 +516,7 @@ buffered_ops = {buffered}
 
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial(process_global)]
     fn failed_sentinel_write_surfaced_on_readonly_dir() {
         // Read-only sentinel directory: the sentinel parses fine but
         // write_file_atomic cannot create its tmp file. Replay must
@@ -562,6 +569,7 @@ buffered_ops = {buffered}
 
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial(process_global)]
     fn failed_orphan_delete_surfaced_on_readonly_dir() {
         // Read-only sentinel directory: the orphan tmp file is
         // present and matches `is_orphan_temp_name`, but
@@ -616,6 +624,7 @@ buffered_ops = {buffered}
     }
 
     #[test]
+    #[serial_test::serial(process_global)]
     fn leaves_unparseable_sentinels_in_place() {
         let (_t, repo) = fresh_repo();
         let dir = sentinel_dir(&repo);
@@ -689,6 +698,7 @@ buffered_ops = {buffered}
         /// any partial state collapses into one of the four cases
         /// modelled above.
         #[test]
+        #[serial_test::serial(process_global)]
         fn crash_matrix_replay_reaches_consistent_terminal_state(
             crash in arb_crash_kind(),
             ops in arb_ops(),

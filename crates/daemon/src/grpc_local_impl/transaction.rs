@@ -464,6 +464,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn begin_creates_active_sentinel() {
         let (_tmp, svc) = build_service();
         let resp = svc
@@ -487,6 +488,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn commit_flips_state_to_committed() {
         let (_tmp, svc) = build_service();
         let begin = svc
@@ -519,6 +521,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn abort_records_reason() {
         let (_tmp, svc) = build_service();
         let begin = svc
@@ -549,6 +552,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn commit_after_abort_returns_failed_precondition() {
         let (_tmp, svc) = build_service();
         let begin = svc
@@ -577,6 +581,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn get_status_returns_current_state() {
         let (_tmp, svc) = build_service();
         let begin = svc
@@ -599,6 +604,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn commit_clears_buffered_ops_and_records_oplog_entry() {
         let (_tmp, svc) = build_service();
         let begin = svc
@@ -666,6 +672,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn abort_records_oplog_entry_with_reason() {
         let (_tmp, svc) = build_service();
         let begin = svc
@@ -710,6 +717,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn begin_idempotent_returns_same_transaction_id() {
         let (_tmp, svc) = build_service();
         let client_op = OperationId::new().to_string();
@@ -732,6 +740,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(process_global)]
     fn sentinel_path_is_derived_from_operation_id() {
         let (_tmp, svc) = build_service();
         let transaction_id = OperationId::new();
@@ -754,6 +763,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn invalid_transaction_ids_are_rejected_before_sentinel_path_io() {
         let (tmp, svc) = build_service();
         let absolute = tmp.path().join("outside-absolute").display().to_string();

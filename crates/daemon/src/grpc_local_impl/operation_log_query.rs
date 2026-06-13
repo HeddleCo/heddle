@@ -328,6 +328,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn query_returns_records_within_window() {
         let (_t, svc) = fresh_service();
         write_op(
@@ -359,6 +360,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn query_excludes_checkpoints_by_default_when_verbs_unset() {
         let (_t, svc) = fresh_service();
         write_op(
@@ -384,6 +386,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn default_query_includes_newer_non_checkpoint_verbs() {
         // Non-vacuous for cid 3330304663: `transaction_commit` was missing from
         // the old hand-maintained default list, so it was silently dropped from
@@ -417,6 +420,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn query_reads_live_oplog_when_index_is_empty() {
         let (_t, svc) = fresh_service();
         let state = ChangeId::from_bytes([2; 16]);
@@ -446,6 +450,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn stream_operations_yields_all_hits() {
         let (_t, svc) = fresh_service();
         for i in 0..5u64 {

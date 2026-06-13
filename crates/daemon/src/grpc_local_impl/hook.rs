@@ -371,6 +371,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn register_then_list_returns_hook() {
         let (_t, svc) = fresh_service();
         svc.register_hook(Request::new(RegisterHookRequest {
@@ -396,6 +397,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn register_unknown_event_is_invalid_argument() {
         let (_t, svc) = fresh_service();
         let err = svc
@@ -413,6 +415,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn deregister_removes_hook() {
         let (_t, svc) = fresh_service();
         svc.register_hook(Request::new(RegisterHookRequest {
@@ -444,6 +447,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn get_hook_event_schema_returns_full_catalog() {
         let (_t, svc) = fresh_service();
         let resp = svc
@@ -458,6 +462,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn get_hook_event_schema_unknown_returns_not_found() {
         let (_t, svc) = fresh_service();
         let err = svc
@@ -470,6 +475,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn subscribe_then_emit_round_trips() {
         let (_t, svc) = fresh_service();
         let stream = svc
@@ -494,6 +500,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn subscribe_unknown_event_is_invalid_argument() {
         let (_t, svc) = fresh_service();
         let result = svc
@@ -511,6 +518,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn respond_to_hook_delivers_to_emit_waiter() {
         use std::time::Duration;
         let (_t, svc) = fresh_service();
@@ -543,6 +551,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn respond_to_hook_rejects_empty_id() {
         let (_t, svc) = fresh_service();
         let err = svc
@@ -559,6 +568,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn respond_to_hook_unknown_id_returns_not_accepted() {
         let (_t, svc) = fresh_service();
         let resp = svc
@@ -575,6 +585,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn register_idempotent_returns_same_hook() {
         let (_t, svc) = fresh_service();
         let op_id = objects::object::OperationId::new().to_string();

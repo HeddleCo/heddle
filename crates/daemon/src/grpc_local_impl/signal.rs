@@ -258,6 +258,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn compute_state_signals_returns_persisted_signals() {
         let (_t, repo) = fresh_repo();
         let signal = sample_signal(RiskSignalKind::Novelty, "novel control flow shape");
@@ -279,6 +280,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn compute_state_signals_returns_empty_when_state_has_no_signals() {
         let (_t, repo) = fresh_repo();
         let attribution = Attribution::human(Principal::new("Alice", "alice@example.com"));
@@ -298,6 +300,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn invalid_state_id_returns_invalid_argument() {
         let (_t, repo) = fresh_repo();
         let svc = local_service(repo);
@@ -313,6 +316,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(process_global)]
     async fn signal_health_groups_by_module_id() {
         let (_t, repo) = fresh_repo();
         let novelty = sample_signal(RiskSignalKind::Novelty, "novel");
