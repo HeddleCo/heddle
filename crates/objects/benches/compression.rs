@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! zstd compression/decompression throughput benchmarks.
 //!
-//! Run: `cargo bench -p heddle-objects --features zstd --bench compression`
+//! Run: `cargo bench -p heddle-objects --features bench,zstd --bench compression`
 
 use std::hint::black_box;
 
