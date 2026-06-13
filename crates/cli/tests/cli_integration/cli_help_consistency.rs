@@ -29,6 +29,7 @@ fn help_render_matches_spawned_binary() {
         // Curated topic page + `heddle help <verb>` clap fall-through.
         vec!["help"],
         vec!["help", "advanced"],
+        vec!["help", "git-concepts"],
         vec!["help", "threads"],
         vec!["help", "git-overlay"],
         vec!["help", "status"],
@@ -296,5 +297,63 @@ fn commit_help_explains_intent_alias() {
     assert!(
         help.contains("--intent") && help.contains("WHY"),
         "commit help should explain the deliberate --intent alias: {help}"
+    );
+}
+
+/// heddle#649. Git veterans need one explicit translation page instead of
+/// inferring Heddle's nouns from scattered command help.
+#[test]
+fn git_concepts_topic_maps_git_veteran_terms() {
+    let help = heddle_help(&["help", "git-concepts"]);
+
+    assert!(
+        help.contains("| Git concept | Heddle concept + semantic difference |"),
+        "git-concepts topic should be a two-column concept table: {help}"
+    );
+    for row in [
+        "`git commit`",
+        "Git commit SHA",
+        "`git branch foo`",
+        "`git checkout foo` / `git switch foo`",
+        "`git tag v1.0`",
+        "`git remote add origin <url>`",
+        "`git push` / `git pull`",
+        "`git fetch`",
+        "`git rebase` to catch up",
+    ] {
+        assert!(
+            help.contains(row),
+            "git-concepts topic missing row `{row}`: {help}"
+        );
+    }
+    for heddle in [
+        "heddle commit -m",
+        "heddle start foo",
+        "heddle thread create foo",
+        "heddle thread marker create v1.0",
+        "heddle remote add origin <url>",
+        "heddle push",
+        "heddle pull",
+        "heddle fetch",
+        "heddle sync",
+    ] {
+        assert!(
+            help.contains(heddle),
+            "git-concepts topic missing Heddle mapping `{heddle}`: {help}"
+        );
+    }
+    assert!(
+        help.contains("Reconciliation examples:")
+            && help.contains("heddle start feature/auth --path ../feature-auth")
+            && help.contains("heddle thread marker create v1.0")
+            && help.contains("heddle fetch origin")
+            && help.contains("heddle sync"),
+        "git-concepts topic should include practical reconciliation examples: {help}"
+    );
+
+    let top = heddle_help(&["help"]);
+    assert!(
+        top.contains("heddle help git-concepts"),
+        "main help should link the git concept map from Start here: {top}"
     );
 }

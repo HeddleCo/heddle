@@ -354,5 +354,6 @@ fn render_adopt(output: &AdoptOutput, json: bool) -> Result<()> {
     if !output.trust.recommended_action.is_empty() {
         print_next(&output.trust.recommended_action);
     }
+    println!("New to Heddle from Git? Run `heddle help git-concepts`.");
     Ok(())
 }
