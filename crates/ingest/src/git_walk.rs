@@ -605,9 +605,10 @@ impl GitSource {
         let mut entries: HashMap<String, CommitEntry> = HashMap::new();
 
         while let Some(sha) = queue.pop_front() {
-            if !seen.insert(sha.clone()) {
+            if seen.contains(&sha) {
                 continue;
             }
+            seen.insert(sha.clone());
             let entry = self.read_commit(&sha)?;
             for p in &entry.parents {
                 if !seen.contains(p) {
@@ -623,35 +624,32 @@ impl GitSource {
         // set (so roots have in-degree 0). We only count edges that land
         // inside the collected set; parents outside the set (e.g. from
         // shallow clones) don't gate the commit.
-        let mut indeg: HashMap<String, usize> = HashMap::new();
-        for sha in entries.keys() {
-            indeg.insert(sha.clone(), 0);
-        }
-        for (_sha, entry) in entries.iter() {
+        let mut indeg: HashMap<&str, usize> = entries.keys().map(|sha| (sha.as_str(), 0)).collect();
+        for (sha, entry) in entries.iter() {
             for p in &entry.parents {
                 if entries.contains_key(p) {
-                    *indeg.entry(entry.sha.clone()).or_insert(0) += 1;
+                    *indeg.get_mut(sha.as_str()).expect("indeg for commit") += 1;
                 }
             }
         }
 
         // Collect all zero-indegree roots into a sorted frontier so output
         // order is deterministic run-to-run.
-        let mut frontier: Vec<String> = indeg
+        let mut frontier: Vec<&str> = indeg
             .iter()
             .filter(|(_, d)| **d == 0)
-            .map(|(s, _)| s.clone())
+            .map(|(s, _)| *s)
             .collect();
         sort_by_time_then_sha(&mut frontier, &entries);
 
         let total_entries = entries.len();
-        let mut out = Vec::with_capacity(total_entries);
+        let mut ordered = Vec::with_capacity(total_entries);
         // children[p] = list of commits that have p as a parent.
-        let mut children: HashMap<String, Vec<String>> = HashMap::new();
+        let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
         for (sha, entry) in entries.iter() {
             for p in &entry.parents {
                 if entries.contains_key(p) {
-                    children.entry(p.clone()).or_default().push(sha.clone());
+                    children.entry(p.as_str()).or_default().push(sha.as_str());
                 }
             }
         }
@@ -662,11 +660,10 @@ impl GitSource {
             // To keep that invariant sane and documented, we instead re-sort
             // after each drain — the frontier is small enough that this is
             // cheap.
-            let entry = entries.remove(&sha).expect("sha present in entries");
-            out.push(entry);
-            if let Some(kids) = children.remove(&sha) {
+            ordered.push(sha.to_string());
+            if let Some(kids) = children.remove(sha) {
                 for k in kids {
-                    let d = indeg.get_mut(&k).expect("indeg for child");
+                    let d = indeg.get_mut(k).expect("indeg for child");
                     *d = d.saturating_sub(1);
                     if *d == 0 {
                         frontier.push(k);
@@ -676,12 +673,17 @@ impl GitSource {
             }
         }
 
-        if out.len() != total_entries {
+        if ordered.len() != total_entries {
             return Err(IngestError::Other(format!(
                 "topo sort dropped commits: {} in graph, {} emitted — cycle?",
                 total_entries,
-                out.len()
+                ordered.len()
             )));
+        }
+
+        let mut out = Vec::with_capacity(total_entries);
+        for sha in ordered {
+            out.push(entries.remove(&sha).expect("sha present in entries"));
         }
 
         Ok(out)
@@ -743,14 +745,14 @@ fn bstr_hex_or_none(bytes: &gix::bstr::BStr) -> Option<String> {
     Some(s.to_string())
 }
 
-fn sort_by_time_then_sha(frontier: &mut [String], entries: &HashMap<String, CommitEntry>) {
+fn sort_by_time_then_sha(frontier: &mut [&str], entries: &HashMap<String, CommitEntry>) {
     // Sort so that pop() yields oldest-first (smallest time, ties → sha).
     //
     // pop() pulls from the end, so we want the oldest at the end: descending
     // sort, with oldest commits at the tail.
     frontier.sort_by(|a, b| {
-        let ea = entries.get(a).expect("a in entries");
-        let eb = entries.get(b).expect("b in entries");
+        let ea = entries.get(*a).expect("a in entries");
+        let eb = entries.get(*b).expect("b in entries");
         // Newest first, so oldest ends up at the tail (where pop takes from).
         eb.committed_at.cmp(&ea.committed_at).then_with(|| b.cmp(a))
     });
