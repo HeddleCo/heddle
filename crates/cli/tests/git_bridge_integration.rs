@@ -17,7 +17,7 @@ use std::{
 use base64::Engine;
 use gix::refs::transaction::PreviousValue;
 use objects::object::{
-    Blob, ChangeId, EntryType, FileMode, MarkerName, ThreadName, Tree, TreeEntry,
+    Blob, ChangeId, ContentHash, EntryType, FileMode, MarkerName, ThreadName, Tree, TreeEntry,
 };
 use repo::Repository;
 use tempfile::TempDir;
@@ -1598,6 +1598,54 @@ fn import_rejects_branch_name_that_is_not_a_valid_thread_id() {
 }
 
 #[test]
+fn failed_import_restores_mapping_and_overrides() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_git_temp, git_repo) = init_git_repo();
+
+    let tree_oid = empty_tree_oid(&git_repo);
+    let base = commit_with_tree(&git_repo, Some("refs/heads/main"), tree_oid, "base", &[]);
+    commit_with_tree(
+        &git_repo,
+        Some("refs/heads/evil;rm"),
+        tree_oid,
+        "evil",
+        &[base],
+    );
+
+    let mut bridge = GitBridge::new(&repo);
+    test_support::set_commit_message_override(
+        &mut bridge,
+        ChangeId::from_bytes([3; 16]),
+        "pre-call override".to_string(),
+    );
+    let pre_mapping = test_support::mapping(&bridge).clone();
+    let pre_overrides = test_support::commit_message_overrides(&bridge).clone();
+
+    import_all(&mut bridge, Some(git_repo.workdir().expect("workdir")))
+        .expect_err("invalid branch name must fail after commits are mapped");
+
+    assert_eq!(
+        test_support::mapping(&bridge),
+        &pre_mapping,
+        "failed import must restore the pre-call mapping"
+    );
+    assert_eq!(
+        test_support::commit_message_overrides(&bridge),
+        &pre_overrides,
+        "failed import must restore pre-call commit message overrides"
+    );
+
+    test_support::build_existing_mapping(&mut bridge, Some(git_repo.workdir().expect("workdir")))
+        .expect("mapping rebuild after failed import");
+    assert_eq!(
+        test_support::mapping(&bridge),
+        &pre_mapping,
+        "rebuilding after a failed import must not recover partial mappings from the sidecar"
+    );
+}
+
+#[test]
 fn push_exports_local_branches_and_tags_to_path_remote() {
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
@@ -2544,6 +2592,98 @@ fn export_counts_exclude_orphan_minted_state_from_total_and_newly() {
         !stats.branches.iter().any(|b| b.name == "scratch"),
         "dropped scratch thread is not a synced branch: {:?}",
         stats.branches
+    );
+}
+
+#[test]
+fn failed_export_restores_mapping_and_overrides_after_purge() {
+    use chrono::Utc;
+    use objects::object::{Attribution, Principal, State, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init_default(heddle_temp.path()).expect("init heddle");
+    let mut cfg = repo.config().clone();
+    cfg.set_principal("Grace Hopper", "grace@example.com");
+    cfg.save(&repo.heddle_dir().join("config.toml"))
+        .expect("save principal");
+    let repo = Repository::open(heddle_temp.path()).expect("reopen heddle");
+
+    let attribution = || Attribution::human(Principal::new("Grace Hopper", "grace@example.com"));
+    let store = repo.store();
+    let blob_hash = store
+        .put_blob(&Blob::from_slice(b"public\n"))
+        .expect("put blob");
+    let tree_hash = store
+        .put_tree(&Tree::from_entries(vec![TreeEntry::file(
+            "public.txt".to_string(),
+            blob_hash,
+            false,
+        )
+        .expect("tree entry")]))
+        .expect("put tree");
+    let exported_state = State::new(tree_hash, Vec::new(), attribution());
+    store.put_state(&exported_state).expect("put exported state");
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &exported_state.change_id)
+        .expect("set main thread");
+
+    let mut bridge = GitBridge::new(&repo);
+    export_all(&mut bridge).expect("initial export seeds mapping");
+
+    repo.put_state_visibility(StateVisibility {
+        state: exported_state.change_id,
+        tier: VisibilityTier::Private {
+            scope_label: "embargo".to_string(),
+        },
+        embargo_until: None,
+        declarer: Principal::new("Grace Hopper", "grace@example.com"),
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .expect("mark exported state private");
+
+    let bad_tree_hash = store
+        .put_tree(&Tree::from_entries(vec![TreeEntry::file(
+            "missing.txt".to_string(),
+            ContentHash::from_bytes([9; 32]),
+            false,
+        )
+        .expect("tree entry")]))
+        .expect("put bad tree");
+    let bad_state = State::new(bad_tree_hash, Vec::new(), attribution());
+    store.put_state(&bad_state).expect("put bad state");
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &bad_state.change_id)
+        .expect("set main to bad state");
+
+    test_support::set_commit_message_override(
+        &mut bridge,
+        exported_state.change_id,
+        "pre-call override".to_string(),
+    );
+    let pre_mapping = test_support::mapping(&bridge).clone();
+    let pre_overrides = test_support::commit_message_overrides(&bridge).clone();
+
+    export_all(&mut bridge).expect_err("missing blob must fail after visibility purge");
+
+    assert_eq!(
+        test_support::mapping(&bridge),
+        &pre_mapping,
+        "failed export must restore the pre-call mapping"
+    );
+    assert_eq!(
+        test_support::commit_message_overrides(&bridge),
+        &pre_overrides,
+        "failed export must restore pre-call commit message overrides"
+    );
+
+    test_support::build_existing_mapping(&mut bridge, None)
+        .expect("mapping rebuild after failed export");
+    assert_eq!(
+        test_support::mapping(&bridge),
+        &pre_mapping,
+        "rebuilding after a failed export must behave as if the purge never ran"
     );
 }
 
