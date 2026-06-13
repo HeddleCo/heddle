@@ -124,6 +124,7 @@ const SWEPT: &[&str] = &[
     "continue",
     "daemon stop",
     "doctor",
+    "expand",
     "fetch",
     "land",
     "log",

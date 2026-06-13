@@ -448,8 +448,12 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             "accepted manually resolved integration state",
         )?;
         if repo.capability() == repo::RepositoryCapability::GitOverlay {
-            let checkpoint_message =
-                land_checkpoint_message(&repo, &merge_thread, args.message.as_deref());
+            let checkpoint_message = land_checkpoint_message(
+                &repo,
+                &merge_thread,
+                args.message.as_deref(),
+                land_collapse_state.is_some(),
+            );
             let record = create_git_checkpoint(
                 &repo,
                 Some(&checkpoint_message),
@@ -637,8 +641,12 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     )?;
 
     if integrated && repo.capability() == repo::RepositoryCapability::GitOverlay {
-        let checkpoint_message =
-            land_checkpoint_message(&repo, &merge_thread, args.message.as_deref());
+        let checkpoint_message = land_checkpoint_message(
+            &repo,
+            &merge_thread,
+            args.message.as_deref(),
+            land_collapse_state.is_some(),
+        );
         let record = create_git_checkpoint(
             &repo,
             Some(&checkpoint_message),
@@ -772,8 +780,8 @@ fn collapse_thread_for_land(
         return Ok(None);
     }
     let intent = message
+        .filter(|message| !message.trim().is_empty())
         .map(ToOwned::to_owned)
-        .or_else(|| thread.task.clone())
         .unwrap_or_else(|| format!("Land {}", thread.id));
     let result = collapse_resolved_states(
         repo,
@@ -975,9 +983,17 @@ fn land_checkpoint_preflight_advice(repo: &Repository, thread_id: &str) -> Optio
     None
 }
 
-fn land_checkpoint_message(repo: &Repository, thread: &Thread, explicit: Option<&str>) -> String {
+fn land_checkpoint_message(
+    repo: &Repository,
+    thread: &Thread,
+    explicit: Option<&str>,
+    prefer_land_subject: bool,
+) -> String {
     if let Some(message) = explicit.filter(|message| !message.trim().is_empty()) {
         return message.to_string();
+    }
+    if prefer_land_subject {
+        return format!("Land {}", thread.id);
     }
     if let Some(intent) = thread
         .current_state

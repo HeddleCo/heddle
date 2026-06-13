@@ -980,6 +980,13 @@ pub struct CollapseArgs {
     pub confidence: Option<f32>,
 }
 
+/// Arguments for the `expand` command.
+#[derive(Clone, Debug, clap::Args)]
+pub struct ExpandArgs {
+    /// Git OID, state spec, or thread name for the squashed land.
+    pub reference: String,
+}
+
 /// Arguments for the `resolve` command.
 #[derive(Clone, Debug, clap::Args)]
 pub struct ResolveArgs {

@@ -15,6 +15,7 @@ use serde::Serialize;
 
 use super::{
     action_line::{format_next_step_dim, print_next_step},
+    expand::{CollapseAnnotation, collapse_annotations_for_states},
     git_overlay_health::{PlainGitVerificationProbe, build_plain_git_verification_probe},
     history_target::resolve_state_id,
     snapshot::ensure_current_state,
@@ -85,6 +86,13 @@ struct StateEntry {
     created_at: String,
     parents: Vec<String>,
     git_checkpoint: Option<String>,
+    collapsed: Option<CollapsedEntry>,
+}
+
+#[derive(Serialize)]
+struct CollapsedEntry {
+    expandable: bool,
+    source_count: usize,
 }
 
 #[derive(Serialize)]
@@ -121,6 +129,7 @@ impl From<&State> for StateEntry {
             created_at: state.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
             parents: state.parents.iter().map(ChangeId::short).collect(),
             git_checkpoint: None,
+            collapsed: None,
         }
     }
 }
@@ -188,6 +197,15 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
     // output would always show the seed state above the user's first
     // real snapshot and report a "Heddle <init@heddle>" or (in older
     // repos) "Unknown" principal that the user never authored.
+    let visible_states = states
+        .iter()
+        .filter(|state| !is_synthetic_root(state))
+        .collect::<Vec<_>>();
+    let collapsed_annotations = collapse_annotations_for_states(
+        &repo,
+        visible_states.iter().map(|state| &state.change_id),
+    )?;
+
     let output = LogOutput {
         output_kind: "log",
         status: "completed",
@@ -201,9 +219,8 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
                 recommended_command: hint.recommended_command,
             }
         }),
-        states: states
-            .iter()
-            .filter(|state| !is_synthetic_root(state))
+        states: visible_states
+            .into_iter()
             .map(|state| {
                 let mut entry = StateEntry::from(state);
                 entry.git_checkpoint = repo
@@ -211,6 +228,10 @@ pub async fn cmd_log(cli: &Cli, options: LogCommandOptions) -> Result<()> {
                     .ok()
                     .flatten()
                     .map(|record| record.git_commit);
+                entry.collapsed = collapsed_annotations
+                    .get(&state.change_id)
+                    .copied()
+                    .map(CollapsedEntry::from);
                 entry
             })
             .collect(),
@@ -512,6 +533,11 @@ fn write_oneline<W: std::io::Write>(
         } else {
             ""
         };
+        let collapsed = if let Some(collapsed) = &entry.collapsed {
+            format!(" [collapsed:{}]", collapsed.source_count)
+        } else {
+            String::new()
+        };
         if verbose {
             // Three columns of decreasing emphasis: id (dim,
             // structural), hash (dim, structural), intent (bold, the
@@ -519,18 +545,20 @@ fn write_oneline<W: std::io::Write>(
             // because the stable change id is the user-facing anchor.
             writeln!(
                 out,
-                "{} {} {}{}",
+                "{} {} {}{}{}",
                 style::change_id(&entry.change_id),
                 style::dim(&entry.content_hash),
                 style::bold(intent),
                 checkpoint,
+                style::dim(&collapsed),
             )?;
         } else {
             writeln!(
                 out,
-                "{} {}",
+                "{} {}{}",
                 style::change_id(&entry.change_id),
                 style::bold(intent),
+                style::dim(&collapsed),
             )?;
         }
     }
@@ -605,6 +633,16 @@ fn write_full<W: std::io::Write>(
             // Intent is the editorial line — bold, no color.
             writeln!(out, "  {}", style::bold(intent))?;
         }
+        if let Some(collapsed) = &entry.collapsed {
+            writeln!(
+                out,
+                "  {}",
+                style::dim(&format!(
+                    "Collapsed: expandable with `heddle expand {}` ({} captures)",
+                    entry.change_id, collapsed.source_count
+                ))
+            )?;
+        }
 
         if verbose {
             writeln!(
@@ -646,6 +684,15 @@ fn write_full<W: std::io::Write>(
     Ok(())
 }
 
+impl From<CollapseAnnotation> for CollapsedEntry {
+    fn from(annotation: CollapseAnnotation) -> Self {
+        Self {
+            expandable: true,
+            source_count: annotation.source_count,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serial_test::serial;
@@ -665,6 +712,7 @@ mod tests {
             created_at: "2026-05-01 12:00:00".to_string(),
             parents: vec![],
             git_checkpoint: Some("abc123def456".to_string()),
+            collapsed: None,
         }
     }
 

@@ -15,8 +15,8 @@ use cli::cli::{
 use cli::{
     cli::{
         ActorCommands, AgentCommands, Cli, CloneArgs, CollapseArgs, Commands, ContextCommands,
-        DaemonCommands, DiagnoseArgs, DiffArgs, IntegrationCommands, LogArgs, MergeArgs,
-        ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionCommands, SessionEndArgs,
+        DaemonCommands, DiagnoseArgs, DiffArgs, ExpandArgs, IntegrationCommands, LogArgs,
+        MergeArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs, SessionCommands, SessionEndArgs,
         SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs, UndoArgs,
         cli_args::{LandArgs, SyncArgs},
         commands::{
@@ -28,13 +28,13 @@ use cli::{
             cmd_context_history, cmd_context_list, cmd_context_rm, cmd_context_set,
             cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
             cmd_daemon_status, cmd_daemon_stop, cmd_diagnose, cmd_diff, cmd_discuss,
-            cmd_doctor_docs, cmd_doctor_schemas, cmd_fetch, cmd_fsck, cmd_hook, cmd_init,
-            cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_merge, cmd_pull, cmd_push,
-            cmd_query, cmd_ready, cmd_rebase, cmd_redo, cmd_remote, cmd_resolve, cmd_retro,
-            cmd_revert, cmd_review, cmd_run, cmd_schemas, cmd_session_end, cmd_session_list,
-            cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell, cmd_show,
-            cmd_snapshot, cmd_start, cmd_stash, cmd_status, cmd_switch_compat, cmd_sync_smart,
-            cmd_thread, cmd_transaction, cmd_try, cmd_undo, cmd_verify, cmd_watch,
+            cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_fetch, cmd_fsck, cmd_hook,
+            cmd_init, cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_merge, cmd_pull,
+            cmd_push, cmd_query, cmd_ready, cmd_rebase, cmd_redo, cmd_remote, cmd_resolve,
+            cmd_retro, cmd_revert, cmd_review, cmd_run, cmd_schemas, cmd_session_end,
+            cmd_session_list, cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell,
+            cmd_show, cmd_snapshot, cmd_start, cmd_stash, cmd_status, cmd_switch_compat,
+            cmd_sync_smart, cmd_thread, cmd_transaction, cmd_try, cmd_undo, cmd_verify, cmd_watch,
             command_runtime_contract_for_command, print_error_with_hint,
             print_parse_error_json_envelope,
         },
@@ -516,6 +516,8 @@ async fn async_main() -> Result<()> {
             into,
             confidence,
         }) => cmd_collapse(&cli, states.clone(), into.clone(), *confidence),
+
+        Commands::Expand(ExpandArgs { reference }) => cmd_expand(&cli, reference.clone()),
 
         Commands::Thread { command } => cmd_thread(&cli, command.clone()).await,
 

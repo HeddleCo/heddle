@@ -1,0 +1,286 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Expand a squashed land back to its constituent captures.
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+};
+
+use anyhow::{Context, Result, anyhow};
+use objects::object::{Agent, ChangeId, State};
+use oplog::{OpLogBackend, OpRecord};
+use repo::{Repository, format_confidence};
+use serde::{Deserialize, Serialize};
+
+use super::{
+    advice::RecoveryAdvice,
+    history_target::{require_resolved_state, resolve_state_id},
+};
+use crate::cli::{Cli, should_output_json, style};
+
+const EXPAND_OUTPUT_KIND: &str = "expand";
+
+#[derive(Serialize)]
+struct ExpandOutput {
+    output_kind: &'static str,
+    status: &'static str,
+    requested: String,
+    collapsed: CollapsedLandOutput,
+    captures: Vec<ExpandedCaptureOutput>,
+}
+
+#[derive(Serialize)]
+struct CollapsedLandOutput {
+    change_id: String,
+    change_id_full: String,
+    git_commit: Option<String>,
+    thread: Option<String>,
+    source_count: usize,
+}
+
+#[derive(Serialize)]
+struct ExpandedCaptureOutput {
+    change_id: String,
+    change_id_full: String,
+    content_hash: String,
+    intent: Option<String>,
+    principal: String,
+    agent: Option<String>,
+    confidence: Option<f32>,
+    created_at: String,
+    parents: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CollapseAnnotation {
+    pub source_count: usize,
+}
+
+struct CollapseRecord {
+    sources: Vec<ChangeId>,
+    result: ChangeId,
+    thread: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct BridgeMappingFile {
+    entries: Vec<BridgeMappingEntry>,
+}
+
+#[derive(Deserialize)]
+struct BridgeMappingEntry {
+    change_id: String,
+    git_oid: String,
+}
+
+pub fn cmd_expand(cli: &Cli, reference: String) -> Result<()> {
+    let repo = cli.open_repo()?;
+    let target = resolve_expand_target(&repo, &reference)?;
+    let collapse = find_collapse_for_result(&repo, &target)?
+        .ok_or_else(|| anyhow!(not_expandable_advice(&reference, &target)))?;
+    let captures = collapse
+        .sources
+        .iter()
+        .map(|source| require_resolved_state(&repo, source).map(ExpandedCaptureOutput::from))
+        .collect::<Result<Vec<_>>>()?;
+    let git_commit = repo
+        .latest_git_checkpoint_for_change(&collapse.result)
+        .ok()
+        .flatten()
+        .map(|record| record.git_commit);
+
+    let output = ExpandOutput {
+        output_kind: EXPAND_OUTPUT_KIND,
+        status: "completed",
+        requested: reference,
+        collapsed: CollapsedLandOutput {
+            change_id: collapse.result.short(),
+            change_id_full: collapse.result.to_string_full(),
+            git_commit,
+            thread: collapse.thread,
+            source_count: captures.len(),
+        },
+        captures,
+    };
+
+    if should_output_json(cli, Some(repo.config())) {
+        println!("{}", serde_json::to_string(&output)?);
+    } else {
+        print_human(&output);
+    }
+    Ok(())
+}
+
+pub(crate) fn collapse_annotations_for_states<'a>(
+    repo: &Repository,
+    states: impl IntoIterator<Item = &'a ChangeId>,
+) -> Result<BTreeMap<ChangeId, CollapseAnnotation>> {
+    let wanted = states.into_iter().copied().collect::<BTreeSet<_>>();
+    let mut annotations = BTreeMap::new();
+    if wanted.is_empty() {
+        return Ok(annotations);
+    }
+    for entry in repo.oplog().recent(usize::MAX)? {
+        if entry.undone {
+            continue;
+        }
+        if let OpRecord::Collapse {
+            sources, result, ..
+        } = entry.operation
+            && wanted.contains(&result)
+        {
+            annotations.insert(
+                result,
+                CollapseAnnotation {
+                    source_count: sources.len(),
+                },
+            );
+        }
+    }
+    Ok(annotations)
+}
+
+fn resolve_expand_target(repo: &Repository, reference: &str) -> Result<ChangeId> {
+    if let Some(change) = mapped_change_for_git_oid(repo, reference)? {
+        return Ok(change);
+    }
+    resolve_state_id(repo, reference)
+}
+
+fn mapped_change_for_git_oid(repo: &Repository, git_oid: &str) -> Result<Option<ChangeId>> {
+    if let Some(change) = bridge_mapped_change_for_git_oid(repo, git_oid)? {
+        return Ok(Some(change));
+    }
+    if let Some(record) = repo
+        .list_git_checkpoints()?
+        .into_iter()
+        .rev()
+        .find(|record| record.git_commit == git_oid)
+    {
+        return Ok(Some(ChangeId::parse(&record.change_id)?));
+    }
+    Ok(None)
+}
+
+fn bridge_mapped_change_for_git_oid(repo: &Repository, git_oid: &str) -> Result<Option<ChangeId>> {
+    let path = repo
+        .heddle_dir()
+        .join("git-bridge")
+        .join("bridge-mapping.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents =
+        fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    if contents.trim().is_empty() {
+        return Ok(None);
+    }
+    let mapping: BridgeMappingFile =
+        serde_json::from_str(&contents).context("parsing git bridge mapping")?;
+    if let Some(entry) = mapping
+        .entries
+        .into_iter()
+        .find(|entry| entry.git_oid == git_oid)
+    {
+        return Ok(Some(ChangeId::parse(&entry.change_id)?));
+    }
+    Ok(None)
+}
+
+fn find_collapse_for_result(
+    repo: &Repository,
+    result: &ChangeId,
+) -> Result<Option<CollapseRecord>> {
+    for entry in repo.oplog().recent(usize::MAX)? {
+        if entry.undone {
+            continue;
+        }
+        if let OpRecord::Collapse {
+            sources,
+            result: collapse_result,
+            thread,
+            ..
+        } = entry.operation
+            && collapse_result == *result
+        {
+            return Ok(Some(CollapseRecord {
+                sources,
+                result: collapse_result,
+                thread,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+fn not_expandable_advice(reference: &str, target: &ChangeId) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "collapse_not_found",
+        format!("No collapse found for {reference}"),
+        "Run `heddle log` to find entries marked `[collapsed]`, then retry `heddle expand <state>` with one of those entries.",
+        format!(
+            "reference '{reference}' resolved to {}, but no matching OpRecord::Collapse result exists",
+            target.short()
+        ),
+        "expanding needs the ordered source list recorded by the original collapse",
+        "repository state and worktree files were left unchanged",
+        "heddle log",
+        vec!["heddle log".to_string()],
+    )
+}
+
+fn print_human(output: &ExpandOutput) {
+    let mut target = output.collapsed.change_id.clone();
+    if let Some(git_commit) = &output.collapsed.git_commit {
+        target.push_str(&format!(" git:{}", short_oid(git_commit)));
+    }
+    if let Some(thread) = &output.collapsed.thread {
+        target.push_str(&format!(" thread:{thread}"));
+    }
+    println!(
+        "Collapsed land {} contains {} capture(s):",
+        style::change_id(&target),
+        output.collapsed.source_count
+    );
+    for (index, capture) in output.captures.iter().enumerate() {
+        let intent = capture.intent.as_deref().unwrap_or("(no intent)");
+        match capture.confidence {
+            Some(confidence) => println!(
+                "  {}. {} {} {}",
+                index + 1,
+                style::change_id(&capture.change_id),
+                style::bold(intent),
+                style::dim(&format!(
+                    "confidence {}",
+                    format_confidence(Some(confidence))
+                )),
+            ),
+            None => println!(
+                "  {}. {} {}",
+                index + 1,
+                style::change_id(&capture.change_id),
+                style::bold(intent),
+            ),
+        }
+    }
+}
+
+fn short_oid(oid: &str) -> &str {
+    oid.get(..12).unwrap_or(oid)
+}
+
+impl From<State> for ExpandedCaptureOutput {
+    fn from(state: State) -> Self {
+        Self {
+            change_id: state.change_id.short(),
+            change_id_full: state.change_id.to_string_full(),
+            content_hash: state.compute_hash().short(),
+            intent: state.intent,
+            principal: state.attribution.principal.to_string(),
+            agent: state.attribution.agent.as_ref().map(Agent::to_string),
+            confidence: state.confidence,
+            created_at: state.created_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+            parents: state.parents.iter().map(ChangeId::short).collect(),
+        }
+    }
+}
