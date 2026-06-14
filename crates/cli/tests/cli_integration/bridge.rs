@@ -450,8 +450,8 @@ fn test_cli_bridge_git_export_and_pull_roundtrip() {
     );
     assert!(export.is_ok(), "bridge export failed: {:?}", export.err());
 
-    let dest_repo = gix::open(&dest).unwrap();
-    assert!(dest_repo.find_reference("refs/heads/main").is_ok());
+    let dest_repo = open_git(&dest).unwrap();
+    assert!(find_reference(&dest_repo, "refs/heads/main").is_ok());
 
     heddle(&["init"], Some(target.path())).unwrap();
     let pull = heddle(
@@ -474,7 +474,7 @@ fn test_cli_bridge_git_export_and_pull_roundtrip() {
 fn test_cli_bridge_git_import_from_external_repo() {
     let heddle_repo_dir = TempDir::new().unwrap();
     let git_repo_dir = TempDir::new().unwrap();
-    let git_repo = gix::init(git_repo_dir.path()).unwrap();
+    let git_repo = SleyRepository::init(git_repo_dir.path()).unwrap();
     let tree_oid = git_empty_tree_oid(&git_repo);
     git_commit_with_tree(
         &git_repo,
@@ -509,7 +509,7 @@ fn test_cli_bridge_git_import_from_external_repo() {
 fn test_cli_bridge_git_push_to_local_bare_remote() {
     let source = TempDir::new().unwrap();
     let remote = TempDir::new().unwrap();
-    let remote_repo = gix::init_bare(remote.path()).unwrap();
+    let remote_repo = SleyRepository::init_bare(remote.path()).unwrap();
 
     heddle(&["init"], Some(source.path())).unwrap();
     std::fs::write(source.path().join("push.txt"), "bridge push").unwrap();
@@ -521,7 +521,7 @@ fn test_cli_bridge_git_push_to_local_bare_remote() {
     );
     assert!(result.is_ok(), "Bridge push failed: {:?}", result.err());
 
-    assert!(remote_repo.find_reference("refs/heads/main").is_ok());
+    assert!(find_reference(&remote_repo, "refs/heads/main").is_ok());
 }
 
 /// `heddle push --mirror=<git-remote>` performs the primary push to the
@@ -532,7 +532,7 @@ fn test_cli_push_mirror_dual_push_to_weft_and_git_remote() {
     let source = TempDir::new().unwrap();
     let weft_target = TempDir::new().unwrap();
     let git_remote = TempDir::new().unwrap();
-    let mirror_repo = gix::init_bare(git_remote.path()).unwrap();
+    let mirror_repo = SleyRepository::init_bare(git_remote.path()).unwrap();
 
     heddle(&["init"], Some(source.path())).unwrap();
     heddle(&["init"], Some(weft_target.path())).unwrap();
@@ -577,7 +577,7 @@ fn test_cli_push_mirror_dual_push_to_weft_and_git_remote() {
 
     // Mirror push landed at the bare git remote.
     assert!(
-        mirror_repo.find_reference("refs/heads/main").is_ok(),
+        find_reference(&mirror_repo, "refs/heads/main").is_ok(),
         "git mirror remote should have refs/heads/main after mirror push"
     );
 }
@@ -690,7 +690,7 @@ fn test_cli_push_mirror_explicit_equals_form_parses_value() {
     let source = TempDir::new().unwrap();
     let weft_target = TempDir::new().unwrap();
     let git_remote = TempDir::new().unwrap();
-    let mirror_repo = gix::init_bare(git_remote.path()).unwrap();
+    let mirror_repo = SleyRepository::init_bare(git_remote.path()).unwrap();
 
     heddle(&["init"], Some(source.path())).unwrap();
     heddle(&["init"], Some(weft_target.path())).unwrap();
@@ -715,7 +715,7 @@ fn test_cli_push_mirror_explicit_equals_form_parses_value() {
     let threads = heddle(&["thread", "list"], Some(weft_target.path())).unwrap();
     assert!(threads.contains("main"));
     assert!(
-        mirror_repo.find_reference("refs/heads/main").is_ok(),
+        find_reference(&mirror_repo, "refs/heads/main").is_ok(),
         "mirror push should land at the explicit <git_path>"
     );
 }
@@ -727,7 +727,7 @@ fn test_cli_push_mirror_json_success_emits_mirrored_true() {
     let source = TempDir::new().unwrap();
     let weft_target = TempDir::new().unwrap();
     let git_remote = TempDir::new().unwrap();
-    gix::init_bare(git_remote.path()).unwrap();
+    SleyRepository::init_bare(git_remote.path()).unwrap();
 
     heddle(&["init"], Some(source.path())).unwrap();
     heddle(&["init"], Some(weft_target.path())).unwrap();
@@ -778,8 +778,8 @@ fn test_cli_push_mirror_in_git_overlay_pushes_to_both_remotes() {
     let source = TempDir::new().unwrap();
     let primary_remote = TempDir::new().unwrap();
     let mirror_remote = TempDir::new().unwrap();
-    let primary_repo = gix::init_bare(primary_remote.path()).unwrap();
-    let mirror_repo = gix::init_bare(mirror_remote.path()).unwrap();
+    let primary_repo = SleyRepository::init_bare(primary_remote.path()).unwrap();
+    let mirror_repo = SleyRepository::init_bare(mirror_remote.path()).unwrap();
 
     // Plain `git init` → RepositoryCapability::GitOverlay,
     // hosted_enabled() == false. This is the drop-in case the
@@ -836,11 +836,11 @@ fn test_cli_push_mirror_in_git_overlay_pushes_to_both_remotes() {
         .expect("push --mirror in GitOverlay repo should succeed");
 
     assert!(
-        primary_repo.find_reference("refs/heads/main").is_ok(),
+        find_reference(&primary_repo, "refs/heads/main").is_ok(),
         "primary remote should have refs/heads/main after overlay push"
     );
     assert!(
-        mirror_repo.find_reference("refs/heads/main").is_ok(),
+        find_reference(&mirror_repo, "refs/heads/main").is_ok(),
         "mirror remote MUST ALSO have refs/heads/main — the GitOverlay early-return previously bypassed --mirror"
     );
 }
@@ -859,7 +859,7 @@ fn test_cli_push_mirror_json_uses_rfc8259_escaping_for_unicode() {
     // push succeeds and the `"remote"` field carries the bad codepoint.
     let mirror_dir = mirror_parent.path().join("mirror\u{2028}suffix");
     std::fs::create_dir_all(&mirror_dir).unwrap();
-    let mirror_repo = gix::init_bare(&mirror_dir).unwrap();
+    let mirror_repo = SleyRepository::init_bare(&mirror_dir).unwrap();
 
     heddle(&["init"], Some(source.path())).unwrap();
     heddle(&["init"], Some(weft_target.path())).unwrap();
@@ -910,7 +910,7 @@ fn test_cli_push_mirror_json_uses_rfc8259_escaping_for_unicode() {
     );
     // Sanity: mirror push landed too.
     assert!(
-        mirror_repo.find_reference("refs/heads/main").is_ok(),
+        find_reference(&mirror_repo, "refs/heads/main").is_ok(),
         "mirror push should have landed at the U+2028 path"
     );
 }

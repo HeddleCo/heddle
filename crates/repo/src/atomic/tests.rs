@@ -3,21 +3,21 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 
 use objects::error::{HeddleError, Result};
 use objects::object::{ChangeId, ContentHash, MarkerName, ThreadName, VisibilityTier};
 use oplog::{
-    isolation_keys_for_record, ConditionalCommitOutcome, IsolationKey, IsolationPrecondition,
-    OpLogBackend, OpRecord, ThreadUpdateSnapshots,
+    ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpLogBackend, OpRecord,
+    ThreadUpdateSnapshots, isolation_keys_for_record,
 };
 use refs::{Head, RefExpectation, RefManager, RefUpdate};
 use tempfile::TempDir;
 
 use super::{
-    execute, AtomicMutation, Compensator, DeferredMutation, EagerMutation, RewindLedger,
-    StagedCommit, Tx,
+    AtomicMutation, Compensator, DeferredMutation, EagerMutation, RewindLedger, StagedCommit, Tx,
+    execute,
 };
 use crate::Repository;
 
@@ -681,19 +681,22 @@ fn all_ten_readers_reconcile() {
             .unwrap(),
         Some(remote_state)
     );
-    assert!(refs
-        .list_threads()
-        .unwrap()
-        .contains(&ThreadName::new("ft")));
-    assert!(refs
-        .list_markers()
-        .unwrap()
-        .contains(&MarkerName::new("mk")));
+    assert!(
+        refs.list_threads()
+            .unwrap()
+            .contains(&ThreadName::new("ft"))
+    );
+    assert!(
+        refs.list_markers()
+            .unwrap()
+            .contains(&MarkerName::new("mk"))
+    );
     assert!(refs.list_remotes().unwrap().contains(&"origin".to_string()));
-    assert!(refs
-        .list_remote_threads("origin")
-        .unwrap()
-        .contains(&ThreadName::new("rt")));
+    assert!(
+        refs.list_remote_threads("origin")
+            .unwrap()
+            .contains(&ThreadName::new("rt"))
+    );
     assert_eq!(refs.resolve("ft").unwrap(), Some(thread_state));
 }
 
@@ -1566,10 +1569,11 @@ fn reconcile_folds_every_record_shape() {
     let threads = refs.list_threads().unwrap();
     assert!(threads.contains(&ThreadName::new("t_coll")));
     assert!(threads.contains(&ThreadName::new("t_ff")));
-    assert!(refs
-        .list_markers()
-        .unwrap()
-        .contains(&MarkerName::new("mk2")));
+    assert!(
+        refs.list_markers()
+            .unwrap()
+            .contains(&MarkerName::new("mk2"))
+    );
     let remotes = refs.list_remotes().unwrap();
     assert!(remotes.contains(&"origin".to_string()));
     let remote_threads = refs.list_remote_threads("origin").unwrap();

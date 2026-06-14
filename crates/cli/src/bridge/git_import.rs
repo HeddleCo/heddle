@@ -11,6 +11,9 @@ use objects::object::{
 };
 use refs::{Head, RefExpectation};
 use repo::{Repository as HeddleRepository, ResignOutcome, ThreadId};
+use sley::{
+    CommitObject, GitObjectType, ObjectId, ReferenceTarget, Repository as SleyRepository, Signature,
+};
 use tracing::warn;
 
 pub use super::git_import_tree::{GitTreeImporter, import_git_tree};
@@ -18,8 +21,8 @@ use super::git_import_tree::{PackImportSink, fail_lossy_entry};
 use crate::bridge::{
     git_core::{
         GitBridge, GitBridgeError, GitResult, RefNamespace, RefUpdate, SyncMapping,
-        apply_ref_updates, collect_reachable_entries_excluding, copy_reachable_objects, git_err,
-        install_objects_pack, open_repo, parse_git_ref, thread_is_unclaimed_bootstrap,
+        apply_ref_updates, copy_reachable_objects, git_err, open_repo, parse_git_ref,
+        thread_is_unclaimed_bootstrap,
     },
     git_notes,
     git_util::{GitImportOptions, ImportStats, PartialMirrorRef, SkippedRef},
@@ -40,10 +43,10 @@ struct RefPlan {
     /// The OID the source ref points at directly. For lightweight tags
     /// and branches this is a commit; for annotated tags it's a tag
     /// object that wraps a commit.
-    immediate_oid: gix::hash::ObjectId,
+    immediate_oid: ObjectId,
     /// The commit reachable by peeling `immediate_oid` through any tag
     /// chain. Used as a tip for ancestry walking.
-    peeled_commit_oid: gix::hash::ObjectId,
+    peeled_commit_oid: ObjectId,
 }
 
 /// Peel `reference` to its final OID and confirm the OID is a commit. If
@@ -58,41 +61,44 @@ struct RefPlan {
 /// this guard prevents the import from crashing on the very common
 /// "tag-points-at-non-commit-blob" pattern in mature OSS repos.
 fn peel_to_commit_oid(
-    repo: &gix::Repository,
-    reference: &mut gix::Reference,
-) -> GitResult<Result<gix::hash::ObjectId, gix::objs::Kind>> {
-    let oid = reference.peel_to_id().map_err(git_err)?.detach();
-    let object = repo.find_object(oid).map_err(git_err)?;
-    if object.kind == gix::objs::Kind::Commit {
-        Ok(Ok(oid))
-    } else {
-        Ok(Err(object.kind))
+    repo: &SleyRepository,
+    mut oid: ObjectId,
+) -> GitResult<Result<ObjectId, GitObjectType>> {
+    loop {
+        let object = repo.read_object(&oid).map_err(git_err)?;
+        match object.object_type {
+            GitObjectType::Commit => return Ok(Ok(oid)),
+            GitObjectType::Tag => {
+                oid = repo.read_tag(&oid).map_err(git_err)?.object;
+            }
+            kind => return Ok(Err(kind)),
+        }
     }
 }
 
 fn remote_tracking_ref_suggestions(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     missing: &[String],
 ) -> GitResult<Vec<String>> {
     let missing = missing.iter().map(String::as_str).collect::<HashSet<_>>();
     let mut suggestions = Vec::new();
 
-    for reference in repo
-        .references()
-        .map_err(git_err)?
-        .prefixed("refs/remotes/")
-        .map_err(git_err)?
-    {
-        let mut reference = reference.map_err(git_err)?;
-        let Some(_) = reference.target().try_id() else {
+    for reference in repo.references().list_refs().map_err(git_err)? {
+        if !reference.name.starts_with("refs/remotes/") {
+            continue;
+        }
+        let ReferenceTarget::Direct(target) = reference.target else {
             continue;
         };
-        let full = reference.name().as_bstr().to_string();
-        let short = reference.name().shorten().to_string();
+        let full = reference.name.to_string();
+        let short = full
+            .strip_prefix("refs/remotes/")
+            .unwrap_or(&full)
+            .to_string();
         if short.ends_with("/HEAD") {
             continue;
         }
-        if peel_to_commit_oid(repo, &mut reference)?.is_err() {
+        if peel_to_commit_oid(repo, target)?.is_err() {
             continue;
         }
         let Some(parsed) = parse_git_ref(&full) else {
@@ -124,8 +130,8 @@ fn remote_tracking_ref_suggestions(
 ///      which is what we want.
 fn resolve_identity(
     mapping: &SyncMapping,
-    repo: &gix::Repository,
-    git_oid: gix::hash::ObjectId,
+    repo: &SleyRepository,
+    git_oid: ObjectId,
     trailers: &std::collections::HashMap<String, String>,
 ) -> GitResult<(ChangeId, Option<git_notes::HeddleNote>)> {
     if let Some(existing) = mapping.get_heddle(git_oid) {
@@ -138,7 +144,7 @@ fn resolve_identity(
     if let Some(id_str) = trailers.get(GitBridge::TRAILER_CHANGE_ID) {
         return Ok((ChangeId::parse(id_str)?, None));
     }
-    let oid_hex = git_oid.to_hex_with_len(40).to_string();
+    let oid_hex = git_oid.to_hex();
     let bytes = hex::decode(&oid_hex[..32])
         .map_err(|err| GitBridgeError::InvalidMapping(err.to_string()))?;
     let mut change_id_bytes = [0u8; 16];
@@ -153,13 +159,13 @@ fn resolve_identity(
 /// Built straight from the raw commit object bytes (`commit.data`) via
 /// [`parse_commit_extension_headers`] so `encoding` / `gpgsig` / `mergetag` /
 /// any unknown header all land at their TRUE captured position through one code
-/// path. We deliberately do NOT stitch the vec from gix's typed accessors
-/// (`CommitRef::encoding`, …): gix surfaces some headers as typed fields outside
+/// path. We deliberately do NOT stitch the vec from Sley's typed accessors
+/// (`CommitRef::encoding`, …): Sley surfaces some headers as typed fields outside
 /// `extra_headers`, and re-inserting them by hand reorders them — the close-the-
 /// class bug this replaces. The raw header block is the source of truth.
 /// #564 de-lossy step 1.
-fn collect_extra_headers(commit: &gix::Commit<'_>) -> GitResult<Vec<(Vec<u8>, Vec<u8>)>> {
-    Ok(parse_commit_extension_headers(&commit.data))
+fn collect_extra_headers(raw_commit_body: &[u8]) -> GitResult<Vec<(Vec<u8>, Vec<u8>)>> {
+    Ok(parse_commit_extension_headers(raw_commit_body))
 }
 
 /// The git-fidelity fields (#564 de-lossy step 1, #565) re-derived from a git
@@ -188,12 +194,17 @@ pub(crate) struct CommitFidelityFields {
 /// Re-derive the [`CommitFidelityFields`] from a git commit object. See that
 /// type's docs for why this is the only place the fields are extracted.
 pub(crate) fn extract_commit_fidelity_fields(
-    commit: &gix::Commit<'_>,
+    commit: &CommitObject,
+    raw_commit_body: &[u8],
 ) -> GitResult<CommitFidelityFields> {
-    let author = commit.author().map_err(git_err)?;
-    let authored_time = author.time().map_err(git_err)?;
-    let committer = commit.committer().map_err(git_err)?;
-    let committer_time = committer.time().map_err(git_err)?;
+    let author = commit
+        .author_signature()
+        .ok_or_else(|| GitBridgeError::InvalidMapping("invalid Git author identity".into()))?;
+    let committer = commit
+        .committer_signature()
+        .ok_or_else(|| GitBridgeError::InvalidMapping("invalid Git committer identity".into()))?;
+    let authored_time = author.time;
+    let committer_time = committer.time;
     let created_at = Utc
         .timestamp_opt(committer_time.seconds, 0)
         .single()
@@ -213,24 +224,32 @@ pub(crate) fn extract_commit_fidelity_fields(
             ))
         })?;
     Ok(CommitFidelityFields {
-        committer: Principal::new(committer.name.to_string(), committer.email.to_string()),
-        authored_tz_offset: authored_time.offset,
-        committer_tz_offset: committer_time.offset,
+        committer: principal_from_signature(&committer),
+        authored_tz_offset: i32::from(authored_time.timezone_offset_minutes) * 60,
+        committer_tz_offset: i32::from(committer_time.timezone_offset_minutes) * 60,
         created_at,
         authored_at,
-        raw_message: commit.message_raw_sloppy().to_vec(),
-        extra_headers: collect_extra_headers(commit)?,
+        raw_message: commit.message.clone(),
+        extra_headers: collect_extra_headers(raw_commit_body)?,
     })
+}
+
+fn principal_from_signature(signature: &Signature) -> Principal {
+    Principal::new(
+        String::from_utf8_lossy(signature.name.as_bytes()).into_owned(),
+        String::from_utf8_lossy(signature.email.as_bytes()).into_owned(),
+    )
 }
 
 /// Import a single Git commit as a Heddle state.
 pub fn import_commit(
     mapping: &mut SyncMapping,
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     tree_importer: &mut GitTreeImporter<'_>,
-    git_oid: gix::hash::ObjectId,
+    git_oid: ObjectId,
 ) -> GitResult<ChangeId> {
-    let commit = repo.find_commit(git_oid).map_err(git_err)?;
+    let raw_commit = repo.read_object(&git_oid).map_err(git_err)?;
+    let commit = repo.read_commit(&git_oid).map_err(git_err)?;
     // #565: re-derive the committer identity, both tz offsets, the verbatim
     // message bytes, and the ordered extension headers (encoding / gpgsig /
     // mergetag / unknown each at their captured position) through the single
@@ -238,14 +257,14 @@ pub fn import_commit(
     // drift. The verbatim message bytes survive a non-UTF8 encoding (latin-1,
     // shift-jis, …); a lossy String view is derived only for trailer / intent
     // parsing, which inspect the (ASCII) footer lines.
-    let fidelity = extract_commit_fidelity_fields(&commit)?;
+    let fidelity = extract_commit_fidelity_fields(&commit, &raw_commit.body)?;
     let message = String::from_utf8_lossy(&fidelity.raw_message).into_owned();
-    let author = commit.author().map_err(git_err)?;
-    let author_name = author.name.to_string();
-    let author_email = author.email.to_string();
-    let tree_id = commit.tree_id().map_err(git_err)?.detach();
-    let parent_git_oids: Vec<gix::hash::ObjectId> =
-        commit.parent_ids().map(|id| id.detach()).collect();
+    let author = commit
+        .author_signature()
+        .ok_or_else(|| GitBridgeError::InvalidMapping("invalid Git author identity".into()))?;
+    let principal = principal_from_signature(&author);
+    let tree_id = commit.tree;
+    let parent_git_oids: Vec<ObjectId> = commit.parents.clone();
 
     let trailers = GitBridge::parse_trailers(&message);
     let (change_id, note) = resolve_identity(mapping, repo, git_oid, &trailers)?;
@@ -267,8 +286,6 @@ pub fn import_commit(
     let lossy_before = tree_importer.lossy_entries().len();
     let tree_hash = tree_importer.import_tree(tree_id)?;
     let git_lossy = tree_importer.lossy_entries().len() > lossy_before;
-
-    let principal = Principal::new(author_name, author_email);
 
     // Agent / confidence / status: prefer the note (Phase-B-and-later format)
     // and fall back to legacy trailers for pre-Phase-B history.
@@ -427,7 +444,7 @@ pub fn backfill_fidelity(bridge: &mut GitBridge<'_>) -> GitResult<BackfillStats>
 
     // Snapshot the mapping pairs up front so the immutable store borrow below
     // doesn't overlap the mapping borrow.
-    let pairs: Vec<(ChangeId, gix::hash::ObjectId)> = bridge
+    let pairs: Vec<(ChangeId, ObjectId)> = bridge
         .mapping
         .iter()
         .map(|(change_id, git_oid)| (*change_id, *git_oid))
@@ -441,7 +458,7 @@ pub fn backfill_fidelity(bridge: &mut GitBridge<'_>) -> GitResult<BackfillStats>
         // operator knows it was left at its pre-bump fidelity. The latter
         // (annotated-tag objects, blobs) is a legitimate skip: only commits
         // carry fidelity fields today (#575 covers tag objects).
-        let object = match repo.find_object(git_oid) {
+        let object = match repo.read_object(&git_oid) {
             Ok(object) => object,
             Err(_) => {
                 stats.missing_mirror_commits.push(MissingMirrorCommit {
@@ -451,16 +468,16 @@ pub fn backfill_fidelity(bridge: &mut GitBridge<'_>) -> GitResult<BackfillStats>
                 continue;
             }
         };
-        if object.kind != gix::objs::Kind::Commit {
+        if object.object_type != GitObjectType::Commit {
             continue;
         }
-        let commit = repo.find_commit(git_oid).map_err(git_err)?;
+        let commit = repo.read_commit(&git_oid).map_err(git_err)?;
         let Some(state) = store.get_state(&change_id)? else {
             continue;
         };
         stats.scanned += 1;
 
-        let fidelity = extract_commit_fidelity_fields(&commit)?;
+        let fidelity = extract_commit_fidelity_fields(&commit, &object.body)?;
         let before = state.compute_hash();
         // A state adopted+signed BEFORE the #565 format bump was signed over
         // its PRE-fidelity hash, not the post-bump `compute_hash()` above. Pass
@@ -613,8 +630,7 @@ fn import_with_ref_filter(
         return Err(GitBridgeError::ShallowClone {
             repository: repo
                 .workdir()
-                .unwrap_or_else(|| repo.git_dir())
-                .to_path_buf(),
+                .unwrap_or_else(|| repo.git_dir().to_path_buf()),
             retry_command: shallow_import_retry_command(wanted_refs),
         });
     }
@@ -634,22 +650,19 @@ fn import_with_ref_filter(
     // immediate target (annotated-tag-aware) and the peeled commit (for
     // ancestry walking). Non-commit-pointing refs are recorded in
     // `skipped_non_commit_refs` and excluded from the plan list.
-    for reference in repo
-        .references()
-        .map_err(git_err)?
-        .local_branches()
-        .map_err(git_err)?
-    {
-        let mut reference = reference.map_err(git_err)?;
-        let short = reference.name().shorten().to_string();
+    for reference in repo.references().list_refs().map_err(git_err)? {
+        let full = reference.name.to_string();
+        let Some(short) = full.strip_prefix("refs/heads/").map(str::to_string) else {
+            continue;
+        };
         if wanted_refs.is_some_and(|wanted| !wanted.contains(&short)) {
             continue;
         }
-        let immediate = match reference.target().try_id() {
-            Some(id) => id.to_owned(),
-            None => continue, // symbolic ref (e.g. HEAD) — not a real ref to import
+        let immediate = match reference.target {
+            ReferenceTarget::Direct(id) => id,
+            ReferenceTarget::Symbolic(_) => continue, // symbolic ref (e.g. HEAD) — not a real ref to import
         };
-        match peel_to_commit_oid(&repo, &mut reference)? {
+        match peel_to_commit_oid(&repo, immediate)? {
             Ok(commit_oid) => plans.push(RefPlan {
                 short_name: short,
                 namespace: RefNamespace::Branch,
@@ -672,25 +685,22 @@ fn import_with_ref_filter(
         }
     }
     if wanted_refs.is_some() {
-        for reference in repo
-            .references()
-            .map_err(git_err)?
-            .prefixed("refs/remotes/")
-            .map_err(git_err)?
-        {
-            let mut reference = reference.map_err(git_err)?;
-            let short = reference.name().shorten().to_string();
+        for reference in repo.references().list_refs().map_err(git_err)? {
+            let full = reference.name.to_string();
+            let Some(short) = full.strip_prefix("refs/remotes/").map(str::to_string) else {
+                continue;
+            };
             if short.ends_with("/HEAD") {
                 continue;
             }
             if wanted_refs.is_some_and(|wanted| !wanted.contains(&short)) {
                 continue;
             }
-            let immediate = match reference.target().try_id() {
-                Some(id) => id.to_owned(),
-                None => continue,
+            let immediate = match reference.target {
+                ReferenceTarget::Direct(id) => id,
+                ReferenceTarget::Symbolic(_) => continue,
             };
-            match peel_to_commit_oid(&repo, &mut reference)? {
+            match peel_to_commit_oid(&repo, immediate)? {
                 Ok(commit_oid) => plans.push(RefPlan {
                     short_name: short,
                     namespace: RefNamespace::Branch,
@@ -711,22 +721,19 @@ fn import_with_ref_filter(
             }
         }
     }
-    for reference in repo
-        .references()
-        .map_err(git_err)?
-        .tags()
-        .map_err(git_err)?
-    {
-        let mut reference = reference.map_err(git_err)?;
-        let short = reference.name().shorten().to_string();
+    for reference in repo.references().list_refs().map_err(git_err)? {
+        let full = reference.name.to_string();
+        let Some(short) = full.strip_prefix("refs/tags/").map(str::to_string) else {
+            continue;
+        };
         if wanted_refs.is_some_and(|wanted| !wanted.contains(&short)) {
             continue;
         }
-        let immediate = match reference.target().try_id() {
-            Some(id) => id.to_owned(),
-            None => continue,
+        let immediate = match reference.target {
+            ReferenceTarget::Direct(id) => id,
+            ReferenceTarget::Symbolic(_) => continue,
         };
-        match peel_to_commit_oid(&repo, &mut reference)? {
+        match peel_to_commit_oid(&repo, immediate)? {
             Ok(commit_oid) => plans.push(RefPlan {
                 short_name: short,
                 namespace: RefNamespace::Tag,
@@ -792,30 +799,23 @@ fn import_with_ref_filter(
     //      `sync_marker_to_tag` skip the rewrite — leaving the
     //      annotated tag intact through to the destination push.
     //
-    // We collect entries **per ref** so a ref whose ancestry references a
+    // We copy objects **per ref** so a ref whose ancestry references a
     // missing object (a known failure mode in real-world repos like git-lfs,
     // where pack data carries dangling references that `git fsck` doesn't
-    // catch) doesn't poison the rest of the mirror. Successful refs are then
-    // installed together as one pack, avoiding N loose writes and N per-ref
-    // packfiles on the adopt path.
+    // catch) doesn't poison the rest of the mirror.
     if git_path.is_some() {
         bridge.init_mirror()?;
         let mirror_repo = bridge.open_git_repo()?;
         if mirror_repo.git_dir() != repo.git_dir() {
             let mut successful_updates: Vec<RefUpdate> = Vec::new();
-            let mut mirror_entries = Vec::new();
-            let mut mirror_seen = HashSet::new();
             for plan in &plans {
                 // Roots include both the immediate target (tag object for
                 // annotated tags) and the peeled commit (so the walker
                 // descends through commit→tree→blob even when the
                 // immediate object is a tag).
                 let roots = [plan.immediate_oid, plan.peeled_commit_oid];
-                let mut candidate_seen = mirror_seen.clone();
-                match collect_reachable_entries_excluding(&repo, roots, &mut candidate_seen) {
-                    Ok(entries) => {
-                        mirror_seen = candidate_seen;
-                        mirror_entries.extend(entries);
+                match copy_reachable_objects(&repo, &mirror_repo, roots) {
+                    Ok(()) => {
                         successful_updates.push(RefUpdate {
                             name: plan.short_name.clone(),
                             target: plan.immediate_oid,
@@ -841,7 +841,6 @@ fn import_with_ref_filter(
                     }
                 }
             }
-            install_objects_pack(&mirror_repo, mirror_entries)?;
             // Write source refs into the mirror. For annotated tags this
             // points refs/tags/<name> at the tag object (not the peeled
             // commit), which is what preserves the annotated form across
@@ -867,7 +866,7 @@ fn import_with_ref_filter(
         }
     }
 
-    bridge.build_existing_mapping(Some(repo.path()))?;
+    bridge.build_existing_mapping(Some(repo.git_dir()))?;
 
     // heddle#555: route the bulk import through a single streaming pack (one
     // atomic install) instead of N loose objects + per-object fsync. Stage
@@ -977,20 +976,21 @@ fn import_with_ref_filter(
         }
     }
 
-    for tag in repo
-        .references()
-        .map_err(git_err)?
-        .tags()
-        .map_err(git_err)?
-    {
-        let mut tag = tag.map_err(git_err)?;
-        let name = tag.name().shorten().to_string();
+    for tag in repo.references().list_refs().map_err(git_err)? {
+        let full = tag.name.to_string();
+        let Some(name) = full.strip_prefix("refs/tags/").map(str::to_string) else {
+            continue;
+        };
         if wanted_refs.is_some_and(|wanted| !wanted.contains(&name)) {
             continue;
         }
         // Skip non-commit-pointing tags here too; the tips loop already
         // recorded them in `skipped_non_commit_refs`.
-        let oid = match peel_to_commit_oid(&repo, &mut tag)? {
+        let immediate = match tag.target {
+            ReferenceTarget::Direct(oid) => oid,
+            ReferenceTarget::Symbolic(_) => continue,
+        };
+        let oid = match peel_to_commit_oid(&repo, immediate)? {
             Ok(oid) => oid,
             Err(_) => continue,
         };
@@ -1045,26 +1045,19 @@ fn sync_marker_from_git_tag(
     }
 }
 
-fn collect_note_ref_updates(repo: &gix::Repository) -> GitResult<Vec<RefUpdate>> {
+fn collect_note_ref_updates(repo: &SleyRepository) -> GitResult<Vec<RefUpdate>> {
     let mut updates = Vec::new();
-    for reference in repo
-        .references()
-        .map_err(git_err)?
-        .prefixed("refs/notes/")
-        .map_err(git_err)?
-    {
-        let reference = reference.map_err(git_err)?;
-        let Some(target) = reference.try_id() else {
+    for reference in repo.references().list_refs().map_err(git_err)? {
+        let full = reference.name.to_string();
+        let Some(short) = full.strip_prefix("refs/notes/").map(str::to_string) else {
             continue;
         };
-        let full = reference.name().as_bstr().to_string();
-        let short = full
-            .strip_prefix("refs/notes/")
-            .unwrap_or(&full)
-            .to_string();
+        let ReferenceTarget::Direct(target) = reference.target else {
+            continue;
+        };
         updates.push(RefUpdate {
             name: short,
-            target: target.detach(),
+            target,
             namespace: RefNamespace::Note,
         });
     }
@@ -1125,8 +1118,8 @@ pub(crate) fn thread_can_adopt_change(
 /// queued this commit's parents but haven't emitted the commit itself
 /// yet" without keeping per-node state outside the stack.
 enum WalkPhase {
-    Enter(gix::hash::ObjectId),
-    Emit(gix::hash::ObjectId),
+    Enter(ObjectId),
+    Emit(ObjectId),
 }
 
 /// Iterative ancestry walk — post-order DFS using an explicit stack
@@ -1151,7 +1144,7 @@ enum WalkPhase {
 #[allow(clippy::too_many_arguments)]
 fn walk_plans_into_states(
     bridge: &mut GitBridge<'_>,
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     tree_importer: &mut GitTreeImporter<'_>,
     plans: &[RefPlan],
     stats: &mut ImportStats,
@@ -1177,11 +1170,11 @@ fn walk_plans_into_states(
 #[allow(clippy::too_many_arguments)]
 fn import_commit_ancestry(
     bridge: &mut GitBridge<'_>,
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     tree_importer: &mut GitTreeImporter<'_>,
-    git_oid: gix::hash::ObjectId,
-    visiting: &mut HashSet<gix::hash::ObjectId>,
-    imported: &mut HashSet<gix::hash::ObjectId>,
+    git_oid: ObjectId,
+    visiting: &mut HashSet<ObjectId>,
+    imported: &mut HashSet<ObjectId>,
     stats: &mut ImportStats,
     progress: &mut dyn FnMut(usize),
 ) -> GitResult<()> {
@@ -1207,9 +1200,8 @@ fn import_commit_ancestry(
                     continue;
                 }
 
-                let commit = repo.find_commit(oid).map_err(git_err)?;
-                let parent_git_oids: Vec<gix::hash::ObjectId> =
-                    commit.parent_ids().map(|id| id.detach()).collect();
+                let commit = repo.read_commit(&oid).map_err(git_err)?;
+                let parent_git_oids: Vec<ObjectId> = commit.parents;
 
                 // Schedule emit AFTER all parents are processed. Stack is
                 // LIFO so the Emit goes on first; then parents on top of

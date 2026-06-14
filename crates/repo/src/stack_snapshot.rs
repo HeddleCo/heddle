@@ -159,9 +159,7 @@ impl RepositorySnapshot {
     /// Look up the stack containing `thread_name`. Returns `None` if the
     /// thread is unknown to this snapshot.
     pub fn stack_containing(&self, thread_name: &str) -> Option<&ThreadStack> {
-        self.stacks
-            .iter()
-            .find(|stack| stack.contains(thread_name))
+        self.stacks.iter().find(|stack| stack.contains(thread_name))
     }
 
     /// Decide the next stack-level action for the stack containing
@@ -397,7 +395,10 @@ mod tests {
             snap("b", Some("a"), ThreadState::Ready),
             snap("c", Some("b"), ThreadState::Merged),
         ]);
-        assert_eq!(snapshot.next_action_for("a").unwrap(), StackNextAction::Ready);
+        assert_eq!(
+            snapshot.next_action_for("a").unwrap(),
+            StackNextAction::Ready
+        );
     }
 
     #[test]

@@ -16,6 +16,7 @@ use objects::{
     worktree::diff_blobs,
 };
 use repo::Repository;
+use sley::{EntryKind, Repository as SleyRepository};
 
 #[cfg(not(feature = "semantic"))]
 use super::super::advice::RecoveryAdvice;
@@ -535,7 +536,7 @@ fn render_plain_git_head_diff(
 ) -> Result<()> {
     // The plain-Git fast path has no heddle Repository, so there is
     // no in-tree blob source `get_worktree_diff` can read from. When
-    // patch text is needed we read the HEAD blobs through `gix`
+    // patch text is needed we read the HEAD blobs through Sley
     // and feed them through the same `diff_blobs` + renderer pipeline
     // the heddle paths use — that way the `\ No newline at end of
     // file` handling stays in one place.
@@ -599,25 +600,21 @@ fn render_status_changes(
 }
 
 /// Build one `FileChange` per status entry in the plain-Git probe,
-/// computing real hunks against the gix-read HEAD blobs so `--patch`
+/// computing real hunks against the sley-read HEAD blobs so `--patch`
 /// emits a body the regular renderer can stamp newline markers onto.
 ///
 /// Unborn HEAD (plain `git init` + staged file, no commit yet) has
-/// no tree to read; in that case we pass `None` and the add-only path
+/// no tree to read; in that case we skip old-side lookup and the add-only path
 /// in `compute_plain_git_hunks` renders against `/dev/null`. Without
-/// this check, `head_tree()?` propagates a "no HEAD commit" error and
+/// this check, resolving old-side blobs propagates a "no HEAD commit" error and
 /// the whole `--patch` render fails, even though the only honest diff
 /// is "everything is new."
 fn plain_git_file_changes_with_hunks(
     probe: &PlainGitVerificationProbe,
     unified: usize,
 ) -> Result<Vec<FileChange>> {
-    let git_repo = gix::discover(&probe.root)?;
-    let mut head_tree = if git_repo.head()?.is_unborn() {
-        None
-    } else {
-        Some(git_repo.head_tree()?)
-    };
+    let git_repo = SleyRepository::discover(&probe.root)?;
+    let head_has_tree = !git_repo.head()?.is_unborn();
     // `plain_git_worktree_status` can report the same path as BOTH
     // deleted (index-vs-HEAD) and added (untracked worktree) — e.g.
     // `git rm --cached f` followed by editing the still-present untracked
@@ -632,7 +629,7 @@ fn plain_git_file_changes_with_hunks(
     for path in &probe.changes.modified {
         push_plain_git_modified(
             &git_repo,
-            &mut head_tree,
+            head_has_tree,
             &probe.root,
             path,
             unified,
@@ -646,7 +643,7 @@ fn plain_git_file_changes_with_hunks(
             // splits into delete+add rather than emitting a cross-type chmod.
             push_plain_git_modified(
                 &git_repo,
-                &mut head_tree,
+                head_has_tree,
                 &probe.root,
                 path,
                 unified,
@@ -655,7 +652,7 @@ fn plain_git_file_changes_with_hunks(
         } else {
             changes.push(plain_git_file_change(
                 &git_repo,
-                head_tree.as_mut(),
+                head_has_tree,
                 &probe.root,
                 path,
                 "added",
@@ -671,7 +668,7 @@ fn plain_git_file_changes_with_hunks(
         }
         changes.push(plain_git_file_change(
             &git_repo,
-            head_tree.as_mut(),
+            head_has_tree,
             &probe.root,
             path,
             "deleted",
@@ -684,17 +681,17 @@ fn plain_git_file_changes_with_hunks(
 
 #[allow(clippy::too_many_arguments)]
 fn plain_git_file_change(
-    git_repo: &gix::Repository,
-    head_tree: Option<&mut gix::Tree<'_>>,
+    git_repo: &SleyRepository,
+    head_has_tree: bool,
     root: &Path,
     path: &std::path::Path,
     kind: &str,
     diff_kind: DiffKind,
     unified: usize,
 ) -> Result<FileChange> {
-    let (old_blob, old_mode) = match (head_tree, &diff_kind) {
-        (Some(tree), DiffKind::Modified | DiffKind::Deleted) => {
-            match plain_git_lookup_blob_and_mode(git_repo, tree, path)? {
+    let (old_blob, old_mode) = match (head_has_tree, &diff_kind) {
+        (true, DiffKind::Modified | DiffKind::Deleted) => {
+            match plain_git_lookup_blob_and_mode(git_repo, path)? {
                 Some((blob, mode)) => (Some(blob), Some(mode)),
                 None => (None, None),
             }
@@ -743,26 +740,31 @@ fn plain_git_file_change(
 }
 
 fn plain_git_lookup_blob_and_mode(
-    git_repo: &gix::Repository,
-    tree: &mut gix::Tree<'_>,
+    git_repo: &SleyRepository,
     path: &std::path::Path,
 ) -> Result<Option<(Blob, FileMode)>> {
-    let Some(entry) = tree.peel_to_entry_by_path(path)? else {
+    let tree_path = plain_git_tree_path(path);
+    let Ok(entry) = git_repo.resolve_path("HEAD", &tree_path) else {
         return Ok(None);
     };
-    let entry_mode = entry.mode();
-    if !entry_mode.is_blob_or_symlink() {
+    let Some(entry_mode) = entry.mode else {
         return Ok(None);
-    }
-    let mode = if entry_mode.is_link() {
-        FileMode::Symlink
-    } else if entry_mode.is_executable() {
-        FileMode::Executable
-    } else {
-        FileMode::Normal
     };
-    let object = git_repo.find_object(entry.object_id())?;
-    Ok(Some((Blob::new(object.data.clone()), mode)))
+    let mode = match EntryKind::from_mode(entry_mode) {
+        Some(EntryKind::Symlink) => FileMode::Symlink,
+        Some(EntryKind::BlobExecutable) => FileMode::Executable,
+        Some(EntryKind::Blob) => FileMode::Normal,
+        _ => return Ok(None),
+    };
+    let object = git_repo.read_object(&entry.oid)?;
+    Ok(Some((Blob::new(object.body.clone()), mode)))
+}
+
+fn plain_git_tree_path(path: &std::path::Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Classify the HEAD-tree side of a plain-Git path. A tracked entry is a
@@ -771,19 +773,21 @@ fn plain_git_lookup_blob_and_mode(
 /// HEAD) is `Absent`, which `is_type_change` treats as no type change so
 /// the modify renders as content.
 fn plain_git_old_side_kind(
-    head_tree: Option<&mut gix::Tree<'_>>,
+    git_repo: &SleyRepository,
+    head_has_tree: bool,
     path: &std::path::Path,
 ) -> Result<SideKind> {
-    let Some(tree) = head_tree else {
+    if !head_has_tree {
+        return Ok(SideKind::Absent);
+    }
+    let tree_path = plain_git_tree_path(path);
+    let Ok(entry) = git_repo.resolve_path("HEAD", &tree_path) else {
         return Ok(SideKind::Absent);
     };
-    let Some(entry) = tree.peel_to_entry_by_path(path)? else {
-        return Ok(SideKind::Absent);
-    };
-    Ok(if entry.mode().is_link() {
-        SideKind::Symlink
-    } else {
-        SideKind::Regular
+    Ok(match entry.mode.and_then(EntryKind::from_mode) {
+        Some(EntryKind::Symlink) => SideKind::Symlink,
+        Some(EntryKind::Tree) => SideKind::Dir,
+        _ => SideKind::Regular,
     })
 }
 
@@ -799,19 +803,19 @@ fn plain_git_old_side_kind(
 /// their own `added` entries from status). A tracked old side is always a
 /// single blob/symlink, so there is never an old subtree to expand here.
 fn push_plain_git_modified(
-    git_repo: &gix::Repository,
-    head_tree: &mut Option<gix::Tree<'_>>,
+    git_repo: &SleyRepository,
+    head_has_tree: bool,
     root: &Path,
     path: &std::path::Path,
     unified: usize,
     out: &mut Vec<FileChange>,
 ) -> Result<()> {
     let new_kind = worktree_side_kind(&root.join(path));
-    let old_kind = plain_git_old_side_kind(head_tree.as_mut(), path)?;
+    let old_kind = plain_git_old_side_kind(git_repo, head_has_tree, path)?;
     if is_type_change(old_kind, new_kind) {
         out.push(plain_git_file_change(
             git_repo,
-            head_tree.as_mut(),
+            head_has_tree,
             root,
             path,
             "deleted",
@@ -823,7 +827,7 @@ fn push_plain_git_modified(
         if new_kind != SideKind::Dir {
             out.push(plain_git_file_change(
                 git_repo,
-                head_tree.as_mut(),
+                head_has_tree,
                 root,
                 path,
                 "added",
@@ -834,7 +838,7 @@ fn push_plain_git_modified(
     } else {
         out.push(plain_git_file_change(
             git_repo,
-            head_tree.as_mut(),
+            head_has_tree,
             root,
             path,
             "modified",

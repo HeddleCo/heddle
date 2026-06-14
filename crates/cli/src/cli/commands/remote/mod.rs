@@ -9,11 +9,11 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use gix::{bstr::ByteSlice, refs::transaction::PreviousValue};
 use objects::{fs_atomic::write_file_atomic, object::ThreadName};
 use refs::Head;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
+use sley::{FullName, RefPrecondition, Repository as SleyRepository};
 
 use super::{
     action_line::print_next,
@@ -779,27 +779,18 @@ fn refresh_git_tracking_after_overlay_push(
     if branch.is_empty() {
         return Ok(None);
     }
-    let git = match gix::discover(repo.root()) {
+    let git = match SleyRepository::discover(repo.root()) {
         Ok(git) => git,
         Err(_) => return Ok(None),
     };
-    let Ok(head) = git.head_id() else {
+    let Some(head) = git.head().ok().and_then(|head| head.oid) else {
         return Ok(None);
     };
-    let head = head.detach();
     let Some(tracking_remote) = resolve_git_tracking_remote_name(repo, remote_name)? else {
         return Ok(None);
     };
 
-    let upstream = git
-        .find_reference(format!("refs/heads/{branch}").as_str())
-        .ok()
-        .and_then(|local| {
-            local
-                .remote_tracking_ref_name(gix::remote::Direction::Fetch)?
-                .ok()
-                .map(|name| name.as_ref().as_bstr().to_str_lossy().into_owned())
-        })
+    let upstream = git_branch_upstream_from_config(&git, &branch)
         .and_then(|name| name.strip_prefix("refs/remotes/").map(str::to_string))
         .unwrap_or_else(|| format!("{}/{branch}", tracking_remote.name));
 
@@ -821,7 +812,7 @@ fn refresh_git_tracking_after_overlay_push(
         &git,
         &full_ref,
         head,
-        PreviousValue::Any,
+        RefPrecondition::Any,
         &format!("heddle: push to {remote_name}"),
     ) {
         return Err(anyhow!(
@@ -903,21 +894,15 @@ fn resolve_git_tracking_remote_name(
 }
 
 fn git_remote_name_for_url(root: &Path, requested: &str) -> Result<Option<String>> {
+    let git = match SleyRepository::discover(root) {
+        Ok(git) => git,
+        Err(_) => return Ok(None),
+    };
     for name in git_remote_names(root)? {
-        let git = match gix::discover(root) {
-            Ok(git) => git,
-            Err(_) => return Ok(None),
-        };
-        let Some(remote) = git
-            .try_find_remote(name.as_bytes().as_bstr())
-            .and_then(Result::ok)
-        else {
+        let Some(url) = git_remote_push_url(&git, &name)? else {
             continue;
         };
-        let Some(url) = remote.url(gix::remote::Direction::Push) else {
-            continue;
-        };
-        if remote_urls_match(&url.to_string(), requested) {
+        if remote_urls_match(&url, requested) {
             return Ok(Some(name));
         }
     }
@@ -925,14 +910,13 @@ fn git_remote_name_for_url(root: &Path, requested: &str) -> Result<Option<String
 }
 
 fn git_remote_names(root: &Path) -> Result<Vec<String>> {
-    let git = match gix::discover(root) {
+    let git = match SleyRepository::discover(root) {
         Ok(git) => git,
         Err(_) => return Ok(Vec::new()),
     };
     Ok(git
-        .remote_names()
+        .remote_names()?
         .into_iter()
-        .map(|name| name.to_str_lossy().into_owned())
         .filter(|name| !name.is_empty())
         .collect())
 }
@@ -942,7 +926,23 @@ fn git_remote_ref_name_is_valid(_root: &Path, name: &str) -> Result<bool> {
         return Ok(false);
     }
     let refname = format!("refs/remotes/{name}/HEAD");
-    Ok(gix::refs::FullName::try_from(refname.as_str()).is_ok())
+    Ok(FullName::try_from(refname.as_str()).is_ok())
+}
+
+fn git_branch_upstream_from_config(git: &SleyRepository, branch: &str) -> Option<String> {
+    let config = git.config_snapshot().ok()?;
+    let remote = config.get("branch", Some(branch), "remote")?;
+    let merge = config.get("branch", Some(branch), "merge")?;
+    let branch_name = merge.strip_prefix("refs/heads/")?;
+    Some(format!("refs/remotes/{remote}/{branch_name}"))
+}
+
+fn git_remote_push_url(git: &SleyRepository, remote: &str) -> Result<Option<String>> {
+    let config = git.config_snapshot()?;
+    Ok(config
+        .get("remote", Some(remote), "pushurl")
+        .or_else(|| config.get("remote", Some(remote), "url"))
+        .map(str::to_string))
 }
 
 fn write_git_overlay_branch_upstream(root: &Path, branch: &str, remote: &str) -> Result<()> {

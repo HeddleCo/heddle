@@ -148,3 +148,15 @@ where
         max_duration
     );
 }
+
+fn performance_budget(release: Duration, debug: Duration) -> Duration {
+    if cfg!(debug_assertions) {
+        // Comprehensive perf checks run in the default parallel harness beside
+        // other subprocess-heavy tests. Keep debug-mode budgets loose enough to
+        // avoid scheduler-noise flakes while release budgets guard production
+        // expectations.
+        debug
+    } else {
+        release
+    }
+}

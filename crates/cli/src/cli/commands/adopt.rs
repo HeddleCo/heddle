@@ -4,9 +4,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
-use gix::bstr::ByteSlice;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
+use sley::Repository as SleyRepository;
 
 use super::{
     action_line::print_next,
@@ -154,29 +154,17 @@ fn preflight_importable_git_history(git_root: &Path, refs: &[String]) -> Result<
 }
 
 fn git_repo_has_any_commit_ref(git_root: &Path) -> Result<bool> {
-    let git =
-        gix::discover(git_root).map_err(|error| anyhow!("failed to inspect Git refs: {error}"))?;
-    let references = git
-        .references()
+    let git = SleyRepository::discover(git_root)
         .map_err(|error| anyhow!("failed to inspect Git refs: {error}"))?;
-    for branch in references
-        .local_branches()
+    for reference in git
+        .references()
+        .list_refs()
         .map_err(|error| anyhow!("failed to inspect Git refs: {error}"))?
     {
-        let branch = branch.map_err(|error| anyhow!("failed to inspect Git ref: {error}"))?;
-        if git_ref_points_to_commit(git_root, &branch.name().as_bstr().to_str_lossy())? {
-            return Ok(true);
-        }
-    }
-    let references = git
-        .references()
-        .map_err(|error| anyhow!("failed to inspect Git refs: {error}"))?;
-    for tag in references
-        .tags()
-        .map_err(|error| anyhow!("failed to inspect Git refs: {error}"))?
-    {
-        let tag = tag.map_err(|error| anyhow!("failed to inspect Git ref: {error}"))?;
-        if git_ref_points_to_commit(git_root, &tag.name().as_bstr().to_str_lossy())? {
+        let name = reference.name.as_str();
+        if (name.starts_with("refs/heads/") || name.starts_with("refs/tags/"))
+            && git_ref_points_to_commit(git_root, name)?
+        {
             return Ok(true);
         }
     }
@@ -185,9 +173,9 @@ fn git_repo_has_any_commit_ref(git_root: &Path) -> Result<bool> {
 
 fn git_ref_points_to_commit(git_root: &Path, name: &str) -> Result<bool> {
     let spec = format!("{name}^{{commit}}");
-    let git = gix::discover(git_root)
+    let git = SleyRepository::discover(git_root)
         .map_err(|error| anyhow!("failed to inspect Git ref '{name}': {error}"))?;
-    Ok(git.rev_parse_single(spec.as_bytes().as_bstr()).is_ok())
+    Ok(git.rev_parse(&spec).is_ok())
 }
 
 fn no_git_commits_to_adopt_advice(git_root: &Path, missing_refs: Vec<String>) -> RecoveryAdvice {
@@ -245,7 +233,7 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
 }
 
 fn git_worktree_root(start: &Path) -> Result<PathBuf> {
-    let git = gix::discover(start).map_err(|error| {
+    let git = SleyRepository::discover(start).map_err(|error| {
         anyhow!(RecoveryAdvice::adopt_requires_git_worktree(Some(format!(
             "Git inspection failed: {error}"
         ))))

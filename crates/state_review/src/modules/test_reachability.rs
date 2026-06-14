@@ -18,14 +18,13 @@ use std::{
 };
 
 use objects::object::{ProducerId, RiskSignal, RiskSignalKind, SignalAnchor, State};
-use semantic::{parser::FunctionDef, Language};
+use semantic::{Language, parser::FunctionDef};
 
 use crate::{config::ReviewSignalsConfig, registry::SemanticContext};
 
 const VERSION: u32 = 1;
 const MODULE_ID: &str = "test_reachability.tree_sitter";
-const REASON_TEXT: &str =
-    "no test reaches this symbol via static reachability via tree-sitter call graph; \
+const REASON_TEXT: &str = "no test reaches this symbol via static reachability via tree-sitter call graph; \
      this is not runtime coverage";
 
 pub fn run(

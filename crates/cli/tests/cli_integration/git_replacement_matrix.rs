@@ -137,8 +137,8 @@ fn git_stdout(args: &[&str], cwd: &std::path::Path) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn seed_bare_git_repo(path: &std::path::Path) -> gix::hash::ObjectId {
-    let repo = gix::init_bare(path).expect("init bare git repo");
+fn seed_bare_git_repo(path: &std::path::Path) -> ObjectId {
+    let repo = SleyRepository::init_bare(path).expect("init bare git repo");
     let commit = git_commit_with_tree(
         &repo,
         Some("refs/heads/main"),
@@ -150,29 +150,26 @@ fn seed_bare_git_repo(path: &std::path::Path) -> gix::hash::ObjectId {
     commit
 }
 
-fn git_tree_with_file(repo: &gix::Repository, path: &str, content: &[u8]) -> gix::hash::ObjectId {
-    let blob = repo.write_blob(content).expect("write git blob").detach();
+fn git_tree_with_file(repo: &SleyRepository, path: &str, content: &[u8]) -> ObjectId {
+    let blob = repo.write_blob(content).expect("write git blob");
     let empty = git_empty_tree_oid(repo);
-    let mut editor = repo.edit_tree(empty).expect("edit git tree");
-    editor
-        .upsert(path, gix::object::tree::EntryKind::Blob, blob)
-        .expect("add file to git tree");
-    editor.write().expect("write git tree").detach()
+    let mut editor = repo.edit_tree(&empty).expect("edit git tree");
+    editor.upsert(path, EntryKind::Blob, blob);
+    repo.write_tree(editor).expect("write git tree")
 }
 
 fn git_head_oid(path: &std::path::Path) -> String {
-    gix::open(path)
+    open_git(path)
         .expect("open git repo")
         .head_id()
         .expect("resolve HEAD")
-        .detach()
         .to_string()
 }
 
 #[test]
 fn git_replacement_matrix_fresh_git_read_commands_without_git_on_path() {
     let temp = TempDir::new().unwrap();
-    gix::init(temp.path()).expect("init git worktree");
+    SleyRepository::init(temp.path()).expect("init git worktree");
     std::fs::write(temp.path().join("pending.txt"), "pending\n").unwrap();
 
     let status = heddle_without_git(&["status", "--output", "json"], temp.path()).unwrap();
@@ -253,7 +250,7 @@ fn git_replacement_matrix_fresh_git_read_commands_without_git_on_path() {
     );
 
     let committed = TempDir::new().unwrap();
-    let repo = gix::init(committed.path()).expect("init committed git worktree");
+    let repo = SleyRepository::init(committed.path()).expect("init committed git worktree");
     std::fs::write(
         committed.path().join(".git").join("HEAD"),
         "ref: refs/heads/main\n",
@@ -287,7 +284,7 @@ fn git_replacement_matrix_fresh_git_read_commands_without_git_on_path() {
 #[test]
 fn git_replacement_matrix_shallow_import_refuses_without_raw_git_advice() {
     let temp = TempDir::new().unwrap();
-    let git = gix::init(temp.path()).expect("init git worktree");
+    let git = SleyRepository::init(temp.path()).expect("init git worktree");
     std::fs::write(
         temp.path().join(".git").join("HEAD"),
         "ref: refs/heads/main\n",
@@ -347,7 +344,7 @@ fn git_replacement_matrix_shallow_import_refuses_without_raw_git_advice() {
 #[test]
 fn git_replacement_matrix_raw_git_operation_handoff_without_git_on_path() {
     let temp = TempDir::new().unwrap();
-    let git = gix::init(temp.path()).expect("init git worktree");
+    let git = SleyRepository::init(temp.path()).expect("init git worktree");
     configure_repo_local_git_identity(temp.path());
     std::fs::write(
         temp.path().join(".git").join("HEAD"),
@@ -522,7 +519,7 @@ fn git_replacement_matrix_native_repo_read_commands_without_git_on_path() {
 #[test]
 fn git_replacement_matrix_everyday_save_read_machine_streams_without_git_on_path() {
     let temp = TempDir::new().unwrap();
-    gix::init(temp.path()).expect("init git worktree");
+    SleyRepository::init(temp.path()).expect("init git worktree");
     configure_repo_local_git_identity(temp.path());
 
     let init = assert_clean_json_without_git(&["--output", "json", "init"], temp.path());
@@ -634,13 +631,11 @@ fn git_replacement_matrix_clone_status_capture_push_without_git_on_path() {
     heddle_without_git(&["capture", "-m", "heddle change"], &work).unwrap();
     heddle_without_git(&["push"], &work).unwrap();
 
-    let origin_repo = gix::open(&origin).expect("open pushed origin");
-    let new_tip = origin_repo
-        .find_reference("refs/heads/main")
+    let origin_repo = open_git(&origin).expect("open pushed origin");
+    let new_tip = find_reference(&origin_repo, "refs/heads/main")
         .expect("main ref exists")
         .peel_to_id()
-        .expect("peel main")
-        .detach();
+        .expect("peel main");
     assert_ne!(
         new_tip, original_tip,
         "heddle push should advance Git branch"
@@ -760,10 +755,8 @@ fn git_replacement_matrix_bridge_import_export_sync_reconcile_without_git_on_pat
             || export["threads_synced"].as_u64().unwrap_or(0) >= 1,
         "explicit bridge export should write Git-format refs natively: {export}"
     );
-    let exported = gix::open(&export_path).expect("open exported git repo");
-    exported
-        .find_reference("refs/heads/main")
-        .expect("export should write main branch");
+    let exported = open_git(&export_path).expect("open exported git repo");
+    find_reference(&exported, "refs/heads/main").expect("export should write main branch");
 
     let sync = assert_clean_json_without_git(
         &[
@@ -848,13 +841,11 @@ fn git_replacement_matrix_commit_undo_rewinds_checkpoint_without_git_on_path() {
         "undo should rewind the visible Git checkout without invoking git"
     );
 
-    let mirror = gix::open(work.join(".heddle/git")).expect("open Heddle Git mirror");
-    let mirror_tip = mirror
-        .find_reference("refs/heads/main")
+    let mirror = open_git(work.join(".heddle/git")).expect("open Heddle Git mirror");
+    let mirror_tip = find_reference(&mirror, "refs/heads/main")
         .expect("mirror main exists")
         .peel_to_id()
         .expect("peel mirror main")
-        .detach()
         .to_string();
     assert_eq!(
         mirror_tip, base,
@@ -1149,11 +1140,11 @@ fn git_replacement_matrix_merge_git_commit_pushes_checkpoint_without_git_on_path
         .to_string();
     assert_eq!(git_head_oid(&work), merge_sha);
 
-    let git_repo = gix::open(&work).expect("open checkout git repo");
+    let git_repo = open_git(&work).expect("open checkout git repo");
     let head = git_repo
         .find_commit(
             merge_sha
-                .parse::<gix::hash::ObjectId>()
+                .parse::<ObjectId>()
                 .expect("merge sha should parse"),
         )
         .expect("merge checkpoint should exist");
@@ -1172,13 +1163,11 @@ fn git_replacement_matrix_merge_git_commit_pushes_checkpoint_without_git_on_path
     );
 
     heddle_without_git(&["push"], &work).unwrap();
-    let origin_repo = gix::open(&origin).expect("open origin");
-    let origin_tip = origin_repo
-        .find_reference("refs/heads/main")
+    let origin_repo = open_git(&origin).expect("open origin");
+    let origin_tip = find_reference(&origin_repo, "refs/heads/main")
         .expect("origin main exists")
         .peel_to_id()
         .expect("peel origin main")
-        .detach()
         .to_string();
     assert_eq!(
         origin_tip, merge_sha,
@@ -1360,13 +1349,11 @@ fn git_replacement_matrix_checkpoint_writes_through_to_git_branch_and_index_with
     heddle_without_git(&["capture", "-m", "write through"], &work).unwrap();
     heddle_without_git(&["checkpoint", "-m", "commit captured work"], &work).unwrap();
 
-    let git_repo = gix::open(&work).expect("open checkout git repo");
-    let new_tip = git_repo
-        .find_reference("refs/heads/main")
+    let git_repo = open_git(&work).expect("open checkout git repo");
+    let new_tip = find_reference(&git_repo, "refs/heads/main")
         .expect("main ref exists")
         .peel_to_id()
-        .expect("peel main")
-        .detach();
+        .expect("peel main");
     assert_ne!(
         new_tip, original_tip,
         "checkpoint should advance the real Git branch ref"
@@ -1519,7 +1506,7 @@ fn git_replacement_matrix_pull_adopts_remote_branch_without_git_on_path() {
     )
     .unwrap();
 
-    let origin_repo = gix::open(&origin).expect("open origin");
+    let origin_repo = open_git(&origin).expect("open origin");
     let advanced_tip = git_commit_with_tree(
         &origin_repo,
         Some("refs/heads/main"),
@@ -1549,13 +1536,11 @@ fn git_replacement_matrix_pull_adopts_remote_branch_without_git_on_path() {
         "pull text should explain remote movement without requiring git on PATH: {pull}"
     );
 
-    let mirror = gix::open(work.join(".heddle/git")).expect("open Heddle Git mirror");
-    let mirror_tip = mirror
-        .find_reference("refs/heads/main")
+    let mirror = open_git(work.join(".heddle/git")).expect("open Heddle Git mirror");
+    let mirror_tip = find_reference(&mirror, "refs/heads/main")
         .expect("mirror main exists")
         .peel_to_id()
-        .expect("peel mirror main")
-        .detach();
+        .expect("peel mirror main");
     assert_eq!(
         mirror_tip, advanced_tip,
         "heddle pull should advance the native Git mirror without using git on PATH"
@@ -1568,7 +1553,7 @@ fn git_replacement_matrix_fetch_does_not_dirty_checkout_and_pull_materializes_wi
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
-    let origin_repo = gix::init_bare(&origin).expect("init bare git repo");
+    let origin_repo = SleyRepository::init_bare(&origin).expect("init bare git repo");
     let base_tree = git_tree_with_file(&origin_repo, "shared.txt", b"base\n");
     let original_tip = git_commit_with_tree(
         &origin_repo,
@@ -1659,7 +1644,7 @@ fn git_replacement_matrix_fetch_discovers_new_remote_branch_without_git_on_path(
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
-    let origin_repo = gix::init_bare(&origin).expect("init bare git repo");
+    let origin_repo = SleyRepository::init_bare(&origin).expect("init bare git repo");
     let base_tree = git_tree_with_file(&origin_repo, "shared.txt", b"base\n");
     let original_tip = git_commit_with_tree(
         &origin_repo,
@@ -1698,22 +1683,18 @@ fn git_replacement_matrix_fetch_discovers_new_remote_branch_without_git_on_path(
     )
     .unwrap();
 
-    let checkout = gix::open(&work).expect("open checkout git repo");
-    let checkout_topic = checkout
-        .find_reference("refs/remotes/origin/topic-remote")
+    let checkout = open_git(&work).expect("open checkout git repo");
+    let checkout_topic = find_reference(&checkout, "refs/remotes/origin/topic-remote")
         .expect("fetch should discover checkout remote-tracking branch")
         .peel_to_id()
-        .expect("peel checkout remote-tracking branch")
-        .detach();
+        .expect("peel checkout remote-tracking branch");
     assert_eq!(checkout_topic, topic_tip);
 
-    let mirror = gix::open(work.join(".heddle/git")).expect("open Heddle Git mirror");
-    let mirror_topic = mirror
-        .find_reference("refs/remotes/origin/topic-remote")
+    let mirror = open_git(work.join(".heddle/git")).expect("open Heddle Git mirror");
+    let mirror_topic = find_reference(&mirror, "refs/remotes/origin/topic-remote")
         .expect("fetch should mirror remote-tracking branch")
         .peel_to_id()
-        .expect("peel mirror remote-tracking branch")
-        .detach();
+        .expect("peel mirror remote-tracking branch");
     assert_eq!(mirror_topic, topic_tip);
 
     let import = assert_clean_json_without_git(
@@ -1769,10 +1750,11 @@ fn git_replacement_matrix_https_push_uses_native_transport_without_git_on_path()
     )
     .expect_err("closed HTTPS endpoint should fail after choosing native transport");
 
+    let lowercase_error = err.to_ascii_lowercase();
     assert!(
-        err.contains("failed to connect")
-            || err.contains("receive-pack handshake failed")
-            || err.contains("connection"),
+        lowercase_error.contains("failed to connect")
+            || lowercase_error.contains("receive-pack handshake failed")
+            || lowercase_error.contains("connection"),
         "HTTPS push should fail as a native transport connection error: {err}"
     );
     assert!(

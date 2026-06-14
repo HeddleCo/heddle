@@ -587,6 +587,7 @@ fn git_overlay_isolated_checkout_status_and_verify_identify_parent_context() {
         ],
     );
 
+    let parent_repo = canonical_path_string(temp.path());
     let status = json_value(&checkout, &["status", "--output", "json"]);
     assert_eq!(
         status["repository_capability"], "native-heddle",
@@ -602,7 +603,7 @@ fn git_overlay_isolated_checkout_status_and_verify_identify_parent_context() {
     );
     assert_eq!(
         status["repository_context"]["parent_repository"],
-        temp.path().display().to_string()
+        parent_repo
     );
     assert_eq!(status["repository_context"]["target_thread"], "main");
     assert_eq!(status["target_thread"], "main");
@@ -611,7 +612,7 @@ fn git_overlay_isolated_checkout_status_and_verify_identify_parent_context() {
         heddle(&["status", "--output", "text"], Some(&checkout)).expect("status text");
     assert!(
         status_text.contains("Repository: Git + Heddle isolated checkout")
-            && status_text.contains(&format!("Parent repo: {}", temp.path().display()))
+            && status_text.contains(&format!("Parent repo: {parent_repo}"))
             && status_text
                 .contains("Git checkout: no .git here; raw Git commands belong in the parent repo")
             && status_text.contains("Target thread: main")
@@ -624,7 +625,7 @@ fn git_overlay_isolated_checkout_status_and_verify_identify_parent_context() {
     assert_eq!(verify["repository_label"], "Git + Heddle isolated checkout");
     assert_eq!(
         verify["repository_context"]["parent_repository"],
-        temp.path().display().to_string()
+        parent_repo
     );
     assert_eq!(verify["repository_context"]["target_thread"], "main");
 
@@ -635,7 +636,7 @@ fn git_overlay_isolated_checkout_status_and_verify_identify_parent_context() {
     .expect("verify text");
     assert!(
         verify_text.contains("Repository: Git + Heddle isolated checkout")
-            && verify_text.contains(&format!("Parent repo: {}", temp.path().display()))
+            && verify_text.contains(&format!("Parent repo: {parent_repo}"))
             && verify_text.contains("Target thread: main"),
         "verify text should surface managed Git-overlay child context: {verify_text}"
     );
@@ -4545,7 +4546,7 @@ fn parse_exactly_one_json_value(raw: &str) -> Result<Value, String> {
 #[test]
 fn git_compat_commit_branch_and_switch_shims_work() {
     let temp = TempDir::new().unwrap();
-    gix::init(temp.path()).expect("init git repo");
+    SleyRepository::init(temp.path()).expect("init git repo");
     configure_repo_local_git_identity_for_json_contract(temp.path());
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
@@ -4665,8 +4666,8 @@ fn thread_switch_refuses_dirty_worktree_without_force() {
 fn remote_list_and_show_json_share_git_overlay_remote_view() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
-    gix::init_bare(&origin).expect("init bare origin");
-    gix::init(temp.path()).expect("init git worktree");
+    SleyRepository::init_bare(&origin).expect("init bare origin");
+    SleyRepository::init(temp.path()).expect("init git worktree");
     std::fs::OpenOptions::new()
         .append(true)
         .open(temp.path().join(".git/config"))
@@ -5897,7 +5898,7 @@ fn revert_empty_state_uses_typed_advice() {
 #[test]
 fn checkpoint_refuses_uncaptured_worktree_with_shared_advice() {
     let temp = TempDir::new().unwrap();
-    gix::init(temp.path()).expect("init git repo");
+    SleyRepository::init(temp.path()).expect("init git repo");
     configure_repo_local_git_identity_for_json_contract(temp.path());
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::write(temp.path().join("tracked.txt"), "base\n").unwrap();
@@ -6562,6 +6563,13 @@ fn profile_env_writes_timings_to_stderr_without_polluting_json_stdout() {
         "status profile should show worktree scan cost: {stderr}"
     );
     assert!(
+        stderr.contains("git_overlay_status_ms:")
+            && stderr.contains("git_overlay_health_ms:")
+            && stderr.contains("verification_ms:")
+            && stderr.contains("git_index_ms:"),
+        "status profile should break out git-overlay health and index costs: {stderr}"
+    );
+    assert!(
         stderr.contains("directories_scanned:"),
         "status profile should show worktree scan counters: {stderr}"
     );
@@ -6651,9 +6659,10 @@ fn start_merge_undo_json_workflow_keeps_machine_streams_clean() {
         &repo,
     );
     assert_eq!(started["name"], "feature/a");
+    let feature_path = canonical_path_string(&feature);
     assert_eq!(
         started["execution_path"].as_str(),
-        Some(feature.to_str().expect("utf8 path"))
+        Some(feature_path.as_str())
     );
 
     std::fs::write(
@@ -7886,7 +7895,9 @@ fn default_run_does_not_leak_info_traces() {
 #[test]
 fn verbose_flag_re_enables_info_traces() {
     let temp = TempDir::new().unwrap();
-    let output = heddle_output(&["-v", "init"], Some(temp.path())).unwrap();
+    let output =
+        heddle_output_with_env_removed(&["-v", "init"], Some(temp.path()), &[], &["RUST_LOG"])
+            .unwrap();
     assert!(output.status.success(), "init -v should succeed");
 
     let stderr = std::str::from_utf8(&output.stderr).unwrap();
@@ -7950,12 +7961,12 @@ fn missing_repo_status_emits_structured_error_in_json_mode() {
         envelope["hint"]
             .as_str()
             .unwrap_or("")
-            .contains(temp.path().to_str().expect("temp path utf8")),
+            .contains(&canonical_path_string(temp.path())),
         "envelope.hint should suggest initializing the requested path: {envelope}"
     );
     assert_eq!(
         envelope["primary_command_template"]["argv_template"],
-        heddle_argv_json(["init", temp.path().to_str().expect("temp path utf8")])
+        heddle_argv_json(["init", canonical_path_string(temp.path()).as_str()])
     );
 }
 
@@ -8502,18 +8513,19 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
     );
 
     let checkout_status = json_value(&checkout, &["status", "--output", "json"]);
+    let repo_path = canonical_path_string(temp.path());
     assert_eq!(
         checkout_status["recommended_action"],
         format!(
             "heddle --repo {} land --thread feature/capture-next --no-push",
-            temp.path().display()
+            repo_path
         )
     );
     assert_eq!(
         checkout_status["recommended_action_template"]["argv_template"],
         heddle_argv_json([
             "--repo",
-            temp.path().to_str().expect("repo path utf8"),
+            repo_path.as_str(),
             "land",
             "--thread",
             "feature/capture-next",
@@ -8586,7 +8598,7 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
         &checkout,
         &[
             "--repo",
-            temp.path().to_str().expect("repo path utf8"),
+            repo_path.as_str(),
             "merge",
             "feature/capture-next",
             "--preview",
@@ -8598,7 +8610,7 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
         contextual_preview["recommended_action"],
         format!(
             "heddle --repo {} land --thread feature/capture-next --no-push",
-            temp.path().display()
+            repo_path
         ),
         "merge preview invoked from an isolated checkout must preserve parent repo context: {contextual_preview}"
     );
@@ -8606,7 +8618,7 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
         contextual_preview["recommended_action_template"]["argv_template"],
         heddle_argv_json([
             "--repo",
-            temp.path().to_str().expect("repo path utf8"),
+            repo_path.as_str(),
             "land",
             "--thread",
             "feature/capture-next",
@@ -8620,14 +8632,14 @@ fn isolated_thread_capture_points_to_ready_not_checkpoint_tip() {
         checkout_after_preview["recommended_action"],
         format!(
             "heddle --repo {} land --thread feature/capture-next --no-push",
-            temp.path().display()
+            repo_path
         )
     );
     assert_eq!(
         checkout_after_preview["recommended_action_template"]["argv_template"],
         heddle_argv_json([
             "--repo",
-            temp.path().to_str().expect("repo path utf8"),
+            repo_path.as_str(),
             "land",
             "--thread",
             "feature/capture-next",
@@ -9136,7 +9148,8 @@ fn cd_hint_quotes_paths_with_spaces() {
     )
     .expect("start with spaced path");
 
-    let quoted = format!("'{checkout_str}'");
+    let checkout_display = canonical_path_string(&checkout);
+    let quoted = format!("'{checkout_display}'");
     assert!(
         output.contains(&format!("    cd {quoted}")),
         "cd hint must single-quote paths with spaces: {output}"
@@ -10021,7 +10034,7 @@ fn agent_api_json_outputs_match_registered_schemas_and_include_verification() {
     assert!(
         status["pid_path"]
             .as_str()
-            .is_some_and(|path| path.starts_with(temp.path().to_str().unwrap())),
+            .is_some_and(|path| path.starts_with(&canonical_path_string(temp.path()))),
         "agent status should use the requested repo for daemon paths: {status}"
     );
 
@@ -10154,6 +10167,7 @@ fn agent_daemon_status_honors_global_repo_argument() {
     heddle(&["init"], Some(target_repo.path())).expect("init target repo");
 
     let target_arg = target_repo.path().to_str().expect("utf8 target path");
+    let target_path = canonical_path_string(target_repo.path());
     let output = heddle(
         &["--repo", target_arg, "agent", "status", "--output", "json"],
         Some(cwd_repo.path()),
@@ -10165,7 +10179,7 @@ fn agent_daemon_status_honors_global_repo_argument() {
         .as_str()
         .expect("agent status should include pid_path");
     assert!(
-        pid_path.starts_with(target_arg),
+        pid_path.starts_with(&target_path),
         "agent status must inspect the global --repo target, not cwd: {status}"
     );
     assert!(
@@ -10317,7 +10331,7 @@ fn actor_explain_json_detects_harness_without_active_actor() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    let output = heddle_output_with_env(
+    let output = heddle_output_with_env_removed(
         &["actor", "explain", "--output", "json"],
         Some(temp.path()),
         &[
@@ -10327,6 +10341,7 @@ fn actor_explain_json_detects_harness_without_active_actor() {
             ("HEDDLE_PRINCIPAL_NAME", "Cold Agent"),
             ("HEDDLE_PRINCIPAL_EMAIL", "agent@example.com"),
         ],
+        &["CODEX_INTERNAL_ORIGINATOR_OVERRIDE"],
     )
     .expect("invoke actor explain");
     assert!(
@@ -10624,7 +10639,7 @@ fn verify_and_status_json_tolerate_closed_downstream_pipes() {
         let output = std::process::Command::new("bash")
             .arg("-c")
             .arg(format!(
-                "set -o pipefail; \"$HEDDLE_BIN\" --output json {command} | head -c 0"
+                "set -o pipefail; \"$HEDDLE_BIN\" --output json {command} | true"
             ))
             .current_dir(temp.path())
             .env("HEDDLE_BIN", env!("CARGO_BIN_EXE_heddle"))
@@ -10656,9 +10671,7 @@ fn text_surfaces_tolerate_closed_downstream_pipes() {
     ] {
         let output = std::process::Command::new("bash")
             .arg("-c")
-            .arg(format!(
-                "set -o pipefail; \"$HEDDLE_BIN\" {command} | head -c 0"
-            ))
+            .arg(format!("set -o pipefail; \"$HEDDLE_BIN\" {command} | true"))
             .current_dir(temp.path())
             .env("HEDDLE_BIN", env!("CARGO_BIN_EXE_heddle"))
             .env(
@@ -10987,7 +11000,7 @@ fn error_envelope_schema_is_registered_and_matches_runtime_shape() {
     assert_eq!(envelope["exit_code"], 78);
     assert_eq!(
         envelope["primary_command_template"]["argv_template"],
-        heddle_argv_json(["init", temp.path().to_str().expect("temp path utf8")])
+        heddle_argv_json(["init", canonical_path_string(temp.path()).as_str()])
     );
 
     let op_id = "550e8400-e29b-41d4-a716-446655440099";
@@ -11795,23 +11808,16 @@ fn freshly_initialized_repo_reports_clean_health() {
 /// commits, suitable for `heddle clone` from a local path.
 fn make_local_master_git_repo(parent: &std::path::Path, commits: usize) -> std::path::PathBuf {
     let bare = parent.join("origin.git");
-    let repo = gix::init_bare(&bare).expect("init bare origin");
-    let mut parent_oid: Option<gix::hash::ObjectId> = None;
+    let repo = SleyRepository::init_bare(&bare).expect("init bare origin");
+    let mut parent_oid: Option<ObjectId> = None;
     for i in 0..commits {
         let blob = repo
             .write_blob(format!("content {i}\n").as_bytes())
-            .expect("write blob")
-            .detach();
-        let empty = repo.empty_tree().id;
-        let mut editor = repo.edit_tree(empty).expect("edit tree");
-        editor
-            .upsert(
-                format!("f{i}.txt"),
-                gix::object::tree::EntryKind::Blob,
-                blob,
-            )
-            .expect("add file");
-        let tree = editor.write().expect("write tree").detach();
+            .expect("write blob");
+        let empty = git_empty_tree_oid(&repo);
+        let mut editor = repo.edit_tree(&empty).expect("edit tree");
+        editor.upsert(format!("f{i}.txt").into_bytes(), EntryKind::Blob, blob);
+        let tree = repo.write_tree(editor).expect("write tree");
         let parents = parent_oid.map(|p| vec![p]).unwrap_or_default();
         let commit = git_commit_with_tree(
             &repo,

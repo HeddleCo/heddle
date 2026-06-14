@@ -17,9 +17,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use merge::{text_hunk_merge_with_markers, ConflictMarkers, MergeOutcome};
+use merge::{ConflictMarkers, MergeOutcome, text_hunk_merge_with_markers};
 
-use super::items::{inter_ranges, FileSegments, Item, ItemKey, ItemKind};
+use super::items::{FileSegments, Item, ItemKey, ItemKind, inter_ranges};
 
 /// Three sides of the merge: `[base, ours, theirs]`. Each per-iteration
 /// segment contribution is indexed by [`Side`] so emission tracking can
@@ -351,7 +351,10 @@ fn build_aligned_match_keys(
         let mut base_by_key: BTreeMap<&ItemKey, Vec<(usize, &Item)>> = BTreeMap::new();
         for (i, it) in base.iter().enumerate() {
             if container_keys.contains(&it.key) {
-                base_by_key.entry(&it.key).or_default().push((base_mks[i].1, it));
+                base_by_key
+                    .entry(&it.key)
+                    .or_default()
+                    .push((base_mks[i].1, it));
             }
         }
         let mut used: BTreeMap<&ItemKey, BTreeSet<usize>> = BTreeMap::new();
@@ -442,7 +445,10 @@ fn build_aligned_match_keys(
                 } else {
                     let used_set = used.entry(&it.key).or_default();
                     let next_unused = base_by_key.get(&it.key).and_then(|cands| {
-                        cands.iter().map(|(d, _)| *d).find(|d| !used_set.contains(d))
+                        cands
+                            .iter()
+                            .map(|(d, _)| *d)
+                            .find(|d| !used_set.contains(d))
                     });
                     if let Some(d) = next_unused {
                         used_set.insert(d);
@@ -687,7 +693,10 @@ fn resolve_node(
     theirs_item: Option<&Item>,
     markers: ConflictMarkers<'_>,
 ) -> (Option<Vec<u8>>, usize) {
-    let mut present = [base_item, ours_item, theirs_item].into_iter().flatten().peekable();
+    let mut present = [base_item, ours_item, theirs_item]
+        .into_iter()
+        .flatten()
+        .peekable();
     let all_containers = present.peek().is_some() && present.all(|i| i.body.is_some());
     if all_containers {
         resolve_container(sides, base_item, ours_item, theirs_item, markers)
@@ -1025,7 +1034,12 @@ fn resolve_use_component(
     // Both sides changed the component, differently. Conflict the whole
     // unit — see the outcome list above.
     (
-        Some(emit_addadd_conflict(&ours_bytes, &theirs_bytes, markers, sides)),
+        Some(emit_addadd_conflict(
+            &ours_bytes,
+            &theirs_bytes,
+            markers,
+            sides,
+        )),
         1,
     )
 }

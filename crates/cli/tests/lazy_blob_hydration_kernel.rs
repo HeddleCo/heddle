@@ -31,50 +31,85 @@ use std::{
 use cli::{bridge::git_core::clone_url_to_bare, cli::commands::GitOverlayBlobHydrator};
 use objects::object::Blob;
 use repo::Repository;
+use sley::plumbing::sley_core::ByteString as GitByteString;
+use sley::plumbing::sley_object::EncodedObject;
+use sley::plumbing::sley_refs::ReflogEntry;
+use sley::{
+    CommitObject, EntryKind, GitObjectType, GitTime, ObjectId, RefPrecondition, ReferenceTarget,
+    Repository as SleyRepository, Signature,
+};
 use tempfile::TempDir;
 
-/// Build a minimal bare gix repo with a single commit / tree / blob,
+/// Build a minimal bare Git repo with a single commit / tree / blob,
 /// returning `(temp_dir, bare_path, blob_oid, blob_bytes)`. The temp
 /// dir must outlive the test that uses it.
-fn build_local_bare_with_one_blob() -> (TempDir, std::path::PathBuf, gix::ObjectId, Vec<u8>) {
+fn build_local_bare_with_one_blob() -> (TempDir, std::path::PathBuf, ObjectId, Vec<u8>) {
     let temp = TempDir::new().expect("temp for bare git");
     let bare = temp.path().join("source.git");
-    let repo = gix::init_bare(&bare).expect("init bare gix");
+    let repo = SleyRepository::init_bare(&bare).expect("init bare git");
 
     let blob_bytes = b"# Hydration sentinel\nlazy lazy lazy\n".to_vec();
-    let blob_oid = repo
-        .write_blob(blob_bytes.as_slice())
-        .expect("write blob")
-        .detach();
+    let blob_oid = repo.write_blob(blob_bytes.as_slice()).expect("write blob");
 
-    let empty_tree = repo.empty_tree().id;
-    let mut editor = repo.edit_tree(empty_tree).expect("edit tree");
-    editor
-        .upsert("README.md", gix::object::tree::EntryKind::Blob, blob_oid)
-        .expect("add file");
-    let tree_oid = editor.write().expect("write tree").detach();
+    let empty_tree = repo
+        .write_tree(sley::TreeEditor::new())
+        .expect("write empty tree");
+    let mut editor = repo.edit_tree(&empty_tree).expect("edit tree");
+    editor.upsert("README.md", EntryKind::Blob, blob_oid);
+    let tree_oid = repo.write_tree(editor).expect("write tree");
 
-    let sig = gix::actor::Signature {
-        name: "Heddle Test".into(),
-        email: "test@heddle".into(),
-        time: gix::date::Time {
-            seconds: 0,
-            offset: 0,
-        },
+    let sig = test_signature();
+    let commit = CommitObject {
+        tree: tree_oid,
+        parents: Vec::new(),
+        author: sig.to_ident_bytes(),
+        committer: sig.to_ident_bytes(),
+        encoding: None,
+        message: b"seed".to_vec(),
     };
-    let mut author_buf = gix::date::parse::TimeBuf::default();
-    let mut committer_buf = gix::date::parse::TimeBuf::default();
-    let _commit = repo
-        .new_commit_as(
-            sig.to_ref(&mut committer_buf),
-            sig.to_ref(&mut author_buf),
-            "seed",
-            tree_oid,
-            Vec::<gix::hash::ObjectId>::new(),
-        )
+    let commit_oid = repo
+        .write_object(EncodedObject::new(GitObjectType::Commit, commit.write()))
         .expect("commit");
+    set_reference(&repo, "refs/heads/main", commit_oid);
 
     (temp, bare, blob_oid, blob_bytes)
+}
+
+fn test_signature() -> Signature {
+    Signature {
+        name: GitByteString::new(b"Heddle Test".to_vec()),
+        email: GitByteString::new(b"test@heddle".to_vec()),
+        time: GitTime::new(0, 0),
+        raw: b"Heddle Test <test@heddle> 0 +0000".to_vec(),
+    }
+}
+
+fn set_reference(repo: &SleyRepository, name: &str, target: ObjectId) {
+    let sig = test_signature();
+    let refs = repo.references();
+    let old_oid = match refs.read_ref(name).expect("read ref") {
+        Some(ReferenceTarget::Direct(oid)) => oid,
+        _ => ObjectId::null(repo.object_format()),
+    };
+    let mut tx = refs.transaction();
+    tx.update_to(
+        name.to_string(),
+        ReferenceTarget::Direct(target),
+        RefPrecondition::Any,
+        Some(ReflogEntry {
+            old_oid,
+            new_oid: target,
+            committer: sig.to_ident_bytes(),
+            message: b"test: update ref".to_vec(),
+        }),
+    );
+    tx.commit().expect("update ref");
+}
+
+fn open_git(path: impl AsRef<Path>) -> Result<SleyRepository, String> {
+    SleyRepository::open(path.as_ref())
+        .or_else(|_| SleyRepository::discover(path.as_ref()))
+        .map_err(|err| err.to_string())
 }
 
 /// Drive a `GitOverlayBlobHydrator` registered on a freshly-init'd
@@ -84,11 +119,7 @@ fn build_local_bare_with_one_blob() -> (TempDir, std::path::PathBuf, gix::Object
 ///
 /// Returns the time spent inside the single `require_blob` call so the
 /// caller can attach a perf line to the PR description.
-fn drive_hydration_round_trip(
-    git_bare: &Path,
-    blob_oid: gix::ObjectId,
-    blob_bytes: &[u8],
-) -> Duration {
+fn drive_hydration_round_trip(git_bare: &Path, blob_oid: ObjectId, blob_bytes: &[u8]) -> Duration {
     let blake3 = Blob::new(blob_bytes.to_vec()).hash();
 
     let heddle_temp = TempDir::new().expect("heddle temp");
@@ -226,12 +257,11 @@ fn hydration_survives_repository_reopen() {
 
     // Second reopen with a *new* missing blob in the bare repo to
     // confirm the registry isn't a one-shot install.
-    let bare_open = gix::open(&bare).expect("open bare for second blob");
+    let bare_open = open_git(&bare).expect("open bare for second blob");
     let payload2 = b"second-blob-after-reopen\n".to_vec();
     let oid2 = bare_open
         .write_blob(payload2.as_slice())
-        .expect("write blob 2")
-        .detach();
+        .expect("write blob 2");
     let blake3_2 = Blob::new(payload2.clone()).hash();
     // Re-register the factory under the same kind to seed the new
     // OID — last-write-wins, mirroring how the production path could
@@ -275,31 +305,25 @@ fn hydration_fires_against_torvalds_linux() {
 
     let temp = TempDir::new().expect("temp for linux clone");
     let bare = temp.path().join("linux.git");
-    let url = gix::url::parse("https://github.com/torvalds/linux.git".as_bytes().into())
-        .expect("parse url");
+    let url = "https://github.com/torvalds/linux.git";
 
     eprintln!("cloning torvalds/linux.git at depth=1 + filter=blob:none ...");
     let started = Instant::now();
-    if let Err(err) = clone_url_to_bare(&url, &bare, Some(1), Some("blob:none")) {
+    if let Err(err) = clone_url_to_bare(url, &bare, Some(1), Some("blob:none")) {
         eprintln!("SKIP: kernel clone failed (network?): {err}");
         return;
     }
     eprintln!("clone completed in {:?}", started.elapsed());
 
-    let gix_repo = gix::open(&bare).expect("open kernel bare repo");
-    let tip = gix_repo.head_commit().expect("HEAD commit").id().detach();
-    let tree = gix_repo
-        .find_commit(tip)
-        .expect("find HEAD commit")
-        .tree_id()
-        .expect("commit tree id")
-        .detach();
-    let tree_obj = gix_repo.find_tree(tree).expect("read tip tree");
+    let git_repo = open_git(&bare).expect("open kernel bare repo");
+    let tip = git_repo.head().expect("HEAD").oid.expect("HEAD commit");
+    let tree = git_repo.read_commit(&tip).expect("find HEAD commit").tree;
+    let tree_obj = git_repo.read_tree(&tree).expect("read tip tree");
     let blob_oid = tree_obj
+        .entries
         .iter()
-        .filter_map(|entry| entry.ok())
-        .find(|entry| matches!(entry.mode().kind(), gix::object::tree::EntryKind::Blob))
-        .map(|entry| entry.oid().to_owned())
+        .find(|entry| EntryKind::from_mode(entry.mode) == Some(EntryKind::Blob))
+        .map(|entry| entry.oid)
         .expect("tip tree must contain at least one blob entry");
     eprintln!("targeting blob {blob_oid} for hydration");
 
@@ -322,10 +346,10 @@ fn hydration_fires_against_torvalds_linux() {
     let bytes = cat.stdout;
     eprintln!("blob materialised ({} bytes)", bytes.len());
 
-    // gix can confirm the blob is now in the ODB after the promisor
+    // sley can confirm the blob is now in the ODB after the promisor
     // refetch — the hydrator's local-first read will hit this path
     // on the test's second `cat-file` call rather than re-fetching.
-    let _ = gix_repo;
+    let _ = git_repo;
 
     let elapsed = drive_hydration_round_trip(&bare, blob_oid, &bytes);
     eprintln!("hydration round-trip: {elapsed:?}");

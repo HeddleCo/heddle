@@ -66,7 +66,7 @@ extract time.
 ## Fixes Made During This Audit Pass
 
 - Replaced `git symbolic-ref` usage in `Repository::git_overlay_current_branch`
-  with native `.git/HEAD` / `gix` detection.
+  with native `.git/HEAD` / Sley-backed detection.
 - Made Git-overlay worktree status fall back to Heddle's native tree comparison
   when the `git` executable is absent.
 - Made upstream drift probing degrade to `remote_tracking=null` when the `git`
@@ -340,12 +340,12 @@ Enforced by `cargo test -p heddle-cli --test git_process_lint`.
 
 The hard gate is no `git` executable dependency for supported Git-overlay
 workflows. The default CLI runtime has an empty allowlist for `git`
-subprocesses; Git-format operations use native code and `gix`.
+subprocesses; Git-format operations use native code through Sley.
 
 | Location | Classification | Rationale |
 |---|---|---|
-| `repo::Repository::git_remote_tracking_status` / `git_overlay_worktree_status` | Native/gix read path | Remote tracking, HEAD, and worktree/index checks do not invoke the Git binary. |
-| `bridge::git_core::resolve_remote_default_branch` | Native/gix remote default-branch hint | Clone/import use protocol/ref inspection without invoking the Git binary. |
+| `repo::Repository::git_remote_tracking_status` / `git_overlay_worktree_status` | Native/Sley read path | Remote tracking, HEAD, and worktree/index checks do not invoke the Git binary. |
+| `bridge::git_core::resolve_remote_default_branch` | Native/Sley remote default-branch hint | Clone/import use protocol/ref inspection without invoking the Git binary. |
 | `bridge::git_core::clone_url_to_bare` filtered clone | Unsupported native capability | Filtered/lazy Git-overlay clones now fail closed instead of shelling out to `git clone`; ordinary local/bare clone no-git workflows are covered by real fixtures. |
 | `clone::GitOverlayBlobHydrator::read_blob_bytes` | Local-only native hydration | Local object lookup is attempted first; missing promisor blobs report the native lazy-hydration boundary instead of invoking `git cat-file`. |
 | `merge --git-commit` / `merge::git_commit` | Native Git object/ref write | The flag asks Heddle to create a Git commit, and the implementation writes Git objects, index, and refs through native libraries. |

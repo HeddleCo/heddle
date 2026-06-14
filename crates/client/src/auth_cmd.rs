@@ -153,8 +153,7 @@ async fn cmd_auth_login(server: &str, no_browser: bool) -> Result<()> {
     // subsequent captures sign with it (it supersedes any per-repo local key;
     // states already signed by a local key keep verifying). Best-effort — a
     // failure here just leaves captures signing with the local key.
-    if let Err(error) =
-        repo::identity::link_device_key(&public_key_bytes, &private_key_pem, server)
+    if let Err(error) = repo::identity::link_device_key(&public_key_bytes, &private_key_pem, server)
     {
         tracing::warn!(%error, "could not record device signing identity; captures will use the per-repo local key");
     }
@@ -666,10 +665,12 @@ mod tests {
                 .expect("store credential");
 
             let device_path = repo::identity::device_identity_path();
-            std::fs::create_dir_all(device_path.parent().expect("home parent"))
-                .expect("home dir");
-            std::fs::write(&device_path, b"!!! definitely not valid device-identity toml !!!")
-                .expect("write corrupt device identity");
+            std::fs::create_dir_all(device_path.parent().expect("home parent")).expect("home dir");
+            std::fs::write(
+                &device_path,
+                b"!!! definitely not valid device-identity toml !!!",
+            )
+            .expect("write corrupt device identity");
 
             let result = cmd_auth_logout(&TextCtx, None);
             assert!(

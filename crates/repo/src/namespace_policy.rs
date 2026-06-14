@@ -82,10 +82,7 @@ mod tests {
     #[test]
     fn falls_back_to_internal_when_nothing_set() {
         let ctx = VisibilityResolutionContext::default();
-        assert_eq!(
-            resolve_default_visibility(&ctx),
-            VisibilityTier::Internal
-        );
+        assert_eq!(resolve_default_visibility(&ctx), VisibilityTier::Internal);
     }
 
     #[test]
@@ -94,10 +91,7 @@ mod tests {
             repo_default: Some(VisibilityTier::Public),
             namespace: None,
         };
-        assert_eq!(
-            resolve_default_visibility(&ctx),
-            VisibilityTier::Public
-        );
+        assert_eq!(resolve_default_visibility(&ctx), VisibilityTier::Public);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 
 use pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePublicKey};
 use rsa::{
-    pkcs1::DecodeRsaPrivateKey, rand_core::OsRng, Pkcs1v15Sign, RsaPrivateKey, RsaPublicKey,
+    Pkcs1v15Sign, RsaPrivateKey, RsaPublicKey, pkcs1::DecodeRsaPrivateKey, rand_core::OsRng,
 };
 use sha2::{Digest, Sha256};
 
@@ -40,7 +40,7 @@ impl RsaSigner {
     }
 
     pub fn from_pem(pem: &str) -> Result<Self, SignerError> {
-        use crate::pem_loader::{classify_pem, PemKind};
+        use crate::pem_loader::{PemKind, classify_pem};
 
         let private_key =
             match classify_pem(pem) {

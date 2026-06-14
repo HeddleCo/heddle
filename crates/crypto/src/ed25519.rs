@@ -23,7 +23,7 @@ impl Ed25519Signer {
     }
 
     pub fn from_pem(pem: &str) -> Result<Self, SignerError> {
-        use crate::pem_loader::{classify_pem, PemKind};
+        use crate::pem_loader::{PemKind, classify_pem};
 
         match classify_pem(pem) {
             PemKind::Pkcs8 => Self::from_pkcs8_pem(pem),

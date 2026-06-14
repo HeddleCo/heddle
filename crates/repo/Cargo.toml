@@ -14,7 +14,6 @@ anyhow.workspace = true
 blake3.workspace = true
 chrono.workspace = true
 hex.workspace = true
-gix.workspace = true
 ignore.workspace = true
 libc.workspace = true
 objects = { path = "../objects", package = "heddle-objects", version = "0.2" }
@@ -28,6 +27,7 @@ semantic = { path = "../semantic", package = "heddle-semantic", version = "0.2",
 state_review = { path = "../state_review", package = "heddle-state-review", version = "0.2", optional = true }
 serde.workspace = true
 serde_json.workspace = true
+sley.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, optional = true }

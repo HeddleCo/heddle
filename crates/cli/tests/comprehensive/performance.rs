@@ -128,6 +128,7 @@ fn print_snapshot_cli_report(
 fn test_snapshot_performance_small_repo() {
     let temp = TempDir::new().unwrap();
     setup_repo_with_file(&temp, "file.txt", "content");
+    let max_duration = performance_budget(Duration::from_millis(500), Duration::from_secs(1));
 
     assert_performance(
         "snapshot small repo",
@@ -135,7 +136,7 @@ fn test_snapshot_performance_small_repo() {
             fs::write(temp.path().join("new.txt"), "new").unwrap();
             heddle(&["capture", "-m", "Test"], Some(temp.path())).unwrap();
         },
-        Duration::from_millis(500),
+        max_duration,
     );
 }
 
@@ -194,7 +195,7 @@ fn test_status_performance_large_repo() {
         || {
             let _ = heddle(&["status"], Some(temp.path()));
         },
-        Duration::from_secs(5),
+        performance_budget(Duration::from_secs(5), Duration::from_secs(10)),
     );
 }
 
@@ -259,7 +260,7 @@ fn test_log_performance_deep_history() {
         || {
             let _ = heddle(&["log", "--oneline"], Some(temp.path()));
         },
-        Duration::from_secs(2),
+        performance_budget(Duration::from_secs(2), Duration::from_secs(4)),
     );
 }
 
@@ -288,6 +289,6 @@ fn test_gc_performance_many_objects() {
         || {
             heddle(&["maintenance", "gc", "--aggressive"], Some(temp.path())).unwrap();
         },
-        Duration::from_secs(5),
+        performance_budget(Duration::from_secs(5), Duration::from_secs(10)),
     );
 }

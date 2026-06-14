@@ -212,10 +212,7 @@ pub fn describe_thread_advice_with_initial(
         return ThreadAdvice {
             thread_health: "ready".to_string(),
             blockers,
-            recommended_action: format!(
-                "heddle land {} --no-push",
-                thread_flag(&thread.id)
-            ),
+            recommended_action: format!("heddle land {} --no-push", thread_flag(&thread.id)),
         };
     } else if clean_ready_merges_to_apply || thread.state == ThreadState::Ready {
         RecommendedAction::Land

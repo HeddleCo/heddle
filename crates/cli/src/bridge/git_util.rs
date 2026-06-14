@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use objects::object::{State, Status};
 use serde::{Deserialize, Serialize};
+use sley::ObjectId as GitObjectId;
 
 use super::git_core::GitBridge;
 
@@ -182,7 +183,7 @@ pub struct ExportStats {
 #[derive(Debug, Clone)]
 pub struct ExportedRef {
     pub name: String,
-    pub tip: gix::hash::ObjectId,
+    pub tip: GitObjectId,
 }
 
 /// Statistics for import operation.

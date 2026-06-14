@@ -7,8 +7,8 @@ mod name;
 pub mod operation_index;
 mod packed_model;
 mod packed_refs;
-mod ref_backend;
 mod reconcile;
+mod ref_backend;
 mod ref_summary_index;
 mod refs_head;
 mod refs_manager;
@@ -39,10 +39,8 @@ pub use operation_index::{IndexedOperation, OperationLogIndex, OperationLogQuery
 pub use packed_model::PackedRefsModel;
 #[cfg(feature = "postgres")]
 pub use pg_refs::PgRefBackend;
+pub use reconcile::{LoadRequest, Loaded, ReconcileOutcome, RefClass, RefCommitter, RefReconciler};
 pub use ref_backend::RefBackend;
-pub use reconcile::{
-    Loaded, LoadRequest, RefClass, RefCommitter, RefReconciler, ReconcileOutcome,
-};
 pub use ref_summary_index::RefSummaryIndexInspection;
 pub use refs_manager::{RefManager, UNDO_RECOVERY_HANDLE};
 pub use reftable_model::{ReftableError, ReftableModel};

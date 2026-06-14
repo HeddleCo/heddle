@@ -9,13 +9,6 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use gix::{
-    ObjectId,
-    refs::{
-        Target,
-        transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog},
-    },
-};
 use objects::error::{HeddleError, Result as HeddleResult};
 use objects::lock::{RepoLock, WriteLockGuard};
 use objects::object::{ChangeId, ContentHash, MarkerName, ThreadName};
@@ -26,6 +19,11 @@ use repo::{
     ThreadState, VisibilitySidecarRestore,
     atomic::{AtomicMutation, DeferredMutation, StagedCommit, Tx},
     refresh_thread_freshness,
+};
+use sley::{
+    DeleteRef, FullName, GitObjectType, GitTime, IndexWriteOptions, ObjectId, RefPrecondition,
+    ReferenceTarget, Repository as SleyRepository, Signature,
+    plumbing::sley_core::ByteString as GitByteString,
 };
 
 use super::{advice::RecoveryAdvice, thread_cmd::thread_not_found_advice};
@@ -100,9 +98,11 @@ fn batches_have_git_checkpoint(batches: &[OpBatch]) -> bool {
 
 fn current_git_head(repo: &Repository) -> Result<String> {
     let git = git_checkout_repo(repo)?;
-    git.head_id()
-        .map(|id| id.detach().to_string())
-        .map_err(|error| anyhow!("failed to inspect Git HEAD: {error}"))
+    git.head()
+        .map_err(|error| anyhow!("failed to inspect Git HEAD: {error}"))?
+        .oid
+        .map(|id| id.to_string())
+        .ok_or_else(|| anyhow!("failed to inspect Git HEAD: HEAD is unborn"))
 }
 
 fn ensure_simulated_git_head_is(
@@ -1056,7 +1056,10 @@ fn capture_git_state(repo: &Repository, branch: &str) -> HeddleResult<GitState> 
         ref_target_oid(&git, &format!("refs/heads/{branch}")).map_err(apply_error)?
     };
     let head_file = fs::read_to_string(git.git_dir().join("HEAD")).ok();
-    let checkout_head_oid = git.head_id().ok().map(|id| id.detach().to_string());
+    let checkout_head_oid = git
+        .head()
+        .ok()
+        .and_then(|head| head.oid.map(|id| id.to_string()));
     let mirror_branch_oid = capture_mirror_oid(repo, branch).map_err(apply_error)?;
     Ok(GitState {
         head_file,
@@ -1078,7 +1081,7 @@ fn restore_git_state(repo: &Repository, branch: &str, state: &GitState) -> Heddl
                 &git,
                 &ref_name,
                 oid,
-                PreviousValue::Any,
+                RefPrecondition::Any,
                 "heddle: rollback git checkpoint",
             )
             .map_err(|error| apply_error(anyhow!(error)))?,
@@ -1125,7 +1128,7 @@ fn restore_mirror_oid(repo: &Repository, branch: &str, oid: Option<ObjectId>) ->
             &git,
             &ref_name,
             oid,
-            PreviousValue::Any,
+            RefPrecondition::Any,
             "heddle: rollback mirror checkpoint ref",
         )
         .map_err(|error| anyhow!(error)),
@@ -1133,7 +1136,7 @@ fn restore_mirror_oid(repo: &Repository, branch: &str, oid: Option<ObjectId>) ->
     }
 }
 
-fn delete_ref_if_present(git: &gix::Repository, ref_name: &str) -> Result<()> {
+fn delete_ref_if_present(git: &SleyRepository, ref_name: &str) -> Result<()> {
     if ref_target_oid(git, ref_name)?.is_some() {
         delete_reference_matching(git, ref_name, None)?;
     }
@@ -1239,7 +1242,7 @@ fn apply_git_checkpoint_redo(
                         &git_checkout_repo(repo)?,
                         &format!("refs/heads/{branch}"),
                         new_oid,
-                        PreviousValue::Any,
+                        RefPrecondition::Any,
                         "heddle: redo git checkpoint",
                     )
                     .map_err(|error| anyhow!(error))
@@ -1291,7 +1294,7 @@ fn update_mirror_branch_ref(
             &git,
             &ref_name,
             parse_git_oid(target)?,
-            PreviousValue::MustExistAndMatch(Target::Object(parse_git_oid(expected)?)),
+            RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(parse_git_oid(expected)?)),
             "heddle: update mirror checkpoint ref",
         )
         .map_err(|error| anyhow!(error)),
@@ -1299,7 +1302,7 @@ fn update_mirror_branch_ref(
             &git,
             &ref_name,
             parse_git_oid(target)?,
-            PreviousValue::Any,
+            RefPrecondition::Any,
             "heddle: update mirror checkpoint ref",
         )
         .map_err(|error| anyhow!(error)),
@@ -1362,7 +1365,7 @@ fn format_status_paths(kind: &str, paths: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 
-fn git_checkout_repo(repo: &Repository) -> Result<gix::Repository> {
+fn git_checkout_repo(repo: &Repository) -> Result<SleyRepository> {
     open_git_repo(repo.root()).map_err(|error| anyhow!(error))
 }
 
@@ -1371,20 +1374,19 @@ fn parse_git_oid(oid: &str) -> Result<ObjectId> {
         .map_err(|error| anyhow!("invalid Git object id '{oid}': {error}"))
 }
 
-fn ref_target_oid(repo: &gix::Repository, name: &str) -> Result<Option<ObjectId>> {
-    let Some(mut reference) = repo
-        .try_find_reference(name)
+fn ref_target_oid(repo: &SleyRepository, name: &str) -> Result<Option<ObjectId>> {
+    let Some(reference) = repo
+        .find_reference(name)
         .map_err(|error| anyhow!("failed to inspect Git reference '{name}': {error}"))?
     else {
         return Ok(None);
     };
     reference
-        .peel_to_id()
-        .map(|id| Some(id.detach()))
+        .peeled_oid(repo)
         .map_err(|error| anyhow!("failed to resolve Git reference '{name}': {error}"))
 }
 
-fn attach_git_head_to_branch(repo: &gix::Repository, branch: &str) -> Result<()> {
+fn attach_git_head_to_branch(repo: &SleyRepository, branch: &str) -> Result<()> {
     if branch == "HEAD" {
         return Ok(());
     }
@@ -1396,85 +1398,162 @@ fn attach_git_head_to_branch(repo: &gix::Repository, branch: &str) -> Result<()>
 }
 
 fn set_attached_git_head(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     branch: &str,
     target: ObjectId,
     expected: ObjectId,
     log_message: &str,
 ) -> Result<()> {
-    let signature = git_signature();
-    let mut time_buf = gix::date::parse::TimeBuf::default();
-    let edit = RefEdit {
-        change: Change::Update {
-            log: LogChange {
-                mode: RefLog::AndReference,
-                force_create_reflog: false,
-                message: log_message.into(),
-            },
-            expected: PreviousValue::MustExistAndMatch(Target::Object(expected)),
-            new: Target::Object(target),
-        },
-        name: "HEAD"
-            .try_into()
-            .map_err(|error| anyhow!("invalid Git HEAD ref: {error}"))?,
-        deref: true,
+    let ref_name = if branch == "HEAD" {
+        "HEAD".to_string()
+    } else {
+        format!("refs/heads/{branch}")
     };
-    repo.edit_references_as([edit], Some(signature.to_ref(&mut time_buf)))
-        .map_err(|error| anyhow!("failed to update Git HEAD for branch '{branch}': {error}"))?;
-    Ok(())
+    set_reference_with_reflog(
+        repo,
+        &ref_name,
+        target,
+        RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(expected)),
+        log_message,
+    )
+    .map_err(|error| anyhow!("failed to update Git HEAD for branch '{branch}': {error}"))
 }
 
-fn reset_git_index_to_commit(repo: &gix::Repository, oid: ObjectId) -> Result<()> {
-    let commit = repo
-        .find_commit(oid)
+fn reset_git_index_to_commit(repo: &SleyRepository, oid: ObjectId) -> Result<()> {
+    let object = repo
+        .read_object(&oid)
         .map_err(|error| anyhow!("failed to inspect Git commit {oid}: {error}"))?;
-    let tree_id = commit
-        .tree_id()
-        .map_err(|error| anyhow!("failed to inspect Git commit tree {oid}: {error}"))?;
-    let mut index = repo
-        .index_from_tree(tree_id.as_ref())
+    if object.object_type != GitObjectType::Commit {
+        return Err(anyhow!("failed to inspect Git commit {oid}: not a commit"));
+    }
+    let commit = repo
+        .read_commit(&oid)
+        .map_err(|error| anyhow!("failed to inspect Git commit {oid}: {error}"))?;
+    let index = repo
+        .index_from_tree(&commit.tree)
         .map_err(|error| anyhow!("failed to build Git index for commit {oid}: {error}"))?;
-    index
-        .write(gix_index::write::Options::default())
-        .map_err(|error| anyhow!("failed to write Git index for commit {oid}: {error}"))?;
+    repo.write_index(
+        &index,
+        IndexWriteOptions {
+            fsync: true,
+            validate_checksum: true,
+        },
+    )
+    .map_err(|error| anyhow!("failed to write Git index for commit {oid}: {error}"))?;
     Ok(())
 }
 
 fn delete_reference_matching(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     name: &str,
     expected: Option<ObjectId>,
 ) -> Result<()> {
-    let signature = git_signature();
-    let mut time_buf = gix::date::parse::TimeBuf::default();
-    let expected = expected.map_or(PreviousValue::MustExist, |oid| {
-        PreviousValue::MustExistAndMatch(Target::Object(oid))
-    });
-    let edit = RefEdit {
-        change: Change::Delete {
-            log: RefLog::AndReference,
-            expected,
-        },
-        name: name
-            .try_into()
-            .map_err(|error| anyhow!("invalid Git reference '{name}': {error}"))?,
-        deref: false,
-    };
-    repo.edit_references_as([edit], Some(signature.to_ref(&mut time_buf)))
-        .map_err(|error| anyhow!("failed to delete Git reference '{name}': {error}"))?;
-    Ok(())
+    let current = ref_target_oid(repo, name)?;
+    if current.is_none() {
+        return Err(anyhow!(
+            "failed to delete Git reference '{name}': ref is missing"
+        ));
+    }
+    if let Some(expected) = expected
+        && current != Some(expected)
+    {
+        return Err(anyhow!(
+            "failed to delete Git reference '{name}': expected {expected}, found {}",
+            current
+                .map(|oid| oid.to_string())
+                .unwrap_or_else(|| "missing".to_string())
+        ));
+    }
+    let refs = repo.references();
+    match refs
+        .read_ref(name)
+        .map_err(|error| anyhow!("failed to inspect Git reference '{name}': {error}"))?
+    {
+        Some(ReferenceTarget::Direct(oid)) => repo
+            .delete_ref(DeleteRef {
+                name: FullName::new(name)
+                    .map_err(|error| anyhow!("invalid Git reference '{name}': {error}"))?,
+                expected_old: Some(expected.unwrap_or(oid)),
+                expected: None,
+                reflog: None,
+                reflog_committer: None,
+            })
+            .map_err(|error| anyhow!("failed to delete Git reference '{name}': {error}")),
+        Some(ReferenceTarget::Symbolic(_)) => refs
+            .delete_symbolic_ref(name)
+            .map(|_| ())
+            .map_err(|error| anyhow!("failed to delete Git reference '{name}': {error}")),
+        None => Err(anyhow!(
+            "failed to delete Git reference '{name}': ref is missing"
+        )),
+    }
 }
 
-fn git_signature() -> gix::actor::Signature {
+fn git_signature() -> Signature {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0);
-    gix::actor::Signature {
-        name: "Heddle".into(),
-        email: "heddle@local".into(),
-        time: gix::date::Time { seconds, offset: 0 },
+    let name = "Heddle";
+    let email = "heddle@local";
+    Signature {
+        name: GitByteString::new(name.as_bytes().to_vec()),
+        email: GitByteString::new(email.as_bytes().to_vec()),
+        time: GitTime::new(seconds, 0),
+        raw: format!("{name} <{email}> {seconds} +0000").into_bytes(),
     }
+}
+
+fn git_reflog_entry(
+    old_oid: ObjectId,
+    new_oid: ObjectId,
+    message: &str,
+) -> sley::plumbing::sley_refs::ReflogEntry {
+    sley::plumbing::sley_refs::ReflogEntry {
+        old_oid,
+        new_oid,
+        committer: git_signature().to_ident_bytes(),
+        message: message.as_bytes().to_vec(),
+    }
+}
+
+fn set_reference_with_reflog(
+    repo: &SleyRepository,
+    name: &str,
+    target: ObjectId,
+    constraint: RefPrecondition,
+    log_message: &str,
+) -> Result<()> {
+    let refs = repo.references();
+    let old_oid = match refs
+        .read_ref(name)
+        .map_err(|error| anyhow!("failed to inspect Git reference '{name}': {error}"))?
+    {
+        Some(ReferenceTarget::Direct(oid)) => oid,
+        _ => ObjectId::null(repo.object_format()),
+    };
+    let reflog = git_reflog_entry(old_oid, target, log_message);
+    let should_append_head_reflog = name != "HEAD"
+        && repo
+            .head()
+            .ok()
+            .and_then(|head| head.symbolic_target.map(|target| target.to_string()))
+            .as_deref()
+            == Some(name);
+    let mut tx = refs.transaction();
+    tx.update_to(
+        name.to_string(),
+        ReferenceTarget::Direct(target),
+        constraint,
+        Some(reflog.clone()),
+    );
+    tx.commit()
+        .map_err(|error| anyhow!("failed to update Git reference '{name}': {error}"))?;
+    if should_append_head_reflog {
+        refs.append_reflog("HEAD", &reflog)
+            .map_err(|error| anyhow!("failed to append Git HEAD reflog: {error}"))?;
+    }
+    Ok(())
 }
 
 fn fsync_file_and_parent(path: &Path) -> Result<()> {

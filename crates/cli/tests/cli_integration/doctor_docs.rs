@@ -277,11 +277,7 @@ fn all_enumerates_markdown_without_git() {
     let root = temp.path();
     // Two markdown files at different depths, plus one file inside
     // an ignored prefix that must NOT be scanned.
-    write_file(
-        root,
-        "README.md",
-        "Run `heddle start probe --path foo`.\n",
-    );
+    write_file(root, "README.md", "Run `heddle start probe --path foo`.\n");
     fs::create_dir_all(root.join("docs")).unwrap();
     write_file(
         &root.join("docs"),

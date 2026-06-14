@@ -460,10 +460,7 @@ fn withheld_marker_path(heddle_dir: &Path, canonical_worktree_root: &Path) -> Pa
 /// must be a no-op. Keyed per worktree root (see [`withheld_marker_path`]), so a
 /// sibling worktree of the same thread is unaffected. The marker body is the
 /// human-readable root for diagnostics; presence is the signal.
-pub fn mark_withheld_checkout(
-    heddle_dir: &Path,
-    canonical_worktree_root: &Path,
-) -> io::Result<()> {
+pub fn mark_withheld_checkout(heddle_dir: &Path, canonical_worktree_root: &Path) -> io::Result<()> {
     let path = withheld_marker_path(heddle_dir, canonical_worktree_root);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| enrich_fs_error(parent, "creating", e))?;
@@ -736,7 +733,10 @@ mod tests {
         assert_eq!(dir, Path::new("/repo/.heddle/threads/feature%2Ffoo"));
         // The manifest is a child of the shared per-thread dir, so a checkout
         // root at `<dir>/root` is its sibling.
-        assert_eq!(manifest_path(heddle, "feature/foo"), dir.join("manifest.toml"));
+        assert_eq!(
+            manifest_path(heddle, "feature/foo"),
+            dir.join("manifest.toml")
+        );
         assert!(manifest_path(heddle, "feature/foo").starts_with(heddle.join("threads")));
     }
 
@@ -790,8 +790,14 @@ mod tests {
         ] {
             let seg = encode_thread_segment(id);
             assert!(!seg.contains('/'), "{id:?} → {seg:?} must be one segment");
-            assert_ne!(seg, ".", "{id:?} must not encode to a current-dir component");
-            assert_ne!(seg, "..", "{id:?} must not encode to a parent-dir component");
+            assert_ne!(
+                seg, ".",
+                "{id:?} must not encode to a current-dir component"
+            );
+            assert_ne!(
+                seg, "..",
+                "{id:?} must not encode to a parent-dir component"
+            );
             assert_eq!(
                 decode_thread_segment(&seg).as_deref(),
                 Some(id),
@@ -882,7 +888,9 @@ mod tests {
             "a slash-namespaced sibling must be completely untouched by the drop"
         );
         assert!(
-            read_manifest(dir.path(), "feature/keeper").unwrap().is_some(),
+            read_manifest(dir.path(), "feature/keeper")
+                .unwrap()
+                .is_some(),
             "the sibling's manifest must survive"
         );
 

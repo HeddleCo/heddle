@@ -337,11 +337,9 @@ impl ShaMap {
         // On primary-key conflict we fall back to a SELECT so we can
         // distinguish idempotent re-inserts (same `heddle_repr`) from
         // genuine conflicts.
-        let mut stmt = self
-            .conn
-            .prepare_cached(
-                "INSERT INTO sha_map (git_sha, kind, heddle_repr, lossy_entries) VALUES (?, ?, ?, ?)",
-            )?;
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT INTO sha_map (git_sha, kind, heddle_repr, lossy_entries) VALUES (?, ?, ?, ?)",
+        )?;
         match stmt.execute(params![git_sha, kind.as_i64(), heddle_repr, lossy_json]) {
             Ok(_) => Ok(()),
             Err(rusqlite::Error::SqliteFailure(err, _))

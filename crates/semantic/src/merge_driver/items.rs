@@ -26,8 +26,8 @@ use std::rc::Rc;
 
 use tree_sitter::Node;
 
+use super::language_rules::{Classified, MetadataBinding, USE_POISON_KEY, rules_for};
 pub(super) use super::language_rules::{ItemKind, UseIdentity};
-use super::language_rules::{rules_for, Classified, MetadataBinding, USE_POISON_KEY};
 use crate::parser::{Language, ParsedFile};
 
 /// Stable identifier for an item across the three sides. Two items match iff
@@ -267,7 +267,12 @@ fn collect_raw_items(language: Language, source: &str, root: Node<'_>) -> Vec<Ra
                         use_identity: None,
                         container: recurse.then(|| {
                             let (content_start, content_end) = body_content_bounds(body);
-                            (body.start_byte(), body.end_byte(), content_start, content_end)
+                            (
+                                body.start_byte(),
+                                body.end_byte(),
+                                content_start,
+                                content_end,
+                            )
                         }),
                     });
                     if recurse {
@@ -337,7 +342,10 @@ fn assemble_tree(mut raws: Vec<RawItem>) -> Vec<Item> {
     }
 
     for raw in raws {
-        while open.last().is_some_and(|(_, _, end)| raw.start_byte >= *end) {
+        while open
+            .last()
+            .is_some_and(|(_, _, end)| raw.start_byte >= *end)
+        {
             close_one(&mut open, &mut top);
         }
         match raw.container {

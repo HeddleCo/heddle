@@ -145,7 +145,11 @@ impl Repository {
     ///   valid-looking one (heddle#570).
     ///
     /// In both cases the caller MUST NOT persist a rewritten version of the state.
-    pub fn resign_if_owned(&self, state: &mut State, prior_hashes: &[ContentHash]) -> ResignOutcome {
+    pub fn resign_if_owned(
+        &self,
+        state: &mut State,
+        prior_hashes: &[ContentHash],
+    ) -> ResignOutcome {
         let Some(existing) = state.signature.clone() else {
             return ResignOutcome::Unsigned;
         };
@@ -418,7 +422,9 @@ mod tests {
             let (temp, repo) = setup_repo();
             std::fs::write(temp.path().join("file.txt"), "hello").expect("write file");
 
-            let state = repo.snapshot(Some("first".to_string()), None).expect("capture");
+            let state = repo
+                .snapshot(Some("first".to_string()), None)
+                .expect("capture");
 
             // Every captured state is signed and verifies, with no auth login.
             assert!(state.signature.is_some(), "capture must auto-sign");
@@ -445,7 +451,9 @@ mod tests {
 
             // Pre-auth capture: signed by the auto-minted local key.
             std::fs::write(temp.path().join("a.txt"), "a").expect("write");
-            let local_state = repo.snapshot(Some("local".to_string()), None).expect("capture");
+            let local_state = repo
+                .snapshot(Some("local".to_string()), None)
+                .expect("capture");
             let local_pubkey = sig_pubkey(&local_state);
             assert_eq!(
                 repo.verify_state_signature(&local_state.change_id)
@@ -467,7 +475,9 @@ mod tests {
             // A fresh handle (fresh signer cache) now signs with the device key.
             let repo2 = Repository::open(temp.path()).expect("reopen repo");
             std::fs::write(temp.path().join("b.txt"), "b").expect("write");
-            let device_state = repo2.snapshot(Some("device".to_string()), None).expect("capture");
+            let device_state = repo2
+                .snapshot(Some("device".to_string()), None)
+                .expect("capture");
             assert_eq!(
                 sig_pubkey(&device_state),
                 device_pubkey,
@@ -516,7 +526,9 @@ mod tests {
 
             // Post-login capture signs with the device key.
             std::fs::write(temp.path().join("a.txt"), "a").expect("write");
-            let signed_in = repo.snapshot(Some("in".to_string()), None).expect("capture");
+            let signed_in = repo
+                .snapshot(Some("in".to_string()), None)
+                .expect("capture");
             assert_eq!(
                 sig_pubkey(&signed_in),
                 device_pubkey,
@@ -524,15 +536,19 @@ mod tests {
             );
 
             // Simulate `auth logout grpc.S`: unlink the device identity.
-            let removed =
-                crate::identity::unlink_device_key("grpc.S").expect("unlink device key");
-            assert!(removed, "logout removes the matching-server device identity");
+            let removed = crate::identity::unlink_device_key("grpc.S").expect("unlink device key");
+            assert!(
+                removed,
+                "logout removes the matching-server device identity"
+            );
 
             // Subsequent capture on the SAME handle no longer uses the device
             // key — it falls back to the per-repo local key (a distinct key),
             // which still verifies.
             std::fs::write(temp.path().join("b.txt"), "b").expect("write");
-            let signed_out = repo.snapshot(Some("out".to_string()), None).expect("capture");
+            let signed_out = repo
+                .snapshot(Some("out".to_string()), None)
+                .expect("capture");
             assert_ne!(
                 sig_pubkey(&signed_out),
                 device_pubkey,
@@ -545,8 +561,7 @@ mod tests {
             );
 
             // Logout is idempotent: a second one finds nothing to remove.
-            let again =
-                crate::identity::unlink_device_key("grpc.S").expect("idempotent unlink");
+            let again = crate::identity::unlink_device_key("grpc.S").expect("idempotent unlink");
             assert!(!again, "second logout finds nothing to remove");
         });
     }
@@ -559,13 +574,19 @@ mod tests {
 
             // Build a fork: A -> B on one side, A -> C on the other.
             std::fs::write(temp.path().join("file.txt"), "a").expect("write");
-            let state_a = repo.snapshot(Some("a".to_string()), None).expect("capture a");
+            let state_a = repo
+                .snapshot(Some("a".to_string()), None)
+                .expect("capture a");
             std::fs::write(temp.path().join("file.txt"), "b").expect("write");
-            let state_b = repo.snapshot(Some("b".to_string()), None).expect("capture b");
+            let state_b = repo
+                .snapshot(Some("b".to_string()), None)
+                .expect("capture b");
 
             repo.goto(&state_a.change_id).expect("goto a");
             std::fs::write(temp.path().join("side.txt"), "c").expect("write");
-            let state_c = repo.snapshot(Some("c".to_string()), None).expect("capture c");
+            let state_c = repo
+                .snapshot(Some("c".to_string()), None)
+                .expect("capture c");
 
             // Merge B into head C -> a real two-parent merge state.
             let attribution = Attribution::human(Principal::new("Merger", "merge@example.com"));
@@ -583,7 +604,8 @@ mod tests {
             // The merge state carries its own signature.
             assert!(merge.signature.is_some(), "merge state must be signed");
             assert_eq!(
-                repo.verify_state_signature(&merge.change_id).expect("verify"),
+                repo.verify_state_signature(&merge.change_id)
+                    .expect("verify"),
                 SignatureStatus::Valid,
             );
 
@@ -866,7 +888,9 @@ mod tests {
 
             // First capture on this handle mints the 0600 local key and signs.
             std::fs::write(temp.path().join("a.txt"), "a").expect("write");
-            let first = repo.snapshot(Some("a".to_string()), None).expect("capture a");
+            let first = repo
+                .snapshot(Some("a".to_string()), None)
+                .expect("capture a");
             assert!(
                 first.signature.is_some(),
                 "first capture signs with the freshly-minted 0600 key",
@@ -887,7 +911,9 @@ mod tests {
             // The SAME handle must refuse to reuse a cached signer: the gate is
             // re-validated per sign, so this capture is unsigned-but-marked.
             std::fs::write(temp.path().join("b.txt"), "b").expect("write");
-            let exposed = repo.snapshot(Some("b".to_string()), None).expect("capture b");
+            let exposed = repo
+                .snapshot(Some("b".to_string()), None)
+                .expect("capture b");
             assert!(
                 exposed.signature.is_none(),
                 "an exposed key must make the next sign fail closed, not reuse a cached signer",
@@ -902,7 +928,9 @@ mod tests {
             std::fs::set_permissions(&identity, std::fs::Permissions::from_mode(0o600))
                 .expect("re-secure perms");
             std::fs::write(temp.path().join("c.txt"), "c").expect("write");
-            let resecured = repo.snapshot(Some("c".to_string()), None).expect("capture c");
+            let resecured = repo
+                .snapshot(Some("c".to_string()), None)
+                .expect("capture c");
             assert!(
                 resecured.signature.is_some(),
                 "re-securing the key lets the same handle sign again",

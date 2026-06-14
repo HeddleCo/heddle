@@ -97,9 +97,7 @@ mod tests {
     use super::*;
 
     fn team(id: &str) -> VisibilityTier {
-        VisibilityTier::TeamScoped {
-            team_id: id.into(),
-        }
+        VisibilityTier::TeamScoped { team_id: id.into() }
     }
     fn restricted(label: &str) -> VisibilityTier {
         VisibilityTier::Restricted {
@@ -113,27 +111,31 @@ mod tests {
             VisibilityTier::Public.restrictiveness_rank()
                 < VisibilityTier::Internal.restrictiveness_rank()
         );
-        assert!(
-            VisibilityTier::Internal.restrictiveness_rank() < team("a").restrictiveness_rank()
-        );
+        assert!(VisibilityTier::Internal.restrictiveness_rank() < team("a").restrictiveness_rank());
         assert!(team("a").restrictiveness_rank() < restricted("legal").restrictiveness_rank());
     }
 
     #[test]
     fn strictly_less_restrictive_only_when_rank_drops() {
         // Opening transitions (lower rank) are strictly less restrictive.
-        assert!(VisibilityTier::Public.is_strictly_less_restrictive_than(&VisibilityTier::Internal));
+        assert!(
+            VisibilityTier::Public.is_strictly_less_restrictive_than(&VisibilityTier::Internal)
+        );
         assert!(VisibilityTier::Internal.is_strictly_less_restrictive_than(&restricted("legal")));
         assert!(VisibilityTier::Internal.is_strictly_less_restrictive_than(&team("infra")));
 
         // Narrowing transitions (higher rank) are NOT.
         assert!(!restricted("legal").is_strictly_less_restrictive_than(&VisibilityTier::Internal));
-        assert!(!VisibilityTier::Internal.is_strictly_less_restrictive_than(&VisibilityTier::Public));
+        assert!(
+            !VisibilityTier::Internal.is_strictly_less_restrictive_than(&VisibilityTier::Public)
+        );
 
         // Lateral (same rank) is NOT strictly less restrictive — even across
         // different team/scope labels. A re-scope must go through `set`.
         assert!(!team("a").is_strictly_less_restrictive_than(&team("b")));
         assert!(!restricted("legal").is_strictly_less_restrictive_than(&restricted("security")));
-        assert!(!VisibilityTier::Internal.is_strictly_less_restrictive_than(&VisibilityTier::Internal));
+        assert!(
+            !VisibilityTier::Internal.is_strictly_less_restrictive_than(&VisibilityTier::Internal)
+        );
     }
 }

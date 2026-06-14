@@ -95,6 +95,13 @@ where
     )
 }
 
+fn canonical_path_string(path: &std::path::Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string()
+}
+
 fn heddle_output_with_env(
     args: &[&str],
     cwd: Option<&std::path::Path>,

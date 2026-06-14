@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
 use serde_json::Value;
+use sley::Repository as SleyRepository;
 
 use super::{
     advice::RecoveryAdvice,
@@ -984,9 +985,8 @@ fn find_repo_root(start: &Path) -> Option<PathBuf> {
             return Some(ancestor.to_path_buf());
         }
     }
-    let repo = gix::discover(start).ok()?;
+    let repo = SleyRepository::discover(start).ok()?;
     repo.workdir()
-        .map(Path::to_path_buf)
         .or_else(|| repo.git_dir().parent().map(Path::to_path_buf))
 }
 

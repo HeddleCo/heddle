@@ -1728,8 +1728,10 @@ fn thread_promote_materializes_visible_checkout_without_changing_thread_identity
     assert_eq!(promoted["thread"]["id"], "feature/promote");
     assert_eq!(promoted["thread"]["mode"], "solid");
     assert_eq!(
-        promoted["thread"]["materialized_path"],
-        visible.path().display().to_string()
+        canonical_path_string(std::path::Path::new(
+            promoted["thread"]["materialized_path"].as_str().unwrap()
+        )),
+        canonical_path_string(visible.path())
     );
     assert!(visible.path().join(".heddle").is_dir());
     assert!(visible.path().join(".heddle").join("objectstore").is_file());

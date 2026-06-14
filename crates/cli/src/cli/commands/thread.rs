@@ -10,7 +10,6 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use gix::bstr::ByteSlice;
 use objects::{
     object::{ChangeId, State, ThreadName, Tree},
     store::{AgentEntry, AgentRegistry, AgentStatus, current_boot_id},
@@ -25,6 +24,7 @@ use repo::{
     ThreadView, describe_thread_advice,
 };
 use serde::Serialize;
+use sley::Repository as SleyRepository;
 
 use super::{
     action_line::{print_nested_next_step, print_nested_optional, print_next_step, print_optional},
@@ -963,7 +963,8 @@ pub fn find_thread_summary(repo: &Repository, name: &str) -> Result<Option<Threa
 ///   them needs a global parent-thread scan; callers that display these
 ///   relations should route through `find_thread_summary` instead.
 /// - `git_branch_tip` and `history_imported` are not populated for
-///   the same reason — discovering them needs the full gix branch walk.
+///   the same reason — discovering them needs the full Sley-backed
+///   branch walk.
 ///   `tip_only` thread_health is therefore not surfaced; the import-
 ///   hint line on the surrounding render already nudges the user.
 ///
@@ -993,7 +994,7 @@ pub fn find_thread_summary_single(repo: &Repository, name: &str) -> Result<Optio
         name.to_string(),
         entries,
         thread_record,
-        None, // skip branch_tip lookup (would require full gix walk)
+        None, // skip branch_tip lookup (would require full Sley-backed walk)
     )?;
     let mut summary = ThreadSummary::from_view(view, coordination_status);
 
@@ -1425,12 +1426,8 @@ pub(crate) fn thread_is_available_git_ref(entry: &ThreadSummary) -> bool {
 }
 
 fn remote_tracking_local_ref(repo: &Repository, thread_name: &str) -> Option<String> {
-    let git = gix::discover(repo.root()).ok()?;
-    let remotes = git
-        .remote_names()
-        .into_iter()
-        .map(|name| name.to_str_lossy().into_owned())
-        .collect::<Vec<_>>();
+    let git = SleyRepository::discover(repo.root()).ok()?;
+    let remotes = git.remote_names().ok()?;
     remotes
         .iter()
         .find_map(|remote| thread_name.strip_prefix(&format!("{remote}/")))

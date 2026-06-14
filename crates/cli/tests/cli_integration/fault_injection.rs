@@ -44,15 +44,12 @@ fn bridge_recovers_from_crash_after_tmp_before_commit() {
     // short-circuit the fault checkpoint). Reuses the helpers from
     // `cli_integration.rs` so the fixture shape matches the other
     // bridge tests.
-    let origin_repo = gix::init_bare(&origin).expect("init origin");
-    let blob = origin_repo.write_blob(b"fn a() {}\n").unwrap().detach();
-    let mut tree_editor = origin_repo
-        .edit_tree(origin_repo.empty_tree().id)
-        .expect("tree editor");
-    tree_editor
-        .upsert("core.rs", gix::object::tree::EntryKind::Blob, blob)
-        .unwrap();
-    let tree_oid = tree_editor.write().unwrap().detach();
+    let origin_repo = SleyRepository::init_bare(&origin).expect("init origin");
+    let blob = origin_repo.write_blob(b"fn a() {}\n").unwrap();
+    let empty = git_empty_tree_oid(&origin_repo);
+    let mut tree_editor = origin_repo.edit_tree(&empty).expect("tree editor");
+    tree_editor.upsert("core.rs", EntryKind::Blob, blob);
+    let tree_oid = origin_repo.write_tree(tree_editor).unwrap();
     let _commit =
         git_commit_with_tree(&origin_repo, Some("refs/heads/main"), tree_oid, "seed", &[]);
 
@@ -397,7 +394,10 @@ fn thread_update_save_failure_does_not_commit_undoable_record() {
     let failed = heddle_output_with_env(
         &["thread", "resolve", "feature/atomic-save"],
         Some(temp.path()),
-        &[("HEDDLE_FAULT_INJECT", "thread_manager_save_in_thread_update")],
+        &[(
+            "HEDDLE_FAULT_INJECT",
+            "thread_manager_save_in_thread_update",
+        )],
     )
     .expect("spawn injected thread resolve");
     assert!(

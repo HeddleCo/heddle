@@ -500,8 +500,7 @@ impl Repository {
             return Ok(StateVisibilityBlob::empty());
         }
         let bytes = fs::read(&path).with_context(|| format!("read '{}'", path.display()))?;
-        StateVisibilityBlob::decode(&bytes)
-            .with_context(|| format!("decode '{}'", path.display()))
+        StateVisibilityBlob::decode(&bytes).with_context(|| format!("decode '{}'", path.display()))
     }
 
     /// Whether `state` resolves to a **non-public** effective tier. `false`
@@ -525,11 +524,11 @@ impl Repository {
     /// Pure over the persisted records — never wall-clock (an `embargo_until`
     /// is materialized into a superseding record before it can change the
     /// effective tier, see the spike §5.4).
-    pub fn effective_state_visibility(
-        &self,
-        state: &ChangeId,
-    ) -> Result<Option<StateVisibility>> {
-        Ok(self.get_state_visibility_for_state(state)?.latest()?.cloned())
+    pub fn effective_state_visibility(&self, state: &ChangeId) -> Result<Option<StateVisibility>> {
+        Ok(self
+            .get_state_visibility_for_state(state)?
+            .latest()?
+            .cloned())
     }
 
     /// The effective tier of `state`: the latest declaration's tier, or
@@ -656,9 +655,9 @@ impl Repository {
         let _own_lock = if lock_held {
             None
         } else {
-            Some(self.locker().write().with_context(|| {
-                "acquire repo write lock for capture-time default visibility binding"
-            })?)
+            Some(self.locker().write().with_context(
+                || "acquire repo write lock for capture-time default visibility binding",
+            )?)
         };
         let record = StateVisibility {
             state: *state,
@@ -760,9 +759,10 @@ impl Repository {
         expected_current: &Option<Vec<u8>>,
         target: Option<Vec<u8>>,
     ) -> Result<VisibilitySidecarRestore> {
-        let _lock = self.locker().write().with_context(|| {
-            "acquire repo write lock for undo/redo visibility sidecar restore"
-        })?;
+        let _lock = self
+            .locker()
+            .write()
+            .with_context(|| "acquire repo write lock for undo/redo visibility sidecar restore")?;
         let current = self.get_state_visibility_bytes_for_state(state)?;
         if &current != expected_current {
             // A concurrent visibility commit superseded the sidecar since the
@@ -1308,7 +1308,11 @@ mod tests {
         let stored = repo
             .get_state_visibility_for_state(&state)
             .expect("read stored");
-        assert_eq!(stored.records.len(), 1, "no spurious second record appended");
+        assert_eq!(
+            stored.records.len(),
+            1,
+            "no spurious second record appended"
+        );
         assert_eq!(
             stored.records[0], existing,
             "bind must not overwrite the user's declared tier"
@@ -1332,9 +1336,15 @@ mod tests {
         );
         match staged.record {
             OpRecord::StateVisibilitySet {
-                tier, prior_sidecar, ..
+                tier,
+                prior_sidecar,
+                ..
             } => {
-                assert_eq!(tier, VisibilityTier::Internal, "bound the configured default");
+                assert_eq!(
+                    tier,
+                    VisibilityTier::Internal,
+                    "bound the configured default"
+                );
                 assert!(
                     prior_sidecar.is_none(),
                     "the staged oplog record's before-image is None for a fresh state"
@@ -1688,7 +1698,9 @@ mod tests {
             "a failed append on a fresh state must leave NO orphaned sidecar"
         );
         assert!(
-            !repo.has_visibility_for_state(&fresh).expect("has visibility"),
+            !repo
+                .has_visibility_for_state(&fresh)
+                .expect("has visibility"),
             "the state must read public-by-absence after the rollback"
         );
         assert!(
@@ -1750,7 +1762,9 @@ mod tests {
         let (_dir, repo) = repo_with_default("\"Internal\"");
         let state = ChangeId::from_bytes([88u8; 16]);
         assert!(
-            !repo.has_visibility_for_state(&state).expect("has visibility"),
+            !repo
+                .has_visibility_for_state(&state)
+                .expect("has visibility"),
             "the state starts public-by-absence"
         );
 
@@ -1767,7 +1781,9 @@ mod tests {
             "a failed snapshot commit must rewind the staged visibility sidecar — no orphan"
         );
         assert!(
-            !repo.has_visibility_for_state(&state).expect("has visibility"),
+            !repo
+                .has_visibility_for_state(&state)
+                .expect("has visibility"),
             "the state must read public-by-absence again after the rewind"
         );
     }

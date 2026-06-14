@@ -66,9 +66,11 @@ pub use state_visibility::{
     STATE_VISIBILITY_SIGNING_PAYLOAD_VERSION_TAG, StateVisibility, StateVisibilityBlob,
     StateVisibilityError,
 };
-pub use visibility_tier::VisibilityTier;
 pub use structured_conflict::{
     ConflictError, ConflictResolution, ConflictSide, ConflictSymbol, StructuredConflict,
 };
-pub use tree::{EntryType, FileMode, Tree, TreeEntry, TreeError, validate_name as validate_tree_entry_name};
+pub use tree::{
+    EntryType, FileMode, Tree, TreeEntry, TreeError, validate_name as validate_tree_entry_name,
+};
 pub use tree_diff::{diff_trees, diff_trees_visit};
+pub use visibility_tier::VisibilityTier;

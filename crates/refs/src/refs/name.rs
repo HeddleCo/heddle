@@ -27,7 +27,10 @@ pub fn validate_ref_name(name: &str) -> Result<(), RefNameError> {
     // Git refname rule: no path *component* may end in `.lock` (not just
     // the whole ref) — `refs/heads/foo.lock/bar` would collide with the
     // on-disk lockfile of `refs/heads/foo`.
-    if name.split('/').any(|component| component.ends_with(".lock")) {
+    if name
+        .split('/')
+        .any(|component| component.ends_with(".lock"))
+    {
         return Err(invalid(name));
     }
     Ok(())

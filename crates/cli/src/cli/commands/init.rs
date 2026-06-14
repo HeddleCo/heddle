@@ -11,6 +11,7 @@ use objects::object::{Principal, ThreadName, Tree};
 use refs::Head;
 use repo::{Repository, RepositoryCapability, ThreadId};
 use serde::Serialize;
+use sley::{FullName, GitObjectType, ObjectId, ReferenceTarget, Repository as SleyRepository};
 use tracing::{debug, info};
 
 use super::{
@@ -250,11 +251,11 @@ fn resolve_quickstart_target(path: &Path) -> Result<QuickstartTarget> {
 
 /// Whether `dir` is itself a Git checkout root — Git metadata AT `dir`, mirroring
 /// the repo crate's `has_git_metadata`/`repository_capability_for_root`. (A
-/// `gix::discover` probe would instead walk to an ANCESTOR Git checkout, which
+/// a Git discovery probe would instead walk to an ANCESTOR Git checkout, which
 /// is exactly the misclassification this avoids.)
 fn dir_is_git_root(dir: &Path) -> bool {
     let dot_git = dir.join(".git");
-    (dot_git.is_dir() || dot_git.is_file()) && gix::discover(dir).is_ok()
+    (dot_git.is_dir() || dot_git.is_file()) && SleyRepository::discover(dir).is_ok()
 }
 
 pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
@@ -282,7 +283,7 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
     // Git next, and pre-seeding would make `main` point at a throwaway
     // empty-tree snapshot. Otherwise, seed `main` so the repo is immediately
     // usable for snapshot/history/etc.
-    let has_git = gix::discover(&path).is_ok();
+    let has_git = SleyRepository::discover(&path).is_ok();
 
     // Resolve the single quickstart root ONCE, by read-only discovery, so the
     // preflight (a read-only viability probe) and the write path below operate
@@ -381,7 +382,7 @@ pub fn cmd_init(cli: &Cli, args: InitArgs) -> Result<()> {
 
     // Output reflects the repo that was actually created/opened. For quickstart
     // that is the resolved target's capability (a subdirectory invocation may
-    // have opened a native repo even though `gix::discover` finds an ancestor
+    // have opened a native repo even though Git discovery finds an ancestor
     // Git checkout); the non-quickstart path keeps its prior `has_git` framing.
     let repo_is_git_overlay = if args.quickstart {
         repo.capability() == RepositoryCapability::GitOverlay
@@ -946,30 +947,42 @@ fn prompt_line(label: &str) -> Result<String> {
 /// existing history so the quickstart confirms AND imports rather than
 /// acting as if the repo were empty (which would leave partial/wrong state).
 fn git_has_commits(path: &Path) -> bool {
-    let Ok(repo) = gix::discover(path) else {
+    let Ok(repo) = SleyRepository::discover(path) else {
         return false;
     };
-    if repo.head_id().is_ok() {
+    if repo.head().ok().and_then(|head| head.oid).is_some() {
         return true;
     }
-    let Ok(platform) = repo.references() else {
+    let Ok(refs) = repo.references().list_refs() else {
         return false;
     };
-    let Ok(refs) = platform.all() else {
-        return false;
-    };
-    for reference in refs.filter_map(Result::ok) {
-        let mut reference = reference;
-        if let Ok(id) = reference.peel_to_id()
-            && repo
-                .find_object(id.detach())
-                .map(|object| object.kind == gix::objs::Kind::Commit)
-                .unwrap_or(false)
-        {
+    for reference in refs {
+        let ReferenceTarget::Direct(oid) = reference.target else {
+            continue;
+        };
+        if object_peels_to_commit(&repo, oid) {
             return true;
         }
     }
     false
+}
+
+fn object_peels_to_commit(repo: &SleyRepository, mut oid: ObjectId) -> bool {
+    loop {
+        let Ok(object) = repo.read_object(&oid) else {
+            return false;
+        };
+        match object.object_type {
+            GitObjectType::Commit => return true,
+            GitObjectType::Tag => {
+                let Ok(tag) = repo.read_tag(&oid) else {
+                    return false;
+                };
+                oid = tag.object;
+            }
+            _ => return false,
+        }
+    }
 }
 
 /// Read-only decision for the Git-overlay quickstart's pre-capture checkout
@@ -992,19 +1005,19 @@ fn quickstart_attachment_decision(
         return QuickstartAttachmentDecision::SkipUnborn;
     }
 
-    let Ok(repo) = gix::discover(path) else {
+    let Ok(repo) = SleyRepository::discover(path) else {
         return QuickstartAttachmentDecision::SkipUnborn;
     };
-    let Ok(head) = repo.head_id() else {
+    let Some(head) = repo.head().ok().and_then(|head| head.oid) else {
         return QuickstartAttachmentDecision::SkipUnborn;
     };
-    let Ok(Some(mut reference)) = repo.try_find_reference(&format!("refs/heads/{thread}")) else {
+    let Ok(Some(reference)) = repo.find_reference(&format!("refs/heads/{thread}")) else {
         return QuickstartAttachmentDecision::Attach;
     };
-    let Ok(branch_tip) = reference.peel_to_id() else {
+    let Ok(Some(branch_tip)) = reference.peeled_oid(&repo) else {
         return QuickstartAttachmentDecision::Attach;
     };
-    if head.detach() == branch_tip.detach() {
+    if head == branch_tip {
         QuickstartAttachmentDecision::Attach
     } else {
         QuickstartAttachmentDecision::RefuseCollision
@@ -1020,7 +1033,7 @@ fn quickstart_attachment_decision(
 /// checkpoint write-through points `.git/HEAD` at `refs/heads/<name>`, so
 /// reject here exactly what Git's porcelain would refuse there.
 fn git_branch_name_is_valid(name: &str) -> bool {
-    if gix::refs::FullName::try_from(format!("refs/heads/{name}").as_str()).is_err() {
+    if FullName::try_from(format!("refs/heads/{name}").as_str()).is_err() {
         return false;
     }
     // Branch-shorthand rules `--branch` adds on top of full-ref syntax: not
@@ -1034,7 +1047,7 @@ fn git_branch_name_is_valid(name: &str) -> bool {
 /// shallow clone before any write rather than after `bootstrap_git_overlay`
 /// already created `.heddle/`.
 fn git_is_shallow(path: &Path) -> bool {
-    gix::discover(path)
+    SleyRepository::discover(path)
         .ok()
         .map(|repo| repo.git_dir().join("shallow").is_file())
         .unwrap_or(false)
@@ -1044,7 +1057,7 @@ fn git_is_shallow(path: &Path) -> bool {
 /// (HEAD points directly at a commit instead of an attached branch). An
 /// unborn HEAD reads as not-detached.
 fn git_head_is_detached(path: &Path) -> bool {
-    gix::discover(path)
+    SleyRepository::discover(path)
         .ok()
         .and_then(|repo| repo.head().ok().map(|head| head.is_detached()))
         .unwrap_or(false)

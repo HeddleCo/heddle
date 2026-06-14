@@ -23,8 +23,8 @@ use objects::{
 };
 
 use crate::{
-    repository::Repository, ConfidenceBand, Thread, ThreadConfidenceSummary, ThreadFreshness,
-    ThreadImpactCategory, ThreadManager, ThreadState, ThreadVerificationSummary,
+    ConfidenceBand, Thread, ThreadConfidenceSummary, ThreadFreshness, ThreadImpactCategory,
+    ThreadManager, ThreadState, ThreadVerificationSummary, repository::Repository,
 };
 
 /// Result of a metadata refresh: derived signal the caller may want

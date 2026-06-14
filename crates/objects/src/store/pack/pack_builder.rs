@@ -4,14 +4,14 @@
 use std::collections::{HashMap, VecDeque};
 
 use super::{
-    append_container_checksum, compress_pack_payload, encode_tagged_entry,
-    encode_tagged_entry_parts, pack_container_spec, pack_index::PackIndex, write_container_header,
-    ObjectType, PackObjectId, PackObjectRecord, PackStats,
+    ObjectType, PackObjectId, PackObjectRecord, PackStats, append_container_checksum,
+    compress_pack_payload, encode_tagged_entry, encode_tagged_entry_parts, pack_container_spec,
+    pack_index::PackIndex, write_container_header,
 };
 use crate::{
     delta::DeltaEncoder,
     object::ContentHash,
-    store::{compression::CompressionConfig, Result},
+    store::{Result, compression::CompressionConfig},
 };
 
 const MIN_DELTA_SIZE: usize = 64;

@@ -50,7 +50,7 @@ clap_complete = "4"
 ed25519-dalek = { version = "2", features = ["pem", "rand_core"] }
 fs2 = "0.4.3"
 futures = "0.3"
-gix = { version = "=0.84.0", default-features = false, features = ["sha1", "revision", "tree-editor", "blocking-network-client", "blocking-http-transport-reqwest-rust-tls"] }
+sley = { path = "/Users/lukethorne/dev/HeddleCo/sley/crates/sley" }
 hex = "0.4"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 ignore = "0.4"
@@ -129,7 +129,6 @@ uuid = { version = "1", features = ["v4", "v7", "serde"] }
 walkdir = "2"
 windows-sys = "0.61"
 zstd = "0.13"
-gix-transport = { version = "0.57", features = ["http-client-insecure-credentials"] }
 
 [profile.dev]
 debug = "line-tables-only"

@@ -19,8 +19,10 @@ import hints, and worktree scan time.
 
 Use this when a real repository feels slow and the next move is unclear. The
 phase split should make it obvious whether to inspect startup/config overhead,
-worktree scanning, ref/thread summary work, Git subprocess fallbacks, or
+worktree scanning, ref/thread summary work, Sley-backed Git engine work, or
 rendering.
+Sley-backed Git engine work should show up inside the command-specific phases
+rather than as a hidden subprocess floor.
 
 ## Release Smoke Benchmark
 

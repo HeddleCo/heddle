@@ -64,10 +64,6 @@ pub use context_suggestions::{
     MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD, SUGGESTION_WINDOW,
     compute_rewrite_pct, is_major_rewrite,
 };
-use gix::{
-    bstr::{BStr, ByteSlice},
-    prelude::ObjectIdExt,
-};
 pub use objects::object::DiffKind;
 use objects::{
     error::{HeddleError, Result},
@@ -80,6 +76,10 @@ use objects::{
 use oplog::{OpLog, OpLogBackend, OpRecord};
 pub use refs::RefSummaryIndexInspection;
 use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
+use sley::{
+    ObjectId as SleyObjectId, Reference as SleyReference, ReferenceTarget as SleyRefTarget,
+    Repository as SleyRepository,
+};
 
 use crate::git_worktree_status::GitWorktreeEntryState;
 pub use repo_config::{HostedConfig, OutputFormat, RedactConfig, RepoConfig, TrustedKey};
@@ -117,7 +117,7 @@ pub enum RepositoryCapability {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GitHeadState {
     Attached(String),
-    Detached(gix::hash::ObjectId),
+    Detached(SleyObjectId),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,7 +258,7 @@ struct GitBridgeMappingFile {
 ///
 /// Two production implementations exist:
 /// - Git-overlay clones: `cli::commands::clone::GitOverlayBlobHydrator`
-///   uses gix promisor-fetch semantics against the bare `.git/` repo.
+///   uses sley promisor-fetch semantics against the bare `.git/` repo.
 /// - Hosted clones: `heddle_client::grpc_hosted::LazyHostedHydrator`
 ///   bridges sync `hydrate` calls to async gRPC via a dedicated worker
 ///   thread + private Tokio runtime; on each call the worker invokes
@@ -302,6 +302,7 @@ where
     config: RepoConfig,
     shallow: RwLock<ShallowInfo>,
     blob_hydrator: RwLock<Option<Arc<dyn BlobHydrator>>>,
+    git_overlay_repo: RwLock<Option<SleyRepository>>,
 }
 
 impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> RepositoryLockExt for Repository<R, O, S> {
@@ -342,6 +343,7 @@ impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> Repository<R, O, S> {
             config,
             shallow: RwLock::new(shallow),
             blob_hydrator: RwLock::new(None),
+            git_overlay_repo: RwLock::new(None),
         }
     }
 
@@ -612,6 +614,7 @@ impl Repository {
             config,
             shallow: RwLock::new(ShallowInfo::load(&heddle_dir)?),
             blob_hydrator: RwLock::new(None),
+            git_overlay_repo: RwLock::new(None),
         })
     }
 
@@ -850,6 +853,35 @@ impl Repository {
         self.capability
     }
 
+    pub fn git_overlay_sley_repository(&self) -> Result<Option<SleyRepository>> {
+        if self.capability() != RepositoryCapability::GitOverlay {
+            return Ok(None);
+        }
+
+        if let Some(repo) = self
+            .git_overlay_repo
+            .read()
+            .map_err(|_| HeddleError::Config("git overlay repo cache lock poisoned".into()))?
+            .clone()
+        {
+            return Ok(Some(repo));
+        }
+
+        let repo = SleyRepository::discover(&self.root).map_err(|error| {
+            HeddleError::Config(format!(
+                "failed to inspect Git repository at '{}': {}",
+                self.root.display(),
+                error
+            ))
+        })?;
+        *self
+            .git_overlay_repo
+            .write()
+            .map_err(|_| HeddleError::Config("git overlay repo cache lock poisoned".into()))? =
+            Some(repo.clone());
+        Ok(Some(repo))
+    }
+
     pub fn capability_label(&self) -> &'static str {
         match self.capability() {
             RepositoryCapability::GitOverlay => "git-overlay",
@@ -914,27 +946,17 @@ impl Repository {
             None => return Ok(None),
         };
 
-        let git = match gix::discover(&self.root) {
-            Ok(git) => git,
-            Err(_) => return Ok(None),
+        let Some(git) = self.git_overlay_sley_repository()? else {
+            return Ok(None);
         };
         let Some(head) = git_resolve_oid(&git, "HEAD")? else {
             return Ok(None);
         };
 
         let local_ref_name = format!("refs/heads/{branch}");
-        if let Some(local_ref) = git_find_reference(&git, &local_ref_name)?
-            && let Some(tracking_ref_name) =
-                local_ref.remote_tracking_ref_name(gix::remote::Direction::Fetch)
+        if git_find_reference(&git, &local_ref_name)?.is_some()
+            && let Some(tracking_name) = git_configured_tracking_ref(&git, &branch)?
         {
-            let tracking_ref_name = tracking_ref_name.map_err(|error| {
-                HeddleError::Config(format!(
-                    "failed to inspect upstream branch at '{}': {error}",
-                    self.root.display()
-                ))
-            })?;
-            let tracking_ref = tracking_ref_name.as_ref();
-            let tracking_name = tracking_ref.as_bstr().to_str_lossy().into_owned();
             if let Some(upstream_head) = git_resolve_oid(&git, &tracking_name)? {
                 let (ahead, behind) = git_ahead_behind(&self.root, &git, upstream_head, head)?;
                 if ahead == 0 && behind == 0 {
@@ -1132,13 +1154,9 @@ impl Repository {
             return Ok(Vec::new());
         }
 
-        let git_repo = gix::discover(&self.root).map_err(|error| {
-            HeddleError::Config(format!(
-                "failed to inspect git branches at '{}': {}",
-                self.root.display(),
-                error
-            ))
-        })?;
+        let Some(git_repo) = self.git_overlay_sley_repository()? else {
+            return Ok(Vec::new());
+        };
 
         let imported_threads: std::collections::HashSet<ThreadName> =
             self.refs().list_threads()?.into_iter().collect();
@@ -1146,34 +1164,19 @@ impl Repository {
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
         let mut branch_tips = Vec::new();
 
-        for branch in git_repo
-            .references()
-            .map_err(|error| {
-                HeddleError::Config(format!(
-                    "failed to read git references at '{}': {}",
-                    self.root.display(),
-                    error
-                ))
-            })?
-            .local_branches()
-            .map_err(|error| {
-                HeddleError::Config(format!(
-                    "failed to enumerate git branches at '{}': {}",
-                    self.root.display(),
-                    error
-                ))
-            })?
-        {
-            let mut branch = branch.map_err(|error| {
-                HeddleError::Config(format!(
-                    "failed to inspect git branch at '{}': {}",
-                    self.root.display(),
-                    error
-                ))
-            })?;
-            let name = branch.name().shorten().to_string();
+        for branch in git_repo.references().list_refs().map_err(|error| {
+            HeddleError::Config(format!(
+                "failed to enumerate git branches at '{}': {}",
+                self.root.display(),
+                error
+            ))
+        })? {
+            let Some(name) = branch.name.strip_prefix("refs/heads/") else {
+                continue;
+            };
+            let name = name.to_string();
             let Some(target) =
-                self.git_overlay_commit_tip_oid(&git_repo, &mut branch, "branch", &name)?
+                self.git_overlay_commit_tip_oid(&git_repo, &branch, "branch", &name)?
             else {
                 continue;
             };
@@ -1216,7 +1219,6 @@ impl Repository {
                 mapped_change,
             });
         }
-
         branch_tips.sort_by(|a, b| a.branch.cmp(&b.branch));
         Ok(branch_tips)
     }
@@ -1226,13 +1228,9 @@ impl Repository {
             return Ok(Vec::new());
         }
 
-        let git_repo = gix::discover(&self.root).map_err(|error| {
-            HeddleError::Config(format!(
-                "failed to inspect git tags at '{}': {}",
-                self.root.display(),
-                error
-            ))
-        })?;
+        let Some(git_repo) = self.git_overlay_sley_repository()? else {
+            return Ok(Vec::new());
+        };
 
         let imported_markers: std::collections::HashSet<MarkerName> =
             self.refs().list_markers()?.into_iter().collect();
@@ -1240,34 +1238,18 @@ impl Repository {
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
         let mut tag_tips = Vec::new();
 
-        for tag in git_repo
-            .references()
-            .map_err(|error| {
-                HeddleError::Config(format!(
-                    "failed to read git references at '{}': {}",
-                    self.root.display(),
-                    error
-                ))
-            })?
-            .tags()
-            .map_err(|error| {
-                HeddleError::Config(format!(
-                    "failed to enumerate git tags at '{}': {}",
-                    self.root.display(),
-                    error
-                ))
-            })?
-        {
-            let mut tag = tag.map_err(|error| {
-                HeddleError::Config(format!(
-                    "failed to inspect git tag at '{}': {}",
-                    self.root.display(),
-                    error
-                ))
-            })?;
-            let name = tag.name().shorten().to_string();
-            let Some(target) =
-                self.git_overlay_commit_tip_oid(&git_repo, &mut tag, "tag", &name)?
+        for tag in git_repo.references().list_refs().map_err(|error| {
+            HeddleError::Config(format!(
+                "failed to enumerate git tags at '{}': {}",
+                self.root.display(),
+                error
+            ))
+        })? {
+            let Some(name) = tag.name.strip_prefix("refs/tags/") else {
+                continue;
+            };
+            let name = name.to_string();
+            let Some(target) = self.git_overlay_commit_tip_oid(&git_repo, &tag, "tag", &name)?
             else {
                 continue;
             };
@@ -1333,57 +1315,81 @@ impl Repository {
         if self.capability() != RepositoryCapability::GitOverlay {
             return Ok(None);
         }
-        let git_repo = match gix::discover(&self.root) {
-            Ok(repo) => repo,
-            Err(_) => return Ok(None),
+        let git_repo = match self.git_overlay_sley_repository() {
+            Ok(Some(repo)) => repo,
+            Ok(None) | Err(_) => return Ok(None),
         };
         if git_repo.workdir().is_none() {
             return Ok(None);
         }
 
-        let index = git_repo.index_or_empty().map_err(|error| {
+        let index = git_repo.open_index().map_err(|error| {
             HeddleError::Config(format!(
                 "failed to inspect Git index at '{}': {}",
                 self.root.display(),
                 error
             ))
         })?;
-        let head_tree = git_repo.head_tree_id_or_empty().map_err(|error| {
-            HeddleError::Config(format!(
-                "failed to inspect Git HEAD tree at '{}': {}",
-                self.root.display(),
-                error
-            ))
-        })?;
-        let head_index = git_repo
-            .index_from_tree(head_tree.as_ref())
+        let index = index.unwrap_or_else(|| sley::Index {
+            version: 2,
+            entries: Vec::new(),
+            extensions: Vec::new(),
+            checksum: None,
+        });
+        let head_tree = match git_repo
+            .head()
             .map_err(|error| {
                 HeddleError::Config(format!(
                     "failed to inspect Git HEAD tree at '{}': {}",
                     self.root.display(),
                     error
                 ))
-            })?;
+            })?
+            .oid
+        {
+            Some(head) => {
+                git_repo
+                    .read_commit(&head)
+                    .map_err(|error| {
+                        HeddleError::Config(format!(
+                            "failed to inspect Git HEAD commit at '{}': {}",
+                            self.root.display(),
+                            error
+                        ))
+                    })?
+                    .tree
+            }
+            None => sley::ObjectId::empty_tree(git_repo.object_format()),
+        };
+        let head_index = git_repo.index_from_tree(&head_tree).map_err(|error| {
+            HeddleError::Config(format!(
+                "failed to inspect Git HEAD tree at '{}': {}",
+                self.root.display(),
+                error
+            ))
+        })?;
 
         let mut head_entries = BTreeMap::new();
-        for (_, (path, entry)) in head_index.entries_with_paths_by_filter_map(|path, entry| {
-            Some((git_path(path), (entry.id, entry.mode.bits())))
-        }) {
-            head_entries.insert(path, entry);
+        for entry in head_index.entries {
+            let path = git_path(entry.path.as_bytes());
+            head_entries.insert(path, (entry.oid, entry.mode));
         }
-        let index_timestamp_secs = index.timestamp().unix_seconds();
         let mut index_entries = BTreeMap::new();
-        for (_, (path, entry)) in index.entries_with_paths_by_filter_map(|path, entry| {
-            Some((git_path(path), (entry.id, entry.mode.bits(), entry.stat)))
-        }) {
-            index_entries.insert(path, entry);
+        let index_path = sley::plumbing::sley_worktree::repository_index_path(git_repo.git_dir());
+        for entry in index.entries {
+            let path = git_path(entry.path.as_bytes());
+            let probe = crate::git_worktree_status::IndexStatProbe::from_index_entry_and_index_path(
+                entry.clone(),
+                &index_path,
+            );
+            index_entries.insert(path, (entry.oid, entry.mode, probe));
         }
 
         let mut added = BTreeSet::new();
         let mut modified = BTreeSet::new();
         let mut deleted = BTreeSet::new();
 
-        for (path, (oid, mode, _stat)) in &index_entries {
+        for (path, (oid, mode, _probe)) in &index_entries {
             if ignored_git_overlay_status_path(path) {
                 continue;
             }
@@ -1403,20 +1409,16 @@ impl Repository {
             }
         }
 
-        for (path, (oid, mode, stat)) in &index_entries {
+        for (path, (oid, mode, probe)) in &index_entries {
             if ignored_git_overlay_status_path(path) {
                 continue;
             }
-            let probe = crate::git_worktree_status::IndexStatProbe {
-                stat: *stat,
-                index_timestamp_secs,
-            };
             match crate::git_worktree_status::git_worktree_entry_state(
                 &self.root,
                 path,
                 *oid,
                 *mode,
-                Some(probe),
+                Some(probe.clone()),
             )? {
                 GitWorktreeEntryState::Clean => {}
                 GitWorktreeEntryState::Deleted => {
@@ -1497,7 +1499,7 @@ impl Repository {
 
     fn git_overlay_mapped_change_for_git_oid(
         &self,
-        git_oid: gix::hash::ObjectId,
+        git_oid: SleyObjectId,
     ) -> Result<Option<ChangeId>> {
         let git_commit = git_oid.to_string();
         let bridge_mapping = self.git_overlay_bridge_mapping()?;
@@ -1520,11 +1522,11 @@ impl Repository {
         if self.capability() != RepositoryCapability::GitOverlay {
             return Ok(None);
         }
-        let git_repo = match gix::discover(&self.root) {
-            Ok(repo) => repo,
-            Err(_) => return Ok(None),
+        let git_repo = match self.git_overlay_sley_repository() {
+            Ok(Some(repo)) => repo,
+            Ok(None) | Err(_) => return Ok(None),
         };
-        let Ok(tip) = gix::hash::ObjectId::from_hex(tip_git_commit.as_bytes()) else {
+        let Ok(tip) = SleyObjectId::from_hex(git_repo.object_format(), tip_git_commit) else {
             return Ok(None);
         };
 
@@ -1557,15 +1559,11 @@ impl Repository {
                     truncated: true,
                 }));
             }
-            let Some(commit) = git_repo
-                .find_object(oid)
-                .ok()
-                .and_then(|object| object.try_into_commit().ok())
-            else {
+            let Ok(commit) = git_repo.read_commit(&oid) else {
                 continue;
             };
-            for parent in commit.parent_ids() {
-                pending.push(parent.detach());
+            for parent in commit.parents {
+                pending.push(parent);
             }
         }
         Ok(Some(GitOverlayOutOfBandCommits {
@@ -1611,26 +1609,23 @@ impl Repository {
 
     fn git_overlay_commit_tip_oid(
         &self,
-        git_repo: &gix::Repository,
-        reference: &mut gix::Reference,
+        git_repo: &SleyRepository,
+        reference: &sley::plumbing::sley_refs::Ref,
         ref_kind: &str,
         ref_name: &str,
-    ) -> Result<Option<gix::hash::ObjectId>> {
-        if reference.target().try_id().is_none() {
-            return Ok(None);
-        }
-
-        let target = match reference.peel_to_id() {
-            Ok(target) => target.detach(),
+    ) -> Result<Option<SleyObjectId>> {
+        let target = match &reference.target {
+            SleyRefTarget::Direct(oid) => *oid,
+            SleyRefTarget::Symbolic(_) => return Ok(None),
+        };
+        let target = match sley::plumbing::sley_rev::peel_to_commit(
+            git_repo.objects().as_ref(),
+            git_repo.object_format(),
+            &target,
+        ) {
+            Ok(target) => target,
             Err(_) => return Ok(None),
         };
-        let object = match git_repo.find_object(target) {
-            Ok(object) => object,
-            Err(_) => return Ok(None),
-        };
-        if object.kind != gix::objs::Kind::Commit {
-            return Ok(None);
-        }
 
         let _ = (ref_kind, ref_name);
         Ok(Some(target))
@@ -1843,7 +1838,9 @@ impl Repository {
             })
             .collect::<Result<Vec<_>>>()?;
         let scope = self.op_scope();
-        let result = self.refs.commit_and_publish(&encoded, ref_updates, Some(&scope));
+        let result = self
+            .refs
+            .commit_and_publish(&encoded, ref_updates, Some(&scope));
         // The committer appended through a fresh `OpLog` handle (the `refs`→`repo`
         // seam), so this repository's own cached oplog handle is now stale.
         // Refresh it so a same-process read via `self.oplog()` observes the
@@ -2133,7 +2130,9 @@ impl Repository {
                 .git_overlay_mapped_change_for_branch(&branch)?
                 .is_some()
         {
-            return Ok(Head::Attached { thread: branch_thread });
+            return Ok(Head::Attached {
+                thread: branch_thread,
+            });
         }
         Ok(raw)
     }
@@ -2380,7 +2379,7 @@ impl Repository {
 }
 
 fn ensure_git_overlay_exclude(root: &Path) -> Result<()> {
-    let git_dir = match gix::discover(root) {
+    let git_dir = match SleyRepository::discover(root) {
         Ok(repo) if repo.workdir().is_some() => repo.git_dir().to_path_buf(),
         _ => root.join(".git"),
     };
@@ -2465,7 +2464,7 @@ fn has_git_metadata(path: &Path) -> bool {
         return false;
     }
 
-    gix::discover(path).is_ok()
+    SleyRepository::discover(path).is_ok()
 }
 
 /// If `start_path` lies inside a *managed virtualized thread root*
@@ -2501,14 +2500,10 @@ fn metadataless_managed_thread_root(start_path: &Path) -> Option<PathBuf> {
 }
 
 fn git_config_principal(root: &Path) -> Option<Principal> {
-    let git_repo = gix::discover(root).ok()?;
-    let config = git_repo.config_snapshot();
-    let name = config
-        .string("user.name")
-        .map(|value| value.to_str_lossy().into_owned())?;
-    let email = config
-        .string("user.email")
-        .map(|value| value.to_str_lossy().into_owned())?;
+    let git_repo = SleyRepository::discover(root).ok()?;
+    let config = git_repo.config_snapshot().ok()?;
+    let name = config.get("user", None, "name")?.to_string();
+    let email = config.get("user", None, "email")?.to_string();
     if name.trim().is_empty() || email.trim().is_empty() {
         return None;
     }
@@ -2594,8 +2589,8 @@ fn path_to_git_path(path: &Path) -> String {
         .join("/")
 }
 
-fn git_path(path: &BStr) -> String {
-    path.to_str_lossy().into_owned()
+fn git_path(path: &[u8]) -> String {
+    String::from_utf8_lossy(path).into_owned()
 }
 
 fn ignored_git_overlay_status_path(path: &str) -> bool {
@@ -2603,39 +2598,60 @@ fn ignored_git_overlay_status_path(path: &str) -> bool {
 }
 
 fn git_remote_names(root: &Path) -> Result<Vec<String>> {
-    let repo = match gix::discover(root) {
+    let repo = match SleyRepository::discover(root) {
         Ok(repo) => repo,
         Err(_) => return Ok(Vec::new()),
     };
-    Ok(repo
-        .remote_names()
-        .into_iter()
-        .map(|name| name.to_str_lossy().into_owned())
-        .filter(|name| !name.trim().is_empty())
-        .collect())
+    repo.remote_names()
+        .map(|names| {
+            names
+                .into_iter()
+                .filter(|name| !name.trim().is_empty())
+                .collect()
+        })
+        .map_err(|error| HeddleError::Config(error.to_string()))
 }
 
 fn git_find_reference<'repo>(
-    repo: &'repo gix::Repository,
+    repo: &'repo SleyRepository,
     name: &str,
-) -> Result<Option<gix::Reference<'repo>>> {
-    repo.try_find_reference(name).map_err(|error| {
+) -> Result<Option<SleyReference>> {
+    repo.find_reference(name).map_err(|error| {
         HeddleError::Config(format!("failed to inspect Git reference '{name}': {error}"))
     })
 }
 
-fn git_resolve_oid(repo: &gix::Repository, rev: &str) -> Result<Option<gix::ObjectId>> {
-    match repo.rev_parse_single(rev.as_bytes().as_bstr()) {
-        Ok(id) => Ok(Some(id.detach())),
+fn git_resolve_oid(repo: &SleyRepository, rev: &str) -> Result<Option<SleyObjectId>> {
+    match repo.rev_parse(rev) {
+        Ok(id) => Ok(Some(id)),
         Err(_) => Ok(None),
     }
 }
 
+fn git_configured_tracking_ref(repo: &SleyRepository, branch: &str) -> Result<Option<String>> {
+    let config = repo
+        .config_snapshot()
+        .map_err(|error| HeddleError::Config(error.to_string()))?;
+    let Some(remote) = config.get("branch", Some(branch), "remote") else {
+        return Ok(None);
+    };
+    let Some(merge) = config.get("branch", Some(branch), "merge") else {
+        return Ok(None);
+    };
+    if remote == "." {
+        return Ok(Some(merge.to_string()));
+    }
+    let Some(short) = merge.strip_prefix("refs/heads/") else {
+        return Ok(None);
+    };
+    Ok(Some(format!("refs/remotes/{remote}/{short}")))
+}
+
 fn git_ahead_behind(
     root: &Path,
-    repo: &gix::Repository,
-    upstream: gix::ObjectId,
-    head: gix::ObjectId,
+    repo: &SleyRepository,
+    upstream: SleyObjectId,
+    head: SleyObjectId,
 ) -> Result<(usize, usize)> {
     if upstream == head {
         return Ok((0, 0));
@@ -2647,32 +2663,50 @@ fn git_ahead_behind(
 
 fn git_reachable_count(
     root: &Path,
-    repo: &gix::Repository,
-    tip: gix::ObjectId,
-    hidden: gix::ObjectId,
+    repo: &SleyRepository,
+    tip: SleyObjectId,
+    hidden: SleyObjectId,
 ) -> Result<usize> {
-    let walk = tip
-        .attach(repo)
-        .ancestors()
-        .with_hidden([hidden])
-        .all()
-        .map_err(|error| {
-            HeddleError::Config(format!(
-                "failed to inspect Git upstream drift at '{}': {error}",
-                root.display()
-            ))
-        })?;
+    let hidden = git_ancestor_set(root, repo, hidden)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = vec![tip];
     let mut count = 0;
-    for entry in walk {
-        entry.map_err(|error| {
+    while let Some(oid) = pending.pop() {
+        if hidden.contains(&oid) || !seen.insert(oid) {
+            continue;
+        }
+        count += 1;
+        let commit = repo.read_commit(&oid).map_err(|error| {
             HeddleError::Config(format!(
                 "failed to inspect Git upstream drift at '{}': {error}",
                 root.display()
             ))
         })?;
-        count += 1;
+        pending.extend(commit.parents);
     }
     Ok(count)
+}
+
+fn git_ancestor_set(
+    root: &Path,
+    repo: &SleyRepository,
+    start: SleyObjectId,
+) -> Result<std::collections::HashSet<SleyObjectId>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut pending = vec![start];
+    while let Some(oid) = pending.pop() {
+        if !seen.insert(oid) {
+            continue;
+        }
+        let commit = repo.read_commit(&oid).map_err(|error| {
+            HeddleError::Config(format!(
+                "failed to inspect Git upstream drift at '{}': {error}",
+                root.display()
+            ))
+        })?;
+        pending.extend(commit.parents);
+    }
+    Ok(seen)
 }
 
 fn git_remote_tracking_display_name(name: &str) -> String {
@@ -2749,11 +2783,11 @@ fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Resul
     Ok(())
 }
 
-/// Read git's HEAD ref via `gix::discover` (~25ms — full repository
+/// Read git's HEAD ref via `sley::Repository::discover` (~25ms — full repository
 /// inspection). Used as a fallback when the fast path can't parse the
 /// raw `.git/HEAD` file (e.g. detached HEAD, multi-worktree layouts).
-fn detect_git_head_state_via_gix(path: &Path) -> Result<Option<GitHeadState>> {
-    let repo = gix::discover(path).map_err(|error| {
+fn detect_git_head_state_via_sley(path: &Path) -> Result<Option<GitHeadState>> {
+    let repo = SleyRepository::discover(path).map_err(|error| {
         HeddleError::Config(format!(
             "failed to inspect git repository at '{}': {}",
             path.display(),
@@ -2765,13 +2799,13 @@ fn detect_git_head_state_via_gix(path: &Path) -> Result<Option<GitHeadState>> {
         Err(_) => return Ok(None),
     };
 
-    if let Some(name) = head.referent_name() {
-        return Ok(Some(GitHeadState::Attached(name.shorten().to_string())));
+    if let Some(name) = head.branch_name() {
+        return Ok(Some(GitHeadState::Attached(name.to_string())));
     }
     if head.is_detached()
-        && let Some(id) = head.id()
+        && let Some(id) = head.oid
     {
-        return Ok(Some(GitHeadState::Detached(id.detach())));
+        return Ok(Some(GitHeadState::Detached(id)));
     }
     Ok(None)
 }
@@ -2780,21 +2814,23 @@ fn detect_git_head_state(path: &Path) -> Result<Option<GitHeadState>> {
     if let Some(head) = detect_git_head_fast(path) {
         return Ok(Some(head));
     }
-    detect_git_head_state_via_gix(path)
+    detect_git_head_state_via_sley(path)
 }
 
 /// Detect git's current HEAD branch.
 ///
 /// The fast path reads `.git/HEAD` directly as text. `.git/HEAD` is a
 /// tiny file (~30 bytes for `ref: refs/heads/<name>\n`) and a direct
-/// read is ~50us vs. `gix::discover()`'s ~25ms full repository
-/// inspection. Falls back to gix only for the cases the text parser
+/// read is ~50us vs. repository discovery's ~25ms full repository
+/// inspection. Falls back to sley only for the cases the text parser
 /// can't handle: detached HEAD, multi-worktree `gitdir:` indirections,
 /// and any malformed file (where we'd rather surface the right error
 /// than guess).
 fn detect_git_head(path: &Path) -> Result<Option<Head>> {
     if let Some(GitHeadState::Attached(thread)) = detect_git_head_state(path)? {
-        return Ok(Some(Head::Attached { thread: ThreadName::from(thread) }));
+        return Ok(Some(Head::Attached {
+            thread: ThreadName::from(thread),
+        }));
     }
     Ok(None)
 }
@@ -2803,7 +2839,7 @@ fn detect_git_head(path: &Path) -> Result<Option<Head>> {
 /// when `.git/HEAD` is the simple `ref: refs/heads/<name>` form;
 /// returns `None` for any case we don't trust ourselves to parse
 /// correctly (detached HEAD raw OIDs, `gitdir:` worktree pointers,
-/// missing files), letting the gix fallback handle it.
+/// missing files), letting the sley fallback handle it.
 fn detect_git_head_fast(path: &Path) -> Option<GitHeadState> {
     let head_path = path.join(".git").join("HEAD");
     // `.git` may also be a *file* (the gitdir: pointer used by
@@ -2822,7 +2858,7 @@ fn detect_git_head_fast(path: &Path) -> Option<GitHeadState> {
 }
 
 fn resolve_git_dir(path: &Path) -> Result<PathBuf> {
-    let repo = gix::discover(path).map_err(|error| {
+    let repo = SleyRepository::discover(path).map_err(|error| {
         HeddleError::Config(format!(
             "failed to resolve git dir at '{}': {}",
             path.display(),

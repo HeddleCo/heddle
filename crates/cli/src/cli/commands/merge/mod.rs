@@ -16,6 +16,7 @@ use repo::{
 };
 use serde::Serialize;
 use serde_json::Value;
+use sley::Repository as SleyRepository;
 
 use super::{
     action_line::print_nested_next,
@@ -1480,8 +1481,8 @@ fn merge_op_targets_state(op: &OpRecord, state: &ChangeId) -> bool {
 }
 
 fn git_rev_parse_head(root: &Path) -> Option<String> {
-    let git = gix::discover(root).ok()?;
-    git.head_id().ok().map(|id| id.to_string())
+    let git = SleyRepository::discover(root).ok()?;
+    git.head().ok()?.oid.map(|id| id.to_string())
 }
 
 /// Extended pre-flight for `--git-commit`. Catches dry-runnable failure

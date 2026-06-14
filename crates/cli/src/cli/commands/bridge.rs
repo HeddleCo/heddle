@@ -309,11 +309,8 @@ fn exported_refs_summary(refs: &[ExportedRef]) -> String {
     let listing = refs
         .iter()
         .map(|r| {
-            format!(
-                "{} {}",
-                r.name,
-                style::dim(&r.tip.to_hex_with_len(7).to_string())
-            )
+            let short_tip = r.tip.to_hex().chars().take(7).collect::<String>();
+            format!("{} {}", r.name, style::dim(&short_tip))
         })
         .collect::<Vec<_>>()
         .join(" · ");

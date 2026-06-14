@@ -40,8 +40,8 @@ macro_rules! versioned_msgpack_blob {
             }
 
             pub fn decode(bytes: &[u8]) -> ::core::result::Result<Self, $Err> {
-                let blob: Self = rmp_serde::from_slice(bytes)
-                    .map_err(|err| <$Err>::$codec(err.to_string()))?;
+                let blob: Self =
+                    rmp_serde::from_slice(bytes).map_err(|err| <$Err>::$codec(err.to_string()))?;
                 blob.validate()?;
                 Ok(blob)
             }

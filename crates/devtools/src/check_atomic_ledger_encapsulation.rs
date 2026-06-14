@@ -199,9 +199,7 @@ fn pred_can_be_true_without_test(meta: &Meta) -> bool {
         // The `test` atom is false in a non-test build; any other atom is free.
         Meta::Path(path) => !path.is_ident("test"),
         Meta::List(list) if list.path.is_ident("not") => match cfg_children(list) {
-            Some(children) if children.len() == 1 => {
-                pred_can_be_false_without_test(&children[0])
-            }
+            Some(children) if children.len() == 1 => pred_can_be_false_without_test(&children[0]),
             _ => true,
         },
         Meta::List(list) if list.path.is_ident("all") => match cfg_children(list) {
@@ -226,9 +224,7 @@ fn pred_can_be_false_without_test(meta: &Meta) -> bool {
         // atom is free and can be left unset.
         Meta::Path(_) => true,
         Meta::List(list) if list.path.is_ident("not") => match cfg_children(list) {
-            Some(children) if children.len() == 1 => {
-                pred_can_be_true_without_test(&children[0])
-            }
+            Some(children) if children.len() == 1 => pred_can_be_true_without_test(&children[0]),
             _ => true,
         },
         // `all` is false if any child can be false; `any` is false only if every
@@ -347,7 +343,11 @@ mod tests {
                 do_forward()?; \
                 Ok(()) }",
         );
-        assert_eq!(hits.len(), 1, "an out-of-module on_rewind call must be flagged");
+        assert_eq!(
+            hits.len(),
+            1,
+            "an out-of-module on_rewind call must be flagged"
+        );
     }
 
     #[test]
@@ -370,23 +370,33 @@ mod tests {
                 fn drives_primitive(tx: &mut Tx) { tx.on_rewind(|| Ok(())); } \
              }",
         );
-        assert!(hits.is_empty(), "inline #[cfg(test)] module must be skipped");
+        assert!(
+            hits.is_empty(),
+            "inline #[cfg(test)] module must be skipped"
+        );
     }
 
     #[test]
     fn ignores_string_literal() {
         let hits = scan_source("fn f() { let s = \"tx.on_rewind(x)\"; let _ = s; }");
-        assert!(hits.is_empty(), "a string mentioning on_rewind is not a call");
+        assert!(
+            hits.is_empty(),
+            "a string mentioning on_rewind is not a call"
+        );
     }
 
     #[test]
     fn atomic_module_path_is_recognized() {
-        assert!(is_atomic_module_path(Path::new("crates/repo/src/atomic/tx.rs")));
+        assert!(is_atomic_module_path(Path::new(
+            "crates/repo/src/atomic/tx.rs"
+        )));
         assert!(is_atomic_module_path(Path::new(
             "/work/crates/repo/src/atomic/tests.rs"
         )));
         // A sibling `atomic` dir under a different crate is NOT exempt.
-        assert!(!is_atomic_module_path(Path::new("crates/cli/src/atomic/x.rs")));
+        assert!(!is_atomic_module_path(Path::new(
+            "crates/cli/src/atomic/x.rs"
+        )));
         assert!(!is_atomic_module_path(Path::new(
             "crates/cli/src/cli/commands/undo_apply.rs"
         )));
@@ -469,7 +479,11 @@ mod tests {
             "#[cfg(any(test, feature = \"x\"))] \
              fn prod(tx: &mut Tx) { tx.on_rewind(|| Ok(())); }",
         );
-        assert_eq!(hits.len(), 1, "any(test, feature) is prod-reachable and must be flagged");
+        assert_eq!(
+            hits.len(),
+            1,
+            "any(test, feature) is prod-reachable and must be flagged"
+        );
     }
 
     #[test]
@@ -527,7 +541,10 @@ mod tests {
         let mut hits = Vec::new();
         let mut scanned = 0usize;
         scan_dir(&crates_dir, &mut hits, &mut scanned).expect("scan crates/");
-        assert!(scanned > 0, "expected to scan some files under {crates_dir:?}");
+        assert!(
+            scanned > 0,
+            "expected to scan some files under {crates_dir:?}"
+        );
         assert!(
             hits.is_empty(),
             "out-of-module on_rewind call site(s) found: {:?}",

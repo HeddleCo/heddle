@@ -1179,8 +1179,8 @@ mod tests {
         let with_committer = sample_state()
             .with_change_id(base.change_id)
             .with_logical_change_id(base.logical_change_id());
-        let mut with_committer = with_committer
-            .with_committer(Principal::new("Carol", "carol@example.com"));
+        let mut with_committer =
+            with_committer.with_committer(Principal::new("Carol", "carol@example.com"));
         with_committer.created_at = base.created_at;
         assert_ne!(
             with_committer.hash(),

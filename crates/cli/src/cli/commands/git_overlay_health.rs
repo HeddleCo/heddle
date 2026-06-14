@@ -3,11 +3,9 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
     path::{Path, PathBuf},
 };
 
-use gix::bstr::{BStr, ByteSlice};
 use objects::object::ThreadName;
 use objects::worktree::WorktreeStatus;
 use refs::Head;
@@ -18,6 +16,7 @@ use repo::{
 };
 use schemars::JsonSchema;
 use serde::{Serialize, Serializer};
+use sley::{BString as GitBString, GitObjectType, Index, Repository as SleyRepository};
 
 use super::{
     advice::RecoveryAdvice,
@@ -1617,7 +1616,7 @@ fn dirty_details(status: &WorktreeStatus) -> BTreeMap<String, String> {
 pub(crate) fn build_plain_git_verification_probe(
     start: &Path,
 ) -> anyhow::Result<Option<PlainGitVerificationProbe>> {
-    let git_repo = match gix::discover(start) {
+    let git_repo = match SleyRepository::discover(start) {
         Ok(repo) => repo,
         Err(_) => return Ok(None),
     };
@@ -1858,11 +1857,8 @@ fn plain_git_missing_import_branches(
     dedup_commands(missing)
 }
 
-fn plain_git_current_branch(git_repo: &gix::Repository) -> Option<String> {
-    let raw = fs::read_to_string(git_repo.git_dir().join("HEAD")).ok()?;
-    let target = raw.trim().strip_prefix("ref: ")?;
-    let branch = target.strip_prefix("refs/heads/")?;
-    (!branch.is_empty()).then(|| branch.to_string())
+fn plain_git_current_branch(git_repo: &SleyRepository) -> Option<String> {
+    git_repo.head().ok()?.branch_name().map(str::to_string)
 }
 
 fn dedup_commands(commands: Vec<String>) -> Vec<String> {
@@ -1873,16 +1869,13 @@ fn dedup_commands(commands: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-fn plain_git_local_branches(git_repo: &gix::Repository) -> Vec<String> {
-    let Ok(references) = git_repo.references() else {
-        return Vec::new();
-    };
-    let Ok(branches) = references.local_branches() else {
+fn plain_git_local_branches(git_repo: &SleyRepository) -> Vec<String> {
+    let Ok(branches) = git_repo.references().list_refs() else {
         return Vec::new();
     };
     let mut names = branches
-        .filter_map(Result::ok)
-        .map(|branch| branch.name().shorten().to_string())
+        .into_iter()
+        .filter_map(|branch| branch.name.strip_prefix("refs/heads/").map(str::to_string))
         .filter(|branch| !branch.trim().is_empty())
         .collect::<Vec<_>>();
     names.sort();
@@ -1890,16 +1883,13 @@ fn plain_git_local_branches(git_repo: &gix::Repository) -> Vec<String> {
     names
 }
 
-fn plain_git_local_tags(git_repo: &gix::Repository) -> Vec<String> {
-    let Ok(references) = git_repo.references() else {
-        return Vec::new();
-    };
-    let Ok(tags) = references.tags() else {
+fn plain_git_local_tags(git_repo: &SleyRepository) -> Vec<String> {
+    let Ok(tags) = git_repo.references().list_refs() else {
         return Vec::new();
     };
     let mut names = tags
-        .filter_map(Result::ok)
-        .map(|tag| tag.name().shorten().to_string())
+        .into_iter()
+        .filter_map(|tag| tag.name.strip_prefix("refs/tags/").map(str::to_string))
         .filter(|tag| !tag.trim().is_empty())
         .collect::<Vec<_>>();
     names.sort();
@@ -1909,51 +1899,35 @@ fn plain_git_local_tags(git_repo: &gix::Repository) -> Vec<String> {
 
 fn plain_git_worktree_status(
     root: &Path,
-    git_repo: &gix::Repository,
+    git_repo: &SleyRepository,
 ) -> anyhow::Result<WorktreeStatus> {
-    let index = git_repo.index_or_empty().map_err(|error| {
+    let index = plain_git_index_or_empty(git_repo).map_err(|error| {
         anyhow::anyhow!(
             "failed to inspect Git index at '{}': {error}",
             root.display()
         )
     })?;
-    let head_tree = git_repo.head_tree_id_or_empty().map_err(|error| {
+    let head_index = plain_git_head_index_or_empty(git_repo).map_err(|error| {
         anyhow::anyhow!(
             "failed to inspect Git HEAD tree at '{}': {error}",
             root.display()
         )
     })?;
-    let head_index = git_repo
-        .index_from_tree(head_tree.as_ref())
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "failed to inspect Git HEAD tree at '{}': {error}",
-                root.display()
-            )
-        })?;
 
     let mut head_entries = BTreeMap::new();
-    for (_, (path, entry)) in head_index.entries_with_paths_by_filter_map(|path, entry| {
-        Some((plain_git_path(path), (entry.id, entry.mode.bits())))
-    }) {
-        head_entries.insert(path, entry);
+    for entry in &head_index.entries {
+        head_entries.insert(plain_git_path(&entry.path), (entry.oid, entry.mode));
     }
-    let index_timestamp_secs = index.timestamp().unix_seconds();
     let mut index_entries = BTreeMap::new();
-    for (_, (path, entry)) in index.entries_with_paths_by_filter_map(|path, entry| {
-        Some((
-            plain_git_path(path),
-            (entry.id, entry.mode.bits(), entry.stat),
-        ))
-    }) {
-        index_entries.insert(path, entry);
+    for entry in &index.entries {
+        index_entries.insert(plain_git_path(&entry.path), (entry.oid, entry.mode));
     }
 
     let mut added = BTreeSet::new();
     let mut modified = BTreeSet::new();
     let mut deleted = BTreeSet::new();
 
-    for (path, (oid, mode, _stat)) in &index_entries {
+    for (path, (oid, mode)) in &index_entries {
         match head_entries.get(path) {
             None => {
                 added.insert(PathBuf::from(path));
@@ -1970,18 +1944,8 @@ fn plain_git_worktree_status(
         }
     }
 
-    for (path, (oid, mode, stat)) in &index_entries {
-        let probe = repo::git_worktree_status::IndexStatProbe {
-            stat: *stat,
-            index_timestamp_secs,
-        };
-        match repo::git_worktree_status::git_worktree_entry_state(
-            root,
-            path,
-            *oid,
-            *mode,
-            Some(probe),
-        )? {
+    for (path, (oid, mode)) in &index_entries {
+        match repo::git_worktree_status::git_worktree_entry_state(root, path, *oid, *mode, None)? {
             GitWorktreeEntryState::Clean => {}
             GitWorktreeEntryState::Deleted => {
                 deleted.insert(PathBuf::from(path));
@@ -2069,24 +2033,52 @@ fn path_to_plain_git_path(path: &Path) -> String {
         .join("/")
 }
 
-fn plain_git_path(path: &BStr) -> String {
-    path.to_str_lossy().into_owned()
+fn plain_git_empty_index() -> Index {
+    Index {
+        version: 2,
+        entries: Vec::new(),
+        extensions: Vec::new(),
+        checksum: None,
+    }
+}
+
+fn plain_git_index_or_empty(
+    git_repo: &SleyRepository,
+) -> std::result::Result<Index, sley::GitError> {
+    git_repo
+        .open_index()
+        .map(|index| index.unwrap_or_else(plain_git_empty_index))
+}
+
+fn plain_git_head_index_or_empty(
+    git_repo: &SleyRepository,
+) -> std::result::Result<Index, sley::GitError> {
+    let head = git_repo.head()?;
+    let Some(oid) = head.oid else {
+        return Ok(plain_git_empty_index());
+    };
+    let commit = git_repo.read_commit(&oid)?;
+    git_repo.index_from_tree(&commit.tree)
+}
+
+fn plain_git_path(path: &GitBString) -> String {
+    String::from_utf8_lossy(path.as_bytes()).into_owned()
 }
 
 fn plain_git_head_has_commit(
-    git_repo: &gix::Repository,
+    git_repo: &SleyRepository,
     git_branch: Option<&str>,
 ) -> anyhow::Result<bool> {
     let spec = git_branch
         .map(|branch| format!("refs/heads/{branch}^{{commit}}"))
         .unwrap_or_else(|| "HEAD^{commit}".to_string());
-    let Ok(id) = git_repo.rev_parse_single(spec.as_bytes().as_bstr()) else {
+    let Ok(id) = git_repo.rev_parse(&spec) else {
         return Ok(false);
     };
-    let Ok(object) = git_repo.find_object(id.detach()) else {
+    let Ok(object) = git_repo.read_object(&id) else {
         return Ok(false);
     };
-    Ok(object.kind == gix::objs::Kind::Commit)
+    Ok(object.object_type == GitObjectType::Commit)
 }
 
 pub(crate) fn action_template(action: &str) -> Option<ActionTemplate> {
@@ -2542,14 +2534,14 @@ fn default_remote_name(repo: &Repository) -> Option<String> {
 }
 
 fn git_default_remote_name(root: &Path) -> Option<String> {
-    let repo = gix::discover(root).ok()?;
+    let repo = SleyRepository::discover(root).ok()?;
     git_default_remote_name_from_repo(&repo)
 }
 
-fn git_default_remote_name_from_repo(repo: &gix::Repository) -> Option<String> {
+fn git_default_remote_name_from_repo(repo: &SleyRepository) -> Option<String> {
     repo.remote_names()
+        .ok()?
         .into_iter()
-        .map(|name| name.to_str_lossy().into_owned())
         .find(|name| name == "origin")
 }
 
@@ -3519,6 +3511,7 @@ fn mapped_change_relation(
 mod tests {
     use objects::object::ThreadName;
     use repo::{GitRemoteTrackingStatus, Repository};
+    use sley::Repository as SleyRepository;
     use tempfile::TempDir;
 
     use super::{
@@ -3890,7 +3883,7 @@ mod tests {
             }
         }
 
-        let git_repo = gix::open(root).expect("open gix");
+        let git_repo = SleyRepository::discover(root).expect("open git repo");
         let status = super::plain_git_worktree_status(root, &git_repo).expect("status");
 
         let target = PathBuf::from("file.txt");

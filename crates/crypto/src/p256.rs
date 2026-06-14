@@ -2,11 +2,11 @@
 //! P-256 (ECDSA) signature implementation.
 
 use p256::{
-    ecdsa::{
-        signature::{Signer as SignatureSigner, Verifier as SignatureVerifier},
-        Signature, SigningKey, VerifyingKey,
-    },
     SecretKey,
+    ecdsa::{
+        Signature, SigningKey, VerifyingKey,
+        signature::{Signer as SignatureSigner, Verifier as SignatureVerifier},
+    },
 };
 use pkcs8::DecodePrivateKey;
 use rsa::{pkcs1::DecodeRsaPrivateKey, rand_core::OsRng};

@@ -382,8 +382,7 @@ mod tests {
             fork_b.clone()
         };
         // Resolved identically regardless of the order the records appear in.
-        let blob1 =
-            StateVisibilityBlob::new(vec![genesis.clone(), fork_a.clone(), fork_b.clone()]);
+        let blob1 = StateVisibilityBlob::new(vec![genesis.clone(), fork_a.clone(), fork_b.clone()]);
         let blob2 = StateVisibilityBlob::new(vec![genesis, fork_b, fork_a]);
         assert_eq!(blob1.latest().unwrap().unwrap(), &expected);
         assert_eq!(

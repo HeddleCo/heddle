@@ -17,10 +17,11 @@
 //! first-class content-addressed objects; lightweight tags need no object (just
 //! a ref at the commit).
 
-use gix::hash::ObjectId;
 use objects::object::{Principal, State};
 use objects::store::{ObjectStore, StoreError};
 use repo::Repository as HeddleRepository;
+use sley::plumbing::sley_object::EncodedObject;
+use sley::{GitObjectType, ObjectFormat, ObjectId, Repository as SleyRepository};
 
 use crate::bridge::git_core::{GitBridge, GitBridgeError, GitResult, SyncMapping, git_err};
 use crate::bridge::git_export::export_tree;
@@ -44,18 +45,14 @@ pub fn frame_git_object(kind: &str, content: &[u8]) -> Vec<u8> {
 /// `content`: frame per §0, then hash. Equals the original commit SHA exactly
 /// when `content` is byte-identical to the original object.
 pub fn commit_object_id(content: &[u8]) -> ObjectId {
-    let framed = frame_git_object("commit", content);
-    let mut hasher = gix::hash::hasher(gix::hash::Kind::Sha1);
-    hasher.update(&framed);
-    hasher
-        .try_finalize()
-        .expect("SHA-1 over an in-memory buffer cannot fail")
+    sley::plumbing::sley_core::object_id_for_bytes(ObjectFormat::Sha1, "commit", content)
+        .expect("SHA-1 commit object id over in-memory bytes cannot fail")
 }
 
 /// Reconstruct the byte-exact git commit object **content** (the bytes
 /// `git cat-file commit` prints, WITHOUT the §0 framing) for `state`.
 ///
-/// `repo` is any writable gix repo: the git tree OID is resolved by re-exporting
+/// `repo` is any writable sley repo: the git tree OID is resolved by re-exporting
 /// `state.tree` through [`export_tree`] (git trees are content-addressed, so the
 /// resulting OID is independent of which repo it is written into — the round-trip
 /// fidelity gate proves this path reproduces the original tree SHA). Parent OIDs
@@ -63,7 +60,7 @@ pub fn commit_object_id(content: &[u8]) -> ObjectId {
 /// `state.parents` order — order is part of a commit's identity (§1.2).
 pub fn reconstruct_commit_bytes(
     heddle_repo: &HeddleRepository,
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     mapping: &SyncMapping,
     state: &State,
 ) -> GitResult<Vec<u8>> {
@@ -88,12 +85,11 @@ pub fn reconstruct_commit_bytes(
 /// This is the write side of export-from-state (#567): export regenerates each
 /// commit object from Heddle state and writes it here, rather than relying on the
 /// git mirror still holding the verbatim imported bytes — the dependency #568
-/// removes. Idempotent: `gix`'s `write_buf` hashes first and no-ops when the
+/// removes. Idempotent: sley's object writer hashes first and no-ops when the
 /// object already exists, so re-writing a commit the mirror already carries (the
 /// common case today) costs nothing.
-pub fn write_commit_object(repo: &gix::Repository, content: &[u8]) -> GitResult<ObjectId> {
-    use gix::objs::Write;
-    repo.write_buf(gix::objs::Kind::Commit, content)
+pub fn write_commit_object(repo: &SleyRepository, content: &[u8]) -> GitResult<ObjectId> {
+    repo.write_object(EncodedObject::new(GitObjectType::Commit, content.to_vec()))
         .map_err(git_err)
 }
 
@@ -207,7 +203,7 @@ fn checked_actor_timestamp(label: &[u8], seconds: i64, tz_offset_secs: i32) -> G
 }
 
 /// Render a timezone offset — stored as **seconds** east of UTC (#565's `i32`
-/// unit; gix `Time::offset` is seconds) — as git's `±HHMM` (§5). The sign is
+/// unit) — as git's `±HHMM` (§5). The sign is
 /// always present; zero is `+0000` (git never emits `-0000` for a real commit);
 /// odd offsets like `-0830` / `+1245` survive verbatim.
 fn format_tz_offset(offset_secs: i32) -> String {
@@ -235,10 +231,10 @@ fn append_folded(out: &mut Vec<u8>, value: &[u8]) {
 }
 
 impl GitBridge<'_> {
-    /// Open (initializing if necessary) a writable gix repo suitable for
+    /// Open (initializing if necessary) a writable sley repo suitable for
     /// reconstruction's tree-OID resolution. Any writable odb works — git trees
     /// are content-addressed — so the bridge's own mirror is reused.
-    pub fn reconstruction_repo(&mut self) -> GitResult<gix::Repository> {
+    pub fn reconstruction_repo(&mut self) -> GitResult<SleyRepository> {
         self.init_mirror()?;
         self.open_git_repo()
     }
@@ -248,7 +244,7 @@ impl GitBridge<'_> {
     /// parent OIDs.
     pub fn reconstruct_commit_bytes(
         &self,
-        repo: &gix::Repository,
+        repo: &SleyRepository,
         state: &State,
     ) -> GitResult<Vec<u8>> {
         reconstruct_commit_bytes(self.heddle_repo, repo, &self.mapping, state)
@@ -261,7 +257,7 @@ impl GitBridge<'_> {
     /// the verbatim bytes.
     pub fn reconstruct_and_write_commit(
         &self,
-        repo: &gix::Repository,
+        repo: &SleyRepository,
         state: &State,
     ) -> GitResult<ObjectId> {
         let content = self.reconstruct_commit_bytes(repo, state)?;
@@ -274,10 +270,10 @@ impl GitBridge<'_> {
     /// reconstruction of each original commit against its captured golden bytes.
     pub fn reconstruct_commit_for_git_sha(
         &self,
-        repo: &gix::Repository,
+        repo: &SleyRepository,
         sha: &str,
     ) -> GitResult<Option<Vec<u8>>> {
-        let oid = ObjectId::from_hex(sha.as_bytes()).map_err(git_err)?;
+        let oid = ObjectId::from_hex(ObjectFormat::Sha1, sha).map_err(git_err)?;
         let Some(change_id) = self.mapping.get_heddle(oid) else {
             return Ok(None);
         };
@@ -301,10 +297,10 @@ impl GitBridge<'_> {
     /// copied from the mirror.
     pub fn reconstruct_and_write_commit_for_git_sha(
         &self,
-        repo: &gix::Repository,
+        repo: &SleyRepository,
         sha: &str,
     ) -> GitResult<Option<ObjectId>> {
-        let oid = ObjectId::from_hex(sha.as_bytes()).map_err(git_err)?;
+        let oid = ObjectId::from_hex(ObjectFormat::Sha1, sha).map_err(git_err)?;
         let Some(change_id) = self.mapping.get_heddle(oid) else {
             return Ok(None);
         };

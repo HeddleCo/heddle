@@ -20,6 +20,9 @@ use objects::{
 use refs::Head;
 use repo::{BlobHydrator, Repository};
 use serde::Serialize;
+use sley::{
+    GitObjectType, IndexWriteOptions, ObjectId, RefPrecondition, Repository as SleyRepository,
+};
 
 use super::{
     advice::RecoveryAdvice,
@@ -174,8 +177,8 @@ pub async fn cmd_clone(
             if looks_like_local_path(&remote) {
                 return Err(anyhow!(clone_remote_not_found_advice(Path::new(&remote))));
             }
-            if let Ok(url) = gix::url::parse(remote.as_bytes().into()) {
-                return clone_git_overlay_url(cli, &url, local_path, &options);
+            if looks_like_git_overlay_url(&remote) {
+                return clone_git_overlay_url(cli, &remote, local_path, &options);
             }
             return Err(anyhow!(clone_invalid_remote_url_advice(&remote)));
         }
@@ -183,7 +186,7 @@ pub async fn cmd_clone(
 
     match target {
         RemoteTarget::Local(remote_path) => {
-            if !remote_path.join(".heddle").exists() && gix::open(&remote_path).is_ok() {
+            if !remote_path.join(".heddle").exists() && open_repo(&remote_path).is_ok() {
                 return clone_git_overlay_path(cli, &remote_path, local_path, &options);
             }
             clone_local(cli, &remote_path, local_path, &options).await?;
@@ -246,9 +249,13 @@ fn looks_like_local_path(remote: &str) -> bool {
         || remote.starts_with("~/")
 }
 
+fn looks_like_git_overlay_url(remote: &str) -> bool {
+    remote.contains("://") || remote.starts_with("git@")
+}
+
 fn clone_git_overlay_url(
     cli: &Cli,
-    url: &gix::Url,
+    url: &str,
     local_path: &Path,
     options: &CloneOptions,
 ) -> Result<()> {
@@ -266,7 +273,7 @@ fn clone_git_overlay_path(
 ) -> Result<()> {
     reject_unsupported_for_git_overlay(options)?;
     fs::create_dir_all(local_path)?;
-    gix::init(local_path).map_err(anyhow::Error::msg)?;
+    SleyRepository::init(local_path).map_err(anyhow::Error::msg)?;
     copy_local_repo_to_bare(remote_path, &local_path.join(".git")).map_err(anyhow::Error::msg)?;
     let remote_label = fs::canonicalize(remote_path)
         .unwrap_or_else(|_| remote_path.to_path_buf())
@@ -382,7 +389,7 @@ fn finish_git_overlay_clone(
     // Re-attach HEAD to the cloned thread, AND mirror the choice into
     // `.git/HEAD`. `Repository::open` on a git-overlay repo
     // unconditionally syncs heddle's HEAD from `.git/HEAD` via
-    // `detect_git_head`, so if we left `.git/HEAD` pointing at gix's
+    // `detect_git_head`, so if we left `.git/HEAD` pointing at Sley's
     // init-time default ("main" / "master") the very next `heddle`
     // command would silently reset HEAD to a thread that doesn't
     // exist — and `current_state` would return `None`, causing
@@ -548,7 +555,7 @@ fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Res
         ))
     })?;
     let branch_ref = format!("refs/heads/{branch}");
-    let mut reference = git_repo.find_reference(&branch_ref).map_err(|err| {
+    let reference = git_repo.find_reference(&branch_ref).map_err(|err| {
         anyhow!(clone_verification_failed_advice(
             format!("clone verification failed: selected Git branch '{branch}' is missing: {err}"),
             format!("Git ref '{branch_ref}' is missing after Git-overlay clone"),
@@ -556,7 +563,15 @@ fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Res
             canonical_bridge_import_ref_command(branch),
         ))
     })?;
-    let target = reference.peel_to_id().map_err(|err| {
+    let Some(reference) = reference else {
+        return Err(anyhow!(clone_verification_failed_advice(
+            format!("clone verification failed: selected Git branch '{branch}' is missing"),
+            format!("Git ref '{branch_ref}' is missing after Git-overlay clone"),
+            "Git status would report upstream tracking for a branch whose local ref is absent",
+            canonical_bridge_import_ref_command(branch),
+        )));
+    };
+    let target = reference.peeled_oid(&git_repo).map_err(|err| {
         anyhow!(clone_verification_failed_advice(
             format!(
                 "clone verification failed: selected Git branch '{branch}' is not readable: {err}"
@@ -565,12 +580,20 @@ fn configure_git_overlay_origin_tracking(local_path: &Path, branch: &str) -> Res
             "Git status would report upstream tracking for an unreadable branch",
             canonical_bridge_import_ref_command(branch),
         ))
+    })?
+    .ok_or_else(|| {
+        anyhow!(clone_verification_failed_advice(
+            format!("clone verification failed: selected Git branch '{branch}' is unborn"),
+            format!("Git ref '{branch_ref}' could not be peeled to a commit"),
+            "Git status would report upstream tracking for an unreadable branch",
+            canonical_bridge_import_ref_command(branch),
+        ))
     })?;
     set_reference(
         &git_repo,
         &format!("refs/remotes/origin/{branch}"),
-        target.detach(),
-        gix::refs::transaction::PreviousValue::Any,
+        target,
+        RefPrecondition::Any,
         "heddle: seed origin remote-tracking branch after clone",
     )
     .map_err(|err| {
@@ -682,7 +705,7 @@ fn verify_git_overlay_clone(
 }
 
 fn refresh_git_index_to_head(local_path: &Path) -> Result<()> {
-    let git = gix::discover(local_path).map_err(|err| {
+    let git = open_repo(local_path).map_err(|err| {
         anyhow!(clone_verification_failed_advice(
             format!("clone verification failed: cannot reopen Git checkout: {err}"),
             format!(
@@ -693,7 +716,18 @@ fn refresh_git_index_to_head(local_path: &Path) -> Result<()> {
             "heddle status",
         ))
     })?;
-    let head_tree = git.head_tree_id_or_empty().map_err(|err| {
+    let head = git.head().map_err(|err| {
+        anyhow!(clone_verification_failed_advice(
+            format!("clone verification failed: cannot read Git HEAD: {err}"),
+            "Git HEAD could not be read during clone verification",
+            "clone cannot refresh the Git index to match the selected branch",
+            "heddle status",
+        ))
+    })?;
+    let Some(head_oid) = head.oid else {
+        return Ok(());
+    };
+    let commit = git.read_commit(&head_oid).map_err(|err| {
         anyhow!(clone_verification_failed_advice(
             format!("clone verification failed: cannot read Git HEAD tree: {err}"),
             "Git HEAD tree could not be read during clone verification",
@@ -701,7 +735,7 @@ fn refresh_git_index_to_head(local_path: &Path) -> Result<()> {
             "heddle status",
         ))
     })?;
-    let mut index = git.index_from_tree(head_tree.as_ref()).map_err(|err| {
+    let mut index = git.index_from_tree(&commit.tree).map_err(|err| {
         anyhow!(clone_verification_failed_advice(
             format!("clone verification failed: cannot build Git index from HEAD tree: {err}"),
             "Git index could not be rebuilt from HEAD during clone verification",
@@ -709,7 +743,15 @@ fn refresh_git_index_to_head(local_path: &Path) -> Result<()> {
             "heddle status",
         ))
     })?;
-    index.write(Default::default()).map_err(|err| {
+    index.upgrade_version_for_flags();
+    git.write_index(
+        &index,
+        IndexWriteOptions {
+            fsync: true,
+            validate_checksum: true,
+        },
+    )
+    .map_err(|err| {
         anyhow!(clone_verification_failed_advice(
             format!("clone verification failed: cannot write Git index: {err}"),
             "Git index could not be written during clone verification",
@@ -961,7 +1003,7 @@ fn read_git_head_branch(git_dir: &Path) -> Option<String> {
 
 /// Pin `.git/HEAD` to `refs/heads/<branch>`. Called after clone so a
 /// future `Repository::open` reads the same branch heddle attached to,
-/// rather than the init-time default gix wrote (typically `main`).
+/// rather than the init-time default Sley wrote (typically `main`).
 fn write_git_head_branch(git_dir: &Path, branch: &str) -> Result<()> {
     fs::write(git_dir.join("HEAD"), format!("ref: refs/heads/{branch}\n"))?;
     Ok(())
@@ -1410,7 +1452,7 @@ fn clone_symlink_unsupported_advice(path: &Path, dest_path: &Path) -> RecoveryAd
 /// blake3-hashed blob is recorded in `.heddle/partial-fetch` but is
 /// absent from the local object store — the read path delegates here.
 /// This hydrator looks up the corresponding Git object id, fetches the
-/// blob from the underlying gix repo when it is already present locally
+/// blob from the underlying sley repo when it is already present locally
 /// and writes the bytes into the heddle store. Native promisor fetching
 /// for absent Git blobs is not implemented yet; Heddle rejects public
 /// Git-overlay lazy/filtered clones until that path can run without a
@@ -1419,7 +1461,7 @@ fn clone_symlink_unsupported_advice(path: &Path, dest_path: &Path) -> RecoveryAd
 /// ## Why a side-table?
 ///
 /// `PartialFetchMetadata` records blake3 hashes only, but
-/// `gix::Repository::find_blob` is keyed by Git OID. The bridge
+/// `Repository::read_object` is keyed by Git OID. The bridge
 /// already computes blake3↔git mappings *for commits* (see
 /// `SyncMapping` in `bridge/git_core.rs`); blob mappings are
 /// constructed on-the-fly during import. We accept the same shape of
@@ -1434,7 +1476,7 @@ pub struct GitOverlayBlobHydrator {
     /// `Send + Sync` while still allowing the mapping to grow over
     /// time (e.g. if the import path is later extended to record new
     /// blobs as it walks).
-    blob_oid_map: Mutex<std::collections::HashMap<ContentHash, gix::ObjectId>>,
+    blob_oid_map: Mutex<std::collections::HashMap<ContentHash, ObjectId>>,
 }
 
 impl GitOverlayBlobHydrator {
@@ -1447,7 +1489,7 @@ impl GitOverlayBlobHydrator {
 
     /// Pre-seed the blake3 → git OID mapping. Called by the importer
     /// (or by tests) as missing blobs are discovered.
-    pub fn record_blob_oid(&self, hash: ContentHash, oid: gix::ObjectId) {
+    pub fn record_blob_oid(&self, hash: ContentHash, oid: ObjectId) {
         self.blob_oid_map.lock().unwrap().insert(hash, oid);
     }
 }
@@ -1487,18 +1529,22 @@ impl BlobHydrator for GitOverlayBlobHydrator {
 }
 
 impl GitOverlayBlobHydrator {
-    fn read_blob_bytes(&self, oid: gix::ObjectId) -> HeddleResult<Vec<u8>> {
-        let local_first = open_repo(&self.git_repo_path)
+    fn read_blob_bytes(&self, oid: ObjectId) -> HeddleResult<Vec<u8>> {
+        let object = open_repo(&self.git_repo_path)
             .map_err(|err| HeddleError::Io(std::io::Error::other(err.to_string())))?
-            .find_blob(oid)
-            .ok()
-            .map(|mut blob| blob.take_data());
-        if let Some(bytes) = local_first {
-            return Ok(bytes);
+            .read_object(&oid)
+            .map_err(|err| {
+                HeddleError::Io(std::io::Error::other(format!(
+                    "Git object {oid} could not be read from {}; native Git-overlay lazy hydration is not implemented yet. Re-run a full clone/import without --lazy or --filter so Heddle has a complete local object graph. Cause: {err}",
+                    self.git_repo_path.display()
+                )))
+            })?;
+        if object.object_type == GitObjectType::Blob {
+            return Ok(object.body.clone());
         }
 
         Err(HeddleError::Config(format!(
-            "Git blob {oid} is missing from {}; native Git-overlay lazy hydration is not implemented yet. Re-run a full clone/import without --lazy or --filter so Heddle has a complete local object graph.",
+            "Git object {oid} in {} is not a blob; native Git-overlay lazy hydration is not implemented yet. Re-run a full clone/import without --lazy or --filter so Heddle has a complete local object graph.",
             self.git_repo_path.display()
         )))
     }
@@ -1813,7 +1859,7 @@ mod tests {
     /// Standalone helpers to exercise [`GitOverlayBlobHydrator`]'s
     /// error and fallback branches that the kernel/hermetic end-to-end
     /// test (in `tests/lazy_blob_hydration_kernel.rs`) doesn't reach.
-    /// Each test sets up the smallest possible bare gix repo it needs;
+    /// Each test sets up the smallest possible bare Git repo it needs;
     /// none of them hit the network.
     mod git_overlay_hydrator {
         use objects::object::ContentHash;
@@ -1822,12 +1868,12 @@ mod tests {
 
         use super::*;
 
-        /// Build a fresh empty bare gix repo and a fresh `Repository`,
+        /// Build a fresh empty bare Git repo and a fresh `Repository`,
         /// returning `(temp, bare_path, repo)` for use in a single test.
         fn fixtures() -> (TempDir, std::path::PathBuf, Repository) {
             let temp = TempDir::new().expect("temp");
             let bare = temp.path().join("source.git");
-            gix::init_bare(&bare).expect("init bare gix");
+            SleyRepository::init_bare(&bare).expect("init bare git repo");
             let heddle_root = temp.path().join("heddle");
             std::fs::create_dir_all(&heddle_root).expect("mkdir heddle");
             let repo =
@@ -1836,9 +1882,9 @@ mod tests {
         }
 
         /// Write a single blob into the bare repo and return its OID.
-        fn write_local_blob(bare: &std::path::Path, payload: &[u8]) -> gix::ObjectId {
-            let g = gix::open(bare).expect("open bare");
-            g.write_blob(payload).expect("write blob").detach()
+        fn write_local_blob(bare: &std::path::Path, payload: &[u8]) -> ObjectId {
+            let git = SleyRepository::open(bare).expect("open bare");
+            git.write_blob(payload).expect("write blob")
         }
 
         #[test]
@@ -1907,7 +1953,7 @@ mod tests {
             // shell out to `git cat-file`; the error should name the
             // missing OID and the native lazy-hydration boundary.
             let (_temp, bare, _repo) = fixtures();
-            let absent_oid = gix::ObjectId::null(gix::hash::Kind::Sha1);
+            let absent_oid = ObjectId::null(sley::ObjectFormat::Sha1);
             let hydrator = GitOverlayBlobHydrator::new(bare.clone());
 
             let err = hydrator

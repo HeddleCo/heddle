@@ -512,15 +512,23 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
     // consumers (the health build below + the changes computation here). It
     // re-reads + SHA-1s every tracked file (~950ms on a 10k-file worktree);
     // previously `status` paid that twice.
+    let git_overlay_status_start = Instant::now();
     let git_worktree_status_result = repo.git_overlay_worktree_status();
+    let git_overlay_status_ms = git_overlay_status_start.elapsed().as_millis();
+    let git_overlay_health_start = Instant::now();
     let git_overlay_health =
         build_git_overlay_health_with_worktree_status(&repo, &git_worktree_status_result);
+    let git_overlay_health_ms = git_overlay_health_start.elapsed().as_millis();
+    let verification_start = Instant::now();
     let trust = RepositoryVerificationState::from_health(&repo, git_overlay_health.clone());
+    let verification_ms = verification_start.elapsed().as_millis();
     let remote_tracking =
         remote_tracking.map(|remote| remote_tracking_with_verification_action(remote, &trust));
     let status_options = worktree_status_options(Some(repo.config()));
     let git_worktree_status = git_worktree_status_result.unwrap_or(None);
+    let git_index_start = Instant::now();
     let git_index = git_index_plan_for_repo(&repo)?;
+    let git_index_ms = git_index_start.elapsed().as_millis();
     let identity_notice = first_capture_identity_notice(&repo, current_state.as_ref())?;
     let git_clean_mapping_blocker = matches!(
         trust.status.as_str(),
@@ -589,6 +597,10 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
                     ProfileField::millis("operation_ms", operation_ms),
                     ProfileField::millis("remote_tracking_ms", remote_tracking_ms),
                     ProfileField::millis("import_hint_ms", import_hint_ms),
+                    ProfileField::millis("git_overlay_status_ms", git_overlay_status_ms),
+                    ProfileField::millis("git_overlay_health_ms", git_overlay_health_ms),
+                    ProfileField::millis("verification_ms", verification_ms),
+                    ProfileField::millis("git_index_ms", git_index_ms),
                     ProfileField::millis("worktree_status_ms", worktree_status_ms),
                     ProfileField::duration("build_total_ms", body_start.elapsed()),
                 ],
@@ -1119,6 +1131,10 @@ pub(crate) fn build_status_output(cli: &Cli, short: bool) -> Result<StatusOutput
                 ProfileField::millis("operation_ms", operation_ms),
                 ProfileField::millis("remote_tracking_ms", remote_tracking_ms),
                 ProfileField::millis("import_hint_ms", import_hint_ms),
+                ProfileField::millis("git_overlay_status_ms", git_overlay_status_ms),
+                ProfileField::millis("git_overlay_health_ms", git_overlay_health_ms),
+                ProfileField::millis("verification_ms", verification_ms),
+                ProfileField::millis("git_index_ms", git_index_ms),
                 ProfileField::millis("worktree_status_ms", worktree_status_ms),
                 ProfileField::millis("thread_summary_ms", thread_summary_ms),
                 ProfileField::millis("parallel_threads_ms", parallel_threads_ms),

@@ -3,7 +3,7 @@
 //!
 //! Heddle's public Git-overlay workflows must not depend on a `git`
 //! executable being present on PATH. Git-format work is handled by
-//! native code and gix; tests and fixture builders may shell out to Git,
+//! native code through Sley; tests and fixture builders may shell out to Git,
 //! but runtime CLI crates may not.
 
 use std::{
@@ -52,7 +52,7 @@ fn runtime_git_process_spawns_match_reviewed_allowlist() {
 
     assert!(
         unexpected.is_empty(),
-        "runtime `git` process spawn(s) are not allowed:\n{}\nReplace the call with native/gix behavior or move fixture setup into tests.",
+        "runtime `git` process spawn(s) are not allowed:\n{}\nReplace the call with native/Sley behavior or move fixture setup into tests.",
         unexpected
             .iter()
             .map(|site| format!(
@@ -71,6 +71,46 @@ fn runtime_git_process_spawns_match_reviewed_allowlist() {
     assert!(
         missing.is_empty(),
         "git-process allowlist entry no longer matches a production spawn; remove or update it: {missing:?}"
+    );
+}
+
+#[test]
+fn git_engine_dependency_is_sley_not_gix() {
+    let workspace = workspace_root();
+    let root_manifest =
+        fs::read_to_string(workspace.join("Cargo.toml")).expect("read workspace Cargo.toml");
+    assert!(
+        root_manifest
+            .lines()
+            .any(|line| line.trim_start().starts_with("sley = ")),
+        "workspace dependencies must name Sley as the Git-format engine"
+    );
+
+    let mut manifests = Vec::new();
+    collect_manifest_files(&workspace, &mut manifests);
+    let mut direct_gix_mentions = Vec::new();
+    for manifest in manifests {
+        let rel = manifest
+            .strip_prefix(&workspace)
+            .unwrap_or(&manifest)
+            .display()
+            .to_string();
+        let body = fs::read_to_string(&manifest)
+            .unwrap_or_else(|err| panic!("read {}: {err}", manifest.display()));
+        for (idx, line) in body.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("gix")
+                || trimmed.starts_with("gitoxide")
+                || trimmed.contains("package = \"gix")
+            {
+                direct_gix_mentions.push(format!("{rel}:{}: {trimmed}", idx + 1));
+            }
+        }
+    }
+    assert!(
+        direct_gix_mentions.is_empty(),
+        "Heddle should depend on Sley, not direct gix/gitoxide crates:\n{}",
+        direct_gix_mentions.join("\n")
     );
 }
 
@@ -142,6 +182,25 @@ fn scan_file(workspace: &Path, path: &Path, sites: &mut Vec<SpawnSite>) {
             });
         } else if starts_multiline_command_new(trimmed) {
             pending_command_new = Some((idx + 1, trimmed.to_string(), function.clone(), 4));
+        }
+    }
+}
+
+fn collect_manifest_files(dir: &Path, manifests: &mut Vec<PathBuf>) {
+    let entries =
+        fs::read_dir(dir).unwrap_or_else(|err| panic!("read_dir {}: {err}", dir.display()));
+    for entry in entries {
+        let entry = entry.expect("read dir entry");
+        let path = entry.path();
+        let file_type = entry.file_type().expect("file type");
+        if file_type.is_dir() {
+            let name = entry.file_name();
+            if matches!(name.to_str(), Some(".git" | "target")) {
+                continue;
+            }
+            collect_manifest_files(&path, manifests);
+        } else if entry.file_name() == "Cargo.toml" {
+            manifests.push(path);
         }
     }
 }

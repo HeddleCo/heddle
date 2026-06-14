@@ -18,7 +18,7 @@ fn test_blame_large_file_performance() {
         || {
             let _ = heddle(&["query", "--attribution", "large.txt"], Some(temp.path()));
         },
-        Duration::from_secs(2),
+        performance_budget(Duration::from_secs(2), Duration::from_secs(4)),
     );
 }
 

@@ -18,6 +18,7 @@ use objects::store::ObjectStore;
 use oplog::{OpLogBackend, OpRecord};
 use repo::{CommitGraphIndex, GitCheckpointRecord, Repository, RepositoryCapability};
 use serde::Serialize;
+use sley::Repository as SleyRepository;
 
 use super::{
     action_line::print_next,
@@ -333,8 +334,8 @@ fn checkpoint_git_write_skipped_advice(reason: String) -> RecoveryAdvice {
 }
 
 fn git_rev_parse_head(root: &std::path::Path) -> Option<String> {
-    let git = gix::discover(root).ok()?;
-    git.head_id().ok().map(|id| id.to_string())
+    let git = SleyRepository::discover(root).ok()?;
+    git.head().ok()?.oid.map(|id| id.to_string())
 }
 
 fn build_output(
