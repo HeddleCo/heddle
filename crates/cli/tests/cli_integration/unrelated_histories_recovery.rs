@@ -159,7 +159,7 @@ fn unrelated_histories_recover_via_tree_hash_match() {
     //
     // `git merge-base origin/main work` produces no output — the
     // graphs share no ancestor. This is the load-bearing diagnostic.
-    let merge_base = origin_repo.merge_base(commit_y, _commit_c).ok().map(|m| m);
+    let merge_base = origin_repo.merge_base(commit_y, _commit_c).ok();
     assert!(
         merge_base.is_none(),
         "synthetic root must have no common ancestor with origin/main; \

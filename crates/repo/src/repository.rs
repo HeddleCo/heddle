@@ -956,39 +956,38 @@ impl Repository {
         let local_ref_name = format!("refs/heads/{branch}");
         if git_find_reference(&git, &local_ref_name)?.is_some()
             && let Some(tracking_name) = git_configured_tracking_ref(&git, &branch)?
+            && let Some(upstream_head) = git_resolve_oid(&git, &tracking_name)?
         {
-            if let Some(upstream_head) = git_resolve_oid(&git, &tracking_name)? {
-                let (ahead, behind) = git_ahead_behind(&self.root, &git, upstream_head, head)?;
-                if ahead == 0 && behind == 0 {
-                    return Ok(None);
-                }
-                let upstream = git_remote_tracking_display_name(&tracking_name);
-                let local_oid = head.to_string();
-                let upstream_oid = upstream_head.to_string();
-                let upstream_is_undone_checkpoint =
-                    self.remote_tracks_undone_git_checkpoint(&branch, &local_oid, &upstream_oid)?;
-                return Ok(Some(GitRemoteTrackingStatus {
-                    branch: branch.clone(),
-                    upstream: upstream.clone(),
+            let (ahead, behind) = git_ahead_behind(&self.root, &git, upstream_head, head)?;
+            if ahead == 0 && behind == 0 {
+                return Ok(None);
+            }
+            let upstream = git_remote_tracking_display_name(&tracking_name);
+            let local_oid = head.to_string();
+            let upstream_oid = upstream_head.to_string();
+            let upstream_is_undone_checkpoint =
+                self.remote_tracks_undone_git_checkpoint(&branch, &local_oid, &upstream_oid)?;
+            return Ok(Some(GitRemoteTrackingStatus {
+                branch: branch.clone(),
+                upstream: upstream.clone(),
+                ahead,
+                behind,
+                local_oid: Some(local_oid),
+                upstream_oid: Some(upstream_oid),
+                upstream_is_undone_checkpoint,
+                message: git_remote_tracking_message(
+                    &branch,
+                    &upstream,
                     ahead,
                     behind,
-                    local_oid: Some(local_oid),
-                    upstream_oid: Some(upstream_oid),
                     upstream_is_undone_checkpoint,
-                    message: git_remote_tracking_message(
-                        &branch,
-                        &upstream,
-                        ahead,
-                        behind,
-                        upstream_is_undone_checkpoint,
-                    ),
-                    next_action: git_remote_tracking_next_action(
-                        ahead,
-                        behind,
-                        upstream_is_undone_checkpoint,
-                    ),
-                }));
-            }
+                ),
+                next_action: git_remote_tracking_next_action(
+                    ahead,
+                    behind,
+                    upstream_is_undone_checkpoint,
+                ),
+            }));
         }
 
         let remotes = git_remote_names(&self.root)?;
@@ -2612,10 +2611,7 @@ fn git_remote_names(root: &Path) -> Result<Vec<String>> {
         .map_err(|error| HeddleError::Config(error.to_string()))
 }
 
-fn git_find_reference<'repo>(
-    repo: &'repo SleyRepository,
-    name: &str,
-) -> Result<Option<SleyReference>> {
+fn git_find_reference(repo: &SleyRepository, name: &str) -> Result<Option<SleyReference>> {
     repo.find_reference(name).map_err(|error| {
         HeddleError::Config(format!("failed to inspect Git reference '{name}': {error}"))
     })

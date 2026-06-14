@@ -159,4 +159,5 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # Git deps must be explicitly listed. Empty list means "crates.io only" — if
 # you add a `git = "..."` dependency, add the remote here with a comment
 # explaining why crates.io isn't sufficient.
-allow-git = []
+# sley: native-git substrate; not yet published to crates.io
+allow-git = ["https://github.com/HeddleCo/sley"]

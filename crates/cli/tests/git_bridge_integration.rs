@@ -4536,7 +4536,7 @@ fn matrix_mirror_tag(bridge: &GitBridge, name: &str) -> Option<ObjectId> {
     let mirror = test_support::open_git_repo(bridge).expect("open mirror");
     find_reference(&mirror, &format!("refs/tags/{name}"))
         .ok()
-        .and_then(|mut r| r.peel_to_id().ok().map(|id| id))
+        .and_then(|mut r| r.peel_to_id().ok())
 }
 
 /// Read the mirror's `refs/heads/<name>` tip, or `None` when the branch is absent.
@@ -4544,7 +4544,7 @@ fn matrix_mirror_head(bridge: &GitBridge, name: &str) -> Option<ObjectId> {
     let mirror = test_support::open_git_repo(bridge).expect("open mirror");
     find_reference(&mirror, &format!("refs/heads/{name}"))
         .ok()
-        .and_then(|mut r| r.peel_to_id().ok().map(|id| id))
+        .and_then(|mut r| r.peel_to_id().ok())
 }
 
 /// #316 / PR #528 — plant a FOREIGN tag in the mirror: a `refs/tags/<name>` heddle
@@ -7071,7 +7071,6 @@ fn out_of_band_destination_tag_not_overwritten() {
         let tip = find_reference(&dest, "refs/tags/v1.0")
             .unwrap()
             .try_id()
-            .map(|id| id)
             .expect("tag id");
         assert_eq!(
             tip, oid_x,
@@ -7092,7 +7091,6 @@ fn out_of_band_destination_tag_not_overwritten() {
         let tip = find_reference(&dest, "refs/tags/v1.0")
             .unwrap()
             .try_id()
-            .map(|id| id)
             .expect("tag id");
         assert_eq!(
             tip, served_tag,
@@ -7119,7 +7117,6 @@ fn out_of_band_destination_tag_not_overwritten() {
         find_reference(&remote, "refs/tags/v1.0")
             .unwrap()
             .try_id()
-            .map(|id| id)
             .expect("tag id")
     };
 
@@ -7159,7 +7156,6 @@ fn out_of_band_destination_tag_not_overwritten() {
         let tip = find_reference(&remote, "refs/tags/v1.0")
             .unwrap()
             .try_id()
-            .map(|id| id)
             .expect("tag id");
         assert_eq!(
             tip, remote_oid_x,
@@ -7175,7 +7171,6 @@ fn out_of_band_destination_tag_not_overwritten() {
         let tip = find_reference(&remote, "refs/tags/v1.0")
             .unwrap()
             .try_id()
-            .map(|id| id)
             .expect("tag id");
         assert_eq!(
             tip, remote_served_tag,

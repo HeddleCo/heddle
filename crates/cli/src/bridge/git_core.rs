@@ -1568,9 +1568,8 @@ impl<'a> GitBridge<'a> {
         // PRUNE: any intent-to-add entry whose path is no longer desired.
         let before_prune = index.entries.len();
         index.entries.retain(|entry| {
-            !(entry.is_intent_to_add()
-                && !captured_paths
-                    .contains(String::from_utf8_lossy(entry.path.as_bytes()).as_ref()))
+            !entry.is_intent_to_add()
+                || captured_paths.contains(String::from_utf8_lossy(entry.path.as_bytes()).as_ref())
         });
         let mut changed = index.entries.len() != before_prune;
 
