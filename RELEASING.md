@@ -4,7 +4,7 @@ Heddle has two release pipelines, both static-asserted on every PR:
 
 | Pipeline | Trigger | Workflow | Asserter |
 |---|---|---|---|
-| **Binary release** — `heddle` CLI artifacts for HomeBrew / Scoop / apt | `vX.Y.Z` tag push (or `workflow_dispatch` for RC dry-runs) | `.github/workflows/release.yml` | `scripts/check-release-pipeline.sh` |
+| **Binary release** — `heddle` CLI archives, the macOS cask DMG, and downstream package-manifest PRs | `vX.Y.Z` tag push (or `workflow_dispatch` for RC dry-runs) | `.github/workflows/release.yml` | `scripts/check-release-pipeline.sh` |
 | **crates.io publish** — workspace crates managed by `release-plz` | push to `main` (typically a release-plz merge) | `.github/workflows/publish-crates.yml` | `scripts/check-publish-pipeline.sh` |
 
 The two are independent — a binary release doesn't bump crate versions
@@ -47,7 +47,8 @@ release-plz → push-to-main flow documented in
      prerelease/dry-run path only. See [Dry-runs](#dry-runs) for why.
    - classifies the run as `stable` or `prerelease`
    - emits the resolved commit SHA as `tag_sha`. Every downstream job
-     (build, release) checks out **that SHA**, not `refs/tags/<tag>`.
+     (build, build-macos-cask, release, publish-manifests) checks out
+     **that SHA**, not `refs/tags/<tag>`.
      A tag is mutable; force-moving it after `validate-tag` passes
      would otherwise redirect the build to an attacker-controlled
      commit (TOCTOU). The SHA pin keeps every signed artifact tied to
@@ -59,12 +60,17 @@ release-plz → push-to-main flow documented in
    - build the `heddle` binary natively on five GitHub-hosted runners
    - package each into a versioned archive (`.tar.gz` for unix,
      `.zip` for windows)
+   - build a signed, notarized universal macOS DMG containing
+     `Heddle.app`, with the CLI bundled at
+     `Heddle.app/Contents/Resources/bin/heddle`
    - emit a `.sha256` next to each archive
-   - sign each archive with `cosign` keyless (Sigstore public-good
+   - sign each archive/DMG with `cosign` keyless (Sigstore public-good
      instance; trust is rooted in the GitHub OIDC token for this run)
    - publish a GitHub Release with auto-generated notes, all
      artifacts, signatures, certificates, and an aggregated
      `SHA256SUMS`
+   - for stable releases only, render `Casks/heddle.rb` and open a PR
+     against `HeddleCo/homebrew-heddle`
 
 4. Verify the Release page lists the expected asset set (see
    [Artifact contract](#artifact-contract) below). If anything is
@@ -118,6 +124,10 @@ For tag `v<version>`, the release publishes one set per target:
 | `heddle-v<version>-<target>.{tar.gz,zip}.sha256` | one-line `<hex>  <filename>` |
 | `heddle-v<version>-<target>.{tar.gz,zip}.sig` | cosign signature (base64) |
 | `heddle-v<version>-<target>.{tar.gz,zip}.pem` | cosign certificate (Fulcio-issued) |
+| `Heddle-v<version>-macos-universal.dmg` | signed + notarized cask artifact containing `Heddle.app` and the bundled CLI |
+| `Heddle-v<version>-macos-universal.dmg.sha256` | one-line `<hex>  <filename>` |
+| `Heddle-v<version>-macos-universal.dmg.sig` | cosign signature (base64) |
+| `Heddle-v<version>-macos-universal.dmg.pem` | cosign certificate (Fulcio-issued) |
 | `SHA256SUMS` | aggregated, one line per archive, sorted |
 
 Targets (`<target>`):
@@ -134,15 +144,66 @@ Each archive contains:
 - `heddle` (or `heddle.exe` on Windows) — the CLI binary, release profile
 - `README.md`, `LICENSE`, `NOTICE`
 
-Downstream channels (HomeBrew formula, Scoop manifest, apt `.deb`
-metadata) **must** consume:
+Downstream channels **must** consume:
 
-- the archive URL and its `.sha256` for integrity
+- Homebrew cask: the macOS universal DMG URL and sha256
+- Scoop / apt / any CLI-only channel: the target archive URL and sha256
 - optionally the `.sig` + `.pem` for signature verification
 
 The asset filenames and the `SHA256SUMS` layout are part of this
 contract. Changing them is a breaking change for downstream packaging
 channels and requires a coordinated update.
+
+## Homebrew cask publication
+
+The primary macOS install path is:
+
+```bash
+brew install --cask heddleco/heddle/heddle
+```
+
+The tap repository is `HeddleCo/homebrew-heddle`, which maps to
+`heddleco/heddle` by Homebrew's tap naming convention. Stable releases
+render `Casks/heddle.rb` with:
+
+- `app "Heddle.app"` so Homebrew installs the host app into
+  `/Applications`
+- `binary "#{appdir}/Heddle.app/Contents/Resources/bin/heddle",
+  target: "heddle"` so the CLI is symlinked into Homebrew's `bin`
+- `depends_on macos: ">= :tahoe"` because the native FSKit path relies
+  on macOS 26 FSKit APIs
+
+The cask is not pushed directly. The `publish-manifests` job uses a
+HeddleCo GitHub App installation token to open or refresh a PR in the
+tap repo. A maintainer merges that PR after tap CI passes.
+
+### macOS signing and tap secrets
+
+The macOS cask artifact job expects these GitHub Actions secrets in the
+`HeddleCo/heddle` repo:
+
+| Name | Purpose |
+|---|---|
+| `HEDDLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64` | Base64-encoded `.p12` for the Developer ID Application certificate |
+| `HEDDLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD` | Password for that `.p12` |
+| `HEDDLE_HOST_PROVISION_PROFILE_BASE64` | Base64-encoded Developer ID provisioning profile for `sh.heddle.HeddleHost` |
+| `HEDDLE_FSMODULE_PROVISION_PROFILE_BASE64` | Base64-encoded Developer ID provisioning profile for `sh.heddle.HeddleHost.HeddleFSModule` |
+| `HEDDLE_NOTARY_PRIVATE_KEY` | App Store Connect API private key text |
+| `HEDDLE_NOTARY_KEY_ID` | App Store Connect key ID |
+| `HEDDLE_NOTARY_ISSUER_ID` | App Store Connect issuer ID |
+| `HEDDLE_RELEASE_APP_ID` | HeddleCo release-publisher GitHub App ID |
+| `HEDDLE_RELEASE_APP_PRIVATE_KEY` | Private key for the release-publisher GitHub App |
+
+Set these GitHub Actions variables as well:
+
+| Name | Purpose |
+|---|---|
+| `HEDDLE_TEAM_ID` | Apple Developer team ID; defaults to `33V6242M8S` in the workflow |
+| `HEDDLE_DEVELOPER_ID_APPLICATION` | Codesigning identity, e.g. `Developer ID Application: HeddleCo, LLC (33V6242M8S)` |
+
+The release-publisher GitHub App should be installed only on
+`homebrew-heddle` and granted only `Contents: write` and
+`Pull requests: write`.
 
 ### Linux glibc floor
 
@@ -220,11 +281,13 @@ passes:
 - **Smoke (grep).** Cheap content checks: the five target triples, the
   strict-semver push trigger, presence of the `validate-tag` trust gate
   with its ancestry check, packaging/checksum/signing/upload steps, the
+  macOS cask DMG job, the Homebrew cask PR wiring, the
   draft+prerelease keying off `validate-tag.outputs.kind`, and the
   stable-tag-refusal on the dispatch path.
 - **Strict (parsed YAML).** Per-job structural checks: `validate-tag`
-  exports `tag_sha`, and every downstream job (`build`, `release`) both
-  declares `needs: validate-tag` and pins its `actions/checkout` `ref`
+  exports `tag_sha`, and every downstream job (`build`,
+  `build-macos-cask`, `release`, `publish-manifests`) both declares
+  `needs: validate-tag` and pins its `actions/checkout` `ref`
   to `${{ needs.validate-tag.outputs.tag_sha }}` rather than the
   mutable `refs/tags/<tag>`. Grep alone would pass if *any* job kept
   the `needs:` line; the parser confirms each downstream job

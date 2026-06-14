@@ -5,9 +5,11 @@ name: Release binaries
 # Trigger: stable-semver tag push (vX.Y.Z) OR manual workflow_dispatch
 # with an existing tag (used for RC dry-runs). The job tree:
 #
-#   validate-tag ──► build (matrix, 6 targets) ──┐
-#                                                ├─► sign + checksum (per artifact, in-matrix)
-#                                                └─► release (aggregates, publishes, posts SHA256SUMS)
+#   validate-tag ──► build (matrix, 5 CLI targets) ──┐
+#              └──► build-macos-cask ────────────────┤
+#                                                    ├─► sign + checksum
+#                                                    ├─► release (aggregates, publishes, posts SHA256SUMS)
+#                                                    └─► publish-manifests (stable only)
 #
 # validate-tag is the single trust gate for the pipeline. It refuses to
 # proceed unless the requested tag (a) exists, (b) is reachable from
@@ -302,9 +304,142 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  build-macos-cask:
+    name: build macOS cask artifact
+    needs: validate-tag
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Same SHA pin as the CLI build job — see comment there.
+          ref: ${{ needs.validate-tag.outputs.tag_sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-macos-cask
+          cache-on-failure: true
+
+      - name: Compute version
+        id: ver
+        shell: bash
+        env:
+          TAG: ${{ needs.validate-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Import Developer ID Application certificate
+        shell: bash
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.HEDDLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.HEDDLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${CERTIFICATE_BASE64:?missing HEDDLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64}"
+          : "${CERTIFICATE_PASSWORD:?missing HEDDLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD}"
+
+          keychain_password="$(uuidgen)"
+          keychain_path="$RUNNER_TEMP/heddle-signing.keychain-db"
+          certificate_path="$RUNNER_TEMP/developer-id-application.p12"
+
+          echo "$CERTIFICATE_BASE64" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -P "$CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$keychain_path"
+          security list-keychains -d user -s "$keychain_path" $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path"
+
+      - name: Install FSKit provisioning profiles
+        shell: bash
+        env:
+          HOST_PROFILE_BASE64: ${{ secrets.HEDDLE_HOST_PROVISION_PROFILE_BASE64 }}
+          FSMODULE_PROFILE_BASE64: ${{ secrets.HEDDLE_FSMODULE_PROVISION_PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+          : "${HOST_PROFILE_BASE64:?missing HEDDLE_HOST_PROVISION_PROFILE_BASE64}"
+          : "${FSMODULE_PROFILE_BASE64:?missing HEDDLE_FSMODULE_PROVISION_PROFILE_BASE64}"
+
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+
+          host_profile="$RUNNER_TEMP/HeddleHost.provisionprofile"
+          fsmodule_profile="$RUNNER_TEMP/HeddleFSModule.provisionprofile"
+          echo "$HOST_PROFILE_BASE64" | base64 --decode > "$host_profile"
+          echo "$FSMODULE_PROFILE_BASE64" | base64 --decode > "$fsmodule_profile"
+
+          cp "$host_profile" "$HOME/Library/MobileDevice/Provisioning Profiles/HeddleHost.provisionprofile"
+          cp "$fsmodule_profile" "$HOME/Library/MobileDevice/Provisioning Profiles/HeddleFSModule.provisionprofile"
+
+          echo "HEDDLE_HOST_PROVISION_PROFILE=$host_profile" >> "$GITHUB_ENV"
+          echo "HEDDLE_FSMODULE_PROVISION_PROFILE=$fsmodule_profile" >> "$GITHUB_ENV"
+
+      - name: Write App Store Connect notary key
+        shell: bash
+        env:
+          NOTARY_PRIVATE_KEY: ${{ secrets.HEDDLE_NOTARY_PRIVATE_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.HEDDLE_NOTARY_KEY_ID }}
+        run: |
+          set -euo pipefail
+          : "${NOTARY_PRIVATE_KEY:?missing HEDDLE_NOTARY_PRIVATE_KEY}"
+          : "${NOTARY_KEY_ID:?missing HEDDLE_NOTARY_KEY_ID}"
+
+          key_path="$RUNNER_TEMP/AuthKey_${NOTARY_KEY_ID}.p8"
+          printf '%s' "$NOTARY_PRIVATE_KEY" | perl -pe 's/\\n/\n/g' > "$key_path"
+          chmod 0600 "$key_path"
+          echo "HEDDLE_NOTARY_KEY=$key_path" >> "$GITHUB_ENV"
+
+      - name: Build, sign, notarize, and package Heddle.app
+        shell: bash
+        env:
+          HEDDLE_TAG: ${{ needs.validate-tag.outputs.tag }}
+          HEDDLE_VERSION: ${{ steps.ver.outputs.version }}
+          HEDDLE_TEAM_ID: ${{ vars.HEDDLE_TEAM_ID || '33V6242M8S' }}
+          HEDDLE_DEVELOPER_ID: ${{ vars.HEDDLE_DEVELOPER_ID_APPLICATION }}
+          HEDDLE_NOTARY_KEY_ID: ${{ secrets.HEDDLE_NOTARY_KEY_ID }}
+          HEDDLE_NOTARY_ISSUER_ID: ${{ secrets.HEDDLE_NOTARY_ISSUER_ID }}
+        run: scripts/build-macos-cask-artifact.sh
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign macOS cask artifact (cosign keyless)
+        shell: bash
+        env:
+          TAG: ${{ needs.validate-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          asset="dist/Heddle-${TAG}-macos-universal.dmg"
+          cosign sign-blob --yes \
+            --output-signature "${asset}.sig" \
+            --output-certificate "${asset}.pem" \
+            "$asset"
+
+      - name: Upload macOS cask outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: heddle-macos-cask
+          path: |
+            dist/Heddle-${{ needs.validate-tag.outputs.tag }}-macos-universal.dmg
+            dist/Heddle-${{ needs.validate-tag.outputs.tag }}-macos-universal.dmg.sha256
+            dist/Heddle-${{ needs.validate-tag.outputs.tag }}-macos-universal.dmg.sig
+            dist/Heddle-${{ needs.validate-tag.outputs.tag }}-macos-universal.dmg.pem
+          if-no-files-found: error
+          retention-days: 7
+
   release:
     name: publish release
-    needs: [validate-tag, build]
+    needs: [validate-tag, build, build-macos-cask]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -322,7 +457,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          find staging -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sig' -o -name '*.pem' -o -name '*.sha256' \) \
+          find staging -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.dmg' -o -name '*.sig' -o -name '*.pem' -o -name '*.sha256' \) \
             -exec cp -t dist {} +
           ( cd dist && cat *.sha256 | sort > SHA256SUMS )
           echo "--- artifacts ---"
@@ -349,4 +484,69 @@ jobs:
             dist/heddle-*.zip.sha256
             dist/heddle-*.zip.sig
             dist/heddle-*.zip.pem
+            dist/Heddle-*.dmg
+            dist/Heddle-*.dmg.sha256
+            dist/Heddle-*.dmg.sig
+            dist/Heddle-*.dmg.pem
             dist/SHA256SUMS
+
+  publish-manifests:
+    name: publish package manifests
+    needs: [validate-tag, build, build-macos-cask, release]
+    if: needs.validate-tag.outputs.kind == 'stable'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Render manifests from the exact commit that produced the release.
+          ref: ${{ needs.validate-tag.outputs.tag_sha }}
+
+      - name: Download release build outputs
+        uses: actions/download-artifact@v4
+        with:
+          path: staging
+
+      - name: Flatten + aggregate SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist rendered
+          find staging -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.dmg' -o -name '*.sha256' \) \
+            -exec cp -t dist {} +
+          ( cd dist && cat *.sha256 | sort > SHA256SUMS )
+
+      - name: Compute manifest inputs
+        id: ver
+        shell: bash
+        env:
+          TAG: ${{ needs.validate-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Render Homebrew cask
+        shell: bash
+        run: scripts/render-homebrew-cask.sh "${{ steps.ver.outputs.tag }}" dist/SHA256SUMS rendered/heddle.rb
+
+      - name: Generate release publisher token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.HEDDLE_RELEASE_APP_ID }}
+          private-key: ${{ secrets.HEDDLE_RELEASE_APP_PRIVATE_KEY }}
+          owner: HeddleCo
+          repositories: homebrew-heddle
+
+      - name: Publish Homebrew cask PR
+        uses: ./.github/actions/publish-manifest
+        with:
+          target-repo: HeddleCo/homebrew-heddle
+          manifest-path: Casks/heddle.rb
+          rendered-file: rendered/heddle.rb
+          token: ${{ steps.app-token.outputs.token }}
+          channel: homebrew
+          version: ${{ steps.ver.outputs.version }}

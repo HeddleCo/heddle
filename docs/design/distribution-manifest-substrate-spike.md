@@ -18,6 +18,14 @@ This is a substrate decision, not an implementation. The deliverable is
 this doc. No production change to `release.yml`, and no external repos
 are created here (see the guardrails in #346).
 
+**Implementation note (2026-06):** the Homebrew leg has since pivoted
+from a CLI-only formula to a macOS-first cask. The implemented path
+renders `Casks/heddle.rb` with `scripts/render-homebrew-cask.sh`, using
+the signed/notarized `Heddle-v<version>-macos-universal.dmg` release
+asset. Formula-oriented examples below are historical sketches for a
+possible future CLI-only/Linux Homebrew package, not the primary macOS
+install path.
+
 ## TL;DR
 
 - **Mechanism:** add one `publish-manifests` job to `release.yml`,

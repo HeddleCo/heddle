@@ -4,14 +4,16 @@
 # The release pipeline is invoked only on `v*` tag pushes, so we can't
 # observe its artifacts in normal CI. Instead we statically verify that
 # `.github/workflows/release.yml` declares the contract every downstream
-# packaging channel (HomeBrew, Scoop, apt) relies on:
+# packaging channel (Homebrew, Scoop, apt) relies on:
 #
 #   - tag-push trigger
 #   - all 5 target triples
-#   - tarball/zip packaging
+#   - tarball/zip packaging for CLI targets
+#   - signed/notarized macOS cask DMG
 #   - sha256 checksums
 #   - signing step
 #   - GitHub Release upload
+#   - stable-only Homebrew manifest PR publication
 #
 # This is the failing test that drives the red-commit-first DoD.
 
@@ -123,6 +125,38 @@ fi
 # Packaging: tarball for unix, zip for windows.
 grep -E "\.tar\.gz" "$WF" >/dev/null && ok "tar.gz packaging" || err "no tar.gz packaging in $WF"
 grep -E "\.zip"    "$WF" >/dev/null && ok "zip packaging"    || err "no zip packaging in $WF"
+grep -E "\.dmg"    "$WF" >/dev/null && ok "macOS cask DMG packaging" || err "no macOS cask DMG packaging in $WF"
+
+# macOS cask release path.
+if grep -E "^\s*build-macos-cask:" "$WF" >/dev/null \
+   && grep -F "runs-on: macos-26" "$WF" >/dev/null \
+   && grep -F "scripts/build-macos-cask-artifact.sh" "$WF" >/dev/null; then
+  ok "macOS cask artifact job present"
+else
+  err "missing macOS cask artifact job (build-macos-cask on macos-26)"
+fi
+
+if grep -F 'Heddle-${TAG}-macos-universal.dmg' "$WF" >/dev/null \
+   || grep -F 'Heddle-${{ needs.validate-tag.outputs.tag }}-macos-universal.dmg' "$WF" >/dev/null; then
+  ok "macOS cask DMG artifact name declared"
+else
+  err "missing deterministic Heddle-<tag>-macos-universal.dmg artifact name"
+fi
+
+if [[ -x scripts/render-homebrew-cask.sh ]] \
+   && grep -F "Casks/heddle.rb" "$WF" >/dev/null \
+   && grep -F "actions/create-github-app-token" "$WF" >/dev/null \
+   && grep -F "HeddleCo/homebrew-heddle" "$WF" >/dev/null; then
+  ok "Homebrew cask manifest publication wired"
+else
+  err "missing Homebrew cask manifest publication wiring"
+fi
+
+if grep -F "if: needs.validate-tag.outputs.kind == 'stable'" "$WF" >/dev/null; then
+  ok "manifest publication gated to stable releases"
+else
+  err "publish-manifests must be gated to stable releases only"
+fi
 
 # sha256 checksums.
 if grep -Ei "sha256sum|shasum|sha256" "$WF" >/dev/null; then
@@ -199,7 +233,131 @@ ensure_pyyaml() {
   echo "$venv/bin/python"
 }
 
-if ! command -v python3 >/dev/null 2>&1; then
+if command -v ruby >/dev/null 2>&1 && ruby --disable-gems -e 'require "yaml"' >/dev/null 2>&1; then
+  strict_report=$(ruby --disable-gems - "$WF" <<'RB'
+require "yaml"
+
+wf_path = ARGV.fetch(0)
+wf = YAML.load_file(wf_path)
+
+jobs = wf.fetch("jobs", {}) || {}
+errors = []
+oks = []
+
+vt = jobs["validate-tag"]
+if !vt.is_a?(Hash)
+  errors << "validate-tag job missing or malformed"
+else
+  outs = vt.fetch("outputs", {}) || {}
+  if !outs.key?("tag_sha")
+    errors << "validate-tag must declare a 'tag_sha' output (used by downstream jobs to pin checkout to the validated commit)"
+  else
+    oks << "validate-tag exports tag_sha output"
+  end
+  errors << "validate-tag must declare 'tag' and 'kind' outputs" unless outs.key?("tag") && outs.key?("kind")
+end
+
+downstream = ["build", "build-macos-cask", "release", "publish-manifests"]
+downstream.each do |name|
+  job = jobs[name]
+  if !job.is_a?(Hash)
+    errors << "#{name} job missing or malformed"
+    next
+  end
+  needs = job.fetch("needs", [])
+  needs = [needs] if needs.is_a?(String)
+  if !needs.include?("validate-tag")
+    errors << "#{name} job does not declare 'needs: validate-tag' (would skip the trust gate)"
+  else
+    oks << "#{name} job declares needs: validate-tag"
+  end
+end
+
+sha_ref_ok = "${{ needs.validate-tag.outputs.tag_sha }}"
+tag_ref_bad = "refs/tags/"
+downstream.each do |name|
+  job = jobs[name]
+  next unless job.is_a?(Hash)
+  steps = job.fetch("steps", []) || []
+  checkouts = steps.select do |step|
+    step.is_a?(Hash) &&
+      step["uses"].is_a?(String) &&
+      step["uses"].start_with?("actions/checkout@")
+  end
+  if checkouts.empty?
+    errors << "#{name} job has no actions/checkout step - cannot verify SHA pin"
+    next
+  end
+  checkouts.each do |step|
+    ref = step.fetch("with", {}).fetch("ref", "").to_s
+    if !ref.include?(sha_ref_ok)
+      errors << "#{name} job checks out '#{ref}' instead of needs.validate-tag.outputs.tag_sha - TOCTOU on mutable tag ref"
+    elsif ref.include?(tag_ref_bad)
+      errors << "#{name} job mixes refs/tags/ with tag_sha ('#{ref}') - refs/tags/ is mutable; remove it"
+    else
+      oks << "#{name} job pins checkout to validated tag_sha"
+    end
+  end
+end
+
+pm = jobs["publish-manifests"]
+if pm.is_a?(Hash)
+  condition = pm.fetch("if", "").to_s
+  if !condition.include?("needs.validate-tag.outputs.kind == 'stable'")
+    errors << "publish-manifests must gate on needs.validate-tag.outputs.kind == 'stable'"
+  else
+    oks << "publish-manifests is stable-only"
+  end
+  needs = pm.fetch("needs", [])
+  needs = [needs] if needs.is_a?(String)
+  if !needs.include?("release")
+    errors << "publish-manifests must depend on release so the GitHub Release exists before opening tap PRs"
+  else
+    oks << "publish-manifests depends on release"
+  end
+end
+
+build_job = jobs["build"]
+if build_job.is_a?(Hash)
+  matrix = build_job.fetch("strategy", {}).fetch("matrix", {}) || {}
+  include = matrix.fetch("include", []) || []
+  gnu_legs = include.select do |entry|
+    entry.is_a?(Hash) && entry.fetch("target", "").to_s.end_with?("-unknown-linux-gnu")
+  end
+  errors << "build matrix has no *-unknown-linux-gnu legs to floor" if gnu_legs.empty?
+  gnu_legs.each do |entry|
+    runner = entry.fetch("runner", "").to_s
+    target = entry["target"]
+    if runner.start_with?("ubuntu-22.04")
+      oks << "#{target} pinned to #{runner} (glibc 2.35 floor)"
+    else
+      errors << "#{target} builds on '#{runner}', not ubuntu-22.04 - raises the glibc floor above 2.35 (#549)"
+    end
+  end
+end
+
+puts "OKS:"
+oks.each { |ok| puts ok }
+puts "ERRORS:"
+errors.each { |error| puts error }
+RB
+  )
+
+  in_oks=0
+  in_errors=0
+  while IFS= read -r line; do
+    case "$line" in
+      "OKS:")     in_oks=1; in_errors=0; continue ;;
+      "ERRORS:")  in_oks=0; in_errors=1; continue ;;
+    esac
+    [[ -z "$line" ]] && continue
+    if (( in_oks )); then
+      ok "$line"
+    elif (( in_errors )); then
+      err "$line"
+    fi
+  done <<< "$strict_report"
+elif ! command -v python3 >/dev/null 2>&1; then
   err "python3 not available; strict structural checks skipped"
 elif ! PY=$(ensure_pyyaml); then
   err "PyYAML not available and venv fallback failed; strict structural checks skipped"
@@ -233,7 +391,7 @@ else:
 # explicitly keeps this honest: adding a new downstream job requires
 # updating this list, which forces a conscious decision about whether
 # the new job needs the trust gate.
-downstream = ["build", "release"]
+downstream = ["build", "build-macos-cask", "release", "publish-manifests"]
 for name in downstream:
     job = jobs.get(name)
     if not isinstance(job, dict):
@@ -280,6 +438,22 @@ for name in downstream:
             )
         else:
             oks.append(f"{name} job pins checkout to validated tag_sha")
+
+# The tap update must never run for RC/draft workflow_dispatch releases.
+pm = jobs.get("publish-manifests")
+if isinstance(pm, dict):
+    condition = str(pm.get("if", ""))
+    if "needs.validate-tag.outputs.kind == 'stable'" not in condition:
+        errors.append("publish-manifests must gate on needs.validate-tag.outputs.kind == 'stable'")
+    else:
+        oks.append("publish-manifests is stable-only")
+    needs = pm.get("needs", [])
+    if isinstance(needs, str):
+        needs = [needs]
+    if "release" not in needs:
+        errors.append("publish-manifests must depend on release so the GitHub Release exists before opening tap PRs")
+    else:
+        oks.append("publish-manifests depends on release")
 
 # Linux glibc floor (#549): the two -unknown-linux-gnu build legs must
 # pin an ubuntu-22.04 runner (glibc 2.35). Read the runner per matrix

@@ -279,8 +279,8 @@ wrong one.
 
 The eventual `brew install --cask heddleco/heddle/heddle` should:
 
-1. Install `heddle` to `/usr/local/bin/heddle`.
-2. Install the host app to `/Applications/Heddle.app`.
+1. Install the host app to `/Applications/Heddle.app`.
+2. Link the bundled CLI to Homebrew's `bin` directory as `heddle`.
 3. Run `lsregister -f /Applications/Heddle.app` in
    `post_install` so the extension is discoverable on the first
    `heddle start`.
@@ -292,32 +292,33 @@ A Homebrew **cask** is the right shape because it ships a `.app`:
 cask "heddle" do
   version "0.3.0"
   sha256 "..."
-  url "https://github.com/HeddleCo/heddle/releases/download/v#{version}/heddle-#{version}-macos.dmg"
+  url "https://github.com/HeddleCo/heddle/releases/download/v#{version}/Heddle-v#{version}-macos-universal.dmg"
   name "Heddle"
   desc "AI-native version control system"
   homepage "https://heddle.sh"
 
-  pkg "Heddle.pkg"
+  depends_on macos: ">= :tahoe"
 
-  uninstall pkgutil: "sh.heddle.Heddle"
+  app "Heddle.app"
+  binary "#{appdir}/Heddle.app/Contents/Resources/bin/heddle", target: "heddle"
 end
 ```
 
-The `.pkg` payload contains both `heddle` (CLI) and the Heddle host app.
-`pkg/scripts/postinstall` owns the LaunchServices refresh, so website downloads
-and Homebrew installs exercise the same path. Building, signing, and notarizing
-the package depends on:
+The DMG contains `Heddle.app`; the app bundle contains the CLI at
+`Contents/Resources/bin/heddle`. Homebrew handles moving the app into
+`/Applications` and linking the CLI. Building, signing, and notarizing the app
+DMG depends on:
 
 - Apple Developer Program enrollment ($99/year)
 - The `com.apple.developer.fskit.fsmodule` entitlement (request
   via the Developer portal — Apple gates this)
 - Developer ID Application certificate
-- Developer ID Installer certificate
 - A notarization workflow (`xcrun notarytool` + `xcrun stapler`)
 
 The CLI code in `mount_lifecycle.rs` is already brew-ready — it
 detects the extension state and adapts. The only blocker for
-shipping the cask is the signing/notarization pipeline.
+shipping the cask is the GitHub Actions signing/notarization secrets and the
+first stable release that publishes `Heddle-v<version>-macos-universal.dmg`.
 
 ## Status today
 
