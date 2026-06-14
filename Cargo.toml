@@ -50,7 +50,7 @@ clap_complete = "4"
 ed25519-dalek = { version = "2", features = ["pem", "rand_core"] }
 fs2 = "0.4.3"
 futures = "0.3"
-sley = { git = "https://github.com/HeddleCo/sley", rev = "68ee4286b7b8bb186f1146b996d3ddfe474ccf11" }
+sley = { git = "https://github.com/HeddleCo/sley", rev = "68ee4286b7b8bb186f1146b996d3ddfe474ccf11", version = "0.1.0" }
 hex = "0.4"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 ignore = "0.4"
