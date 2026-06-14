@@ -467,7 +467,11 @@ fn rust_use_leaves(source: &str, argument: Node<'_>) -> Option<Vec<String>> {
 /// partial-signal field — any non-byte difference conflicts; heddle#468
 /// r4). An `Unanalyzable` item poisons its region so the leaf union never
 /// runs there at all (heddle#468 r6).
-pub(super) fn use_identity(language: Language, source: &str, node: Node<'_>) -> Option<UseIdentity> {
+pub(super) fn use_identity(
+    language: Language,
+    source: &str,
+    node: Node<'_>,
+) -> Option<UseIdentity> {
     if language != Language::Rust || node.kind() != "use_declaration" {
         return None;
     }

@@ -10,6 +10,7 @@ use std::{
 
 use objects::object::ChangeId;
 use serde::{Deserialize, Serialize};
+use sley::{ObjectFormat, ObjectId as SleyObjectId, ReferenceTarget, Repository as SleyRepository};
 
 use super::{
     git_core::{GitBridge, GitBridgeError, GitResult, git_err},
@@ -92,10 +93,7 @@ impl<'a> GitBridge<'a> {
 
         for entry in file.entries {
             let change_id = ChangeId::parse(&entry.change_id)?;
-            let git_oid = entry
-                .git_oid
-                .parse::<gix::hash::ObjectId>()
-                .map_err(|err| GitBridgeError::InvalidMapping(err.to_string()))?;
+            let git_oid = parse_stored_git_oid(&entry.git_oid)?;
             self.mapping.insert_checked(change_id, git_oid)?;
             self.mapping
                 .set_git_lossy_entries(git_oid, entry.lossy_entries);
@@ -218,9 +216,9 @@ impl<'a> GitBridge<'a> {
             if self.mapping.has_git(oid) {
                 continue;
             }
-            let commit = repo.find_commit(oid).map_err(git_err)?;
-            let message = commit.message_raw_sloppy();
-            let trailers = GitBridge::parse_trailers(&message.to_string());
+            let commit = repo.read_commit(&oid).map_err(git_err)?;
+            let message = String::from_utf8_lossy(&commit.message);
+            let trailers = GitBridge::parse_trailers(&message);
             if let Some(change_id) = trailers.get(GitBridge::TRAILER_CHANGE_ID) {
                 let change_id = ChangeId::parse(change_id)?;
                 self.mapping.insert_checked(change_id, oid)?;
@@ -248,41 +246,58 @@ impl<'a> GitBridge<'a> {
 /// to non-commit objects (annotated-tag-points-at-blob/tree); see
 /// `git_import::peel_to_commit_oid` for the full rationale and the
 /// `SkippedRef` recording layer.
-fn collect_commit_oids(repo: &gix::Repository) -> GitResult<Vec<gix::hash::ObjectId>> {
+fn collect_commit_oids(repo: &SleyRepository) -> GitResult<Vec<SleyObjectId>> {
     let mut tips = Vec::new();
-    for reference in repo
-        .references()
-        .map_err(git_err)?
-        .local_branches()
-        .map_err(git_err)?
-    {
-        let mut reference = reference.map_err(git_err)?;
-        let oid = reference.peel_to_id().map_err(git_err)?.detach();
-        if let Ok(object) = repo.find_object(oid)
-            && object.kind == gix::objs::Kind::Commit
+
+    for reference in repo.references().list_refs().map_err(git_err)? {
+        if !(reference.name.starts_with("refs/heads/") || reference.name.starts_with("refs/tags/"))
         {
-            tips.push(oid);
+            continue;
         }
-    }
-    for reference in repo
-        .references()
-        .map_err(git_err)?
-        .tags()
-        .map_err(git_err)?
-    {
-        let mut reference = reference.map_err(git_err)?;
-        let oid = reference.peel_to_id().map_err(git_err)?.detach();
-        if let Ok(object) = repo.find_object(oid)
-            && object.kind == gix::objs::Kind::Commit
-        {
-            tips.push(oid);
+        let oid = match reference.target {
+            ReferenceTarget::Direct(oid) => oid,
+            ReferenceTarget::Symbolic(_) => {
+                let Some(reference) = repo.find_reference(&reference.name).map_err(git_err)? else {
+                    continue;
+                };
+                let Some(oid) = reference.peeled_oid(repo).map_err(git_err)? else {
+                    continue;
+                };
+                oid
+            }
+        };
+        if let Ok(commit_oid) = sley::plumbing::sley_rev::peel_to_commit(
+            repo.objects().as_ref(),
+            repo.object_format(),
+            &oid,
+        ) {
+            tips.push(commit_oid);
         }
     }
 
     let mut seen = HashSet::new();
-    for info in repo.rev_walk(tips).all().map_err(git_err)? {
-        seen.insert(info.map_err(git_err)?.id);
+    let mut stack = tips;
+    while let Some(oid) = stack.pop() {
+        if !seen.insert(oid) {
+            continue;
+        }
+        let commit = repo.read_commit(&oid).map_err(git_err)?;
+        stack.extend(commit.parents);
     }
 
     Ok(seen.into_iter().collect())
+}
+
+fn parse_stored_git_oid(value: &str) -> GitResult<SleyObjectId> {
+    let format = match value.len() {
+        40 => ObjectFormat::Sha1,
+        64 => ObjectFormat::Sha256,
+        _ => {
+            return Err(GitBridgeError::InvalidMapping(format!(
+                "invalid git oid length for {value}"
+            )));
+        }
+    };
+    SleyObjectId::from_hex(format, value)
+        .map_err(|err| GitBridgeError::InvalidMapping(err.to_string()))
 }

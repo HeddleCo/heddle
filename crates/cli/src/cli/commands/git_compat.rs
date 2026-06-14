@@ -9,8 +9,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use gix::bstr::{BStr, ByteSlice};
-use gix_index::entry::{Mode, Stage};
 use objects::{
     object::{
         Agent, Blob, ChangeId, ContentHash, EntryType, FileMode, Principal, ThreadName, Tree,
@@ -21,6 +19,10 @@ use objects::{
 use oplog::{OpBatch, OpLogBackend, OpRecord};
 use repo::{Repository, RepositoryCapability, git_worktree_status::GitWorktreeEntryState};
 use serde::Serialize;
+use sley::{
+    BString as GitBString, GitObjectType, Index, IndexEntry, IndexStage, ObjectId,
+    Repository as SleyRepository,
+};
 
 use super::{
     action_line::print_next,
@@ -52,6 +54,12 @@ use crate::{
     },
     config::UserConfig,
 };
+
+const GIT_MODE_FILE: u32 = 0o100644;
+const GIT_MODE_FILE_EXECUTABLE: u32 = 0o100755;
+const GIT_MODE_SYMLINK: u32 = 0o120000;
+const GIT_MODE_COMMIT: u32 = 0o160000;
+const GIT_MODE_DIR: u32 = 0o040000;
 
 #[derive(Serialize)]
 struct CommitCompatOutput {
@@ -156,7 +164,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
         // Git-overlay staged-index path below when one exists.
         let has_staged_index_intent = !args.all
             && repo.capability() == RepositoryCapability::GitOverlay
-            && !git_index_intent(&repo)?.staged_paths.is_empty();
+            && !git_index_intent_for_repo(&repo)?.staged_paths.is_empty();
         if status.is_clean() && !has_staged_index_intent {
             let trust = build_repository_verification_state(&repo);
             // `--no-all` forces an index-only commit and must never auto-commit
@@ -263,7 +271,7 @@ pub async fn cmd_commit_compat(cli: &Cli, args: CommitArgs) -> Result<()> {
         return Ok(());
     }
 
-    let index_intent = git_index_intent(&repo)?;
+    let index_intent = git_index_intent_for_repo(&repo)?;
     if args.no_all && !args.all && index_intent.staged_paths.is_empty() {
         // `--no-all` is index-only. With no staged paths the index is identical
         // to HEAD (empty index, or index == HEAD), so there is nothing genuinely
@@ -595,19 +603,22 @@ impl GitIndexPlan {
 /// nested inside one. A Heddle thread checkout now lives under the parent
 /// repo's `.heddle/threads/` (heddle#572); it's a *native* isolated
 /// checkout that shares the parent's object store but is NOT a Git
-/// worktree of its own. Bare `gix::discover` walks up the directory tree,
+/// worktree of its own. Bare git discovery walks up the directory tree,
 /// so from inside such a checkout it would find the PARENT repo's `.git`
 /// and read its index/HEAD as though they belonged to the checkout.
 /// Requiring the discovered worktree to equal `root` keeps git-index
 /// inspection scoped to genuine git-overlay roots — and matches the
 /// pre-#572 behaviour where a sibling checkout had no git above it at all.
 fn git_worktree_rooted_at(root: &Path) -> bool {
-    match gix::discover(root) {
-        Ok(git) => git
-            .workdir()
-            .is_some_and(|workdir| paths_equal(workdir, root)),
+    match SleyRepository::discover(root) {
+        Ok(git) => git_worktree_matches_root(&git, root),
         Err(_) => false,
     }
+}
+
+fn git_worktree_matches_root(git: &SleyRepository, root: &Path) -> bool {
+    git.workdir()
+        .is_some_and(|workdir| paths_equal(&workdir, root))
 }
 
 fn paths_equal(left: &Path, right: &Path) -> bool {
@@ -630,11 +641,14 @@ pub(crate) fn git_index_plan_for_root(root: &Path) -> Result<Option<GitIndexPlan
 }
 
 pub(crate) fn git_index_plan_for_repo(repo: &Repository) -> Result<Option<GitIndexPlan>> {
-    if !git_worktree_rooted_at(repo.root()) {
+    let Some(git) = repo.git_overlay_sley_repository()? else {
+        return Ok(None);
+    };
+    if !git_worktree_matches_root(&git, repo.root()) {
         return Ok(None);
     }
     Ok(Some(GitIndexPlan::from_intent(
-        &git_index_intent(repo)?,
+        &git_index_intent(repo, &git)?,
         false,
     )))
 }
@@ -652,9 +666,37 @@ fn split_extra_paths(extra_paths: &[String]) -> (Vec<String>, Vec<String>) {
     (unstaged_paths, untracked_paths)
 }
 
-fn git_index_intent(repo: &Repository) -> Result<GitIndexIntent> {
+fn empty_git_index() -> Index {
+    Index {
+        version: 2,
+        entries: Vec::new(),
+        extensions: Vec::new(),
+        checksum: None,
+    }
+}
+
+fn index_or_empty(git: &SleyRepository) -> Result<Index> {
+    Ok(git.open_index()?.unwrap_or_else(empty_git_index))
+}
+
+fn head_index_or_empty(git: &SleyRepository) -> Result<Index> {
+    let Some(head_oid) = git.head()?.oid else {
+        return Ok(empty_git_index());
+    };
+    let commit = git.read_commit(&head_oid)?;
+    Ok(git.index_from_tree(&commit.tree)?)
+}
+
+fn git_index_intent(repo: &Repository, git: &SleyRepository) -> Result<GitIndexIntent> {
     let ignore_patterns = repo.ignore_patterns()?;
-    git_index_intent_for_root_with_ignore(repo.root(), &ignore_patterns)
+    git_index_intent_for_root_with_ignore_and_repo(repo.root(), &ignore_patterns, git)
+}
+
+fn git_index_intent_for_repo(repo: &Repository) -> Result<GitIndexIntent> {
+    let git = repo
+        .git_overlay_sley_repository()?
+        .ok_or_else(|| anyhow!("failed to inspect Git index before commit"))?;
+    git_index_intent(repo, &git)
 }
 
 pub(crate) fn git_index_intent_for_root(root: &Path) -> Result<GitIndexIntent> {
@@ -666,16 +708,19 @@ fn git_index_intent_for_root_with_ignore(
     root: &Path,
     ignore_patterns: &[String],
 ) -> Result<GitIndexIntent> {
-    let git = gix::discover(root).context("failed to inspect Git index before commit")?;
-    let index = git
-        .index_or_empty()
-        .context("failed to inspect Git index before commit")?;
-    let head_tree = git
-        .head_tree_id_or_empty()
-        .context("failed to inspect Git index before commit")?;
-    let head_index = git
-        .index_from_tree(head_tree.as_ref())
-        .context("failed to inspect Git index before commit")?;
+    let git =
+        SleyRepository::discover(root).context("failed to inspect Git index before commit")?;
+    git_index_intent_for_root_with_ignore_and_repo(root, ignore_patterns, &git)
+}
+
+fn git_index_intent_for_root_with_ignore_and_repo(
+    root: &Path,
+    ignore_patterns: &[String],
+    git: &SleyRepository,
+) -> Result<GitIndexIntent> {
+    let index = index_or_empty(git).context("failed to inspect Git index before commit")?;
+    let head_index =
+        head_index_or_empty(git).context("failed to inspect Git index before commit")?;
 
     let head_entries = index_entries_by_path(&head_index);
     let index_entries = index_entries_by_path(&index);
@@ -695,11 +740,11 @@ fn git_index_intent_for_root_with_ignore(
     let tracked_paths: BTreeSet<String> = index_entries.keys().cloned().collect();
     let gitlink_paths: BTreeSet<String> = index_entries
         .iter()
-        .filter(|(_, entry)| entry.mode == Mode::COMMIT)
+        .filter(|(_, entry)| entry.mode == GIT_MODE_COMMIT)
         .map(|(path, _)| path.clone())
         .collect();
     for (path, entry) in &index_entries {
-        if entry.mode == Mode::COMMIT {
+        if entry.mode == GIT_MODE_COMMIT {
             continue;
         }
         if worktree_entry_changed(root, path, entry)? {
@@ -714,7 +759,8 @@ fn git_index_intent_for_root_with_ignore(
 }
 
 fn git_ignore_patterns_for_root(root: &Path) -> Result<Vec<String>> {
-    let git = gix::discover(root).context("failed to inspect Git ignore files before commit")?;
+    let git = SleyRepository::discover(root)
+        .context("failed to inspect Git ignore files before commit")?;
     let mut patterns = Vec::new();
     append_ignore_file_patterns(&mut patterns, &root.join(".gitignore"))?;
     append_ignore_file_patterns(&mut patterns, &git.git_dir().join("info").join("exclude"))?;
@@ -740,21 +786,20 @@ fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Resul
 }
 
 fn git_index_tree(repo: &Repository) -> Result<Tree> {
-    let git = gix::discover(repo.root()).context("failed to inspect Git index before commit")?;
-    let index = git
-        .index_or_empty()
-        .context("failed to inspect Git index before commit")?;
+    let git = repo
+        .git_overlay_sley_repository()?
+        .ok_or_else(|| anyhow!("failed to inspect Git index before commit"))?;
+    let index = index_or_empty(&git).context("failed to inspect Git index before commit")?;
     let mut builder = IndexTreeBuilder::default();
 
-    index
-        .entries_with_paths_by_filter_map(|path, entry| Some((bstr_path(path), entry.clone())))
-        .try_for_each(|(_, (path, entry))| -> Result<()> {
-            if entry.stage() != Stage::Unconflicted {
-                return Err(anyhow!(unmerged_git_index_advice(&path)));
-            }
-            let node = index_entry_node(repo, &git, &path, &entry)?;
-            builder.insert(&path, node)
-        })?;
+    for entry in index.entries {
+        let path = git_path_from_bstring(&entry.path);
+        if entry.stage() != IndexStage::Normal {
+            return Err(anyhow!(unmerged_git_index_advice(&path)));
+        }
+        let node = index_entry_node(repo, &git, &path, &entry)?;
+        builder.insert(&path, node)?;
+    }
 
     builder.into_tree(repo)
 }
@@ -818,16 +863,16 @@ impl IndexTreeBuilder {
 
 fn index_entry_node(
     repo: &Repository,
-    git: &gix::Repository,
+    git: &SleyRepository,
     path: &str,
-    entry: &gix_index::Entry,
+    entry: &IndexEntry,
 ) -> Result<IndexTreeNode> {
     let tree_entry = match entry.mode {
-        mode if mode == Mode::FILE || mode == Mode::FILE_EXECUTABLE => {
-            let hash = import_index_blob(repo, git, entry.id, path)?;
+        mode if mode == GIT_MODE_FILE || mode == GIT_MODE_FILE_EXECUTABLE => {
+            let hash = import_index_blob(repo, git, entry.oid, path)?;
             TreeEntry {
                 name: leaf_name(path),
-                mode: if entry.mode == Mode::FILE_EXECUTABLE {
+                mode: if entry.mode == GIT_MODE_FILE_EXECUTABLE {
                     FileMode::Executable
                 } else {
                     FileMode::Normal
@@ -836,8 +881,8 @@ fn index_entry_node(
                 hash,
             }
         }
-        mode if mode == Mode::SYMLINK => {
-            let hash = import_index_blob(repo, git, entry.id, path)?;
+        mode if mode == GIT_MODE_SYMLINK => {
+            let hash = import_index_blob(repo, git, entry.oid, path)?;
             TreeEntry {
                 name: leaf_name(path),
                 mode: FileMode::Symlink,
@@ -845,8 +890,8 @@ fn index_entry_node(
                 hash,
             }
         }
-        mode if mode == Mode::COMMIT => {
-            let hash = import_index_gitlink(repo, entry.id)?;
+        mode if mode == GIT_MODE_COMMIT => {
+            let hash = import_index_gitlink(repo, entry.oid)?;
             TreeEntry {
                 name: leaf_name(path),
                 mode: FileMode::Normal,
@@ -854,12 +899,12 @@ fn index_entry_node(
                 hash,
             }
         }
-        mode if mode == Mode::DIR => {
+        mode if mode == GIT_MODE_DIR => {
             return Err(anyhow!(sparse_git_index_advice(path)));
         }
         _ => {
             return Err(anyhow!(
-                "Git index path '{path}' has unsupported mode {:?}",
+                "Git index path '{path}' has unsupported mode {:o}",
                 entry.mode
             ));
         }
@@ -869,18 +914,24 @@ fn index_entry_node(
 
 fn import_index_blob(
     repo: &Repository,
-    git: &gix::Repository,
-    oid: gix::ObjectId,
+    git: &SleyRepository,
+    oid: ObjectId,
     path: &str,
 ) -> Result<ContentHash> {
-    let mut blob = git
-        .find_blob(oid)
+    let object = git
+        .read_object(&oid)
         .with_context(|| format!("failed to read staged Git blob for '{path}'"))?;
-    let blob = Blob::new(blob.take_data());
+    if object.object_type != GitObjectType::Blob {
+        return Err(anyhow!(
+            "Git index path '{path}' points at {}, not a blob",
+            object.object_type.as_str()
+        ));
+    }
+    let blob = Blob::new(object.body.clone());
     Ok(repo.store().put_blob(&blob)?)
 }
 
-fn import_index_gitlink(repo: &Repository, oid: gix::ObjectId) -> Result<ContentHash> {
+fn import_index_gitlink(repo: &Repository, oid: ObjectId) -> Result<ContentHash> {
     let blob = Blob::new(format!("heddle-submodule: {oid}").into_bytes());
     Ok(repo.store().put_blob(&blob)?)
 }
@@ -917,32 +968,30 @@ fn sparse_git_index_advice(path: &str) -> RecoveryAdvice {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IndexEntryIntent {
-    id: gix::ObjectId,
-    mode: Mode,
+    id: ObjectId,
+    mode: u32,
 }
 
-fn index_entries_by_path(index: &gix_index::File) -> BTreeMap<String, IndexEntryIntent> {
+fn index_entries_by_path(index: &Index) -> BTreeMap<String, IndexEntryIntent> {
     index
-        .entries_with_paths_by_filter_map(|path, entry| {
-            Some(IndexEntryIntent {
-                id: entry.id,
-                mode: entry.mode,
-            })
-            .map(|entry| (bstr_path(path), entry))
+        .entries
+        .iter()
+        .map(|entry| {
+            (
+                git_path_from_bstring(&entry.path),
+                IndexEntryIntent {
+                    id: entry.oid,
+                    mode: entry.mode,
+                },
+            )
         })
-        .map(|(_, pair)| pair)
         .collect()
 }
 
 fn worktree_entry_changed(root: &Path, path: &str, entry: &IndexEntryIntent) -> Result<bool> {
-    let state = repo::git_worktree_status::git_worktree_entry_state(
-        root,
-        path,
-        entry.id,
-        entry.mode.bits(),
-        None,
-    )
-    .with_context(|| format!("failed to inspect worktree path before commit: {path}"))?;
+    let state =
+        repo::git_worktree_status::git_worktree_entry_state(root, path, entry.id, entry.mode, None)
+            .with_context(|| format!("failed to inspect worktree path before commit: {path}"))?;
     Ok(state != GitWorktreeEntryState::Clean)
 }
 
@@ -1030,8 +1079,8 @@ fn pathbuf_to_git_path(path: &Path) -> String {
         .join("/")
 }
 
-fn bstr_path(path: &BStr) -> String {
-    path.to_str_lossy().into_owned()
+fn git_path_from_bstring(path: &GitBString) -> String {
+    String::from_utf8_lossy(path.as_bytes()).into_owned()
 }
 
 fn commit_safe_trust(mut trust: RepositoryVerificationState) -> RepositoryVerificationState {
@@ -1226,8 +1275,8 @@ fn find_recent_git_checkpoint_batch(repo: &Repository, git_commit: &str) -> Resu
 }
 
 fn git_head_oid(root: &Path) -> Option<String> {
-    let git = gix::discover(root).ok()?;
-    git.head_id().ok().map(|id| id.to_string())
+    let git = SleyRepository::discover(root).ok()?;
+    git.head().ok()?.oid.map(|id| id.to_string())
 }
 
 fn placeholder_principal_first_commit_warning(

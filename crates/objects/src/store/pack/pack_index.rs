@@ -2,11 +2,11 @@
 //! Pack index for fast object lookup within packfiles.
 
 use crate::store::{
-    pack::{
-        versioned_header::{HeaderChecksum, VersionedHeader},
-        PackObjectId,
-    },
     Result,
+    pack::{
+        PackObjectId,
+        versioned_header::{HeaderChecksum, VersionedHeader},
+    },
 };
 
 pub(super) const INDEX_MAGIC: &[u8; 4] = b"LMI\0";

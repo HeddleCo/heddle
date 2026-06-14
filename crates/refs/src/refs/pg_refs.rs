@@ -244,7 +244,11 @@ impl CoreRefBackend for PgRefBackend {
         let name = name.to_string();
         self.block(async move { let row = sqlx::query("DELETE FROM refs WHERE repo_id = $1 AND name = $2 AND is_thread = true RETURNING change_id").bind(repo_id).bind(&name).fetch_optional(pool.as_ref()).await.map_err(sqlx_err)?; row.map(|r| { let bytes: Vec<u8> = r.try_get("change_id").map_err(sqlx_err)?; Self::bytes_to_id(bytes) }).transpose() })
     }
-    fn delete_thread_cas(&self, name: &ThreadName, expected: RefExpectation<ChangeId>) -> Result<()> {
+    fn delete_thread_cas(
+        &self,
+        name: &ThreadName,
+        expected: RefExpectation<ChangeId>,
+    ) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let repo_id = self.repo_id;
         let name = name.to_string();
@@ -278,7 +282,9 @@ impl CoreRefBackend for PgRefBackend {
             .map_err(sqlx_err)?
             .rows_affected();
         if n == 0 {
-            Err(HeddleError::Conflict(format!("marker '{name}' already exists")))
+            Err(HeddleError::Conflict(format!(
+                "marker '{name}' already exists"
+            )))
         } else {
             Ok(())
         }
@@ -301,7 +307,11 @@ impl CoreRefBackend for PgRefBackend {
         let name = name.to_string();
         self.block(async move { let row = sqlx::query("DELETE FROM refs WHERE repo_id = $1 AND name = $2 AND is_thread = false RETURNING change_id").bind(repo_id).bind(&name).fetch_optional(pool.as_ref()).await.map_err(sqlx_err)?; row.map(|r| { let bytes: Vec<u8> = r.try_get("change_id").map_err(sqlx_err)?; Self::bytes_to_id(bytes) }).transpose() })
     }
-    fn delete_marker_cas(&self, name: &MarkerName, expected: RefExpectation<ChangeId>) -> Result<()> {
+    fn delete_marker_cas(
+        &self,
+        name: &MarkerName,
+        expected: RefExpectation<ChangeId>,
+    ) -> Result<()> {
         let pool = Arc::clone(&self.pool);
         let repo_id = self.repo_id;
         let name = name.to_string();
@@ -363,7 +373,11 @@ impl RefBackend for PgRefBackend {
             "remote threading refs are not supported on the server backend".into(),
         ))
     }
-    fn delete_remote_thread(&self, _remote: &str, _thread: &ThreadName) -> Result<Option<ChangeId>> {
+    fn delete_remote_thread(
+        &self,
+        _remote: &str,
+        _thread: &ThreadName,
+    ) -> Result<Option<ChangeId>> {
         Err(HeddleError::Conflict(
             "remote threading refs are not supported on the server backend".into(),
         ))

@@ -422,13 +422,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
             .refs()
             .get_thread(&ThreadName::new(&thread.thread))?
             .map(|id| id.short());
-        save_thread_update_with_oplog(
-            &repo,
-            &manager,
-            &thread,
-            before_update,
-            thread_state,
-        )?;
+        save_thread_update_with_oplog(&repo, &manager, &thread, before_update, thread_state)?;
     }
     let recommended_action = if blockers.is_empty() {
         if rebase_state_path.exists() {

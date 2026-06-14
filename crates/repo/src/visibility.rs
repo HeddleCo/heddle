@@ -175,10 +175,9 @@ pub fn visible(visibility: &VisibilityTier, audience: &AudienceTier) -> bool {
         (VisibilityTier::TeamScoped { team_id }, AudienceTier::Team(name)) => team_id == name,
         (VisibilityTier::TeamScoped { .. }, _) => false,
         // Restricted: visible only to a viewer holding the matching label.
-        (
-            VisibilityTier::Restricted { scope_label },
-            AudienceTier::Restricted(viewer_label),
-        ) => scope_label == viewer_label,
+        (VisibilityTier::Restricted { scope_label }, AudienceTier::Restricted(viewer_label)) => {
+            scope_label == viewer_label
+        }
         (VisibilityTier::Restricted { .. }, _) => false,
     }
 }
@@ -313,7 +312,10 @@ mod tests {
             scope_label: "sec-embargo".into(),
         };
         // The one authorized scope sees it.
-        assert!(visible(&vis, &AudienceTier::Restricted("sec-embargo".into())));
+        assert!(visible(
+            &vis,
+            &AudienceTier::Restricted("sec-embargo".into())
+        ));
         // A non-matching restricted label does not.
         assert!(!visible(&vis, &AudienceTier::Restricted("legal".into())));
     }

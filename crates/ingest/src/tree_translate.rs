@@ -99,7 +99,10 @@ impl<'a, S: ObjectStore> TreeTranslator<'a, S> {
                 .unwrap_or_default();
             if !entries.is_empty() {
                 if !self.options.lossy {
-                    return Err(fail_lossy_entry(&rebase_lossy_entry(path_prefix, &entries[0])));
+                    return Err(fail_lossy_entry(&rebase_lossy_entry(
+                        path_prefix,
+                        &entries[0],
+                    )));
                 }
                 self.lossy_entries.extend(
                     entries

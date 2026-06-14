@@ -9,14 +9,256 @@
 use objects::store::ObjectStore;
 use std::{
     io::Write,
+    path::Path,
     process::{Command, Output, Stdio},
     str,
 };
 
-use gix::refs::transaction::PreviousValue;
 use repo::Repository;
 use serde_json::Value;
+use sley::plumbing::sley_core::ByteString as GitByteString;
+use sley::plumbing::sley_object::EncodedObject;
+use sley::plumbing::sley_refs::ReflogEntry;
+use sley::{
+    CommitObject, EntryKind, GitObjectType, GitTime, ObjectId, RefPrecondition, ReferenceTarget,
+    Repository as SleyRepository, Signature, TagObject,
+};
 use tempfile::TempDir;
+
+trait SleyIntegrationRepoExt {
+    fn find_commit(&self, oid: ObjectId) -> Result<TestCommit, String>;
+    fn find_object(&self, oid: ObjectId) -> Result<(), String>;
+    fn head_id(&self) -> Result<ObjectId, String>;
+    fn head_commit(&self) -> Result<TestCommit, String>;
+    fn merge_base(&self, a: ObjectId, b: ObjectId) -> Result<ObjectId, String>;
+    fn rev_walk<I>(&self, starts: I) -> TestRevWalk
+    where
+        I: IntoIterator<Item = ObjectId>;
+}
+
+impl SleyIntegrationRepoExt for SleyRepository {
+    fn find_commit(&self, oid: ObjectId) -> Result<TestCommit, String> {
+        let commit = self.read_commit(&oid).map_err(|err| err.to_string())?;
+        let tree = self
+            .read_tree(&commit.tree)
+            .map_err(|err| err.to_string())?;
+        Ok(TestCommit {
+            id: oid,
+            commit,
+            tree,
+        })
+    }
+
+    fn find_object(&self, oid: ObjectId) -> Result<(), String> {
+        self.read_object(&oid)
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+
+    fn head_id(&self) -> Result<ObjectId, String> {
+        self.head()
+            .map_err(|err| err.to_string())?
+            .oid
+            .ok_or_else(|| "HEAD is unborn".to_string())
+    }
+
+    fn head_commit(&self) -> Result<TestCommit, String> {
+        let oid = self.head_id()?;
+        self.find_commit(oid)
+    }
+
+    fn merge_base(&self, a: ObjectId, b: ObjectId) -> Result<ObjectId, String> {
+        let ancestors = commit_ancestors(self, a);
+        let mut pending = std::collections::VecDeque::from([b]);
+        let mut seen = std::collections::HashSet::new();
+        while let Some(oid) = pending.pop_front() {
+            if ancestors.contains(&oid) {
+                return Ok(oid);
+            }
+            if !seen.insert(oid) {
+                continue;
+            }
+            if let Ok(commit) = self.read_commit(&oid) {
+                pending.extend(commit.parents);
+            }
+        }
+        Err(format!("no merge base for {a} and {b}"))
+    }
+
+    fn rev_walk<I>(&self, starts: I) -> TestRevWalk
+    where
+        I: IntoIterator<Item = ObjectId>,
+    {
+        let mut pending: std::collections::VecDeque<ObjectId> = starts.into_iter().collect();
+        let mut seen = std::collections::HashSet::new();
+        let mut items = Vec::new();
+        while let Some(oid) = pending.pop_front() {
+            if !seen.insert(oid) {
+                continue;
+            }
+            match self.read_commit(&oid) {
+                Ok(commit) => {
+                    pending.extend(commit.parents.iter().copied());
+                    items.push(Ok(TestCommitInfo { id: oid }));
+                }
+                Err(err) => items.push(Err(err.to_string())),
+            }
+        }
+        TestRevWalk { items }
+    }
+}
+
+fn commit_ancestors(repo: &SleyRepository, start: ObjectId) -> std::collections::HashSet<ObjectId> {
+    let mut pending = std::collections::VecDeque::from([start]);
+    let mut seen = std::collections::HashSet::new();
+    while let Some(oid) = pending.pop_front() {
+        if !seen.insert(oid) {
+            continue;
+        }
+        if let Ok(commit) = repo.read_commit(&oid) {
+            pending.extend(commit.parents);
+        }
+    }
+    seen
+}
+
+struct TestCommit {
+    id: ObjectId,
+    commit: CommitObject,
+    tree: sley::TreeObject,
+}
+
+struct TestCommitInfo {
+    id: ObjectId,
+}
+
+struct TestRevWalk {
+    items: Vec<Result<TestCommitInfo, String>>,
+}
+
+impl TestRevWalk {
+    fn all(self) -> Result<std::vec::IntoIter<Result<TestCommitInfo, String>>, String> {
+        Ok(self.items.into_iter())
+    }
+}
+
+struct TestTag {
+    id: ObjectId,
+}
+
+impl TestTag {
+    fn id(&self) -> ObjectId {
+        self.id
+    }
+}
+
+impl TestCommit {
+    fn id(&self) -> ObjectId {
+        self.id
+    }
+
+    fn tree_id(&self) -> Option<ObjectId> {
+        Some(self.commit.tree)
+    }
+
+    fn tree(&self) -> Result<TestTree, String> {
+        Ok(TestTree {
+            entries: self
+                .tree
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_bytes().to_vec())
+                .collect(),
+        })
+    }
+
+    fn message_raw_sloppy(&self) -> TestRawMessage<'_> {
+        TestRawMessage(&self.commit.message)
+    }
+}
+
+struct TestTree {
+    entries: Vec<Vec<u8>>,
+}
+
+impl TestTree {
+    fn lookup_entry_by_path(&self, path: &str) -> Result<Option<()>, String> {
+        if path.contains('/') {
+            return Err(format!(
+                "nested lookup not implemented for test path {path}"
+            ));
+        }
+        Ok(self
+            .entries
+            .iter()
+            .any(|entry| entry.as_slice() == path.as_bytes())
+            .then_some(()))
+    }
+}
+
+struct TestRawMessage<'a>(&'a [u8]);
+
+impl std::fmt::Display for TestRawMessage<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", String::from_utf8_lossy(self.0))
+    }
+}
+
+fn find_reference<'a>(repo: &'a SleyRepository, name: &str) -> Result<TestReference<'a>, String> {
+    let full_name = if name == "HEAD" || name.starts_with("refs/") {
+        name.to_string()
+    } else {
+        format!("refs/heads/{name}")
+    };
+    let target = repo
+        .references()
+        .read_ref(&full_name)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| format!("reference {full_name} not found"))?;
+    Ok(TestReference { repo, target })
+}
+
+struct TestReference<'a> {
+    repo: &'a SleyRepository,
+    target: ReferenceTarget,
+}
+
+impl TestReference<'_> {
+    fn peel_to_id(&mut self) -> Result<ObjectId, String> {
+        let oid = match &self.target {
+            ReferenceTarget::Direct(oid) => *oid,
+            ReferenceTarget::Symbolic(name) => {
+                let reference = find_reference(self.repo, name)?;
+                match reference.target {
+                    ReferenceTarget::Direct(oid) => oid,
+                    ReferenceTarget::Symbolic(_) => {
+                        return Err(format!("nested symbolic reference {name} is unsupported"));
+                    }
+                }
+            }
+        };
+        Ok(oid)
+    }
+
+    fn target(&self) -> TestReferenceTarget<'_> {
+        TestReferenceTarget {
+            target: &self.target,
+        }
+    }
+}
+
+struct TestReferenceTarget<'a> {
+    target: &'a ReferenceTarget,
+}
+
+impl<'a> TestReferenceTarget<'a> {
+    fn try_id(&self) -> Option<&'a ObjectId> {
+        match self.target {
+            ReferenceTarget::Direct(oid) => Some(oid),
+            ReferenceTarget::Symbolic(_) => None,
+        }
+    }
+}
 
 #[path = "cli_integration/basics.rs"]
 mod basics;
@@ -60,10 +302,10 @@ mod hooks;
 mod hydrate;
 #[path = "cli_integration/misc.rs"]
 mod misc;
-#[path = "cli_integration/oplog_salvage.rs"]
-mod oplog_salvage;
 #[path = "cli_integration/next_action_contract.rs"]
 mod next_action_contract;
+#[path = "cli_integration/oplog_salvage.rs"]
+mod oplog_salvage;
 #[path = "cli_integration/oss_cli_polish.rs"]
 mod oss_cli_polish;
 #[path = "cli_integration/output_kind_invariant.rs"]
@@ -257,10 +499,26 @@ where
     serde_json::json!(argv)
 }
 
+fn canonical_path_string(path: &std::path::Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string()
+}
+
 fn heddle_output_with_env(
     args: &[&str],
     cwd: Option<&std::path::Path>,
     envs: &[(&str, &str)],
+) -> Result<Output, String> {
+    heddle_output_with_env_removed(args, cwd, envs, &[])
+}
+
+fn heddle_output_with_env_removed(
+    args: &[&str],
+    cwd: Option<&std::path::Path>,
+    envs: &[(&str, &str)],
+    remove_envs: &[&str],
 ) -> Result<Output, String> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_heddle"));
     cmd.args(translate_legacy_args(args));
@@ -277,6 +535,9 @@ fn heddle_output_with_env(
     seed_default_test_user_config(&config_path, &dir)?;
     cmd.env("HEDDLE_CONFIG", config_path);
     cmd.env_remove("NO_COLOR");
+    for key in remove_envs {
+        cmd.env_remove(key);
+    }
     for (key, value) in envs {
         cmd.env(key, value);
     }
@@ -387,14 +648,18 @@ pub(crate) fn git_hermetic(args: &[&str], dir: &std::path::Path) {
     assert!(status.success(), "git {args:?} failed in {}", dir.display());
 }
 
-fn git_test_signature() -> gix::actor::Signature {
-    gix::actor::Signature {
-        name: "Heddle Test".into(),
-        email: "heddle@test".into(),
-        time: gix::date::Time {
-            seconds: 0,
-            offset: 0,
-        },
+fn open_git(path: impl AsRef<Path>) -> Result<SleyRepository, String> {
+    SleyRepository::open(path.as_ref())
+        .or_else(|_| SleyRepository::discover(path.as_ref()))
+        .map_err(|err| err.to_string())
+}
+
+fn git_test_signature() -> Signature {
+    Signature {
+        name: GitByteString::new(b"Heddle Test".to_vec()),
+        email: GitByteString::new(b"heddle@test".to_vec()),
+        time: GitTime::new(0, 0),
+        raw: b"Heddle Test <heddle@test> 0 +0000".to_vec(),
     }
 }
 
@@ -433,51 +698,85 @@ fn default_test_user_config_path(cwd: &std::path::Path) -> std::path::PathBuf {
     ))
 }
 
-fn git_empty_tree_oid(repo: &gix::Repository) -> gix::hash::ObjectId {
-    repo.empty_tree().id
+fn git_empty_tree_oid(repo: &SleyRepository) -> ObjectId {
+    repo.write_tree(sley::TreeEditor::new())
+        .expect("write empty tree")
 }
 
-fn git_set_reference(repo: &gix::Repository, name: &str, target: gix::hash::ObjectId) {
+fn git_set_reference(repo: &SleyRepository, name: &str, target: ObjectId) {
     let sig = git_test_signature();
-    let mut time_buf = gix::date::parse::TimeBuf::default();
-    let edit = gix::refs::transaction::RefEdit {
-        change: gix::refs::transaction::Change::Update {
-            log: gix::refs::transaction::LogChange {
-                mode: gix::refs::transaction::RefLog::AndReference,
-                force_create_reflog: false,
-                message: "test: update ref".into(),
-            },
-            expected: PreviousValue::Any,
-            new: gix::refs::Target::Object(target),
-        },
-        name: name.try_into().expect("valid ref name"),
-        deref: false,
+    let refs = repo.references();
+    let old_oid = match refs.read_ref(name).expect("read ref") {
+        Some(ReferenceTarget::Direct(oid)) => oid,
+        _ => ObjectId::null(repo.object_format()),
     };
-    repo.edit_references_as([edit], Some(sig.to_ref(&mut time_buf)))
-        .expect("update ref");
+    let mut tx = refs.transaction();
+    tx.update_to(
+        name.to_string(),
+        ReferenceTarget::Direct(target),
+        RefPrecondition::Any,
+        Some(ReflogEntry {
+            old_oid,
+            new_oid: target,
+            committer: sig.to_ident_bytes(),
+            message: b"test: update ref".to_vec(),
+        }),
+    );
+    tx.commit().expect("update ref");
 }
 
 fn git_commit_with_tree(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     reference: Option<&str>,
-    tree_oid: gix::hash::ObjectId,
+    tree_oid: ObjectId,
     message: &str,
-    parents: &[gix::hash::ObjectId],
-) -> gix::hash::ObjectId {
+    parents: &[ObjectId],
+) -> ObjectId {
     let sig = git_test_signature();
-    let mut committer_buf = gix::date::parse::TimeBuf::default();
-    let mut author_buf = gix::date::parse::TimeBuf::default();
-    let commit = repo
-        .new_commit_as(
-            sig.to_ref(&mut committer_buf),
-            sig.to_ref(&mut author_buf),
-            message,
-            tree_oid,
-            parents.to_vec(),
-        )
+    let commit = CommitObject {
+        tree: tree_oid,
+        parents: parents.to_vec(),
+        author: sig.to_ident_bytes(),
+        committer: sig.to_ident_bytes(),
+        encoding: None,
+        message: message.as_bytes().to_vec(),
+    };
+    let commit_id = repo
+        .write_object(EncodedObject::new(GitObjectType::Commit, commit.write()))
         .expect("commit");
     if let Some(reference) = reference {
-        git_set_reference(repo, reference, commit.id);
+        git_set_reference(repo, reference, commit_id);
     }
-    commit.id
+    commit_id
+}
+
+fn git_create_annotated_tag(
+    repo: &SleyRepository,
+    name: &str,
+    target: ObjectId,
+    object_type: GitObjectType,
+    message: &str,
+    precondition: RefPrecondition,
+) -> TestTag {
+    let tag = TagObject {
+        object: target,
+        object_type,
+        name: name.as_bytes().to_vec(),
+        tagger: Some(git_test_signature().to_ident_bytes()),
+        message: message.as_bytes().to_vec(),
+        raw_body: None,
+    };
+    let tag_id = repo
+        .write_object(EncodedObject::new(GitObjectType::Tag, tag.write()))
+        .expect("write annotated tag");
+    let refs = repo.references();
+    let mut tx = refs.transaction();
+    tx.update_to(
+        format!("refs/tags/{name}"),
+        ReferenceTarget::Direct(tag_id),
+        precondition,
+        None,
+    );
+    tx.commit().expect("update tag ref");
+    TestTag { id: tag_id }
 }

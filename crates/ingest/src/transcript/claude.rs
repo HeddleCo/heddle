@@ -136,7 +136,10 @@ pub(crate) fn stream_events(text: &str, source_path: &Path) -> Vec<StreamEvent> 
             session_id: event.session_id,
             starting_commit: None,
             cwd: event.cwd.map(|c| CwdSignal::IfUnset(PathBuf::from(c))),
-            is_turn: matches!(event.event_type.as_deref(), Some("user") | Some("assistant")),
+            is_turn: matches!(
+                event.event_type.as_deref(),
+                Some("user") | Some("assistant")
+            ),
             texts,
             touches,
         });

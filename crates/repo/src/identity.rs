@@ -185,9 +185,9 @@ fn acquire_device_lock(device_path: &Path) -> std::io::Result<objects::lock::Wri
 /// more reason to delete it. Returns `None` when the file is absent.
 fn read_device_record(path: &Path) -> std::io::Result<Option<DeviceIdentity>> {
     match std::fs::read_to_string(path) {
-        Ok(contents) => toml::from_str(&contents).map(Some).map_err(|error| {
-            std::io::Error::other(format!("parsing {}: {error}", path.display()))
-        }),
+        Ok(contents) => toml::from_str(&contents)
+            .map(Some)
+            .map_err(|error| std::io::Error::other(format!("parsing {}: {error}", path.display()))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }
@@ -402,7 +402,9 @@ mod tests {
         let local_signer = resolve_signer(&local, &device).expect("local signer");
         let local_pubkey = hex::encode(local_signer.public_key());
         let prior_state = signed_state_with(local_signer.as_ref());
-        prior_state.verify_signature().expect("local state verifies");
+        prior_state
+            .verify_signature()
+            .expect("local state verifies");
 
         // Reconcile: record a device key (a distinct keypair).
         let device_signer = Ed25519Signer::generate().expect("device keypair");
@@ -522,8 +524,7 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
             .expect("loosen perms");
 
-        let err =
-            load_local(&path).expect_err("group/world-readable identity must be rejected");
+        let err = load_local(&path).expect_err("group/world-readable identity must be rejected");
         let signer_err = err
             .get_ref()
             .and_then(|source| source.downcast_ref::<SignerError>());
@@ -543,7 +544,11 @@ mod tests {
         // Tightening back to 0600 restores loadability.
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
             .expect("tighten perms");
-        assert!(load_local(&path).expect("re-secured identity loads").is_some());
+        assert!(
+            load_local(&path)
+                .expect("re-secured identity loads")
+                .is_some()
+        );
     }
 
     fn write_device_for(path: &Path, server: &str) -> Ed25519Signer {
@@ -581,7 +586,10 @@ mod tests {
         // Logout for the matching server removes the device identity.
         let removed = unlink_device_key_at(&device, "grpc.S").expect("unlink");
         assert!(removed, "matching-server device identity must be removed");
-        assert!(!device.exists(), "device-identity file must be gone after logout");
+        assert!(
+            !device.exists(),
+            "device-identity file must be gone after logout"
+        );
 
         // The resolver now mints/uses the per-repo local key (a distinct key),
         // so the logged-out device key can no longer sign new states.
@@ -609,7 +617,10 @@ mod tests {
             !removed,
             "logging out of a different server must not remove this device identity",
         );
-        assert!(device.exists(), "non-matching device identity must remain on disk");
+        assert!(
+            device.exists(),
+            "non-matching device identity must remain on disk"
+        );
 
         let still = load_device(&device).expect("load").expect("present");
         assert_eq!(still.public_key, device_pubkey);
@@ -714,8 +725,7 @@ mod tests {
             let b_pem = b.to_pem().expect("b pem");
 
             let logout_path = device.clone();
-            let logout =
-                std::thread::spawn(move || unlink_device_key_at(&logout_path, "grpc.A"));
+            let logout = std::thread::spawn(move || unlink_device_key_at(&logout_path, "grpc.A"));
 
             let login_path = device.clone();
             let login = std::thread::spawn(move || {
@@ -766,8 +776,7 @@ mod tests {
         // refusal, and no key bytes are trusted for signing.
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
             .expect("loosen perms");
-        let err =
-            load_device(&path).expect_err("group-readable device identity must be rejected");
+        let err = load_device(&path).expect_err("group-readable device identity must be rejected");
         let signer_err = err
             .get_ref()
             .and_then(|source| source.downcast_ref::<SignerError>());

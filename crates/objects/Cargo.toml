@@ -29,7 +29,9 @@ thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+# Win32_Security: CreateFileW's binding is gated on it in windows-sys 0.61
+# (its signature takes a *const SECURITY_ATTRIBUTES from Win32::Security).
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem"] }
 zstd = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 

@@ -284,6 +284,8 @@ pub(crate) struct TargetDirHandle {
     dev: u64,
     #[cfg(unix)]
     ino: u64,
+    #[cfg(unix)]
+    path: PathBuf,
     #[cfg(not(unix))]
     path: PathBuf,
 }
@@ -327,6 +329,7 @@ impl TargetDirHandle {
                 dir: Rc::new(dir),
                 dev: metadata.dev(),
                 ino: metadata.ino(),
+                path: abs_path.to_path_buf(),
             })
         }
         #[cfg(not(unix))]
@@ -344,21 +347,34 @@ impl TargetDirHandle {
         }
     }
 
-    fn io_path(&self) -> PathBuf {
+    #[cfg(unix)]
+    fn fd_traversal_path(&self) -> Option<PathBuf> {
+        use std::os::fd::AsRawFd;
+
+        Path::new("/proc/self/fd").is_dir().then(|| {
+            let fd = self.dir.as_raw_fd();
+            PathBuf::from(format!("/proc/self/fd/{fd}"))
+        })
+    }
+
+    fn io_path_if_current(&self, abs_path: &Path) -> std::io::Result<Option<PathBuf>> {
         #[cfg(unix)]
         {
-            use std::os::fd::AsRawFd;
-
-            let fd = self.dir.as_raw_fd();
-            if Path::new("/proc/self/fd").is_dir() {
-                PathBuf::from(format!("/proc/self/fd/{fd}"))
+            if let Some(path) = self.fd_traversal_path() {
+                Ok(Some(path))
             } else {
-                PathBuf::from(format!("/dev/fd/{fd}"))
+                match self.same_identity_at_path(abs_path) {
+                    Ok(true) => Ok(Some(self.path.clone())),
+                    Ok(false) => Ok(None),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotADirectory => Ok(None),
+                    Err(err) => Err(err),
+                }
             }
         }
         #[cfg(not(unix))]
         {
-            self.path.clone()
+            Ok((abs_path == self.path).then(|| self.path.clone()))
         }
     }
 
@@ -404,7 +420,11 @@ fn outcome_from_cell(
 fn adopt_existing_empty_dir(abs_path: &Path) -> HeddleResult<TargetDirHandle> {
     let handle = TargetDirHandle::open(abs_path)
         .map_err(|_| target_dir_shape_refusal(abs_path, &target_dir_shape_reason(abs_path)))?;
-    if std::fs::read_dir(handle.io_path())
+    let io_path = handle
+        .io_path_if_current(abs_path)
+        .map_err(HeddleError::from)?
+        .ok_or_else(|| target_dir_shape_refusal(abs_path, "changed since it was claimed"))?;
+    if std::fs::read_dir(io_path)
         .map_err(HeddleError::from)?
         .next()
         .transpose()
@@ -460,8 +480,15 @@ fn clear_dir_contents(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn clear_claimed_dir_contents(claim: &TargetDir) -> HeddleResult<()> {
-    match clear_dir_contents(&claim.handle().io_path()) {
+fn clear_claimed_dir_contents(abs_path: &Path, claim: &TargetDir) -> HeddleResult<()> {
+    let Some(io_path) = claim
+        .handle()
+        .io_path_if_current(abs_path)
+        .map_err(HeddleError::from)?
+    else {
+        return Ok(());
+    };
+    match clear_dir_contents(&io_path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotADirectory => Ok(()),
@@ -491,10 +518,10 @@ fn rewind_checkout(abs_path: &Path, claim: Option<TargetDir>) -> HeddleResult<()
     };
     match claim.kind() {
         TargetDirKind::Created => {
-            clear_claimed_dir_contents(&claim)?;
+            clear_claimed_dir_contents(abs_path, &claim)?;
             remove_claimed_created_dir_if_still_at_path(abs_path, &claim)
         }
-        TargetDirKind::AdoptedEmpty => clear_claimed_dir_contents(&claim),
+        TargetDirKind::AdoptedEmpty => clear_claimed_dir_contents(abs_path, &claim),
     }
 }
 
@@ -520,7 +547,11 @@ fn remove_claimed_created_dir_if_still_at_path(
 fn claimed_worktree_path(claim: Option<TargetDir>, abs_path: &Path) -> HeddleResult<PathBuf> {
     match claim {
         Some(claim) => match claim.handle().same_identity_at_path(abs_path) {
-            Ok(true) => Ok(claim.handle().io_path()),
+            Ok(true) => claim
+                .handle()
+                .io_path_if_current(abs_path)
+                .map_err(HeddleError::from)?
+                .ok_or_else(|| target_dir_shape_refusal(abs_path, "changed since it was claimed")),
             Ok(false) => Err(target_dir_shape_refusal(
                 abs_path,
                 "changed since it was claimed",
@@ -750,8 +781,13 @@ impl StartThread {
                 // rewind removes the dir: the canonical key is derived by
                 // canonicalizing the still-present root. A rolled-back start must
                 // leave no orphaned sidecar (heddle#316 r11 P2).
-                if let Some(claim) = claim.as_ref() {
-                    rewind_repo.clear_materialized_root_records(&claim.handle().io_path())?;
+                if let Some(claim) = claim.as_ref()
+                    && let Some(io_path) = claim
+                        .handle()
+                        .io_path_if_current(&rewind_abs)
+                        .map_err(HeddleError::from)?
+                {
+                    rewind_repo.clear_materialized_root_records(&io_path)?;
                 }
                 rewind_checkout(&rewind_abs, claim)
             },

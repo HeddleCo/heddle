@@ -4,7 +4,6 @@ use std::{collections::BTreeSet, path::Path};
 
 use anyhow::Result;
 use chrono::Utc;
-use gix::bstr::ByteSlice;
 use objects::object::ThreadName;
 use repo::{
     GitOverlayImportHint, GitRemoteTrackingStatus, OperationKind, OperationScope, Repository,
@@ -12,6 +11,7 @@ use repo::{
     ThreadState, shell_quote, update_thread_state_from_state,
 };
 use serde::{Serialize, Serializer, ser::SerializeStruct};
+use sley::{IndexStage, Repository as SleyRepository};
 
 use super::{
     git_overlay_health::{
@@ -713,19 +713,20 @@ pub(crate) fn recommend_next_action(
 }
 
 fn git_unmerged_paths(repo: &Repository) -> Result<Vec<String>> {
-    let git = match gix::discover(repo.root()) {
+    let git = match SleyRepository::discover(repo.root()) {
         Ok(git) => git,
         Err(_) => return Ok(Vec::new()),
     };
-    let index = match git.index_or_empty() {
-        Ok(index) => index,
+    let index = match git.open_index() {
+        Ok(Some(index)) => index,
+        Ok(None) => return Ok(Vec::new()),
         Err(_) => return Ok(Vec::new()),
     };
     let mut paths = BTreeSet::new();
-    for (_, path) in index.entries_with_paths_by_filter_map(|path, entry| {
-        (entry.stage_raw() != 0).then(|| path.to_str_lossy().into_owned())
-    }) {
-        paths.insert(path);
+    for entry in index.entries {
+        if entry.stage() != IndexStage::Normal {
+            paths.insert(String::from_utf8_lossy(entry.path.as_bytes()).into_owned());
+        }
     }
     Ok(paths.into_iter().collect())
 }

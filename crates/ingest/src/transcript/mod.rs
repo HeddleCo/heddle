@@ -26,6 +26,7 @@ pub mod types;
 use std::path::{Path, PathBuf};
 
 pub use matcher::{Match, MatchParams, TranscriptMatcher};
+use sley::Repository as SleyRepository;
 use tracing::{debug, warn};
 pub use types::{FileTouch, Provider, TouchKind, Transcript};
 
@@ -147,13 +148,13 @@ pub(crate) fn repo_matches_checkout(candidate: &Path, repo_root: &Path) -> bool 
 }
 
 pub(crate) fn repo_workdir(path: &Path) -> Option<PathBuf> {
-    let repo = gix::discover(path).ok()?;
+    let repo = SleyRepository::discover(path).ok()?;
     let workdir = repo.workdir()?;
-    canonicalize_fallback(workdir)
+    canonicalize_fallback(&workdir)
 }
 
 fn repo_common_dir(path: &Path) -> Option<PathBuf> {
-    let repo = gix::discover(path).ok()?;
+    let repo = SleyRepository::discover(path).ok()?;
     canonicalize_fallback(repo.common_dir())
 }
 

@@ -69,7 +69,8 @@ pub fn for_each_rs_file(
         if skip(path) {
             continue;
         }
-        let source = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let source =
+            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         *files_scanned += 1;
         visit(path, &source)?;
     }

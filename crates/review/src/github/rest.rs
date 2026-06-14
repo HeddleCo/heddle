@@ -971,12 +971,10 @@ mod tests {
         // status and the fetch fails loudly *without* ever connecting to
         // the dead port — proving the redirect was not chased.
         let base_url = spawn_server(|_| {
-            vec![
-                MockResponse::json(302, String::new()).with_header(
-                    "Location",
-                    "http://127.0.0.1:1/repos/heddle/repo/pulls/439/files?per_page=100&page=2",
-                ),
-            ]
+            vec![MockResponse::json(302, String::new()).with_header(
+                "Location",
+                "http://127.0.0.1:1/repos/heddle/repo/pulls/439/files?per_page=100&page=2",
+            )]
         })
         .await;
         let err = client_for(&base_url)

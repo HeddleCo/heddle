@@ -12,8 +12,8 @@ use super::{
     FsStore,
     fs_io::{list_hashes_from_dir, read_file_bytes, read_file_header},
     fs_paths::{
-        action_path, actions_dir, blobs_dir, hash_path, redaction_path, redactions_dir,
-        state_path, state_visibility_dir, state_visibility_path, states_dir, trees_dir,
+        action_path, actions_dir, blobs_dir, hash_path, redaction_path, redactions_dir, state_path,
+        state_visibility_dir, state_visibility_path, states_dir, trees_dir,
     },
 };
 use crate::{
@@ -348,9 +348,7 @@ impl FsStore {
         // miss) returns the stale packed body. (Trees/blobs are
         // content-addressed and can't go stale this way, so their read paths
         // deliberately keep pack-first ordering.)
-        if loose_exists
-            && let Some(data) = read_file_bytes(&path)?
-        {
+        if loose_exists && let Some(data) = read_file_bytes(&path)? {
             trace!(
                 size = data.as_slice().len(),
                 "State read from loose object (shadows any packed copy)"
@@ -1042,11 +1040,7 @@ impl ObjectStore for FsStore {
         }
     }
 
-    fn put_state_visibility_bytes_for_state(
-        &self,
-        state: &ChangeId,
-        bytes: &[u8],
-    ) -> Result<()> {
+    fn put_state_visibility_bytes_for_state(&self, state: &ChangeId, bytes: &[u8]) -> Result<()> {
         let dir = state_visibility_dir(&self.root);
         if !dir.exists() {
             fs::create_dir_all(&dir)?;
@@ -1077,5 +1071,4 @@ impl ObjectStore for FsStore {
         }
         Ok(out)
     }
-
 }

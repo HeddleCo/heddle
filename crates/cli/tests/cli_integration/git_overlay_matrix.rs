@@ -1589,9 +1589,10 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
         &["--output", "json", "ready", "-m", "ready thread work"],
     );
     assert_eq!(ready["status"], "completed");
+    let repo_path = canonical_path_string(temp.path());
     let parent_land_action = format!(
         "heddle --repo {} land --thread feature/ready-verify --no-push",
-        temp.path().display()
+        repo_path
     );
     assert_eq!(
         ready["recommended_action"], parent_land_action,
@@ -1720,9 +1721,10 @@ fn git_overlay_matrix_ready_thread_keeps_verification_clean_and_workflow_actiona
         "Workflow check should match the established land path: {thread_show_after_preview}"
     );
     let ready_after_preview = json(&thread_path, &["--output", "json", "ready"]);
+    let repo_path = canonical_path_string(temp.path());
     let parent_land_action = format!(
         "heddle --repo {} land --thread feature/ready-verify --no-push",
-        temp.path().display()
+        repo_path
     );
     assert_eq!(
         ready_after_preview["recommended_action"], parent_land_action,

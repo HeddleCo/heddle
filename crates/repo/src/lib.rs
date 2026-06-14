@@ -52,9 +52,9 @@ mod thread_record_store;
 mod thread_stack;
 mod thread_storage;
 mod thread_worktree_target;
+pub mod visibility;
 mod worktree_ignore;
 pub mod worktree_index;
-pub mod visibility;
 mod worktree_state;
 mod worktree_status_options;
 
@@ -74,55 +74,53 @@ pub use objects::{
 };
 pub use repository::{
     BlobHydrator, ChangeMonitorInspection, ChangedPathFilter, ChangedPathFilters,
-    CheckoutMaterialization, CommitGraphIndex,
-    CommitGraphInspection, ContextSuggestion, ContextSuggestionTier, DiffKind, GitCheckpointRecord,
-    GitOverlayBranchTip, GitOverlayImportHint, GitOverlayOutOfBandCommits,
-    GitRemoteTrackingStatus, HIGH_SUGGESTION_THRESHOLD,
-    HistoryQuery, HostedConfig, MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD,
-    MissingBlob, OperationKind, OperationScope, OutputFormat, PackFilesInspection,
-    PartialFetchInspection, PullPlannerCacheInspection, RedactConfig, RefCountsInspection,
-    RefSummaryIndexInspection, RepoConfig, Repository, RepositoryCapability, ResignOutcome,
+    CheckoutMaterialization, CommitGraphIndex, CommitGraphInspection, ContextSuggestion,
+    ContextSuggestionTier, DiffKind, GitCheckpointRecord, GitOverlayBranchTip,
+    GitOverlayImportHint, GitOverlayOutOfBandCommits, GitRemoteTrackingStatus,
+    HIGH_SUGGESTION_THRESHOLD, HistoryQuery, HostedConfig, MAJOR_REWRITE_THRESHOLD_PCT,
+    MEDIUM_SUGGESTION_THRESHOLD, MissingBlob, OperationKind, OperationScope, OutputFormat,
+    PackFilesInspection, PartialFetchInspection, PullPlannerCacheInspection, RedactConfig,
+    RefCountsInspection, RefSummaryIndexInspection, RepoConfig, Repository, RepositoryCapability,
     RepositoryMaintenanceRunReport, RepositoryOperationStatus,
-    RepositoryPerformanceInspectionReport, SUGGESTION_WINDOW, SnapshotExecution, SnapshotProfile,
-    ThreadCaptureOutcome, TreeBuildProfile, TrustedKey, UntrackedSet, UntrackedSubtree,
-    WarmCanonicalStoreStats, WorktreeCompareProfile, WorktreeIndexInspection,
+    RepositoryPerformanceInspectionReport, ResignOutcome, SUGGESTION_WINDOW, SnapshotExecution,
+    SnapshotProfile, ThreadCaptureOutcome, TreeBuildProfile, TrustedKey, UntrackedSet,
+    UntrackedSubtree, WarmCanonicalStoreStats, WorktreeCompareProfile, WorktreeIndexInspection,
     WorktreeStatusDetailed, compute_rewrite_pct, find_merge_base, is_major_rewrite,
     is_synthetic_root,
 };
 pub use repository_redaction::{PurgeOutcome, RemoveRedactionOutcome};
-pub use visibility::{
-    AudienceParseError, AudienceTier, ScopeDropCounts, filter_for_audience,
-    filter_for_audience_with_drops, visible,
-};
 pub use session_storage::SessionManager;
 pub use snapshot_metadata::{
     ABSENT_CONFIDENCE_DISPLAY, ThreadMetadataRefresh, classify_impact_categories,
-    compute_heavy_impact_paths, format_confidence,
-    refresh_active_thread_metadata, refresh_thread_freshness, summarize_confidence,
-    summarize_verification, update_thread_state_from_state,
+    compute_heavy_impact_paths, format_confidence, refresh_active_thread_metadata,
+    refresh_thread_freshness, summarize_confidence, summarize_verification,
+    update_thread_state_from_state,
 };
-pub use stash::{StashEntry, StashManager};
 pub use stack_snapshot::{
     REPOSITORY_SNAPSHOT_SCHEMA_VERSION, RepositorySnapshot, StackNextAction, ThreadSnapshot,
 };
+pub use stash::{StashEntry, StashManager};
 pub use thread_advice::{
     RecommendedAction, ThreadAdvice, describe_thread_advice, describe_thread_advice_with_initial,
     shell_quote, thread_flag,
 };
+pub use thread_model::{
+    ConfidenceBand, EphemeralMarker, ThreadConfidenceSummary, ThreadFreshness, ThreadId,
+    ThreadIdError, ThreadImpactCategory, ThreadIntegrationPolicy, ThreadMode, ThreadRecord,
+    ThreadRuntimeOverlay, ThreadState, ThreadVerificationSummary, ThreadView, validate_thread_id,
+};
+pub use thread_record_store::{FilesystemThreadRecordStore, ThreadRecordStore};
 pub use thread_stack::{
     PlanRebaseError, StackNode, StackRebasePlan, StackRebaseStep, ThreadStack, compute_stacks,
     plan_stack_rebase, stack_for,
 };
-pub use thread_model::{
-    ConfidenceBand, EphemeralMarker, ThreadConfidenceSummary, ThreadFreshness, ThreadId,
-    ThreadIdError, ThreadImpactCategory, ThreadIntegrationPolicy, ThreadMode,
-    ThreadRecord, ThreadRuntimeOverlay, ThreadState, ThreadVerificationSummary, ThreadView,
-    validate_thread_id,
-};
-pub use thread_record_store::{FilesystemThreadRecordStore, ThreadRecordStore};
 pub use thread_storage::{SyncedThreadMetadata, Thread, ThreadManager};
 pub use thread_worktree_target::{
     ThreadWorktreeTargetDisposition, ThreadWorktreeTargetError, validate_thread_worktree_target,
+};
+pub use visibility::{
+    AudienceParseError, AudienceTier, ScopeDropCounts, filter_for_audience,
+    filter_for_audience_with_drops, visible,
 };
 pub use worktree_index::{DirectoryCacheEntry, IndexEntry, WorktreeIndex};
 pub use worktree_state::WorktreeState;

@@ -236,9 +236,7 @@ impl<'ast> Visit<'ast> for Finder<'_> {
 /// enum — return its name. Catches `OpRecord::Snapshot { .. }`,
 /// `OpRecord::Fork(..)`, and or-patterns / refs / parens thereof.
 fn matched_target_enum(node: &ExprMatch) -> Option<String> {
-    node.arms
-        .iter()
-        .find_map(|arm| pat_target_enum(&arm.pat))
+    node.arms.iter().find_map(|arm| pat_target_enum(&arm.pat))
 }
 
 fn pat_target_enum(pat: &Pat) -> Option<String> {
@@ -350,14 +348,16 @@ mod tests {
                 OpRecord::Snapshot { .. } | _ => {} \
             } }",
         );
-        assert_eq!(hits.len(), 1, "wildcard inside an or-pattern must be flagged");
+        assert_eq!(
+            hits.len(),
+            1,
+            "wildcard inside an or-pattern must be flagged"
+        );
     }
 
     #[test]
     fn flags_o_p_kind_match_too() {
-        let hits = scan_source(
-            "fn f(k: OpKind) { match k { OpKind::Snapshot => a(), _ => {} } }",
-        );
+        let hits = scan_source("fn f(k: OpKind) { match k { OpKind::Snapshot => a(), _ => {} } }");
         assert_eq!(hits.len(), 1, "OpKind is also a target enum");
         assert_eq!(hits[0].enum_name, "OpKind");
     }
@@ -384,15 +384,17 @@ mod tests {
                 OpRecord::Goto { .. } => c(), \
             } }",
         );
-        assert!(hits.is_empty(), "a guarded catch-all is not a silent swallow");
+        assert!(
+            hits.is_empty(),
+            "a guarded catch-all is not a silent swallow"
+        );
     }
 
     #[test]
     fn ignores_wildcard_over_non_target_enum() {
         // A `match` over a string/other enum legitimately uses `_`.
-        let hits = scan_source(
-            "fn f(kind: &str) -> u8 { match kind { \"snapshot\" => 1, _ => 0 } }",
-        );
+        let hits =
+            scan_source("fn f(kind: &str) -> u8 { match kind { \"snapshot\" => 1, _ => 0 } }");
         assert!(hits.is_empty(), "non-target matches keep their wildcard");
     }
 
@@ -401,9 +403,8 @@ mod tests {
         // `matches!` expands to a macro, not an `ExprMatch`, so its internal
         // `_ => false` is invisible to the source AST — the idiomatic predicate
         // stays allowed.
-        let hits = scan_source(
-            "fn f(op: &OpRecord) -> bool { matches!(op, OpRecord::Snapshot { .. }) }",
-        );
+        let hits =
+            scan_source("fn f(op: &OpRecord) -> bool { matches!(op, OpRecord::Snapshot { .. }) }");
         assert!(hits.is_empty(), "matches! predicate must not be flagged");
     }
 
@@ -415,7 +416,10 @@ mod tests {
                 fn t(op: &OpRecord) { match op { OpRecord::Snapshot { .. } => a(), _ => {} } } \
              }",
         );
-        assert!(hits.is_empty(), "inline #[cfg(test)] module must be skipped");
+        assert!(
+            hits.is_empty(),
+            "inline #[cfg(test)] module must be skipped"
+        );
     }
 
     const PLANTED: &str = "fn f(op: &OpRecord) { match op { \
@@ -470,12 +474,21 @@ mod tests {
         let mut hits = Vec::new();
         let mut scanned = 0usize;
         scan_dir(&crates_dir, &mut hits, &mut scanned).expect("scan crates/");
-        assert!(scanned > 0, "expected to scan some files under {crates_dir:?}");
+        assert!(
+            scanned > 0,
+            "expected to scan some files under {crates_dir:?}"
+        );
         assert!(
             hits.is_empty(),
             "non-exhaustive OpRecord/OpKind match(es) found: {:?}",
             hits.iter()
-                .map(|h| format!("{}:{} ({} arm `{}`)", h.path.display(), h.line, h.enum_name, h.arm))
+                .map(|h| format!(
+                    "{}:{} ({} arm `{}`)",
+                    h.path.display(),
+                    h.line,
+                    h.enum_name,
+                    h.arm
+                ))
                 .collect::<Vec<_>>()
         );
     }

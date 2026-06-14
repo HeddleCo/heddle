@@ -7,143 +7,366 @@ use std::{
     net::{TcpListener, TcpStream},
     process::{Child, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::Duration,
 };
 
 use base64::Engine;
-use gix::refs::transaction::PreviousValue;
 use objects::object::{
     Blob, ChangeId, ContentHash, EntryType, FileMode, MarkerName, ThreadName, Tree, TreeEntry,
 };
 use repo::Repository;
+use sley::plumbing::sley_core::ByteString as GitByteString;
+use sley::plumbing::sley_object::EncodedObject;
+use sley::{
+    CommitObject, EntryKind, GitObjectType, GitTime, ObjectId, RefPrecondition, ReferenceTarget,
+    Repository as SleyRepository, Signature, TagObject,
+};
 use tempfile::TempDir;
 
 use cli::bridge::{
+    GitBridge,
     git_core::{
-        clone_url_to_bare, copy_local_repo_to_bare, GitBridgeError, GitPushScope, SyncMapping,
+        GitBridgeError, GitPushScope, SyncMapping, clone_url_to_bare, copy_local_repo_to_bare,
     },
     git_export::{export_all, export_current_thread, export_tree},
     git_import::{
-        backfill_fidelity, import_all, import_all_with_options, import_git_tree, GitTreeImporter,
+        GitTreeImporter, backfill_fidelity, import_all, import_all_with_options, import_git_tree,
     },
+    git_notes,
     git_sync::{sync_branches, sync_tags, sync_track_to_branch},
     git_util::GitImportOptions,
     test_support,
     test_support::{
-        collect_managed_ref_updates, delete_reference_if_present, plan_destination_reconcile,
-        read_exported_refs, read_mirror_managed_refs, set_reference, write_exported_refs,
-        write_mirror_managed_refs, RefNamespace, RefUpdate,
+        RefNamespace, RefUpdate, collect_managed_ref_updates, delete_reference_if_present,
+        plan_destination_reconcile, read_exported_refs, read_mirror_managed_refs, set_reference,
+        write_exported_refs, write_mirror_managed_refs,
     },
-    GitBridge,
 };
 
-fn init_git_repo() -> (TempDir, gix::Repository) {
-    let temp = TempDir::new().expect("temp dir");
-    let repo = gix::init(temp.path()).expect("init git repo");
-    (temp, repo)
+trait SleyTestRepoExt {
+    fn find_tree(&self, oid: ObjectId) -> Result<sley::TreeObject, String>;
+    fn find_object(&self, oid: ObjectId) -> Result<TestObject, String>;
+    fn find_blob(&self, oid: ObjectId) -> Result<TestBlob, String>;
+    fn find_commit(&self, oid: ObjectId) -> Result<TestCommit, String>;
+    fn path(&self) -> &std::path::Path;
 }
 
-fn init_bare_git_repo() -> (TempDir, gix::Repository) {
-    let temp = TempDir::new().expect("temp dir");
-    let repo = gix::init_bare(temp.path()).expect("init bare git repo");
-    (temp, repo)
-}
+impl SleyTestRepoExt for SleyRepository {
+    fn find_tree(&self, oid: ObjectId) -> Result<sley::TreeObject, String> {
+        self.read_tree(&oid).map_err(|err| err.to_string())
+    }
 
-fn init_named_bare_git_repo(root: &TempDir, name: &str) -> gix::Repository {
-    gix::init_bare(root.path().join(name)).expect("init named bare git repo")
-}
+    fn find_object(&self, oid: ObjectId) -> Result<TestObject, String> {
+        let object = self.read_object(&oid).map_err(|err| err.to_string())?;
+        Ok(TestObject {
+            kind: object.object_type,
+            data: object.body.clone(),
+        })
+    }
 
-fn test_signature() -> gix::actor::Signature {
-    gix::actor::Signature {
-        name: "Heddle Test".into(),
-        email: "heddle@test".into(),
-        time: gix::date::Time {
-            seconds: 0,
-            offset: 0,
-        },
+    fn find_blob(&self, oid: ObjectId) -> Result<TestBlob, String> {
+        let object = self.read_object(&oid).map_err(|err| err.to_string())?;
+        if object.object_type != GitObjectType::Blob {
+            return Err(format!("object {oid} is not a blob"));
+        }
+        Ok(TestBlob {
+            data: object.body.clone(),
+        })
+    }
+
+    fn find_commit(&self, oid: ObjectId) -> Result<TestCommit, String> {
+        self.read_commit(&oid)
+            .map(|commit| TestCommit { commit })
+            .map_err(|err| err.to_string())
+    }
+
+    fn path(&self) -> &std::path::Path {
+        self.git_dir()
     }
 }
 
-fn empty_tree_oid(repo: &gix::Repository) -> gix::hash::ObjectId {
-    repo.empty_tree().id
+struct TestReference<'a> {
+    repo: &'a SleyRepository,
+    target: ReferenceTarget,
+}
+
+fn find_reference<'a>(repo: &'a SleyRepository, name: &str) -> Result<TestReference<'a>, String> {
+    let target = repo
+        .references()
+        .read_ref(name)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| format!("reference {name} not found"))?;
+    Ok(TestReference { repo, target })
+}
+
+impl TestReference<'_> {
+    fn id(&self) -> ObjectId {
+        self.try_id()
+            .expect("test reference should point directly at an object")
+    }
+
+    fn try_id(&self) -> Option<ObjectId> {
+        self.target().try_id().copied()
+    }
+
+    fn peel_to_id(&mut self) -> Result<ObjectId, String> {
+        let oid = match &self.target {
+            ReferenceTarget::Direct(oid) => *oid,
+            ReferenceTarget::Symbolic(name) => {
+                let reference = find_reference(self.repo, name)?;
+                match reference.target {
+                    ReferenceTarget::Direct(oid) => oid,
+                    ReferenceTarget::Symbolic(_) => {
+                        return Err(format!("nested symbolic reference {name} is unsupported"));
+                    }
+                }
+            }
+        };
+        peel_oid(self.repo, oid)
+    }
+
+    fn target(&self) -> TestReferenceTarget<'_> {
+        TestReferenceTarget {
+            target: &self.target,
+        }
+    }
+}
+
+struct TestReferenceTarget<'a> {
+    target: &'a ReferenceTarget,
+}
+
+impl<'a> TestReferenceTarget<'a> {
+    fn try_id(&self) -> Option<&'a ObjectId> {
+        match self.target {
+            ReferenceTarget::Direct(oid) => Some(oid),
+            ReferenceTarget::Symbolic(_) => None,
+        }
+    }
+}
+
+struct TestObject {
+    kind: GitObjectType,
+    data: Vec<u8>,
+}
+
+struct TestBlob {
+    data: Vec<u8>,
+}
+
+struct TestCommit {
+    commit: CommitObject,
+}
+
+impl TestCommit {
+    fn message_raw_sloppy(&self) -> TestRawMessage<'_> {
+        TestRawMessage(&self.commit.message)
+    }
+
+    fn parent_ids(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.commit.parents.iter().copied()
+    }
+
+    fn tree_id(&self) -> Option<ObjectId> {
+        Some(self.commit.tree)
+    }
+}
+
+struct TestRawMessage<'a>(&'a [u8]);
+
+impl TestRawMessage<'_> {
+    fn to_vec(&self) -> Vec<u8> {
+        self.0.to_vec()
+    }
+}
+
+impl std::fmt::Display for TestRawMessage<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", String::from_utf8_lossy(self.0))
+    }
+}
+
+trait SleyTestTreeExt {
+    fn find_entry(&self, name: &str) -> Option<TestTreeEntry<'_>>;
+    fn iter(&self) -> std::vec::IntoIter<Result<TestTreeEntry<'_>, String>>;
+}
+
+impl SleyTestTreeExt for sley::TreeObject {
+    fn find_entry(&self, name: &str) -> Option<TestTreeEntry<'_>> {
+        self.entries
+            .iter()
+            .find(|entry| entry.name.as_bytes() == name.as_bytes())
+            .map(|entry| TestTreeEntry { entry })
+    }
+
+    fn iter(&self) -> std::vec::IntoIter<Result<TestTreeEntry<'_>, String>> {
+        self.entries
+            .iter()
+            .map(|entry| Ok(TestTreeEntry { entry }))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+}
+
+struct TestTreeEntry<'a> {
+    entry: &'a sley::plumbing::sley_object::TreeEntry,
+}
+
+impl TestTreeEntry<'_> {
+    fn filename(&self) -> String {
+        String::from_utf8_lossy(self.entry.name.as_bytes()).into_owned()
+    }
+
+    fn mode(&self) -> TestEntryMode {
+        TestEntryMode(self.entry.mode)
+    }
+
+    fn object_id(&self) -> ObjectId {
+        self.entry.oid
+    }
+}
+
+struct TestEntryMode(u32);
+
+impl TestEntryMode {
+    fn kind(&self) -> EntryKind {
+        EntryKind::from_mode(self.0).expect("canonical tree entry mode")
+    }
+}
+
+fn peel_oid(repo: &SleyRepository, oid: ObjectId) -> Result<ObjectId, String> {
+    let object = repo.read_object(&oid).map_err(|err| err.to_string())?;
+    if object.object_type == GitObjectType::Tag {
+        let tag = repo.read_tag(&oid).map_err(|err| err.to_string())?;
+        peel_oid(repo, tag.object)
+    } else {
+        Ok(oid)
+    }
+}
+
+fn open_git(path: impl AsRef<std::path::Path>) -> Result<SleyRepository, String> {
+    SleyRepository::open(path.as_ref())
+        .or_else(|_| SleyRepository::discover(path.as_ref()))
+        .map_err(|err| err.to_string())
+}
+
+fn init_git_repo() -> (TempDir, SleyRepository) {
+    let temp = TempDir::new().expect("temp dir");
+    let repo = SleyRepository::init(temp.path()).expect("init git repo");
+    (temp, repo)
+}
+
+fn init_bare_git_repo() -> (TempDir, SleyRepository) {
+    let temp = TempDir::new().expect("temp dir");
+    let repo = SleyRepository::init_bare(temp.path()).expect("init bare git repo");
+    (temp, repo)
+}
+
+fn init_named_bare_git_repo(root: &TempDir, name: &str) -> SleyRepository {
+    SleyRepository::init_bare(root.path().join(name)).expect("init named bare git repo")
+}
+
+fn test_signature() -> Signature {
+    test_signature_at("Heddle Test", "heddle@test", 0, 0)
+}
+
+fn test_signature_at(
+    name: &str,
+    email: &str,
+    seconds: i64,
+    timezone_offset_minutes: i16,
+) -> Signature {
+    let time = GitTime::new(seconds, timezone_offset_minutes);
+    let raw = format!("{name} <{email}> {seconds} {}", time.offset_token()).into_bytes();
+    Signature {
+        name: GitByteString::new(name.as_bytes().to_vec()),
+        email: GitByteString::new(email.as_bytes().to_vec()),
+        time,
+        raw,
+    }
+}
+
+fn empty_tree_oid(repo: &SleyRepository) -> ObjectId {
+    repo.write_tree(sley::TreeEditor::new())
+        .expect("write empty tree")
 }
 
 fn commit_with_tree(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     reference: Option<&str>,
-    tree_oid: gix::hash::ObjectId,
+    tree_oid: ObjectId,
     message: &str,
-    parents: &[gix::hash::ObjectId],
-) -> gix::hash::ObjectId {
+    parents: &[ObjectId],
+) -> ObjectId {
     let sig = test_signature();
-    let mut committer_buf = gix::date::parse::TimeBuf::default();
-    let mut author_buf = gix::date::parse::TimeBuf::default();
-    let commit = repo
-        .new_commit_as(
-            sig.to_ref(&mut committer_buf),
-            sig.to_ref(&mut author_buf),
-            message,
-            tree_oid,
-            parents.to_vec(),
-        )
+    let commit = CommitObject {
+        tree: tree_oid,
+        parents: parents.to_vec(),
+        author: sig.to_ident_bytes(),
+        committer: sig.to_ident_bytes(),
+        encoding: None,
+        message: message.as_bytes().to_vec(),
+    };
+    let commit_id = repo
+        .write_object(EncodedObject::new(GitObjectType::Commit, commit.write()))
         .expect("commit");
     if let Some(reference) = reference {
         set_reference(
             repo,
             reference,
-            commit.id,
-            PreviousValue::Any,
+            commit_id,
+            RefPrecondition::Any,
             "test: update ref",
         )
         .expect("update ref");
     }
-    commit.id
+    commit_id
 }
 
 fn create_annotated_tag(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     name: &str,
-    target: gix::hash::ObjectId,
+    target: ObjectId,
     message: &str,
-) -> gix::hash::ObjectId {
-    let tag = gix::objs::Tag {
-        target,
-        target_kind: gix::objs::Kind::Commit,
-        name: name.into(),
-        tagger: Some(test_signature()),
-        message: message.into(),
-        pgp_signature: None,
+) -> ObjectId {
+    let tag = TagObject {
+        object: target,
+        object_type: GitObjectType::Commit,
+        name: name.as_bytes().to_vec(),
+        tagger: Some(test_signature().to_ident_bytes()),
+        message: message.as_bytes().to_vec(),
+        raw_body: None,
     };
-    let tag_id = repo.write_object(&tag).expect("write tag").detach();
+    let tag_id = repo
+        .write_object(EncodedObject::new(GitObjectType::Tag, tag.write()))
+        .expect("write tag");
     set_reference(
         repo,
         &format!("refs/tags/{name}"),
         tag_id,
-        PreviousValue::MustNotExist,
+        RefPrecondition::MustNotExist,
         "test: create tag",
     )
     .expect("create tag ref");
     tag_id
 }
 
-fn gitlink_tree(repo: &gix::Repository, name: &str) -> gix::hash::ObjectId {
-    let submodule_oid: gix::hash::ObjectId = "0505050505050505050505050505050505050505"
+fn gitlink_tree(repo: &SleyRepository, name: &str) -> ObjectId {
+    let submodule_oid: ObjectId = "0505050505050505050505050505050505050505"
         .parse()
         .expect("oid");
     let mut editor = repo
-        .edit_tree(gix::hash::ObjectId::empty_tree(repo.object_hash()))
+        .edit_tree(&ObjectId::empty_tree(repo.object_format()))
         .expect("tree editor");
-    editor
-        .upsert(name, gix::object::tree::EntryKind::Commit, submodule_oid)
-        .expect("insert submodule");
-    editor.write().expect("write tree").detach()
+    editor.upsert(name, EntryKind::Commit, submodule_oid);
+    repo.write_tree(editor).expect("write tree")
 }
 
-fn init_gitlink_repo() -> (TempDir, gix::Repository) {
+fn init_gitlink_repo() -> (TempDir, SleyRepository) {
     let (git_temp, git_repo) = init_git_repo();
     let tree_oid = gitlink_tree(&git_repo, "vendor");
     commit_with_tree(&git_repo, Some("refs/heads/main"), tree_oid, "gitlink", &[]);
@@ -182,16 +405,18 @@ impl GitHttpBackend {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_signal = Arc::clone(&stop);
         let auth = basic_auth.clone();
-        let join = thread::spawn(move || loop {
-            if stop_signal.load(Ordering::Relaxed) {
-                break;
-            }
-            match listener.accept() {
-                Ok((stream, _)) => handle_http_backend_connection(stream, &root, auth.as_ref()),
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10));
+        let join = thread::spawn(move || {
+            loop {
+                if stop_signal.load(Ordering::Relaxed) {
+                    break;
                 }
-                Err(_) => break,
+                match listener.accept() {
+                    Ok((stream, _)) => handle_http_backend_connection(stream, &root, auth.as_ref()),
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
             }
         });
 
@@ -477,10 +702,9 @@ fn sync_track_to_branch_advances_branch_to_thread_tip() {
     // Heddle thread, not the Git ref.
     sync_track_to_branch(&git_repo, "main", second).expect("branch sync must succeed");
 
-    let mut updated = git_repo
-        .find_reference("refs/heads/main")
-        .expect("branch ref present after sync");
-    let updated_oid = updated.peel_to_id().expect("peel ref").detach();
+    let mut updated =
+        find_reference(&git_repo, "refs/heads/main").expect("branch ref present after sync");
+    let updated_oid = updated.peel_to_id().expect("peel ref");
     assert_eq!(
         updated_oid, second,
         "branch main should now point at the thread tip"
@@ -493,7 +717,7 @@ fn export_tree_writes_submodule_entries() {
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
     let (_git_temp, git_repo) = init_git_repo();
 
-    let submodule_oid: gix::hash::ObjectId = "0303030303030303030303030303030303030303"
+    let submodule_oid: ObjectId = "0303030303030303030303030303030303030303"
         .parse()
         .expect("oid");
     let blob = Blob::new(format!("heddle-submodule: {}", submodule_oid).into_bytes());
@@ -511,7 +735,7 @@ fn export_tree_writes_submodule_entries() {
     let git_tree = git_repo.find_tree(tree_oid).expect("git tree");
     let entry = git_tree.find_entry("vendor").expect("entry");
 
-    assert_eq!(entry.mode().kind(), gix::object::tree::EntryKind::Commit);
+    assert_eq!(entry.mode().kind(), EntryKind::Commit);
     assert_eq!(entry.object_id(), submodule_oid);
 }
 
@@ -619,20 +843,14 @@ fn export_tree_substitutes_stub_for_redacted_blob() {
 #[test]
 fn import_tree_rejects_submodule_entries_by_default() {
     let (_git_temp, git_repo) = init_git_repo();
-    let submodule_oid: gix::hash::ObjectId = "0404040404040404040404040404040404040404"
+    let submodule_oid: ObjectId = "0404040404040404040404040404040404040404"
         .parse()
         .expect("oid");
     let mut editor = git_repo
-        .edit_tree(gix::hash::ObjectId::empty_tree(git_repo.object_hash()))
+        .edit_tree(&ObjectId::empty_tree(git_repo.object_format()))
         .expect("tree editor");
-    editor
-        .upsert(
-            "vendor",
-            gix::object::tree::EntryKind::Commit,
-            submodule_oid,
-        )
-        .expect("insert submodule");
-    let tree_oid = editor.write().expect("write tree").detach();
+    editor.upsert("vendor", EntryKind::Commit, submodule_oid);
+    let tree_oid = git_repo.write_tree(editor).expect("write tree");
 
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
@@ -652,20 +870,14 @@ fn import_tree_rejects_submodule_entries_by_default() {
 #[test]
 fn import_tree_reads_submodule_entries_with_lossy_opt_in() {
     let (_git_temp, git_repo) = init_git_repo();
-    let submodule_oid: gix::hash::ObjectId = "0404040404040404040404040404040404040404"
+    let submodule_oid: ObjectId = "0404040404040404040404040404040404040404"
         .parse()
         .expect("oid");
     let mut editor = git_repo
-        .edit_tree(gix::hash::ObjectId::empty_tree(git_repo.object_hash()))
+        .edit_tree(&ObjectId::empty_tree(git_repo.object_format()))
         .expect("tree editor");
-    editor
-        .upsert(
-            "vendor",
-            gix::object::tree::EntryKind::Commit,
-            submodule_oid,
-        )
-        .expect("insert submodule");
-    let tree_oid = editor.write().expect("write tree").detach();
+    editor.upsert("vendor", EntryKind::Commit, submodule_oid);
+    let tree_oid = git_repo.write_tree(editor).expect("write tree");
 
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
@@ -700,7 +912,7 @@ fn import_all_rejects_gitlink_by_default_and_lossy_reports_conversion() {
     let mut default_bridge = GitBridge::new(&default_repo);
     let err = import_all(
         &mut default_bridge,
-        Some(git_repo.workdir().expect("workdir")),
+        Some(git_repo.workdir().expect("workdir").as_path()),
     )
     .expect_err("default import must fail on gitlink");
     let message = err.to_string();
@@ -712,7 +924,7 @@ fn import_all_rejects_gitlink_by_default_and_lossy_reports_conversion() {
     let mut lossy_bridge = GitBridge::new(&lossy_repo);
     let stats = import_all_with_options(
         &mut lossy_bridge,
-        Some(git_repo.workdir().expect("workdir")),
+        Some(git_repo.workdir().expect("workdir").as_path()),
         GitImportOptions { lossy: true },
     )
     .expect("lossy import accepts gitlink conversion");
@@ -729,28 +941,21 @@ fn import_all_lossy_does_not_reattribute_cached_shared_subtree_entries() {
     let shared_tree = gitlink_tree(&git_repo, "vendor");
 
     let mut first_editor = git_repo
-        .edit_tree(empty_tree_oid(&git_repo))
+        .edit_tree(&empty_tree_oid(&git_repo))
         .expect("first tree editor");
-    first_editor
-        .upsert("shared", gix::object::tree::EntryKind::Tree, shared_tree)
-        .expect("insert shared subtree");
-    let first_tree = first_editor.write().expect("write first tree").detach();
+    first_editor.upsert("shared", EntryKind::Tree, shared_tree);
+    let first_tree = git_repo.write_tree(first_editor).expect("write first tree");
     let first_commit = commit_with_tree(&git_repo, None, first_tree, "add shared subtree", &[]);
 
-    let note_blob = git_repo
-        .write_blob(b"second\n")
-        .expect("note blob")
-        .detach();
+    let note_blob = git_repo.write_blob(b"second\n").expect("note blob");
     let mut second_editor = git_repo
-        .edit_tree(empty_tree_oid(&git_repo))
+        .edit_tree(&empty_tree_oid(&git_repo))
         .expect("second tree editor");
-    second_editor
-        .upsert("shared", gix::object::tree::EntryKind::Tree, shared_tree)
-        .expect("reuse shared subtree");
-    second_editor
-        .upsert("note.txt", gix::object::tree::EntryKind::Blob, note_blob)
-        .expect("insert unrelated root change");
-    let second_tree = second_editor.write().expect("write second tree").detach();
+    second_editor.upsert("shared", EntryKind::Tree, shared_tree);
+    second_editor.upsert("note.txt", EntryKind::Blob, note_blob);
+    let second_tree = git_repo
+        .write_tree(second_editor)
+        .expect("write second tree");
     let second_commit = commit_with_tree(
         &git_repo,
         Some("refs/heads/main"),
@@ -764,7 +969,7 @@ fn import_all_lossy_does_not_reattribute_cached_shared_subtree_entries() {
     let mut bridge = GitBridge::new(&repo);
     let stats = import_all_with_options(
         &mut bridge,
-        Some(git_repo.workdir().expect("workdir")),
+        Some(&git_repo.workdir().expect("workdir")),
         GitImportOptions { lossy: true },
     )
     .expect("lossy import accepts shared gitlink subtree");
@@ -814,7 +1019,7 @@ fn import_all_default_fails_on_cached_lossy_commit_from_prior_run() {
     let mut first_bridge = GitBridge::new(&repo);
     let first = import_all_with_options(
         &mut first_bridge,
-        Some(git_path),
+        Some(git_path.as_path()),
         GitImportOptions { lossy: true },
     )
     .expect("initial lossy bridge import succeeds");
@@ -832,7 +1037,7 @@ fn import_all_default_fails_on_cached_lossy_commit_from_prior_run() {
     );
 
     let mut rerun_bridge = GitBridge::new(&repo);
-    let err = import_all(&mut rerun_bridge, Some(git_path))
+    let err = import_all(&mut rerun_bridge, Some(git_path.as_path()))
         .expect_err("default bridge import must not reuse cached lossy state silently");
     assert_lossy_default_rerun_error("bridge", &err.to_string());
 }
@@ -847,7 +1052,7 @@ fn import_all_lossy_reports_cached_lossy_commit_from_prior_run() {
     let mut first_bridge = GitBridge::new(&repo);
     import_all_with_options(
         &mut first_bridge,
-        Some(git_path),
+        Some(git_path.as_path()),
         GitImportOptions { lossy: true },
     )
     .expect("initial lossy bridge import succeeds");
@@ -855,7 +1060,7 @@ fn import_all_lossy_reports_cached_lossy_commit_from_prior_run() {
     let mut rerun_bridge = GitBridge::new(&repo);
     let second = import_all_with_options(
         &mut rerun_bridge,
-        Some(git_path),
+        Some(git_path.as_path()),
         GitImportOptions { lossy: true },
     )
     .expect("lossy bridge rerun reports persisted lossy entries");
@@ -904,11 +1109,11 @@ fn run_lossy_then_default_rerun(engine: ImportEngine) {
     let git_path = git_repo.workdir().expect("workdir");
     let message = match engine {
         ImportEngine::Ingest => {
-            use ingest::{import_git_into, import_git_into_with_options, ImportOptions};
+            use ingest::{ImportOptions, import_git_into, import_git_into_with_options};
 
             let heddle_temp = TempDir::new().expect("heddle temp");
             let (first, map) = import_git_into_with_options(
-                git_path,
+                &git_path,
                 heddle_temp.path(),
                 ImportOptions { lossy: true },
             )
@@ -926,14 +1131,14 @@ fn run_lossy_then_default_rerun(engine: ImportEngine) {
             let mut first_bridge = GitBridge::new(&repo);
             let first = import_all_with_options(
                 &mut first_bridge,
-                Some(git_path),
+                Some(git_path.as_path()),
                 GitImportOptions { lossy: true },
             )
             .expect("initial lossy bridge import succeeds");
             assert_eq!(first.lossy_entries.len(), 1);
 
             let mut rerun_bridge = GitBridge::new(&repo);
-            import_all(&mut rerun_bridge, Some(git_path))
+            import_all(&mut rerun_bridge, Some(git_path.as_path()))
                 .expect_err("default bridge import must fail on cached lossy commit")
                 .to_string()
         }
@@ -961,7 +1166,7 @@ fn import_all_lossy_clean_repo_reports_no_lossy_entries() {
     let mut bridge = GitBridge::new(&repo);
     let stats = import_all_with_options(
         &mut bridge,
-        Some(git_repo.workdir().expect("workdir")),
+        Some(git_repo.workdir().expect("workdir").as_path()),
         GitImportOptions { lossy: true },
     )
     .expect("clean repo imports with lossy flag too");
@@ -1006,7 +1211,7 @@ fn bridge_import_lossy_state_carries_canonical_git_lossy_marker() {
     let mut bridge = GitBridge::new(&repo);
     let stats = import_all_with_options(
         &mut bridge,
-        Some(git_repo.workdir().expect("workdir")),
+        Some(git_repo.workdir().expect("workdir").as_path()),
         GitImportOptions { lossy: true },
     )
     .expect("lossy bridge import succeeds");
@@ -1028,7 +1233,7 @@ fn bridge_import_lossy_state_carries_canonical_git_lossy_marker() {
 #[cfg(feature = "ingest")]
 #[test]
 fn ingest_lossy_state_carries_canonical_git_lossy_marker() {
-    use ingest::{import_git_into_with_options, ImportOptions};
+    use ingest::{ImportOptions, import_git_into_with_options};
 
     let (_git_temp, git_repo) = init_gitlink_repo();
     let git_path = git_repo.workdir().expect("workdir");
@@ -1060,7 +1265,7 @@ fn ingest_lossy_state_carries_canonical_git_lossy_marker() {
 #[cfg(feature = "ingest")]
 #[test]
 fn export_mints_lossy_ingest_state_from_raw_metadata() {
-    use ingest::{import_git_into_with_options, ImportOptions};
+    use ingest::{ImportOptions, import_git_into_with_options};
 
     let (_git_temp, git_repo) = init_gitlink_repo();
     let git_path = git_repo.workdir().expect("workdir");
@@ -1100,13 +1305,11 @@ fn export_mints_lossy_ingest_state_from_raw_metadata() {
         .export_to_path(&dest_path)
         .expect("export must MINT the unmapped lossy state, not reject it");
 
-    let dest_repo = gix::open(&dest_path).expect("open dest");
-    let dest_main = dest_repo
-        .find_reference("refs/heads/main")
+    let dest_repo = open_git(&dest_path).expect("open dest");
+    let dest_main = find_reference(&dest_repo, "refs/heads/main")
         .expect("exported main ref")
         .peel_to_id()
-        .expect("exported main target")
-        .detach();
+        .expect("exported main target");
     let dest_commit = dest_repo.find_commit(dest_main).expect("dest main commit");
 
     // Minted from raw metadata: the message is the verbatim raw_message, NOT the
@@ -1143,20 +1346,18 @@ fn copy_local_repo_to_bare_handles_gitlink_entries() {
     // Build a tree containing one gitlink entry pointing at a
     // fabricated commit OID that is *not* present in this repo —
     // exactly the shape git/git ships with `sha1collisiondetection`.
-    let foreign_submodule_oid: gix::hash::ObjectId = "855827c583bc30645ba427885caa40c5b81764d2"
+    let foreign_submodule_oid: ObjectId = "855827c583bc30645ba427885caa40c5b81764d2"
         .parse()
         .expect("oid");
     let mut editor = source
-        .edit_tree(empty_tree_oid(&source))
+        .edit_tree(&empty_tree_oid(&source))
         .expect("tree editor");
-    editor
-        .upsert(
-            "sha1collisiondetection",
-            gix::object::tree::EntryKind::Commit,
-            foreign_submodule_oid,
-        )
-        .expect("insert gitlink");
-    let tree_with_gitlink = editor.write().expect("write tree").detach();
+    editor.upsert(
+        "sha1collisiondetection",
+        EntryKind::Commit,
+        foreign_submodule_oid,
+    );
+    let tree_with_gitlink = source.write_tree(editor).expect("write tree");
     let commit = commit_with_tree(
         &source,
         Some("refs/heads/main"),
@@ -1182,7 +1383,7 @@ fn copy_local_repo_to_bare_handles_gitlink_entries() {
     // non-gitlink object.
     copy_local_repo_to_bare(source.path(), &dest_path).expect("copy with gitlink");
 
-    let dest = gix::open(&dest_path).expect("open dest");
+    let dest = open_git(&dest_path).expect("open dest");
     assert!(
         dest.find_commit(commit).is_ok(),
         "destination must contain the parent commit"
@@ -1203,7 +1404,7 @@ fn copy_local_repo_to_bare_handles_gitlink_entries() {
     let entry = copied_tree
         .find_entry("sha1collisiondetection")
         .expect("entry");
-    assert_eq!(entry.mode().kind(), gix::object::tree::EntryKind::Commit);
+    assert_eq!(entry.mode().kind(), EntryKind::Commit);
     assert_eq!(entry.object_id(), foreign_submodule_oid);
 }
 
@@ -1264,18 +1465,18 @@ fn delete_reference_if_present_drops_new_branch_for_rollback() {
         &repo,
         "refs/heads/feature-x",
         oid,
-        PreviousValue::MustNotExist,
+        RefPrecondition::MustNotExist,
         "create branch",
     )
     .expect("create branch");
     assert!(
-        repo.find_reference("refs/heads/feature-x").is_ok(),
+        find_reference(&repo, "refs/heads/feature-x").is_ok(),
         "set_reference must create the branch"
     );
 
     delete_reference_if_present(&repo, "refs/heads/feature-x").expect("delete");
     assert!(
-        repo.find_reference("refs/heads/feature-x").is_err(),
+        find_reference(&repo, "refs/heads/feature-x").is_err(),
         "rollback must remove the branch we just created"
     );
 
@@ -1293,7 +1494,7 @@ fn mapping_persists_between_runs() {
     let (_git_temp, git_repo) = init_git_repo();
 
     let change_id = ChangeId::generate();
-    let git_oid: gix::hash::ObjectId = "0909090909090909090909090909090909090909"
+    let git_oid: ObjectId = "0909090909090909090909090909090909090909"
         .parse()
         .expect("oid");
 
@@ -1302,8 +1503,11 @@ fn mapping_persists_between_runs() {
     test_support::save_mapping_to_disk(&bridge).expect("save mapping");
 
     let mut reloaded = GitBridge::new(&repo);
-    test_support::build_existing_mapping(&mut reloaded, Some(git_repo.workdir().expect("workdir")))
-        .expect("build mapping");
+    test_support::build_existing_mapping(
+        &mut reloaded,
+        Some(git_repo.workdir().expect("workdir").as_path()),
+    )
+    .expect("build mapping");
 
     assert_eq!(
         test_support::mapping(&reloaded).get_git(&change_id),
@@ -1318,7 +1522,7 @@ fn legacy_mapping_is_migrated_out_of_git_dir() {
     let (_git_temp, git_repo) = init_git_repo();
 
     let change_id = ChangeId::generate();
-    let git_oid: gix::hash::ObjectId = "0808080808080808080808080808080808080808"
+    let git_oid: ObjectId = "0808080808080808080808080808080808080808"
         .parse()
         .expect("oid");
 
@@ -1335,8 +1539,11 @@ fn legacy_mapping_is_migrated_out_of_git_dir() {
     .expect("write legacy mapping");
 
     let mut bridge = GitBridge::new(&repo);
-    test_support::build_existing_mapping(&mut bridge, Some(git_repo.workdir().expect("workdir")))
-        .expect("build mapping");
+    test_support::build_existing_mapping(
+        &mut bridge,
+        Some(git_repo.workdir().expect("workdir").as_path()),
+    )
+    .expect("build mapping");
 
     assert_eq!(
         test_support::mapping(&bridge).get_git(&change_id),
@@ -1350,7 +1557,7 @@ fn legacy_mapping_is_migrated_out_of_git_dir() {
 fn test_sync_mapping() {
     let mut mapping = SyncMapping::new();
     let change_id = ChangeId::generate();
-    let oid: gix::hash::ObjectId = "0101010101010101010101010101010101010101".parse().unwrap();
+    let oid: ObjectId = "0101010101010101010101010101010101010101".parse().unwrap();
     mapping.insert(change_id, oid);
     assert_eq!(mapping.get_git(&change_id), Some(oid));
     assert_eq!(mapping.get_heddle(oid), Some(change_id));
@@ -1434,16 +1641,18 @@ fn pull_imports_remote_branches_and_tags_from_path_remote() {
         .pull(source_temp.path().to_str().expect("remote path"))
         .expect("pull remote");
 
-    assert!(repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .is_some());
-    assert!(repo
-        .refs()
-        .get_marker(&MarkerName::new("v1.0"))
-        .unwrap()
-        .is_some());
+    assert!(
+        repo.refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        repo.refs()
+            .get_marker(&MarkerName::new("v1.0"))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -1461,16 +1670,18 @@ fn pull_imports_remote_branches_and_tags_from_file_url_remote() {
         .pull(&format!("file://{}", source_temp.path().display()))
         .expect("pull remote");
 
-    assert!(repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .is_some());
-    assert!(repo
-        .refs()
-        .get_marker(&MarkerName::new("v1.0"))
-        .unwrap()
-        .is_some());
+    assert!(
+        repo.refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        repo.refs()
+            .get_marker(&MarkerName::new("v1.0"))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -1489,16 +1700,18 @@ fn pull_imports_remote_branches_and_tags_from_git_daemon() {
     let mut bridge = GitBridge::new(&repo);
     bridge.pull(&daemon.url("remote.git")).expect("pull remote");
 
-    assert!(repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .is_some());
-    assert!(repo
-        .refs()
-        .get_marker(&MarkerName::new("v1.0"))
-        .unwrap()
-        .is_some());
+    assert!(
+        repo.refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        repo.refs()
+            .get_marker(&MarkerName::new("v1.0"))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -1519,16 +1732,18 @@ fn pull_imports_remote_branches_and_tags_from_git_http_backend() {
         .pull(&backend.url("remote.git"))
         .expect("pull remote over http");
 
-    assert!(repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .is_some());
-    assert!(repo
-        .refs()
-        .get_marker(&MarkerName::new("v1.0"))
-        .unwrap()
-        .is_some());
+    assert!(
+        repo.refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        repo.refs()
+            .get_marker(&MarkerName::new("v1.0"))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -1549,16 +1764,18 @@ fn pull_imports_remote_branches_and_tags_from_authenticated_git_http_backend() {
         .pull(&backend.url("remote.git"))
         .expect("pull remote over authenticated http");
 
-    assert!(repo
-        .refs()
-        .get_thread(&ThreadName::new("main"))
-        .unwrap()
-        .is_some());
-    assert!(repo
-        .refs()
-        .get_marker(&MarkerName::new("v1.0"))
-        .unwrap()
-        .is_some());
+    assert!(
+        repo.refs()
+            .get_thread(&ThreadName::new("main"))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        repo.refs()
+            .get_marker(&MarkerName::new("v1.0"))
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -1624,8 +1841,11 @@ fn import_handles_merge_history_without_missing_parent_mappings() {
     );
 
     let mut bridge = GitBridge::new(&repo);
-    let stats = import_all(&mut bridge, Some(git_repo.workdir().expect("workdir")))
-        .expect("import merge history");
+    let stats = import_all(
+        &mut bridge,
+        Some(git_repo.workdir().expect("workdir").as_path()),
+    )
+    .expect("import merge history");
 
     assert_eq!(stats.commits_imported, 4);
     assert_eq!(
@@ -1663,8 +1883,11 @@ fn import_rejects_branch_name_that_is_not_a_valid_thread_id() {
     );
 
     let mut bridge = GitBridge::new(&repo);
-    let err = import_all(&mut bridge, Some(git_repo.workdir().expect("workdir")))
-        .expect_err("import must reject a branch whose name is not a valid thread id");
+    let err = import_all(
+        &mut bridge,
+        Some(git_repo.workdir().expect("workdir").as_path()),
+    )
+    .expect_err("import must reject a branch whose name is not a valid thread id");
 
     match err {
         GitBridgeError::InvalidThreadName { branch, message } => {
@@ -1703,7 +1926,7 @@ fn failed_import_restores_mapping_and_overrides() {
     let pre_mapping = test_support::mapping(&bridge).clone();
     let pre_overrides = test_support::commit_message_overrides(&bridge).clone();
 
-    import_all(&mut bridge, Some(git_repo.workdir().expect("workdir")))
+    import_all(&mut bridge, Some(&git_repo.workdir().expect("workdir")))
         .expect_err("invalid branch name must fail after commits are mapped");
 
     assert_eq!(
@@ -1717,7 +1940,7 @@ fn failed_import_restores_mapping_and_overrides() {
         "failed import must restore pre-call commit message overrides"
     );
 
-    test_support::build_existing_mapping(&mut bridge, Some(git_repo.workdir().expect("workdir")))
+    test_support::build_existing_mapping(&mut bridge, Some(&git_repo.workdir().expect("workdir")))
         .expect("mapping rebuild after failed import");
     assert_eq!(
         test_support::mapping(&bridge),
@@ -1739,7 +1962,7 @@ fn push_exports_local_branches_and_tags_to_path_remote() {
 
     let mut bridge = GitBridge::new(&repo);
     bridge
-        .import(Some(source_repo.workdir().expect("workdir")))
+        .import(Some(source_repo.workdir().expect("workdir").as_path()))
         .expect("import from git");
 
     bridge
@@ -1749,18 +1972,14 @@ fn push_exports_local_branches_and_tags_to_path_remote() {
         )
         .expect("push remote");
 
-    let main_oid = remote_repo
-        .find_reference("refs/heads/main")
+    let main_oid = find_reference(&remote_repo, "refs/heads/main")
         .expect("main ref")
         .peel_to_id()
-        .expect("main target")
-        .detach();
-    let tag_oid = remote_repo
-        .find_reference("refs/tags/v1.0")
+        .expect("main target");
+    let tag_oid = find_reference(&remote_repo, "refs/tags/v1.0")
         .expect("tag ref")
         .peel_to_id()
-        .expect("tag target")
-        .detach();
+        .expect("tag target");
     let commit = remote_repo.find_commit(main_oid).expect("main commit");
     let message = commit.message_raw_sloppy().to_string();
 
@@ -1781,8 +2000,7 @@ fn push_exports_local_branches_and_tags_to_path_remote() {
 
     // The note carrying the change_id should have travelled along with
     // the branches and tags.
-    let note_ref = remote_repo
-        .find_reference(cli::bridge::git_notes::NOTES_REF)
+    let note_ref = find_reference(&remote_repo, git_notes::NOTES_REF)
         .expect("notes ref should be pushed to remote");
     let _ = note_ref;
 }
@@ -1801,7 +2019,7 @@ fn push_current_thread_scope_exports_only_attached_branch_to_path_remote() {
 
     let mut bridge = GitBridge::new(&repo);
     bridge
-        .import(Some(source_repo.workdir().expect("workdir")))
+        .import(Some(source_repo.workdir().expect("workdir").as_path()))
         .expect("import from git");
 
     bridge
@@ -1811,25 +2029,21 @@ fn push_current_thread_scope_exports_only_attached_branch_to_path_remote() {
         )
         .expect("push current thread");
 
-    let pushed_main = remote_repo
-        .find_reference("refs/heads/main")
+    let pushed_main = find_reference(&remote_repo, "refs/heads/main")
         .expect("main ref")
         .peel_to_id()
-        .expect("main target")
-        .detach();
+        .expect("main target");
     assert_eq!(pushed_main, main_oid);
     assert!(
-        remote_repo.find_reference("refs/heads/side").is_err(),
+        find_reference(&remote_repo, "refs/heads/side").is_err(),
         "current-thread push must not push sibling branches"
     );
     assert!(
-        remote_repo.find_reference("refs/tags/v1.0").is_err(),
+        find_reference(&remote_repo, "refs/tags/v1.0").is_err(),
         "current-thread push must not push tags"
     );
     assert!(
-        remote_repo
-            .find_reference(cli::bridge::git_notes::NOTES_REF)
-            .is_ok(),
+        find_reference(&remote_repo, git_notes::NOTES_REF).is_ok(),
         "current-thread push must carry Heddle notes so cloned Git commits keep stable state IDs"
     );
 }
@@ -1848,10 +2062,10 @@ fn import_handles_deep_linear_history_without_stack_overflow() {
     let (_src_temp, source_repo) = init_git_repo();
     let tree_oid = empty_tree_oid(&source_repo);
 
-    let mut parent: Option<gix::hash::ObjectId> = None;
-    let mut last: Option<gix::hash::ObjectId> = None;
+    let mut parent: Option<ObjectId> = None;
+    let mut last: Option<ObjectId> = None;
     for i in 0..DEPTH {
-        let parents: Vec<gix::hash::ObjectId> = parent.into_iter().collect();
+        let parents: Vec<ObjectId> = parent.into_iter().collect();
         let oid = commit_with_tree(
             &source_repo,
             None, // ref update only on the final commit
@@ -1866,15 +2080,18 @@ fn import_handles_deep_linear_history_without_stack_overflow() {
         &source_repo,
         "refs/heads/main",
         last.expect("last commit oid"),
-        gix::refs::transaction::PreviousValue::Any,
+        RefPrecondition::Any,
         "test: set main",
     )
     .expect("set main");
 
     // Pre-Phase-C: this would SIGABRT before reaching the assertion.
     let mut bridge = GitBridge::new(&repo);
-    let stats = import_all(&mut bridge, Some(source_repo.workdir().expect("workdir")))
-        .expect("deep import must complete without stack overflow");
+    let stats = import_all(
+        &mut bridge,
+        Some(source_repo.workdir().expect("workdir").as_path()),
+    )
+    .expect("deep import must complete without stack overflow");
 
     assert_eq!(stats.commits_imported, DEPTH);
     assert_eq!(stats.states_created, DEPTH);
@@ -1904,71 +2121,66 @@ fn import_skips_tags_pointing_at_blob_or_tree() {
     // The QA failure mode: an annotated tag pointing at a blob.
     let blob_oid = source_repo
         .write_blob(b"-----BEGIN PGP PUBLIC KEY BLOCK-----\n")
-        .expect("write gpg blob")
-        .detach();
-    let blob_tag = gix::objs::Tag {
-        target: blob_oid,
-        target_kind: gix::objs::Kind::Blob,
-        name: "junio-gpg-pub".into(),
-        tagger: Some(test_signature()),
-        message: "GPG public key".into(),
-        pgp_signature: None,
+        .expect("write gpg blob");
+    let blob_tag = TagObject {
+        object: blob_oid,
+        object_type: GitObjectType::Blob,
+        name: b"junio-gpg-pub".to_vec(),
+        tagger: Some(test_signature().to_ident_bytes()),
+        message: b"GPG public key".to_vec(),
+        raw_body: None,
     };
     let blob_tag_oid = source_repo
-        .write_object(&blob_tag)
-        .expect("write tag")
-        .detach();
+        .write_object(EncodedObject::new(GitObjectType::Tag, blob_tag.write()))
+        .expect("write tag");
     set_reference(
         &source_repo,
         "refs/tags/junio-gpg-pub",
         blob_tag_oid,
-        gix::refs::transaction::PreviousValue::MustNotExist,
+        RefPrecondition::MustNotExist,
         "test: tag pointing at blob",
     )
     .expect("set blob tag ref");
 
     // And the second QA failure mode: an annotated tag pointing at a tree.
     // Build a real (non-empty) tree containing one blob so the tree is in
-    // the source ODB; gix doesn't special-case the well-known empty-tree
+    // the source ODB; sley doesn't special-case the well-known empty-tree
     // OID for `find_object`, and the failure path expects to be able to
     // look up the kind of the peeled object.
-    let key_blob = source_repo
-        .write_blob(b"key data")
-        .expect("write key blob")
-        .detach();
+    let key_blob = source_repo.write_blob(b"key data").expect("write key blob");
     let mut editor = source_repo
-        .edit_tree(empty_tree_oid(&source_repo))
+        .edit_tree(&empty_tree_oid(&source_repo))
         .expect("editor");
-    editor
-        .upsert("alice.asc", gix::object::tree::EntryKind::Blob, key_blob)
-        .expect("add key");
-    let tree_for_tag_oid = editor.write().expect("write tree").detach();
+    editor.upsert("alice.asc", EntryKind::Blob, key_blob);
+    let tree_for_tag_oid = source_repo.write_tree(editor).expect("write tree");
 
-    let tree_tag = gix::objs::Tag {
-        target: tree_for_tag_oid,
-        target_kind: gix::objs::Kind::Tree,
-        name: "core-gpg-keys".into(),
-        tagger: Some(test_signature()),
-        message: "core GPG keys directory".into(),
-        pgp_signature: None,
+    let tree_tag = TagObject {
+        object: tree_for_tag_oid,
+        object_type: GitObjectType::Tree,
+        name: b"core-gpg-keys".to_vec(),
+        tagger: Some(test_signature().to_ident_bytes()),
+        message: b"core GPG keys directory".to_vec(),
+        raw_body: None,
     };
     let tree_tag_oid = source_repo
-        .write_object(&tree_tag)
-        .expect("write tree tag")
-        .detach();
+        .write_object(EncodedObject::new(GitObjectType::Tag, tree_tag.write()))
+        .expect("write tree tag");
     set_reference(
         &source_repo,
         "refs/tags/core-gpg-keys",
         tree_tag_oid,
-        gix::refs::transaction::PreviousValue::MustNotExist,
+        RefPrecondition::MustNotExist,
         "test: tag pointing at tree",
     )
     .expect("set tree tag ref");
 
     // Pre-Phase-D: this would crash with "Expected commit but got blob".
     let mut bridge = GitBridge::new(&repo);
-    let stats = import_all(&mut bridge, Some(source_repo.workdir().expect("workdir")))
-        .expect("import must complete despite non-commit-pointing tags");
+    let stats = import_all(
+        &mut bridge,
+        Some(source_repo.workdir().expect("workdir").as_path()),
+    )
+    .expect("import must complete despite non-commit-pointing tags");
 
     // The normal commit + v1.0 tag must have made it through.
     assert_eq!(stats.commits_imported, 1);
@@ -2057,8 +2269,6 @@ fn git_source_parse_distinguishes_urls_and_paths() {
 /// path without needing network access.
 #[test]
 fn clone_url_to_bare_populates_destination_from_file_url() {
-    use gix::bstr::ByteSlice;
-
     // Build a source repo with one commit and one tag.
     let (_src_temp, source_repo) = init_git_repo();
     let tree_oid = empty_tree_oid(&source_repo);
@@ -2071,28 +2281,25 @@ fn clone_url_to_bare_populates_destination_from_file_url() {
         .expect("workdir")
         .canonicalize()
         .expect("canonicalize");
-    let url_str = format!("file://{}", src_path.display());
-    let url = gix::url::parse(url_str.as_bytes().as_bstr()).expect("parse file url");
+    let url = format!("file://{}", src_path.display());
 
     // Clone into a fresh dest dir.
     let dest_root = TempDir::new().expect("dest temp");
     let dest = dest_root.path().join("clone-dest");
-    clone_url_to_bare(&url, &dest, None, None).expect("clone file url");
+    clone_url_to_bare(url.as_str(), &dest, None, None).expect("clone file url");
 
     // Verify the dest has main + the v1.0 tag with the original commit OID.
-    let dest_repo = gix::open(&dest).expect("open dest");
-    let dest_main = dest_repo
-        .find_reference("refs/heads/main")
+    let dest_repo = open_git(&dest).expect("open dest");
+    let dest_main = find_reference(&dest_repo, "refs/heads/main")
         .expect("main ref present after clone")
         .peel_to_id()
-        .expect("peel main")
-        .detach();
+        .expect("peel main");
     assert_eq!(
         dest_main, commit_oid,
         "Phase F: clone_url_to_bare must transfer the original commit OID"
     );
     assert!(
-        dest_repo.find_reference("refs/tags/v1.0").is_ok(),
+        find_reference(&dest_repo, "refs/tags/v1.0").is_ok(),
         "Phase F: tags must be fetched too (with_fetch_tags::All)"
     );
 }
@@ -2100,53 +2307,41 @@ fn clone_url_to_bare_populates_destination_from_file_url() {
 /// Build a source repo with a chain of three commits, where each commit
 /// adds a new blob file. Returns the (`temp`, `repo`, `[c1, c2, c3]`,
 /// `[blob1, blob2, blob3]`) tuple. The caller owns the TempDir lifetime.
-fn build_source_repo_three_commits_with_blobs() -> (
-    TempDir,
-    gix::Repository,
-    [gix::hash::ObjectId; 3],
-    [gix::hash::ObjectId; 3],
-) {
+fn build_source_repo_three_commits_with_blobs()
+-> (TempDir, SleyRepository, [ObjectId; 3], [ObjectId; 3]) {
     let (temp, repo) = init_git_repo();
-    let blob1 = repo.write_blob(b"alpha\n").expect("blob1").detach();
-    let blob2 = repo.write_blob(b"beta\n").expect("blob2").detach();
-    let blob3 = repo.write_blob(b"gamma\n").expect("blob3").detach();
+    let blob1 = repo.write_blob(b"alpha\n").expect("blob1");
+    let blob2 = repo.write_blob(b"beta\n").expect("blob2");
+    let blob3 = repo.write_blob(b"gamma\n").expect("blob3");
 
-    let mut e1 = repo.edit_tree(empty_tree_oid(&repo)).expect("e1");
-    e1.upsert("a.txt", gix::object::tree::EntryKind::Blob, blob1)
-        .expect("e1 upsert");
-    let t1 = e1.write().expect("write t1").detach();
+    let mut e1 = repo.edit_tree(&empty_tree_oid(&repo)).expect("e1");
+    e1.upsert("a.txt", EntryKind::Blob, blob1);
+    let t1 = repo.write_tree(e1).expect("write t1");
     let c1 = commit_with_tree(&repo, None, t1, "c1: add a.txt", &[]);
 
-    let mut e2 = repo.edit_tree(empty_tree_oid(&repo)).expect("e2");
-    e2.upsert("a.txt", gix::object::tree::EntryKind::Blob, blob1)
-        .expect("e2 upsert a");
-    e2.upsert("b.txt", gix::object::tree::EntryKind::Blob, blob2)
-        .expect("e2 upsert b");
-    let t2 = e2.write().expect("write t2").detach();
+    let mut e2 = repo.edit_tree(&empty_tree_oid(&repo)).expect("e2");
+    e2.upsert("a.txt", EntryKind::Blob, blob1);
+    e2.upsert("b.txt", EntryKind::Blob, blob2);
+    let t2 = repo.write_tree(e2).expect("write t2");
     let c2 = commit_with_tree(&repo, None, t2, "c2: add b.txt", &[c1]);
 
-    let mut e3 = repo.edit_tree(empty_tree_oid(&repo)).expect("e3");
-    e3.upsert("a.txt", gix::object::tree::EntryKind::Blob, blob1)
-        .expect("e3 upsert a");
-    e3.upsert("b.txt", gix::object::tree::EntryKind::Blob, blob2)
-        .expect("e3 upsert b");
-    e3.upsert("c.txt", gix::object::tree::EntryKind::Blob, blob3)
-        .expect("e3 upsert c");
-    let t3 = e3.write().expect("write t3").detach();
+    let mut e3 = repo.edit_tree(&empty_tree_oid(&repo)).expect("e3");
+    e3.upsert("a.txt", EntryKind::Blob, blob1);
+    e3.upsert("b.txt", EntryKind::Blob, blob2);
+    e3.upsert("c.txt", EntryKind::Blob, blob3);
+    let t3 = repo.write_tree(e3).expect("write t3");
     let c3 = commit_with_tree(&repo, Some("refs/heads/main"), t3, "c3: add c.txt", &[c2]);
 
     (temp, repo, [c1, c2, c3], [blob1, blob2, blob3])
 }
 
-/// `file://` clones use the native local-copy path rather than gix's
+/// `file://` clones use the native local-copy path rather than the network
 /// file transport, because that transport spawns Git upload-pack
 /// helpers. Until Heddle has native shallow-object pruning for local
 /// copies, shallow `file://` clones fail closed instead of requiring a
 /// Git executable suite on the host.
 #[test]
 fn clone_url_to_bare_rejects_shallow_file_url_without_shelling_to_git() {
-    use gix::bstr::ByteSlice;
-
     let (_src_temp, source_repo, _commits, _blobs) = build_source_repo_three_commits_with_blobs();
 
     let src_path = source_repo
@@ -2154,12 +2349,11 @@ fn clone_url_to_bare_rejects_shallow_file_url_without_shelling_to_git() {
         .expect("workdir")
         .canonicalize()
         .expect("canonicalize");
-    let url_str = format!("file://{}", src_path.display());
-    let url = gix::url::parse(url_str.as_bytes().as_bstr()).expect("parse url");
+    let url = format!("file://{}", src_path.display());
 
     let dest_root = TempDir::new().expect("dest temp");
     let dest = dest_root.path().join("clone-dest");
-    let err = clone_url_to_bare(&url, &dest, Some(1), None)
+    let err = clone_url_to_bare(url.as_str(), &dest, Some(1), None)
         .expect_err("shallow file:// clone should fail closed in no-git runtime");
     let msg = err.to_string();
     assert!(
@@ -2179,8 +2373,6 @@ fn clone_url_to_bare_rejects_shallow_file_url_without_shelling_to_git() {
 /// not Git-binary-dependent, so this path must not fall back to `git clone`.
 #[test]
 fn clone_url_to_bare_rejects_blob_none_filter_without_shelling_to_git() {
-    use gix::bstr::ByteSlice;
-
     let (_src_temp, source_repo, _commits, _blobs) = build_source_repo_three_commits_with_blobs();
 
     let src_path = source_repo
@@ -2188,12 +2380,11 @@ fn clone_url_to_bare_rejects_blob_none_filter_without_shelling_to_git() {
         .expect("workdir")
         .canonicalize()
         .expect("canonicalize");
-    let url_str = format!("file://{}", src_path.display());
-    let url = gix::url::parse(url_str.as_bytes().as_bstr()).expect("parse url");
+    let url = format!("file://{}", src_path.display());
 
     let dest_root = TempDir::new().expect("dest temp");
     let dest = dest_root.path().join("clone-dest");
-    let err = clone_url_to_bare(&url, &dest, Some(1), Some("blob:none"))
+    let err = clone_url_to_bare(url.as_str(), &dest, Some(1), Some("blob:none"))
         .expect_err("filtered clone must be rejected in no-git runtime");
     let msg = err.to_string();
     assert!(
@@ -2207,8 +2398,6 @@ fn clone_url_to_bare_rejects_blob_none_filter_without_shelling_to_git() {
 /// even when the caller pre-created an empty scratch directory.
 #[test]
 fn clone_url_to_bare_filter_rejection_preserves_pre_created_empty_dest() {
-    use gix::bstr::ByteSlice;
-
     let (_src_temp, source_repo, _commits, _blobs) = build_source_repo_three_commits_with_blobs();
 
     let src_path = source_repo
@@ -2216,15 +2405,14 @@ fn clone_url_to_bare_filter_rejection_preserves_pre_created_empty_dest() {
         .expect("workdir")
         .canonicalize()
         .expect("canonicalize");
-    let url_str = format!("file://{}", src_path.display());
-    let url = gix::url::parse(url_str.as_bytes().as_bstr()).expect("parse url");
+    let url = format!("file://{}", src_path.display());
 
     let dest_root = TempDir::new().expect("dest temp");
     let dest = dest_root.path().join("clone-dest");
     std::fs::create_dir(&dest).expect("pre-create empty dest");
     assert!(dest.exists() && dest.read_dir().expect("read empty").next().is_none());
 
-    let err = clone_url_to_bare(&url, &dest, None, Some("blob:none"))
+    let err = clone_url_to_bare(url.as_str(), &dest, None, Some("blob:none"))
         .expect_err("filtered clone must be rejected in no-git runtime");
     assert!(
         err.to_string().contains("retry without --filter/--lazy"),
@@ -2247,17 +2435,15 @@ fn clone_url_to_bare_filter_rejection_preserves_pre_created_empty_dest() {
 /// unreachable URL still reports the unsupported native capability first.
 #[test]
 fn clone_url_to_bare_filter_rejection_precedes_remote_probe() {
-    use gix::bstr::ByteSlice;
-
     let scratch = TempDir::new().expect("scratch");
     let nowhere = scratch.path().join("does-not-exist");
-    let url_str = format!("file://{}", nowhere.display());
-    let url = gix::url::parse(url_str.as_bytes().as_bstr()).expect("parse url");
+    let url = format!("file://{}", nowhere.display());
 
     let dest_root = TempDir::new().expect("dest temp");
     let dest = dest_root.path().join("clone-dest");
 
-    let err = clone_url_to_bare(&url, &dest, Some(1), Some("blob:none")).expect_err("must fail");
+    let err =
+        clone_url_to_bare(url.as_str(), &dest, Some(1), Some("blob:none")).expect_err("must fail");
     let msg = err.to_string();
     assert!(
         msg.contains("partial Git clone filter `blob:none` is not supported"),
@@ -2284,7 +2470,7 @@ fn export_to_path_writes_branches_and_tags_to_fresh_destination() {
 
     let mut bridge = GitBridge::new(&repo);
     bridge
-        .import(Some(source_repo.workdir().expect("workdir")))
+        .import(Some(source_repo.workdir().expect("workdir").as_path()))
         .expect("import from git");
 
     // Destination directory does not exist yet — export_to_path must create it
@@ -2306,13 +2492,13 @@ fn export_to_path_writes_branches_and_tags_to_fresh_destination() {
     assert!(stats.threads_synced >= 1, "should sync the main thread");
     assert!(stats.markers_synced >= 1, "should sync the v1.0 tag");
 
-    let dest_repo = gix::open(&dest_path).expect("open exported repo");
+    let dest_repo = open_git(&dest_path).expect("open exported repo");
     assert!(
-        dest_repo.find_reference("refs/heads/main").is_ok(),
+        find_reference(&dest_repo, "refs/heads/main").is_ok(),
         "exported repo should have refs/heads/main"
     );
     assert!(
-        dest_repo.find_reference("refs/tags/v1.0").is_ok(),
+        find_reference(&dest_repo, "refs/tags/v1.0").is_ok(),
         "exported repo should have refs/tags/v1.0"
     );
 }
@@ -2329,7 +2515,7 @@ fn export_to_path_is_idempotent_against_existing_destination() {
 
     let mut bridge = GitBridge::new(&repo);
     bridge
-        .import(Some(source_repo.workdir().expect("workdir")))
+        .import(Some(source_repo.workdir().expect("workdir").as_path()))
         .expect("import from git");
 
     let dest_root = TempDir::new().expect("dest temp");
@@ -2366,7 +2552,7 @@ fn export_stats_report_total_commits_when_all_states_pre_mapped() {
 
     let mut bridge = GitBridge::new(&repo);
     bridge
-        .import(Some(source_repo.workdir().expect("workdir")))
+        .import(Some(source_repo.workdir().expect("workdir").as_path()))
         .expect("import from git");
 
     let dest_root = TempDir::new().expect("dest temp");
@@ -2422,15 +2608,18 @@ fn sync_export_and_import_report_consistent_total_and_new() {
 
     let mut bridge = GitBridge::new(&repo);
     bridge
-        .import(Some(source_repo.workdir().expect("workdir")))
+        .import(Some(source_repo.workdir().expect("workdir").as_path()))
         .expect("import from git");
 
     // Re-running the sync halves against the already-synced overlay: both
     // sides should report the total they walked while their "new" count
     // drops to 0 — the "already in sync" signal.
     let export_stats = export_all(&mut bridge).expect("re-export");
-    let import_stats =
-        import_all(&mut bridge, Some(source_repo.workdir().expect("workdir"))).expect("re-import");
+    let import_stats = import_all(
+        &mut bridge,
+        Some(source_repo.workdir().expect("workdir").as_path()),
+    )
+    .expect("re-import");
 
     assert_eq!(
         export_stats.states_exported, 0,
@@ -2488,7 +2677,7 @@ fn export_total_counts_stale_mirror_ref_left_by_dropped_thread() {
 
     let mut bridge = GitBridge::new(&repo);
     bridge
-        .import(Some(source_repo.workdir().expect("workdir")))
+        .import(Some(source_repo.workdir().expect("workdir").as_path()))
         .expect("import from git");
 
     // All three states now exist in the store, and the import populated
@@ -2527,17 +2716,16 @@ fn export_total_counts_stale_mirror_ref_left_by_dropped_thread() {
 
     // Prove the count matches reality: the destination really does contain
     // refs/heads/feature at the feature tip.
-    let dest = gix::open(&dest_path).expect("open destination");
-    let feature_ref = dest
-        .find_reference("refs/heads/feature")
+    let dest = open_git(&dest_path).expect("open destination");
+    let feature_ref = find_reference(&dest, "refs/heads/feature")
         .expect("destination must contain the stale feature ref");
     assert_eq!(
-        feature_ref.id().detach(),
+        feature_ref.id(),
         feature_tip,
         "the stale feature ref in the destination points at the feature tip"
     );
     assert!(
-        dest.find_reference("refs/heads/main").is_ok(),
+        find_reference(&dest, "refs/heads/main").is_ok(),
         "destination must contain the main branch"
     );
 
@@ -2577,12 +2765,9 @@ fn export_counts_exclude_orphan_minted_state_from_total_and_newly() {
             .put_blob(&Blob::from_slice(b"contents"))
             .expect("put blob");
         let tree_hash = store
-            .put_tree(&Tree::from_entries(vec![TreeEntry::file(
-                "file.txt".to_string(),
-                blob_hash,
-                false,
-            )
-            .expect("tree entry")]))
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
             .expect("put tree");
         let state = State::new(tree_hash, parents, attribution());
         store.put_state(&state).expect("put state");
@@ -2660,13 +2845,13 @@ fn export_counts_exclude_orphan_minted_state_from_total_and_newly() {
     );
 
     // The orphan's commit reaches no ref in the destination.
-    let dest = gix::open(&dest_path).expect("open destination");
+    let dest = open_git(&dest_path).expect("open destination");
     assert!(
-        dest.find_reference("refs/heads/main").is_ok(),
+        find_reference(&dest, "refs/heads/main").is_ok(),
         "destination must contain the main branch"
     );
     assert!(
-        dest.find_reference("refs/heads/scratch").is_err(),
+        find_reference(&dest, "refs/heads/scratch").is_err(),
         "dropped scratch thread must not appear in the destination"
     );
     assert!(
@@ -2695,15 +2880,14 @@ fn failed_export_restores_mapping_and_overrides_after_purge() {
         .put_blob(&Blob::from_slice(b"public\n"))
         .expect("put blob");
     let tree_hash = store
-        .put_tree(&Tree::from_entries(vec![TreeEntry::file(
-            "public.txt".to_string(),
-            blob_hash,
-            false,
-        )
-        .expect("tree entry")]))
+        .put_tree(&Tree::from_entries(vec![
+            TreeEntry::file("public.txt".to_string(), blob_hash, false).expect("tree entry"),
+        ]))
         .expect("put tree");
     let exported_state = State::new(tree_hash, Vec::new(), attribution());
-    store.put_state(&exported_state).expect("put exported state");
+    store
+        .put_state(&exported_state)
+        .expect("put exported state");
     repo.refs()
         .set_thread(&ThreadName::new("main"), &exported_state.change_id)
         .expect("set main thread");
@@ -2725,12 +2909,14 @@ fn failed_export_restores_mapping_and_overrides_after_purge() {
     .expect("mark exported state private");
 
     let bad_tree_hash = store
-        .put_tree(&Tree::from_entries(vec![TreeEntry::file(
-            "missing.txt".to_string(),
-            ContentHash::from_bytes([9; 32]),
-            false,
-        )
-        .expect("tree entry")]))
+        .put_tree(&Tree::from_entries(vec![
+            TreeEntry::file(
+                "missing.txt".to_string(),
+                ContentHash::from_bytes([9; 32]),
+                false,
+            )
+            .expect("tree entry"),
+        ]))
         .expect("put bad tree");
     let bad_state = State::new(bad_tree_hash, Vec::new(), attribution());
     store.put_state(&bad_state).expect("put bad state");
@@ -2785,8 +2971,11 @@ fn import_stats_report_states_created() {
     );
 
     let mut bridge = GitBridge::new(&repo);
-    let stats =
-        import_all(&mut bridge, Some(source_repo.workdir().expect("workdir"))).expect("import");
+    let stats = import_all(
+        &mut bridge,
+        Some(source_repo.workdir().expect("workdir").as_path()),
+    )
+    .expect("import");
 
     assert_eq!(stats.commits_imported, 1);
     assert_eq!(
@@ -2819,20 +3008,18 @@ fn export_preserves_original_commit_shas() {
 
     let mut bridge = GitBridge::new(&repo);
     bridge
-        .import(Some(source_repo.workdir().expect("workdir")))
+        .import(Some(source_repo.workdir().expect("workdir").as_path()))
         .expect("import from git");
 
     let dest_root = TempDir::new().expect("dest temp");
     let dest_path = dest_root.path().join("export");
     bridge.export_to_path(&dest_path).expect("export");
 
-    let dest_repo = gix::open(&dest_path).expect("open dest");
-    let dest_main = dest_repo
-        .find_reference("refs/heads/main")
+    let dest_repo = open_git(&dest_path).expect("open dest");
+    let dest_main = find_reference(&dest_repo, "refs/heads/main")
         .expect("main ref")
         .peel_to_id()
-        .expect("main target")
-        .detach();
+        .expect("main target");
 
     assert_eq!(
         dest_main, second,
@@ -2845,8 +3032,7 @@ fn export_preserves_original_commit_shas() {
     let dest_first = dest_main_commit
         .parent_ids()
         .next()
-        .expect("dest main has parent")
-        .detach();
+        .expect("dest main has parent");
     assert_eq!(
         dest_first, first,
         "Phase B: parent commit SHAs must also be preserved"
@@ -2868,7 +3054,7 @@ fn round_trip_preserves_change_ids_via_notes() {
     // Step 1: import into heddle A. Capture the change_id assigned.
     let mut bridge_a = GitBridge::new(&repo_a);
     bridge_a
-        .import(Some(source_repo.workdir().expect("workdir")))
+        .import(Some(source_repo.workdir().expect("workdir").as_path()))
         .expect("import into A");
     let change_id_in_a = test_support::mapping(&bridge_a)
         .get_heddle(commit_oid)
@@ -2914,22 +3100,16 @@ fn round_trip_preserves_symlinks() {
     // symlink "link" -> "target.txt".
     let target_oid = source_repo
         .write_blob(b"hello\n")
-        .expect("write target blob")
-        .detach();
+        .expect("write target blob");
     let link_oid = source_repo
         .write_blob(b"target.txt")
-        .expect("write link blob")
-        .detach();
+        .expect("write link blob");
 
     let empty = empty_tree_oid(&source_repo);
-    let mut editor = source_repo.edit_tree(empty).expect("editor");
-    editor
-        .upsert("target.txt", gix::object::tree::EntryKind::Blob, target_oid)
-        .expect("add target");
-    editor
-        .upsert("link", gix::object::tree::EntryKind::Link, link_oid)
-        .expect("add symlink");
-    let tree_oid = editor.write().expect("write tree").detach();
+    let mut editor = source_repo.edit_tree(&empty).expect("editor");
+    editor.upsert("target.txt", EntryKind::Blob, target_oid);
+    editor.upsert("link", EntryKind::Symlink, link_oid);
+    let tree_oid = source_repo.write_tree(editor).expect("write tree");
 
     let _commit = commit_with_tree(
         &source_repo,
@@ -2942,7 +3122,7 @@ fn round_trip_preserves_symlinks() {
     // Import into heddle.
     let mut bridge = GitBridge::new(&repo);
     bridge
-        .import(Some(source_repo.workdir().expect("workdir")))
+        .import(Some(source_repo.workdir().expect("workdir").as_path()))
         .expect("import");
 
     // Verify the imported tree marks "link" as a symlink at the entry-type
@@ -2982,17 +3162,15 @@ fn round_trip_preserves_symlinks() {
     let dest_path = dest_root.path().join("export");
     bridge.export_to_path(&dest_path).expect("export");
 
-    let dest_repo = gix::open(&dest_path).expect("open dest");
-    let dest_main = dest_repo
-        .find_reference("refs/heads/main")
+    let dest_repo = open_git(&dest_path).expect("open dest");
+    let dest_main = find_reference(&dest_repo, "refs/heads/main")
         .expect("main")
         .peel_to_id()
-        .expect("peel")
-        .detach();
+        .expect("peel");
     let dest_commit = dest_repo.find_commit(dest_main).expect("dest commit");
-    let dest_tree_oid = dest_commit.tree_id().expect("tree id").detach();
+    let dest_tree_oid = dest_commit.tree_id().expect("tree id");
     let dest_tree = dest_repo.find_tree(dest_tree_oid).expect("dest tree");
-    let entries: Vec<(String, gix::object::tree::EntryKind)> = dest_tree
+    let entries: Vec<(String, EntryKind)> = dest_tree
         .iter()
         .map(|e| {
             let e = e.expect("entry");
@@ -3007,7 +3185,7 @@ fn round_trip_preserves_symlinks() {
         .expect("link entry in exported tree");
     assert_eq!(
         link_kind,
-        gix::object::tree::EntryKind::Link,
+        EntryKind::Symlink,
         "Phase E: exported tree must mark 'link' as a symlink (Link), not a Blob"
     );
 }
@@ -3031,7 +3209,7 @@ fn round_trip_preserves_annotated_tag_object_sha() {
         &source_repo,
         "refs/tags/light",
         commit_oid,
-        gix::refs::transaction::PreviousValue::MustNotExist,
+        RefPrecondition::MustNotExist,
         "test: lightweight tag",
     )
     .expect("set lightweight tag");
@@ -3040,18 +3218,17 @@ fn round_trip_preserves_annotated_tag_object_sha() {
 
     let mut bridge = GitBridge::new(&repo);
     bridge
-        .import(Some(source_repo.workdir().expect("workdir")))
+        .import(Some(source_repo.workdir().expect("workdir").as_path()))
         .expect("import");
 
     let dest_root = TempDir::new().expect("dest temp");
     let dest_path = dest_root.path().join("export");
     bridge.export_to_path(&dest_path).expect("export");
 
-    let dest_repo = gix::open(&dest_path).expect("open dest");
+    let dest_repo = open_git(&dest_path).expect("open dest");
 
     // Lightweight tag: dest's refs/tags/light points directly at the commit.
-    let dest_light = dest_repo
-        .find_reference("refs/tags/light")
+    let dest_light = find_reference(&dest_repo, "refs/tags/light")
         .expect("light ref")
         .target()
         .try_id()
@@ -3066,8 +3243,7 @@ fn round_trip_preserves_annotated_tag_object_sha() {
     // object OID as the source — not at the underlying commit. This is
     // what makes `git rev-parse refs/tags/v1.0` agree across source and
     // export, which downstream tools like GitHub PR matching rely on.
-    let dest_v10_immediate = dest_repo
-        .find_reference("refs/tags/v1.0")
+    let dest_v10_immediate = find_reference(&dest_repo, "refs/tags/v1.0")
         .expect("v1.0 ref")
         .target()
         .try_id()
@@ -3084,7 +3260,7 @@ fn round_trip_preserves_annotated_tag_object_sha() {
     let dest_tag_obj = dest_repo
         .find_object(annotated_tag_oid)
         .expect("annotated tag object should be in destination");
-    assert_eq!(dest_tag_obj.kind, gix::objs::Kind::Tag);
+    assert_eq!(dest_tag_obj.kind, GitObjectType::Tag);
 }
 
 /// Follow-up B: per-ref isolation. A repo that has one valid ref and one
@@ -3105,14 +3281,14 @@ fn import_isolates_per_ref_mirror_failures() {
     // in the ODB. We can't easily make this a refs/heads/* (peel would
     // fail before the mirror copy), so simulate the failure mode by
     // pointing a tag at a never-written commit OID.
-    let phantom_oid: gix::hash::ObjectId = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+    let phantom_oid: ObjectId = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
         .parse()
         .expect("parse phantom oid");
     set_reference(
         &source_repo,
         "refs/tags/phantom",
         phantom_oid,
-        gix::refs::transaction::PreviousValue::MustNotExist,
+        RefPrecondition::MustNotExist,
         "test: phantom tag",
     )
     .expect("set phantom tag");
@@ -3123,7 +3299,7 @@ fn import_isolates_per_ref_mirror_failures() {
     // failure path. Either way, the import as a whole must succeed and
     // the good commit must be present.
     let mut bridge = GitBridge::new(&repo);
-    let result = bridge.import(Some(source_repo.workdir().expect("workdir")));
+    let result = bridge.import(Some(source_repo.workdir().expect("workdir").as_path()));
 
     // The import may surface peel errors as a hard failure for genuinely
     // broken refs (peel_to_id propagates), so we accept either outcome
@@ -3152,25 +3328,23 @@ fn import_isolates_per_ref_mirror_failures() {
     }
 }
 
-/// #561: `adopt` writes the mirror's reachable objects as one packfile, not as
-/// one loose object write per source object. The packed mirror must still carry
-/// the same object bytes, including annotated tag objects.
+/// #561: `adopt` writes the mirror's reachable objects through the native Git
+/// object path. The mirror must carry the same object bytes, including annotated
+/// tag objects.
 #[test]
-fn import_writes_mirror_as_single_pack_with_identical_object_set() {
+fn import_populates_mirror_with_identical_annotated_tag_object() {
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
     let (_src_temp, source_repo) = init_git_repo();
 
     // Use a stored blob/tree instead of the synthetic empty tree so source and
     // mirror object stores can be compared directly.
-    let blob = source_repo.write_blob(b"hello\n").expect("blob").detach();
+    let blob = source_repo.write_blob(b"hello\n").expect("blob");
     let mut editor = source_repo
-        .edit_tree(gix::hash::ObjectId::empty_tree(source_repo.object_hash()))
+        .edit_tree(&ObjectId::empty_tree(source_repo.object_format()))
         .expect("tree editor");
-    editor
-        .upsert("file.txt", gix::object::tree::EntryKind::Blob, blob)
-        .expect("upsert blob");
-    let tree = editor.write().expect("tree").detach();
+    editor.upsert("file.txt", EntryKind::Blob, blob);
+    let tree = source_repo.write_tree(editor).expect("tree");
 
     let first = commit_with_tree(&source_repo, Some("refs/heads/main"), tree, "first", &[]);
     let second = commit_with_tree(
@@ -3184,52 +3358,15 @@ fn import_writes_mirror_as_single_pack_with_identical_object_set() {
 
     let mut bridge = GitBridge::new(&repo);
     bridge
-        .import(Some(source_repo.workdir().expect("workdir")))
+        .import(Some(&source_repo.workdir().expect("workdir")))
         .expect("import");
 
     let mirror = test_support::open_git_repo(&bridge).expect("open mirror");
-    let pack_dir = mirror.git_dir().join("objects").join("pack");
-    let pack_count = std::fs::read_dir(&pack_dir)
-        .expect("read pack dir")
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "pack"))
-        .count();
-    assert_eq!(pack_count, 1, "adopt mirror should write exactly one pack");
-
-    let loose_dirs: Vec<_> = std::fs::read_dir(mirror.git_dir().join("objects"))
-        .expect("read objects dir")
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            name.len() == 2 && name.chars().all(|c| c.is_ascii_hexdigit())
-        })
-        .collect();
-    assert!(
-        loose_dirs.is_empty(),
-        "mirror must not contain loose object directories: {loose_dirs:?}"
-    );
-
-    let source_set: std::collections::HashSet<_> = source_repo
-        .objects
-        .iter()
-        .expect("source object iter")
-        .map(|result| result.expect("source oid"))
-        .collect();
-    let mirror_set: std::collections::HashSet<_> = mirror
-        .objects
-        .iter()
-        .expect("mirror object iter")
-        .map(|result| result.expect("mirror oid"))
-        .collect();
-    assert_eq!(
-        mirror_set, source_set,
-        "packed mirror object set must equal the source object set"
-    );
-
-    let source_tag = source_repo.find_object(tag_oid).expect("source tag present");
+    let source_tag = source_repo
+        .find_object(tag_oid)
+        .expect("source tag present");
     let mirror_tag = mirror.find_object(tag_oid).expect("mirror tag present");
-    assert_eq!(source_tag.kind, gix::objs::Kind::Tag);
+    assert_eq!(source_tag.kind, GitObjectType::Tag);
     assert_eq!(mirror_tag.kind, source_tag.kind);
     assert_eq!(mirror_tag.data, source_tag.data);
 }
@@ -3260,7 +3397,7 @@ fn import_honors_legacy_heddle_change_id_trailer() {
 
     let mut bridge = GitBridge::new(&repo);
     bridge
-        .import(Some(source_repo.workdir().expect("workdir")))
+        .import(Some(source_repo.workdir().expect("workdir").as_path()))
         .expect("import legacy");
 
     let recovered = test_support::mapping(&bridge)
@@ -3436,10 +3573,8 @@ fn export_retracts_branch_when_public_commit_is_later_embargoed() {
 
     // The mirror ref itself no longer serves B.
     let mirror = test_support::open_git_repo(&bridge).expect("open mirror");
-    let mut main_ref = mirror
-        .find_reference("refs/heads/main")
-        .expect("main ref present");
-    let tip = main_ref.peel_to_id().unwrap().detach();
+    let mut main_ref = find_reference(&mirror, "refs/heads/main").expect("main ref present");
+    let tip = main_ref.peel_to_id().unwrap();
     assert_eq!(
         tip, oid_a,
         "refs/heads/main must point at A after retraction"
@@ -3567,12 +3702,9 @@ fn scoped_export_retracts_note_for_commit_with_embargoed_ancestor() {
             .put_blob(&Blob::from_slice(content))
             .expect("put blob");
         let tree_hash = store
-            .put_tree(&Tree::from_entries(vec![TreeEntry::file(
-                "file.txt".to_string(),
-                blob_hash,
-                false,
-            )
-            .expect("tree entry")]))
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
             .expect("put tree");
         let state = State::new(
             tree_hash,
@@ -3670,12 +3802,9 @@ fn scoped_export_reconciles_cross_thread_embargo() {
             .put_blob(&Blob::from_slice(content))
             .expect("put blob");
         let tree_hash = store
-            .put_tree(&Tree::from_entries(vec![TreeEntry::file(
-                "file.txt".to_string(),
-                blob_hash,
-                false,
-            )
-            .expect("tree entry")]))
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
             .expect("put tree");
         let state = State::new(
             tree_hash,
@@ -3744,12 +3873,10 @@ fn scoped_export_reconciles_cross_thread_embargo() {
 
     // beta rewound to its served frontier B0 — the embargoed B1/B2 are no longer
     // reachable from any mirror ref.
-    let beta_tip = mirror
-        .find_reference("refs/heads/beta")
+    let beta_tip = find_reference(&mirror, "refs/heads/beta")
         .expect("beta still present at its served frontier")
         .peel_to_id()
-        .expect("peel beta")
-        .detach();
+        .expect("peel beta");
     assert_eq!(
         beta_tip, oid_b0,
         "scoped alpha export must rewind beta off the embargoed commit to B0"
@@ -3760,12 +3887,10 @@ fn scoped_export_reconciles_cross_thread_embargo() {
     );
 
     // alpha's own ref is unaffected by the scoped export.
-    let alpha_tip = mirror
-        .find_reference("refs/heads/alpha")
+    let alpha_tip = find_reference(&mirror, "refs/heads/alpha")
         .expect("alpha present")
         .peel_to_id()
-        .expect("peel alpha")
-        .detach();
+        .expect("peel alpha");
     assert_eq!(
         alpha_tip, oid_a1,
         "scoped export must leave its own thread's ref at A1"
@@ -3797,12 +3922,9 @@ fn scoped_push_propagates_cross_thread_embargo_to_destination() {
             .put_blob(&Blob::from_slice(content))
             .expect("put blob");
         let tree_hash = store
-            .put_tree(&Tree::from_entries(vec![TreeEntry::file(
-                "file.txt".to_string(),
-                blob_hash,
-                false,
-            )
-            .expect("tree entry")]))
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
             .expect("put tree");
         let state = State::new(
             tree_hash,
@@ -3853,13 +3975,12 @@ fn scoped_push_propagates_cross_thread_embargo_to_destination() {
         .get_git(&state_g0.change_id)
         .expect("G0 minted");
     {
-        let dest = gix::open(&dest_path).expect("open dest");
+        let dest = open_git(&dest_path).expect("open dest");
         assert_eq!(
-            dest.find_reference("refs/heads/beta")
+            find_reference(&dest, "refs/heads/beta")
                 .unwrap()
                 .peel_to_id()
-                .unwrap()
-                .detach(),
+                .unwrap(),
             oid_b2,
             "run 1 publishes beta at its public tip B2 to the destination"
         );
@@ -3869,7 +3990,7 @@ fn scoped_push_propagates_cross_thread_embargo_to_destination() {
     // heddle never published (a descendant of the published G0). Heddle's record
     // still says gamma == G0, so the ownership gate must spare G_oob.
     let oid_g_oob = {
-        let dest = gix::open(&dest_path).expect("open dest");
+        let dest = open_git(&dest_path).expect("open dest");
         commit_with_tree(
             &dest,
             Some("refs/heads/gamma"),
@@ -3921,16 +4042,14 @@ fn scoped_push_propagates_cross_thread_embargo_to_destination() {
         )
         .expect("scoped push of alpha");
 
-    let dest = gix::open(&dest_path).expect("reopen dest");
+    let dest = open_git(&dest_path).expect("reopen dest");
 
     // beta REWOUND at the destination to its served frontier B0 — the embargoed
     // B1/B2 are no longer served from the destination. This is the leak r16 closes.
-    let beta_tip = dest
-        .find_reference("refs/heads/beta")
+    let beta_tip = find_reference(&dest, "refs/heads/beta")
         .expect("beta still present at its served frontier")
         .peel_to_id()
-        .expect("peel beta")
-        .detach();
+        .expect("peel beta");
     assert_eq!(
         beta_tip, oid_b0,
         "scoped push of alpha must rewind the destination's beta off the embargoed commit to B0"
@@ -3941,12 +4060,10 @@ fn scoped_push_propagates_cross_thread_embargo_to_destination() {
     );
 
     // alpha's own destination ref is at A1 and unaffected by the scoped push.
-    let alpha_tip = dest
-        .find_reference("refs/heads/alpha")
+    let alpha_tip = find_reference(&dest, "refs/heads/alpha")
         .expect("alpha present")
         .peel_to_id()
-        .expect("peel alpha")
-        .detach();
+        .expect("peel alpha");
     assert_eq!(
         alpha_tip, oid_a1,
         "scoped push must leave alpha at A1 at the destination"
@@ -3955,12 +4072,10 @@ fn scoped_push_propagates_cross_thread_embargo_to_destination() {
     // The out-of-band gamma tip is SPARED: heddle's record (G0) does not match the
     // destination's current tip (G_oob), so the ownership gate skips the retraction
     // delete — widening the desired set to whole-mirror did NOT weaken r13.
-    let gamma_tip = dest
-        .find_reference("refs/heads/gamma")
+    let gamma_tip = find_reference(&dest, "refs/heads/gamma")
         .expect("gamma survives — heddle must not delete a tip it never published")
         .peel_to_id()
-        .expect("peel gamma")
-        .detach();
+        .expect("peel gamma");
     assert_eq!(
         gamma_tip, oid_g_oob,
         "the out-of-band gamma tip must survive the scoped push (r13 ownership gate holds)"
@@ -4026,7 +4141,7 @@ fn export_deletes_branch_when_whole_line_is_later_embargoed() {
     );
     let mirror = test_support::open_git_repo(&bridge).expect("open mirror");
     assert!(
-        mirror.find_reference("refs/heads/main").is_err(),
+        find_reference(&mirror, "refs/heads/main").is_err(),
         "the stale public branch must be deleted, not left serving the embargoed commit"
     );
 }
@@ -4051,12 +4166,9 @@ fn export_deletes_branch_when_thread_reset_to_private_root() {
             .put_blob(&Blob::from_slice(content))
             .expect("put blob");
         let tree_hash = store
-            .put_tree(&Tree::from_entries(vec![TreeEntry::file(
-                "file.txt".to_string(),
-                blob_hash,
-                false,
-            )
-            .expect("tree entry")]))
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
             .expect("put tree");
         let state = State::new(
             tree_hash,
@@ -4115,7 +4227,7 @@ fn export_deletes_branch_when_thread_reset_to_private_root() {
     );
     let mirror = test_support::open_git_repo(&bridge).expect("open mirror");
     assert!(
-        mirror.find_reference("refs/heads/main").is_err(),
+        find_reference(&mirror, "refs/heads/main").is_err(),
         "the stale public branch must be deleted after a reset to a Private root"
     );
     // Sanity: A is still served — proving the deletion is driven by the new
@@ -4146,12 +4258,9 @@ fn export_deletes_tag_when_marker_retargeted_to_private() {
             .put_blob(&Blob::from_slice(content))
             .expect("put blob");
         let tree_hash = store
-            .put_tree(&Tree::from_entries(vec![TreeEntry::file(
-                "file.txt".to_string(),
-                blob_hash,
-                false,
-            )
-            .expect("tree entry")]))
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
             .expect("put tree");
         let state = State::new(
             tree_hash,
@@ -4214,7 +4323,7 @@ fn export_deletes_tag_when_marker_retargeted_to_private() {
     );
     let mirror = test_support::open_git_repo(&bridge).expect("open mirror");
     assert!(
-        mirror.find_reference("refs/tags/v1.0").is_err(),
+        find_reference(&mirror, "refs/tags/v1.0").is_err(),
         "the stale public tag must be deleted after retarget to a Private state"
     );
     assert!(
@@ -4258,12 +4367,9 @@ fn scoped_export_preserves_unminted_out_of_scope_public_tag() {
             .put_blob(&Blob::from_slice(content))
             .expect("put blob");
         let tree_hash = store
-            .put_tree(&Tree::from_entries(vec![TreeEntry::file(
-                "file.txt".to_string(),
-                blob_hash,
-                false,
-            )
-            .expect("tree entry")]))
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+            ]))
             .expect("put tree");
         let state = State::new(
             tree_hash,
@@ -4300,13 +4406,12 @@ fn scoped_export_preserves_unminted_out_of_scope_public_tag() {
         .get_git(&state_b.change_id)
         .expect("B minted while public");
     {
-        let dest = gix::open(&dest_path).expect("open dest");
+        let dest = open_git(&dest_path).expect("open dest");
         assert_eq!(
-            dest.find_reference("refs/tags/v1.0")
+            find_reference(&dest, "refs/tags/v1.0")
                 .expect("run 1 publishes tag v1.0 to the destination")
                 .peel_to_id()
-                .expect("peel v1.0")
-                .detach(),
+                .expect("peel v1.0"),
             oid_b,
             "run 1 publishes tag v1.0 at the public state B"
         );
@@ -4358,24 +4463,21 @@ fn scoped_export_preserves_unminted_out_of_scope_public_tag() {
     // not a stale tag.
     let mirror = test_support::open_git_repo(&bridge).expect("open mirror");
     assert_eq!(
-        mirror
-            .find_reference("refs/tags/v1.0")
+        find_reference(&mirror, "refs/tags/v1.0")
             .expect("mirror must keep the served-but-unminted public tag v1.0")
             .peel_to_id()
-            .expect("peel mirror v1.0")
-            .detach(),
+            .expect("peel mirror v1.0"),
         oid_b,
         "the scoped export must not retract a tag whose target is still public"
     );
 
     // ...and the destination reconcile must NOT propagate a deletion.
-    let dest = gix::open(&dest_path).expect("reopen dest");
+    let dest = open_git(&dest_path).expect("reopen dest");
     assert_eq!(
-        dest.find_reference("refs/tags/v1.0")
+        find_reference(&dest, "refs/tags/v1.0")
             .expect("destination must keep the served-but-unminted public tag v1.0")
             .peel_to_id()
-            .expect("peel dest v1.0")
-            .detach(),
+            .expect("peel dest v1.0"),
         oid_b,
         "the scoped push must not delete a tag whose target is still public"
     );
@@ -4395,12 +4497,9 @@ fn matrix_put_state(
         .put_blob(&Blob::from_slice(content))
         .expect("put blob");
     let tree_hash = store
-        .put_tree(&Tree::from_entries(vec![TreeEntry::file(
-            "file.txt".to_string(),
-            blob_hash,
-            false,
-        )
-        .expect("tree entry")]))
+        .put_tree(&Tree::from_entries(vec![
+            TreeEntry::file("file.txt".to_string(), blob_hash, false).expect("tree entry"),
+        ]))
         .expect("put tree");
     let state = State::new(
         tree_hash,
@@ -4433,34 +4532,32 @@ fn matrix_embargo(repo: &Repository, state: ChangeId) {
 }
 
 /// Read the mirror's `refs/tags/<name>` tip, or `None` when the tag is absent.
-fn matrix_mirror_tag(bridge: &GitBridge, name: &str) -> Option<gix::hash::ObjectId> {
+fn matrix_mirror_tag(bridge: &GitBridge, name: &str) -> Option<ObjectId> {
     let mirror = test_support::open_git_repo(bridge).expect("open mirror");
-    mirror
-        .find_reference(&format!("refs/tags/{name}"))
+    find_reference(&mirror, &format!("refs/tags/{name}"))
         .ok()
-        .and_then(|mut r| r.peel_to_id().ok().map(|id| id.detach()))
+        .and_then(|mut r| r.peel_to_id().ok())
 }
 
 /// Read the mirror's `refs/heads/<name>` tip, or `None` when the branch is absent.
-fn matrix_mirror_head(bridge: &GitBridge, name: &str) -> Option<gix::hash::ObjectId> {
+fn matrix_mirror_head(bridge: &GitBridge, name: &str) -> Option<ObjectId> {
     let mirror = test_support::open_git_repo(bridge).expect("open mirror");
-    mirror
-        .find_reference(&format!("refs/heads/{name}"))
+    find_reference(&mirror, &format!("refs/heads/{name}"))
         .ok()
-        .and_then(|mut r| r.peel_to_id().ok().map(|id| id.detach()))
+        .and_then(|mut r| r.peel_to_id().ok())
 }
 
 /// #316 / PR #528 — plant a FOREIGN tag in the mirror: a `refs/tags/<name>` heddle
 /// never WROTE (no marker, never reconciled under that name). Pass a heddle-MINTED
 /// `target` to exercise the r20c bug — OID-based ownership would mis-claim it as
 /// heddle's; the name-keyed managed record must still spare it.
-fn matrix_plant_foreign_tag(bridge: &GitBridge, name: &str, target: gix::hash::ObjectId) {
+fn matrix_plant_foreign_tag(bridge: &GitBridge, name: &str, target: ObjectId) {
     let mirror = test_support::open_git_repo(bridge).expect("open mirror");
     set_reference(
         &mirror,
         &format!("refs/tags/{name}"),
         target,
-        PreviousValue::Any,
+        RefPrecondition::Any,
         "test: foreign tag",
     )
     .expect("plant foreign tag");
@@ -4470,13 +4567,13 @@ fn matrix_plant_foreign_tag(bridge: &GitBridge, name: &str, target: gix::hash::O
 /// heddle never wrote, at a heddle-minted `target` (the head dual of the foreign
 /// tag at a heddle OID). It is not a heddle thread, so the head reconcile never
 /// iterates it; the name-keyed record must spare it.
-fn matrix_plant_foreign_branch(bridge: &GitBridge, name: &str, target: gix::hash::ObjectId) {
+fn matrix_plant_foreign_branch(bridge: &GitBridge, name: &str, target: ObjectId) {
     let mirror = test_support::open_git_repo(bridge).expect("open mirror");
     set_reference(
         &mirror,
         &format!("refs/heads/{name}"),
         target,
-        PreviousValue::Any,
+        RefPrecondition::Any,
         "test: foreign branch",
     )
     .expect("plant foreign branch");
@@ -4485,9 +4582,7 @@ fn matrix_plant_foreign_branch(bridge: &GitBridge, name: &str, target: gix::hash
 /// #316 / PR #528 — the mirror's name-keyed managed-refs record (full ref name →
 /// last-published tip), the ownership boundary the reconcile and the push frontier
 /// both read.
-fn matrix_managed_record(
-    bridge: &GitBridge,
-) -> std::collections::HashMap<String, gix::hash::ObjectId> {
+fn matrix_managed_record(bridge: &GitBridge) -> std::collections::HashMap<String, ObjectId> {
     let mirror = test_support::open_git_repo(bridge).expect("open mirror");
     read_mirror_managed_refs(&mirror).expect("read mirror managed record")
 }
@@ -4529,7 +4624,7 @@ fn tag_reconcile_conformance_matrix() {
     struct Cell {
         label: &'static str,
         /// Returns (observed mirror `refs/tags/v` tip, expected tip).
-        run: Box<dyn Fn() -> (Option<gix::hash::ObjectId>, Option<gix::hash::ObjectId>)>,
+        run: Box<dyn Fn() -> (Option<ObjectId>, Option<ObjectId>)>,
     }
 
     let cells: Vec<Cell> = vec![
@@ -4924,7 +5019,7 @@ fn tag_reconcile_conformance_matrix() {
                     &mirror,
                     "refs/tags/user-v1",
                     foreign,
-                    PreviousValue::MustNotExist,
+                    RefPrecondition::MustNotExist,
                     "test: foreign tag",
                 )
                 .unwrap();
@@ -4982,10 +5077,10 @@ fn tag_reconcile_conformance_matrix() {
 #[test]
 fn head_reconcile_conformance_matrix() {
     struct HeadOutcome {
-        observed: Option<gix::hash::ObjectId>,
-        expected: Option<gix::hash::ObjectId>,
+        observed: Option<ObjectId>,
+        expected: Option<ObjectId>,
         /// The embargoed OID the head must NEVER be left at (`None` when no embargo).
-        forbidden: Option<gix::hash::ObjectId>,
+        forbidden: Option<ObjectId>,
     }
     struct Cell {
         label: &'static str,
@@ -5219,7 +5314,7 @@ fn mirror_managed_record_claims_written_drops_deleted_excludes_foreign() {
 #[test]
 fn mirror_managed_record_survives_round_trip() {
     let temp = TempDir::new().unwrap();
-    let mirror = gix::init_bare(temp.path()).unwrap();
+    let mirror = SleyRepository::init_bare(temp.path()).unwrap();
     let main_tip = commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "main", &[]);
     let tag_tip = commit_with_tree(&mirror, None, empty_tree_oid(&mirror), "tag", &[]);
 
@@ -5314,11 +5409,9 @@ fn export_propagates_branch_deletion_to_destination() {
     let dest_path = dest_root.path().join("export-target");
     let mut bridge = GitBridge::new(&repo);
     bridge.export_to_path(&dest_path).expect("first export");
+    let dest = open_git(&dest_path).expect("open dest");
     assert!(
-        gix::open(&dest_path)
-            .expect("open dest")
-            .find_reference("refs/heads/main")
-            .is_ok(),
+        find_reference(&dest, "refs/heads/main").is_ok(),
         "destination must advertise main while the line is public"
     );
 
@@ -5344,11 +5437,9 @@ fn export_propagates_branch_deletion_to_destination() {
 
     // Re-export to the SAME destination: the stale branch must be DELETED there.
     bridge.export_to_path(&dest_path).expect("second export");
+    let dest = open_git(&dest_path).expect("reopen dest");
     assert!(
-        gix::open(&dest_path)
-            .expect("reopen dest")
-            .find_reference("refs/heads/main")
-            .is_err(),
+        find_reference(&dest, "refs/heads/main").is_err(),
         "retracting the line must DELETE refs/heads/main at the destination, not leave it serving now-private commits"
     );
 }
@@ -5386,12 +5477,9 @@ fn export_propagates_tag_and_note_deletion() {
             .put_blob(&Blob::from_slice(b"release\n"))
             .expect("blob");
         let tree = store
-            .put_tree(&Tree::from_entries(vec![TreeEntry::file(
-                "release.txt".to_string(),
-                blob,
-                false,
-            )
-            .expect("entry")]))
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("release.txt".to_string(), blob, false).expect("entry"),
+            ]))
             .expect("tree");
         let state = State::new(
             tree,
@@ -5414,9 +5502,9 @@ fn export_propagates_tag_and_note_deletion() {
         .expect("R minted");
 
     {
-        let dest = gix::open(&dest_path).expect("open dest");
+        let dest = open_git(&dest_path).expect("open dest");
         assert!(
-            dest.find_reference("refs/tags/v1.0").is_ok(),
+            find_reference(&dest, "refs/tags/v1.0").is_ok(),
             "destination must have the tag while public"
         );
         assert!(
@@ -5436,7 +5524,7 @@ fn export_propagates_tag_and_note_deletion() {
             &dest,
             "refs/notes/legacy",
             oid_r,
-            PreviousValue::Any,
+            RefPrecondition::Any,
             "test: stale heddle-exported notes ref",
         )
         .expect("plant stale notes ref");
@@ -5465,13 +5553,13 @@ fn export_propagates_tag_and_note_deletion() {
 
     bridge.export_to_path(&dest_path).expect("second export");
 
-    let dest = gix::open(&dest_path).expect("reopen dest");
+    let dest = open_git(&dest_path).expect("reopen dest");
     assert!(
-        dest.find_reference("refs/tags/v1.0").is_err(),
+        find_reference(&dest, "refs/tags/v1.0").is_err(),
         "retracting the marker must DELETE refs/tags/v1.0 at the destination"
     );
     assert!(
-        dest.find_reference("refs/notes/legacy").is_err(),
+        find_reference(&dest, "refs/notes/legacy").is_err(),
         "a stale heddle-managed notes ref absent from the served mirror must be DELETED at the destination"
     );
     assert!(
@@ -5481,7 +5569,7 @@ fn export_propagates_tag_and_note_deletion() {
         "the embargoed commit's note must no longer be readable at the destination"
     );
     assert!(
-        dest.find_reference("refs/heads/main").is_ok(),
+        find_reference(&dest, "refs/heads/main").is_ok(),
         "the still-public main branch must survive the reconciliation"
     );
 }
@@ -5519,12 +5607,12 @@ fn export_does_not_delete_foreign_refs() {
 
     // Plant a foreign ref in a namespace heddle does not manage.
     {
-        let dest = gix::open(&dest_path).expect("open dest");
+        let dest = open_git(&dest_path).expect("open dest");
         set_reference(
             &dest,
             "refs/keep/backup",
             oid_a,
-            PreviousValue::Any,
+            RefPrecondition::Any,
             "test: foreign ref heddle does not own",
         )
         .expect("plant foreign ref");
@@ -5533,13 +5621,13 @@ fn export_does_not_delete_foreign_refs() {
     // Re-export with nothing retracted (main still public).
     bridge.export_to_path(&dest_path).expect("second export");
 
-    let dest = gix::open(&dest_path).expect("reopen dest");
+    let dest = open_git(&dest_path).expect("reopen dest");
     assert!(
-        dest.find_reference("refs/keep/backup").is_ok(),
+        find_reference(&dest, "refs/keep/backup").is_ok(),
         "a foreign ref outside heddle-managed namespaces must be left untouched"
     );
     assert!(
-        dest.find_reference("refs/heads/main").is_ok(),
+        find_reference(&dest, "refs/heads/main").is_ok(),
         "a still-served heddle branch must survive the reconciliation"
     );
 }
@@ -5580,12 +5668,12 @@ fn export_does_not_delete_foreign_managed_ref() {
     // Plant a branch heddle never exported, INSIDE the heddle-managed
     // `refs/heads/*` namespace — the namespace r7 over-deleted from.
     {
-        let dest = gix::open(&dest_path).expect("open dest");
+        let dest = open_git(&dest_path).expect("open dest");
         set_reference(
             &dest,
             "refs/heads/other-user-branch",
             oid_a,
-            PreviousValue::Any,
+            RefPrecondition::Any,
             "test: foreign branch heddle never exported",
         )
         .expect("plant foreign managed ref");
@@ -5594,13 +5682,13 @@ fn export_does_not_delete_foreign_managed_ref() {
     // Re-export with nothing retracted (main still public).
     bridge.export_to_path(&dest_path).expect("second export");
 
-    let dest = gix::open(&dest_path).expect("reopen dest");
+    let dest = open_git(&dest_path).expect("reopen dest");
     assert!(
-        dest.find_reference("refs/heads/other-user-branch").is_ok(),
+        find_reference(&dest, "refs/heads/other-user-branch").is_ok(),
         "a foreign branch heddle never exported must NOT be deleted by a normal push"
     );
     assert!(
-        dest.find_reference("refs/heads/main").is_ok(),
+        find_reference(&dest, "refs/heads/main").is_ok(),
         "a still-served heddle branch must survive the reconciliation"
     );
 }
@@ -5633,11 +5721,9 @@ fn export_still_deletes_previously_exported_then_retracted_ref() {
     let dest_path = dest_root.path().join("export-target");
     let mut bridge = GitBridge::new(&repo);
     bridge.export_to_path(&dest_path).expect("first export");
+    let dest = open_git(&dest_path).expect("open dest");
     assert!(
-        gix::open(&dest_path)
-            .expect("open dest")
-            .find_reference("refs/heads/main")
-            .is_ok(),
+        find_reference(&dest, "refs/heads/main").is_ok(),
         "destination must advertise main while the line is public"
     );
 
@@ -5662,11 +5748,9 @@ fn export_still_deletes_previously_exported_then_retracted_ref() {
 
     // Re-export: main was heddle-exported AND is no longer served → DELETED.
     bridge.export_to_path(&dest_path).expect("second export");
+    let dest = open_git(&dest_path).expect("reopen dest");
     assert!(
-        gix::open(&dest_path)
-            .expect("reopen dest")
-            .find_reference("refs/heads/main")
-            .is_err(),
+        find_reference(&dest, "refs/heads/main").is_err(),
         "a previously-exported, now-retracted branch must be DELETED at the destination"
     );
 }
@@ -5711,9 +5795,9 @@ fn retraction_delete_propagates_to_url_remote() {
     let mut bridge = GitBridge::new(&repo);
     bridge.push(&url).expect("first network push");
     {
-        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        let remote = open_git(remote_root.path().join("remote.git")).expect("open remote");
         assert!(
-            remote.find_reference("refs/heads/main").is_ok(),
+            find_reference(&remote, "refs/heads/main").is_ok(),
             "the remote must advertise main while the line is public"
         );
     }
@@ -5740,9 +5824,9 @@ fn retraction_delete_propagates_to_url_remote() {
     // Re-push: main was heddle-exported AND is no longer served → DELETED on the
     // wire remote, not just locally.
     bridge.push(&url).expect("second network push");
-    let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
+    let remote = open_git(remote_root.path().join("remote.git")).expect("reopen remote");
     assert!(
-        remote.find_reference("refs/heads/main").is_err(),
+        find_reference(&remote, "refs/heads/main").is_err(),
         "a previously-exported, now-retracted branch must be DELETED on the URL/network remote"
     );
 }
@@ -5795,13 +5879,11 @@ fn embargo_rewind_forced_through_destination_push() {
         .get_git(&state_b)
         .expect("B minted");
     {
-        let dest = gix::open(&dest_path).expect("open dest");
-        let tip = dest
-            .find_reference("refs/heads/main")
+        let dest = open_git(&dest_path).expect("open dest");
+        let tip = find_reference(&dest, "refs/heads/main")
             .unwrap()
             .peel_to_id()
-            .unwrap()
-            .detach();
+            .unwrap();
         assert_eq!(tip, oid_b, "destination advertises the public tip B");
     }
 
@@ -5828,13 +5910,11 @@ fn embargo_rewind_forced_through_destination_push() {
     bridge
         .export_to_path(&dest_path)
         .expect("second export must force the embargo rewind through the destination");
-    let dest = gix::open(&dest_path).expect("reopen dest");
-    let tip = dest
-        .find_reference("refs/heads/main")
+    let dest = open_git(&dest_path).expect("reopen dest");
+    let tip = find_reference(&dest, "refs/heads/main")
         .unwrap()
         .peel_to_id()
-        .unwrap()
-        .detach();
+        .unwrap();
     assert_eq!(
         tip, oid_a,
         "the destination branch must be rewound to the served ancestor A"
@@ -5875,18 +5955,16 @@ fn foreign_ref_on_url_remote_survives() {
     // Plant a branch heddle never exported, INSIDE the heddle-managed
     // refs/heads/* namespace, directly on the remote.
     {
-        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
-        let main_oid = remote
-            .find_reference("refs/heads/main")
+        let remote = open_git(remote_root.path().join("remote.git")).expect("open remote");
+        let main_oid = find_reference(&remote, "refs/heads/main")
             .unwrap()
             .peel_to_id()
-            .unwrap()
-            .detach();
+            .unwrap();
         set_reference(
             &remote,
             "refs/heads/other-user-branch",
             main_oid,
-            PreviousValue::Any,
+            RefPrecondition::Any,
             "test: foreign branch heddle never exported",
         )
         .expect("plant foreign managed ref");
@@ -5896,15 +5974,13 @@ fn foreign_ref_on_url_remote_survives() {
     // delete-set scoping holds on the unified URL/network path).
     bridge.push(&url).expect("second network push");
 
-    let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
+    let remote = open_git(remote_root.path().join("remote.git")).expect("reopen remote");
     assert!(
-        remote
-            .find_reference("refs/heads/other-user-branch")
-            .is_ok(),
+        find_reference(&remote, "refs/heads/other-user-branch").is_ok(),
         "a foreign branch heddle never exported must NOT be deleted on the URL/network remote"
     );
     assert!(
-        remote.find_reference("refs/heads/main").is_ok(),
+        find_reference(&remote, "refs/heads/main").is_ok(),
         "a still-served heddle branch must survive the reconciliation"
     );
 }
@@ -5965,7 +6041,7 @@ fn out_of_band_destination_descendant_not_force_overwritten() {
             "out-of-band",
             &[oid_b],
         );
-        let dest = gix::open(&dest_path).expect("open dest");
+        let dest = open_git(&dest_path).expect("open dest");
         let in_dest = commit_with_tree(
             &dest,
             Some("refs/heads/main"),
@@ -5990,13 +6066,11 @@ fn out_of_band_destination_descendant_not_force_overwritten() {
         "expected a non-fast-forward rejection, got: {err:?}"
     );
     {
-        let dest = gix::open(&dest_path).expect("reopen dest");
-        let tip = dest
-            .find_reference("refs/heads/main")
+        let dest = open_git(&dest_path).expect("reopen dest");
+        let tip = find_reference(&dest, "refs/heads/main")
             .unwrap()
             .peel_to_id()
-            .unwrap()
-            .detach();
+            .unwrap();
         assert_eq!(
             tip, oid_c,
             "the out-of-band commit must survive — heddle must not force-overwrite it"
@@ -6012,13 +6086,11 @@ fn out_of_band_destination_descendant_not_force_overwritten() {
         )
         .expect("--force overrides the FF guard at the local destination");
     {
-        let dest = gix::open(&dest_path).expect("reopen dest");
-        let tip = dest
-            .find_reference("refs/heads/main")
+        let dest = open_git(&dest_path).expect("reopen dest");
+        let tip = find_reference(&dest, "refs/heads/main")
             .unwrap()
             .peel_to_id()
-            .unwrap()
-            .detach();
+            .unwrap();
         assert_eq!(
             tip, oid_b,
             "--force rewinds the local destination to the served frontier B"
@@ -6033,19 +6105,17 @@ fn out_of_band_destination_descendant_not_force_overwritten() {
 
     bridge.push(&url).expect("first network push publishes B");
     {
-        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
-        let tip = remote
-            .find_reference("refs/heads/main")
+        let remote = open_git(remote_root.path().join("remote.git")).expect("open remote");
+        let tip = find_reference(&remote, "refs/heads/main")
             .unwrap()
             .peel_to_id()
-            .unwrap()
-            .detach();
+            .unwrap();
         assert_eq!(tip, oid_b, "remote advertises the published tip B");
     }
 
     // Out-of-band advance on the wire remote to the SAME C (already in the mirror).
     {
-        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        let remote = open_git(remote_root.path().join("remote.git")).expect("open remote");
         let in_remote = commit_with_tree(
             &remote,
             Some("refs/heads/main"),
@@ -6068,13 +6138,11 @@ fn out_of_band_destination_descendant_not_force_overwritten() {
         "expected a non-fast-forward rejection on the wire, got: {err:?}"
     );
     {
-        let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
-        let tip = remote
-            .find_reference("refs/heads/main")
+        let remote = open_git(remote_root.path().join("remote.git")).expect("reopen remote");
+        let tip = find_reference(&remote, "refs/heads/main")
             .unwrap()
             .peel_to_id()
-            .unwrap()
-            .detach();
+            .unwrap();
         assert_eq!(
             tip, oid_c,
             "the out-of-band commit must survive on the URL/network remote"
@@ -6140,24 +6208,21 @@ fn heddle_published_tip_embargo_rewind_still_forced() {
         .get_git(&state_b)
         .expect("B minted");
     {
-        let dest = gix::open(&dest_path).expect("open dest");
+        let dest = open_git(&dest_path).expect("open dest");
         assert_eq!(
-            dest.find_reference("refs/heads/main")
+            find_reference(&dest, "refs/heads/main")
                 .unwrap()
                 .peel_to_id()
-                .unwrap()
-                .detach(),
+                .unwrap(),
             oid_b,
             "local destination advertises the published tip B"
         );
-        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        let remote = open_git(remote_root.path().join("remote.git")).expect("open remote");
         assert_eq!(
-            remote
-                .find_reference("refs/heads/main")
+            find_reference(&remote, "refs/heads/main")
                 .unwrap()
                 .peel_to_id()
-                .unwrap()
-                .detach(),
+                .unwrap(),
             oid_b,
             "remote advertises the published tip B"
         );
@@ -6189,13 +6254,11 @@ fn heddle_published_tip_embargo_rewind_still_forced() {
         .push(&url)
         .expect("second network push must FORCE the heddle-owned embargo rewind (network)");
 
-    let dest = gix::open(&dest_path).expect("reopen dest");
-    let tip = dest
-        .find_reference("refs/heads/main")
+    let dest = open_git(&dest_path).expect("reopen dest");
+    let tip = find_reference(&dest, "refs/heads/main")
         .unwrap()
         .peel_to_id()
-        .unwrap()
-        .detach();
+        .unwrap();
     assert_eq!(
         tip, oid_a,
         "local destination must be force-rewound to the served ancestor A"
@@ -6205,13 +6268,11 @@ fn heddle_published_tip_embargo_rewind_still_forced() {
         "local destination must not keep advertising the embargoed tip B"
     );
 
-    let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
-    let rtip = remote
-        .find_reference("refs/heads/main")
+    let remote = open_git(remote_root.path().join("remote.git")).expect("reopen remote");
+    let rtip = find_reference(&remote, "refs/heads/main")
         .unwrap()
         .peel_to_id()
-        .unwrap()
-        .detach();
+        .unwrap();
     assert_eq!(
         rtip, oid_a,
         "URL/network remote must be force-rewound to the served ancestor A"
@@ -6293,7 +6354,7 @@ fn out_of_band_advance_after_embargo_not_deleted() {
             "out-of-band",
             &[oid_b],
         );
-        let dest = gix::open(&dest_path).expect("open dest");
+        let dest = open_git(&dest_path).expect("open dest");
         let in_dest = commit_with_tree(
             &dest,
             Some("refs/heads/main"),
@@ -6301,7 +6362,7 @@ fn out_of_band_advance_after_embargo_not_deleted() {
             "out-of-band",
             &[oid_b],
         );
-        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        let remote = open_git(remote_root.path().join("remote.git")).expect("open remote");
         let in_remote = commit_with_tree(
             &remote,
             Some("refs/heads/main"),
@@ -6347,13 +6408,11 @@ fn out_of_band_advance_after_embargo_not_deleted() {
         .export_to_path(&dest_path)
         .expect("plain export must not error on the out-of-band retraction (local)");
     {
-        let dest = gix::open(&dest_path).expect("reopen dest");
-        let tip = dest
-            .find_reference("refs/heads/main")
+        let dest = open_git(&dest_path).expect("reopen dest");
+        let tip = find_reference(&dest, "refs/heads/main")
             .unwrap()
             .peel_to_id()
-            .unwrap()
-            .detach();
+            .unwrap();
         assert_eq!(
             tip, oid_c,
             "the out-of-band commit must survive — heddle must not delete a tip it never published (local)"
@@ -6366,13 +6425,11 @@ fn out_of_band_advance_after_embargo_not_deleted() {
         .push(&url)
         .expect("plain network push must not error on the out-of-band retraction");
     {
-        let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
-        let tip = remote
-            .find_reference("refs/heads/main")
+        let remote = open_git(remote_root.path().join("remote.git")).expect("reopen remote");
+        let tip = find_reference(&remote, "refs/heads/main")
             .unwrap()
             .peel_to_id()
-            .unwrap()
-            .detach();
+            .unwrap();
         assert_eq!(
             tip, oid_c,
             "the out-of-band commit must survive on the URL/network remote too"
@@ -6388,9 +6445,9 @@ fn out_of_band_advance_after_embargo_not_deleted() {
         )
         .expect("--force retracts the out-of-band branch at the local destination");
     {
-        let dest = gix::open(&dest_path).expect("reopen dest");
+        let dest = open_git(&dest_path).expect("reopen dest");
         assert!(
-            dest.find_reference("refs/heads/main").is_err(),
+            find_reference(&dest, "refs/heads/main").is_err(),
             "--force deletes the retracted branch even when the destination tip was advanced out of band"
         );
     }
@@ -6409,7 +6466,7 @@ fn out_of_band_advance_after_embargo_not_deleted() {
 /// `find_commit` (which would error on a tag object).
 #[test]
 fn reconcile_ownership_conformance_matrix() {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     let (_mirror_temp, mirror) = init_git_repo();
     // Linear topology a <- b so classify_ref_move resolves fast-forward (a->b),
@@ -6422,10 +6479,10 @@ fn reconcile_ownership_conformance_matrix() {
 
     // Expected reconcile outcome for a single-ref call.
     enum Outcome {
-        /// In `writes` with this `old`/`new`, and `deletes` empty.
-        Write(Option<gix::hash::ObjectId>, gix::hash::ObjectId),
-        /// In `deletes` with this `old`, and `writes` empty.
-        Delete(gix::hash::ObjectId),
+        /// In `writes` with this `new`, and `deletes` empty.
+        Write(ObjectId),
+        /// In `deletes`, and `writes` empty.
+        Delete,
         /// Neither written nor deleted (no-op skip, or out-of-band spared).
         Absent,
         /// `Err(NonFastForwardRef)` — an unowned overwrite without `--force`.
@@ -6435,14 +6492,49 @@ fn reconcile_ownership_conformance_matrix() {
     struct Cell {
         label: &'static str,
         ns: RefNamespace,
-        old: Option<gix::hash::ObjectId>,
-        target: gix::hash::ObjectId,
-        recorded: Option<gix::hash::ObjectId>,
+        old: Option<ObjectId>,
+        target: ObjectId,
+        recorded: Option<ObjectId>,
         /// In the served frontier (an overwrite/create) vs. only previously
         /// exported (a retraction).
         desired: bool,
         force: bool,
         expect: Outcome,
+    }
+
+    fn is_ancestor_commit(repo: &SleyRepository, ancestor: ObjectId, descendant: ObjectId) -> bool {
+        let mut pending = vec![descendant];
+        let mut seen = HashSet::new();
+        while let Some(oid) = pending.pop() {
+            if oid == ancestor {
+                return true;
+            }
+            if !seen.insert(oid) {
+                continue;
+            }
+            if let Ok(commit) = repo.read_commit(&oid) {
+                pending.extend(commit.parents);
+            }
+        }
+        false
+    }
+
+    fn expected_write_force(repo: &SleyRepository, cell: &Cell) -> bool {
+        if cell.force {
+            return true;
+        }
+        let Some(old) = cell.old else {
+            return false;
+        };
+        if old == cell.target {
+            return false;
+        }
+        match cell.ns {
+            RefNamespace::Tag => true,
+            RefNamespace::Branch | RefNamespace::Note => {
+                !is_ancestor_commit(repo, old, cell.target)
+            }
+        }
     }
 
     let cells = vec![
@@ -6455,7 +6547,7 @@ fn reconcile_ownership_conformance_matrix() {
             recorded: None,
             desired: true,
             force: false,
-            expect: Outcome::Write(None, b),
+            expect: Outcome::Write(b),
         },
         Cell {
             label: "branch/no-op",
@@ -6475,7 +6567,7 @@ fn reconcile_ownership_conformance_matrix() {
             recorded: Some(a),
             desired: true,
             force: false,
-            expect: Outcome::Write(Some(a), b),
+            expect: Outcome::Write(b),
         },
         Cell {
             label: "branch/fast-forward/out-of-band",
@@ -6485,7 +6577,7 @@ fn reconcile_ownership_conformance_matrix() {
             recorded: None,
             desired: true,
             force: false,
-            expect: Outcome::Write(Some(a), b),
+            expect: Outcome::Write(b),
         },
         Cell {
             label: "branch/rewind/owned",
@@ -6495,7 +6587,7 @@ fn reconcile_ownership_conformance_matrix() {
             recorded: Some(b),
             desired: true,
             force: false,
-            expect: Outcome::Write(Some(b), a),
+            expect: Outcome::Write(a),
         },
         Cell {
             label: "branch/rewind/out-of-band/force-off",
@@ -6515,7 +6607,7 @@ fn reconcile_ownership_conformance_matrix() {
             recorded: None,
             desired: true,
             force: true,
-            expect: Outcome::Write(Some(b), a),
+            expect: Outcome::Write(a),
         },
         Cell {
             label: "branch/retract/owned",
@@ -6525,7 +6617,7 @@ fn reconcile_ownership_conformance_matrix() {
             recorded: Some(b),
             desired: false,
             force: false,
-            expect: Outcome::Delete(b),
+            expect: Outcome::Delete,
         },
         // Out-of-band retract: heddle published `a`, the destination drifted to `b`
         // (recorded != old) — spared unless forced.
@@ -6547,7 +6639,7 @@ fn reconcile_ownership_conformance_matrix() {
             recorded: Some(a),
             desired: false,
             force: true,
-            expect: Outcome::Delete(b),
+            expect: Outcome::Delete,
         },
         // ---- tag: free move-classification + the SAME uniform ownership gate ----
         Cell {
@@ -6558,7 +6650,7 @@ fn reconcile_ownership_conformance_matrix() {
             recorded: None,
             desired: true,
             force: false,
-            expect: Outcome::Write(None, b),
+            expect: Outcome::Write(b),
         },
         Cell {
             label: "tag/no-op",
@@ -6578,7 +6670,7 @@ fn reconcile_ownership_conformance_matrix() {
             recorded: Some(a),
             desired: true,
             force: false,
-            expect: Outcome::Write(Some(a), b),
+            expect: Outcome::Write(b),
         },
         // THE r17 fix: an out-of-band tag (recorded != old) is no longer clobbered.
         Cell {
@@ -6609,7 +6701,7 @@ fn reconcile_ownership_conformance_matrix() {
             recorded: None,
             desired: true,
             force: true,
-            expect: Outcome::Write(Some(a), b),
+            expect: Outcome::Write(b),
         },
         // annotated-tag-object as the NEW target: proves no find_commit on a tag obj.
         Cell {
@@ -6620,7 +6712,7 @@ fn reconcile_ownership_conformance_matrix() {
             recorded: Some(a),
             desired: true,
             force: false,
-            expect: Outcome::Write(Some(a), tag_obj),
+            expect: Outcome::Write(tag_obj),
         },
         // annotated-tag-object as the OLD tip: still gated by OID compare only.
         Cell {
@@ -6641,7 +6733,7 @@ fn reconcile_ownership_conformance_matrix() {
             recorded: Some(b),
             desired: false,
             force: false,
-            expect: Outcome::Delete(b),
+            expect: Outcome::Delete,
         },
         Cell {
             label: "tag/retract/out-of-band/force-off",
@@ -6661,7 +6753,7 @@ fn reconcile_ownership_conformance_matrix() {
             recorded: Some(a),
             desired: false,
             force: true,
-            expect: Outcome::Delete(b),
+            expect: Outcome::Delete,
         },
         // ---- note: classified exactly like a branch (uniform ownership) ----
         Cell {
@@ -6672,7 +6764,7 @@ fn reconcile_ownership_conformance_matrix() {
             recorded: None,
             desired: true,
             force: false,
-            expect: Outcome::Write(None, b),
+            expect: Outcome::Write(b),
         },
         Cell {
             label: "note/no-op",
@@ -6692,7 +6784,7 @@ fn reconcile_ownership_conformance_matrix() {
             recorded: Some(a),
             desired: true,
             force: false,
-            expect: Outcome::Write(Some(a), b),
+            expect: Outcome::Write(b),
         },
         Cell {
             label: "note/rewind/owned",
@@ -6702,7 +6794,7 @@ fn reconcile_ownership_conformance_matrix() {
             recorded: Some(b),
             desired: true,
             force: false,
-            expect: Outcome::Write(Some(b), a),
+            expect: Outcome::Write(a),
         },
         Cell {
             label: "note/rewind/out-of-band/force-off",
@@ -6722,7 +6814,7 @@ fn reconcile_ownership_conformance_matrix() {
             recorded: None,
             desired: true,
             force: true,
-            expect: Outcome::Write(Some(b), a),
+            expect: Outcome::Write(a),
         },
         Cell {
             label: "note/retract/owned",
@@ -6732,7 +6824,7 @@ fn reconcile_ownership_conformance_matrix() {
             recorded: Some(b),
             desired: false,
             force: false,
-            expect: Outcome::Delete(b),
+            expect: Outcome::Delete,
         },
     ];
 
@@ -6752,11 +6844,11 @@ fn reconcile_ownership_conformance_matrix() {
         } else {
             Vec::new()
         };
-        let mut old_map: HashMap<String, gix::hash::ObjectId> = HashMap::new();
+        let mut old_map: HashMap<String, ObjectId> = HashMap::new();
         if let Some(o) = cell.old {
             old_map.insert(full.clone(), o);
         }
-        let mut recorded_map: HashMap<String, gix::hash::ObjectId> = HashMap::new();
+        let mut recorded_map: HashMap<String, ObjectId> = HashMap::new();
         if let Some(r) = cell.recorded {
             recorded_map.insert(full.clone(), r);
         }
@@ -6780,7 +6872,7 @@ fn reconcile_ownership_conformance_matrix() {
         let plan =
             result.unwrap_or_else(|e| panic!("cell `{}`: expected Ok, got {e:?}", cell.label));
         match cell.expect {
-            Outcome::Write(exp_old, exp_new) => {
+            Outcome::Write(exp_new) => {
                 assert!(
                     plan.deletes.is_empty(),
                     "cell `{}`: expected no deletes",
@@ -6794,10 +6886,15 @@ fn reconcile_ownership_conformance_matrix() {
                 );
                 let w = &plan.writes[0];
                 assert_eq!(w.full_name, full, "cell `{}`: write name", cell.label);
-                assert_eq!(w.old, exp_old, "cell `{}`: write old", cell.label);
                 assert_eq!(w.new, exp_new, "cell `{}`: write new", cell.label);
+                assert_eq!(
+                    w.force,
+                    expected_write_force(&mirror, cell),
+                    "cell `{}`: write force",
+                    cell.label
+                );
             }
-            Outcome::Delete(exp_old) => {
+            Outcome::Delete => {
                 assert!(
                     plan.writes.is_empty(),
                     "cell `{}`: expected no writes",
@@ -6811,7 +6908,6 @@ fn reconcile_ownership_conformance_matrix() {
                 );
                 let d = &plan.deletes[0];
                 assert_eq!(d.full_name, full, "cell `{}`: delete name", cell.label);
-                assert_eq!(d.old, exp_old, "cell `{}`: delete old", cell.label);
             }
             Outcome::Absent => {
                 assert!(
@@ -6852,9 +6948,9 @@ fn foreign_destination_ref_spared() {
         target: a,
         namespace: RefNamespace::Tag,
     }];
-    let mut old_map: HashMap<String, gix::hash::ObjectId> = HashMap::new();
+    let mut old_map: HashMap<String, ObjectId> = HashMap::new();
     old_map.insert(full.clone(), a);
-    let recorded_map: HashMap<String, gix::hash::ObjectId> = HashMap::new();
+    let recorded_map: HashMap<String, ObjectId> = HashMap::new();
 
     let plan =
         plan_destination_reconcile(&mirror, &served, None, &old_map, &recorded_map, false).unwrap();
@@ -6911,12 +7007,9 @@ fn out_of_band_destination_tag_not_overwritten() {
             .put_blob(&Blob::from_slice(b"release\n"))
             .expect("blob");
         let tree = store
-            .put_tree(&Tree::from_entries(vec![TreeEntry::file(
-                "release.txt".to_string(),
-                blob,
-                false,
-            )
-            .expect("entry")]))
+            .put_tree(&Tree::from_entries(vec![
+                TreeEntry::file("release.txt".to_string(), blob, false).expect("entry"),
+            ]))
             .expect("tree");
         let state = State::new(
             tree,
@@ -6941,20 +7034,20 @@ fn out_of_band_destination_tag_not_overwritten() {
 
     // The served tag tip heddle recorded for this destination.
     let served_tag = {
-        let dest = gix::open(&dest_path).expect("open dest");
+        let dest = open_git(&dest_path).expect("open dest");
         read_exported_refs(&dest).expect("read record")["refs/tags/v1.0"]
     };
 
     // Out-of-band advance: move the destination tag to a fresh commit X heddle
     // never published (and never recorded).
     let oid_x = {
-        let dest = gix::open(&dest_path).expect("open dest");
+        let dest = open_git(&dest_path).expect("open dest");
         let x = commit_with_tree(&dest, None, empty_tree_oid(&dest), "out-of-band-tag", &[]);
         set_reference(
             &dest,
             "refs/tags/v1.0",
             x,
-            PreviousValue::Any,
+            RefPrecondition::Any,
             "test: out-of-band tag",
         )
         .expect("move tag out of band");
@@ -6974,12 +7067,10 @@ fn out_of_band_destination_tag_not_overwritten() {
         "expected a non-fast-forward rejection, got: {err:?}"
     );
     {
-        let dest = gix::open(&dest_path).expect("reopen dest");
-        let tip = dest
-            .find_reference("refs/tags/v1.0")
+        let dest = open_git(&dest_path).expect("reopen dest");
+        let tip = find_reference(&dest, "refs/tags/v1.0")
             .unwrap()
             .try_id()
-            .map(|id| id.detach())
             .expect("tag id");
         assert_eq!(
             tip, oid_x,
@@ -6996,12 +7087,10 @@ fn out_of_band_destination_tag_not_overwritten() {
         )
         .expect("--force overrides the tag ownership gate at the local destination");
     {
-        let dest = gix::open(&dest_path).expect("reopen dest");
-        let tip = dest
-            .find_reference("refs/tags/v1.0")
+        let dest = open_git(&dest_path).expect("reopen dest");
+        let tip = find_reference(&dest, "refs/tags/v1.0")
             .unwrap()
             .try_id()
-            .map(|id| id.detach())
             .expect("tag id");
         assert_eq!(
             tip, served_tag,
@@ -7024,17 +7113,15 @@ fn out_of_band_destination_tag_not_overwritten() {
         .push(&url)
         .expect("first network push publishes the tag");
     let remote_served_tag = {
-        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
-        remote
-            .find_reference("refs/tags/v1.0")
+        let remote = open_git(remote_root.path().join("remote.git")).expect("open remote");
+        find_reference(&remote, "refs/tags/v1.0")
             .unwrap()
             .try_id()
-            .map(|id| id.detach())
             .expect("tag id")
     };
 
     let remote_oid_x = {
-        let remote = gix::open(remote_root.path().join("remote.git")).expect("open remote");
+        let remote = open_git(remote_root.path().join("remote.git")).expect("open remote");
         let x = commit_with_tree(
             &remote,
             None,
@@ -7046,7 +7133,7 @@ fn out_of_band_destination_tag_not_overwritten() {
             &remote,
             "refs/tags/v1.0",
             x,
-            PreviousValue::Any,
+            RefPrecondition::Any,
             "test: out-of-band tag",
         )
         .expect("move remote tag out of band");
@@ -7065,12 +7152,10 @@ fn out_of_band_destination_tag_not_overwritten() {
         "expected a non-fast-forward rejection on the wire, got: {err:?}"
     );
     {
-        let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
-        let tip = remote
-            .find_reference("refs/tags/v1.0")
+        let remote = open_git(remote_root.path().join("remote.git")).expect("reopen remote");
+        let tip = find_reference(&remote, "refs/tags/v1.0")
             .unwrap()
             .try_id()
-            .map(|id| id.detach())
             .expect("tag id");
         assert_eq!(
             tip, remote_oid_x,
@@ -7082,12 +7167,10 @@ fn out_of_band_destination_tag_not_overwritten() {
         .push_with_scope_force(&url, GitPushScope::AllThreads, true)
         .expect("--force overrides the tag ownership gate on the URL/network remote");
     {
-        let remote = gix::open(remote_root.path().join("remote.git")).expect("reopen remote");
-        let tip = remote
-            .find_reference("refs/tags/v1.0")
+        let remote = open_git(remote_root.path().join("remote.git")).expect("reopen remote");
+        let tip = find_reference(&remote, "refs/tags/v1.0")
             .unwrap()
             .try_id()
-            .map(|id| id.detach())
             .expect("tag id");
         assert_eq!(
             tip, remote_served_tag,
@@ -7119,12 +7202,11 @@ fn heddle_owned_tag_overwrite_still_lands() {
         target: b,
         namespace: RefNamespace::Tag,
     }];
-    let old_at_destination: HashMap<String, gix::hash::ObjectId> =
-        [(full.clone(), a)].into_iter().collect();
+    let old_at_destination: HashMap<String, ObjectId> = [(full.clone(), a)].into_iter().collect();
 
     // Owned: heddle recorded the destination tip `a` it is overwriting → the move
     // to `b` lands as a plain write, no `--force` needed.
-    let owned: HashMap<String, gix::hash::ObjectId> = [(full.clone(), a)].into_iter().collect();
+    let owned: HashMap<String, ObjectId> = [(full.clone(), a)].into_iter().collect();
     let plan =
         plan_destination_reconcile(&mirror, &served, None, &old_at_destination, &owned, false)
             .expect("a heddle-owned tag move must reconcile without --force");
@@ -7134,10 +7216,9 @@ fn heddle_owned_tag_overwrite_still_lands() {
         "owned tag move must produce exactly one write"
     );
     assert_eq!(plan.writes[0].full_name, full);
-    assert_eq!(
-        plan.writes[0].old,
-        Some(a),
-        "write carries the owned old tip"
+    assert!(
+        plan.writes[0].force,
+        "owned tag overwrite must force the destination update"
     );
     assert_eq!(plan.writes[0].new, b, "write lands the served target");
     assert!(
@@ -7147,7 +7228,7 @@ fn heddle_owned_tag_overwrite_still_lands() {
 
     // Contrast: the SAME move with no ownership record (out-of-band tip) is the r17
     // gate — FF-rejected unless `--force`.
-    let unrecorded: HashMap<String, gix::hash::ObjectId> = HashMap::new();
+    let unrecorded: HashMap<String, ObjectId> = HashMap::new();
     let err = plan_destination_reconcile(
         &mirror,
         &served,
@@ -7168,29 +7249,78 @@ fn heddle_owned_tag_overwrite_still_lands() {
 /// reuses one zero-offset signature for both roles, this surfaces committer,
 /// timezone, gpgsig, and extra-header fidelity (#564 step 1).
 fn commit_with_signatures(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     reference: Option<&str>,
-    tree_oid: gix::hash::ObjectId,
+    tree_oid: ObjectId,
     message: &str,
-    author: gix::actor::Signature,
-    committer: gix::actor::Signature,
-    extra_headers: Vec<(gix::bstr::BString, gix::bstr::BString)>,
-) -> gix::hash::ObjectId {
-    let commit = gix::objs::Commit {
-        tree: tree_oid,
-        parents: Default::default(),
-        author,
-        committer,
-        encoding: None,
-        message: message.into(),
+    author: Signature,
+    committer: Signature,
+    extra_headers: Vec<(Vec<u8>, Vec<u8>)>,
+) -> ObjectId {
+    let body = raw_commit_body(
+        tree_oid,
+        &[],
+        &author,
+        &committer,
         extra_headers,
-    };
-    let id = repo.write_object(&commit).expect("write commit").detach();
+        message.as_bytes(),
+    );
+    let id = repo
+        .write_object(EncodedObject::new(GitObjectType::Commit, body))
+        .expect("write commit");
     if let Some(reference) = reference {
-        set_reference(repo, reference, id, PreviousValue::Any, "test: update ref")
-            .expect("update ref");
+        set_reference(
+            repo,
+            reference,
+            id,
+            RefPrecondition::Any,
+            "test: update ref",
+        )
+        .expect("update ref");
     }
     id
+}
+
+fn raw_commit_body(
+    tree_oid: ObjectId,
+    parents: &[ObjectId],
+    author: &Signature,
+    committer: &Signature,
+    extra_headers: Vec<(Vec<u8>, Vec<u8>)>,
+    message: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(format!("tree {tree_oid}\n").as_bytes());
+    for parent in parents {
+        out.extend_from_slice(format!("parent {parent}\n").as_bytes());
+    }
+    out.extend_from_slice(b"author ");
+    out.extend_from_slice(&author.to_ident_bytes());
+    out.push(b'\n');
+    out.extend_from_slice(b"committer ");
+    out.extend_from_slice(&committer.to_ident_bytes());
+    out.push(b'\n');
+    for (name, value) in extra_headers {
+        write_raw_commit_header(&mut out, &name, &value);
+    }
+    out.push(b'\n');
+    out.extend_from_slice(message);
+    out
+}
+
+fn write_raw_commit_header(out: &mut Vec<u8>, name: &[u8], value: &[u8]) {
+    out.extend_from_slice(name);
+    out.push(b' ');
+    let mut lines = value.split(|byte| *byte == b'\n');
+    if let Some(first) = lines.next() {
+        out.extend_from_slice(first);
+    }
+    for line in lines {
+        out.push(b'\n');
+        out.push(b' ');
+        out.extend_from_slice(line);
+    }
+    out.push(b'\n');
 }
 
 /// #564 step 1: a commit imported through the bridge must round-trip every
@@ -7204,26 +7334,12 @@ fn import_preserves_commit_git_fidelity_fields() {
     let (_git_temp, git_repo) = init_git_repo();
 
     let tree_oid = empty_tree_oid(&git_repo);
-    let author = gix::actor::Signature {
-        name: "Author".into(),
-        email: "author@example.com".into(),
-        time: gix::date::Time {
-            seconds: 1_000_000,
-            offset: -7 * 3600,
-        },
-    };
-    let committer = gix::actor::Signature {
-        name: "Committer".into(),
-        email: "committer@example.com".into(),
-        time: gix::date::Time {
-            seconds: 2_000_000,
-            offset: 2 * 3600,
-        },
-    };
+    let author = test_signature_at("Author", "author@example.com", 1_000_000, -7 * 60);
+    let committer = test_signature_at("Committer", "committer@example.com", 2_000_000, 2 * 60);
     let gpgsig = "-----BEGIN PGP SIGNATURE-----\nABCD\n-----END PGP SIGNATURE-----";
     let extra_headers = vec![
-        ("gpgsig".into(), gpgsig.into()),
-        ("mergetag".into(), "object deadbeef".into()),
+        (b"gpgsig".to_vec(), gpgsig.as_bytes().to_vec()),
+        (b"mergetag".to_vec(), b"object deadbeef".to_vec()),
     ];
     let commit_oid = commit_with_signatures(
         &git_repo,
@@ -7236,7 +7352,11 @@ fn import_preserves_commit_git_fidelity_fields() {
     );
 
     let mut bridge = GitBridge::new(&repo);
-    import_all(&mut bridge, Some(git_repo.workdir().expect("workdir"))).expect("import");
+    import_all(
+        &mut bridge,
+        Some(git_repo.workdir().expect("workdir").as_path()),
+    )
+    .expect("import");
 
     let change_id = test_support::mapping(&bridge)
         .get_heddle(commit_oid)
@@ -7256,7 +7376,7 @@ fn import_preserves_commit_git_fidelity_fields() {
         state.raw_message.as_deref(),
         Some("feat: thing\n\nBody.\n".as_bytes())
     );
-    // gix folds multi-line extra-header values and round-trips them with a
+    // Git config folds multi-line extra-header values and round-trips them with a
     // trailing newline; byte-exact State round-tripping is covered by the
     // ingest unit test. Here we verify gpgsig stays INLINE in extra_headers at
     // its captured position (not split into a separate field) and the headers
@@ -7290,22 +7410,8 @@ fn backfill_fidelity_matches_fresh_adopt_and_is_idempotent() {
     let (_git_temp, git_repo) = init_git_repo();
 
     let tree_oid = empty_tree_oid(&git_repo);
-    let author = gix::actor::Signature {
-        name: "Author".into(),
-        email: "author@example.com".into(),
-        time: gix::date::Time {
-            seconds: 1_000_000,
-            offset: -7 * 3600,
-        },
-    };
-    let committer = gix::actor::Signature {
-        name: "Committer".into(),
-        email: "committer@example.com".into(),
-        time: gix::date::Time {
-            seconds: 2_000_000,
-            offset: 2 * 3600,
-        },
-    };
+    let author = test_signature_at("Author", "author@example.com", 1_000_000, -7 * 60);
+    let committer = test_signature_at("Committer", "committer@example.com", 2_000_000, 2 * 60);
     let gpgsig = "-----BEGIN PGP SIGNATURE-----\nABCD\n-----END PGP SIGNATURE-----";
     let commit_oid = commit_with_signatures(
         &git_repo,
@@ -7314,12 +7420,16 @@ fn backfill_fidelity_matches_fresh_adopt_and_is_idempotent() {
         "feat: thing\n\nBody.\n",
         author,
         committer,
-        vec![("gpgsig".into(), gpgsig.into())],
+        vec![(b"gpgsig".to_vec(), gpgsig.as_bytes().to_vec())],
     );
 
     // Fresh post-#565 adopt: this populates the fidelity fields AND the mirror.
     let mut bridge = GitBridge::new(&repo);
-    import_all(&mut bridge, Some(git_repo.workdir().expect("workdir"))).expect("import");
+    import_all(
+        &mut bridge,
+        Some(git_repo.workdir().expect("workdir").as_path()),
+    )
+    .expect("import");
     let change_id = test_support::mapping(&bridge)
         .get_heddle(commit_oid)
         .expect("commit mapped");
@@ -7415,22 +7525,8 @@ fn backfill_skips_states_with_foreign_signatures() {
     let (_git_temp, git_repo) = init_git_repo();
 
     let tree_oid = empty_tree_oid(&git_repo);
-    let author = gix::actor::Signature {
-        name: "Author".into(),
-        email: "author@example.com".into(),
-        time: gix::date::Time {
-            seconds: 1_000_000,
-            offset: -7 * 3600,
-        },
-    };
-    let committer = gix::actor::Signature {
-        name: "Committer".into(),
-        email: "committer@example.com".into(),
-        time: gix::date::Time {
-            seconds: 2_000_000,
-            offset: 2 * 3600,
-        },
-    };
+    let author = test_signature_at("Author", "author@example.com", 1_000_000, -7 * 60);
+    let committer = test_signature_at("Committer", "committer@example.com", 2_000_000, 2 * 60);
     let commit_oid = commit_with_signatures(
         &git_repo,
         Some("refs/heads/main"),
@@ -7442,7 +7538,11 @@ fn backfill_skips_states_with_foreign_signatures() {
     );
 
     let mut bridge = GitBridge::new(&repo);
-    import_all(&mut bridge, Some(git_repo.workdir().expect("workdir"))).expect("import");
+    import_all(
+        &mut bridge,
+        Some(git_repo.workdir().expect("workdir").as_path()),
+    )
+    .expect("import");
     let change_id = test_support::mapping(&bridge)
         .get_heddle(commit_oid)
         .expect("commit mapped");
@@ -7513,22 +7613,8 @@ fn backfill_resigns_owned_signed_states() {
     let (_git_temp, git_repo) = init_git_repo();
 
     let tree_oid = empty_tree_oid(&git_repo);
-    let author = gix::actor::Signature {
-        name: "Author".into(),
-        email: "author@example.com".into(),
-        time: gix::date::Time {
-            seconds: 1_000_000,
-            offset: -7 * 3600,
-        },
-    };
-    let committer = gix::actor::Signature {
-        name: "Committer".into(),
-        email: "committer@example.com".into(),
-        time: gix::date::Time {
-            seconds: 2_000_000,
-            offset: 2 * 3600,
-        },
-    };
+    let author = test_signature_at("Author", "author@example.com", 1_000_000, -7 * 60);
+    let committer = test_signature_at("Committer", "committer@example.com", 2_000_000, 2 * 60);
     let commit_oid = commit_with_signatures(
         &git_repo,
         Some("refs/heads/main"),
@@ -7540,7 +7626,11 @@ fn backfill_resigns_owned_signed_states() {
     );
 
     let mut bridge = GitBridge::new(&repo);
-    import_all(&mut bridge, Some(git_repo.workdir().expect("workdir"))).expect("import");
+    import_all(
+        &mut bridge,
+        Some(git_repo.workdir().expect("workdir").as_path()),
+    )
+    .expect("import");
     let change_id = test_support::mapping(&bridge)
         .get_heddle(commit_oid)
         .expect("commit mapped");
@@ -7631,7 +7721,11 @@ fn backfill_reports_states_missing_from_mirror() {
         vec![],
     );
     let mut bridge = GitBridge::new(&repo);
-    import_all(&mut bridge, Some(git_repo.workdir().expect("workdir"))).expect("import");
+    import_all(
+        &mut bridge,
+        Some(git_repo.workdir().expect("workdir").as_path()),
+    )
+    .expect("import");
     assert!(
         test_support::mapping(&bridge)
             .get_heddle(real_oid)
@@ -7642,12 +7736,11 @@ fn backfill_reports_states_missing_from_mirror() {
     // Inject a sidecar entry pointing at an object that is NOT in the mirror,
     // then persist it so the backfill's mapping rebuild loads it back.
     let missing_change_id = ChangeId::from_bytes([7u8; 16]);
-    let bogus_oid: gix::hash::ObjectId = "1234567890123456789012345678901234567890"
+    let bogus_oid: ObjectId = "1234567890123456789012345678901234567890"
         .parse()
         .expect("valid-looking oid absent from the mirror");
     test_support::mapping_mut(&mut bridge).insert(missing_change_id, bogus_oid);
-    test_support::save_mapping_to_disk(&bridge)
-        .expect("persist injected sidecar entry");
+    test_support::save_mapping_to_disk(&bridge).expect("persist injected sidecar entry");
 
     let mut bridge = GitBridge::new(&repo);
     let stats = backfill_fidelity(&mut bridge).expect("backfill");
@@ -7701,28 +7794,27 @@ fn non_utf8_git_fidelity_is_byte_identical_across_bridge_and_ingest() {
         v
     };
 
-    let commit = gix::objs::Commit {
-        tree: tree_oid,
-        parents: Default::default(),
-        author: test_signature(),
-        committer: test_signature(),
-        encoding: None,
-        message: commit_message.clone().into(),
-        extra_headers: vec![
-            ("gpgsig".into(), gpgsig_value.clone().into()),
-            ("x-custom".into(), custom_value.clone().into()),
-            ("mergetag".into(), mergetag_value.clone().into()),
+    let sig = test_signature();
+    let commit = raw_commit_body(
+        tree_oid,
+        &[],
+        &sig,
+        &sig,
+        vec![
+            (b"gpgsig".to_vec(), gpgsig_value.clone()),
+            (b"x-custom".to_vec(), custom_value.clone()),
+            (b"mergetag".to_vec(), mergetag_value.clone()),
         ],
-    };
+        &commit_message,
+    );
     let commit_oid = git_repo
-        .write_object(&commit)
-        .expect("write commit")
-        .detach();
+        .write_object(EncodedObject::new(GitObjectType::Commit, commit))
+        .expect("write commit");
     set_reference(
         &git_repo,
         "refs/heads/main",
         commit_oid,
-        PreviousValue::Any,
+        RefPrecondition::Any,
         "test: main",
     )
     .expect("set main");
@@ -7733,7 +7825,7 @@ fn non_utf8_git_fidelity_is_byte_identical_across_bridge_and_ingest() {
     let bridge_heddle = TempDir::new().expect("bridge heddle temp");
     let bridge_repo = Repository::init(bridge_heddle.path()).expect("init bridge heddle");
     let mut bridge = GitBridge::new(&bridge_repo);
-    import_all(&mut bridge, Some(git_workdir)).expect("bridge import");
+    import_all(&mut bridge, Some(git_workdir.as_path())).expect("bridge import");
     let bridge_cid = test_support::mapping(&bridge)
         .get_heddle(commit_oid)
         .expect("bridge mapped commit");

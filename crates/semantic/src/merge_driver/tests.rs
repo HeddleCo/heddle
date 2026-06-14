@@ -2501,8 +2501,16 @@ fn add_add_container_identical_no_base_takes_one() {
     let ours = "mod foo {\n    fn a() {}\n}\n";
     let theirs = "mod foo {\n    fn a() {}\n}\n";
     let merged = assert_clean(merge_rust(base, ours, theirs));
-    assert_eq!(merged.matches("mod foo").count(), 1, "module duplicated: {merged}");
-    assert_eq!(merged.matches("fn a()").count(), 1, "body duplicated: {merged}");
+    assert_eq!(
+        merged.matches("mod foo").count(),
+        1,
+        "module duplicated: {merged}"
+    );
+    assert_eq!(
+        merged.matches("fn a()").count(),
+        1,
+        "body duplicated: {merged}"
+    );
     assert!(
         !merged.contains("<<<<<<<"),
         "no spurious conflict on identical add/add containers: {merged}"
@@ -2519,7 +2527,10 @@ fn add_add_container_divergent_header_no_base_conflicts() {
     let ours = "pub mod foo {\n    fn a() {}\n}\n";
     let theirs = "mod foo {\n    fn a() {}\n}\n";
     let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
-    assert!(count >= 1, "expected ≥1 conflict on the divergent header, got {count}: {text}");
+    assert!(
+        count >= 1,
+        "expected ≥1 conflict on the divergent header, got {count}: {text}"
+    );
     assert!(
         text.contains("<<<<<<<") && text.contains("=======") && text.contains(">>>>>>>"),
         "expected canonical conflict markers around the divergent module: {text}"
@@ -2566,8 +2577,16 @@ fn base_anchored_container_merges_structurally_clean() {
     let ours = "mod foo {\n    fn a() {}\n    fn b() {}\n}\n";
     let theirs = "mod foo {\n    fn a() {}\n    fn c() {}\n}\n";
     let merged = assert_clean(merge_rust(base, ours, theirs));
-    assert_eq!(merged.matches("mod foo").count(), 1, "module duplicated: {merged}");
-    assert_eq!(merged.matches("mod foo {").count(), 1, "delimiter duplicated: {merged}");
+    assert_eq!(
+        merged.matches("mod foo").count(),
+        1,
+        "module duplicated: {merged}"
+    );
+    assert_eq!(
+        merged.matches("mod foo {").count(),
+        1,
+        "delimiter duplicated: {merged}"
+    );
     assert!(
         merged.contains("fn a()") && merged.contains("fn b()") && merged.contains("fn c()"),
         "base child + both disjoint additions must weave into the single module: {merged}"
@@ -2657,7 +2676,10 @@ fn empty_base_container_divergent_header_conflict_is_well_formed() {
     let ours = "pub mod foo {\n    fn a() {}\n}\n";
     let theirs = "pub(crate) mod foo {\n    fn b() {}\n}\n";
     let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
-    assert!(count >= 1, "expected ≥1 conflict on the divergent header: {text}");
+    assert!(
+        count >= 1,
+        "expected ≥1 conflict on the divergent header: {text}"
+    );
     assert!(
         text.contains("<<<<<<<") && text.contains("=======") && text.contains(">>>>>>>"),
         "expected canonical conflict markers: {text}"
@@ -2675,7 +2697,8 @@ fn empty_base_container_divergent_header_conflict_is_well_formed() {
             "a resolved side has unbalanced braces: {side}"
         );
         assert!(
-            crate::parser::ParsedFile::parse(side.as_str(), crate::parser::Language::Rust).is_some(),
+            crate::parser::ParsedFile::parse(side.as_str(), crate::parser::Language::Rust)
+                .is_some(),
             "a resolved side does not parse: {side}"
         );
     }
@@ -2705,7 +2728,8 @@ fn conflict_output_resolved_sides_always_reparse() {
     };
     for side in resolve_both_sides(&text) {
         assert!(
-            crate::parser::ParsedFile::parse(side.as_str(), crate::parser::Language::Rust).is_some(),
+            crate::parser::ParsedFile::parse(side.as_str(), crate::parser::Language::Rust)
+                .is_some(),
             "driver emitted a conflict whose resolved side does not parse: {side}"
         );
     }
@@ -3732,8 +3756,14 @@ interface Foo {
                 .is_some(),
                 "clean merge must re-parse (no silent corruption): {text}"
             );
-            assert!(text.contains("a(x: number)"), "theirs's edit on a lost: {text}");
-            assert!(text.contains("f(y: string)"), "theirs's edit on f lost: {text}");
+            assert!(
+                text.contains("a(x: number)"),
+                "theirs's edit on a lost: {text}"
+            );
+            assert!(
+                text.contains("f(y: string)"),
+                "theirs's edit on f lost: {text}"
+            );
             for m in ["a(", "b(", "c(", "d(", "e(", "f("] {
                 assert_eq!(text.matches(m).count(), 1, "{m} not once: {text}");
             }
@@ -3743,8 +3773,14 @@ interface Foo {
             ..
         } => {
             let text = String::from_utf8(merged_bytes_with_markers).unwrap();
-            assert!(text.contains("a(x: number)"), "theirs's edit on a lost: {text}");
-            assert!(text.contains("f(y: string)"), "theirs's edit on f lost: {text}");
+            assert!(
+                text.contains("a(x: number)"),
+                "theirs's edit on a lost: {text}"
+            );
+            assert!(
+                text.contains("f(y: string)"),
+                "theirs's edit on f lost: {text}"
+            );
             for m in ["a(", "b(", "c(", "d(", "e(", "f("] {
                 assert!(text.contains(m), "{m} silently dropped: {text}");
             }
@@ -3817,8 +3853,14 @@ abstract class Foo {
                 .is_some(),
                 "clean merge must re-parse (no silent corruption): {text}"
             );
-            assert!(text.contains("abstract a(x: number)"), "abstract a edit lost: {text}");
-            assert!(text.contains("abstract f(y: string)"), "abstract f edit lost: {text}");
+            assert!(
+                text.contains("abstract a(x: number)"),
+                "abstract a edit lost: {text}"
+            );
+            assert!(
+                text.contains("abstract f(y: string)"),
+                "abstract f edit lost: {text}"
+            );
             for m in methods {
                 assert_eq!(text.matches(m).count(), 1, "{m} not once: {text}");
             }
@@ -3828,8 +3870,14 @@ abstract class Foo {
             ..
         } => {
             let text = String::from_utf8(merged_bytes_with_markers).unwrap();
-            assert!(text.contains("abstract a(x: number)"), "abstract a edit lost: {text}");
-            assert!(text.contains("abstract f(y: string)"), "abstract f edit lost: {text}");
+            assert!(
+                text.contains("abstract a(x: number)"),
+                "abstract a edit lost: {text}"
+            );
+            assert!(
+                text.contains("abstract f(y: string)"),
+                "abstract f edit lost: {text}"
+            );
             for m in methods {
                 assert!(text.contains(m), "{m} silently dropped: {text}");
             }
@@ -4904,8 +4952,14 @@ fn rust_identical_use_addition_dedups_clean() {
         1,
         "identical re-export must appear exactly once: {merged}"
     );
-    assert!(merged.contains("fn alpha() { 10 }"), "ours edit lost: {merged}");
-    assert!(merged.contains("fn beta() { 20 }"), "theirs edit lost: {merged}");
+    assert!(
+        merged.contains("fn alpha() { 10 }"),
+        "ours edit lost: {merged}"
+    );
+    assert!(
+        merged.contains("fn beta() { 20 }"),
+        "theirs edit lost: {merged}"
+    );
 }
 
 // heddle#468 r1 (Codex P2): grouped-vs-ungrouped imports must be normalized
@@ -4946,8 +5000,14 @@ fn rust_identical_grouped_use_dedups_clean() {
         1,
         "identical grouped re-export must appear exactly once: {merged}"
     );
-    assert!(merged.contains("fn alpha() { 10 }"), "ours edit lost: {merged}");
-    assert!(merged.contains("fn beta() { 20 }"), "theirs edit lost: {merged}");
+    assert!(
+        merged.contains("fn alpha() { 10 }"),
+        "ours edit lost: {merged}"
+    );
+    assert!(
+        merged.contains("fn beta() { 20 }"),
+        "theirs edit lost: {merged}"
+    );
 }
 
 // Distinct single re-exports on different leaf paths still auto-combine —
@@ -4958,8 +5018,14 @@ fn rust_distinct_reexports_still_auto_combine() {
     let ours = "pub use crate::a::X;\nfn anchor() { 0 }\n";
     let theirs = "pub use crate::b::Y;\nfn anchor() { 0 }\n";
     let merged = assert_clean(merge_rust(base, ours, theirs));
-    assert!(merged.contains("crate::a::X"), "ours re-export lost: {merged}");
-    assert!(merged.contains("crate::b::Y"), "theirs re-export lost: {merged}");
+    assert!(
+        merged.contains("crate::a::X"),
+        "ours re-export lost: {merged}"
+    );
+    assert!(
+        merged.contains("crate::b::Y"),
+        "theirs re-export lost: {merged}"
+    );
     assert!(
         !merged.contains("<<<<<<<"),
         "distinct re-exports must merge cleanly: {merged}"
@@ -5124,8 +5190,14 @@ fn rust_identical_attributed_use_addition_dedups_clean() {
         1,
         "the shared attribute must appear exactly once: {merged}"
     );
-    assert!(merged.contains("fn alpha() { 10 }"), "ours edit lost: {merged}");
-    assert!(merged.contains("fn beta() { 20 }"), "theirs edit lost: {merged}");
+    assert!(
+        merged.contains("fn alpha() { 10 }"),
+        "ours edit lost: {merged}"
+    );
+    assert!(
+        merged.contains("fn beta() { 20 }"),
+        "theirs edit lost: {merged}"
+    );
 }
 
 // SAME leaf set spelled differently AND with divergent visibility
@@ -5266,8 +5338,14 @@ fn rust_use_identical_multiline_component_dedups_clean() {
         1,
         "Baz must appear exactly once after dedup: {merged}"
     );
-    assert!(merged.contains("fn alpha() { 10 }"), "ours edit lost: {merged}");
-    assert!(merged.contains("fn beta() { 20 }"), "theirs edit lost: {merged}");
+    assert!(
+        merged.contains("fn alpha() { 10 }"),
+        "ours edit lost: {merged}"
+    );
+    assert!(
+        merged.contains("fn beta() { 20 }"),
+        "theirs edit lost: {merged}"
+    );
 }
 
 // heddle#468 r6 (Codex cid 3350239933): the clever leaf-component union is
@@ -5382,8 +5460,14 @@ fn rust_use_identical_glob_both_sides_dedups_clean() {
         1,
         "byte-identical glob must dedup to one line, not conflict: {merged}"
     );
-    assert!(merged.contains("fn alpha() { 10 }"), "ours edit lost: {merged}");
-    assert!(merged.contains("fn beta() { 20 }"), "theirs edit lost: {merged}");
+    assert!(
+        merged.contains("fn alpha() { 10 }"),
+        "ours edit lost: {merged}"
+    );
+    assert!(
+        merged.contains("fn beta() { 20 }"),
+        "theirs edit lost: {merged}"
+    );
 }
 
 // heddle#490 r7 — per-scope use-poison. An unanalyzable glob nested in
@@ -5399,8 +5483,14 @@ fn rust_use_nested_glob_does_not_poison_disjoint_top_level_adds() {
     let ours = "use a::A;\nmod m {\n    use x::*;\n}\nfn anchor() { 0 }\n";
     let theirs = "use b::B;\nmod m {\n    use x::*;\n}\nfn anchor() { 0 }\n";
     let merged = assert_clean(merge_rust(base, ours, theirs));
-    assert!(merged.contains("use a::A;"), "ours top-level add lost: {merged}");
-    assert!(merged.contains("use b::B;"), "theirs top-level add lost: {merged}");
+    assert!(
+        merged.contains("use a::A;"),
+        "ours top-level add lost: {merged}"
+    );
+    assert!(
+        merged.contains("use b::B;"),
+        "theirs top-level add lost: {merged}"
+    );
     assert_eq!(
         merged.matches("use x::*;").count(),
         1,
@@ -5432,7 +5522,6 @@ fn rust_use_nested_glob_still_poisons_its_own_scope() {
         "expected a conflict region in the poisoned nested scope: {text}"
     );
 }
-
 
 // =====================================================================
 // heddle#484 / #490 — close-the-class conformance harness (ported from the
@@ -5580,13 +5669,26 @@ fn repro_484_bug1_trailing_postamble_not_duplicated() {
     let ours = "pub fn a() {}\n\npub fn c() {}\n\n// MARK\n";
     let theirs = "pub fn a() {}\n\npub fn b() {}\n\n// MARK\n";
     let merged = assert_conformant(base, ours, theirs);
-    assert_eq!(merged.matches("// MARK").count(), 1, "marker duplicated:\n{merged}");
-    assert!(merged.contains("pub fn b() {}"), "theirs add lost:\n{merged}");
+    assert_eq!(
+        merged.matches("// MARK").count(),
+        1,
+        "marker duplicated:\n{merged}"
+    );
+    assert!(
+        merged.contains("pub fn b() {}"),
+        "theirs add lost:\n{merged}"
+    );
     assert!(merged.contains("pub fn c() {}"), "ours add lost:\n{merged}");
     // both additions precede the single marker.
     let mark = merged.find("// MARK").unwrap();
-    assert!(merged.find("pub fn b() {}").unwrap() < mark, "b after marker:\n{merged}");
-    assert!(merged.find("pub fn c() {}").unwrap() < mark, "c after marker:\n{merged}");
+    assert!(
+        merged.find("pub fn b() {}").unwrap() < mark,
+        "b after marker:\n{merged}"
+    );
+    assert!(
+        merged.find("pub fn c() {}").unwrap() < mark,
+        "c after marker:\n{merged}"
+    );
 }
 
 #[test]
@@ -5597,11 +5699,21 @@ fn repro_484_bug2_trailing_module_not_nested_or_duplicated() {
     let ours = "pub fn a() {}\n\npub fn c() {}\n\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n";
     let theirs = "pub fn a() {}\n\npub fn b() {}\n\n#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n";
     let merged = assert_conformant(base, ours, theirs);
-    assert_eq!(merged.matches("mod tests").count(), 1, "module duplicated:\n{merged}");
+    assert_eq!(
+        merged.matches("mod tests").count(),
+        1,
+        "module duplicated:\n{merged}"
+    );
     // both added fns stay at top level, BEFORE the module.
     let m = merged.find("mod tests").unwrap();
-    assert!(merged.find("pub fn b() {}").unwrap() < m, "b nested/after module:\n{merged}");
-    assert!(merged.find("pub fn c() {}").unwrap() < m, "c nested/after module:\n{merged}");
+    assert!(
+        merged.find("pub fn b() {}").unwrap() < m,
+        "b nested/after module:\n{merged}"
+    );
+    assert!(
+        merged.find("pub fn c() {}").unwrap() < m,
+        "c nested/after module:\n{merged}"
+    );
     assert!(merged.contains("fn t() {}"), "module body lost:\n{merged}");
 }
 
@@ -5611,18 +5723,33 @@ fn repro_484_bug3_nested_pub_use_stays_inside_module() {
     // top-level fn. Pre-fix one re-export escaped `prelude`.
     let base = "pub mod prelude {\n    pub use crate::a;\n}\n";
     let ours = "pub mod prelude {\n    pub use crate::a;\n    pub use crate::b;\n}\n\npub fn ours_fn() {}\n";
-    let theirs =
-        "pub mod prelude {\n    pub use crate::a;\n    pub use crate::c;\n}\n\npub fn theirs_fn() {}\n";
+    let theirs = "pub mod prelude {\n    pub use crate::a;\n    pub use crate::c;\n}\n\npub fn theirs_fn() {}\n";
     let merged = assert_conformant(base, ours, theirs);
-    assert_eq!(merged.matches("pub mod prelude").count(), 1, "module duplicated:\n{merged}");
+    assert_eq!(
+        merged.matches("pub mod prelude").count(),
+        1,
+        "module duplicated:\n{merged}"
+    );
     // The two re-exports stay INSIDE the module (before its closing brace),
     // and the sibling fns stay OUTSIDE (after it). conformance already pins
     // the scopes; this pins the byte order.
     let close = merged.find("}").unwrap();
-    assert!(merged.find("pub use crate::b").unwrap() < close, "b escaped module:\n{merged}");
-    assert!(merged.find("pub use crate::c").unwrap() < close, "c escaped module:\n{merged}");
-    assert!(merged.find("pub fn ours_fn").unwrap() > close, "ours_fn inside module:\n{merged}");
-    assert!(merged.find("pub fn theirs_fn").unwrap() > close, "theirs_fn inside module:\n{merged}");
+    assert!(
+        merged.find("pub use crate::b").unwrap() < close,
+        "b escaped module:\n{merged}"
+    );
+    assert!(
+        merged.find("pub use crate::c").unwrap() < close,
+        "c escaped module:\n{merged}"
+    );
+    assert!(
+        merged.find("pub fn ours_fn").unwrap() > close,
+        "ours_fn inside module:\n{merged}"
+    );
+    assert!(
+        merged.find("pub fn theirs_fn").unwrap() > close,
+        "theirs_fn inside module:\n{merged}"
+    );
 }
 
 #[test]
@@ -5634,15 +5761,34 @@ fn repro_484_reopened_rust_impl_keeps_top_level_between_blocks() {
     let ours = "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n    fn a2(&self) {}\n}\n\nfn top_level() {}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
     let theirs = "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n}\n\nfn top_level() {}\n\nimpl Foo {\n    fn b(&self) {}\n    fn b2(&self) {}\n}\n";
     let merged = assert_conformant(base, ours, theirs);
-    assert!(merged.contains("fn a2(&self) {}"), "ours add lost:\n{merged}");
-    assert!(merged.contains("fn b2(&self) {}"), "theirs add lost:\n{merged}");
-    assert_eq!(merged.matches("impl Foo").count(), 2, "reopened impls collapsed:\n{merged}");
+    assert!(
+        merged.contains("fn a2(&self) {}"),
+        "ours add lost:\n{merged}"
+    );
+    assert!(
+        merged.contains("fn b2(&self) {}"),
+        "theirs add lost:\n{merged}"
+    );
+    assert_eq!(
+        merged.matches("impl Foo").count(),
+        2,
+        "reopened impls collapsed:\n{merged}"
+    );
     let first = merged.find("impl Foo").unwrap();
     let top = merged.find("fn top_level()").unwrap();
     let last = merged.rfind("impl Foo").unwrap();
-    assert!(first < top && top < last, "top-level fn must sit between impls:\n{merged}");
-    assert!(merged.find("fn a2(&self) {}").unwrap() < top, "a2 escaped first impl:\n{merged}");
-    assert!(merged.find("fn b2(&self) {}").unwrap() > top, "b2 escaped second impl:\n{merged}");
+    assert!(
+        first < top && top < last,
+        "top-level fn must sit between impls:\n{merged}"
+    );
+    assert!(
+        merged.find("fn a2(&self) {}").unwrap() < top,
+        "a2 escaped first impl:\n{merged}"
+    );
+    assert!(
+        merged.find("fn b2(&self) {}").unwrap() > top,
+        "b2 escaped second impl:\n{merged}"
+    );
 }
 
 #[test]
@@ -5654,13 +5800,26 @@ fn repro_484_reopened_rust_impl_add_first_modify_second_keeps_order() {
     let ours = "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n    fn a2(&self) {}\n}\n\nfn top_level() {}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
     let theirs = "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n}\n\nfn top_level() {}\n\nimpl Foo {\n    fn b(&self) { let _ = 1; }\n}\n";
     let merged = assert_conformant(base, ours, theirs);
-    assert!(merged.contains("fn a2(&self) {}"), "ours add lost:\n{merged}");
-    assert!(merged.contains("fn b(&self) { let _ = 1; }"), "theirs edit lost:\n{merged}");
-    assert_eq!(merged.matches("impl Foo").count(), 2, "reopened impls collapsed:\n{merged}");
+    assert!(
+        merged.contains("fn a2(&self) {}"),
+        "ours add lost:\n{merged}"
+    );
+    assert!(
+        merged.contains("fn b(&self) { let _ = 1; }"),
+        "theirs edit lost:\n{merged}"
+    );
+    assert_eq!(
+        merged.matches("impl Foo").count(),
+        2,
+        "reopened impls collapsed:\n{merged}"
+    );
     let first = merged.find("impl Foo").unwrap();
     let top = merged.find("fn top_level()").unwrap();
     let last = merged.rfind("impl Foo").unwrap();
-    assert!(first < top && top < last, "top-level fn must sit between impls:\n{merged}");
+    assert!(
+        first < top && top < last,
+        "top-level fn must sit between impls:\n{merged}"
+    );
 }
 
 /// A reopened-`impl Foo` triple whose two blocks are joined by `sep`. ours
@@ -5697,8 +5856,14 @@ fn conformance_484_reopened_rust_impl_separator_matrix() {
             2,
             "[{label}] reopened impls collapsed:\n{merged}"
         );
-        assert!(merged.contains("fn a2(&self) {}"), "[{label}] ours add lost:\n{merged}");
-        assert!(merged.contains("fn b2(&self) {}"), "[{label}] theirs add lost:\n{merged}");
+        assert!(
+            merged.contains("fn a2(&self) {}"),
+            "[{label}] ours add lost:\n{merged}"
+        );
+        assert!(
+            merged.contains("fn b2(&self) {}"),
+            "[{label}] theirs add lost:\n{merged}"
+        );
         let second_impl = merged.rfind("impl Foo").unwrap();
         assert!(
             merged.find("fn a2(&self) {}").unwrap() < second_impl,
@@ -5732,12 +5897,23 @@ fn repro_484_r3_prepend_new_impl_before_base_block_no_collapse() {
     // before it; theirs edits fn b's body. Pre-fix the prepended block and the
     // base block collapsed into a single `impl Foo`.
     let base = "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
-    let ours = "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
+    let ours =
+        "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
     let theirs = "struct Foo;\n\nimpl Foo {\n    fn b(&self) { let _ = 1; }\n}\n";
     let merged = assert_conformant(base, ours, theirs);
-    assert_eq!(merged.matches("impl Foo").count(), 2, "prepended impl collapsed:\n{merged}");
-    assert!(merged.contains("fn a(&self) {}"), "ours add lost:\n{merged}");
-    assert!(merged.contains("fn b(&self) { let _ = 1; }"), "theirs edit lost:\n{merged}");
+    assert_eq!(
+        merged.matches("impl Foo").count(),
+        2,
+        "prepended impl collapsed:\n{merged}"
+    );
+    assert!(
+        merged.contains("fn a(&self) {}"),
+        "ours add lost:\n{merged}"
+    );
+    assert!(
+        merged.contains("fn b(&self) { let _ = 1; }"),
+        "theirs edit lost:\n{merged}"
+    );
     assert!(
         merged.find("fn a(&self) {}").unwrap() < merged.find("fn b(&self)").unwrap(),
         "prepended block must precede base block:\n{merged}"
@@ -5769,7 +5945,10 @@ fn conformance_484_r3_cross_side_container_alignment_matrix() {
     for (label, base, ours, theirs) in cases {
         let merged = assert_conformant(base, ours, theirs);
         for needle in ["fn a", "fn b"] {
-            assert!(merged.contains(needle), "[{label}] {needle} lost:\n{merged}");
+            assert!(
+                merged.contains(needle),
+                "[{label}] {needle} lost:\n{merged}"
+            );
         }
         assert!(
             crate::parser::ParsedFile::parse(&merged, crate::parser::Language::Rust).is_some(),
@@ -5792,8 +5971,10 @@ fn conformance_484_r3_cross_side_container_alignment_matrix() {
 #[test]
 fn reopened_impl_both_add_new_block_no_base_conflicts() {
     let base = "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
-    let ours = "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
-    let theirs = "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n\nimpl Foo {\n    fn c(&self) {}\n}\n";
+    let ours =
+        "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
+    let theirs =
+        "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n\nimpl Foo {\n    fn c(&self) {}\n}\n";
     let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
     assert!(count >= 1, "expected ≥1 conflict, got {count}: {text}");
     assert!(
@@ -5805,7 +5986,10 @@ fn reopened_impl_both_add_new_block_no_base_conflicts() {
         "both new blocks' bodies must survive inside the conflict: {text}"
     );
     // The base-anchored `fn b` block resolves cleanly, outside the markers.
-    assert!(text.contains("fn b(&self)"), "base-anchored block lost: {text}");
+    assert!(
+        text.contains("fn b(&self)"),
+        "base-anchored block lost: {text}"
+    );
 }
 
 #[test]
@@ -5813,11 +5997,16 @@ fn repro_484_r3_reordered_container_no_silent_collapse() {
     // ours REORDERS the two same-name `impl Foo` blocks; theirs edits the first
     // disjointly. Never a silent corruption: the outcome is a conflict OR a
     // clean merge that re-parses with both blocks intact.
-    let base = "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
-    let ours = "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n\nimpl Foo {\n    fn a(&self) {}\n}\n";
+    let base =
+        "struct Foo;\n\nimpl Foo {\n    fn a(&self) {}\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
+    let ours =
+        "struct Foo;\n\nimpl Foo {\n    fn b(&self) {}\n}\n\nimpl Foo {\n    fn a(&self) {}\n}\n";
     let theirs = "struct Foo;\n\nimpl Foo {\n    fn a(&self) { let _ = 1; }\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
     let text = match merge_rust(base, ours, theirs) {
-        MergeOutcome::Conflicts { merged_bytes_with_markers, conflict_count } => {
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            conflict_count,
+        } => {
             assert!(conflict_count >= 1);
             String::from_utf8(merged_bytes_with_markers).unwrap()
         }
@@ -5845,7 +6034,10 @@ fn repro_484_r3_ambiguous_block_merge_no_silent_collapse() {
     let ours = "struct Foo;\n\nimpl Foo {\n    fn a(&self) -> u32 { 9 }\n    fn b(&self) {}\n}\n";
     let theirs = "struct Foo;\n\nimpl Foo {\n    fn a(&self) -> u32 { 1 }\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
     match merge_rust(base, ours, theirs) {
-        MergeOutcome::Conflicts { merged_bytes_with_markers, conflict_count } => {
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            conflict_count,
+        } => {
             let text = String::from_utf8(merged_bytes_with_markers).unwrap();
             assert!(conflict_count >= 1, "expected a real conflict");
             assert!(text.contains("fn a(&self)"), "fn a lost:\n{text}");
@@ -5875,7 +6067,10 @@ fn repro_484_r3_ambiguous_block_split_no_silent_collapse() {
     let ours = "struct Foo;\n\nimpl Foo {\n    fn a(&self) -> u32 { 9 }\n}\n\nimpl Foo {\n    fn b(&self) {}\n}\n";
     let theirs = "struct Foo;\n\nimpl Foo {\n    fn a(&self) -> u32 { 1 }\n    fn b(&self) {}\n}\n";
     let text = match merge_rust(base, ours, theirs) {
-        MergeOutcome::Conflicts { merged_bytes_with_markers, conflict_count } => {
+        MergeOutcome::Conflicts {
+            merged_bytes_with_markers,
+            conflict_count,
+        } => {
             assert!(conflict_count >= 1);
             String::from_utf8(merged_bytes_with_markers).unwrap()
         }
@@ -5927,12 +6122,18 @@ fn repro_490_r1_two_empty_impl_blocks_one_side_adds_method_clean() {
         2,
         "empty blocks dropped/duplicated:\n{merged}"
     );
-    assert!(merged.contains("fn m(&self) {}"), "ours add lost:\n{merged}");
+    assert!(
+        merged.contains("fn m(&self) {}"),
+        "ours add lost:\n{merged}"
+    );
     // The method lands in the FIRST block; the second stays empty.
     let first = merged.find("impl Foo").unwrap();
     let second = merged.rfind("impl Foo").unwrap();
     let m = merged.find("fn m(&self) {}").unwrap();
-    assert!(first < m && m < second, "method escaped the first block:\n{merged}");
+    assert!(
+        first < m && m < second,
+        "method escaped the first block:\n{merged}"
+    );
 }
 
 #[test]
@@ -5948,8 +6149,14 @@ fn repro_490_r1_two_empty_impl_blocks_each_side_edits_different_block_clean() {
         2,
         "empty blocks dropped/duplicated:\n{merged}"
     );
-    assert!(merged.contains("fn ours_m(&self) {}"), "ours edit lost:\n{merged}");
-    assert!(merged.contains("fn theirs_m(&self) {}"), "theirs edit lost:\n{merged}");
+    assert!(
+        merged.contains("fn ours_m(&self) {}"),
+        "ours edit lost:\n{merged}"
+    );
+    assert!(
+        merged.contains("fn theirs_m(&self) {}"),
+        "theirs edit lost:\n{merged}"
+    );
     assert!(
         merged.find("fn ours_m(&self) {}").unwrap() < merged.find("fn theirs_m(&self) {}").unwrap(),
         "edits landed in the wrong blocks:\n{merged}"
@@ -5972,10 +6179,23 @@ fn repro_490_r1_fully_replaced_impl_children_align_to_base_slot_no_conflict() {
         crate::parser::ParsedFile::parse(&merged, crate::parser::Language::Rust).is_some(),
         "unparseable merge:\n{merged}"
     );
-    assert_eq!(merged.matches("impl Foo").count(), 1, "block duplicated:\n{merged}");
-    assert!(merged.contains("fn y(&self) {}"), "ours replacement lost:\n{merged}");
-    assert!(merged.contains("fn z(&self) {}"), "theirs add lost:\n{merged}");
-    assert!(!merged.contains("fn x(&self) {}"), "ours deletion of fn x dropped:\n{merged}");
+    assert_eq!(
+        merged.matches("impl Foo").count(),
+        1,
+        "block duplicated:\n{merged}"
+    );
+    assert!(
+        merged.contains("fn y(&self) {}"),
+        "ours replacement lost:\n{merged}"
+    );
+    assert!(
+        merged.contains("fn z(&self) {}"),
+        "theirs add lost:\n{merged}"
+    );
+    assert!(
+        !merged.contains("fn x(&self) {}"),
+        "ours deletion of fn x dropped:\n{merged}"
+    );
 }
 
 #[test]
@@ -5992,10 +6212,20 @@ fn repro_490_r1_fully_replaced_mod_children_align_to_base_slot_no_conflict() {
         crate::parser::ParsedFile::parse(&merged, crate::parser::Language::Rust).is_some(),
         "unparseable merge:\n{merged}"
     );
-    assert_eq!(merged.matches("mod m").count(), 1, "mod duplicated:\n{merged}");
-    assert!(merged.contains("fn y() {}"), "ours replacement lost:\n{merged}");
+    assert_eq!(
+        merged.matches("mod m").count(),
+        1,
+        "mod duplicated:\n{merged}"
+    );
+    assert!(
+        merged.contains("fn y() {}"),
+        "ours replacement lost:\n{merged}"
+    );
     assert!(merged.contains("fn z() {}"), "theirs add lost:\n{merged}");
-    assert!(!merged.contains("fn x() {}"), "ours deletion of fn x dropped:\n{merged}");
+    assert!(
+        !merged.contains("fn x() {}"),
+        "ours deletion of fn x dropped:\n{merged}"
+    );
 }
 
 #[cfg(feature = "lang-cpp")]
@@ -6017,7 +6247,10 @@ fn repro_490_r1_two_empty_cpp_namespaces_one_side_adds_clean() {
     let first = merged.find("namespace N").unwrap();
     let second = merged.rfind("namespace N").unwrap();
     let m = merged.find("void m() {}").unwrap();
-    assert!(first < m && m < second, "function escaped the first namespace:\n{merged}");
+    assert!(
+        first < m && m < second,
+        "function escaped the first namespace:\n{merged}"
+    );
 }
 
 #[test]
@@ -6037,8 +6270,14 @@ fn repro_490_r1_modify_vs_delete_empty_container_conflicts() {
     let theirs = "struct Foo;\n";
     let (text, count) = assert_conflicts(merge_rust(base, ours, theirs));
     assert!(count >= 1, "expected a modify/delete conflict, got {count}");
-    assert!(text.contains("fn m(&self) {}"), "ours modification lost from conflict:\n{text}");
-    assert!(text.contains("<<<<<<<") && text.contains(">>>>>>>"), "missing conflict markers:\n{text}");
+    assert!(
+        text.contains("fn m(&self) {}"),
+        "ours modification lost from conflict:\n{text}"
+    );
+    assert!(
+        text.contains("<<<<<<<") && text.contains(">>>>>>>"),
+        "missing conflict markers:\n{text}"
+    );
 }
 
 // =====================================================================
@@ -6082,8 +6321,14 @@ fn repro_490_r2_delete_earlier_edit_later_zero_overlap_separator_not_moved() {
         1,
         "block dropped/duplicated:\n{merged}"
     );
-    assert!(merged.contains("fn m(&self) {}"), "ours method lost:\n{merged}");
-    assert!(merged.contains("// edited sep"), "theirs separator edit lost:\n{merged}");
+    assert!(
+        merged.contains("fn m(&self) {}"),
+        "ours method lost:\n{merged}"
+    );
+    assert!(
+        merged.contains("// edited sep"),
+        "theirs separator edit lost:\n{merged}"
+    );
     assert_eq!(
         merged.matches("sep").count(),
         1,
@@ -6107,9 +6352,16 @@ fn repro_490_r2_prepend_zero_overlap_keeps_survivor_base_slot() {
         2,
         "block dropped/duplicated:\n{merged}"
     );
-    assert!(merged.contains("fn m(&self) {}"), "theirs method lost:\n{merged}");
+    assert!(
+        merged.contains("fn m(&self) {}"),
+        "theirs method lost:\n{merged}"
+    );
     // The method lands on the `// orig` (base) block; the comment survives once.
-    assert_eq!(merged.matches("// orig").count(), 1, "comment moved/duplicated:\n{merged}");
+    assert_eq!(
+        merged.matches("// orig").count(),
+        1,
+        "comment moved/duplicated:\n{merged}"
+    );
     assert!(
         merged.find("// orig").unwrap() < merged.find("fn m(&self) {}").unwrap(),
         "method escaped the original block:\n{merged}"
@@ -6132,7 +6384,10 @@ fn repro_490_r2_reorder_zero_overlap_blocks_keep_identity_by_header() {
         2,
         "block dropped/duplicated:\n{merged}"
     );
-    assert!(merged.contains("fn am(&self) {}"), "theirs method lost:\n{merged}");
+    assert!(
+        merged.contains("fn am(&self) {}"),
+        "theirs method lost:\n{merged}"
+    );
     // The method stays bound to the `// a` block, not `// b`.
     assert!(
         merged.find("// a").unwrap() < merged.find("fn am(&self) {}").unwrap()
@@ -6264,8 +6519,14 @@ class C:
         other => panic!("expected Clean, got {other:?}"),
     };
     assert!(merged.contains("@deco"), "ours decorator lost:\n{merged}");
-    assert!(merged.contains("return 2"), "theirs body edit lost:\n{merged}");
-    assert!(!merged.contains("<<<<<<<"), "unexpected conflict markers:\n{merged}");
+    assert!(
+        merged.contains("return 2"),
+        "theirs body edit lost:\n{merged}"
+    );
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "unexpected conflict markers:\n{merged}"
+    );
 }
 
 #[test]
@@ -6297,8 +6558,14 @@ class C:
         "missing conflict markers:\n{text}"
     );
     // Both sides' divergent bodies are represented in the conflict, none lost.
-    assert!(text.contains("return 10"), "ours side lost from conflict:\n{text}");
-    assert!(text.contains("return 20"), "theirs side lost from conflict:\n{text}");
+    assert!(
+        text.contains("return 10"),
+        "ours side lost from conflict:\n{text}"
+    );
+    assert!(
+        text.contains("return 20"),
+        "theirs side lost from conflict:\n{text}"
+    );
 }
 
 #[test]
@@ -6322,8 +6589,14 @@ fn repro_490_r3_rust_mod_block_to_decl_mixed_kind_no_panic() {
     );
     // Both forms appear inside the conflict block — `mod foo;` (ours) and the
     // edited block body (theirs) — so neither side is silently dropped.
-    assert!(text.contains("mod foo;"), "ours leaf form lost from conflict:\n{text}");
-    assert!(text.contains("let x = 1;"), "theirs edit lost from conflict:\n{text}");
+    assert!(
+        text.contains("mod foo;"),
+        "ours leaf form lost from conflict:\n{text}"
+    );
+    assert!(
+        text.contains("let x = 1;"),
+        "theirs edit lost from conflict:\n{text}"
+    );
 }
 
 #[test]
@@ -6337,8 +6610,14 @@ fn repro_490_r3_rust_mod_decl_to_block_mixed_kind_disjoint_clean() {
     let ours = "mod foo {\n    fn a() {}\n}\n";
     let theirs = "mod foo;\n";
     let merged = assert_clean(merge_rust(base, ours, theirs));
-    assert!(merged.contains("fn a() {}"), "ours expansion lost:\n{merged}");
-    assert!(!merged.contains("<<<<<<<"), "unexpected conflict markers:\n{merged}");
+    assert!(
+        merged.contains("fn a() {}"),
+        "ours expansion lost:\n{merged}"
+    );
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "unexpected conflict markers:\n{merged}"
+    );
 }
 
 // C++ `namespace N {…} namespace N {…}` is the same close-the-class shape in
@@ -6375,8 +6654,14 @@ fn conformance_484_reopened_cpp_namespace_separator_matrix() {
             2,
             "[{label}] reopened namespaces collapsed:\n{merged}"
         );
-        assert!(merged.contains("void a2() {}"), "[{label}] ours add lost:\n{merged}");
-        assert!(merged.contains("void b2() {}"), "[{label}] theirs add lost:\n{merged}");
+        assert!(
+            merged.contains("void a2() {}"),
+            "[{label}] ours add lost:\n{merged}"
+        );
+        assert!(
+            merged.contains("void b2() {}"),
+            "[{label}] theirs add lost:\n{merged}"
+        );
         let second_ns = merged.rfind("namespace N").unwrap();
         assert!(
             merged.find("void a2() {}").unwrap() < second_ns,
@@ -6419,7 +6704,10 @@ fn conformance_484_r3_cross_side_cpp_namespace_prepend_no_collapse() {
         "prepended namespace collapsed into base block:\n{merged}"
     );
     assert!(merged.contains("void a() {}"), "ours add lost:\n{merged}");
-    assert!(merged.contains("void b() { int x = 1; }"), "theirs edit lost:\n{merged}");
+    assert!(
+        merged.contains("void b() { int x = 1; }"),
+        "theirs edit lost:\n{merged}"
+    );
     assert!(
         merged.find("void a()").unwrap() < merged.find("void b()").unwrap(),
         "prepended block must precede the base block:\n{merged}"

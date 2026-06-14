@@ -27,9 +27,7 @@ fn main() -> Result<()> {
         Some("check-atomic-ledger-encapsulation") => {
             check_atomic_ledger_encapsulation::run(args.collect())
         }
-        Some("check-oprecord-exhaustiveness") => {
-            check_oprecord_exhaustiveness::run(args.collect())
-        }
+        Some("check-oprecord-exhaustiveness") => check_oprecord_exhaustiveness::run(args.collect()),
         Some("fuse-dispatch-bench") => fuse_dispatch_bench::run(args.collect()),
         Some(command) => bail!("unknown command '{command}'"),
         None => bail!("expected a command (for example: web-proto)"),

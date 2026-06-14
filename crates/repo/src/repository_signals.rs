@@ -13,8 +13,8 @@
 
 #![cfg(feature = "tree-sitter-symbols")]
 
-use objects::store::ObjectStore;
 use objects::object::{Blob, ContentHash, RiskSignalBlob, State};
+use objects::store::ObjectStore;
 use state_review::{
     ReviewSignalsConfig, SemanticContext,
     config::{

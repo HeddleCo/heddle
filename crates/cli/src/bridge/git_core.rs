@@ -4,25 +4,10 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fs,
-    io::Write,
-    num::NonZeroU32,
     path::{Path, PathBuf},
-    sync::atomic::AtomicBool,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use gix::{
-    bstr::ByteSlice,
-    hash::{Kind as ObjectHashKind, ObjectId},
-    refs::{
-        Target,
-        transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog},
-    },
-};
-use gix_transport::{
-    Protocol, Service,
-    client::{MessageKind, WriteMode, blocking_io::Transport},
-};
 use objects::{
     error::HeddleError,
     lock::{RepositoryLockExt, WriteLockGuard},
@@ -31,6 +16,16 @@ use objects::{
 };
 use refs::Head;
 use repo::Repository as HeddleRepository;
+use sley::plumbing::sley_core::ByteString as GitByteString;
+use sley::remote::{
+    FetchOptions, LsRemoteFilter, NoCredentials, PushActionPlan, PushCommand, PushOptions,
+    SilentProgress,
+};
+use sley::{
+    BString as GitBString, DeleteRef, FullName, GitObjectType, GitTime, Index, IndexEntry,
+    IndexWriteOptions, ObjectFormat, ObjectId, RefPrecondition, ReferenceTarget,
+    Repository as SleyRepository, Signature,
+};
 
 use super::{
     git_export::{export_all, export_current_thread},
@@ -338,16 +333,11 @@ mod negative_refspec {
         pub fn new(source: impl Into<String>) -> GitResult<Self> {
             let source = source.into();
             validate_refspec_ref(&source)?;
-            let rendered = format!("^{source}");
-            gix_refspec::parse(
-                rendered.as_str().into(),
-                gix_refspec::parse::Operation::Fetch,
-            )
-            .map_err(|error| {
-                GitBridgeError::InvalidMapping(format!(
-                    "invalid negative refspec source '{source}': {error}"
-                ))
-            })?;
+            if source.contains('*') {
+                return Err(GitBridgeError::InvalidMapping(format!(
+                    "invalid negative refspec source '{source}': Negative glob patterns are not supported"
+                )));
+            }
             Ok(Self { source })
         }
 
@@ -408,10 +398,16 @@ enum RefreshCheckoutAfterFetch {
     No,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteDirection {
+    Fetch,
+    Push,
+}
+
 #[derive(Debug, Clone)]
 enum ResolvedRemote {
     Local(PathBuf),
-    Url(gix::Url),
+    Url(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -469,11 +465,17 @@ impl LocalGitIdentity {
         }
     }
 
-    pub(crate) fn to_signature(&self, seconds: i64) -> gix::actor::Signature {
-        gix::actor::Signature {
-            name: self.name.as_str().into(),
-            email: self.email.as_str().into(),
-            time: gix::date::Time { seconds, offset: 0 },
+    pub(crate) fn to_ident_line(&self, seconds: i64) -> Vec<u8> {
+        format!("{} <{}> {} +0000", self.name, self.email, seconds).into_bytes()
+    }
+
+    pub(crate) fn to_signature(&self, seconds: i64) -> Signature {
+        let ident = self.to_ident_line(seconds);
+        Signature {
+            name: GitByteString::new(self.name.as_bytes().to_vec()),
+            email: GitByteString::new(self.email.as_bytes().to_vec()),
+            time: GitTime::new(seconds, 0),
+            raw: ident,
         }
     }
 }
@@ -616,12 +618,12 @@ impl SyncMapping {
         self.heddle_to_git.iter()
     }
 
-    pub(crate) fn retain_git_objects(&mut self, repo: &gix::Repository) {
+    pub(crate) fn retain_git_objects(&mut self, repo: &SleyRepository) {
         let retained: Vec<(ChangeId, ObjectId, Option<Vec<LossyGitImportEntry>>)> = self
             .heddle_to_git
             .iter()
             .filter_map(|(change_id, git_oid)| {
-                repo.find_object(*git_oid).ok().map(|_| {
+                repo.read_object(git_oid).ok().map(|_| {
                     (
                         *change_id,
                         *git_oid,
@@ -766,7 +768,7 @@ impl<'a> GitBridge<'a> {
             false
         } else {
             fs::create_dir_all(&git_dir)?;
-            let _ = gix::init_bare(&git_dir).map_err(git_err)?;
+            let _ = SleyRepository::init_bare(&git_dir).map_err(git_err)?;
             true
         };
 
@@ -785,7 +787,7 @@ impl<'a> GitBridge<'a> {
     }
 
     /// Open the Git repository (mirror or regular).
-    pub(crate) fn open_git_repo(&self) -> GitResult<gix::Repository> {
+    pub(crate) fn open_git_repo(&self) -> GitResult<SleyRepository> {
         if let Some(ref path) = self.git_repo_path {
             open_repo(path)
         } else {
@@ -935,7 +937,7 @@ impl<'a> GitBridge<'a> {
         // inside each path — never a scope-filtered subset; the scope lives in the
         // mirror state, not in a second destination filter (heddle#316 r16).
         let log_message = format!("heddle: push from {}", self.heddle_repo.root().display());
-        match self.resolve_remote(remote_name, gix::remote::Direction::Push)? {
+        match self.resolve_remote(remote_name, RemoteDirection::Push)? {
             ResolvedRemote::Local(target_path) => self.copy_mirror_to_path(
                 &target_path,
                 &log_message,
@@ -1014,7 +1016,7 @@ impl<'a> GitBridge<'a> {
             open_repo(target_path)?
         } else if init_if_missing {
             fs::create_dir_all(target_path)?;
-            gix::init_bare(target_path).map_err(git_err)?;
+            SleyRepository::init_bare(target_path).map_err(git_err)?;
             open_repo(target_path)?
         } else {
             return Err(GitBridgeError::Git(format!(
@@ -1063,19 +1065,20 @@ impl<'a> GitBridge<'a> {
             force,
         )?;
         for write in &plan.writes {
-            // The plan already decided force-vs-FF per ref (erroring on a fork
-            // unless `force`), so the destination write itself is unconditional —
-            // `PreviousValue::Any` mirrors the forced mirror-side branch rewind.
+            let constraint = match write.old {
+                Some(old) => RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(old)),
+                None => RefPrecondition::MustNotExist,
+            };
             set_reference(
                 &target_repo,
                 &write.full_name,
                 write.new,
-                PreviousValue::Any,
+                constraint,
                 log_message,
             )?;
         }
         for delete in &plan.deletes {
-            delete_reference_if_present(&target_repo, &delete.full_name)?;
+            delete_reference_matching(&target_repo, &delete.full_name, delete.old)?;
         }
         write_exported_refs(&target_repo, &plan.new_manifest)?;
         Ok(planned_write_names(&plan))
@@ -1112,10 +1115,20 @@ impl<'a> GitBridge<'a> {
         }
 
         let mirror_repo = self.open_git_repo()?;
-        match self.resolve_remote(remote_name, gix::remote::Direction::Fetch)? {
+        match self.resolve_remote(remote_name, RemoteDirection::Fetch)? {
             ResolvedRemote::Local(path) => {
                 let remote_repo = open_repo(&path)?;
                 let updates = collect_ref_updates_for_fetch(&remote_repo, scope)?;
+                tracing::debug!(
+                    remote = remote_name,
+                    path = %path.display(),
+                    refs = updates.len(),
+                    notes = updates
+                        .iter()
+                        .filter(|update| update.namespace == RefNamespace::Note)
+                        .count(),
+                    "fetching Git refs from local remote"
+                );
                 copy_reachable_objects(
                     &remote_repo,
                     &mirror_repo,
@@ -1198,6 +1211,10 @@ impl<'a> GitBridge<'a> {
             }
         });
         remotes.dedup();
+        tracing::debug!(
+            remotes = ?remotes,
+            "discovered configured remotes for Heddle note hydration"
+        );
 
         for remote in remotes {
             match self.fetch_with_scope(
@@ -1292,10 +1309,12 @@ impl<'a> GitBridge<'a> {
         };
         let mirror_repo = self.open_git_repo()?;
         let branch_ref = format!("refs/heads/{thread}");
-        let Ok(mut reference) = mirror_repo.find_reference(&branch_ref) else {
+        let Some(reference) = mirror_repo.find_reference(&branch_ref).map_err(git_err)? else {
             return Ok(());
         };
-        let remote_git_oid = reference.peel_to_id().map_err(git_err)?.detach();
+        let Some(remote_git_oid) = reference.peeled_oid(&mirror_repo).map_err(git_err)? else {
+            return Ok(());
+        };
         if remote_git_oid == local_git_oid
             || commit_is_descendant_of(&mirror_repo, remote_git_oid, local_git_oid)?
         {
@@ -1315,7 +1334,7 @@ impl<'a> GitBridge<'a> {
         }
 
         let mirror_repo = self.open_git_repo()?;
-        let checkout_repo = gix::discover(self.heddle_repo.root()).map_err(git_err)?;
+        let checkout_repo = SleyRepository::discover(self.heddle_repo.root()).map_err(git_err)?;
         if checkout_repo.git_dir() == mirror_repo.git_dir() {
             return Ok(());
         }
@@ -1355,13 +1374,13 @@ impl<'a> GitBridge<'a> {
 
     pub(crate) fn seed_git_checkpoint_mappings_from_checkout(
         &mut self,
-        mirror_repo: &gix::Repository,
+        mirror_repo: &SleyRepository,
     ) -> GitResult<()> {
         if !self.heddle_repo.root().join(".git").exists() {
             return Ok(());
         }
 
-        let checkout_repo = match gix::discover(self.heddle_repo.root()) {
+        let checkout_repo = match SleyRepository::discover(self.heddle_repo.root()) {
             Ok(repo) => repo,
             Err(_) => return Ok(()),
         };
@@ -1377,11 +1396,11 @@ impl<'a> GitBridge<'a> {
                 .parse::<ObjectId>()
                 .map_err(|err| GitBridgeError::InvalidMapping(err.to_string()))?;
 
-            if mirror_repo.find_object(git_oid).is_err() {
+            if mirror_repo.read_object(&git_oid).is_err() {
                 copy_reachable_objects(&object_repo, mirror_repo, [git_oid])?;
             }
             mirror_repo
-                .find_object(git_oid)
+                .read_object(&git_oid)
                 .map_err(|_| GitBridgeError::CommitNotFound(record.git_commit.clone()))?;
 
             self.mapping.insert(change_id, git_oid);
@@ -1487,7 +1506,7 @@ impl<'a> GitBridge<'a> {
         if !root.join(".git").exists() {
             return Ok(());
         }
-        let checkout_repo = gix::discover(root).map_err(git_err)?;
+        let checkout_repo = SleyRepository::discover(root).map_err(git_err)?;
         // Skip detached HEAD: write-through only mirrors attached
         // threads, and there is no branch context to reason about here.
         if checkout_repo
@@ -1519,18 +1538,23 @@ impl<'a> GitBridge<'a> {
         // and PRUNE intent-to-add entries whose path left the captured
         // set (deleted, or now committed) — otherwise a stale entry
         // surfaces as a phantom ` D path` in `git status`.
-        let mut index = checkout_repo.open_index().map_err(git_err)?;
+        let mut index = checkout_repo
+            .open_index()
+            .map_err(git_err)?
+            .unwrap_or_else(|| Index {
+                version: 2,
+                entries: Vec::new(),
+                extensions: Vec::new(),
+                checksum: None,
+            });
 
         // Partition existing entries: real tracked paths vs. the
         // intent-to-add placeholders we manage here.
         let mut real_tracked: HashSet<String> = HashSet::new();
         let mut existing_ita: HashSet<String> = HashSet::new();
-        for entry in index.entries() {
-            let path = entry
-                .path_in(index.path_backing())
-                .to_str_lossy()
-                .into_owned();
-            if entry.flags.contains(gix_index::entry::Flags::INTENT_TO_ADD) {
+        for entry in &index.entries {
+            let path = String::from_utf8_lossy(entry.path.as_bytes()).into_owned();
+            if entry.is_intent_to_add() {
                 existing_ita.insert(path);
             } else {
                 real_tracked.insert(path);
@@ -1542,18 +1566,14 @@ impl<'a> GitBridge<'a> {
         let captured_paths: HashSet<&str> = captured.iter().map(|(p, _)| p.as_str()).collect();
 
         // PRUNE: any intent-to-add entry whose path is no longer desired.
-        let mut changed = false;
-        index.remove_entries(|_, path, entry| {
-            let stale = entry.flags.contains(gix_index::entry::Flags::INTENT_TO_ADD)
-                && !captured_paths.contains(path.to_str_lossy().as_ref());
-            if stale {
-                changed = true;
-            }
-            stale
+        let before_prune = index.entries.len();
+        index.entries.retain(|entry| {
+            !entry.is_intent_to_add()
+                || captured_paths.contains(String::from_utf8_lossy(entry.path.as_bytes()).as_ref())
         });
+        let mut changed = index.entries.len() != before_prune;
 
         // ADD: newly-captured paths not already tracked or marked.
-        let empty_blob = checkout_repo.object_hash().empty_blob();
         for (path, mode) in &captured {
             if real_tracked.contains(path) || existing_ita.contains(path) {
                 continue;
@@ -1571,27 +1591,32 @@ impl<'a> GitBridge<'a> {
             {
                 continue;
             }
-            let entry_mode = match mode {
-                FileMode::Executable => gix_index::entry::Mode::FILE_EXECUTABLE,
-                FileMode::Symlink => gix_index::entry::Mode::SYMLINK,
-                FileMode::Normal => gix_index::entry::Mode::FILE,
-            };
-            index.dangerously_push_entry(
-                gix_index::entry::Stat::default(),
-                empty_blob,
-                gix_index::entry::Flags::INTENT_TO_ADD | gix_index::entry::Flags::EXTENDED,
-                entry_mode,
-                path.as_bytes().as_bstr(),
+            let mut entry = IndexEntry::intent_to_add(
+                checkout_repo.object_format(),
+                GitBString::from(path.as_str()),
             );
+            entry.mode = match mode {
+                FileMode::Executable => 0o100755,
+                FileMode::Symlink => 0o120000,
+                FileMode::Normal => 0o100644,
+            };
             changed = true;
+            index.entries.push(entry);
         }
 
         if changed {
-            // `dangerously_push_entry` appends without preserving sort
-            // order; restore it so subsequent path lookups stay correct.
-            index.sort_entries();
             index
-                .write(gix_index::write::Options::default())
+                .entries
+                .sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
+            index.upgrade_version_for_flags();
+            checkout_repo
+                .write_index(
+                    &index,
+                    IndexWriteOptions {
+                        fsync: true,
+                        validate_checksum: true,
+                    },
+                )
                 .map_err(git_err)?;
         }
         Ok(())
@@ -1670,20 +1695,15 @@ impl<'a> GitBridge<'a> {
         };
 
         let mirror_repo = self.open_git_repo()?;
-        let checkout_repo = gix::discover(self.heddle_repo.root()).map_err(git_err)?;
+        let checkout_repo = SleyRepository::discover(self.heddle_repo.root()).map_err(git_err)?;
         if checkout_repo.git_dir() == mirror_repo.git_dir() {
             return Ok(WriteThroughOutcome::Skipped(
                 WriteThroughSkipReason::MirrorIsWorktree,
             ));
         }
         let git_dir = checkout_repo.git_dir().to_path_buf();
-        // gix-index manages its own `index.lock` (atomic `O_CREAT |
-        // O_EXCL`) inside `index.write`, so we don't create a parallel
-        // lock here — that would deadlock with gix's writer. The
-        // existence check below is a UX nicety so a stale or
-        // concurrent lock surfaces as a structured `IndexAlreadyDirty`
-        // skip rather than a raw "Could not acquire lock" error from
-        // gix.
+        // sley's index writer owns `index.lock`; keep this preflight so a stale
+        // or concurrent lock surfaces as a structured `IndexAlreadyDirty` skip.
         if git_dir.join("index.lock").exists() {
             return Ok(WriteThroughOutcome::Skipped(
                 WriteThroughSkipReason::IndexAlreadyDirty,
@@ -1699,18 +1719,26 @@ impl<'a> GitBridge<'a> {
         let previous_branch = object_repo
             .find_reference(&branch_ref)
             .ok()
-            .and_then(|mut reference| reference.peel_to_id().ok())
-            .map(|id| id.detach());
+            .flatten()
+            .and_then(|reference| reference.peeled_oid(&object_repo).ok().flatten());
 
         let write_result = (|| -> GitResult<()> {
             copy_reachable_objects(&mirror_repo, &object_repo, [git_oid])?;
             fs::write(&head_path, format!("ref: {branch_ref}\n"))?;
 
-            let commit = checkout_repo.find_commit(git_oid).map_err(git_err)?;
-            let tree_id = commit.tree_id().map_err(git_err)?;
-            let mut index = checkout_repo.index_from_tree(&tree_id).map_err(git_err)?;
-            index
-                .write(gix_index::write::Options::default())
+            let commit = checkout_repo.read_commit(&git_oid).map_err(git_err)?;
+            let mut index = checkout_repo
+                .index_from_tree(&commit.tree)
+                .map_err(git_err)?;
+            index.upgrade_version_for_flags();
+            checkout_repo
+                .write_index(
+                    &index,
+                    IndexWriteOptions {
+                        fsync: true,
+                        validate_checksum: true,
+                    },
+                )
                 .map_err(git_err)?;
 
             update_checkout_head_ref(
@@ -1721,7 +1749,7 @@ impl<'a> GitBridge<'a> {
             )?;
 
             // fsync after every durable write so a power loss between
-            // `fs::write(HEAD)` and `index.write` doesn't leave the
+            // `fs::write(HEAD)` and `write_index` doesn't leave the
             // checkout in a self-inconsistent state. Sync the parent
             // dir too — file-level fsync on its own doesn't durably
             // commit the dirent on most filesystems.
@@ -1739,7 +1767,7 @@ impl<'a> GitBridge<'a> {
                     &object_repo,
                     &branch_ref,
                     previous_branch,
-                    PreviousValue::Any,
+                    RefPrecondition::Any,
                     "heddle: rollback failed write-through",
                 )?;
             } else {
@@ -1782,12 +1810,14 @@ impl<'a> GitBridge<'a> {
 
         let mirror_repo = self.open_git_repo()?;
         let branch_ref = format!("refs/heads/{branch}");
-        let Ok(mut reference) = mirror_repo.find_reference(&branch_ref) else {
+        let Some(reference) = mirror_repo.find_reference(&branch_ref).map_err(git_err)? else {
             return Ok(());
         };
-        let target = reference.peel_to_id().map_err(git_err)?.detach();
+        let Some(target) = reference.peeled_oid(&mirror_repo).map_err(git_err)? else {
+            return Ok(());
+        };
 
-        let checkout_repo = gix::discover(self.heddle_repo.root()).map_err(git_err)?;
+        let checkout_repo = SleyRepository::discover(self.heddle_repo.root()).map_err(git_err)?;
         if checkout_repo.git_dir() == mirror_repo.git_dir() {
             return Ok(());
         }
@@ -1797,7 +1827,7 @@ impl<'a> GitBridge<'a> {
             &object_repo,
             &format!("refs/remotes/{tracking_remote}/{branch}"),
             target,
-            PreviousValue::Any,
+            RefPrecondition::Any,
             "heddle: refresh remote-tracking branch after pull",
         )?;
         Ok(())
@@ -1815,23 +1845,20 @@ impl<'a> GitBridge<'a> {
         reject_reserved_git_remote_name(&tracking_remote)?;
 
         let mirror_repo = self.open_git_repo()?;
-        let checkout_repo = gix::discover(self.heddle_repo.root()).map_err(git_err)?;
+        let checkout_repo = SleyRepository::discover(self.heddle_repo.root()).map_err(git_err)?;
         if checkout_repo.git_dir() == mirror_repo.git_dir() {
             return Ok(());
         }
         let object_repo = common_repo_for_worktree(&checkout_repo)?;
         let prefix = format!("refs/remotes/{remote_name}/");
-        for reference in mirror_repo
-            .references()
-            .map_err(git_err)?
-            .prefixed(prefix.as_str())
-            .map_err(git_err)?
-        {
-            let reference = reference.map_err(git_err)?;
-            let Some(target) = reference.target().try_id().map(ToOwned::to_owned) else {
+        for reference in mirror_repo.references().list_refs().map_err(git_err)? {
+            if !reference.name.starts_with(&prefix) {
+                continue;
+            }
+            let ReferenceTarget::Direct(target) = reference.target else {
                 continue;
             };
-            let full = reference.name().as_bstr().to_string();
+            let full = reference.name;
             let Some(branch) = full.strip_prefix(&prefix) else {
                 continue;
             };
@@ -1843,7 +1870,7 @@ impl<'a> GitBridge<'a> {
                 &object_repo,
                 &format!("refs/remotes/{tracking_remote}/{branch}"),
                 target,
-                PreviousValue::Any,
+                RefPrecondition::Any,
                 "heddle: refresh remote-tracking branch after fetch",
             )?;
         }
@@ -1856,7 +1883,7 @@ impl<'a> GitBridge<'a> {
         }
 
         let mirror_repo = self.open_git_repo()?;
-        let checkout_repo = gix::discover(self.heddle_repo.root()).map_err(git_err)?;
+        let checkout_repo = SleyRepository::discover(self.heddle_repo.root()).map_err(git_err)?;
         if checkout_repo.git_dir() == mirror_repo.git_dir() {
             return Ok(());
         }
@@ -1885,7 +1912,7 @@ impl<'a> GitBridge<'a> {
     fn resolve_remote(
         &self,
         remote_name: &str,
-        direction: gix::remote::Direction,
+        direction: RemoteDirection,
     ) -> GitResult<ResolvedRemote> {
         let repo = self.open_git_repo()?;
         let url = match remote_url_from_repo(&repo, remote_name, direction)? {
@@ -1893,29 +1920,31 @@ impl<'a> GitBridge<'a> {
             None => self.checkout_remote_url(remote_name, direction)?,
         };
 
+        let base = repo_relative_base(&repo);
         let url = match url {
             Some(url) => url,
-            None => gix::url::parse(remote_name.as_bytes().as_bstr()).map_err(git_err)?,
+            None => parse_configured_remote_url(remote_name, &base)?,
         };
 
-        match url.scheme {
-            gix::url::Scheme::File => Ok(ResolvedRemote::Local(local_path_from_url(&url)?)),
-            _ => Ok(ResolvedRemote::Url(url)),
+        if let Some(path) = local_path_from_url(&url)? {
+            Ok(ResolvedRemote::Local(path))
+        } else {
+            Ok(ResolvedRemote::Url(url))
         }
     }
 
     fn checkout_remote_url(
         &self,
         remote_name: &str,
-        direction: gix::remote::Direction,
-    ) -> GitResult<Option<gix::Url>> {
-        if direction == gix::remote::Direction::Fetch
+        direction: RemoteDirection,
+    ) -> GitResult<Option<String>> {
+        if direction == RemoteDirection::Fetch
             && let Some(url) =
                 remote_fetch_url_from_checkout_config(self.heddle_repo.root(), remote_name)?
         {
             return Ok(Some(url));
         }
-        let Ok(repo) = gix::discover(self.heddle_repo.root()) else {
+        let Ok(repo) = SleyRepository::discover(self.heddle_repo.root()) else {
             return Ok(None);
         };
         remote_url_from_repo(&repo, remote_name, direction)
@@ -1923,23 +1952,25 @@ impl<'a> GitBridge<'a> {
 }
 
 fn remote_url_from_repo(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     remote_name: &str,
-    direction: gix::remote::Direction,
-) -> GitResult<Option<gix::Url>> {
-    if direction == gix::remote::Direction::Fetch {
-        if let Some(url) = remote_fetch_url_from_config(repo, remote_name)? {
-            return Ok(Some(url));
-        }
-        if let Ok(remote) = repo.find_remote(remote_name.as_bytes().as_bstr()) {
-            return Ok(remote.url(direction).cloned());
-        }
-        Ok(None)
-    } else if let Ok(remote) = repo.find_remote(remote_name.as_bytes().as_bstr()) {
-        Ok(remote.url(direction).cloned())
+    direction: RemoteDirection,
+) -> GitResult<Option<String>> {
+    let config = repo.config_snapshot().map_err(git_err)?;
+    let push = direction == RemoteDirection::Push;
+    let value = if push {
+        config
+            .get("remote", Some(remote_name), "pushurl")
+            .or_else(|| config.get("remote", Some(remote_name), "url"))
     } else {
-        Ok(None)
-    }
+        config.get("remote", Some(remote_name), "url")
+    };
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let rewritten =
+        sley::plumbing::sley_config::remotes::rewrite_url_with_config(&config, value, push);
+    parse_configured_remote_url(&rewritten, &repo_relative_base(repo)).map(Some)
 }
 
 fn checkout_tracking_remote_name(root: &Path, requested: &str) -> GitResult<Option<String>> {
@@ -1977,11 +2008,12 @@ fn checkout_note_ref_exists(root: &Path) -> GitResult<bool> {
     if !root.join(".git").exists() {
         return Ok(false);
     }
-    let checkout_repo = gix::discover(root).map_err(git_err)?;
+    let checkout_repo = SleyRepository::discover(root).map_err(git_err)?;
     let object_repo = common_repo_for_worktree(&checkout_repo)?;
     Ok(object_repo
         .find_reference(super::git_notes::NOTES_REF)
-        .is_ok())
+        .map_err(git_err)?
+        .is_some())
 }
 
 fn parse_remote_url_items_from_config(
@@ -2038,24 +2070,10 @@ fn looks_like_remote_location(value: &str) -> bool {
         || value.contains('\\')
 }
 
-fn remote_fetch_url_from_config(
-    repo: &gix::Repository,
-    remote_name: &str,
-) -> GitResult<Option<gix::Url>> {
-    for config_path in repo_config_paths(repo)? {
-        let Some(url) = parse_remote_fetch_url_from_config(&config_path, remote_name)? else {
-            continue;
-        };
-        let base = repo.workdir().unwrap_or_else(|| repo.git_dir());
-        return parse_configured_remote_url(&url, base).map(Some);
-    }
-    Ok(None)
-}
-
 fn remote_fetch_url_from_checkout_config(
     root: &Path,
     remote_name: &str,
-) -> GitResult<Option<gix::Url>> {
+) -> GitResult<Option<String>> {
     for config_path in checkout_git_config_paths(root) {
         let Some(url) = parse_remote_fetch_url_from_config(&config_path, remote_name)? else {
             continue;
@@ -2065,13 +2083,12 @@ fn remote_fetch_url_from_checkout_config(
     Ok(None)
 }
 
-fn parse_configured_remote_url(value: &str, relative_base: &Path) -> GitResult<gix::Url> {
+fn parse_configured_remote_url(value: &str, relative_base: &Path) -> GitResult<String> {
     if configured_remote_is_local_path(value) {
         let path = configured_remote_local_path(value, relative_base);
-        return gix::url::parse(format!("file://{}", path.display()).as_bytes().as_bstr())
-            .map_err(git_err);
+        return Ok(format!("file://{}", path.display()));
     }
-    gix::url::parse(value.as_bytes().as_bstr()).map_err(git_err)
+    Ok(value.to_string())
 }
 
 fn configured_remote_local_path(value: &str, relative_base: &Path) -> PathBuf {
@@ -2147,16 +2164,6 @@ fn common_git_dir_from_git_dir(git_dir: &Path) -> Option<PathBuf> {
     })
 }
 
-fn repo_config_paths(repo: &gix::Repository) -> GitResult<Vec<PathBuf>> {
-    let mut paths = vec![repo.git_dir().join("config")];
-    let common_repo = common_repo_for_worktree(repo)?;
-    let common_config = common_repo.git_dir().join("config");
-    if !paths.iter().any(|path| path == &common_config) {
-        paths.push(common_config);
-    }
-    Ok(paths)
-}
-
 fn parse_remote_fetch_url_from_config(path: &Path, remote_name: &str) -> GitResult<Option<String>> {
     let Ok(contents) = fs::read_to_string(path) else {
         return Ok(None);
@@ -2187,7 +2194,7 @@ fn parse_remote_fetch_url_from_config(path: &Path, remote_name: &str) -> GitResu
     Ok(None)
 }
 
-fn common_repo_for_worktree(repo: &gix::Repository) -> GitResult<gix::Repository> {
+fn common_repo_for_worktree(repo: &SleyRepository) -> GitResult<SleyRepository> {
     let common_dir_file = repo.git_dir().join("commondir");
     let Ok(contents) = fs::read_to_string(&common_dir_file) else {
         return Ok(repo.clone());
@@ -2302,69 +2309,99 @@ pub(crate) fn thread_is_unclaimed_bootstrap(
     Ok(tree == Tree::new())
 }
 
-pub(crate) fn open_repo(path: &Path) -> GitResult<gix::Repository> {
-    match gix::discover(path) {
+pub(crate) fn open_repo(path: &Path) -> GitResult<SleyRepository> {
+    match SleyRepository::discover(path) {
         Ok(repo) => Ok(repo),
-        Err(_) => gix::open(path).map_err(git_err),
+        Err(_) => SleyRepository::open(path).map_err(git_err),
     }
 }
 
 /// Delete a reference if present; missing-ref is a no-op. Used by the
 /// write-through rollback path to drop a branch that was created by a
 /// failed write-through but isn't reachable from any prior state. We
-/// scope the deletion with `PreviousValue::MustExist` so an unrelated
+/// scope the deletion with `RefPrecondition::MustExist` so an unrelated
 /// concurrent writer that *just* updated this ref isn't silently
 /// clobbered — if the ref vanished underneath us between our read and
 /// the delete, that's the rollback we wanted anyway.
-pub(crate) fn delete_reference_if_present(repo: &gix::Repository, name: &str) -> GitResult<()> {
-    let signature = bridge_signature();
-    let mut time_buf = gix::date::parse::TimeBuf::default();
-    let edit = RefEdit {
-        change: Change::Delete {
-            log: RefLog::AndReference,
-            expected: PreviousValue::MustExist,
-        },
-        name: name
-            .try_into()
-            .map_err(|err| GitBridgeError::Git(format!("invalid ref {name}: {err}")))?,
-        deref: false,
-    };
-    match repo.edit_references_as([edit], Some(signature.to_ref(&mut time_buf))) {
-        Ok(_) => Ok(()),
-        // Missing ref → already rolled back; treat as success. gix's
-        // error message on an absent ref reads "for deletion did not
-        // exist or could not be parsed".
-        Err(err) if err.to_string().contains("did not exist") => Ok(()),
-        Err(err) => Err(git_err(err)),
+pub(crate) fn delete_reference_if_present(repo: &SleyRepository, name: &str) -> GitResult<()> {
+    delete_reference(repo, name, None, true)
+}
+
+fn delete_reference_matching(
+    repo: &SleyRepository,
+    name: &str,
+    expected_old: ObjectId,
+) -> GitResult<()> {
+    delete_reference(repo, name, Some(expected_old), false)
+}
+
+fn delete_reference(
+    repo: &SleyRepository,
+    name: &str,
+    expected_old: Option<ObjectId>,
+    missing_ok: bool,
+) -> GitResult<()> {
+    let refs = repo.references();
+    match refs.read_ref(name).map_err(git_err)? {
+        None if missing_ok => Ok(()),
+        None => Err(GitBridgeError::Git(format!(
+            "failed to delete Git reference '{name}': ref is missing"
+        ))),
+        Some(ReferenceTarget::Direct(oid)) => repo
+            .delete_ref(DeleteRef {
+                name: FullName::new(name).map_err(git_err)?,
+                expected_old: Some(expected_old.unwrap_or(oid)),
+                expected: None,
+                reflog: None,
+                reflog_committer: None,
+            })
+            .map_err(git_err),
+        Some(ReferenceTarget::Symbolic(_)) => {
+            if let Some(expected_old) = expected_old {
+                let current = repo
+                    .find_reference(name)
+                    .map_err(git_err)?
+                    .and_then(|reference| reference.peeled_oid(repo).ok().flatten());
+                if current != Some(expected_old) {
+                    return Err(GitBridgeError::Git(format!(
+                        "failed to delete Git reference '{name}': expected {expected_old}, found {}",
+                        current
+                            .map(|oid| oid.to_string())
+                            .unwrap_or_else(|| "missing".to_string())
+                    )));
+                }
+            }
+            refs.delete_symbolic_ref(name).map(|_| ()).map_err(git_err)
+        }
     }
 }
 
 pub(crate) fn set_reference(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     name: &str,
     target: ObjectId,
-    constraint: PreviousValue,
+    constraint: RefPrecondition,
     log_message: &str,
 ) -> GitResult<()> {
-    let signature = bridge_signature();
-    let mut time_buf = gix::date::parse::TimeBuf::default();
-    let edit = RefEdit {
-        change: Change::Update {
-            log: LogChange {
-                mode: RefLog::AndReference,
-                force_create_reflog: false,
-                message: log_message.into(),
-            },
-            expected: constraint,
-            new: Target::Object(target),
-        },
-        name: name
-            .try_into()
-            .map_err(|err| GitBridgeError::Git(format!("invalid ref {name}: {err}")))?,
-        deref: false,
+    let refs = repo.references();
+    let old_oid = match refs.read_ref(name).map_err(git_err)? {
+        Some(ReferenceTarget::Direct(oid)) => oid,
+        _ => ObjectId::null(repo.object_format()),
     };
-    repo.edit_references_as([edit], Some(signature.to_ref(&mut time_buf)))
-        .map_err(git_err)?;
+    let reflog = sley::plumbing::sley_refs::ReflogEntry {
+        old_oid,
+        new_oid: target,
+        committer: bridge_signature(),
+        message: log_message.as_bytes().to_vec(),
+    };
+    let mut tx = refs.transaction();
+    tx.update_to(
+        name.to_string(),
+        ReferenceTarget::Direct(target),
+        constraint,
+        Some(reflog),
+    );
+    tx.commit().map_err(git_err)?;
     Ok(())
 }
 
@@ -2410,38 +2447,37 @@ fn collect_capture_paths<S: ObjectStore + ?Sized>(
 }
 
 fn update_checkout_head_ref(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     target: ObjectId,
     previous_branch: Option<ObjectId>,
     log_message: &str,
 ) -> GitResult<()> {
-    let signature = bridge_signature();
-    let mut time_buf = gix::date::parse::TimeBuf::default();
-    let expected = previous_branch.map_or(PreviousValue::MustNotExist, |oid| {
-        PreviousValue::MustExistAndMatch(Target::Object(oid))
+    let expected = previous_branch.map_or(RefPrecondition::MustNotExist, |oid| {
+        RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(oid))
     });
-    let edit = RefEdit {
-        change: Change::Update {
-            log: LogChange {
-                mode: RefLog::AndReference,
-                force_create_reflog: false,
-                message: log_message.into(),
-            },
-            expected,
-            new: Target::Object(target),
-        },
-        name: "HEAD"
-            .try_into()
-            .map_err(|err| GitBridgeError::Git(format!("invalid ref HEAD: {err}")))?,
-        deref: true,
+    let ref_name = repo
+        .head()
+        .ok()
+        .and_then(|head| head.symbolic_target.map(|name| name.to_string()))
+        .unwrap_or_else(|| "HEAD".to_string());
+    let old_oid = previous_branch.unwrap_or_else(|| ObjectId::null(repo.object_format()));
+    let head_reflog = sley::plumbing::sley_refs::ReflogEntry {
+        old_oid,
+        new_oid: target,
+        committer: bridge_signature(),
+        message: log_message.as_bytes().to_vec(),
     };
-    repo.edit_references_as([edit], Some(signature.to_ref(&mut time_buf)))
-        .map_err(git_err)?;
+    set_reference(repo, &ref_name, target, expected, log_message)?;
+    if ref_name != "HEAD" {
+        repo.references()
+            .append_reflog("HEAD", &head_reflog)
+            .map_err(git_err)?;
+    }
     Ok(())
 }
 
 fn checkout_git_head_is_detached(root: &Path) -> GitResult<bool> {
-    let repo = gix::discover(root).map_err(git_err)?;
+    let repo = SleyRepository::discover(root).map_err(git_err)?;
     Ok(repo.head().map(|head| head.is_detached()).unwrap_or(false))
 }
 
@@ -2482,13 +2518,17 @@ pub(crate) fn principal_is_default_unknown(principal: &Principal) -> bool {
 }
 
 fn git_config_value_with_global_fallback(repo_root: &Path, key: &str) -> GitResult<Option<String>> {
-    let Ok(repo) = gix::discover(repo_root) else {
+    let Ok(repo) = SleyRepository::discover(repo_root) else {
+        return Ok(None);
+    };
+    let Some((section, variable)) = key.split_once('.') else {
         return Ok(None);
     };
     Ok(repo
         .config_snapshot()
-        .string(key)
-        .map(|value| value.to_str_lossy().into_owned()))
+        .map_err(git_err)?
+        .get(section, None, variable)
+        .map(str::to_string))
 }
 
 fn git_config_value(value: &str) -> GitResult<String> {
@@ -2521,98 +2561,71 @@ fn git_config_value(value: &str) -> GitResult<String> {
     Ok(out)
 }
 
-fn bridge_signature() -> gix::actor::Signature {
+fn bridge_signature() -> Vec<u8> {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0);
-    gix::actor::Signature {
-        name: "Heddle".into(),
-        email: "heddle@local".into(),
-        time: gix::date::Time { seconds, offset: 0 },
-    }
+    format!("Heddle <heddle@local> {seconds} +0000").into_bytes()
 }
 
-fn local_path_from_url(url: &gix::Url) -> GitResult<PathBuf> {
-    if url.scheme != gix::url::Scheme::File {
-        return Err(GitBridgeError::Git(format!(
-            "remote '{}' uses unsupported scheme {:?}; only local path and file:// remotes are supported",
-            url, url.scheme
-        )));
-    }
+fn repo_relative_base(repo: &SleyRepository) -> PathBuf {
+    repo.workdir().unwrap_or_else(|| {
+        if repo
+            .git_dir()
+            .file_name()
+            .is_some_and(|name| name == ".git")
+        {
+            repo.git_dir()
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| repo.git_dir().to_path_buf())
+        } else {
+            repo.git_dir().to_path_buf()
+        }
+    })
+}
 
-    let path = PathBuf::from(String::from_utf8_lossy(url.path.as_ref()).into_owned());
+fn local_path_from_url(url: &str) -> GitResult<Option<PathBuf>> {
+    let Some(raw_path) = url.strip_prefix("file://") else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(raw_path);
     if path.as_os_str().is_empty() {
         return Err(GitBridgeError::Git(format!(
             "remote '{}' has no filesystem path",
             url
         )));
     }
-    Ok(path)
+    Ok(Some(path))
 }
 
-fn collect_ref_updates(repo: &gix::Repository) -> GitResult<Vec<RefUpdate>> {
+fn collect_ref_updates(repo: &SleyRepository) -> GitResult<Vec<RefUpdate>> {
     let mut updates = Vec::new();
 
-    for branch in repo
-        .references()
-        .map_err(git_err)?
-        .local_branches()
-        .map_err(git_err)?
-    {
-        let branch = branch.map_err(git_err)?;
-        let Some(target) = branch.try_id() else {
+    for reference in repo.references().list_refs().map_err(git_err)? {
+        let ReferenceTarget::Direct(target) = reference.target else {
             continue;
         };
-        updates.push(RefUpdate {
-            name: branch.name().shorten().to_string(),
-            target: target.detach(),
-            namespace: RefNamespace::Branch,
-        });
-    }
-
-    for tag in repo
-        .references()
-        .map_err(git_err)?
-        .tags()
-        .map_err(git_err)?
-    {
-        let tag = tag.map_err(git_err)?;
-        let Some(target) = tag.try_id() else {
-            continue;
-        };
-        updates.push(RefUpdate {
-            name: tag.name().shorten().to_string(),
-            target: target.detach(),
-            namespace: RefNamespace::Tag,
-        });
-    }
-
-    // Pick up refs/notes/* (currently just refs/notes/heddle) so the
-    // change_id metadata travels alongside branches/tags on every push.
-    for note_ref in repo
-        .references()
-        .map_err(git_err)?
-        .prefixed("refs/notes/")
-        .map_err(git_err)?
-    {
-        let note_ref = note_ref.map_err(git_err)?;
-        let Some(target) = note_ref.try_id() else {
-            continue;
-        };
-        // shorten() on refs/notes/<n> returns "<n>" (the path beneath the
-        // notes/ prefix). We want to round-trip "<n>", not "notes/<n>",
-        // since apply_ref_updates rebuilds the full name.
-        let full = note_ref.name().as_bstr().to_string();
-        let short = full
-            .strip_prefix("refs/notes/")
-            .unwrap_or(&full)
-            .to_string();
-        updates.push(RefUpdate {
-            name: short,
-            target: target.detach(),
-            namespace: RefNamespace::Note,
-        });
+        if let Some(name) = reference.name.strip_prefix("refs/heads/") {
+            updates.push(RefUpdate {
+                name: name.to_string(),
+                target,
+                namespace: RefNamespace::Branch,
+            });
+        } else if let Some(name) = reference.name.strip_prefix("refs/tags/") {
+            updates.push(RefUpdate {
+                name: name.to_string(),
+                target,
+                namespace: RefNamespace::Tag,
+            });
+        } else if let Some(name) = reference.name.strip_prefix("refs/notes/") {
+            updates.push(RefUpdate {
+                name: name.to_string(),
+                target,
+                namespace: RefNamespace::Note,
+            });
+        }
     }
 
     Ok(updates)
@@ -2646,7 +2659,7 @@ pub(crate) struct ExportedCommitCounts {
 /// rest as `already`. Routing both the total and the newly count through
 /// this single walk guarantees they can never diverge.
 pub(crate) fn count_exported_commits(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     newly_minted: &HashSet<ObjectId>,
 ) -> GitResult<ExportedCommitCounts> {
     let tips: Vec<ObjectId> = collect_ref_updates(repo)?
@@ -2662,33 +2675,33 @@ pub(crate) fn count_exported_commits(
         if !seen.insert(oid) {
             continue;
         }
-        let object = repo.find_object(oid).map_err(git_err)?;
-        match object.kind {
-            gix::objs::Kind::Commit => {
+        let object = repo.read_object(&oid).map_err(git_err)?;
+        match object.object_type {
+            GitObjectType::Commit => {
                 counts.total += 1;
                 if newly_minted.contains(&oid) {
                     counts.newly += 1;
                 }
-                let commit = repo.find_commit(oid).map_err(git_err)?;
-                for parent in commit.parent_ids() {
-                    stack.push(parent.detach());
+                let commit = repo.read_commit(&oid).map_err(git_err)?;
+                for parent in commit.parents {
+                    stack.push(parent);
                 }
             }
             // An annotated tag dereferences to its target (commit, or a
             // blob/tree for the rare blob/tree-pointing tag). Follow it;
             // only a Commit at the end increments the count.
-            gix::objs::Kind::Tag => {
-                let tag = repo.find_tag(oid).map_err(git_err)?;
-                stack.push(tag.target_id().map_err(git_err)?.detach());
+            GitObjectType::Tag => {
+                let tag = repo.read_tag(&oid).map_err(git_err)?;
+                stack.push(tag.object);
             }
-            gix::objs::Kind::Tree | gix::objs::Kind::Blob => {}
+            GitObjectType::Tree | GitObjectType::Blob => {}
         }
     }
     Ok(counts)
 }
 
 fn collect_ref_updates_for_fetch(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     scope: GitFetchScope,
 ) -> GitResult<Vec<RefUpdate>> {
     let updates = collect_ref_updates(repo)?;
@@ -2709,13 +2722,14 @@ fn full_ref_name(update: &RefUpdate) -> String {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn ensure_commit_update_fast_forward(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     name: &str,
     old: ObjectId,
     new: ObjectId,
 ) -> GitResult<()> {
-    if old == new || old == repo.object_hash().null() {
+    if old == new || old == ObjectId::null(repo.object_format()) {
         return Ok(());
     }
     match commit_is_descendant_of(repo, new, old) {
@@ -2732,7 +2746,7 @@ pub(crate) fn ensure_commit_update_fast_forward(
 }
 
 fn commit_is_descendant_of(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     descendant: ObjectId,
     ancestor: ObjectId,
 ) -> GitResult<bool> {
@@ -2745,9 +2759,9 @@ fn commit_is_descendant_of(
         if !seen.insert(oid) {
             continue;
         }
-        let commit = repo.find_commit(oid).map_err(git_err)?;
-        for parent in commit.parent_ids() {
-            stack.push(parent.detach());
+        let commit = repo.read_commit(&oid).map_err(git_err)?;
+        for parent in commit.parents {
+            stack.push(parent);
         }
     }
     Ok(false)
@@ -2772,7 +2786,7 @@ const HEDDLE_EXPORTED_REFS_FILE: &str = "heddle-exported-refs";
 /// only difference being WHERE the record is stored (heddle#316 r11).
 const HEDDLE_NETWORK_EXPORTED_REFS_DIR: &str = "git-network-exported-refs";
 
-fn exported_refs_manifest_path(target_repo: &gix::Repository) -> PathBuf {
+fn exported_refs_manifest_path(target_repo: &SleyRepository) -> PathBuf {
     target_repo.git_dir().join(HEDDLE_EXPORTED_REFS_FILE)
 }
 
@@ -2780,9 +2794,8 @@ fn exported_refs_manifest_path(target_repo: &gix::Repository) -> PathBuf {
 /// Keyed by a hash of the URL string so an arbitrarily long / non-ASCII URL maps
 /// to a fixed-length, filesystem-safe filename. Stored under heddle's own dir
 /// (the remote is not local, so there is no destination git dir to host it).
-fn network_exported_refs_path(heddle_dir: &Path, url: &gix::Url) -> PathBuf {
-    let key = ContentHash::compute_typed("git-network-exported-refs", url.to_string().as_bytes())
-        .to_hex();
+fn network_exported_refs_path(heddle_dir: &Path, url: &str) -> PathBuf {
+    let key = ContentHash::compute_typed("git-network-exported-refs", url.as_bytes()).to_hex();
     heddle_dir
         .join(HEDDLE_NETWORK_EXPORTED_REFS_DIR)
         .join(format!("{key}.refs"))
@@ -2818,7 +2831,7 @@ fn read_exported_refs_at(path: &Path) -> GitResult<HashMap<String, ObjectId>> {
                 let tip = parts
                     .next()
                     .and_then(|token| token.parse::<ObjectId>().ok())
-                    .unwrap_or_else(|| ObjectId::null(ObjectHashKind::Sha1));
+                    .unwrap_or_else(|| ObjectId::null(ObjectFormat::Sha1));
                 map.insert(name.to_string(), tip);
             }
             Ok(map)
@@ -2854,7 +2867,7 @@ fn write_exported_refs_at(path: &Path, refs: &HashMap<String, ObjectId>) -> GitR
 /// Heddle's exported-refs record for `target_repo` (full ref name → last-published
 /// tip OID), the local-path destination record. See [`read_exported_refs_at`].
 pub(crate) fn read_exported_refs(
-    target_repo: &gix::Repository,
+    target_repo: &SleyRepository,
 ) -> GitResult<HashMap<String, ObjectId>> {
     read_exported_refs_at(&exported_refs_manifest_path(target_repo))
 }
@@ -2862,7 +2875,7 @@ pub(crate) fn read_exported_refs(
 /// Persist the local-path destination's exported-refs record. See
 /// [`write_exported_refs_at`].
 pub(crate) fn write_exported_refs(
-    target_repo: &gix::Repository,
+    target_repo: &SleyRepository,
     refs: &HashMap<String, ObjectId>,
 ) -> GitResult<()> {
     write_exported_refs_at(&exported_refs_manifest_path(target_repo), refs)
@@ -2882,7 +2895,7 @@ pub(crate) fn write_exported_refs(
 const HEDDLE_MIRROR_MANAGED_REFS_FILE: &str = "heddle-mirror-managed-refs";
 
 /// On-disk path of the mirror's managed-refs record.
-fn mirror_managed_refs_path(mirror_repo: &gix::Repository) -> PathBuf {
+fn mirror_managed_refs_path(mirror_repo: &SleyRepository) -> PathBuf {
     mirror_repo.git_dir().join(HEDDLE_MIRROR_MANAGED_REFS_FILE)
 }
 
@@ -2891,7 +2904,7 @@ fn mirror_managed_refs_path(mirror_repo: &gix::Repository) -> PathBuf {
 /// mirror ref set so pre-existing heddle refs aren't all misread as foreign)
 /// from a record that exists but is empty (everything was legitimately dropped —
 /// do NOT re-seed).
-pub(crate) fn mirror_managed_refs_recorded(mirror_repo: &gix::Repository) -> bool {
+pub(crate) fn mirror_managed_refs_recorded(mirror_repo: &SleyRepository) -> bool {
     mirror_managed_refs_path(mirror_repo).exists()
 }
 
@@ -2899,7 +2912,7 @@ pub(crate) fn mirror_managed_refs_recorded(mirror_repo: &gix::Repository) -> boo
 /// tip OID). `Ok(empty)` when the record is absent — callers seed a first run from
 /// the current mirror ref set; see [`mirror_managed_refs_recorded`].
 pub(crate) fn read_mirror_managed_refs(
-    mirror_repo: &gix::Repository,
+    mirror_repo: &SleyRepository,
 ) -> GitResult<HashMap<String, ObjectId>> {
     read_exported_refs_at(&mirror_managed_refs_path(mirror_repo))
 }
@@ -2907,7 +2920,7 @@ pub(crate) fn read_mirror_managed_refs(
 /// Persist the mirror's managed-refs record. Atomic temp+rename via
 /// [`write_exported_refs_at`].
 pub(crate) fn write_mirror_managed_refs(
-    mirror_repo: &gix::Repository,
+    mirror_repo: &SleyRepository,
     refs: &HashMap<String, ObjectId>,
 ) -> GitResult<()> {
     write_exported_refs_at(&mirror_managed_refs_path(mirror_repo), refs)
@@ -2926,7 +2939,7 @@ pub(crate) fn write_mirror_managed_refs(
 /// run is correct. A record that EXISTS but is empty (everything was legitimately
 /// dropped) is NOT re-seeded — only a truly-absent record triggers the seed.
 pub(crate) fn read_or_seed_mirror_managed_refs(
-    mirror_repo: &gix::Repository,
+    mirror_repo: &SleyRepository,
 ) -> GitResult<HashMap<String, ObjectId>> {
     if mirror_managed_refs_recorded(mirror_repo) {
         read_mirror_managed_refs(mirror_repo)
@@ -2948,7 +2961,7 @@ pub(crate) fn read_or_seed_mirror_managed_refs(
 /// The FETCH path keeps using [`collect_ref_updates`]/[`collect_ref_updates_for_fetch`]
 /// (it must see every ref); only the export/push frontier is managed-filtered.
 pub(crate) fn collect_managed_ref_updates(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     record: &HashMap<String, ObjectId>,
 ) -> GitResult<Vec<RefUpdate>> {
     Ok(collect_ref_updates(repo)?
@@ -3003,7 +3016,7 @@ enum RefMove {
 /// but heddle never published it, so it is [`RefMove::Diverged`] and must not be
 /// force-overwritten (heddle#316 r12).
 fn classify_ref_move(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     old: Option<ObjectId>,
     new: ObjectId,
     recorded_tip: Option<ObjectId>,
@@ -3011,7 +3024,7 @@ fn classify_ref_move(
     let Some(old) = old else {
         return Ok(RefMove::Create);
     };
-    if old == repo.object_hash().null() {
+    if old == ObjectId::null(repo.object_format()) {
         return Ok(RefMove::Create);
     }
     if old == new {
@@ -3032,7 +3045,7 @@ fn classify_ref_move(
     // published it (the embargo purge drops the ChangeId→OID mapping, never the
     // object); if `old` is NOT resolvable here we cannot prove a rewind anyway.
     if recorded_tip == Some(old)
-        && repo.find_commit(old).is_ok()
+        && repo.read_commit(&old).is_ok()
         && commit_is_descendant_of(repo, old, new)?
     {
         return Ok(RefMove::Rewind);
@@ -3100,19 +3113,18 @@ fn classify_tag_move(
     }
 }
 
-/// A served ref a push destination must write: its full name, the destination's
-/// current `old` tip (for the receive-pack command; `None`/absent = a creation),
-/// and the served `new` tip.
+/// A served ref a push destination must write: its full name, the served `new`
+/// tip, and whether the receive-pack command must be forced.
 #[derive(Debug)]
 pub(crate) struct PlannedRefWrite {
     pub(crate) full_name: String,
     pub(crate) old: Option<ObjectId>,
     pub(crate) new: ObjectId,
+    pub(crate) force: bool,
 }
 
 /// A previously-exported ref the served mirror no longer carries: it must be
-/// DELETED at the destination. Carries the destination's current `old` tip for
-/// the receive-pack delete command (`<old> <zero> <ref>`).
+/// deleted at the destination.
 #[derive(Debug)]
 pub(crate) struct PlannedRefDelete {
     pub(crate) full_name: String,
@@ -3231,7 +3243,7 @@ fn creatable_ref_names(
 /// * `force` — the user's explicit `--force`: additionally forces a true fork
 ///   AND authorizes retracting an out-of-band destination tip.
 pub(crate) fn plan_destination_reconcile(
-    mirror_repo: &gix::Repository,
+    mirror_repo: &SleyRepository,
     served_frontier: &[RefUpdate],
     creatable_names: Option<&HashSet<String>>,
     old_at_destination: &HashMap<String, ObjectId>,
@@ -3288,13 +3300,23 @@ pub(crate) fn plan_destination_reconcile(
             // an annotated-tag-object OID, not a commit) with the SAME ownership
             // gate baked into [`classify_tag_move`]. An out-of-band destination tip
             // heddle never recorded is spared at EVERY namespace unless `--force`.
-            let verdict =
-                match update.namespace {
-                    RefNamespace::Branch | RefNamespace::Note => verdict_from_move(
-                        classify_ref_move(mirror_repo, old, update.target, recorded)?,
-                    ),
-                    RefNamespace::Tag => classify_tag_move(old, update.target, recorded),
-                };
+            let (verdict, force_write) = match update.namespace {
+                RefNamespace::Branch | RefNamespace::Note => {
+                    let movement = classify_ref_move(mirror_repo, old, update.target, recorded)?;
+                    (
+                        verdict_from_move(movement),
+                        matches!(movement, RefMove::Rewind),
+                    )
+                }
+                RefNamespace::Tag => {
+                    let verdict = classify_tag_move(old, update.target, recorded);
+                    (
+                        verdict,
+                        old.is_some_and(|old| old != update.target)
+                            && matches!(verdict, WriteVerdict::Write),
+                    )
+                }
+            };
             let proceed = match verdict {
                 WriteVerdict::Skip => false,
                 WriteVerdict::Write => true,
@@ -3304,7 +3326,7 @@ pub(crate) fn plan_destination_reconcile(
                     } else {
                         return Err(GitBridgeError::NonFastForwardRef {
                             name: full.clone(),
-                            old: old.unwrap_or_else(|| mirror_repo.object_hash().null()),
+                            old: old.unwrap_or_else(|| ObjectId::null(mirror_repo.object_format())),
                             new: update.target,
                         });
                     }
@@ -3315,6 +3337,7 @@ pub(crate) fn plan_destination_reconcile(
                     full_name: full.clone(),
                     old,
                     new: update.target,
+                    force: force_write || matches!(verdict, WriteVerdict::RequireForce),
                 });
             }
             // CLAIM ownership in the record ONLY for a ref heddle actually writes
@@ -3369,7 +3392,7 @@ pub(crate) fn plan_destination_reconcile(
 /// The destination's current ref tips (full name → oid) across the namespaces
 /// heddle manages (heads, tags, notes) — the `old_at_destination` input to
 /// [`plan_destination_reconcile`] for a local-path destination.
-fn read_destination_ref_map(repo: &gix::Repository) -> GitResult<HashMap<String, ObjectId>> {
+fn read_destination_ref_map(repo: &SleyRepository) -> GitResult<HashMap<String, ObjectId>> {
     Ok(collect_ref_updates(repo)?
         .iter()
         .map(|update| (full_ref_name(update), update.target))
@@ -3377,7 +3400,7 @@ fn read_destination_ref_map(repo: &gix::Repository) -> GitResult<HashMap<String,
 }
 
 pub(crate) fn apply_ref_updates(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     updates: &[RefUpdate],
     log_message: &str,
 ) -> GitResult<()> {
@@ -3387,7 +3410,7 @@ pub(crate) fn apply_ref_updates(
             repo,
             &full_name,
             update.target,
-            PreviousValue::Any,
+            RefPrecondition::Any,
             log_message,
         )?;
     }
@@ -3395,7 +3418,7 @@ pub(crate) fn apply_ref_updates(
 }
 
 fn apply_remote_tracking_ref_updates(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     remote_name: &str,
     updates: &[RefUpdate],
     log_message: &str,
@@ -3409,7 +3432,7 @@ fn apply_remote_tracking_ref_updates(
             repo,
             &format!("refs/remotes/{remote_name}/{}", update.name),
             update.target,
-            PreviousValue::Any,
+            RefPrecondition::Any,
             log_message,
         )?;
     }
@@ -3422,9 +3445,9 @@ fn apply_remote_tracking_ref_updates(
 pub fn copy_local_repo_to_bare(source_path: &Path, dest: &Path) -> GitResult<()> {
     fs::create_dir_all(dest)?;
     let source = open_repo(source_path)?;
-    let target = match open_repo(dest) {
+    let target = match SleyRepository::open(dest) {
         Ok(repo) => repo,
-        Err(_) => gix::init_bare(dest).map_err(git_err)?,
+        Err(_) => SleyRepository::init_bare(dest).map_err(git_err)?,
     };
     let updates = collect_ref_updates(&source)?;
     copy_reachable_objects(&source, &target, updates.iter().map(|update| update.target))?;
@@ -3447,16 +3470,9 @@ pub fn copy_local_repo_to_bare(source_path: &Path, dest: &Path) -> GitResult<()>
         .map(|update| update.name.as_str())
         .collect();
     let source_head_branch = source
-        .head_name()
+        .head()
         .ok()
-        .flatten()
-        .and_then(|full_name| {
-            full_name
-                .as_bstr()
-                .to_str()
-                .ok()
-                .and_then(|s| s.strip_prefix("refs/heads/").map(str::to_owned))
-        })
+        .and_then(|head| head.branch_name().map(str::to_owned))
         .filter(|branch| copied_branches.contains(branch.as_str()));
     if let Some(branch) = source_head_branch {
         fs::write(dest.join("HEAD"), format!("ref: refs/heads/{branch}\n"))?;
@@ -3475,8 +3491,9 @@ pub fn copy_local_repo_to_bare(source_path: &Path, dest: &Path) -> GitResult<()>
 }
 
 /// Clone a remote git URL into `dest` as a bare repository, fetching all
-/// branches and tags. Mirrors the gix recipe used by `fetch_network_remote`
-/// but starts from an empty `init_bare` rather than an existing repo.
+/// branches and tags. Mirrors the sley remote fetch path used by
+/// `fetch_network_remote` but starts from an empty `init_bare` rather than an
+/// existing repo.
 ///
 /// Used by `bridge import --path <URL>` (Phase F): we clone into a
 /// scratch directory under the heddle repo's `.heddle/tmp/` and feed the
@@ -3492,24 +3509,20 @@ pub fn copy_local_repo_to_bare(source_path: &Path, dest: &Path) -> GitResult<()>
 ///   intentionally Git-compatible but not Git-binary-dependent, and the
 ///   native transport path does not yet expose partial-clone filtering.
 pub fn clone_url_to_bare(
-    url: &gix::Url,
+    url: &str,
     dest: &Path,
     depth: Option<u32>,
     filter: Option<&str>,
 ) -> GitResult<()> {
-    // gix 0.80's high-level fetch builder (`Connection::prepare_fetch` →
-    // `Prepare`) does not expose the v2 partial-clone `filter`
-    // capability. Older code delegated that case to `git clone`, but
-    // public Git-overlay workflows must run on machines with no Git
-    // executable installed. Keep depth-only clones native and reject
-    // filtered clones until we have a native implementation.
+    // Public Git-overlay workflows must run on machines with no Git executable
+    // installed. Keep depth-only clones native and reject filtered clones until
+    // the importer can tolerate missing objects.
     if let Some(spec) = filter {
         return Err(GitBridgeError::Git(format!(
             "partial Git clone filter `{spec}` is not supported in Heddle's native no-git runtime yet; retry without --filter/--lazy so Heddle can import a complete object graph"
         )));
     }
-    if url.scheme == gix::url::Scheme::File {
-        let source_path = local_path_from_url(url)?;
+    if let Some(source_path) = local_path_from_url(url)? {
         if depth.is_some() {
             return Err(GitBridgeError::Git(
                 "shallow file:// Git clones are not supported in Heddle's native no-git runtime yet; retry without --depth so Heddle can copy the local Git object graph without spawning Git transport helpers"
@@ -3519,8 +3532,8 @@ pub fn clone_url_to_bare(
         return copy_local_repo_to_bare(&source_path, dest);
     }
     let default_branch =
-        clone_url_to_bare_via_gix(url, dest, depth)?.or_else(|| default_branch_from_file_url(url));
-    // gix's `init_bare` writes `.git/HEAD = ref: refs/heads/<init.defaultBranch>`
+        clone_url_to_bare_via_sley(url, dest, depth)?.or_else(|| default_branch_from_file_url(url));
+    // `init_bare` writes `.git/HEAD = ref: refs/heads/<init.defaultBranch>`
     // (typically "main" or "master") regardless of what the remote
     // advertises, and the fetch above doesn't touch HEAD. If we leave
     // that in place, downstream `select_clone_thread` and
@@ -3537,8 +3550,8 @@ pub fn clone_url_to_bare(
     Ok(())
 }
 
-fn default_branch_from_file_url(url: &gix::Url) -> Option<String> {
-    let source_path = local_path_from_url(url).ok()?;
+fn default_branch_from_file_url(url: &str) -> Option<String> {
+    let source_path = local_path_from_url(url).ok().flatten()?;
     let head_path = if source_path.join("HEAD").is_file() {
         source_path.join("HEAD")
     } else {
@@ -3551,284 +3564,107 @@ fn default_branch_from_file_url(url: &gix::Url) -> Option<String> {
 
 fn bare_branch_exists(repo_path: &Path, branch: &str) -> GitResult<bool> {
     let repo = open_repo(repo_path)?;
-    Ok(repo.find_reference(&format!("refs/heads/{branch}")).is_ok())
+    Ok(repo
+        .find_reference(&format!("refs/heads/{branch}"))
+        .map_err(git_err)?
+        .is_some())
 }
 
-fn clone_url_to_bare_via_gix(
-    url: &gix::Url,
+fn clone_url_to_bare_via_sley(
+    url: &str,
     dest: &Path,
     depth: Option<u32>,
 ) -> GitResult<Option<String>> {
     fs::create_dir_all(dest)?;
-    let repo = gix::init_bare(dest).map_err(git_err)?;
-    let mut remote = repo.remote_at(url.clone()).map_err(git_err)?;
-    let refspecs = heddle_mirror_fetch_refspecs()?;
-    remote
-        .replace_refspecs(
-            refspecs.iter().map(String::as_str),
-            gix::remote::Direction::Fetch,
+    let repo = SleyRepository::init_bare(dest).map_err(git_err)?;
+    let mut credentials = NoCredentials;
+    let mut progress = SilentProgress;
+    let outcome = repo
+        .fetch(
+            url,
+            &heddle_mirror_fetch_refspecs()?,
+            FetchOptions {
+                quiet: true,
+                auto_follow_tags: true,
+                fetch_all_tags: true,
+                prune: false,
+                dry_run: false,
+                append: false,
+                write_fetch_head: true,
+                tag_option_explicit: true,
+                prune_option_explicit: true,
+                depth,
+                merge_src: None,
+                filter: None,
+                cloning: true,
+                update_shallow: false,
+                deepen_relative: false,
+                deepen_since: None,
+                deepen_not: Vec::new(),
+            },
+            &mut credentials,
+            &mut progress,
         )
-        .map_err(git_err)?;
-    remote = remote.with_fetch_tags(gix::remote::fetch::Tags::All);
-    let mut connection = remote
-        .connect(gix::remote::Direction::Fetch)
-        .map_err(git_err)?;
-    // Suppress interactive credential prompts in CI/agent contexts.
-    // The closure never produces an `Err`; the `result_large_err` lint
-    // is fired by gix's 192-byte protocol error type we never return.
-    #[allow(clippy::result_large_err)]
-    fn no_creds(
-        _action: gix::credentials::helper::Action,
-    ) -> Result<Option<gix::credentials::protocol::Outcome>, gix::credentials::protocol::Error>
-    {
-        Ok(None)
-    }
-    connection.set_credentials(no_creds);
-    let mut prepare = connection
-        .prepare_fetch(
-            gix::progress::Discard,
-            gix::remote::ref_map::Options::default(),
-        )
-        .map_err(git_err)?;
-    if let Some(d) = depth.and_then(NonZeroU32::new) {
-        prepare = prepare.with_shallow(gix::remote::fetch::Shallow::DepthAtRemote(d));
-    }
-    let outcome = prepare
-        .with_reflog_message(gix::remote::fetch::RefLogMessage::Override {
-            message: format!("heddle: clone from {url}").into(),
-        })
-        .receive(gix::progress::Discard, &AtomicBool::new(false))
         .map_err(|err| GitBridgeError::Git(format!("clone failed for {url}: {err}")))?;
-    Ok(default_branch_from_ref_map(&outcome.ref_map))
-}
-
-fn default_branch_from_ref_map(ref_map: &gix::remote::fetch::RefMap) -> Option<String> {
-    for remote_ref in &ref_map.remote_refs {
-        let target = match remote_ref {
-            gix_protocol::handshake::Ref::Symbolic {
-                full_ref_name,
-                target,
-                ..
-            } if full_ref_name.as_bstr() == "HEAD" => target,
-            gix_protocol::handshake::Ref::Unborn {
-                full_ref_name,
-                target,
-            } if full_ref_name.as_bstr() == "HEAD" => target,
-            _ => continue,
-        };
-        let branch = target.as_bstr().strip_prefix(b"refs/heads/")?;
-        if !branch.is_empty() {
-            return Some(branch.to_str_lossy().into_owned());
-        }
-    }
-    None
+    Ok(outcome
+        .head_symref
+        .and_then(|target| target.strip_prefix("refs/heads/").map(str::to_string)))
 }
 
 pub(crate) fn copy_reachable_objects(
-    source: &gix::Repository,
-    target: &gix::Repository,
+    source: &SleyRepository,
+    target: &SleyRepository,
     roots: impl IntoIterator<Item = ObjectId>,
 ) -> GitResult<()> {
-    if source.object_hash() != target.object_hash() {
-        return Err(GitBridgeError::Git(format!(
-            "object hash mismatch: {:?} vs {:?}",
-            source.object_hash(),
-            target.object_hash()
-        )));
-    }
-
-    let entries = collect_reachable_entries(source, roots)?;
-    install_objects_pack(target, entries)
-}
-
-/// Walk every object reachable from `roots` in `source`, reading each object
-/// once and serializing it into a base pack entry.
-pub(crate) fn collect_reachable_entries(
-    source: &gix::Repository,
-    roots: impl IntoIterator<Item = ObjectId>,
-) -> GitResult<Vec<gix_pack::data::output::Entry>> {
-    let mut seen = HashSet::new();
-    collect_reachable_entries_excluding(source, roots, &mut seen)
-}
-
-pub(crate) fn collect_reachable_entries_excluding(
-    source: &gix::Repository,
-    roots: impl IntoIterator<Item = ObjectId>,
-    seen: &mut HashSet<ObjectId>,
-) -> GitResult<Vec<gix_pack::data::output::Entry>> {
-    let object_hash = source.object_hash();
-    let mut stack: Vec<ObjectId> = roots.into_iter().collect();
-    let mut entries = Vec::new();
-
-    while let Some(oid) = stack.pop() {
-        if !seen.insert(oid) {
-            continue;
-        }
-
-        let object = source.find_object(oid).map_err(git_err)?;
-        let kind = object.kind;
-        let data = gix::objs::Data {
-            kind,
-            data: &object.data,
-            object_hash,
-        };
-        let count = gix_pack::data::output::Count::from_data(oid, None);
-        let entry = gix_pack::data::output::Entry::from_data(&count, &data).map_err(git_err)?;
-        entries.push(entry);
-
-        match kind {
-            gix::objs::Kind::Commit => {
-                let commit = object.into_commit();
-                stack.push(commit.tree_id().map_err(git_err)?.detach());
-                for parent in commit.parent_ids() {
-                    stack.push(parent.detach());
-                }
-            }
-            gix::objs::Kind::Tree => {
-                let tree = object.into_tree();
-                for entry in tree.iter() {
-                    let entry = entry.map_err(git_err)?;
-                    // Gitlink (mode 160000) entries point at a commit
-                    // in the *submodule's* repository, not this one —
-                    // by Git's design, that commit is never stored
-                    // locally. Pushing its OID onto the walk would
-                    // make the next `find_object` fail with
-                    // "object … could not be found", which is what
-                    // happens on a normal clone of any repo with
-                    // submodules (e.g. git/git's
-                    // sha1collisiondetection). The bridge import
-                    // path (`import_gitlink`) records the foreign OID
-                    // as a `heddle-submodule:` blob, which is what
-                    // round-trips on export — so skipping it here is
-                    // safe: we still emit the parent tree, just
-                    // without trying to resolve a foreign-repo
-                    // commit we cannot read.
-                    if entry.mode().kind() == gix::object::tree::EntryKind::Commit {
-                        continue;
-                    }
-                    stack.push(entry.object_id());
-                }
-            }
-            gix::objs::Kind::Tag => {
-                let tag = object.into_tag();
-                stack.push(tag.target_id().map_err(git_err)?.detach());
-            }
-            gix::objs::Kind::Blob => {}
-        }
-    }
-
-    Ok(entries)
-}
-
-/// Install reachable objects into `target` as one packfile instead of N loose
-/// object writes. Packed objects keep the same OIDs and are read transparently
-/// by Git/gix, so mirror fidelity is unchanged.
-pub(crate) fn install_objects_pack(
-    target: &gix::Repository,
-    entries: Vec<gix_pack::data::output::Entry>,
-) -> GitResult<()> {
-    if entries.is_empty() {
-        return Ok(());
-    }
-
-    let object_hash = target.object_hash();
-    let num_entries: u32 = entries.len().try_into().map_err(|_| {
-        GitBridgeError::Git(format!(
-            "mirror pack has too many objects to encode: {}",
-            entries.len()
-        ))
-    })?;
-
-    let mut pack = Vec::new();
-    {
-        let input = std::iter::once(Ok::<_, GitBridgeError>(entries));
-        let mut writer = gix_pack::data::output::bytes::FromEntriesIter::new(
-            input,
-            &mut pack,
-            num_entries,
-            gix_pack::data::Version::V2,
-            object_hash,
-        );
-        for result in writer.by_ref() {
-            result.map_err(git_err)?;
-        }
-    }
-
-    let pack_dir = target.git_dir().join("objects").join("pack");
-    fs::create_dir_all(&pack_dir)?;
-    let outcome = gix_pack::Bundle::write_to_directory(
-        &mut std::io::Cursor::new(pack.as_slice()),
-        Some(&pack_dir),
-        &mut gix::progress::Discard,
-        &AtomicBool::new(false),
-        None::<gix::objs::find::Never>,
-        gix_pack::bundle::write::Options {
-            object_hash,
-            ..Default::default()
-        },
-    )
-    .map_err(git_err)?;
-
-    if let Some(keep) = outcome.keep_path {
-        let _ = fs::remove_file(keep);
-    }
-
-    Ok(())
+    let roots = roots.into_iter().collect::<Vec<_>>();
+    target.copy_reachable_from(source, &roots).map_err(git_err)
 }
 
 fn fetch_network_remote(
-    mirror_repo: &gix::Repository,
+    mirror_repo: &SleyRepository,
     remote_name: &str,
-    url: &gix::Url,
+    url: &str,
     scope: GitFetchScope,
 ) -> GitResult<()> {
-    let mut remote = mirror_repo.remote_at(url.clone()).map_err(git_err)?;
-    let refspecs = heddle_mirror_fetch_refspecs()?;
-    remote
-        .replace_refspecs(
-            refspecs.iter().map(String::as_str),
-            gix::remote::Direction::Fetch,
+    let mut credentials = NoCredentials;
+    let mut progress = SilentProgress;
+    mirror_repo
+        .fetch(
+            url,
+            &heddle_mirror_fetch_refspecs()?,
+            FetchOptions {
+                quiet: true,
+                auto_follow_tags: matches!(scope, GitFetchScope::AllRefs),
+                fetch_all_tags: matches!(scope, GitFetchScope::AllRefs),
+                prune: false,
+                dry_run: false,
+                append: false,
+                write_fetch_head: true,
+                tag_option_explicit: true,
+                prune_option_explicit: true,
+                depth: None,
+                merge_src: None,
+                filter: None,
+                cloning: false,
+                update_shallow: false,
+                deepen_relative: false,
+                deepen_since: None,
+                deepen_not: Vec::new(),
+            },
+            &mut credentials,
+            &mut progress,
         )
-        .map_err(git_err)?;
-    remote = remote.with_fetch_tags(match scope {
-        GitFetchScope::BranchesAndNotes => gix::remote::fetch::Tags::None,
-        GitFetchScope::AllRefs => gix::remote::fetch::Tags::All,
-    });
-
-    let mut connection = remote
-        .connect(gix::remote::Direction::Fetch)
-        .map_err(git_err)?;
-    // Suppress interactive credential prompts in CI/agent contexts.
-    // The closure never produces an `Err`; the `result_large_err` lint
-    // is fired by gix's 192-byte protocol error type we never return.
-    #[allow(clippy::result_large_err)]
-    fn no_creds(
-        _action: gix::credentials::helper::Action,
-    ) -> Result<Option<gix::credentials::protocol::Outcome>, gix::credentials::protocol::Error>
-    {
-        Ok(None)
-    }
-    connection.set_credentials(no_creds);
-    let progress = gix::progress::Discard;
-    let prepare = connection
-        .prepare_fetch(progress, gix::remote::ref_map::Options::default())
-        .map_err(git_err)?;
-    let progress = gix::progress::Discard;
-    prepare
-        .with_reflog_message(gix::remote::fetch::RefLogMessage::Override {
-            message: format!("heddle: fetch from {remote_name}").into(),
-        })
-        .receive(progress, &AtomicBool::new(false))
         .map_err(|err| GitBridgeError::Git(format!("failed to fetch from {url}: {err}")))?;
+    let _ = remote_name;
     Ok(())
 }
 
 /// Push the served frontier to a URL/network remote. Returns the sorted
 /// full names of the refs written on the wire (see [`planned_write_names`]).
 fn push_network_remote(
-    mirror_repo: &gix::Repository,
+    mirror_repo: &SleyRepository,
     heddle_dir: &Path,
-    url: &gix::Url,
+    url: &str,
     scope: GitPushScope,
     current_branch: Option<&str>,
     force: bool,
@@ -3855,28 +3691,28 @@ fn push_network_remote(
         return Ok(Vec::new());
     }
 
-    let mut transport = gix_transport::client::blocking_io::connect::connect(
-        url.clone(),
-        gix_transport::client::blocking_io::connect::Options {
-            version: Protocol::V1,
-            ..Default::default()
-        },
-    )
-    .map_err(|err| GitBridgeError::Git(format!("failed to connect to {url}: {err}")))?;
-
-    let remote_refs = {
-        let mut handshake = transport
-            .handshake(Service::ReceivePack, &[])
-            .map_err(|err| {
-                GitBridgeError::Git(format!("receive-pack handshake failed for {url}: {err}"))
-            })?;
-        if !handshake.capabilities.contains("report-status") {
-            return Err(GitBridgeError::Git(format!(
-                "remote {url} does not support report-status; refusing to push without server acknowledgement"
-            )));
-        }
-        remote_refs_from_receive_pack_handshake(&mut handshake)?
-    };
+    let mut credentials = NoCredentials;
+    let records = mirror_repo
+        .ls_remote(
+            url,
+            LsRemoteFilter {
+                heads: false,
+                tags: false,
+                refs_only: true,
+            },
+            &|_| true,
+            &mut credentials,
+        )
+        .map_err(|err| GitBridgeError::Git(format!("failed to list refs from {url}: {err}")))?;
+    let remote_refs = records
+        .into_iter()
+        .filter(|record| {
+            record.name.starts_with("refs/heads/")
+                || record.name.starts_with("refs/tags/")
+                || record.name.starts_with("refs/notes/")
+        })
+        .map(|record| (record.name, record.oid))
+        .collect::<HashMap<_, _>>();
 
     // The SAME served-frontier plan the local-path destination runs: writes
     // (forcing embargo rewinds, rejecting forks), the retraction delete-set
@@ -3892,157 +3728,55 @@ fn push_network_remote(
         force,
     )?;
 
-    let null_oid = mirror_repo.object_hash().null();
-    let mut commands: Vec<(String, ObjectId, ObjectId)> = Vec::new();
-    for write in &plan.writes {
-        let old = write.old.unwrap_or(null_oid);
-        commands.push((write.full_name.clone(), old, write.new));
-    }
-    for delete in &plan.deletes {
-        // A wire delete is `<old> <zero> <ref>` — the retraction sibling of a
-        // write, sent to URL/network remotes too (heddle#316 r11).
-        commands.push((delete.full_name.clone(), delete.old, null_oid));
-    }
-
-    if commands.is_empty() {
+    if plan.writes.is_empty() && plan.deletes.is_empty() {
         // Nothing to move on the wire, but the record may still need to drop a
         // ref that was already absent at the remote.
         write_exported_refs_at(&manifest_path, &plan.new_manifest)?;
         return Ok(Vec::new());
     }
 
-    // Pack only the SURVIVORS' new objects — a delete carries no new object.
-    let pack = pack_reachable_objects(mirror_repo, plan.writes.iter().map(|write| write.new))?;
-    let mut request = transport
-        .request(
-            WriteMode::OneLfTerminatedLinePerWriteCall,
-            MessageKind::Flush,
-            false,
-        )
-        .map_err(git_err)?;
-    for (idx, (name, old, new_oid)) in commands.iter().enumerate() {
-        let mut line = format!("{old} {new_oid} {name}");
-        if idx == 0 {
-            line.push('\0');
-            line.push_str("report-status");
-        }
-        request.write_all(line.as_bytes()).map_err(git_err)?;
+    let mut commands = Vec::with_capacity(plan.writes.len() + plan.deletes.len());
+    let mut pack_objects = Vec::with_capacity(plan.writes.len());
+    let force_transport_checks = plan.writes.iter().any(|write| write.force);
+    for write in &plan.writes {
+        commands.push(PushCommand {
+            src: Some(write.new),
+            dst: write.full_name.clone(),
+            expected_old: write.old,
+            force: write.force,
+        });
+        pack_objects.push(write.new);
     }
-    request.write_message(MessageKind::Flush).map_err(git_err)?;
+    for delete in &plan.deletes {
+        commands.push(PushCommand {
+            src: None,
+            dst: delete.full_name.clone(),
+            expected_old: Some(delete.old),
+            force: false,
+        });
+    }
 
-    let (mut raw_writer, mut reader) = request.into_parts();
-    raw_writer.write_all(&pack).map_err(git_err)?;
-    raw_writer.flush().map_err(git_err)?;
-    drop(raw_writer);
-
-    read_receive_pack_status(&mut reader, &commands, url)?;
+    let mut credentials = NoCredentials;
+    let mut progress = SilentProgress;
+    mirror_repo
+        .push_actions(
+            url,
+            PushActionPlan {
+                commands,
+                pack_objects,
+                options: PushOptions {
+                    quiet: true,
+                    force: force || force_transport_checks,
+                },
+            },
+            &mut credentials,
+            &mut progress,
+        )
+        .map_err(|err| GitBridgeError::Git(format!("push failed for {url}: {err}")))?;
     // Only persist the record once the remote has acknowledged every command, so
     // a failed push never leaves a ref recorded as exported that did not land.
     write_exported_refs_at(&manifest_path, &plan.new_manifest)?;
     Ok(planned_write_names(&plan))
-}
-
-fn remote_refs_from_receive_pack_handshake(
-    handshake: &mut gix_transport::client::blocking_io::SetServiceResponse<'_>,
-) -> GitResult<HashMap<String, ObjectId>> {
-    let mut remote_refs = HashMap::new();
-    let Some(refs) = handshake.refs.as_mut() else {
-        return Ok(remote_refs);
-    };
-    let (parsed, _) =
-        gix_protocol::handshake::refs::from_v1_refs_received_as_part_of_handshake_and_capabilities(
-            refs,
-            handshake.capabilities.iter(),
-        )
-        .map_err(git_err)?;
-
-    for remote_ref in parsed {
-        let (name, target, _) = remote_ref.unpack();
-        let Some(target) = target else {
-            continue;
-        };
-        remote_refs.insert(name.to_string(), target.to_owned());
-    }
-    Ok(remote_refs)
-}
-
-fn pack_reachable_objects(
-    repo: &gix::Repository,
-    roots: impl IntoIterator<Item = ObjectId>,
-) -> GitResult<Vec<u8>> {
-    let entries = collect_reachable_entries(repo, roots)?;
-    let num_entries: u32 = entries.len().try_into().map_err(|_| {
-        GitBridgeError::Git(format!(
-            "push pack has too many objects to encode: {}",
-            entries.len()
-        ))
-    })?;
-
-    let mut pack = Vec::new();
-    let input = std::iter::once(Ok::<_, GitBridgeError>(entries));
-    let mut writer = gix_pack::data::output::bytes::FromEntriesIter::new(
-        input,
-        &mut pack,
-        num_entries,
-        gix_pack::data::Version::V2,
-        repo.object_hash(),
-    );
-    for result in writer.by_ref() {
-        result.map_err(git_err)?;
-    }
-    drop(writer);
-    Ok(pack)
-}
-
-fn read_receive_pack_status(
-    reader: &mut (dyn gix_transport::client::blocking_io::ExtendedBufRead<'_> + Unpin),
-    commands: &[(String, ObjectId, ObjectId)],
-    url: &gix::Url,
-) -> GitResult<()> {
-    let mut line = String::new();
-    let mut saw_unpack_ok = false;
-    let mut acknowledged = HashSet::new();
-
-    loop {
-        line.clear();
-        let read = reader.readline_str(&mut line).map_err(git_err)?;
-        if read == 0 {
-            break;
-        }
-        let status = line.trim_end_matches(['\r', '\n']);
-        if status == "unpack ok" {
-            saw_unpack_ok = true;
-            continue;
-        }
-        if let Some(name) = status.strip_prefix("ok ") {
-            acknowledged.insert(name.to_string());
-            continue;
-        }
-        if let Some(rest) = status.strip_prefix("ng ") {
-            return Err(GitBridgeError::Git(format!(
-                "push rejected by {url}: {rest}"
-            )));
-        }
-        if let Some(rest) = status.strip_prefix("unpack ") {
-            return Err(GitBridgeError::Git(format!(
-                "push pack rejected by {url}: {rest}"
-            )));
-        }
-    }
-
-    if !saw_unpack_ok {
-        return Err(GitBridgeError::Git(format!(
-            "push to {url} did not return an unpack acknowledgement"
-        )));
-    }
-    for (name, _, _) in commands {
-        if !acknowledged.contains(name) {
-            return Err(GitBridgeError::Git(format!(
-                "push to {url} did not acknowledge ref {name}"
-            )));
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -4185,7 +3919,7 @@ mod tests {
     #[test]
     fn fast_forward_guard_reports_exact_rewrite_before_after() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let repo = gix::init_bare(tmp.path()).expect("init bare repo");
+        let repo = SleyRepository::init_bare(tmp.path()).expect("init bare repo");
         let root = test_commit(&repo, "root", &[]);
         let old = test_commit(&repo, "old", &[root]);
         let new = test_commit(&repo, "new", &[root]);
@@ -4202,7 +3936,7 @@ mod tests {
     #[test]
     fn fast_forward_guard_allows_descendant_update() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let repo = gix::init_bare(tmp.path()).expect("init bare repo");
+        let repo = SleyRepository::init_bare(tmp.path()).expect("init bare repo");
         let old = test_commit(&repo, "old", &[]);
         let new = test_commit(&repo, "new", &[old]);
 
@@ -4210,101 +3944,69 @@ mod tests {
             .expect("descendant update should be allowed");
     }
 
-    fn test_commit(
-        repo: &gix::Repository,
-        message: &str,
-        parents: &[gix::ObjectId],
-    ) -> gix::ObjectId {
-        let empty_tree_oid: gix::ObjectId = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-            .parse()
-            .expect("parse empty tree oid");
-        let sig = gix::actor::Signature {
-            name: "Heddle Test".into(),
-            email: "heddle@test".into(),
-            time: gix::date::Time {
-                seconds: 0,
-                offset: 0,
-            },
+    fn test_commit(repo: &SleyRepository, message: &str, parents: &[ObjectId]) -> ObjectId {
+        let empty_tree_oid = ObjectId::empty_tree(repo.object_format());
+        let sig = Signature {
+            name: GitByteString::new(b"Heddle Test".to_vec()),
+            email: GitByteString::new(b"heddle@test".to_vec()),
+            time: GitTime::new(0, 0),
+            raw: b"Heddle Test <heddle@test> 0 +0000".to_vec(),
         };
-        let mut committer_buf = gix::date::parse::TimeBuf::default();
-        let mut author_buf = gix::date::parse::TimeBuf::default();
-        repo.new_commit_as(
-            sig.to_ref(&mut committer_buf),
-            sig.to_ref(&mut author_buf),
-            message,
-            empty_tree_oid,
-            parents.iter().copied(),
-        )
+        let commit = sley::CommitObject {
+            tree: empty_tree_oid,
+            parents: parents.to_vec(),
+            author: sig.to_ident_bytes(),
+            committer: sig.to_ident_bytes(),
+            encoding: None,
+            message: message.as_bytes().to_vec(),
+        };
+        repo.write_object(sley::plumbing::sley_object::EncodedObject::new(
+            GitObjectType::Commit,
+            commit.write(),
+        ))
         .expect("write test commit")
-        .id
+    }
+
+    fn seed_commit(repo: &SleyRepository, message: &str) -> ObjectId {
+        test_commit(repo, message, &[])
     }
 
     /// heddle#141 regression: when the URL-fetch path of
     /// `clone_url_to_bare` runs against a bare repo whose `HEAD`
     /// points at a branch that is *not* alphabetically first (and
-    /// crucially, not what gix's `init_bare` defaults to), the
+    /// crucially, not what sley's `init_bare` defaults to), the
     /// resulting dest bare must have `HEAD` pointing at the remote
-    /// default — not gix's init-time guess.
+    /// default — not sley's init-time guess.
     #[test]
-    fn clone_url_to_bare_via_gix_honours_remote_head_symref() {
+    fn clone_url_to_bare_via_sley_honours_remote_head_symref() {
         let tmp = tempfile::TempDir::new().unwrap();
         let source = tmp.path().join("source.git");
         let dest = tmp.path().join("dest.git");
 
         // Build a bare source with two branches under
         // deliberately-non-default names: `trunk` (will be the
-        // remote default — neither gix's `init.defaultBranch` nor
+        // remote default — neither sley's `init.defaultBranch` nor
         // the alphabetically-first imported ref would land here by
         // accident) and `abc-feature` (alphabetically first — what
         // the buggy fallback used to pick).
-        let src = gix::init_bare(&source).expect("init bare source");
-        // Empty tree (well-known OID) so we don't have to build a
-        // tree object explicitly.
-        let empty_tree_oid: gix::ObjectId = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-            .parse()
-            .expect("parse empty tree oid");
-        // Use an explicit signature via `new_commit_as` rather than
-        // `Repository::commit`. The latter reads `user.name`/`user.email`
-        // from git config, which CI runners don't set — leading to
-        // `AuthorMissing` errors. The clone path under test doesn't care
-        // who authored these seed commits.
-        let sig = gix::actor::Signature {
-            name: "Heddle Test".into(),
-            email: "heddle@test".into(),
-            time: gix::date::Time {
-                seconds: 0,
-                offset: 0,
-            },
-        };
-        let mut committer_buf = gix::date::parse::TimeBuf::default();
-        let mut author_buf = gix::date::parse::TimeBuf::default();
-        let seed = src
-            .new_commit_as(
-                sig.to_ref(&mut committer_buf),
-                sig.to_ref(&mut author_buf),
-                "seed",
-                empty_tree_oid,
-                gix::commit::NO_PARENT_IDS,
-            )
-            .expect("seed commit")
-            .id;
+        let src = SleyRepository::init_bare(&source).expect("init bare source");
+        let seed = seed_commit(&src, "seed");
         for name in ["refs/heads/trunk", "refs/heads/abc-feature"] {
-            set_reference(&src, name, seed, PreviousValue::Any, "test: seed branch")
+            set_reference(&src, name, seed, RefPrecondition::Any, "test: seed branch")
                 .expect("set ref");
         }
         // Make sure HEAD on the source points at trunk so
         // `git ls-remote --symref` reports trunk.
         std::fs::write(source.join("HEAD"), b"ref: refs/heads/trunk\n").unwrap();
 
-        let url = gix::url::parse(format!("file://{}", source.display()).as_bytes().into())
-            .expect("parse file:// url");
+        let url = format!("file://{}", source.display());
         clone_url_to_bare(&url, &dest, None, None).expect("clone url to bare");
 
         let dest_head = std::fs::read_to_string(dest.join("HEAD")).expect("read dest HEAD");
         assert_eq!(
             dest_head.trim(),
             "ref: refs/heads/trunk",
-            "dest HEAD must mirror the remote's symref (trunk), not gix's \
+            "dest HEAD must mirror the remote's symref (trunk), not sley's \
              init-time default and not the alphabetically-first branch \
              (abc-feature) — see heddle#141"
         );

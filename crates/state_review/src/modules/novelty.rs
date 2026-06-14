@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use objects::object::{ProducerId, RiskSignal, RiskSignalKind, SignalAnchor, State};
 use semantic::{
-    analysis::{compute_similarity, SimilarityMethod},
+    analysis::{SimilarityMethod, compute_similarity},
     parser::FunctionDef,
 };
 
@@ -142,7 +142,10 @@ mod tests {
         let mut ctx = SemanticContext::new();
         ctx.new_functions.insert(
             PathBuf::from("a.rs"),
-            vec![fdef("alpha", "let total = first + second + third + fourth;")],
+            vec![fdef(
+                "alpha",
+                "let total = first + second + third + fourth;",
+            )],
         );
         ctx.new_functions.insert(
             PathBuf::from("b.rs"),
@@ -150,11 +153,17 @@ mod tests {
         );
         ctx.new_functions.insert(
             PathBuf::from("c.rs"),
-            vec![fdef("gamma", "match colour { Red => stop(), Green => go() }")],
+            vec![fdef(
+                "gamma",
+                "match colour { Red => stop(), Green => go() }",
+            )],
         );
         ctx.new_functions.insert(
             PathBuf::from("changed.rs"),
-            vec![fdef("delta", "while pending { dequeue().handle(); } flush();")],
+            vec![fdef(
+                "delta",
+                "while pending { dequeue().handle(); } flush();",
+            )],
         );
         ctx.changed_paths.insert(PathBuf::from("changed.rs"));
 

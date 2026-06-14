@@ -29,13 +29,6 @@ chrono.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 futures.workspace = true
-gix-config = "0.57"
-gix-index = "0.52"
-gix-pack = "0.71"
-gix-protocol = { version = "0.62", features = ["blocking-client"] }
-gix-refspec = "0.42"
-gix-transport.workspace = true
-gix.workspace = true
 hex.workspace = true
 ignore.workspace = true
 libc.workspace = true
@@ -73,6 +66,7 @@ schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+sley.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite = { workspace = true, optional = true }
@@ -153,8 +147,8 @@ local = []
 git-overlay = ["repo/git-overlay", "ingest"]
 native = ["repo/native"]
 client = ["dep:heddle-client", "dep:tokio-tungstenite"]
-# Deep git import + AI-session reasoning extraction. Pulls in `gix`'s
-# transport layer, `rusqlite` for OpenCode, and the transcript matchers.
+# Deep git import + AI-session reasoning extraction. Pulls in the sley
+# Git substrate, `rusqlite` for OpenCode, and the transcript matchers.
 # Auto-enabled by `git-overlay` since import is part of the overlay flow;
 # can also be enabled standalone for the `heddle-ingest` binary use case.
 ingest = ["dep:ingest"]
@@ -204,8 +198,6 @@ mount = [
 
 [dev-dependencies]
 criterion = "0.8"
-gix.workspace = true
-gix-transport.workspace = true
 hyper-util.workspace = true
 review = { path = "../review", package = "heddle-review" }
 ntest.workspace = true
@@ -238,6 +230,11 @@ path = "src/lib.rs"
 
 # Integration tests for cli live under `tests/` (auto-discovered) so
 # that `cargo publish` can package the crate cleanly.
+
+[[test]]
+name = "semantic_diff_integration"
+path = "tests/semantic_diff_integration.rs"
+required-features = ["semantic"]
 
 [[bench]]
 name = "local_ops"

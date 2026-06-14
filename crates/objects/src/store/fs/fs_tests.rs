@@ -459,7 +459,10 @@ fn test_state_roundtrip_preserves_non_utf8_raw_message() {
     let (_temp, store) = create_test_store();
 
     let raw = b"caf\xe9\n".to_vec();
-    assert!(String::from_utf8(raw.clone()).is_err(), "fixture must be non-UTF8");
+    assert!(
+        String::from_utf8(raw.clone()).is_err(),
+        "fixture must be non-UTF8"
+    );
 
     let tree_hash = ContentHash::compute(b"tree");
     let attribution = Attribution::human(Principal::new("Test", "test@example.com"));

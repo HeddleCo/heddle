@@ -202,11 +202,7 @@ impl ObjectStore for AnyStore {
     fn get_state_visibility_bytes_for_state(&self, state: &ChangeId) -> Result<Option<Vec<u8>>> {
         any_store_dispatch!(self, get_state_visibility_bytes_for_state(state))
     }
-    fn put_state_visibility_bytes_for_state(
-        &self,
-        state: &ChangeId,
-        bytes: &[u8],
-    ) -> Result<()> {
+    fn put_state_visibility_bytes_for_state(&self, state: &ChangeId, bytes: &[u8]) -> Result<()> {
         any_store_dispatch!(self, put_state_visibility_bytes_for_state(state, bytes))
     }
     fn list_states_with_visibility(&self) -> Result<Vec<ChangeId>> {
@@ -597,11 +593,7 @@ pub trait ObjectStore: Send + Sync {
     ///
     /// Default impl returns an "unsupported" error so stores that do not
     /// model the sidecar refuse instead of dropping it.
-    fn put_state_visibility_bytes_for_state(
-        &self,
-        _state: &ChangeId,
-        _bytes: &[u8],
-    ) -> Result<()> {
+    fn put_state_visibility_bytes_for_state(&self, _state: &ChangeId, _bytes: &[u8]) -> Result<()> {
         Err(HeddleError::InvalidObject(
             "this object store does not support persisting state visibility".to_string(),
         ))
@@ -641,13 +633,19 @@ mod any_store_tests {
         // ── Blobs ──
         let blob = Blob::from("any-store dispatch blob");
         let blob_hash = store.put_blob(&blob).unwrap();
-        assert_eq!(store.get_blob(&blob_hash).unwrap().unwrap().content(), blob.content());
+        assert_eq!(
+            store.get_blob(&blob_hash).unwrap().unwrap().content(),
+            blob.content()
+        );
         assert!(store.has_blob(&blob_hash).unwrap());
         assert_eq!(
             store.get_blob_bytes(&blob_hash).unwrap().unwrap().as_ref(),
             blob.content()
         );
-        assert_eq!(store.blob_size(&blob_hash).unwrap().unwrap(), blob.content().len() as u64);
+        assert_eq!(
+            store.blob_size(&blob_hash).unwrap().unwrap(),
+            blob.content().len() as u64
+        );
         assert!(store.loose_blob_path(&blob_hash).is_some());
         store.promote_to_loose_uncompressed(&blob_hash).unwrap();
         assert!(store.list_blobs().unwrap().contains(&blob_hash));
@@ -676,7 +674,9 @@ mod any_store_tests {
         let tree2 = Tree::new();
         let tree2_bytes = rmp_serde::to_vec_named(&tree2).unwrap();
         assert_eq!(
-            store.put_tree_serialized(&tree2_bytes, tree2.hash()).unwrap(),
+            store
+                .put_tree_serialized(&tree2_bytes, tree2.hash())
+                .unwrap(),
             tree2.hash()
         );
 
@@ -747,10 +747,18 @@ mod any_store_tests {
             .unwrap();
         assert!(store.has_redactions_for_blob(&blob_hash).unwrap());
         assert_eq!(
-            store.get_redactions_bytes_for_blob(&blob_hash).unwrap().as_deref(),
+            store
+                .get_redactions_bytes_for_blob(&blob_hash)
+                .unwrap()
+                .as_deref(),
             Some(redaction.as_slice())
         );
-        assert!(store.list_blobs_with_redactions().unwrap().contains(&blob_hash));
+        assert!(
+            store
+                .list_blobs_with_redactions()
+                .unwrap()
+                .contains(&blob_hash)
+        );
 
         // ── State visibility ──
         let state_visibility = b"any-store state visibility bytes";

@@ -404,8 +404,16 @@ mod tests {
 
         // f0 (200) is under budget, f1 tips the running total to 400 > 350 and
         // is the last load; f2..f4 are skipped entirely.
-        assert_eq!(old_loads.get(), 2, "only the under-budget prefix + tipping file load");
-        assert_eq!(new_loads.get(), 2, "only the under-budget prefix + tipping file load");
+        assert_eq!(
+            old_loads.get(),
+            2,
+            "only the under-budget prefix + tipping file load"
+        );
+        assert_eq!(
+            new_loads.get(),
+            2,
+            "only the under-budget prefix + tipping file load"
+        );
         assert!(
             result
                 .fallback_reasons
@@ -483,8 +491,16 @@ mod tests {
                 _ => None,
             })
         };
-        assert_eq!(classification_of("f0.rs"), Some(true), "loaded prefix keeps detail");
-        assert_eq!(classification_of("f1.rs"), Some(true), "loaded prefix keeps detail");
+        assert_eq!(
+            classification_of("f0.rs"),
+            Some(true),
+            "loaded prefix keeps detail"
+        );
+        assert_eq!(
+            classification_of("f1.rs"),
+            Some(true),
+            "loaded prefix keeps detail"
+        );
         for name in ["f2.rs", "f3.rs", "f4.rs"] {
             assert_eq!(
                 classification_of(name),

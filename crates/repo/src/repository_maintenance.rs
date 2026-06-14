@@ -734,13 +734,15 @@ fn load_ref_snapshots(repo: &Repository, threads: bool) -> Result<Vec<RefSnapsho
         let names = repo.refs().list_threads()?;
         let mut out = Vec::with_capacity(names.len());
         for name in names {
-            let state = repo.refs().get_thread(&name)?
-                .ok_or_else(|| {
-                    HeddleError::Io(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("thread '{}' disappeared while rebuilding pull planner manifest", name),
-                    ))
-                })?;
+            let state = repo.refs().get_thread(&name)?.ok_or_else(|| {
+                HeddleError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "thread '{}' disappeared while rebuilding pull planner manifest",
+                        name
+                    ),
+                ))
+            })?;
             out.push(RefSnapshotMirror {
                 name: name.to_string(),
                 state_id: state.to_string_full(),
@@ -751,13 +753,15 @@ fn load_ref_snapshots(repo: &Repository, threads: bool) -> Result<Vec<RefSnapsho
         let names = repo.refs().list_markers()?;
         let mut out = Vec::with_capacity(names.len());
         for name in names {
-            let state = repo.refs().get_marker(&name)?
-                .ok_or_else(|| {
-                    HeddleError::Io(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("marker '{}' disappeared while rebuilding pull planner manifest", name),
-                    ))
-                })?;
+            let state = repo.refs().get_marker(&name)?.ok_or_else(|| {
+                HeddleError::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "marker '{}' disappeared while rebuilding pull planner manifest",
+                        name
+                    ),
+                ))
+            })?;
             out.push(RefSnapshotMirror {
                 name: name.to_string(),
                 state_id: state.to_string_full(),

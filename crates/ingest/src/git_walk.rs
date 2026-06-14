@@ -18,7 +18,7 @@
 //! - Full commit metadata: parents, tree, both signatures, message.
 //! - Tree and blob readers for use by the [translator](crate).
 //!
-//! Packed-refs inspection is implicit — gix handles that transparently.
+//! Packed-refs inspection is implicit — sley handles that transparently.
 //!
 //! Reflog *is* supported via [`GitSource::collect_reflog`] and
 //! [`GitSource::reflog_commit_shas`]: the former yields every entry across
@@ -44,6 +44,10 @@ use std::{
 };
 
 use chrono::{DateTime, TimeZone, Utc};
+use sley::{
+    GitObjectType, ObjectFormat, ObjectId as SleyObjectId, RefStore as SleyRefStore,
+    ReferenceTarget as SleyRefTarget, Repository as SleyRepository, Signature as SleySignature,
+};
 
 use crate::IngestError;
 
@@ -178,30 +182,36 @@ pub struct RefDiscoveryStats {
 /// (annotated tags whose peeled target is a blob/tree, dangling refs).
 /// Returns `false` on any read error — the caller treats that the same
 /// as "not a commit" and skips the ref.
-fn is_commit(repo: &gix::Repository, oid: gix::hash::ObjectId) -> bool {
+fn is_commit(repo: &SleyRepository, oid: SleyObjectId) -> bool {
     matches!(
-        repo.find_object(oid).map(|o| o.kind),
-        Ok(gix::objs::Kind::Commit)
+        repo.read_object(&oid).map(|object| object.object_type),
+        Ok(GitObjectType::Commit)
     )
 }
 
-/// Opens a git repo and exposes reads keyed on SHA. Holds a gix::Repository
+enum RefResolution {
+    Commit(SleyObjectId),
+    PeelFailed,
+    NonCommit,
+}
+
+/// Opens a git repo and exposes reads keyed on SHA. Holds a sley repository
 /// handle internally; clone-cheap via `&` reference only.
 pub struct GitSource {
-    repo: gix::Repository,
+    repo: SleyRepository,
 }
 
 impl std::fmt::Debug for GitSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GitSource")
-            .field("path", &self.repo.path())
+            .field("git_dir", &self.repo.git_dir())
             .finish()
     }
 }
 
 impl GitSource {
-    /// Open a repo at `path`. Uses `gix::discover` first (works from a
-    /// worktree subdirectory), falling back to `gix::open` for explicit
+    /// Open a repo at `path`. Uses sley's discovery first (works from a
+    /// worktree subdirectory), falling back to direct open for explicit
     /// `.git` dirs.
     pub fn open(path: impl AsRef<Path>) -> crate::Result<Self> {
         let path = path.as_ref();
@@ -209,12 +219,38 @@ impl GitSource {
         // fall back to `open` for explicit `.git` dirs. Both errors are
         // surfaced through our own string-typed Git variant — we don't care
         // which one fired; the user cares whether the path was usable.
-        let repo = match gix::discover(path) {
+        let repo = match SleyRepository::discover(path) {
             Ok(r) => r,
-            Err(_) => gix::open(path)
+            Err(_) => SleyRepository::open(path)
                 .map_err(|e| IngestError::Git(format!("open {}: {e}", path.display())))?,
         };
         Ok(Self { repo })
+    }
+
+    fn resolve_ref_commit(&self, name: &str, target: &SleyRefTarget) -> RefResolution {
+        let oid = match target {
+            SleyRefTarget::Direct(oid) => *oid,
+            SleyRefTarget::Symbolic(_) => match self.repo.find_reference(name) {
+                Ok(Some(reference)) => match reference.peeled_oid(&self.repo) {
+                    Ok(Some(oid)) => oid,
+                    Ok(None) | Err(_) => return RefResolution::PeelFailed,
+                },
+                Ok(None) | Err(_) => return RefResolution::PeelFailed,
+            },
+        };
+
+        match sley::plumbing::sley_rev::peel_to_commit(
+            self.repo.objects().as_ref(),
+            self.repo.object_format(),
+            &oid,
+        ) {
+            Ok(commit_oid) if is_commit(&self.repo, commit_oid) => {
+                RefResolution::Commit(commit_oid)
+            }
+            Ok(_) => RefResolution::NonCommit,
+            Err(_) if self.repo.read_object(&oid).is_ok() => RefResolution::NonCommit,
+            Err(_) => RefResolution::PeelFailed,
+        }
     }
 
     /// Enumerate every ref that resolves to a commit, alongside the
@@ -228,107 +264,46 @@ impl GitSource {
         let refs = self
             .repo
             .references()
+            .list_refs()
             .map_err(|e| IngestError::Git(format!("references: {e}")))?;
 
-        for branch in refs
-            .local_branches()
-            .map_err(|e| IngestError::Git(format!("local_branches: {e}")))?
-        {
-            let mut branch = branch.map_err(|e| IngestError::Git(format!("branch iter: {e}")))?;
-            // `peel_to_id` follows symbolic refs and tag objects down to a
-            // commit id. Branches almost never point at tag objects, but
-            // calling it uniformly keeps the two loops symmetrical.
-            let Ok(target) = branch.peel_to_id() else {
-                stats.peel_failed += 1;
+        for reference in refs {
+            let full_name = reference.name;
+            let Some((namespace, short_name)) = classify_ref_name(&full_name) else {
                 continue;
             };
-            // Guard: confirm the peeled target is actually a commit before
-            // surfacing it as a head. The downstream rev_walk and per-commit
-            // metadata reads assume commit-shaped tips; a non-commit here
-            // (extremely rare for branches but possible in corrupted repos)
-            // would crash the importer with `Expected commit but got X`.
-            if !is_commit(&self.repo, target.detach()) {
-                stats.non_commit_skipped += 1;
-                continue;
-            }
-            stats.local_branches += 1;
-            out.push(RefHead {
-                short_name: branch.name().shorten().to_string(),
-                full_name: branch.name().as_bstr().to_string(),
-                namespace: RefNamespace::Branch,
-                target_sha: target.detach().to_string(),
-            });
-        }
 
-        for tag in refs
-            .tags()
-            .map_err(|e| IngestError::Git(format!("tags: {e}")))?
-        {
-            let mut tag = tag.map_err(|e| IngestError::Git(format!("tag iter: {e}")))?;
-            // Annotated tags point at a tag *object*, not a commit —
-            // peeling is required so `target_sha` is always a commit SHA
-            // the sha map can translate. `peel_to_id` chases tag-of-tag
-            // chains to their final commit too, so a tag pointing at
-            // another annotated tag round-trips correctly.
-            let Ok(target) = tag.peel_to_id() else {
-                stats.peel_failed += 1;
-                continue;
-            };
-            // Guard: tags pointing at non-commit objects (blob: GPG public
-            // keys; tree: a directory of keys; etc.) are a real-world
-            // pattern in mature OSS repos — `git/git`'s `junio-gpg-pub`
-            // is the canonical example. The importer can't model these
-            // (no commit to translate into a state) but must not crash
-            // the entire walk.
-            if !is_commit(&self.repo, target.detach()) {
-                stats.non_commit_skipped += 1;
-                continue;
-            }
-            stats.tags += 1;
-            out.push(RefHead {
-                short_name: tag.name().shorten().to_string(),
-                full_name: tag.name().as_bstr().to_string(),
-                namespace: RefNamespace::Tag,
-                target_sha: target.detach().to_string(),
-            });
-        }
-
-        // Remote-tracking refs (`refs/remotes/<remote>/<branch>`). Without
-        // these the importer silently dropped every commit reachable only
-        // from origin — a real-world repo can easily lose hundreds of
-        // commits that way. We surface them under their `<remote>/<branch>`
-        // short name so they don't collide with local heads.
-        for remote in refs
-            .remote_branches()
-            .map_err(|e| IngestError::Git(format!("remote_branches: {e}")))?
-        {
-            let mut remote =
-                remote.map_err(|e| IngestError::Git(format!("remote-branch iter: {e}")))?;
-            let Ok(target) = remote.peel_to_id() else {
-                stats.peel_failed += 1;
-                continue;
-            };
-            if !is_commit(&self.repo, target.detach()) {
-                stats.non_commit_skipped += 1;
-                continue;
-            }
-            // `shorten()` on `refs/remotes/origin/main` returns `origin/main`,
-            // which is exactly the form a user types — preserve it.
-            let short = remote.name().shorten().to_string();
             // Skip `refs/remotes/<remote>/HEAD` — it's a symbolic ref to
             // another remote-tracking branch we'll emit separately. Letting
             // it through would create a duplicate thread named `origin/HEAD`
             // pointing at the same commit as `origin/main`.
-            if short.ends_with("/HEAD") {
+            if namespace == RefNamespace::RemoteBranch && short_name.ends_with("/HEAD") {
                 stats.symbolic_skipped += 1;
                 continue;
             }
-            stats.remote_branches += 1;
+
+            let target = match self.resolve_ref_commit(&full_name, &reference.target) {
+                RefResolution::Commit(target) => target,
+                RefResolution::PeelFailed => {
+                    stats.peel_failed += 1;
+                    continue;
+                }
+                RefResolution::NonCommit => {
+                    stats.non_commit_skipped += 1;
+                    continue;
+                }
+            };
+
+            match namespace {
+                RefNamespace::Branch => stats.local_branches += 1,
+                RefNamespace::Tag => stats.tags += 1,
+                RefNamespace::RemoteBranch => stats.remote_branches += 1,
+            }
             out.push(RefHead {
-                short_name: short,
-                full_name: remote.name().as_bstr().to_string(),
-                namespace: RefNamespace::RemoteBranch,
-                target_sha: target.detach().to_string(),
+                short_name,
+                full_name,
+                namespace,
+                target_sha: target.to_string(),
             });
         }
 
@@ -409,40 +384,32 @@ impl ChildIndex {
 impl GitSource {
     /// Read one commit by SHA.
     pub fn read_commit(&self, sha: &str) -> crate::Result<CommitEntry> {
-        let oid = parse_oid(sha)?;
-        let commit = self
+        let oid = parse_oid(self.repo.object_format(), sha)?;
+        let object = self
             .repo
-            .find_commit(oid)
+            .read_object(&oid)
             .map_err(|e| IngestError::Git(format!("find_commit {sha}: {e}")))?;
+        if object.object_type != GitObjectType::Commit {
+            return Err(IngestError::Git(format!(
+                "object {sha} is {}, not a commit",
+                object.object_type.as_str()
+            )));
+        }
+        let commit = sley::CommitObject::parse_ref(self.repo.object_format(), &object.body)
+            .map_err(|e| IngestError::Git(format!("parse commit {sha}: {e}")))?;
 
-        let tree_sha = commit
-            .tree_id()
-            .map_err(|e| IngestError::Git(format!("tree_id {sha}: {e}")))?
-            .detach()
-            .to_string();
+        let tree_sha = commit.tree.to_string();
 
-        let parents: Vec<String> = commit
-            .parent_ids()
-            .map(|p| p.detach().to_string())
-            .collect();
+        let parents: Vec<String> = commit.parents.iter().map(ToString::to_string).collect();
 
-        let author_ref = commit
-            .author()
-            .map_err(|e| IngestError::Git(format!("author {sha}: {e}")))?;
-        let committer_ref = commit
-            .committer()
-            .map_err(|e| IngestError::Git(format!("committer {sha}: {e}")))?;
-        let author = signature_from(author_ref);
-        let committer = signature_from(committer_ref);
+        let author = signature_from_bytes(commit.author, sha, "author")?;
+        let committer = signature_from_bytes(commit.committer, sha, "committer")?;
         let authored_at = author.time;
         let committed_at = committer.time;
 
-        let message = commit
-            .message_raw()
-            .map_err(|e| IngestError::Git(format!("message {sha}: {e}")))?
-            .to_vec();
+        let message = commit.message.to_vec();
 
-        let extra_headers = collect_commit_extra_headers(&commit)?;
+        let extra_headers = collect_commit_extra_headers(&object.body);
 
         Ok(CommitEntry {
             sha: oid.to_string(),
@@ -459,29 +426,37 @@ impl GitSource {
 
     /// Read the direct children of a git tree (non-recursive).
     pub fn read_tree(&self, tree_sha: &str) -> crate::Result<Vec<TreeChild>> {
-        let oid = parse_oid(tree_sha)?;
-        let tree = self
-            .repo
-            .find_tree(oid)
-            .map_err(|e| IngestError::Git(format!("find_tree {tree_sha}: {e}")))?;
+        let oid = parse_oid(self.repo.object_format(), tree_sha)?;
+        let entries = if oid == sley::ObjectId::empty_tree(self.repo.object_format()) {
+            Vec::new()
+        } else {
+            self.repo
+                .read_tree(&oid)
+                .map_err(|e| IngestError::Git(format!("find_tree {tree_sha}: {e}")))?
+                .entries
+        };
 
         let mut out = Vec::new();
-        for entry in tree.iter() {
-            let entry = entry.map_err(|e| IngestError::Git(format!("tree entry: {e}")))?;
-            let kind = match entry.mode().kind() {
-                gix::object::tree::EntryKind::Tree => TreeChildKind::Tree,
-                gix::object::tree::EntryKind::Blob => TreeChildKind::Blob { executable: false },
-                gix::object::tree::EntryKind::BlobExecutable => {
-                    TreeChildKind::Blob { executable: true }
+        for entry in entries {
+            let kind = match entry.mode {
+                0o040000 => TreeChildKind::Tree,
+                0o100644 => TreeChildKind::Blob { executable: false },
+                0o100755 => TreeChildKind::Blob { executable: true },
+                0o120000 => TreeChildKind::Symlink,
+                0o160000 => TreeChildKind::Gitlink,
+                mode => {
+                    return Err(IngestError::Git(format!(
+                        "tree entry {} has unsupported mode {:o}",
+                        String::from_utf8_lossy(entry.name.as_bytes()),
+                        mode
+                    )));
                 }
-                gix::object::tree::EntryKind::Link => TreeChildKind::Symlink,
-                gix::object::tree::EntryKind::Commit => TreeChildKind::Gitlink,
             };
-            let raw_name = entry.filename().to_vec();
+            let raw_name = entry.name.as_bytes().to_vec();
             out.push(TreeChild {
                 name: String::from_utf8_lossy(&raw_name).into_owned(),
                 raw_name,
-                sha: entry.object_id().to_string(),
+                sha: entry.oid.to_string(),
                 kind,
             });
         }
@@ -492,18 +467,18 @@ impl GitSource {
     /// as the authoritative byte stream for the import — subsequent blob
     /// translation hashes these bytes directly.
     pub fn read_blob(&self, blob_sha: &str) -> crate::Result<Vec<u8>> {
-        let oid = parse_oid(blob_sha)?;
+        let oid = parse_oid(self.repo.object_format(), blob_sha)?;
         let object = self
             .repo
-            .find_object(oid)
+            .read_object(&oid)
             .map_err(|e| IngestError::Git(format!("find_object {blob_sha}: {e}")))?;
-        if object.kind != gix::objs::Kind::Blob {
+        if object.object_type != GitObjectType::Blob {
             return Err(IngestError::Git(format!(
-                "object {blob_sha} is {:?}, not a blob",
-                object.kind
+                "object {blob_sha} is {}, not a blob",
+                object.object_type.as_str()
             )));
         }
-        Ok(object.data.clone())
+        Ok(object.body.clone())
     }
 
     /// Iterate every reflog entry across `HEAD` and every local branch/tag
@@ -520,32 +495,18 @@ impl GitSource {
         // HEAD — its reflog captures every checkout/commit/reset the user
         // made through the working tree, which is exactly the honesty
         // signal we care about for the oplog.
-        let head = self
-            .repo
-            .head()
-            .map_err(|e| IngestError::Git(format!("head: {e}")))?;
-        collect_one_reflog(&mut head.log_iter(), "HEAD", &mut out)?;
+        let refs = self.repo.references();
+        collect_one_reflog(&refs, "HEAD", &mut out)?;
 
         // Every local branch + tag.
-        let refs = self
-            .repo
-            .references()
-            .map_err(|e| IngestError::Git(format!("references: {e}")))?;
-        for branch in refs
-            .local_branches()
-            .map_err(|e| IngestError::Git(format!("local_branches: {e}")))?
+        for reference in refs
+            .list_refs()
+            .map_err(|e| IngestError::Git(format!("references: {e}")))?
         {
-            let branch = branch.map_err(|e| IngestError::Git(format!("branch iter: {e}")))?;
-            let full = branch.name().as_bstr().to_string();
-            collect_one_reflog(&mut branch.log_iter(), &full, &mut out)?;
-        }
-        for tag in refs
-            .tags()
-            .map_err(|e| IngestError::Git(format!("tags: {e}")))?
-        {
-            let tag = tag.map_err(|e| IngestError::Git(format!("tag iter: {e}")))?;
-            let full = tag.name().as_bstr().to_string();
-            collect_one_reflog(&mut tag.log_iter(), &full, &mut out)?;
+            if reference.name.starts_with("refs/heads/") || reference.name.starts_with("refs/tags/")
+            {
+                collect_one_reflog(&refs, &reference.name, &mut out)?;
+            }
         }
 
         Ok(out)
@@ -577,13 +538,10 @@ impl GitSource {
     /// `true` if `sha` resolves to a commit still present in the odb.
     /// Used to filter pruned / dangling SHAs out of reflog-derived seeds.
     fn object_is_commit(&self, sha: &str) -> bool {
-        let Ok(oid) = gix::hash::ObjectId::from_hex(sha.as_bytes()) else {
+        let Ok(oid) = parse_oid(self.repo.object_format(), sha) else {
             return false;
         };
-        match self.repo.find_object(oid) {
-            Ok(obj) => obj.kind == gix::objs::Kind::Commit,
-            Err(_) => false,
-        }
+        is_commit(&self.repo, oid)
     }
 
     /// Gather every commit reachable from the given heads, in
@@ -690,18 +648,34 @@ impl GitSource {
     }
 }
 
-/// Drain one reflog platform into `out`. Quietly tolerates a missing log
+fn classify_ref_name(full_name: &str) -> Option<(RefNamespace, String)> {
+    full_name
+        .strip_prefix("refs/heads/")
+        .map(|short| (RefNamespace::Branch, short.to_string()))
+        .or_else(|| {
+            full_name
+                .strip_prefix("refs/tags/")
+                .map(|short| (RefNamespace::Tag, short.to_string()))
+        })
+        .or_else(|| {
+            full_name
+                .strip_prefix("refs/remotes/")
+                .map(|short| (RefNamespace::RemoteBranch, short.to_string()))
+        })
+}
+
+/// Drain one reflog into `out`. Quietly tolerates a missing log
 /// (common for tags and freshly-created refs) by treating it as "no
-/// entries". Malformed lines are skipped via `filter_map` — we'd rather
-/// degrade to fewer oplog entries than abort the whole import.
+/// entries". Malformed lines are skipped — we'd rather degrade to fewer
+/// oplog entries than abort the whole import.
 fn collect_one_reflog(
-    platform: &mut gix::refs::file::log::iter::Platform<'_, '_>,
+    refs: &SleyRefStore,
     ref_name: &str,
     out: &mut Vec<ReflogEntry>,
 ) -> crate::Result<()> {
-    let iter = match platform.all() {
-        Ok(Some(it)) => it,
-        Ok(None) => return Ok(()),
+    let entries = match refs.read_reflog(ref_name) {
+        Ok(entries) if entries.is_empty() => return Ok(()),
+        Ok(entries) => entries,
         Err(e) => {
             // A broken reflog shouldn't sink the rest of the import.
             tracing::debug!(ref_name, error = %e, "reflog read failed; skipping");
@@ -709,40 +683,28 @@ fn collect_one_reflog(
         }
     };
 
-    for line in iter.flatten() {
+    for entry in entries {
         // `null_sha` is 40 zeros; map it to `None` so the caller doesn't
         // have to special-case creation / deletion markers downstream.
-        let prev = bstr_hex_or_none(line.previous_oid);
-        let new = bstr_hex_or_none(line.new_oid);
-        let time = line.signature.time().unwrap_or_default();
-        let signature = GitSignature {
-            name: line.signature.name.to_string(),
-            email: line.signature.email.to_string(),
-            time: Utc
-                .timestamp_opt(time.seconds, 0)
-                .single()
-                .unwrap_or_else(Utc::now),
-            tz_offset: time.offset,
+        let prev = oid_hex_or_none(&entry.old_oid);
+        let new = oid_hex_or_none(&entry.new_oid);
+        let Some(signature) = signature_from_raw(&entry.committer) else {
+            tracing::debug!(ref_name, "malformed reflog signature; skipping entry");
+            continue;
         };
         out.push(ReflogEntry {
             ref_name: ref_name.to_string(),
             previous_sha: prev,
             new_sha: new,
             signature,
-            message: line.message.to_string(),
+            message: String::from_utf8_lossy(&entry.message).into_owned(),
         });
     }
     Ok(())
 }
 
-fn bstr_hex_or_none(bytes: &gix::bstr::BStr) -> Option<String> {
-    let s: &str = std::str::from_utf8(bytes).ok()?;
-    // Git's null-sha marker. Either side being null means "ref didn't exist
-    // before / doesn't exist after" — return None so the caller can filter.
-    if s.chars().all(|c| c == '0') {
-        return None;
-    }
-    Some(s.to_string())
+fn oid_hex_or_none(oid: &SleyObjectId) -> Option<String> {
+    (!oid.is_null()).then(|| oid.to_string())
 }
 
 fn sort_by_time_then_sha(frontier: &mut [&str], entries: &HashMap<String, CommitEntry>) {
@@ -758,37 +720,44 @@ fn sort_by_time_then_sha(frontier: &mut [&str], entries: &HashMap<String, Commit
     });
 }
 
-fn parse_oid(sha: &str) -> crate::Result<gix::hash::ObjectId> {
-    gix::hash::ObjectId::from_hex(sha.as_bytes())
+fn parse_oid(format: ObjectFormat, sha: &str) -> crate::Result<SleyObjectId> {
+    SleyObjectId::from_hex(format, sha)
         .map_err(|e| IngestError::Git(format!("parse oid {sha}: {e}")))
 }
 
-fn signature_from(sig: gix::actor::SignatureRef<'_>) -> GitSignature {
-    let time = sig.time().unwrap_or_default();
-    GitSignature {
-        name: sig.name.to_string(),
-        email: sig.email.to_string(),
+fn signature_from_bytes(raw: &[u8], sha: &str, field: &str) -> crate::Result<GitSignature> {
+    signature_from_raw(raw)
+        .ok_or_else(|| IngestError::Git(format!("{field} {sha}: invalid signature")))
+}
+
+fn signature_from_raw(raw: &[u8]) -> Option<GitSignature> {
+    let sig = SleySignature::from_ident_line(raw)?;
+    let time = sig.time;
+    let tz_offset = i32::from(time.timezone_offset_minutes) * 60;
+    Some(GitSignature {
+        name: String::from_utf8_lossy(sig.name.as_bytes()).into_owned(),
+        email: String::from_utf8_lossy(sig.email.as_bytes()).into_owned(),
         time: Utc
             .timestamp_opt(time.seconds, 0)
             .single()
             .unwrap_or_else(Utc::now),
-        tz_offset: time.offset,
-    }
+        tz_offset,
+    })
 }
 
 /// Collect a commit's extension headers in their original on-the-wire order,
 /// as raw bytes so non-UTF8 values survive. ORDER IS LOAD-BEARING for #566
 /// byte-reconstruction.
 ///
-/// Built straight from the raw commit object bytes (`commit.data`) via
+/// Built straight from the raw commit object bytes via
 /// [`objects::object::parse_commit_extension_headers`] so `encoding` / `gpgsig`
 /// / `mergetag` / any unknown header all land at their TRUE captured position
 /// through one code path — the SAME path the bridge importer uses. We do NOT
-/// stitch the vec from gix's typed accessors (`CommitRef::encoding`, …): gix
-/// surfaces some headers outside `extra_headers`, and re-inserting them by hand
+/// stitch the vec from typed accessors (`CommitRef::encoding`, ...): some
+/// headers are surfaced outside `extra_headers`, and re-inserting them by hand
 /// reorders them (the close-the-class bug this replaces). #564 de-lossy step 1.
-fn collect_commit_extra_headers(commit: &gix::Commit<'_>) -> crate::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-    Ok(objects::object::parse_commit_extension_headers(&commit.data))
+fn collect_commit_extra_headers(raw_commit: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    objects::object::parse_commit_extension_headers(raw_commit)
 }
 
 #[cfg(test)]
@@ -1018,7 +987,14 @@ mod tests {
         .join(&b'\n');
 
         let sha = run(
-            &["hash-object", "--literally", "-w", "-t", "commit", "--stdin"],
+            &[
+                "hash-object",
+                "--literally",
+                "-w",
+                "-t",
+                "commit",
+                "--stdin",
+            ],
             Some(&content),
         );
 
@@ -1029,8 +1005,7 @@ mod tests {
             (b"x-custom".to_vec(), b"custom value".to_vec()),
             (
                 b"gpgsig".to_vec(),
-                b"-----BEGIN PGP SIGNATURE-----\nsig-line-1\n-----END PGP SIGNATURE-----"
-                    .to_vec(),
+                b"-----BEGIN PGP SIGNATURE-----\nsig-line-1\n-----END PGP SIGNATURE-----".to_vec(),
             ),
             (b"encoding".to_vec(), b"ISO-8859-1".to_vec()),
             (
@@ -1203,7 +1178,7 @@ mod tests {
         // Commit 1: lightweight files.
         std::fs::write(path.join("a.txt"), "hello").unwrap();
         std::fs::write(path.join("empty.txt"), "").unwrap();
-        // Symlink. macOS + Linux both support `ln -s`; gix reads the
+        // Symlink. macOS + Linux both support `ln -s`; sley reads the
         // resulting tree mode as `Link` regardless of host filesystem.
         #[cfg(unix)]
         std::os::unix::fs::symlink("a.txt", path.join("link.txt")).unwrap();

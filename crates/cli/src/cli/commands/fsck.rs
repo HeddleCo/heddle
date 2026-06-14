@@ -5,6 +5,7 @@ use anyhow::{Result, anyhow};
 use objects::store::ObjectStore;
 use repo::Repository;
 use serde::Serialize;
+use sley::Repository as SleyRepository;
 
 use super::{
     advice::RecoveryAdvice,
@@ -149,7 +150,7 @@ fn check_bridge(
 
     for (change_id, git_oid) in bridge.mapping.iter() {
         *objects_checked += 1;
-        if mirror.find_object(*git_oid).is_err() {
+        if mirror.read_object(git_oid).is_err() {
             errors.push(make_error(
                 "bridge-mapping",
                 &format!("mapped Git object {git_oid} is missing from the mirror"),
@@ -210,7 +211,7 @@ fn check_checkout_head(
     errors: &mut Vec<FsckError>,
     objects_checked: &mut usize,
 ) -> Result<()> {
-    let Ok(checkout) = gix::discover(repo.root()) else {
+    let Ok(checkout) = SleyRepository::discover(repo.root()) else {
         return Ok(());
     };
     let refs::Head::Attached { thread } = repo.head_ref()? else {
@@ -223,13 +224,13 @@ fn check_checkout_head(
         return Ok(());
     };
     let branch_ref = format!("refs/heads/{thread}");
-    let Ok(mut reference) = checkout.find_reference(&branch_ref) else {
+    let Ok(Some(reference)) = checkout.find_reference(&branch_ref) else {
         return Ok(());
     };
     let actual_git_oid = reference
-        .peel_to_id()
+        .peeled_oid(&checkout)
         .map_err(|err| anyhow!("checkout HEAD check failed: {err}"))?
-        .detach();
+        .ok_or_else(|| anyhow!("checkout HEAD check failed: branch ref is unborn"))?;
     *objects_checked += 1;
     if actual_git_oid != expected_git_oid {
         errors.push(make_error(

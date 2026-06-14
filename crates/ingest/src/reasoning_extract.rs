@@ -378,9 +378,7 @@ fn harvest_claude(path: &Path, params: &HarvestParams) -> crate::Result<Vec<Harv
 /// the same gate both the Claude and Codex harvesters used to apply
 /// inline. File-touch kinds are dropped; only the paths matter for target
 /// resolution.
-fn assistant_events(
-    stream: Vec<crate::transcript::stream::StreamEvent>,
-) -> Vec<AssistantEvent> {
+fn assistant_events(stream: Vec<crate::transcript::stream::StreamEvent>) -> Vec<AssistantEvent> {
     let mut out = Vec::new();
     for ev in stream {
         let Some(timestamp) = ev.timestamp else {

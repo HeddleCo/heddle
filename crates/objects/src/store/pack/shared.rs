@@ -2,13 +2,12 @@
 #![deny(clippy::cast_possible_truncation)]
 
 use super::{
-    varint,
+    ObjectType, varint,
     versioned_header::{HeaderChecksum, VersionedHeader},
-    ObjectType,
 };
 use crate::{
     object::{ChangeId, ContentHash},
-    store::{compression::CompressionConfig, Result, StoreError},
+    store::{Result, StoreError, compression::CompressionConfig},
 };
 
 pub const PACK_CHECKSUM_LEN: usize = 32;

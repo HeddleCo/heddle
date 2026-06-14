@@ -655,13 +655,15 @@ mod tests {
         .unwrap();
 
         assert!(
-            full.iter().any(|info| info.obj_type == ObjectType::StateVisibility
-                && info.id == ObjectId::ChangeId(state.change_id)),
+            full.iter()
+                .any(|info| info.obj_type == ObjectType::StateVisibility
+                    && info.id == ObjectId::ChangeId(state.change_id)),
             "full closure must include a StateVisibility entry for the visible state"
         );
         assert!(
-            plan.iter().any(|p| p.obj_type == ObjectType::StateVisibility
-                && p.id == ObjectId::ChangeId(state.change_id)),
+            plan.iter()
+                .any(|p| p.obj_type == ObjectType::StateVisibility
+                    && p.id == ObjectId::ChangeId(state.change_id)),
             "plan closure must include a StateVisibility entry for the visible state"
         );
     }

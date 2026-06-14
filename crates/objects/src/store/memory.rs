@@ -183,11 +183,7 @@ impl ObjectStore for InMemoryStore {
         Ok(self.state_visibility.read().unwrap().get(state).cloned())
     }
 
-    fn put_state_visibility_bytes_for_state(
-        &self,
-        state: &ChangeId,
-        bytes: &[u8],
-    ) -> Result<()> {
+    fn put_state_visibility_bytes_for_state(&self, state: &ChangeId, bytes: &[u8]) -> Result<()> {
         self.state_visibility
             .write()
             .unwrap()
@@ -196,7 +192,13 @@ impl ObjectStore for InMemoryStore {
     }
 
     fn list_states_with_visibility(&self) -> Result<Vec<ChangeId>> {
-        Ok(self.state_visibility.read().unwrap().keys().copied().collect())
+        Ok(self
+            .state_visibility
+            .read()
+            .unwrap()
+            .keys()
+            .copied()
+            .collect())
     }
 }
 

@@ -419,7 +419,6 @@ impl ThreadRecord {
         // A persisted record's id was validated at creation — trust it.
         ThreadId::new_unchecked(self.id.clone())
     }
-
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -504,7 +503,14 @@ mod thread_id_tests {
 
     #[test]
     fn accepts_safe_slugs() {
-        for ok in ["feature/x", "v1.2", "a_b-c.d", "team@scope", "main", "wip+1=2"] {
+        for ok in [
+            "feature/x",
+            "v1.2",
+            "a_b-c.d",
+            "team@scope",
+            "main",
+            "wip+1=2",
+        ] {
             assert!(
                 ThreadId::new(ok).is_ok(),
                 "expected '{ok}' to be a valid thread id"
@@ -540,7 +546,10 @@ mod thread_id_tests {
     fn error_message_carries_a_valid_rename_hint() {
         let err = ThreadId::new("my feature").unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("my feature"), "names the offending input: {msg}");
+        assert!(
+            msg.contains("my feature"),
+            "names the offending input: {msg}"
+        );
         assert!(msg.contains("try 'my-feature'"), "suggests a rename: {msg}");
         // The suggestion itself must be a valid thread id.
         assert!(ThreadId::new(err.suggestion.as_str()).is_ok());

@@ -100,8 +100,7 @@ where
                 from_index += 1;
             }
             std::cmp::Ordering::Greater => {
-                if let ControlFlow::Break(b) =
-                    visit_added_entry(store, prefix, to_entry, visitor)?
+                if let ControlFlow::Break(b) = visit_added_entry(store, prefix, to_entry, visitor)?
                 {
                     return Ok(ControlFlow::Break(b));
                 }

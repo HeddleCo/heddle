@@ -6,10 +6,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use gix::hash::ObjectId;
-use gix::refs::transaction::PreviousValue;
 use objects::object::ChangeId;
 use repo::Repository as HeddleRepository;
+use sley::{ObjectId, RefPrecondition, Repository as SleyRepository};
 
 use super::git_core::{self, GitBridge, GitResult, SyncMapping};
 
@@ -72,6 +71,7 @@ pub struct PlannedRefWrite {
     pub full_name: String,
     pub old: Option<ObjectId>,
     pub new: ObjectId,
+    pub force: bool,
 }
 
 impl From<git_core::PlannedRefWrite> for PlannedRefWrite {
@@ -80,6 +80,7 @@ impl From<git_core::PlannedRefWrite> for PlannedRefWrite {
             full_name: write.full_name,
             old: write.old,
             new: write.new,
+            force: write.force,
         }
     }
 }
@@ -116,44 +117,44 @@ impl From<git_core::DestinationReconcilePlan> for DestinationReconcilePlan {
     }
 }
 
-pub fn delete_reference_if_present(repo: &gix::Repository, name: &str) -> GitResult<()> {
+pub fn delete_reference_if_present(repo: &SleyRepository, name: &str) -> GitResult<()> {
     git_core::delete_reference_if_present(repo, name)
 }
 
 pub fn set_reference(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     name: &str,
     target: ObjectId,
-    previous: PreviousValue,
+    previous: RefPrecondition,
     message: &str,
 ) -> GitResult<()> {
     git_core::set_reference(repo, name, target, previous, message)
 }
 
-pub fn read_exported_refs(repo: &gix::Repository) -> GitResult<HashMap<String, ObjectId>> {
+pub fn read_exported_refs(repo: &SleyRepository) -> GitResult<HashMap<String, ObjectId>> {
     git_core::read_exported_refs(repo)
 }
 
 pub fn write_exported_refs(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     refs: &HashMap<String, ObjectId>,
 ) -> GitResult<()> {
     git_core::write_exported_refs(repo, refs)
 }
 
-pub fn read_mirror_managed_refs(repo: &gix::Repository) -> GitResult<HashMap<String, ObjectId>> {
+pub fn read_mirror_managed_refs(repo: &SleyRepository) -> GitResult<HashMap<String, ObjectId>> {
     git_core::read_mirror_managed_refs(repo)
 }
 
 pub fn write_mirror_managed_refs(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     refs: &HashMap<String, ObjectId>,
 ) -> GitResult<()> {
     git_core::write_mirror_managed_refs(repo, refs)
 }
 
 pub fn collect_managed_ref_updates(
-    repo: &gix::Repository,
+    repo: &SleyRepository,
     record: &HashMap<String, ObjectId>,
 ) -> GitResult<Vec<RefUpdate>> {
     git_core::collect_managed_ref_updates(repo, record)
@@ -161,7 +162,7 @@ pub fn collect_managed_ref_updates(
 }
 
 pub fn plan_destination_reconcile(
-    mirror_repo: &gix::Repository,
+    mirror_repo: &SleyRepository,
     served_frontier: &[RefUpdate],
     creatable_names: Option<&HashSet<String>>,
     old_at_destination: &HashMap<String, ObjectId>,
@@ -222,7 +223,7 @@ pub fn build_existing_mapping(
     bridge.build_existing_mapping(git_repo_path)
 }
 
-pub fn open_git_repo(bridge: &GitBridge<'_>) -> GitResult<gix::Repository> {
+pub fn open_git_repo(bridge: &GitBridge<'_>) -> GitResult<SleyRepository> {
     bridge.open_git_repo()
 }
 
@@ -230,6 +231,6 @@ pub fn heddle_repo<'a>(bridge: &'a GitBridge<'a>) -> &'a HeddleRepository {
     bridge.heddle_repo
 }
 
-pub fn open_repo(path: &Path) -> GitResult<gix::Repository> {
+pub fn open_repo(path: &Path) -> GitResult<SleyRepository> {
     git_core::open_repo(path)
 }

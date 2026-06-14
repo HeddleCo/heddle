@@ -812,7 +812,8 @@ impl HostedGrpcClient {
                         if let Some(local_thread) = options.local_thread
                             && let Some(state) = final_state
                         {
-                            repo.refs().set_thread(&ThreadName::from(local_thread), &state)?;
+                            repo.refs()
+                                .set_thread(&ThreadName::from(local_thread), &state)?;
                         }
                         if let Some(state) = final_state
                             && allow_partial_fetch
@@ -961,13 +962,13 @@ fn redaction_push_message(
 }
 
 fn is_out_of_pack_transfer_object_type(obj_type: ObjectType) -> bool {
-    matches!(obj_type, ObjectType::Redaction | ObjectType::StateVisibility)
+    matches!(
+        obj_type,
+        ObjectType::Redaction | ObjectType::StateVisibility
+    )
 }
 
-fn native_pack_required_for_pull(
-    want_full_closure: bool,
-    wanted_types: &WantedTypes,
-) -> bool {
+fn native_pack_required_for_pull(want_full_closure: bool, wanted_types: &WantedTypes) -> bool {
     want_full_closure
         || wanted_types
             .values()
@@ -976,29 +977,20 @@ fn native_pack_required_for_pull(
             .any(proto::is_native_packable_object_type)
 }
 
-fn record_wanted_type(
-    wanted_types: &mut WantedTypes,
-    pack_id: PackObjectId,
-    obj_type: ObjectType,
-) {
+fn record_wanted_type(wanted_types: &mut WantedTypes, pack_id: PackObjectId, obj_type: ObjectType) {
     let types = wanted_types.entry(pack_id).or_default();
     if !types.contains(&obj_type) {
         types.push(obj_type);
     }
 }
 
-fn wanted_packable_type(
-    wanted_types: &WantedTypes,
-    pack_id: &PackObjectId,
-) -> Option<ObjectType> {
-    wanted_types
-        .get(pack_id)
-        .and_then(|types| {
-            types
-                .iter()
-                .copied()
-                .find(|obj_type| proto::is_native_packable_object_type(*obj_type))
-        })
+fn wanted_packable_type(wanted_types: &WantedTypes, pack_id: &PackObjectId) -> Option<ObjectType> {
+    wanted_types.get(pack_id).and_then(|types| {
+        types
+            .iter()
+            .copied()
+            .find(|obj_type| proto::is_native_packable_object_type(*obj_type))
+    })
 }
 
 fn sidecar_push_message(
@@ -1460,14 +1452,13 @@ mod tests {
     use cli_shared::ClientConfig;
     use grpc::heddle::v1::{
         ListRefsRequest, ListRefsResponse, PullComplete as GrpcPullComplete, PullReady,
-        TransferCheckpoint, UpdateRefRequest, UpdateRefResponse,
+        TransferCheckpoint, UpdateRefRequest, UpdateRefResponse, push_message,
         repo_sync_service_server::{RepoSyncService, RepoSyncServiceServer},
-        push_message,
     };
     use objects::{
         object::{
-            Attribution, Blob, ChangeId, ContentHash, Principal, Redaction, State,
-            StateVisibility, StateVisibilityBlob, Tree, TreeEntry, VisibilityTier,
+            Attribution, Blob, ChangeId, ContentHash, Principal, Redaction, State, StateVisibility,
+            StateVisibilityBlob, Tree, TreeEntry, VisibilityTier,
         },
         store::ObjectStore,
     };
@@ -1595,7 +1586,8 @@ mod tests {
         )]);
         assert!(!native_pack_required_for_pull(false, &sidecar_only));
 
-        let redaction_only = HashMap::from([(PackObjectId::Hash(blob), vec![ObjectType::Redaction])]);
+        let redaction_only =
+            HashMap::from([(PackObjectId::Hash(blob), vec![ObjectType::Redaction])]);
         assert!(!native_pack_required_for_pull(false, &redaction_only));
 
         let packable = HashMap::from([(PackObjectId::Hash(blob), vec![ObjectType::Blob])]);
@@ -1637,7 +1629,10 @@ mod tests {
             .wanted_types
             .get(&PackObjectId::ChangeId(state))
             .expect("same ChangeId want entry");
-        assert_eq!(wanted.as_slice(), &[ObjectType::State, ObjectType::StateVisibility]);
+        assert_eq!(
+            wanted.as_slice(),
+            &[ObjectType::State, ObjectType::StateVisibility]
+        );
         assert!(native_pack_required_for_pull(
             plan.want_full_closure,
             &plan.wanted_types
@@ -1673,7 +1668,9 @@ mod tests {
             _request: tonic::Request<tonic::Streaming<PushMessage>>,
         ) -> Result<Response<Self::PushStream>, Status> {
             let (_tx, rx) = mpsc::channel(1);
-            Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+            Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+                rx,
+            )))
         }
 
         type PullStream = tokio_stream::wrappers::ReceiverStream<Result<PullMessage, Status>>;
@@ -1768,7 +1765,9 @@ mod tests {
                 let _ = tx.send(Ok(complete)).await;
             });
 
-            Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+            Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+                rx,
+            )))
         }
     }
 
@@ -2026,7 +2025,9 @@ mod tests {
             _request: tonic::Request<tonic::Streaming<PushMessage>>,
         ) -> Result<Response<Self::PushStream>, Status> {
             let (_tx, rx) = mpsc::channel(1);
-            Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+            Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+                rx,
+            )))
         }
 
         type PullStream = tokio_stream::wrappers::ReceiverStream<Result<PullMessage, Status>>;
@@ -2087,7 +2088,10 @@ mod tests {
                         body: Some(pull_message::Body::Want(want)),
                     })) if !want.want_full_closure
                         && want.objects.len() == 2
-                        && want.objects.iter().any(|object| object.object_type == "state")
+                        && want
+                            .objects
+                            .iter()
+                            .any(|object| object.object_type == "state")
                         && want
                             .objects
                             .iter()
@@ -2102,11 +2106,9 @@ mod tests {
                     }
                 }
 
-                for message in encode_pull_native_pack_messages(
-                    &pack_bundle,
-                    "state-and-visibility-test",
-                    16,
-                ) {
+                for message in
+                    encode_pull_native_pack_messages(&pack_bundle, "state-and-visibility-test", 16)
+                {
                     if tx.send(Ok(message)).await.is_err() {
                         return;
                     }
@@ -2142,7 +2144,9 @@ mod tests {
                 let _ = tx.send(Ok(complete)).await;
             });
 
-            Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(rx)))
+            Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+                rx,
+            )))
         }
     }
 
@@ -2239,7 +2243,10 @@ mod tests {
     async fn state_and_visibility_same_change_id_pull_requests_pack_and_sidecar() {
         let (_source_dir, source_repo) = temp_repo();
         let (_target_dir, target_repo) = temp_repo();
-        let tree_hash = source_repo.store().put_tree(&Tree::new()).expect("put tree");
+        let tree_hash = source_repo
+            .store()
+            .put_tree(&Tree::new())
+            .expect("put tree");
         let state = State::new_snapshot(
             tree_hash,
             vec![],
@@ -2249,7 +2256,10 @@ mod tests {
             }),
         );
         let state_id = state.change_id;
-        source_repo.store().put_state(&state).expect("put source state");
+        source_repo
+            .store()
+            .put_state(&state)
+            .expect("put source state");
         let state_visibility_blob =
             StateVisibilityBlob::new(vec![sample_state_visibility(state_id)])
                 .encode()
@@ -2257,11 +2267,8 @@ mod tests {
         source_repo
             .accept_wire_state_visibility(state_id, &state_visibility_blob)
             .expect("put source state visibility");
-        let pack_bundle = proto::build_native_pack(
-            source_repo.store(),
-            &[state_info(state_id)],
-        )
-        .expect("build state pack");
+        let pack_bundle = proto::build_native_pack(source_repo.store(), &[state_info(state_id)])
+            .expect("build state pack");
 
         assert!(
             target_repo

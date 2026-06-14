@@ -12,7 +12,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use super::repo_config::SUPPORTED_REPO_FORMAT;
-use super::repository_snapshot::{with_snapshot_fault, SnapshotFault};
+use super::repository_snapshot::{SnapshotFault, with_snapshot_fault};
 use crate::{
     ChangedPathFilters, HeddleError, HistoryQuery, RepoConfig, Repository, RepositoryCapability,
     ThreadFreshness, ThreadManager, WorktreeIndex,
@@ -42,7 +42,10 @@ fn test_init_creates_structure() {
     assert!(temp_dir.path().join(".heddle/objects/trees").exists());
     assert!(temp_dir.path().join(".heddle/objects/states").exists());
     let root_state = repo.head().unwrap().expect("init should seed main state");
-    assert_eq!(repo.refs().get_thread(&ThreadName::new("main")).unwrap(), Some(root_state));
+    assert_eq!(
+        repo.refs().get_thread(&ThreadName::new("main")).unwrap(),
+        Some(root_state)
+    );
     let state = repo.store().get_state(&root_state).unwrap().unwrap();
     assert!(state.parents.is_empty());
     let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
@@ -63,8 +66,7 @@ fn test_open_with_store_threads_a_custom_object_store() {
     drop(repo);
 
     let store = FsStore::new(&heddle_dir);
-    let repo: Repository<_, _, FsStore> =
-        Repository::open_with_store(&heddle_dir, store).unwrap();
+    let repo: Repository<_, _, FsStore> = Repository::open_with_store(&heddle_dir, store).unwrap();
 
     let blob = objects::object::Blob::from("open_with_store round-trip");
     let hash = repo.store().put_blob(&blob).unwrap();
@@ -205,7 +207,10 @@ fn courtesy_filename_scoped_root_only() {
         .expect("snapshot tree");
 
     assert!(
-        !tree.entries().iter().any(|e| e.name == "HEDDLE-EMBARGO.txt"),
+        !tree
+            .entries()
+            .iter()
+            .any(|e| e.name == "HEDDLE-EMBARGO.txt"),
         "the root-level courtesy stub must stay ignored at the worktree root"
     );
     let sub = tree
@@ -355,7 +360,10 @@ fn snapshot_atomic_mutation_fault_and_exactly_once_contract() {
         .iter()
         .filter(|entry| matches!(entry.operation, OpRecord::TransactionCommit { .. }))
         .count();
-    assert_eq!(snapshot_count, 1, "capture batch must contain one snapshot record");
+    assert_eq!(
+        snapshot_count, 1,
+        "capture batch must contain one snapshot record"
+    );
     assert_eq!(
         transaction_count, 1,
         "capture batch must contain one transaction marker"
@@ -1248,7 +1256,9 @@ fn test_fast_forward_attached_preserves_head_and_advances_thread() {
     // Repo::init_default attaches HEAD to "main"; explicitly rewind the
     // thread ref to state1 so a fast-forward to state2 is meaningful.
     let state1 = repo.head().unwrap().expect("base state should exist");
-    repo.refs().set_thread(&ThreadName::new("main"), &state1).unwrap();
+    repo.refs()
+        .set_thread(&ThreadName::new("main"), &state1)
+        .unwrap();
     repo.refs()
         .write_head(&Head::Attached {
             thread: ThreadName::new("main"),
@@ -1324,7 +1334,7 @@ fn test_fast_forward_attached_when_detached_stays_detached() {
 #[test]
 fn test_open_preserves_explicit_detached_head_in_git_overlay() {
     let temp_dir = TempDir::new().unwrap();
-    gix::init(temp_dir.path()).expect("init real git repository");
+    sley::Repository::init(temp_dir.path()).expect("init real git repository");
 
     let repo = Repository::init_default(temp_dir.path()).unwrap();
     assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);
@@ -1366,7 +1376,7 @@ fn test_open_preserves_explicit_detached_head_in_git_overlay() {
 fn git_overlay_worktree_status_is_none_when_embedded_git_is_bare() {
     let temp_dir = TempDir::new().unwrap();
     let git_dir = temp_dir.path().join(".git");
-    gix::init_bare(&git_dir).expect("init bare .git");
+    sley::Repository::init_bare(&git_dir).expect("init bare .git");
     let repo = Repository::init_default(temp_dir.path()).unwrap();
     assert_eq!(
         repo.capability(),
@@ -1954,12 +1964,18 @@ fn dir_only_ignore_covers_node_modules_symlink_native() {
     let status = repo.compare_worktree_cached(&tree).unwrap();
 
     assert!(
-        !status.added.iter().any(|p| p == std::path::Path::new("node_modules")),
+        !status
+            .added
+            .iter()
+            .any(|p| p == std::path::Path::new("node_modules")),
         "node_modules symlink must be ignored by `node_modules/`, not reported as added: {:?}",
         status.added,
     );
     assert!(
-        status.added.iter().any(|p| p == std::path::Path::new("keep.txt")),
+        status
+            .added
+            .iter()
+            .any(|p| p == std::path::Path::new("keep.txt")),
         "a non-ignored sibling must still be reported (proves the scan ran): {:?}",
         status.added,
     );
@@ -1988,7 +2004,10 @@ fn midsession_ignore_broadening_masks_untracked_without_unlink_native() {
     // First status: no ignore yet, so the dep file is seen as untracked.
     let before = repo.compare_worktree_cached(&tree).unwrap();
     assert!(
-        before.added.iter().any(|p| p == std::path::Path::new("node_modules/dep.js")),
+        before
+            .added
+            .iter()
+            .any(|p| p == std::path::Path::new("node_modules/dep.js")),
         "precondition: node_modules/dep.js should be untracked before the ignore: {:?}",
         before.added,
     );
@@ -2003,7 +2022,10 @@ fn midsession_ignore_broadening_masks_untracked_without_unlink_native() {
         after.added,
     );
     assert!(
-        after.added.iter().any(|p| p == std::path::Path::new("keep.txt")),
+        after
+            .added
+            .iter()
+            .any(|p| p == std::path::Path::new("keep.txt")),
         "non-ignored sibling must still be reported after the refresh: {:?}",
         after.added,
     );
@@ -2020,7 +2042,7 @@ fn dir_only_ignore_covers_node_modules_symlink_git_overlay() {
 
     let temp = TempDir::new().unwrap();
     let root = temp.path();
-    gix::init(root).expect("init real git repository");
+    sley::Repository::init(root).expect("init real git repository");
     let repo = Repository::init_default(root).unwrap();
     assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);
 
@@ -2033,12 +2055,18 @@ fn dir_only_ignore_covers_node_modules_symlink_git_overlay() {
 
     let status = repo.git_overlay_worktree_status().unwrap().unwrap();
     assert!(
-        !status.added.iter().any(|p| p == std::path::Path::new("node_modules")),
+        !status
+            .added
+            .iter()
+            .any(|p| p == std::path::Path::new("node_modules")),
         "node_modules symlink must be ignored in git-overlay status: {:?}",
         status.added,
     );
     assert!(
-        status.added.iter().any(|p| p == std::path::Path::new("keep.txt")),
+        status
+            .added
+            .iter()
+            .any(|p| p == std::path::Path::new("keep.txt")),
         "a non-ignored sibling must still be reported in git-overlay status: {:?}",
         status.added,
     );
@@ -2052,7 +2080,7 @@ fn dir_only_ignore_covers_node_modules_symlink_git_overlay() {
 fn midsession_ignore_broadening_masks_untracked_without_unlink_git_overlay() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
-    gix::init(root).expect("init real git repository");
+    sley::Repository::init(root).expect("init real git repository");
     let repo = Repository::init_default(root).unwrap();
     assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);
 
@@ -2063,7 +2091,10 @@ fn midsession_ignore_broadening_masks_untracked_without_unlink_git_overlay() {
 
     let before = repo.git_overlay_worktree_status().unwrap().unwrap();
     assert!(
-        before.added.iter().any(|p| p == std::path::Path::new("node_modules/dep.js")),
+        before
+            .added
+            .iter()
+            .any(|p| p == std::path::Path::new("node_modules/dep.js")),
         "precondition: node_modules/dep.js should be untracked before the ignore: {:?}",
         before.added,
     );
@@ -2096,7 +2127,9 @@ fn open_refuses_metadataless_virtualized_thread_mount() {
 
     // `Repository` isn't `Debug`, so match rather than `expect_err`.
     let err = match Repository::open(&mount_root) {
-        Ok(_) => panic!("opening from a metadata-less virtualized mount must refuse the parent climb"),
+        Ok(_) => {
+            panic!("opening from a metadata-less virtualized mount must refuse the parent climb")
+        }
         Err(e) => e,
     };
     assert!(
@@ -2143,7 +2176,7 @@ fn open_refuses_metadataless_virtualized_thread_mount() {
 #[test]
 fn open_solid_checkout_roots_at_boundary_not_git_overlay_parent() {
     let temp_dir = TempDir::new().unwrap();
-    gix::init(temp_dir.path()).expect("init real git repository");
+    sley::Repository::init(temp_dir.path()).expect("init real git repository");
     let repo = Repository::init_default(temp_dir.path()).unwrap();
     assert_eq!(
         repo.capability(),

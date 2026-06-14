@@ -63,7 +63,7 @@ use std::{
     path::PathBuf,
 };
 
-use super::{pack_container_spec, write_container_header, ObjectType, PackObjectId, PackStats};
+use super::{ObjectType, PackObjectId, PackStats, pack_container_spec, write_container_header};
 
 /// How many bytes to reserve for the compressed-size varint in the
 /// streaming path. 10 is enough to encode any `u64` (max 9 7-bit
@@ -74,7 +74,7 @@ use super::{pack_container_spec, write_container_header, ObjectType, PackObjectI
 const CSIZE_PLACEHOLDER_LEN: usize = 10;
 use crate::{
     object::ContentHash,
-    store::{compression::CompressionConfig, Result, StoreError},
+    store::{Result, StoreError, compression::CompressionConfig},
 };
 
 /// Number of buckets per id variant. 256 = one bucket per first byte

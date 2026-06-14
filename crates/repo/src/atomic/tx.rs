@@ -12,7 +12,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use objects::error::{HeddleError, Result};
-use oplog::{ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpLogBackend, OpRecord};
+use oplog::{
+    ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpLogBackend, OpRecord,
+};
 
 use super::traits::{DeferredMutation, EagerMutation, StagedCommit};
 use crate::Repository;
