@@ -218,8 +218,8 @@ mod macos {
 
     use crate::{cli::commands::mount_lifecycle::FskitReadinessReport, util::OnceMap};
 
-    const MIN_FSKIT_MACOS_MAJOR: u64 = 15;
-    const MIN_FSKIT_MACOS_MINOR: u64 = 4;
+    const MIN_FSKIT_MACOS_MAJOR: u64 = 26;
+    const MIN_FSKIT_MACOS_MINOR: u64 = 0;
     const SETTINGS_PATH: &str = "System Settings → General → Login Items & Extensions → File System Extensions → enable 'Heddle'";
     const SETTINGS_LOGIN_ITEMS_URL: &str =
         "x-apple.systempreferences:com.apple.LoginItems-Settings.extension";
@@ -320,7 +320,7 @@ mod macos {
 
     static REGISTRY: OnceMap<String, std::sync::Arc<MountHandle>> = OnceMap::new();
 
-    /// Mount `thread_id` into `mountpoint`. On macOS 15.4+ this
+    /// Mount `thread_id` into `mountpoint`. On macOS 26.0+ this
     /// probes FSKit readiness first; if the extension is enabled,
     /// mounts via `mount -t heddle`. If the extension is installed
     /// but disabled, the CLI opens System Settings and polls briefly
@@ -398,6 +398,16 @@ mod macos {
                     });
                     mount_via_nfs(&root, thread_id, mountpoint)?
                 }
+                Readiness::UnsupportedMacOS => {
+                    eprintln!("{}", readiness::unsupported_macos_hint());
+                    fskit_readiness = Some(FskitReadinessReport {
+                        state: "unsupported_macos",
+                        backend: "nfs",
+                        action: "fell_back",
+                        settings_url: None,
+                    });
+                    mount_via_nfs(&root, thread_id, mountpoint)?
+                }
                 Readiness::Unknown => {
                     // Probe failed for an environmental reason. Preserve the
                     // existing quiet NFS fallback.
@@ -406,6 +416,13 @@ mod macos {
             }
         } else {
             debug!("macOS version is below FSKit's supported runtime floor; using NFS fallback");
+            eprintln!("{}", readiness::unsupported_macos_hint());
+            fskit_readiness = Some(FskitReadinessReport {
+                state: "unsupported_macos",
+                backend: "nfs",
+                action: "fell_back",
+                settings_url: None,
+            });
             mount_via_nfs(&root, thread_id, mountpoint)?
         };
 

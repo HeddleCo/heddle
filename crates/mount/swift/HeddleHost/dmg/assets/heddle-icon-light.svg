@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="shell" x1="150" y1="80" x2="840" y2="920" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fbf8f0"/>
+      <stop offset="0.58" stop-color="#eee8db"/>
+      <stop offset="1" stop-color="#d7cdbc"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="170" y1="116" x2="840" y2="900" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.84"/>
+      <stop offset="0.52" stop-color="#b7a996" stop-opacity="0.36"/>
+      <stop offset="1" stop-color="#2a2520" stop-opacity="0.2"/>
+    </linearGradient>
+    <filter id="shadow" x="-16%" y="-14%" width="132%" height="132%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="28" stdDeviation="36" flood-color="#3f372e" flood-opacity="0.22"/>
+    </filter>
+  </defs>
+  <rect width="1024" height="1024" fill="none"/>
+  <rect x="126" y="126" width="772" height="772" rx="172" fill="#f5f0e6" filter="url(#shadow)"/>
+  <rect x="143" y="143" width="738" height="738" rx="156" fill="none" stroke="url(#rim)" stroke-width="18"/>
+  <g transform="translate(-91 -77) scale(1.15)">
+    <g fill="#15130f">
+      <rect x="255" y="232" width="18" height="560"/>
+      <rect x="463" y="232" width="18" height="560"/>
+      <rect x="567" y="232" width="18" height="560"/>
+      <rect x="671" y="232" width="18" height="560"/>
+      <rect x="775" y="232" width="18" height="560"/>
+    </g>
+    <g fill="#b57945" transform="matrix(1 0 0 1.3658536 0 -187.31704)">
+      <rect x="361" y="307" width="14" height="10"/>
+      <rect x="361" y="327" width="14" height="10"/>
+      <rect x="361" y="347" width="14" height="10"/>
+      <rect x="361" y="367" width="14" height="10"/>
+      <rect x="361" y="407" width="14" height="10"/>
+      <rect x="347" y="447" width="42" height="10"/>
+      <rect x="361" y="467" width="14" height="10"/>
+      <rect x="361" y="487" width="14" height="10"/>
+      <rect x="347" y="527" width="42" height="10"/>
+      <rect x="361" y="547" width="14" height="10"/>
+      <rect x="361" y="567" width="14" height="10"/>
+      <rect x="361" y="607" width="14" height="10"/>
+      <rect x="347" y="627" width="42" height="10"/>
+      <rect x="361" y="647" width="14" height="10"/>
+      <rect x="361" y="667" width="14" height="10"/>
+      <rect x="361" y="707" width="14" height="10"/>
+    </g>
+  </g>
+</svg>

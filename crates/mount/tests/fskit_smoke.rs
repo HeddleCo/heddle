@@ -3,7 +3,7 @@
 //!
 //! Marked `#[ignore]` and additionally gated on the
 //! `HEDDLE_FSKIT_AVAILABLE=1` env var so CI only opts in on
-//! machines that can actually mount: macOS 15.4+, signed binary
+//! machines that can actually mount: macOS 26.0+, signed binary
 //! with the `com.apple.developer.fskit.fsmodule` entitlement,
 //! and a developer machine with FSKit module loading enabled.
 //!
@@ -26,7 +26,7 @@ use repo::Repository;
 use tempfile::TempDir;
 
 #[test]
-#[ignore = "requires macOS 15.4 + FSKit entitlement; opt-in via HEDDLE_FSKIT_AVAILABLE=1"]
+#[ignore = "requires macOS 26.0 + FSKit entitlement; opt-in via HEDDLE_FSKIT_AVAILABLE=1"]
 fn fskit_mount_serves_blob_content() {
     if env::var("HEDDLE_FSKIT_AVAILABLE").as_deref() != Ok("1") {
         eprintln!(
@@ -37,7 +37,7 @@ fn fskit_mount_serves_blob_content() {
     }
     if !FSKitShell::is_runtime_available() {
         panic!(
-            "FSKit not available at runtime — this test requires macOS 15.4+. \
+            "FSKit not available at runtime — this test requires macOS 26.0+. \
              Either upgrade or unset HEDDLE_FSKIT_AVAILABLE."
         );
     }
@@ -51,7 +51,7 @@ fn fskit_mount_serves_blob_content() {
     let mount = ContentAddressedMount::new(repo, "main").unwrap();
     let mountpoint = TempDir::new().unwrap();
 
-    // FSKit on macOS 15.4+ has no programmatic in-process
+    // FSKit on macOS 26.0+ has no programmatic in-process
     // `mount(at:)`. A real mount requires a code-signed
     // `.fsmodule` System Extension that this CLI doesn't ship
     // yet (release-engineering follow-up, tracked in

@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+
+APP_PATH="/Applications/Heddle.app"
+CLI_PATH="/usr/local/bin/heddle"
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Support/lsregister"
+
+if [ -d "$APP_PATH" ] && [ -x "$LSREGISTER" ]; then
+  "$LSREGISTER" -f "$APP_PATH" >/dev/null 2>&1 || true
+fi
+
+if [ -x "$CLI_PATH" ]; then
+  /usr/bin/xattr -d com.apple.quarantine "$CLI_PATH" >/dev/null 2>&1 || true
+fi
+
+exit 0

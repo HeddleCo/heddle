@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="780" height="480" viewBox="0 0 780 480">
+  <defs>
+    <linearGradient id="paper" x1="32" y1="14" x2="720" y2="454" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fbf8f0"/>
+      <stop offset="0.55" stop-color="#f0eadf"/>
+      <stop offset="1" stop-color="#ded5c6"/>
+    </linearGradient>
+    <radialGradient id="warm" cx="0.42" cy="0.2" r="0.82">
+      <stop offset="0" stop-color="#f6dcc0" stop-opacity="0.62"/>
+      <stop offset="0.54" stop-color="#f6dcc0" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#f6dcc0" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="18"/>
+    </filter>
+  </defs>
+  <rect width="780" height="480" rx="22" fill="url(#paper)"/>
+  <rect width="780" height="480" rx="22" fill="url(#warm)"/>
+  <path d="M90 414 C185 380 278 400 358 424 S530 458 688 404" stroke="#fbf8f0" stroke-opacity="0.56" stroke-width="18" fill="none" filter="url(#soft)"/>
+  <g transform="translate(48 40)">
+    <text x="0" y="0" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="14" font-weight="800" letter-spacing="1.8" fill="#171410">HEDDLE.</text>
+    <text x="0" y="48" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="44" font-weight="800" letter-spacing="0" fill="#171410">Install Heddle.</text>
+    <text x="0" y="84" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="18" font-weight="500" letter-spacing="0" fill="#776f64">One installer places the CLI and the macOS file-system host together.</text>
+  </g>
+  <g opacity="0.95">
+    <circle cx="390" cy="278" r="102" fill="#fffaf2" fill-opacity="0.58"/>
+    <circle cx="390" cy="278" r="102" fill="none" stroke="#d5cabb" stroke-width="1.5"/>
+    <circle cx="390" cy="278" r="126" fill="none" stroke="#c89560" stroke-opacity="0.22" stroke-width="1"/>
+    <circle cx="390" cy="278" r="148" fill="none" stroke="#171410" stroke-opacity="0.055" stroke-width="1"/>
+  </g>
+  <path d="M262 285 C310 238 363 232 411 272 C438 294 469 300 518 276" fill="none" stroke="#171410" stroke-opacity="0.34" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M262 285 C310 238 363 232 411 272 C434 291 459 298 495 286" fill="none" stroke="#c89560" stroke-opacity="0.54" stroke-width="1.1" stroke-linecap="round"/>
+  <text x="390" y="424" text-anchor="middle" font-family="Avenir Next, Helvetica Neue, sans-serif" font-size="12" font-weight="700" letter-spacing="1.2" fill="#81786d">DOUBLE-CLICK TO INSTALL</text>
+  <g transform="translate(632 46) scale(0.145) translate(-255 -232)" opacity="0.96">
+    <g fill="#171410">
+      <rect x="255" y="232" width="18" height="560"/>
+      <rect x="463" y="232" width="18" height="560"/>
+      <rect x="567" y="232" width="18" height="560"/>
+      <rect x="671" y="232" width="18" height="560"/>
+      <rect x="775" y="232" width="18" height="560"/>
+    </g>
+    <g fill="#c89560" transform="matrix(1 0 0 1.3658536 0 -187.31704)">
+      <rect x="361" y="307" width="14" height="10"/>
+      <rect x="361" y="327" width="14" height="10"/>
+      <rect x="361" y="347" width="14" height="10"/>
+      <rect x="361" y="367" width="14" height="10"/>
+      <rect x="361" y="407" width="14" height="10"/>
+      <rect x="347" y="447" width="42" height="10"/>
+      <rect x="361" y="467" width="14" height="10"/>
+      <rect x="361" y="487" width="14" height="10"/>
+      <rect x="347" y="527" width="42" height="10"/>
+      <rect x="361" y="547" width="14" height="10"/>
+      <rect x="361" y="567" width="14" height="10"/>
+      <rect x="361" y="607" width="14" height="10"/>
+      <rect x="347" y="627" width="42" height="10"/>
+      <rect x="361" y="647" width="14" height="10"/>
+      <rect x="361" y="667" width="14" height="10"/>
+      <rect x="361" y="707" width="14" height="10"/>
+    </g>
+  </g>
+</svg>
