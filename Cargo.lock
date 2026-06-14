@@ -5098,6 +5098,9 @@ name = "sley-core"
 version = "0.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc817cfe54cea21211600ba24e30c5ac611ddebf5299effa950cdefc29db19ba"
+dependencies = [
+ "sha1 0.10.6",
+]
 
 [[package]]
 name = "sley-diff-merge"
@@ -5147,6 +5150,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sley-mmap"
+version = "0.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44a922559f5bef1e1b48db5b5025afdb9b83c406ee9a4ca586f8172360eae6b2"
+dependencies = [
+ "memmap2",
+]
+
+[[package]]
 name = "sley-notes"
 version = "0.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5178,6 +5190,7 @@ dependencies = [
  "flate2",
  "sley-core",
  "sley-formats",
+ "sley-mmap",
  "sley-object",
  "sley-pack",
 ]
