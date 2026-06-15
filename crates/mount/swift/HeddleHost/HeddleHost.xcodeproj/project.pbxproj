@@ -173,10 +173,10 @@
 				LastUpgradeCheck = 2650;
 				TargetAttributes = {
 					1AC2C11E2FB654130029BC1D = {
-						CreatedOnToolsVersion = 26.5;
+						CreatedOnToolsVersion = 26.0;
 					};
 					1AC2C1382FB654B80029BC1D = {
-						CreatedOnToolsVersion = 26.5;
+						CreatedOnToolsVersion = 26.0;
 					};
 				};
 			};

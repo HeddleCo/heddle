@@ -1143,7 +1143,7 @@ pub(crate) fn unimported_git_history_advice(
         format!("Run `{primary_command}` before retrying `heddle {action}`."),
         format!("Git branch(es) waiting for Heddle import: {branch_summary}"),
         format!(
-            "{action} would capture or checkpoint the current tree before Heddle has adopted the existing Git history"
+            "{action} would write new Heddle state before Heddle has adopted the existing Git history"
         ),
         "Git refs, Heddle refs, and worktree files were left unchanged",
         primary_command.clone(),

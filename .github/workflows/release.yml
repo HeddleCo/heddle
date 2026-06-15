@@ -19,11 +19,10 @@ name: Release binaries
 # the raw trigger ref. This keeps the answer to "is this a sanctioned
 # release?" in exactly one place.
 #
-# Strategy: native matrix builds (one runner per target) instead of
-# cross-compilation. Rationale lives in RELEASING.md — short version:
-# Apple-codesign + Windows packaging are simpler when the host triple
-# matches the target, and GitHub-hosted ARM runners (ubuntu-24.04-arm,
-# macos-14) make this free.
+# Strategy: one build-matrix leg per target. Rationale lives in
+# RELEASING.md — short version: Linux keeps a pinned glibc floor,
+# Windows stays on an MSVC host, and macOS legs run on macos-26 so
+# every Apple artifact compiles against the same FSKit SDK floor.
 #
 # Signing: cosign keyless via the Sigstore public-good instance. No
 # stored secrets — the GitHub OIDC token is the trust anchor. Verifying
@@ -187,14 +186,13 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-26
             archive: tar.gz
           - target: x86_64-apple-darwin
-            # macos-13 was retired 2025-12-04 (jobs queue for hours, then a
-            # brownout cancels the whole run — observed on the v0.3.0-rc.1
-            # dry-run). macos-15-intel is the LAST x86_64 macOS image and
-            # lives until August 2027; plan the Intel-mac sunset before then.
-            runner: macos-15-intel
+            # Keep standalone CLI tarballs on the same macOS 26 image
+            # as the cask builder so FSKit's SDK/deployment floor never
+            # splits across release artifacts.
+            runner: macos-26
             archive: tar.gz
           - target: aarch64-unknown-linux-gnu
             # glibc floor: ubuntu-22.04 ships glibc 2.35, so the -gnu
@@ -247,7 +245,7 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Build release binary
-        run: cargo build --release --locked -p ${{ env.CRATE_NAME }} --target ${{ matrix.target }}
+        run: cargo build --release --locked -p ${{ env.CRATE_NAME }} --features mount --target ${{ matrix.target }}
 
       - name: Stage artifact (unix)
         if: matrix.archive == 'tar.gz'

@@ -285,10 +285,9 @@ impl Drop for FSKitSession {
 /// destroyed.
 /// File-based logger for the extension. macOS doesn't route
 /// stderr from ExtensionKit extensions to os_log, and the Rust
-/// `tracing` crate has no subscriber in this context — so we
-/// append to a known file the user can `cat` after a mount
-/// attempt. `/tmp/heddle-fskit.log` is covered by our absolute-
-/// path temp-exception entitlement.
+/// `tracing` crate has no subscriber in this context. This best-effort
+/// file log is diagnostic-only and must remain non-fatal because the
+/// signed extension does not request broad filesystem exceptions.
 fn fskit_log(msg: &str) {
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new()

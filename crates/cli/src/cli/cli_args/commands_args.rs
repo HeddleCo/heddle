@@ -41,7 +41,7 @@ pub struct InitArgs {
     #[arg(long)]
     pub install_harnesses: Option<String>,
 
-    /// Skip harness integration install prompts.
+    /// Skip harness integration installation during init.
     #[arg(long)]
     pub no_harness_install: bool,
 

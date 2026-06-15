@@ -24,8 +24,8 @@ single command that collapses that ramp into one invocation.
 4. If `--principal-name`/`--principal-email` are both passed, writes
    them into `UserConfig` (`init.rs:55-69`).
 5. Calls `maybe_prompt_init_install`
-   (`integration.rs:133-187`) which, on a TTY, may offer to wire
-   detected harnesses (Claude Code, Cursor, etc.).
+   (`integration.rs:133-187`) which only wires harnesses when
+   `--install-harnesses` is explicitly passed.
 6. Prints a one-line confirmation (`init.rs:73-94`).
 
 In the non-Git path, `Repository::init_default`

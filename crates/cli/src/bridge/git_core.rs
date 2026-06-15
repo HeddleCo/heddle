@@ -769,6 +769,8 @@ impl<'a> GitBridge<'a> {
         } else {
             fs::create_dir_all(&git_dir)?;
             let _ = SleyRepository::init_bare(&git_dir).map_err(git_err)?;
+            let mirror_repo = open_repo(&git_dir)?;
+            seed_checkout_note_refs_into_mirror(self.heddle_repo.root(), &mirror_repo)?;
             true
         };
 
@@ -1231,6 +1233,56 @@ impl<'a> GitBridge<'a> {
                         remote = remote.as_str(),
                         error = %error,
                         "configured remote did not provide Heddle notes during git-overlay adopt"
+                    );
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Best-effort adoption preflight for the ingest-backed path.
+    ///
+    /// This mirrors [`Self::hydrate_checkout_heddle_notes_from_configured_remotes`]
+    /// without initializing `.heddle/git`: ingest reads directly from the
+    /// checkout, so it only needs `refs/notes/heddle` hydrated in the checkout's
+    /// own object database before `GitSource` opens the repository.
+    pub(crate) fn hydrate_checkout_heddle_notes_without_mirror(root: &Path) -> bool {
+        if checkout_note_ref_exists(root).unwrap_or(false) {
+            return true;
+        }
+
+        let mut remotes = match checkout_remote_url_items(root) {
+            Ok(remotes) => remotes
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    "skipping configured remote note hydration before ingest-backed adopt"
+                );
+                return false;
+            }
+        };
+        remotes.sort_by(|left, right| {
+            match (left.as_str() == "origin", right.as_str() == "origin") {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => left.cmp(right),
+            }
+        });
+        remotes.dedup();
+
+        for remote in remotes {
+            match hydrate_checkout_notes_from_remote_without_mirror(root, &remote) {
+                Ok(()) if checkout_note_ref_exists(root).unwrap_or(false) => return true,
+                Ok(()) => {}
+                Err(error) => {
+                    tracing::debug!(
+                        remote = remote.as_str(),
+                        error = %error,
+                        "configured remote did not provide Heddle notes during ingest-backed adopt"
                     );
                 }
             }
@@ -2014,6 +2066,111 @@ fn checkout_note_ref_exists(root: &Path) -> GitResult<bool> {
         .find_reference(super::git_notes::NOTES_REF)
         .map_err(git_err)?
         .is_some())
+}
+
+fn seed_checkout_note_refs_into_mirror(root: &Path, mirror_repo: &SleyRepository) -> GitResult<()> {
+    if !root.join(".git").exists() {
+        return Ok(());
+    }
+
+    let checkout_repo = match SleyRepository::discover(root) {
+        Ok(repo) => repo,
+        Err(_) => return Ok(()),
+    };
+    if checkout_repo.git_dir() == mirror_repo.git_dir() {
+        return Ok(());
+    }
+    let object_repo = common_repo_for_worktree(&checkout_repo)?;
+    let note_updates = collect_ref_updates(&object_repo)?
+        .into_iter()
+        .filter(|update| update.namespace == RefNamespace::Note)
+        .collect::<Vec<_>>();
+    if note_updates.is_empty() {
+        return Ok(());
+    }
+
+    copy_reachable_objects(
+        &object_repo,
+        mirror_repo,
+        note_updates.iter().map(|update| update.target),
+    )?;
+    apply_ref_updates(
+        mirror_repo,
+        &note_updates,
+        "heddle: seed mirror note refs from checkout",
+    )
+}
+
+fn hydrate_checkout_notes_from_remote_without_mirror(
+    root: &Path,
+    remote_name: &str,
+) -> GitResult<()> {
+    reject_reserved_git_remote_name(remote_name)?;
+    let checkout_repo = SleyRepository::discover(root).map_err(git_err)?;
+    let object_repo = common_repo_for_worktree(&checkout_repo)?;
+    let url = remote_fetch_url_from_checkout_config(root, remote_name)?
+        .ok_or_else(|| GitBridgeError::Git(format!("remote '{remote_name}' has no fetch URL")))?;
+
+    if let Some(path) = local_path_from_url(&url)? {
+        let remote_repo = open_repo(&path)?;
+        let note_updates = collect_ref_updates(&remote_repo)?
+            .into_iter()
+            .filter(|update| update.namespace == RefNamespace::Note)
+            .collect::<Vec<_>>();
+        if note_updates.is_empty() {
+            return Ok(());
+        }
+        copy_reachable_objects(
+            &remote_repo,
+            &object_repo,
+            note_updates.iter().map(|update| update.target),
+        )?;
+        apply_ref_updates(
+            &object_repo,
+            &note_updates,
+            &format!("heddle: hydrate notes from {remote_name}"),
+        )?;
+        return Ok(());
+    }
+
+    fetch_heddle_notes_into_repo(&object_repo, remote_name, &url)
+}
+
+fn fetch_heddle_notes_into_repo(
+    repo: &SleyRepository,
+    remote_name: &str,
+    url: &str,
+) -> GitResult<()> {
+    let mut credentials = NoCredentials;
+    let mut progress = SilentProgress;
+    let refspec = RefSpec::forced("refs/notes/*", "refs/notes/*")?.to_git_format();
+    repo.fetch(
+        url,
+        &[refspec],
+        FetchOptions {
+            quiet: true,
+            auto_follow_tags: false,
+            fetch_all_tags: false,
+            prune: false,
+            dry_run: false,
+            append: false,
+            write_fetch_head: true,
+            tag_option_explicit: true,
+            prune_option_explicit: true,
+            depth: None,
+            merge_src: None,
+            filter: None,
+            cloning: false,
+            update_shallow: false,
+            deepen_relative: false,
+            deepen_since: None,
+            deepen_not: Vec::new(),
+        },
+        &mut credentials,
+        &mut progress,
+    )
+    .map(|_| ())
+    .map_err(|err| GitBridgeError::Git(format!("failed to fetch notes from {remote_name}: {err}")))
 }
 
 fn parse_remote_url_items_from_config(

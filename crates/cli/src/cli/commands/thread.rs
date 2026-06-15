@@ -31,8 +31,9 @@ use super::{
     advice::RecoveryAdvice,
     command_catalog::{ActionTemplate, recommended_action_template},
     git_overlay_health::{
-        RepositoryVerificationState, build_repository_verification_state,
-        canonical_adopt_ref_command, canonical_bridge_reconcile_ref_preview_command,
+        GitOverlayMutationPreflight, RepositoryVerificationState,
+        build_repository_verification_state, canonical_adopt_ref_command,
+        canonical_bridge_reconcile_ref_preview_command, git_overlay_mutation_preflight_advice,
         override_trust_recommended_action, serialize_empty_action_as_null,
     },
     mount_lifecycle,
@@ -358,6 +359,13 @@ pub(crate) struct ThreadCaptureSummary {
 
 pub fn cmd_start(cli: &Cli, args: ThreadStartArgs) -> Result<()> {
     let repo = cli.open_repo()?;
+    if let Some(advice) = git_overlay_mutation_preflight_advice(
+        &repo,
+        "start",
+        GitOverlayMutationPreflight::capture_like(),
+    )? {
+        return Err(anyhow!(advice));
+    }
     if args.path.is_some() {
         ensure_worktree_clean(&repo, "start thread")?;
     }

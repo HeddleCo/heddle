@@ -4047,6 +4047,30 @@ fn dirty_git_repo_after_init_requires_import_before_commit() {
         "capture refusal should name the import recovery: {envelope}"
     );
 
+    let start = heddle_output(
+        &["--output", "json", "start", "feat/improvements"],
+        Some(temp.path()),
+    )
+    .expect("start should run");
+    assert!(!start.status.success(), "start must fail before import");
+    assert!(
+        start.stdout.is_empty(),
+        "failed JSON command should not write stdout: {}",
+        String::from_utf8_lossy(&start.stdout)
+    );
+    let stderr = std::str::from_utf8(&start.stderr).unwrap();
+    let envelope: Value = serde_json::from_str(stderr)
+        .unwrap_or_else(|err| panic!("start stderr should be JSON: {err}: {stderr}"));
+    assert_eq!(envelope["kind"], "git_history_needs_import");
+    assert_eq!(envelope["primary_command"], "heddle adopt --ref main");
+    assert!(
+        !temp
+            .path()
+            .join(".heddle/threads/feat%2Fimprovements/root")
+            .exists(),
+        "start refusal must not create a managed checkout"
+    );
+
     heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
     let after_import = json_value(temp.path(), &["verify", "--output", "json"]);
     assert_eq!(

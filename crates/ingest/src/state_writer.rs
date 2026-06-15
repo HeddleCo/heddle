@@ -33,9 +33,10 @@
 
 use chrono::{DateTime, Utc};
 use objects::{
-    object::{Agent, Attribution, ChangeId, ContentHash, Principal, State},
+    object::{Agent, Attribution, ChangeId, ContentHash, Principal, State, Status},
     store::ObjectStore,
 };
+use serde::Deserialize;
 
 use crate::{
     IngestError,
@@ -90,7 +91,7 @@ impl<'a, S: ObjectStore> StateWriter<'a, S> {
         // The plain `StateWriter` receives an already-translated tree hash and
         // does no tree translation itself, so it has no lossy signal to record —
         // lossy detection lives on the tree-translating `PackedImport` path.
-        let state = state_from_commit(commit, tree, parents, false);
+        let state = state_from_commit(commit, tree, parents, false)?;
 
         self.store.put_state(&state).map_err(IngestError::from)?;
 
@@ -107,13 +108,16 @@ pub(crate) fn state_from_commit(
     tree: ContentHash,
     parents: Vec<ChangeId>,
     git_lossy: bool,
-) -> State {
+) -> crate::Result<State> {
     // A lossy string view, derived once for the parsers that need text
     // (attribution trailers, the one-line intent). The verbatim bytes still
     // reach `with_raw_message` below, so a non-UTF8 message is preserved even
     // though these ASCII-footer parsers read a lossy view.
     let message = String::from_utf8_lossy(&commit.message);
-    let attribution = parse_attribution(&commit.author, &message);
+    let note = read_heddle_note(commit)?;
+    let identity = resolve_identity(commit, note.as_ref())?;
+    let attribution = parse_attribution_with_note(&commit.author, &message, note.as_ref());
+    let status = note_status(note.as_ref());
 
     // Heddle's hash includes the committer timestamp, so we use
     // committed_at (not authored_at) for `created_at` — keeps re-
@@ -131,7 +135,8 @@ pub(crate) fn state_from_commit(
     // the verbatim message, and any extra headers (in order, gpgsig inline at
     // its captured position) so the commit is byte-reconstructable later
     // (#566) without the mirror.
-    State::new(tree, parents, attribution)
+    let mut state = State::new(tree, parents, attribution)
+        .with_change_id(identity)
         .with_timestamp(committed_timestamp(&commit.committed_at))
         .with_authored_at(committed_timestamp(&commit.authored_at))
         .with_intent(first_line_of(&message))
@@ -143,19 +148,153 @@ pub(crate) fn state_from_commit(
         .with_raw_message(commit.message.clone())
         .with_git_lossy(git_lossy)
         .with_extra_headers(commit.extra_headers.clone())
+        .with_status(status);
+    if let Some(confidence) = note.as_ref().and_then(|note| note.confidence) {
+        state = state.with_confidence(confidence);
+    }
+    Ok(state)
 }
 
 /// Best-effort attribution parse. The principal is always the git author;
 /// the agent, if any, comes from a `Co-Authored-By:` trailer whose name
 /// or email resembles an AI assistant.
 pub fn parse_attribution(author: &GitSignature, message: &str) -> Attribution {
-    let principal = Principal::new(author.name.clone(), author.email.clone());
+    parse_attribution_with_note(author, message, None)
+}
 
-    if let Some(agent) = detect_agent_in_message(message) {
+fn parse_attribution_with_note(
+    author: &GitSignature,
+    message: &str,
+    note: Option<&HeddleNote>,
+) -> Attribution {
+    let principal = note
+        .and_then(|note| note.attribution.as_ref())
+        .map(|attribution| {
+            Principal::new(
+                attribution.principal_name.clone(),
+                attribution.principal_email.clone(),
+            )
+        })
+        .unwrap_or_else(|| Principal::new(author.name.clone(), author.email.clone()));
+
+    if let Some(agent) = note
+        .and_then(|note| note.attribution.as_ref())
+        .and_then(|attribution| attribution.agent.as_ref())
+        .or_else(|| note.and_then(|note| note.agent.as_ref()))
+        .map(|agent| Agent::new(agent.provider.clone(), agent.model.clone()))
+        .or_else(|| detect_agent_in_message(message))
+    {
         Attribution::with_agent(principal, agent)
     } else {
         Attribution::human(principal)
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct HeddleNote {
+    change_id: String,
+    #[serde(default)]
+    agent: Option<HeddleNoteAgent>,
+    #[serde(default)]
+    confidence: Option<f32>,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    attribution: Option<HeddleNoteAttribution>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HeddleNoteAttribution {
+    principal_name: String,
+    principal_email: String,
+    #[serde(default)]
+    agent: Option<HeddleNoteAgent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HeddleNoteAgent {
+    provider: String,
+    model: String,
+}
+
+fn read_heddle_note(commit: &CommitEntry) -> crate::Result<Option<HeddleNote>> {
+    let Some(note_bytes) = commit.heddle_note.as_ref() else {
+        return Ok(None);
+    };
+    serde_json::from_slice(note_bytes)
+        .map(Some)
+        .map_err(|error| {
+            IngestError::Git(format!(
+                "parse Heddle note for commit {}: {error}",
+                commit.sha
+            ))
+        })
+}
+
+fn resolve_identity(commit: &CommitEntry, note: Option<&HeddleNote>) -> crate::Result<ChangeId> {
+    if let Some(note) = note {
+        return ChangeId::parse(&note.change_id).map_err(|error| {
+            IngestError::Git(format!(
+                "invalid Heddle note change_id for commit {}: {error}",
+                commit.sha
+            ))
+        });
+    }
+    let message = String::from_utf8_lossy(&commit.message);
+    if let Some(change_id) = parse_trailers(&message).get("Heddle-Change-Id") {
+        return ChangeId::parse(change_id).map_err(|error| {
+            IngestError::Git(format!(
+                "invalid Heddle-Change-Id trailer for commit {}: {error}",
+                commit.sha
+            ))
+        });
+    }
+    deterministic_change_id_from_git_sha(&commit.sha)
+}
+
+fn note_status(note: Option<&HeddleNote>) -> Status {
+    match note.map(|note| note.status.as_str()) {
+        Some("published") => Status::Published,
+        _ => Status::Draft,
+    }
+}
+
+fn parse_trailers(message: &str) -> std::collections::HashMap<String, String> {
+    let mut trailers = std::collections::HashMap::new();
+    for line in message.lines().rev() {
+        if line.is_empty() {
+            break;
+        }
+        if let Some(pos) = line.find(':') {
+            let key = &line[..pos];
+            let value = line[pos + 1..].trim();
+            if key.starts_with("Heddle-") {
+                trailers.insert(key.to_string(), value.to_string());
+            }
+        } else if !line.trim().is_empty() {
+            break;
+        }
+    }
+    trailers
+}
+
+fn deterministic_change_id_from_git_sha(sha: &str) -> crate::Result<ChangeId> {
+    let trimmed = sha.trim();
+    if trimmed.len() < 32 || !trimmed.chars().take(32).all(|c| c.is_ascii_hexdigit()) {
+        return Err(IngestError::Git(format!(
+            "commit {sha} cannot seed deterministic Heddle identity: expected full hex SHA"
+        )));
+    }
+    let mut bytes = [0u8; 16];
+    for (idx, slot) in bytes.iter_mut().enumerate() {
+        let pair = &trimmed[idx * 2..idx * 2 + 2];
+        *slot = u8::from_str_radix(pair, 16).map_err(|error| {
+            IngestError::Git(format!(
+                "commit {sha} cannot seed deterministic Heddle identity: {error}"
+            ))
+        })?;
+    }
+    Ok(ChangeId::from_bytes(bytes))
 }
 
 /// Scan trailers for `Co-Authored-By: <name> <<email>>` lines and
@@ -265,6 +404,7 @@ mod tests {
             authored_at: Utc.with_ymd_and_hms(2026, 4, 1, 12, 0, 0).unwrap(),
             committed_at: Utc.with_ymd_and_hms(2026, 4, 1, 12, 0, 0).unwrap(),
             extra_headers: Vec::new(),
+            heddle_note: None,
         }
     }
 
@@ -388,6 +528,42 @@ mod tests {
             a.agent.is_none(),
             "human co-author must not produce an agent"
         );
+    }
+
+    #[test]
+    fn heddle_note_preserves_identity_and_metadata() {
+        let store = InMemoryStore::new();
+        let tree = empty_tree_hash(&store);
+        let expected_id = ChangeId::from_bytes([0x42; 16]);
+        let mut commit = make_commit("12".repeat(20).as_str(), vec![], "feat: noted\n");
+        commit.heddle_note = Some(
+            format!(
+                r#"{{
+  "change_id": "{}",
+  "status": "published",
+  "confidence": 0.875,
+  "agent": {{"provider": "openai", "model": "codex"}},
+  "attribution": {{
+    "principal_name": "Luke",
+    "principal_email": "luke@example.com",
+    "agent": {{"provider": "anthropic", "model": "claude-opus"}}
+  }}
+}}"#,
+                expected_id.to_string_full()
+            )
+            .into_bytes(),
+        );
+
+        let state = state_from_commit(&commit, tree, vec![], false).unwrap();
+
+        assert_eq!(state.change_id, expected_id);
+        assert_eq!(state.status, Status::Published);
+        assert_eq!(state.confidence, Some(0.875));
+        assert_eq!(state.attribution.principal.name, "Luke");
+        assert_eq!(state.attribution.principal.email, "luke@example.com");
+        let agent = state.attribution.agent.expect("note agent preserved");
+        assert_eq!(agent.provider, "anthropic");
+        assert_eq!(agent.model, "claude-opus");
     }
 
     #[test]

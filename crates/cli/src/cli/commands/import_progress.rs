@@ -5,6 +5,7 @@ use std::io::{self, IsTerminal, Write};
 
 use repo::Repository;
 
+use crate::bridge::git_util::ImportProgressEvent;
 use crate::cli::{Cli, should_output_json, style};
 
 /// Redraw the live commit counter at most once per this many commits, so a
@@ -42,22 +43,35 @@ impl ImportProgress {
         self.step(label);
     }
 
+    pub(crate) fn detail(&self, label: &str) {
+        self.step(label);
+    }
+
     /// Live per-commit counter for the import phase. Renders only to a TTY
     /// (throttled); under `--json`/agent output or a piped stdout it is a
     /// no-op so no control codes leak into machine-readable output (#550).
-    pub(crate) fn commit_tick(&mut self, count: usize) {
+    pub(crate) fn commit_tick(&mut self, event: ImportProgressEvent) {
         if !self.enabled || !io::stdout().is_terminal() {
             return;
         }
-        if !count.is_multiple_of(COMMIT_TICK_INTERVAL) {
+        let should_render = event.commits_imported == 0
+            || event.commits_imported == event.total_commits
+            || event.commits_imported.is_multiple_of(COMMIT_TICK_INTERVAL);
+        if !should_render {
             return;
         }
+        let label = if event.total_commits == 0 {
+            "counting commits"
+        } else {
+            "importing commits"
+        };
         print!(
             "\r{}\x1b[K",
             style::dim(&format!(
-                "[{}/{}] importing commits… {count}",
+                "[{}/{}] {label}… {}",
                 self.current + 1,
-                self.total
+                self.total,
+                format_commit_progress(event),
             ))
         );
         io::stdout().flush().ok();
@@ -93,5 +107,52 @@ impl ImportProgress {
                 style::dim(&format!("[{next}/{}] {label}", self.total))
             );
         }
+    }
+}
+
+fn format_commit_progress(event: ImportProgressEvent) -> String {
+    let inspected = if event.total_commits == 0 {
+        format!(
+            "{} inspected, counting reachable commits",
+            event.commits_imported
+        )
+    } else {
+        format!(
+            "{}/{} inspected ({}%)",
+            event.commits_imported,
+            event.total_commits,
+            event.commits_imported.saturating_mul(100) / event.total_commits
+        )
+    };
+    format!("{inspected}, {} new states", event.states_created)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn import_commit_progress_includes_total_percent_and_new_states() {
+        let rendered = format_commit_progress(ImportProgressEvent {
+            commits_imported: 64,
+            total_commits: 128,
+            states_created: 40,
+        });
+
+        assert_eq!(rendered, "64/128 inspected (50%), 40 new states");
+    }
+
+    #[test]
+    fn import_commit_progress_handles_unknown_total_counting_phase() {
+        let rendered = format_commit_progress(ImportProgressEvent {
+            commits_imported: 0,
+            total_commits: 0,
+            states_created: 0,
+        });
+
+        assert_eq!(
+            rendered,
+            "0 inspected, counting reachable commits, 0 new states"
+        );
     }
 }

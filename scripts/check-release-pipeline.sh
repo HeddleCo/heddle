@@ -122,6 +122,15 @@ else
   err "RELEASING.md must document the Linux glibc floor (see #549)"
 fi
 
+# macOS FSKit SDK floor. Every Apple release artifact must build on macos-26;
+# older runner images can lack the FSKit SDK shape the CLI's mount feature now
+# compiles against.
+if grep -E "runner:\s*macos-(1[0-9]|2[0-5])\b|runs-on:\s*macos-(1[0-9]|2[0-5])\b" "$WF" >/dev/null; then
+  err "release workflow contains a pre-macos-26 Apple runner; macOS release artifacts must build on macos-26"
+else
+  ok "no pre-macos-26 runner pin in release workflow"
+fi
+
 # Packaging: tarball for unix, zip for windows.
 grep -E "\.tar\.gz" "$WF" >/dev/null && ok "tar.gz packaging" || err "no tar.gz packaging in $WF"
 grep -E "\.zip"    "$WF" >/dev/null && ok "zip packaging"    || err "no zip packaging in $WF"
@@ -141,6 +150,26 @@ if grep -F 'Heddle-${TAG}-macos-universal.dmg' "$WF" >/dev/null \
   ok "macOS cask DMG artifact name declared"
 else
   err "missing deterministic Heddle-<tag>-macos-universal.dmg artifact name"
+fi
+
+if grep -F 'cargo build --release --locked -p ${{ env.CRATE_NAME }} --features mount --target ${{ matrix.target }}' "$WF" >/dev/null; then
+  ok "release CLI build explicitly enables mount backends"
+else
+  err "release CLI build must pass --features mount so macOS binaries include FSKit support"
+fi
+
+if grep -F "cargo build --release --locked -p heddle-mount --features fskit --target" scripts/build-macos-cask-artifact.sh >/dev/null \
+   && grep -F "cargo build --release --locked -p heddle-cli --bin heddle --features mount --target" scripts/build-macos-cask-artifact.sh >/dev/null; then
+  ok "macOS cask build explicitly enables FSKit/mount features"
+else
+  err "macOS cask build must compile heddle-mount with --features fskit and heddle-cli with --features mount"
+fi
+
+if ! grep -F "com.apple.security.temporary-exception.files." \
+  crates/mount/swift/HeddleHost/HeddleFSModule/HeddleFSModule.entitlements >/dev/null; then
+  ok "FSKit extension avoids profile-gated temporary path exceptions"
+else
+  err "FSKit extension must not request temporary-exception.files entitlements; Developer ID profiles do not authorize them"
 fi
 
 if [[ -x scripts/render-homebrew-cask.sh ]] \
@@ -334,6 +363,28 @@ if build_job.is_a?(Hash)
       errors << "#{target} builds on '#{runner}', not ubuntu-22.04 - raises the glibc floor above 2.35 (#549)"
     end
   end
+  apple_legs = include.select do |entry|
+    entry.is_a?(Hash) && entry.fetch("target", "").to_s.end_with?("-apple-darwin")
+  end
+  errors << "build matrix has no *-apple-darwin legs to pin to macos-26" if apple_legs.empty?
+  apple_legs.each do |entry|
+    runner = entry.fetch("runner", "").to_s
+    target = entry["target"]
+    if runner == "macos-26"
+      oks << "#{target} pinned to macos-26 (FSKit SDK floor)"
+    else
+      errors << "#{target} builds on '#{runner}', not macos-26 - risks missing the FSKit SDK floor"
+    end
+  end
+  cask = jobs["build-macos-cask"]
+  if cask.is_a?(Hash)
+    runner = cask.fetch("runs-on", "").to_s
+    if runner == "macos-26"
+      oks << "build-macos-cask runs on macos-26"
+    else
+      errors << "build-macos-cask runs on '#{runner}', not macos-26"
+    end
+  end
 end
 
 puts "OKS:"
@@ -476,6 +527,26 @@ if isinstance(build_job, dict):
             errors.append(
                 f"{target} builds on '{runner}', not ubuntu-22.04 — raises the glibc floor above 2.35 (#549)"
             )
+    apple_legs = [e for e in include if isinstance(e, dict)
+                  and str(e.get("target", "")).endswith("-apple-darwin")]
+    if not apple_legs:
+        errors.append("build matrix has no *-apple-darwin legs to pin to macos-26")
+    for e in apple_legs:
+        runner = str(e.get("runner", ""))
+        target = e.get("target")
+        if runner == "macos-26":
+            oks.append(f"{target} pinned to macos-26 (FSKit SDK floor)")
+        else:
+            errors.append(
+                f"{target} builds on '{runner}', not macos-26 — risks missing the FSKit SDK floor"
+            )
+    cask = jobs.get("build-macos-cask")
+    if isinstance(cask, dict):
+        runner = str(cask.get("runs-on", ""))
+        if runner == "macos-26":
+            oks.append("build-macos-cask runs on macos-26")
+        else:
+            errors.append(f"build-macos-cask runs on '{runner}', not macos-26")
 
 print("OKS:")
 for o in oks:

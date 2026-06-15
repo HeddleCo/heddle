@@ -31,8 +31,8 @@ use crate::{
         git_core::clone_url_to_bare,
         git_export::export_all,
         git_import::{
-            backfill_fidelity, import_all, import_all_with_options, import_selected_refs,
-            import_selected_refs_with_options,
+            backfill_fidelity, import_all, import_all_with_options_and_progress,
+            import_selected_refs, import_selected_refs_with_options_and_progress,
         },
         git_util::{ExportedRef, GitImportOptions, LossyGitImportEntry},
     },
@@ -865,24 +865,33 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
             let mut progress = ImportProgress::start(cli, &repo, &scope, &source_label);
             progress.advance("importing commits");
             let import_options = GitImportOptions { lossy };
+            let mut on_commit = |event| progress.commit_tick(event);
             let stats = match &resolved {
-                Some(r) if refs.is_empty() => {
-                    import_all_with_options(&mut bridge, Some(r.path()), import_options)?
-                }
-                Some(r) => import_selected_refs_with_options(
+                Some(r) if refs.is_empty() => import_all_with_options_and_progress(
+                    &mut bridge,
+                    Some(r.path()),
+                    import_options,
+                    Some(&mut on_commit),
+                )?,
+                Some(r) => import_selected_refs_with_options_and_progress(
                     &mut bridge,
                     Some(r.path()),
                     &refs,
                     import_options,
+                    Some(&mut on_commit),
                 )?,
-                None if refs.is_empty() => {
-                    import_all_with_options(&mut bridge, Some(default_source), import_options)?
-                }
-                None => import_selected_refs_with_options(
+                None if refs.is_empty() => import_all_with_options_and_progress(
+                    &mut bridge,
+                    Some(default_source),
+                    import_options,
+                    Some(&mut on_commit),
+                )?,
+                None => import_selected_refs_with_options_and_progress(
                     &mut bridge,
                     Some(default_source),
                     &refs,
                     import_options,
+                    Some(&mut on_commit),
                 )?,
             };
             progress.advance("writing refs");

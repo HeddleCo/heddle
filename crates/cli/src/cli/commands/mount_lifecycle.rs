@@ -241,7 +241,7 @@ mod macos {
     ///
     /// FSKit is the preferred adapter: when the System Extension
     /// is installed and enabled, the CLI shells out to
-    /// `mount -t heddle` and the kernel routes through `fskitd`
+    /// `mount -F -t heddle` and the kernel routes through `fskitd`
     /// → our extension → the Rust core. NFS is the universal
     /// fallback for hosts where the extension is missing or the
     /// user hasn't approved it yet.
@@ -259,7 +259,7 @@ mod macos {
         }
     }
 
-    /// RAII wrapper around an `/sbin/mount -t heddle` invocation.
+    /// RAII wrapper around an `/sbin/mount -F -t heddle` invocation.
     /// Dropping (or calling `unmount`) runs `umount` against the
     /// stashed mountpoint.
     struct FsKitMount {
@@ -269,6 +269,7 @@ mod macos {
     impl FsKitMount {
         fn mount(repo_path: &Path, thread_id: &str, mountpoint: &Path) -> Result<Self> {
             let status = Command::new("/sbin/mount")
+                .arg("-F")
                 .arg("-t")
                 .arg("heddle")
                 .arg("-o")
@@ -276,10 +277,10 @@ mod macos {
                 .arg(repo_path)
                 .arg(mountpoint)
                 .status()
-                .context("invoke /sbin/mount -t heddle")?;
+                .context("invoke /sbin/mount -F -t heddle")?;
             if !status.success() {
                 return Err(anyhow!(
-                    "/sbin/mount -t heddle returned {status} \
+                    "/sbin/mount -F -t heddle returned {status} \
                      (extension installed but rejected the mount; \
                      check `log show --predicate 'subsystem == \"sh.heddle.HeddleFSModule\"'`)"
                 ));
@@ -322,7 +323,7 @@ mod macos {
 
     /// Mount `thread_id` into `mountpoint`. On macOS 26.0+ this
     /// probes FSKit readiness first; if the extension is enabled,
-    /// mounts via `mount -t heddle`. If the extension is installed
+    /// mounts via `mount -F -t heddle`. If the extension is installed
     /// but disabled, the CLI opens System Settings and polls briefly
     /// so the moment the user enables it this same start continues
     /// through FSKit. Other states fall back to NFS.
@@ -341,20 +342,19 @@ mod macos {
                 Readiness::Ready => {
                     info!(
                         thread = thread_id,
-                        "FSKit extension ready; using `mount -t heddle`"
+                        "FSKit extension ready; using `mount -F -t heddle`"
                     );
-                    fskit_readiness = Some(FskitReadinessReport {
-                        state: "ready",
-                        backend: "fskit",
-                        action: "mounted",
-                        settings_url: None,
-                    });
                     // Don't construct an in-process ContentAddressedMount
                     // — the extension owns the mount lifetime.
-                    BackingSession::FsKit(
-                        FsKitMount::mount(&root, thread_id, mountpoint)
-                            .context("FSKit mount via /sbin/mount")?,
-                    )
+                    mount_via_fskit_or_nfs(
+                        &root,
+                        thread_id,
+                        mountpoint,
+                        &mut fskit_readiness,
+                        "ready",
+                        "mounted",
+                        None,
+                    )?
                 }
                 Readiness::NeedsApproval => {
                     let settings_url = settings_deep_link().url;
@@ -363,18 +363,17 @@ mod macos {
                     if wait_for_fskit_ready() {
                         info!(
                             thread = thread_id,
-                            "FSKit extension enabled during poll; using `mount -t heddle`"
+                            "FSKit extension enabled during poll; using `mount -F -t heddle`"
                         );
-                        fskit_readiness = Some(FskitReadinessReport {
-                            state: "ready_after_approval",
-                            backend: "fskit",
-                            action: "mounted_after_poll",
-                            settings_url: Some(settings_url),
-                        });
-                        BackingSession::FsKit(
-                            FsKitMount::mount(&root, thread_id, mountpoint)
-                                .context("FSKit mount via /sbin/mount")?,
-                        )
+                        mount_via_fskit_or_nfs(
+                            &root,
+                            thread_id,
+                            mountpoint,
+                            &mut fskit_readiness,
+                            "ready_after_approval",
+                            "mounted_after_poll",
+                            Some(settings_url),
+                        )?
                     } else {
                         eprintln!(
                             "Heddle FSKit extension still disabled after 60s; using NFS for this run. Enable it and re-run for the fast path."
@@ -548,6 +547,48 @@ mod macos {
             "using NFS fallback (install + enable the Heddle FSKit extension for a faster path)"
         );
         Ok(BackingSession::Nfs(session))
+    }
+
+    fn mount_via_fskit_or_nfs(
+        repo_root: &Path,
+        thread_id: &str,
+        mountpoint: &Path,
+        fskit_readiness: &mut Option<FskitReadinessReport>,
+        success_state: &'static str,
+        success_action: &'static str,
+        settings_url: Option<&'static str>,
+    ) -> Result<BackingSession> {
+        match FsKitMount::mount(repo_root, thread_id, mountpoint) {
+            Ok(mount) => {
+                *fskit_readiness = Some(FskitReadinessReport {
+                    state: success_state,
+                    backend: "fskit",
+                    action: success_action,
+                    settings_url,
+                });
+                Ok(BackingSession::FsKit(mount))
+            }
+            Err(error) => {
+                warn!(
+                    thread = thread_id,
+                    error = %error,
+                    "FSKit mount failed after readiness probe; using NFS fallback"
+                );
+                eprintln!(
+                    "Heddle FSKit mount failed ({error:#}); using NFS fallback for this run.\n\
+                     If this follows a Heddle update, reinstall or re-enable the Heddle host app so macOS reloads the current File System Extension."
+                );
+                *fskit_readiness = Some(FskitReadinessReport {
+                    state: "mount_failed",
+                    backend: "nfs",
+                    action: "fell_back",
+                    settings_url,
+                });
+                mount_via_nfs(repo_root, thread_id, mountpoint).with_context(|| {
+                    format!("FSKit mount failed ({error:#}); NFS fallback also failed")
+                })
+            }
+        }
     }
 
     pub fn unmount_thread_if_mounted(thread_id: &str) -> bool {

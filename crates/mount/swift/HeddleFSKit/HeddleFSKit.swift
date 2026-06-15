@@ -16,7 +16,7 @@
 //
 // SDK-verification result (plan §6.1):
 //
-// The macOS 26.5 SDK at
+// The macOS 26.0 SDK at
 // `MacOSX.sdk/System/Library/Frameworks/FSKit.framework/Headers/`
 // confirms the System-Extension model:
 //
@@ -305,7 +305,7 @@ final class HeddleFSKitSession {
 
 // MARK: - FSKit class skeletons ---------------------------------
 //
-// These compile against the real macOS 26.5 SDK headers. They are
+// These compile against the real macOS 26.0 SDK headers. They are
 // the entry points a future `.fsmodule` System Extension target
 // would consume:
 //

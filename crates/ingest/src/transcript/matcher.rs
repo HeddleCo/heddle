@@ -475,6 +475,7 @@ mod tests {
             authored_at: when,
             committed_at: when,
             extra_headers: Vec::new(),
+            heddle_note: None,
         }
     }
 

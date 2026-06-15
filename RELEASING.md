@@ -259,10 +259,12 @@ cosign verify-blob \
 We build natively (one GitHub-hosted runner per target) rather than
 cross-compiling from a single host. Trade-off:
 
-- **Native matrix (chosen)**: five parallel runners (~5–10 min each
+- **Targeted matrix (chosen)**: five parallel runners (~5–10 min each
   with `Swatinem/rust-cache`). No `cross`, no sysroot juggling, no
   Apple-codesign-on-Linux contortions later if/when we add notarization.
-  ARM is free on GitHub-hosted runners (`ubuntu-22.04-arm`, `macos-14`).
+  Linux ARM stays on `ubuntu-22.04-arm` for the glibc floor; both macOS
+  CLI legs run on `macos-26` so the standalone tarballs and cask app use
+  the same FSKit SDK/deployment floor.
 - **Cross-compilation**: one runner, more setup. Wins on cost only if
   we hit a parallelism cap, which we won't at our release cadence.
 

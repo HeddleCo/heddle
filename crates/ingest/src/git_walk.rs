@@ -101,6 +101,10 @@ pub struct CommitEntry {
     /// position (not split out) so a non-canonical header order reconstructs
     /// byte-identically. #564 step 1.
     pub extra_headers: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Optional Heddle metadata note from `refs/notes/heddle`, if present.
+    /// The state writer parses this to preserve exported Heddle identity and
+    /// metadata during a fresh ingest of a Git repo.
+    pub heddle_note: Option<Vec<u8>>,
 }
 
 /// Author/committer identity + timestamp.
@@ -410,6 +414,7 @@ impl GitSource {
         let message = commit.message.to_vec();
 
         let extra_headers = collect_commit_extra_headers(&object.body);
+        let heddle_note = self.read_heddle_note_bytes(&oid.to_string())?;
 
         Ok(CommitEntry {
             sha: oid.to_string(),
@@ -421,7 +426,18 @@ impl GitSource {
             authored_at,
             committed_at,
             extra_headers,
+            heddle_note,
         })
+    }
+
+    /// Read Heddle's metadata note for `sha`, if the source repository
+    /// carries `refs/notes/heddle`.
+    pub fn read_heddle_note_bytes(&self, sha: &str) -> crate::Result<Option<Vec<u8>>> {
+        let oid = parse_oid(self.repo.object_format(), sha)?;
+        let notes_ref = sley::notes::NotesRef::expand("refs/notes/heddle");
+        self.repo
+            .read_note_bytes(&notes_ref, &oid)
+            .map_err(|e| IngestError::Git(format!("read Heddle note for {sha}: {e}")))
     }
 
     /// Read the direct children of a git tree (non-recursive).
@@ -557,10 +573,23 @@ impl GitSource {
         &self,
         heads: impl IntoIterator<Item = String>,
     ) -> crate::Result<Vec<CommitEntry>> {
+        self.commits_topo_with_progress(heads, None)
+    }
+
+    /// [`Self::commits_topo`] with a callback that reports how many commits
+    /// have been read while the final total is still being discovered.
+    pub fn commits_topo_with_progress(
+        &self,
+        heads: impl IntoIterator<Item = String>,
+        mut progress: Option<&mut dyn FnMut(usize)>,
+    ) -> crate::Result<Vec<CommitEntry>> {
         // BFS from heads; dedupe on SHA.
         let mut queue: VecDeque<String> = heads.into_iter().collect();
         let mut seen: HashSet<String> = HashSet::new();
         let mut entries: HashMap<String, CommitEntry> = HashMap::new();
+        if let Some(progress) = progress.as_deref_mut() {
+            progress(0);
+        }
 
         while let Some(sha) = queue.pop_front() {
             if seen.contains(&sha) {
@@ -574,6 +603,9 @@ impl GitSource {
                 }
             }
             entries.insert(sha, entry);
+            if let Some(progress) = progress.as_deref_mut() {
+                progress(entries.len());
+            }
         }
 
         // Kahn's algorithm for a stable parent-before-child order.
@@ -1421,6 +1453,7 @@ mod tests {
             authored_at: Utc::now(),
             committed_at: Utc::now(),
             extra_headers: Vec::new(),
+            heddle_note: None,
         };
         let commits = vec![
             make("A", &[]),

@@ -16,7 +16,10 @@
 //   2. The OS scans the embedded `.appex` and registers the
 //      extension in the user's available-extensions list.
 //   3. The user toggles it on in System Settings → General →
-//      Login Items & Extensions → File System Extensions.
+//      Login Items & Extensions → File System Extensions, with the
+//      sheet grouped by Category. The per-app ("By App") grouping has
+//      an Apple-side bug where the FSKit toggle silently no-ops, so we
+//      always steer users to the Category view.
 //
 // This manager surfaces the workflow: it asks pluginkit for the
 // real FSKit module state, keeps polling while the onboarding
@@ -33,7 +36,7 @@ final class ExtensionManager {
     nonisolated static let bundleIdentifier = "sh.heddle.HeddleHost.HeddleFSModule"
     nonisolated static let installAppName = "Heddle.app"
     nonisolated static let settingsPath =
-        "System Settings > General > Login Items & Extensions > File System Extensions"
+        "System Settings > General > Login Items & Extensions > File System Extensions (group by Category)"
 
     enum Status {
         /// pluginkit lists the FSKit module with a leading "+".
@@ -100,7 +103,7 @@ final class ExtensionManager {
         case .registeredEnabled:
             return "Heddle is enabled in File System Extensions. Re-run `heddle start --workspace virtualized` to mount through FSKit."
         case .registeredDisabled:
-            return "Heddle is installed but macOS has it turned off. Toggle the Heddle row on in File System Extensions."
+            return "Heddle is installed but macOS has it turned off. Open File System Extensions, switch the grouping to Category, and toggle the Heddle row on. Don't use the By App view — its FSKit toggle is a known macOS bug that silently does nothing."
         case .unregistered:
             return "macOS has not registered the bundled FSKit module yet. Confirm Heddle.app is in /Applications, then refresh LaunchServices."
         case .devLocation(let path):
@@ -278,9 +281,14 @@ final class ExtensionManager {
         let version = ProcessInfo.processInfo.operatingSystemVersion
 
         if #available(macOS 26, *) {
-            // macOS 26 Tahoe: the category-grouped Extensions tab is the
-            // reliable user path for toggling FSKit modules. The anchor is
-            // best-effort and may still land on the parent pane.
+            // macOS 26 Tahoe: `?Extensions` lands on Login Items &
+            // Extensions, which is as deep as the URL scheme goes —
+            // empirically there is no public anchor that opens the
+            // File System Extensions sheet directly, and the
+            // Category-vs-By-App choice is a grouping control *inside*
+            // that sheet rather than a separate destination. So we land
+            // here and rely on the onboarding copy to tell the user to
+            // group by Category (the By App toggle no-ops; Apple bug).
             return SettingsDestination(
                 url: URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension?Extensions")
             )

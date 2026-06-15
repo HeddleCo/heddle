@@ -1258,9 +1258,8 @@ pub(crate) fn recover_oplog_at(path: &Path) -> Result<OplogRecoveryReport> {
             // Healthy this run. If an earlier recovery (e.g. the silent
             // auto-fallback) already salvaged it, surface that sidecar's detail
             // rather than a bare "nothing to recover".
-            return Ok(
-                OplogRecoveryReport::from_prior_sidecar(path).unwrap_or_else(OplogRecoveryReport::healthy)
-            );
+            return Ok(OplogRecoveryReport::from_prior_sidecar(path)
+                .unwrap_or_else(OplogRecoveryReport::healthy));
         }
         Err(err) => err,
     };

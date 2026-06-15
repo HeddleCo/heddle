@@ -27,8 +27,9 @@
 //!
 //! - Pack data on disk: streamed; only one compressed object held in
 //!   memory at a time.
-//! - Index entries in bucket buffers: each bucket is a `BufWriter`
-//!   with default capacity (~8 KB), so 512 buckets at peak is ~4 MB.
+//! - Index entries in bucket buffers: at most 32 bucket files are held
+//!   open at once, each behind a default-capacity `BufWriter` (~8 KB),
+//!   so peak buffering is ~256 KB.
 //! - Sort scratch at finalize: O(largest bucket). For uniformly-
 //!   distributed BLAKE3 hashes / ULID change-ids and N total objects,
 //!   the largest bucket is ~N/256 entries ≈ 40 bytes each. Even at
@@ -58,7 +59,7 @@
 //!   the second pass.
 
 use std::{
-    fs::File,
+    fs::{File, OpenOptions},
     io::{BufWriter, Read, Seek, SeekFrom, Write},
     path::PathBuf,
 };
@@ -85,6 +86,10 @@ use crate::{
 const BUCKETS_PER_VARIANT: usize = 256;
 /// 256 for Hash ids + 256 for ChangeId ids.
 const TOTAL_BUCKETS: usize = BUCKETS_PER_VARIANT * 2;
+/// Cap concurrently-open index-bucket files. macOS GUI-launched
+/// processes commonly inherit a 256-fd soft limit; imports also need
+/// room for Git pack/index files, sqlite maps, the output pack, etc.
+const MAX_OPEN_BUCKET_WRITERS: usize = 32;
 
 /// Variant indices into the `bucket_*` arrays. `Hash` ids fill the
 /// lower half (matches the variant order in `PackObjectId` which makes
@@ -118,9 +123,11 @@ pub struct StreamingPackBuilder<W: Write + Read + Seek> {
     /// so we can clean up on `Drop` if `finalize` is never called.
     bucket_dir: PathBuf,
     /// Buckets `[variant][prefix_byte]` → optional buffered file.
-    /// Lazily opened on first write to avoid creating 512 empty
-    /// files for sparse imports.
-    bucket_writers: Vec<Option<BufWriter<File>>>,
+    /// Lazily opened on first write and capped with LRU eviction so a
+    /// large import cannot exhaust the process fd limit.
+    bucket_writers: Vec<Option<BucketWriter>>,
+    open_bucket_writers: usize,
+    bucket_access_tick: u64,
     bucket_paths: Vec<PathBuf>,
     /// File path where the pack index is materialized at `finalize`.
     /// Bytes are written incrementally as buckets are sorted, so the
@@ -129,6 +136,11 @@ pub struct StreamingPackBuilder<W: Write + Read + Seek> {
     /// Set true on `finalize` so `Drop` knows the bucket dir was
     /// already cleaned and shouldn't be removed again.
     finalized: bool,
+}
+
+struct BucketWriter {
+    writer: BufWriter<File>,
+    last_used: u64,
 }
 
 impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
@@ -171,6 +183,9 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
                 bucket_dir.join(format!("bucket-{variant}-{prefix:02x}"))
             })
             .collect();
+        for path in &bucket_paths {
+            let _ = std::fs::remove_file(path);
+        }
 
         Ok(Self {
             pack_writer: Some(BufWriter::new(pack_writer)),
@@ -181,6 +196,8 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
             compression,
             bucket_dir,
             bucket_writers: (0..TOTAL_BUCKETS).map(|_| None).collect(),
+            open_bucket_writers: 0,
+            bucket_access_tick: 0,
             bucket_paths,
             index_path,
             finalized: false,
@@ -336,14 +353,48 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
     }
 
     fn get_or_open_bucket(&mut self, idx: usize) -> Result<&mut BufWriter<File>> {
+        self.bucket_access_tick = self.bucket_access_tick.wrapping_add(1);
+        let last_used = self.bucket_access_tick;
         if self.bucket_writers[idx].is_none() {
+            if self.open_bucket_writers >= MAX_OPEN_BUCKET_WRITERS {
+                self.evict_lru_bucket()?;
+            }
             let path = &self.bucket_paths[idx];
-            let f = File::create(path).map_err(StoreError::from)?;
-            self.bucket_writers[idx] = Some(BufWriter::new(f));
+            let f = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(StoreError::from)?;
+            self.bucket_writers[idx] = Some(BucketWriter {
+                writer: BufWriter::new(f),
+                last_used,
+            });
+            self.open_bucket_writers += 1;
+        } else if let Some(bucket) = self.bucket_writers[idx].as_mut() {
+            bucket.last_used = last_used;
         }
-        Ok(self.bucket_writers[idx]
+        Ok(&mut self.bucket_writers[idx]
             .as_mut()
-            .expect("just inserted above"))
+            .expect("just inserted above")
+            .writer)
+    }
+
+    fn evict_lru_bucket(&mut self) -> Result<()> {
+        let Some((idx, _)) = self
+            .bucket_writers
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, bucket)| bucket.as_ref().map(|bucket| (idx, bucket.last_used)))
+            .min_by_key(|(_, last_used)| *last_used)
+        else {
+            return Ok(());
+        };
+
+        if let Some(mut bucket) = self.bucket_writers[idx].take() {
+            bucket.writer.flush().map_err(StoreError::from)?;
+            self.open_bucket_writers -= 1;
+        }
+        Ok(())
     }
 
     /// Close the pack: patch the header count, append the BLAKE3
@@ -359,14 +410,15 @@ impl<W: Write + Read + Seek> StreamingPackBuilder<W> {
     pub fn finalize(mut self) -> Result<(W, PackStats)> {
         // 1. Flush every bucket so reads in the next phase see all
         //    queued entries. `flatten()` skips the never-opened slots.
-        for w in self.bucket_writers.iter_mut().flatten() {
-            w.flush().map_err(StoreError::from)?;
+        for bucket in self.bucket_writers.iter_mut().flatten() {
+            bucket.writer.flush().map_err(StoreError::from)?;
         }
         // Drop the writers so the OS file handles close before we
         // re-open the same paths for reading.
         for slot in self.bucket_writers.iter_mut() {
             *slot = None;
         }
+        self.open_bucket_writers = 0;
 
         // 2. Patch the pack header with the real object count, then
         //    re-stream the [header][body] bytes to compute the
@@ -762,6 +814,46 @@ mod tests {
             let id = PackObjectId::Hash(hashes[i]);
             let (_ty, data) = reader.get_object(&id).unwrap().unwrap();
             assert_eq!(data, format!("payload-{i}").into_bytes());
+        }
+    }
+
+    #[test]
+    fn bucket_writers_are_lru_capped_below_fd_limit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (mut b, _bucket_dir, idx_path) = fresh_builder(&tmp);
+        let mut ids = Vec::new();
+
+        for i in 0..BUCKETS_PER_VARIANT {
+            let hash = deterministic_hash(i as u8);
+            ids.push(PackObjectId::Hash(hash));
+            b.add(hash, ObjectType::Blob, format!("hash-{i}").into_bytes())
+                .unwrap();
+            assert!(
+                b.open_bucket_writers <= MAX_OPEN_BUCKET_WRITERS,
+                "open bucket writers should stay capped"
+            );
+        }
+
+        for i in 0..BUCKETS_PER_VARIANT {
+            let cid = deterministic_change_id(i as u8);
+            ids.push(PackObjectId::ChangeId(cid));
+            b.add_id(
+                PackObjectId::ChangeId(cid),
+                ObjectType::State,
+                format!("state-{i}").into_bytes(),
+            )
+            .unwrap();
+            assert!(
+                b.open_bucket_writers <= MAX_OPEN_BUCKET_WRITERS,
+                "open bucket writers should stay capped"
+            );
+        }
+
+        let (pack_data, index_data, stats) = finalize_cursor(b, &idx_path);
+        assert_eq!(stats.object_count, TOTAL_BUCKETS as u64);
+        let reader = PackReader::from_bytes(pack_data, index_data).unwrap();
+        for id in ids {
+            assert!(reader.has_object(&id), "missing id {id:?}");
         }
     }
 

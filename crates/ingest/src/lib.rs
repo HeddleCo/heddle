@@ -49,7 +49,10 @@ pub mod tree_translate;
 
 pub use git_walk::{CommitEntry, GitSource, RefHead, RefNamespace, ReflogEntry};
 pub use import_options::{ImportOptions, LossyImportAction, LossyImportEntry};
-pub use importer::{ImportStats, Importer, import_git_into, import_git_into_with_options};
+pub use importer::{
+    ImportProgressEvent, ImportStats, Importer, import_git_into, import_git_into_with_options,
+    import_git_into_with_options_and_progress,
+};
 pub use oplog_emit::{OplogEmitStats, OplogEmitter};
 pub use reasoning::{ReasoningEvidence, ReasoningPoint, ReasoningTarget};
 pub use reasoning_emit::{ReasoningEmitStats, ReasoningEmitter};

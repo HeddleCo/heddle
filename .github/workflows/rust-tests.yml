@@ -824,15 +824,14 @@ jobs:
       - name: sccache stats
         run: sccache --show-stats
 
-  # The fskit feature is cfg(target_os = "macos") and OFF by default, so no
-  # other lane ever compiles it (release.yml builds default features; this
-  # workflow runs on Linux). Without this job, FSKit changes land
+  # The fskit feature is cfg(target_os = "macos") and most PR lanes run on
+  # Linux. Without this job, FSKit changes can land
   # compile-unverified — caught on PR #667, whose FSKit fix was authored on
   # a Linux box. `cargo check` also exercises build.rs's swiftc compile of
   # the HeddleFSKit bridge, so the Swift side is validated too.
   fskit-check:
     name: FSKit compile check (macOS)
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 30
     env:
       # The workflow-level RUSTC_WRAPPER points at sccache, which only the

@@ -25,7 +25,7 @@ use crate::bridge::{
         thread_is_unclaimed_bootstrap,
     },
     git_notes,
-    git_util::{GitImportOptions, ImportStats, PartialMirrorRef, SkippedRef},
+    git_util::{GitImportOptions, ImportProgressEvent, ImportStats, PartialMirrorRef, SkippedRef},
 };
 
 /// One source ref the import will consider, with both its immediate target
@@ -547,12 +547,23 @@ pub fn import_all_with_options(
     })
 }
 
+pub fn import_all_with_options_and_progress(
+    bridge: &mut GitBridge,
+    git_path: Option<&Path>,
+    options: GitImportOptions,
+    progress: Option<&mut dyn FnMut(ImportProgressEvent)>,
+) -> GitResult<ImportStats> {
+    bridge.with_mapping_rollback(|bridge| {
+        import_with_ref_filter(bridge, git_path, None, options, progress)
+    })
+}
+
 /// Like [`import_all`], reporting the running commit count to `progress`
 /// after each commit is walked (drives the adopt progress indicator).
 pub fn import_all_with_progress(
     bridge: &mut GitBridge,
     git_path: Option<&Path>,
-    progress: Option<&mut dyn FnMut(usize)>,
+    progress: Option<&mut dyn FnMut(ImportProgressEvent)>,
 ) -> GitResult<ImportStats> {
     bridge.with_mapping_rollback(|bridge| {
         import_with_ref_filter(
@@ -594,13 +605,26 @@ pub fn import_selected_refs_with_options(
     })
 }
 
+pub fn import_selected_refs_with_options_and_progress(
+    bridge: &mut GitBridge,
+    git_path: Option<&Path>,
+    refs: &[String],
+    options: GitImportOptions,
+    progress: Option<&mut dyn FnMut(ImportProgressEvent)>,
+) -> GitResult<ImportStats> {
+    let wanted = refs.iter().cloned().collect::<HashSet<_>>();
+    bridge.with_mapping_rollback(|bridge| {
+        import_with_ref_filter(bridge, git_path, Some(&wanted), options, progress)
+    })
+}
+
 /// Like [`import_selected_refs`], reporting the running commit count to
 /// `progress` after each commit is walked.
 pub fn import_selected_refs_with_progress(
     bridge: &mut GitBridge,
     git_path: Option<&Path>,
     refs: &[String],
-    progress: Option<&mut dyn FnMut(usize)>,
+    progress: Option<&mut dyn FnMut(ImportProgressEvent)>,
 ) -> GitResult<ImportStats> {
     let wanted = refs.iter().cloned().collect::<HashSet<_>>();
     bridge.with_mapping_rollback(|bridge| {
@@ -619,7 +643,7 @@ fn import_with_ref_filter(
     git_path: Option<&Path>,
     wanted_refs: Option<&HashSet<String>>,
     options: GitImportOptions,
-    progress: Option<&mut dyn FnMut(usize)>,
+    mut progress: Option<&mut dyn FnMut(ImportProgressEvent)>,
 ) -> GitResult<ImportStats> {
     let repo = if let Some(path) = git_path {
         open_repo(path)?
@@ -785,6 +809,15 @@ fn import_with_ref_filter(
         }
     }
 
+    let total_commits = count_planned_commits(&repo, &plans)?;
+    if let Some(callback) = progress.as_deref_mut() {
+        callback(ImportProgressEvent {
+            commits_imported: 0,
+            total_commits,
+            states_created: 0,
+        });
+    }
+
     // Populate the bridge mirror with the source's reachable objects AND
     // its refs verbatim (when we're importing from an external path
     // rather than the mirror itself).
@@ -882,8 +915,8 @@ fn import_with_ref_filter(
     let pack_sink = PackImportSink::new(&staging_dir)?;
     let mut tree_importer =
         GitTreeImporter::with_options_packed(bridge.heddle_repo, &repo, options.clone(), pack_sink);
-    let mut noop_progress = |_: usize| {};
-    let progress_cb: &mut dyn FnMut(usize) = match progress {
+    let mut noop_progress = |_: ImportProgressEvent| {};
+    let progress_cb: &mut dyn FnMut(ImportProgressEvent) = match progress {
         Some(callback) => callback,
         None => &mut noop_progress,
     };
@@ -892,6 +925,7 @@ fn import_with_ref_filter(
         &repo,
         &mut tree_importer,
         &plans,
+        total_commits,
         &mut stats,
         progress_cb,
     );
@@ -1147,8 +1181,9 @@ fn walk_plans_into_states(
     repo: &SleyRepository,
     tree_importer: &mut GitTreeImporter<'_>,
     plans: &[RefPlan],
+    total_commits: usize,
     stats: &mut ImportStats,
-    progress: &mut dyn FnMut(usize),
+    progress: &mut dyn FnMut(ImportProgressEvent),
 ) -> GitResult<()> {
     let mut visiting = HashSet::new();
     let mut imported = HashSet::new();
@@ -1160,11 +1195,30 @@ fn walk_plans_into_states(
             plan.peeled_commit_oid,
             &mut visiting,
             &mut imported,
+            total_commits,
             stats,
             &mut *progress,
         )?;
     }
     Ok(())
+}
+
+fn count_planned_commits(repo: &SleyRepository, plans: &[RefPlan]) -> GitResult<usize> {
+    let mut seen = HashSet::new();
+    let mut stack = plans
+        .iter()
+        .map(|plan| plan.peeled_commit_oid)
+        .collect::<Vec<_>>();
+
+    while let Some(oid) = stack.pop() {
+        if !seen.insert(oid) {
+            continue;
+        }
+        let commit = repo.read_commit(&oid).map_err(git_err)?;
+        stack.extend(commit.parents);
+    }
+
+    Ok(seen.len())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1175,8 +1229,9 @@ fn import_commit_ancestry(
     git_oid: ObjectId,
     visiting: &mut HashSet<ObjectId>,
     imported: &mut HashSet<ObjectId>,
+    total_commits: usize,
     stats: &mut ImportStats,
-    progress: &mut dyn FnMut(usize),
+    progress: &mut dyn FnMut(ImportProgressEvent),
 ) -> GitResult<()> {
     let mut stack: Vec<WalkPhase> = vec![WalkPhase::Enter(git_oid)];
 
@@ -1258,7 +1313,11 @@ fn import_commit_ancestry(
                 // failure next to `ingest`. `states_created` retains
                 // the "new heddle states written" meaning.
                 stats.commits_imported += 1;
-                progress(stats.commits_imported);
+                progress(ImportProgressEvent {
+                    commits_imported: stats.commits_imported,
+                    total_commits,
+                    states_created: stats.states_created,
+                });
                 visiting.remove(&oid);
                 imported.insert(oid);
             }

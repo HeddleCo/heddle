@@ -186,6 +186,16 @@ pub struct ExportedRef {
     pub tip: GitObjectId,
 }
 
+/// Human-facing progress snapshot emitted while Git commits are walked
+/// into Heddle states. JSON callers receive the final [`ImportStats`];
+/// this live event is only for terminal progress renderers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportProgressEvent {
+    pub commits_imported: usize,
+    pub total_commits: usize,
+    pub states_created: usize,
+}
+
 /// Statistics for import operation.
 ///
 /// `commits_imported` counts every commit visited by the ancestry walk;

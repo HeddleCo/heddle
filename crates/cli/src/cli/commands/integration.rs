@@ -18,7 +18,7 @@ use super::advice::RecoveryAdvice;
 use crate::{
     cli::{
         Cli, IntegrationCommands, IntegrationInstallArgs, IntegrationRelayArgs,
-        IntegrationTargetArgs, is_tty, should_output_json,
+        IntegrationTargetArgs, should_output_json,
     },
     harness,
 };
@@ -145,48 +145,29 @@ pub fn maybe_prompt_init_install(
     perform_init_install(cli, repo, args, &harnesses)
 }
 
-/// Pre-write phase of the harness-install prompt: detect harnesses and
-/// (interactively) ask the user whether to connect them, WITHOUT writing
-/// anything. Returns the harnesses to install once writes are safe.
+/// Pre-write phase of init harness selection: resolve any explicit
+/// `--install-harnesses` request WITHOUT writing anything. Returns the
+/// harnesses to install once writes are safe.
 ///
-/// `--quickstart` calls this before any filesystem mutation so a Ctrl-C
-/// at the harness prompt leaves the directory untouched — the install
-/// itself is deferred to [`perform_init_install`] after the writes land.
-/// Only the directory `root` is needed (PATH lookups + `.claude`/
-/// `.opencode` probes), so it works before the repository exists on disk.
+/// `--quickstart` calls this before any filesystem mutation so scope
+/// errors fail before writes. The install itself is deferred to
+/// [`perform_init_install`] after the writes land. Only the directory
+/// `root` is needed, so it works before the repository exists on disk.
 pub fn prompt_init_install_decision(
-    cli: &Cli,
+    _cli: &Cli,
     root: &Path,
     args: &crate::cli::InitArgs,
-    json: bool,
+    _json: bool,
 ) -> Result<Vec<String>> {
-    let harnesses = if json || cli.quiet || !is_tty() || args.no_harness_install {
-        // Non-interactive: only an explicit `--install-harnesses`
-        // selection installs anything; detection never auto-installs.
+    // For now init never asks to install detected harnesses. Only an
+    // explicit `--install-harnesses` selection installs anything;
+    // detection is still available through `--install-harnesses auto`.
+    let harnesses = if args.no_harness_install {
+        Vec::new()
+    } else {
         match &args.install_harnesses {
             Some(selection) => resolve_selection_for_root(root, selection)?,
             None => Vec::new(),
-        }
-    } else {
-        let harnesses = if let Some(selection) = &args.install_harnesses {
-            resolve_selection_for_root(root, selection)?
-        } else {
-            detect_harnesses_for_root(root)
-        };
-        if harnesses.is_empty() {
-            Vec::new()
-        } else {
-            println!(
-                "Connect Heddle to detected harnesses for ambient actor tracking? [{}] [y/N]",
-                harnesses.join(", ")
-            );
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            if matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-                harnesses
-            } else {
-                Vec::new()
-            }
         }
     };
 
@@ -553,8 +534,8 @@ fn detect_harnesses(repo: &Repository) -> Result<Vec<String>> {
 
 /// Path-based harness detection: PATH lookups for the harness binaries
 /// plus `.claude`/`.opencode` directory probes under `root`. Works
-/// before the repository exists, which the pre-write quickstart prompt
-/// relies on.
+/// before the repository exists, which explicit pre-write
+/// `--install-harnesses auto` resolution relies on.
 fn detect_harnesses_for_root(root: &Path) -> Vec<String> {
     let mut found = BTreeSet::new();
     for harness in ["codex", "claude", "opencode"] {
@@ -996,6 +977,10 @@ fn shell_escape(path: &Path) -> String {
 mod tests {
     use super::*;
 
+    use clap::Parser;
+
+    use crate::cli::Commands;
+
     struct HomeEnvGuard(Option<std::ffi::OsString>);
 
     impl HomeEnvGuard {
@@ -1021,6 +1006,23 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         (temp, repo)
+    }
+
+    #[test]
+    fn init_harness_selection_does_not_auto_connect_detected_harnesses() {
+        let temp = tempfile::TempDir::new().unwrap();
+        fs::create_dir(temp.path().join(".claude")).unwrap();
+        let cli = Cli::parse_from(["heddle", "init"]);
+        let Commands::Init(args) = &cli.command else {
+            panic!("expected parsed init command");
+        };
+
+        let harnesses = prompt_init_install_decision(&cli, temp.path(), args, false).unwrap();
+
+        assert!(
+            harnesses.is_empty(),
+            "init must not auto-select detected harnesses without --install-harnesses"
+        );
     }
 
     #[test]

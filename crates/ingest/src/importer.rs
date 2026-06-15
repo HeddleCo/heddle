@@ -21,7 +21,7 @@ use std::{
 };
 
 use objects::{
-    object::{Blob, ChangeId, ContentHash, Tree, TreeEntry},
+    object::{Blob, ContentHash, Tree, TreeEntry},
     store::{
         CompressionConfig, ObjectStore,
         pack::{ObjectType as PackObjectType, PackObjectId, StreamingPackBuilder},
@@ -57,6 +57,9 @@ pub struct ImportStats {
     pub refs_seen: RefDiscoveryStats,
     /// Commits translated (live + reflog-only).
     pub commits_imported: usize,
+    /// New Heddle states written during this import. Re-runs can inspect the
+    /// same commits while creating zero new states.
+    pub states_created: usize,
     /// Distinct trees materialized (after memoization).
     pub trees_imported: usize,
     /// Distinct blobs materialized (after memoization).
@@ -98,6 +101,18 @@ pub struct Importer<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend = OpLog> 
     /// store's directory so the final `rename(2)` lands on the same
     /// filesystem and stays atomic.
     pack_staging_dir: Option<PathBuf>,
+    progress: Option<&'a mut dyn FnMut(ImportProgressEvent)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportProgressEvent {
+    /// Commits translated into Heddle states, or commits read while
+    /// `total_commits` is still unknown during the reachability pre-pass.
+    pub commits_imported: usize,
+    /// Final import total once known. A value of `0` with a non-final event
+    /// means the importer is still counting reachable commits.
+    pub total_commits: usize,
+    pub states_created: usize,
 }
 
 impl<'a, R: RefBackend, S: ObjectStore> Importer<'a, R, S, OpLog> {
@@ -110,6 +125,7 @@ impl<'a, R: RefBackend, S: ObjectStore> Importer<'a, R, S, OpLog> {
             oplog: None,
             options: ImportOptions::default(),
             pack_staging_dir: None,
+            progress: None,
         }
     }
 }
@@ -130,6 +146,7 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             oplog: Some(oplog),
             options: self.options,
             pack_staging_dir: self.pack_staging_dir,
+            progress: self.progress,
         }
     }
 
@@ -147,6 +164,11 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
     /// collide with them.
     pub fn with_pack_staging_dir(mut self, dir: PathBuf) -> Self {
         self.pack_staging_dir = Some(dir);
+        self
+    }
+
+    pub fn with_progress(mut self, progress: &'a mut dyn FnMut(ImportProgressEvent)) -> Self {
+        self.progress = Some(progress);
         self
     }
 
@@ -186,8 +208,27 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             }
         }
 
-        let commits = self.git.commits_topo(seed)?;
+        let commits = if let Some(progress) = self.progress.as_deref_mut() {
+            let mut on_count = |commits_seen| {
+                progress(ImportProgressEvent {
+                    commits_imported: commits_seen,
+                    total_commits: 0,
+                    states_created: 0,
+                });
+            };
+            self.git
+                .commits_topo_with_progress(seed, Some(&mut on_count))?
+        } else {
+            self.git.commits_topo(seed)?
+        };
         info!(commit_count = commits.len(), "topo-sorted commits");
+        if let Some(progress) = self.progress.as_deref_mut() {
+            progress(ImportProgressEvent {
+                commits_imported: 0,
+                total_commits: commits.len(),
+                states_created: 0,
+            });
+        }
 
         // Translate each commit into a streaming native pack: tree first,
         // then state. Importing a git repo creates thousands of objects;
@@ -261,6 +302,13 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
                 let tree_hash = packed.translate_tree(&commit.tree_sha)?;
                 let git_lossy = packed.stats.lossy_entries.len() > lossy_before;
                 packed.write_commit(commit, tree_hash, git_lossy)?;
+                if let Some(progress) = self.progress.as_deref_mut() {
+                    progress(ImportProgressEvent {
+                        commits_imported: idx + 1,
+                        total_commits: commits.len(),
+                        states_created: packed.stats.states,
+                    });
+                }
 
                 // Progress trace every ~500 commits keeps long imports from
                 // looking hung without spamming at default `info` verbosity.
@@ -331,6 +379,7 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
         Ok(ImportStats {
             refs_seen,
             commits_imported: commits.len(),
+            states_created: packed_stats.states,
             trees_imported: packed_stats.trees,
             blobs_imported: packed_stats.blobs,
             refs: ref_stats,
@@ -344,6 +393,7 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
 #[derive(Clone, Debug, Default)]
 struct PackedImportStats {
     object_count: usize,
+    states: usize,
     trees: usize,
     blobs: usize,
     lossy_entries: Vec<LossyImportEntry>,
@@ -527,9 +577,10 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
         commit: &CommitEntry,
         tree: ContentHash,
         git_lossy: bool,
-    ) -> crate::Result<ChangeId> {
+    ) -> crate::Result<bool> {
         if let Some(cid) = self.map.get_commit(&commit.sha) {
-            return Ok(cid);
+            let _ = cid;
+            return Ok(false);
         }
 
         let mut parents = Vec::with_capacity(commit.parents.len());
@@ -546,7 +597,7 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
             }
         }
 
-        let state = state_from_commit(commit, tree, parents, git_lossy);
+        let state = state_from_commit(commit, tree, parents, git_lossy)?;
         // `to_vec_named` matches objects's convention; see the longer
         // explanation in `translate_tree`.
         let data = rmp_serde::to_vec_named(&state)
@@ -557,11 +608,12 @@ impl<'a, W: std::io::Write + std::io::Read + std::io::Seek> PackedImport<'a, W> 
             data,
         )?;
         self.stats.object_count += 1;
+        self.stats.states += 1;
 
         self.map
             .insert_commit(&commit.sha, state.change_id)
             .map_err(IngestError::from)?;
-        Ok(state.change_id)
+        Ok(true)
     }
 }
 
@@ -601,6 +653,15 @@ pub fn import_git_into_with_options(
     heddle_path: impl AsRef<Path>,
     options: ImportOptions,
 ) -> crate::Result<(ImportStats, ShaMap)> {
+    import_git_into_with_options_and_progress(git_path, heddle_path, options, None)
+}
+
+pub fn import_git_into_with_options_and_progress(
+    git_path: impl AsRef<Path>,
+    heddle_path: impl AsRef<Path>,
+    options: ImportOptions,
+    progress: Option<&mut dyn FnMut(ImportProgressEvent)>,
+) -> crate::Result<(ImportStats, ShaMap)> {
     let git = GitSource::open(git_path)?;
     let heddle_path = heddle_path.as_ref();
     let root = strip_trailing_heddle(heddle_path);
@@ -632,9 +693,54 @@ pub fn import_git_into_with_options(
             .with_options(options)
             .with_oplog(repo.oplog())
             .with_pack_staging_dir(staging_dir);
+        if let Some(progress) = progress {
+            importer = importer.with_progress(progress);
+        }
         pollster::block_on(importer.run())?
     };
+    if repo.capability() == repo::RepositoryCapability::GitOverlay {
+        write_bridge_mapping_sidecar(&repo, &map)?;
+    }
     Ok((stats, map))
+}
+
+#[derive(serde::Serialize)]
+struct BridgeMappingFile {
+    entries: Vec<BridgeMappingEntry>,
+}
+
+#[derive(serde::Serialize)]
+struct BridgeMappingEntry {
+    change_id: String,
+    git_oid: String,
+}
+
+fn write_bridge_mapping_sidecar(repo: &repo::Repository, map: &ShaMap) -> crate::Result<()> {
+    let mut entries = map
+        .commit_shas()
+        .into_iter()
+        .filter_map(|git_oid| {
+            map.get_commit(&git_oid)
+                .map(|change_id| BridgeMappingEntry {
+                    change_id: change_id.to_string_full(),
+                    git_oid,
+                })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.git_oid.cmp(&right.git_oid));
+    let path = repo
+        .heddle_dir()
+        .join("git-bridge")
+        .join("bridge-mapping.json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp_path = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(&BridgeMappingFile { entries })
+        .map_err(|error| IngestError::Other(format!("serialize bridge mapping: {error}")))?;
+    std::fs::write(&tmp_path, bytes)?;
+    std::fs::rename(&tmp_path, &path)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -971,6 +1077,64 @@ mod tests {
     }
 
     #[test]
+    fn progress_reports_total_and_new_state_count() {
+        let gitdir = TempDir::new().unwrap();
+        let heddledir = TempDir::new().unwrap();
+        seed_multibranch_repo(gitdir.path());
+
+        let git = GitSource::open(gitdir.path()).unwrap();
+        let store = InMemoryStore::new();
+        let refs = RefManager::new(heddledir.path());
+        refs.init().unwrap();
+        let mut map = ShaMap::new();
+        let mut events = Vec::new();
+
+        let stats = {
+            let mut on_progress = |event| events.push(event);
+            pollster::block_on(
+                Importer::new(&git, &store, &refs, &mut map)
+                    .with_progress(&mut on_progress)
+                    .run(),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(
+            events.first(),
+            Some(&ImportProgressEvent {
+                commits_imported: 0,
+                total_commits: 0,
+                states_created: 0,
+            })
+        );
+        assert!(
+            events.iter().any(|event| event.total_commits == 0
+                && event.commits_imported == stats.commits_imported),
+            "progress should report the full reachable count before the final total is known: {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| {
+                let total_known = ImportProgressEvent {
+                    commits_imported: 0,
+                    total_commits: stats.commits_imported,
+                    states_created: 0,
+                };
+                *event == total_known
+            }),
+            "progress should reset to 0 imported once the final total is known: {events:?}"
+        );
+        assert_eq!(
+            events.last(),
+            Some(&ImportProgressEvent {
+                commits_imported: stats.commits_imported,
+                total_commits: stats.commits_imported,
+                states_created: stats.states_created,
+            })
+        );
+        assert_eq!(stats.states_created, store.list_states().unwrap().len());
+    }
+
+    #[test]
     fn reflog_only_commits_are_still_imported() {
         let gitdir = TempDir::new().unwrap();
         let heddledir = TempDir::new().unwrap();
@@ -1137,6 +1301,42 @@ mod tests {
             !tree.entries().is_empty(),
             "imported tree must contain at least one entry (a.txt or b.txt)"
         );
+    }
+
+    #[test]
+    fn import_git_into_git_overlay_writes_bridge_mapping_without_mirror() {
+        let gitdir = TempDir::new().unwrap();
+        seed_multibranch_repo(gitdir.path());
+
+        let (stats, map) = import_git_into(gitdir.path(), gitdir.path()).unwrap();
+
+        assert!(stats.commits_imported >= 2);
+        assert_eq!(stats.states_created, map.commit_shas().len());
+        let mapping_path = gitdir
+            .path()
+            .join(".heddle")
+            .join("git-bridge")
+            .join("bridge-mapping.json");
+        assert!(mapping_path.is_file(), "bridge mapping sidecar is missing");
+        assert!(
+            !gitdir.path().join(".heddle").join("git").exists(),
+            "ingest-backed import must not create the legacy internal Git mirror"
+        );
+
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&mapping_path).unwrap()).unwrap();
+        let entries = value["entries"].as_array().expect("mapping entries");
+        assert_eq!(entries.len(), map.commit_shas().len());
+        for git_oid in map.commit_shas() {
+            let change_id = map.get_commit(&git_oid).unwrap().to_string_full();
+            assert!(
+                entries.iter().any(|entry| {
+                    entry["git_oid"].as_str() == Some(git_oid.as_str())
+                        && entry["change_id"].as_str() == Some(change_id.as_str())
+                }),
+                "missing sidecar entry for {git_oid}"
+            );
+        }
     }
 
     #[test]

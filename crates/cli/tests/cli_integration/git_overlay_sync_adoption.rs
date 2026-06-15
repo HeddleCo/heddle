@@ -143,6 +143,41 @@ fn adopt_renders_in_repo_paths_relative_to_repo_root() {
 }
 
 #[test]
+fn adopt_all_uses_ingest_mapping_without_internal_mirror() {
+    let temp = TempDir::new().unwrap();
+    let work = temp.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    git(&work, &["init", "-b", "main"]);
+    configure_git_identity(&work);
+    let git_tip = commit_file(&work, "story.txt", "one\n", "seed");
+
+    let json = heddle(&["adopt", "--output", "json"], Some(&work)).unwrap();
+    let value: Value = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(value["commits_imported"], 1);
+    assert_eq!(value["states_created"], 1);
+    assert_eq!(value["partial_mirror_refs"], 0);
+    assert!(
+        !work.join(".heddle").join("git").exists(),
+        "unscoped adopt should use ingest and avoid creating the legacy mirror"
+    );
+    let mapping_path = work
+        .join(".heddle")
+        .join("git-bridge")
+        .join("bridge-mapping.json");
+    let mapping: Value =
+        serde_json::from_slice(&std::fs::read(&mapping_path).expect("mapping sidecar")).unwrap();
+    let entries = mapping["entries"].as_array().expect("mapping entries");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["git_oid"], git_tip);
+    assert!(
+        entries[0]["change_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
+}
+
+#[test]
 fn adopt_emits_no_terminal_control_codes_in_piped_output() {
     let temp = TempDir::new().unwrap();
 

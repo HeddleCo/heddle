@@ -103,9 +103,9 @@ struct QuickstartPreflight {
     proceed: bool,
     persist_principal: Option<(String, String)>,
     attachment: QuickstartAttachmentPlan,
-    /// Harnesses the user agreed to connect, decided at the prompt before
-    /// any write. Installed only after the repo is created so a Ctrl-C at
-    /// the harness prompt leaves the directory untouched.
+    /// Harnesses explicitly selected for connection before any write.
+    /// Installed only after the repo is created so scope errors leave the
+    /// directory untouched.
     harness_install: Vec<String>,
 }
 
@@ -747,11 +747,9 @@ fn quickstart_preflight(
     }
 
     let persist_principal = resolve_quickstart_identity(cli, args, root, is_git_overlay, json)?;
-    // The harness-install prompt is the LAST interactive gate, decided
-    // here before any write so Ctrl-C at it leaves the directory
-    // untouched. Detect/prompt at the SAME resolved root the install writes
-    // to (`repo.root()` in `cmd_init`), not the raw cwd. The install itself
-    // runs post-write in `cmd_init`.
+    // Resolve explicit harness installs before any write, at the SAME
+    // resolved root the install writes to (`repo.root()` in `cmd_init`),
+    // not the raw cwd. The install itself runs post-write in `cmd_init`.
     let harness_install = super::prompt_init_install_decision(cli, root, args, json)?;
     Ok(QuickstartPreflight {
         proceed: true,

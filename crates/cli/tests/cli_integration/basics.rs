@@ -235,6 +235,8 @@ fn test_cli_adopt_human_progress_and_json_cleanliness() {
         output.contains("Importing Git history:")
             && output.contains("[1/3] scanning refs")
             && output.contains("[2/3] importing commits")
+            && output.contains("[2/3] checking Heddle notes")
+            && output.contains("[2/3] ordering commits")
             && output.contains("[3/3] writing refs")
             && output.contains("[done] imported Git history"),
         "human adopt should show import phases: {output}"

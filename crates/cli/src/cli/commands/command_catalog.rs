@@ -13,8 +13,7 @@ use crate::cli::{
     ActorCommands, AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands,
     HookCommands, IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands,
     RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands, ShellCommands,
-    StashCommands,
-    ThreadCommands, ThreadMarkerCommands, VisibilityCommands,
+    StashCommands, ThreadCommands, ThreadMarkerCommands, VisibilityCommands,
     cli_args::{DiscussCommands, ReviewCommands, TransactionCommands},
     render::shell_quote,
 };

@@ -71,7 +71,7 @@ fn main() {
     // `-emit-object`: produce a .o, not a .swiftmodule.
     // `-static`: emit code for a static lib (no `_swift_FORCE_LOAD_*`
     //   weak refs that need a Swift dylib at runtime).
-    // `-target arm64-apple-macos26.0`: Heddle's FSKit path-resource
+    // `-target arm64-apple-macos26.0`: Heddle's FSKit URL-resource
     //   mount uses FSKit V2 URL resource APIs, which are available
     //   from macOS 26.0 in the local SDK.
     // `-import-objc-header`: import the cbindgen-generated bridging
