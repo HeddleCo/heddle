@@ -254,7 +254,7 @@ pub fn cmd_doctor_schemas(cli: &Cli, args: DoctorSchemasArgs) -> Result<()> {
 }
 
 fn build_schema_report(doc_path: &Path, doc: &str) -> Result<SchemaReport> {
-    let samples = extract_samples(&doc);
+    let samples = extract_samples(doc);
 
     let mut issues = Vec::new();
     let mut passing_verbs = Vec::new();

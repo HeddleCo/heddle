@@ -295,7 +295,6 @@ mod macos {
     use crate::{cli::commands::mount_lifecycle::FskitReadinessReport, util::OnceMap};
 
     const MIN_FSKIT_MACOS_MAJOR: u64 = 26;
-    const MIN_FSKIT_MACOS_MINOR: u64 = 0;
     const SETTINGS_PATH: &str = "System Settings → General → Login Items & Extensions → File System Extensions → enable 'Heddle'";
     const SETTINGS_LOGIN_ITEMS_URL: &str =
         "x-apple.systempreferences:com.apple.LoginItems-Settings.extension";
@@ -580,8 +579,7 @@ mod macos {
         let Some(version) = current_macos_version() else {
             return false;
         };
-        version.major > MIN_FSKIT_MACOS_MAJOR
-            || (version.major == MIN_FSKIT_MACOS_MAJOR && version.minor >= MIN_FSKIT_MACOS_MINOR)
+        version.major >= MIN_FSKIT_MACOS_MAJOR
     }
 
     fn current_macos_version() -> Option<MacOsVersion> {

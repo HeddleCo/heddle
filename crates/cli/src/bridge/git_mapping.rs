@@ -118,6 +118,10 @@ impl<'a> GitBridge<'a> {
     }
 
     pub(crate) fn write_mapping_tmp_to_disk(&self) -> GitResult<PathBuf> {
+        self.write_mapping_tmp_value_to_disk(&self.mapping)
+    }
+
+    fn write_mapping_tmp_value_to_disk(&self, mapping: &SyncMapping) -> GitResult<PathBuf> {
         let path = self.mapping_path();
         let tmp_path = self.mapping_tmp_path();
         if let Some(parent) = path.parent() {
@@ -126,7 +130,7 @@ impl<'a> GitBridge<'a> {
             parent_file.sync_all()?;
         }
 
-        let data = Self::mapping_bytes(&self.mapping)?;
+        let data = Self::mapping_bytes(mapping)?;
         let mut file = File::create(&tmp_path)?;
         file.write_all(&data)?;
         file.sync_all()?;
@@ -157,6 +161,16 @@ impl<'a> GitBridge<'a> {
         // committed `bridge-mapping.json`. The next mapping-cache read
         // atomically renames the tmp into place. Tested by
         // `bridge_recovers_from_crash_after_tmp_before_commit`.
+        objects::fault_inject::maybe_panic_at("mapping_after_tmp_before_commit");
+        self.commit_mapping_tmp_to_disk()
+    }
+
+    pub(crate) fn save_mapping_to_disk_preserving(&self, preserved: &SyncMapping) -> GitResult<()> {
+        let mut combined = preserved.clone();
+        for (change_id, git_oid) in self.mapping.iter() {
+            combined.insert(*change_id, *git_oid);
+        }
+        self.write_mapping_tmp_value_to_disk(&combined)?;
         objects::fault_inject::maybe_panic_at("mapping_after_tmp_before_commit");
         self.commit_mapping_tmp_to_disk()
     }

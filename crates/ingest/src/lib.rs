@@ -82,6 +82,15 @@ pub enum IngestError {
     Git(String),
     #[error("heddle: {0}")]
     Heddle(#[from] objects::error::HeddleError),
+    #[error(
+        "Heddle thread '{thread}' and Git ref '{branch}' diverged: thread {existing}, branch {incoming}"
+    )]
+    ThreadDiverged {
+        thread: String,
+        branch: String,
+        existing: objects::object::ChangeId,
+        incoming: objects::object::ChangeId,
+    },
     #[error("sha map: {0}")]
     ShaMap(#[from] sha_map::ShaMapError),
     #[error("io: {0}")]

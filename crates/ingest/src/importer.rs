@@ -138,7 +138,8 @@ impl ImportScope {
             .refs
             .iter()
             .enumerate()
-            .filter_map(|(idx, spec)| (!matched[idx]).then(|| spec.clone()))
+            .filter(|(idx, _)| !matched[*idx])
+            .map(|(_, spec)| spec.clone())
             .collect::<Vec<_>>();
         if !missing.is_empty() {
             return Err(IngestError::Git(format!(
@@ -450,7 +451,9 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             }
         };
 
-        let ref_stats = RefEmitter::new(self.refs, self.map).emit(&heads).await?;
+        let ref_stats = RefEmitter::new(self.refs, self.store, self.map)
+            .emit(&heads)
+            .await?;
         info!(
             threads = ref_stats.threads_written,
             markers = ref_stats.markers_written,

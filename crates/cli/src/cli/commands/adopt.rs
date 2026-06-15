@@ -143,7 +143,13 @@ fn import_ingest_for_adopt(
         ImportOptions::default(),
         scope,
         Some(&mut on_commit),
-    )?;
+    )
+    .map_err(|error| match error {
+        ingest::IngestError::ThreadDiverged { thread, branch, .. } => {
+            RecoveryAdvice::git_heddle_thread_diverged(&thread, &branch).into()
+        }
+        other => anyhow::Error::from(other),
+    })?;
     Ok(AdoptImportStats {
         commits_imported: stats.commits_imported,
         states_created: stats.states_created,

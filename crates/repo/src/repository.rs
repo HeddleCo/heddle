@@ -1055,7 +1055,19 @@ impl Repository {
         upstream_oid: &str,
     ) -> Result<bool> {
         let scope = self.op_scope();
-        let batches = self.oplog().redo_batches_scoped(64, Some(&scope))?;
+        let batches = match self.oplog().redo_batches_scoped(64, Some(&scope)) {
+            Ok(batches) => batches,
+            Err(error) => {
+                tracing::warn!(
+                    branch,
+                    local_oid,
+                    upstream_oid,
+                    error = %error,
+                    "could not inspect redo oplog for undone Git checkpoint status"
+                );
+                return Ok(false);
+            }
+        };
         Ok(batches.iter().any(|batch| {
             batch.entries.iter().any(|entry| {
                 if !entry.undone {
@@ -1297,6 +1309,46 @@ impl Repository {
         Ok(self
             .git_overlay_branch_tip(name)?
             .and_then(|tip| tip.mapped_change))
+    }
+
+    pub fn git_overlay_mapped_change_for_remote_tracking_ref(
+        &self,
+        name: &str,
+    ) -> Result<Option<ChangeId>> {
+        if self.capability() != RepositoryCapability::GitOverlay {
+            return Ok(None);
+        }
+        let Some(git_repo) = self.git_overlay_sley_repository()? else {
+            return Ok(None);
+        };
+        let full_name = name
+            .strip_prefix("refs/remotes/")
+            .map(|short| format!("refs/remotes/{short}"))
+            .unwrap_or_else(|| format!("refs/remotes/{name}"));
+        let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
+        for reference in git_repo.references().list_refs().map_err(|error| {
+            HeddleError::Config(format!(
+                "failed to enumerate git remote-tracking refs at '{}': {}",
+                self.root.display(),
+                error
+            ))
+        })? {
+            if reference.name != full_name {
+                continue;
+            }
+            let Some(target) =
+                self.git_overlay_commit_tip_oid(&git_repo, &reference, "remote branch", name)?
+            else {
+                return Ok(None);
+            };
+            return self.git_overlay_mapped_change_for_commit(
+                &target.to_string(),
+                &bridge_mapping,
+                &checkpoint_mapping,
+            );
+        }
+        Ok(None)
     }
 
     pub fn git_overlay_mapped_change_for_tag(&self, name: &str) -> Result<Option<ChangeId>> {

@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use ingest::{ImportOptions, LossyImportEntry};
-use objects::object::ThreadName;
+use objects::object::{ChangeId, ThreadName};
 use refs::Head;
 use repo::Repository;
 use serde::Serialize;
@@ -733,6 +733,13 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                 .as_ref()
                 .map(ResolvedSource::path)
                 .unwrap_or(default_source);
+            let attached_before = match repo.head_ref()? {
+                Head::Attached { thread } => repo
+                    .refs()
+                    .get_thread(&thread)?
+                    .map(|state| (thread, state)),
+                Head::Detached { .. } => None,
+            };
             let stats = import_git_history(
                 &mut bridge,
                 Some(source_path),
@@ -742,6 +749,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
             )?;
             progress.begin_ref_write();
             progress.finish();
+            materialize_imported_attached_thread(&mut bridge, attached_before.as_ref())?;
 
             let already_in_sync = stats.states_created == 0 && stats.commits_imported > 0;
             let trust = build_repository_verification_state(&repo);
@@ -1129,6 +1137,38 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
         )?,
     }
 
+    Ok(())
+}
+
+fn materialize_imported_attached_thread(
+    bridge: &mut GitBridge<'_>,
+    attached_before: Option<&(ThreadName, ChangeId)>,
+) -> Result<()> {
+    let Some((thread, old_state)) = attached_before else {
+        return Ok(());
+    };
+    let Some(new_state) = bridge.heddle_repo.refs().get_thread(thread)? else {
+        return Ok(());
+    };
+    if new_state == *old_state {
+        return Ok(());
+    }
+
+    bridge.heddle_repo.refs().set_thread(thread, old_state)?;
+    bridge.heddle_repo.refs().write_head(&Head::Attached {
+        thread: thread.clone(),
+    })?;
+    bridge
+        .heddle_repo
+        .goto_verified_clean_without_record(&new_state)?;
+    bridge.heddle_repo.refs().set_thread(thread, &new_state)?;
+    bridge.heddle_repo.refs().write_head(&Head::Attached {
+        thread: thread.clone(),
+    })?;
+
+    if bridge.heddle_repo.root().join(".git").exists() {
+        bridge.write_current_checkout_from_existing_mirror()?;
+    }
     Ok(())
 }
 

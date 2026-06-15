@@ -29,8 +29,26 @@ pub(crate) fn import_git_history(
         scope,
         progress,
     )
-    .map_err(|error| GitBridgeError::Git(error.to_string()))?;
+    .map_err(map_ingest_error)?;
+    bridge.build_existing_mapping(Some(source))?;
     Ok(import_stats_from_ingest(stats))
+}
+
+fn map_ingest_error(error: ingest::IngestError) -> GitBridgeError {
+    match error {
+        ingest::IngestError::ThreadDiverged {
+            thread,
+            branch,
+            existing,
+            incoming,
+        } => GitBridgeError::GitHeddleThreadDiverged {
+            thread,
+            branch,
+            thread_change: existing,
+            branch_change: incoming,
+        },
+        other => GitBridgeError::Git(other.to_string()),
+    }
 }
 
 fn reject_shallow_source(source: &Path, refs: &[String]) -> GitResult<()> {

@@ -376,6 +376,12 @@ pub struct GitPullOutcome {
     pub materialized_checkout: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PullPreflight {
+    UpToDate,
+    ImportRequired,
+}
+
 fn pull_outcome(stats: &ImportStats, materialized_checkout: bool) -> GitPullOutcome {
     GitPullOutcome {
         changed: materialized_checkout || stats.states_created > 0,
@@ -1171,7 +1177,15 @@ impl<'a> GitBridge<'a> {
             GitFetchScope::AllRefs,
             RefreshCheckoutAfterFetch::No,
         )?;
-        self.preflight_attached_pull_fast_forward(remote_name, attached_before.as_ref())?;
+        if self.preflight_attached_pull_fast_forward(remote_name, attached_before.as_ref())?
+            == PullPreflight::UpToDate
+        {
+            if let Some(thread) = attached_thread {
+                self.refresh_checkout_remote_tracking_ref(remote_name, &thread)?;
+            }
+            self.refresh_checkout_note_refs_from_mirror()?;
+            return Ok(GitPullOutcome::default());
+        }
         let mirror_path = self.mirror_path();
         let stats = import_git_history(self, Some(&mirror_path), &[], Default::default(), None)?;
 
@@ -1214,26 +1228,27 @@ impl<'a> GitBridge<'a> {
         &mut self,
         remote_name: &str,
         attached_before: Option<&(String, ChangeId)>,
-    ) -> GitResult<()> {
+    ) -> GitResult<PullPreflight> {
         let Some((thread, state_id)) = attached_before else {
-            return Ok(());
+            return Ok(PullPreflight::ImportRequired);
         };
         self.build_existing_mapping(None)?;
         let Some(local_git_oid) = self.mapping.get_git(state_id) else {
-            return Ok(());
+            return Ok(PullPreflight::ImportRequired);
         };
         let mirror_repo = self.open_git_repo()?;
         let branch_ref = format!("refs/heads/{thread}");
         let Some(reference) = mirror_repo.find_reference(&branch_ref).map_err(git_err)? else {
-            return Ok(());
+            return Ok(PullPreflight::ImportRequired);
         };
         let Some(remote_git_oid) = reference.peeled_oid(&mirror_repo).map_err(git_err)? else {
-            return Ok(());
+            return Ok(PullPreflight::ImportRequired);
         };
-        if remote_git_oid == local_git_oid
-            || commit_is_descendant_of(&mirror_repo, remote_git_oid, local_git_oid)?
-        {
-            return Ok(());
+        if remote_git_oid == local_git_oid {
+            return Ok(PullPreflight::UpToDate);
+        }
+        if commit_is_descendant_of(&mirror_repo, remote_git_oid, local_git_oid)? {
+            return Ok(PullPreflight::ImportRequired);
         }
         Err(GitBridgeError::RemoteDiverged {
             branch: thread.clone(),
@@ -1557,7 +1572,9 @@ impl<'a> GitBridge<'a> {
         self.write_thread_checkout_from_existing_mirror(thread)
     }
 
-    fn write_current_checkout_from_existing_mirror(&mut self) -> GitResult<WriteThroughOutcome> {
+    pub(crate) fn write_current_checkout_from_existing_mirror(
+        &mut self,
+    ) -> GitResult<WriteThroughOutcome> {
         if !self.heddle_repo.root().join(".git").exists() {
             return Ok(WriteThroughOutcome::Skipped(
                 WriteThroughSkipReason::MissingDotGit,

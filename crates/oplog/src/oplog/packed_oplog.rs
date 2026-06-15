@@ -540,8 +540,16 @@ impl PackedOpLogIndex {
             let len = usize::try_from(record.entry_count).map_err(|_| {
                 HeddleError::InvalidObject("batch entry count too large".to_string())
             })?;
+            let end = first.checked_add(len).ok_or_else(|| {
+                HeddleError::InvalidObject("oplog batch directory range overflows".to_string())
+            })?;
+            if end > batch_offsets.len() {
+                return Err(HeddleError::InvalidObject(
+                    "oplog batch directory range points outside offset list".to_string(),
+                ));
+            }
             let mut entries = Vec::with_capacity(len);
-            for offset in &batch_offsets[first..first + len] {
+            for offset in &batch_offsets[first..end] {
                 let entry = read_entry_at(&mut file, *offset, self.record_schema()?)?;
                 if entry.id > since_head_id {
                     entries.push(entry);
