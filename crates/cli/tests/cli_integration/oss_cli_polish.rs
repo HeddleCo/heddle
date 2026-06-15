@@ -11865,8 +11865,8 @@ fn bridge_git_import_after_clone_reports_commits_not_zero() {
     // after `heddle clone` used to land at `commits_imported: 0` even
     // though every commit on master had been imported during clone —
     // visually indistinguishable from "your import did nothing".
-    // After the fix, `commits_imported` reports commits walked (matching
-    // `bridge git ingest`), `states_created` carries the dedup story,
+    // After the fix, `commits_imported` reports commits walked by the
+    // ingest-backed import path, `states_created` carries the dedup story,
     // and an `already_in_sync` flag tags the no-op case so callers can
     // render the right thing.
     let temp = TempDir::new().unwrap();

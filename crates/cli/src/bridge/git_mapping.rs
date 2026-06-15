@@ -8,7 +8,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use ingest::LossyImportEntry;
 use objects::object::ChangeId;
 use serde::{Deserialize, Serialize};
 use sley::{ObjectFormat, ObjectId as SleyObjectId, ReferenceTarget, Repository as SleyRepository};
@@ -19,8 +18,6 @@ use super::git_core::{GitBridge, GitBridgeError, GitResult, git_err};
 struct MappingEntry {
     change_id: String,
     git_oid: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    lossy_entries: Vec<LossyImportEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -40,47 +37,9 @@ impl<'a> GitBridge<'a> {
         self.mapping_path().with_extension("json.tmp")
     }
 
-    fn legacy_mapping_path(&self) -> PathBuf {
-        self.heddle_repo
-            .heddle_dir()
-            .join("git")
-            .join("bridge-mapping.json")
-    }
-
-    fn remove_legacy_mapping_file(&self) -> GitResult<()> {
-        let legacy_path = self.legacy_mapping_path();
-        if !legacy_path.exists() {
-            return Ok(());
-        }
-
-        fs::remove_file(&legacy_path)?;
-        Ok(())
-    }
-
-    fn migrate_legacy_mapping_if_needed(&self) -> GitResult<PathBuf> {
-        let path = self.mapping_path();
-        let legacy_path = self.legacy_mapping_path();
-
-        if path.exists() {
-            self.remove_legacy_mapping_file()?;
-            return Ok(path);
-        }
-
-        if !legacy_path.exists() {
-            return Ok(path);
-        }
-
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        fs::rename(&legacy_path, &path)?;
-        Ok(path)
-    }
-
     pub(crate) fn load_mapping_from_disk(&mut self) -> GitResult<()> {
         self.recover_mapping_tmp()?;
-        let path = self.migrate_legacy_mapping_if_needed()?;
+        let path = self.mapping_path();
         if !path.exists() {
             return Ok(());
         }
@@ -93,8 +52,6 @@ impl<'a> GitBridge<'a> {
             let change_id = ChangeId::parse(&entry.change_id)?;
             let git_oid = parse_stored_git_oid(&entry.git_oid)?;
             self.mapping.insert_checked(change_id, git_oid)?;
-            self.mapping
-                .set_git_lossy_entries(git_oid, entry.lossy_entries);
         }
 
         Ok(())
@@ -121,11 +78,6 @@ impl<'a> GitBridge<'a> {
             .map(|(change_id, git_oid)| MappingEntry {
                 change_id: change_id.to_string_full(),
                 git_oid: git_oid.to_string(),
-                lossy_entries: self
-                    .mapping
-                    .get_git_lossy_entries(*git_oid)
-                    .map(|entries| entries.to_vec())
-                    .unwrap_or_default(),
             })
             .collect();
 
@@ -164,7 +116,6 @@ impl<'a> GitBridge<'a> {
             let parent_file = File::open(parent)?;
             parent_file.sync_all()?;
         }
-        self.remove_legacy_mapping_file()?;
         Ok(())
     }
 
@@ -183,10 +134,9 @@ impl<'a> GitBridge<'a> {
     /// Build the mapping from existing commits and persisted data. Sources,
     /// in order:
     ///   1. The on-disk sidecar (`bridge-mapping.json`).
-    ///   2. The git notes ref (`refs/notes/heddle`) — Phase B and later.
-    ///   3. Legacy `Heddle-Change-Id:` trailers in commit messages.
+    ///   2. The git notes ref (`refs/notes/heddle`).
     ///
-    /// Sources 2 and 3 must agree with anything already in the sidecar (via
+    /// Notes must agree with anything already in the sidecar (via
     /// `insert_checked`) or the build aborts — this is what catches a
     /// corrupted sidecar that disagrees with the git side of the bridge.
     pub(crate) fn build_existing_mapping(&mut self, git_repo_path: Option<&Path>) -> GitResult<()> {
@@ -197,30 +147,12 @@ impl<'a> GitBridge<'a> {
             None => self.open_git_repo()?,
         };
 
-        // Phase B: scan refs/notes/heddle first. Notes carry change_ids
-        // without altering commit SHAs, so they're our preferred fallback
-        // source after the sidecar.
+        // Notes carry change_ids without altering commit SHAs, so they're
+        // our preferred fallback source after the sidecar.
         let notes = super::git_notes::read_all_notes(&repo)?;
         for (oid, note) in &notes {
             let change_id = ChangeId::parse(&note.change_id)?;
             self.mapping.insert_checked(change_id, *oid)?;
-        }
-
-        // Legacy: scan commit-message trailers for any commits not already
-        // covered by the sidecar or notes. Future-proofing for repos that
-        // were exported by pre-Phase-B builds.
-        let commit_oids = collect_commit_oids(&repo)?;
-        for oid in commit_oids {
-            if self.mapping.has_git(oid) {
-                continue;
-            }
-            let commit = repo.read_commit(&oid).map_err(git_err)?;
-            let message = String::from_utf8_lossy(&commit.message);
-            let trailers = GitBridge::parse_trailers(&message);
-            if let Some(change_id) = trailers.get(GitBridge::TRAILER_CHANGE_ID) {
-                let change_id = ChangeId::parse(change_id)?;
-                self.mapping.insert_checked(change_id, oid)?;
-            }
         }
 
         self.save_mapping_to_disk()?;

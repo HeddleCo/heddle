@@ -820,7 +820,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
             // sync's `commits_imported` keeps the historical "newly
             // imported commits" meaning. After heddle#147, the import
             // walker's `commits_imported` counts every commit it
-            // visited (mirroring `bridge git ingest` so a re-import
+            // visited (mirroring the ingest-backed import path so a re-import
             // doesn't read 0). That would make a no-op sync of an
             // already-synced overlay look like it pulled the whole
             // history again — exactly the operator signal sync is
@@ -1106,12 +1106,6 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
         }
 
         #[cfg(feature = "ingest")]
-        GitCommands::Ingest { path, lossy } => {
-            let resolved = resolve_source(&repo, path)?;
-            run_ingest(cli, &repo, resolved.path(), lossy)?;
-        }
-
-        #[cfg(feature = "ingest")]
         GitCommands::Reason {
             path,
             max_sessions_per_commit,
@@ -1208,92 +1202,6 @@ fn reconcile_write_through_skipped_advice(ref_name: &str, reason: String) -> Rec
         preview_command.clone(),
         vec![preview_command],
     )
-}
-
-#[cfg(feature = "ingest")]
-fn run_ingest(cli: &Cli, repo: &Repository, git_path: &std::path::Path, lossy: bool) -> Result<()> {
-    use ingest::{ImportOptions, import_git_into_with_options};
-
-    let (stats, _map) =
-        import_git_into_with_options(git_path, repo.root(), ImportOptions { lossy })?;
-    if should_output_json(cli, Some(repo.config())) {
-        let lossy_entries = stats
-            .lossy_entries
-            .iter()
-            .map(|entry| {
-                serde_json::json!({
-                    "path": entry.path,
-                    "action": entry.action.as_str(),
-                    "reason": entry.reason,
-                    "git_object": entry.git_object,
-                })
-            })
-            .collect::<Vec<_>>();
-        let out = serde_json::json!({
-            "commits_imported": stats.commits_imported,
-            "trees_imported": stats.trees_imported,
-            "blobs_imported": stats.blobs_imported,
-            "local_branches": stats.refs_seen.local_branches,
-            "tags": stats.refs_seen.tags,
-            "remote_branches": stats.refs_seen.remote_branches,
-            "symbolic_skipped": stats.refs_seen.symbolic_skipped,
-            "peel_failed": stats.refs_seen.peel_failed,
-            "non_commit_skipped": stats.refs_seen.non_commit_skipped,
-            "reflog_only_commits": stats.reflog_only_commits,
-            "lossy_entries": lossy_entries,
-        });
-        println!("{out}");
-    } else {
-        let r = &stats.refs_seen;
-        let walked = r.local_branches
-            + r.tags
-            + r.remote_branches
-            + r.symbolic_skipped
-            + r.peel_failed
-            + r.non_commit_skipped;
-        let kept = r.local_branches + r.tags + r.remote_branches;
-        let ignored = r.symbolic_skipped + r.peel_failed + r.non_commit_skipped;
-        println!("imported from {}", git_path.display());
-        println!("refs:  walked: {walked}  kept: {kept}  ignored: {ignored}");
-        println!("    local branches:  {}", r.local_branches);
-        println!("    tags:            {}", r.tags);
-        println!("    remote branches: {}", r.remote_branches);
-        if r.symbolic_skipped > 0 {
-            println!("    symbolic refs:   {} ignored", r.symbolic_skipped);
-        }
-        if r.peel_failed > 0 {
-            println!("    peel-failed:     {} ignored", r.peel_failed);
-        }
-        if r.non_commit_skipped > 0 {
-            println!(
-                "    non-commit refs: {} ignored (annotated tag → blob/tree)",
-                r.non_commit_skipped
-            );
-        }
-        println!("commits:  imported: {}", stats.commits_imported);
-        if stats.reflog_only_commits > 0 {
-            println!("    reflog-only:   {}", stats.reflog_only_commits);
-        }
-        println!("trees:    {}", stats.trees_imported);
-        println!("blobs:    {}", stats.blobs_imported);
-        println!("threads written:  {}", stats.refs.threads_written);
-        println!("markers written:  {}", stats.refs.markers_written);
-        if !stats.lossy_entries.is_empty() {
-            println!(
-                "lossy import accepted for {} tree entries:",
-                stats.lossy_entries.len()
-            );
-            for entry in &stats.lossy_entries {
-                println!("  {}", entry.summary_line());
-            }
-        }
-        println!();
-        println!(
-            "Next: `heddle bridge reason --path {}` to attach AI-session reasoning.",
-            git_path.display()
-        );
-    }
-    Ok(())
 }
 
 #[cfg(feature = "ingest")]

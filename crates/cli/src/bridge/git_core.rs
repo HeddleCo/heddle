@@ -8,7 +8,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use ingest::LossyImportEntry;
 use objects::{
     error::HeddleError,
     object::{ChangeId, ChangeIdParseError, ContentHash, FileMode, Principal, ThreadName, Tree},
@@ -503,9 +502,6 @@ pub struct SyncMapping {
     heddle_to_git: HashMap<ChangeId, ObjectId>,
     /// Maps Git object id -> Heddle ChangeId
     git_to_heddle: HashMap<ObjectId, ChangeId>,
-    /// Git commits whose imported Heddle states were produced under
-    /// `bridge git import --lossy`, with root-relative lossy entries.
-    git_lossy_entries: HashMap<ObjectId, Vec<LossyImportEntry>>,
 }
 
 impl SyncMapping {
@@ -518,9 +514,6 @@ impl SyncMapping {
     pub fn insert(&mut self, change_id: ChangeId, git_oid: ObjectId) {
         if let Some(previous_git) = self.heddle_to_git.remove(&change_id) {
             self.git_to_heddle.remove(&previous_git);
-            if previous_git != git_oid {
-                self.git_lossy_entries.remove(&previous_git);
-            }
         }
         if let Some(previous_change) = self.git_to_heddle.remove(&git_oid) {
             self.heddle_to_git.remove(&previous_change);
@@ -572,9 +565,8 @@ impl SyncMapping {
         self.heddle_to_git.contains_key(change_id)
     }
 
-    /// Drop the mapping for `change_id`, clearing both directions and any
-    /// lossy-import entries for the now-unmapped Git object. Returns the Git
-    /// OID that was mapped, if any.
+    /// Drop the mapping for `change_id`, clearing both directions. Returns the
+    /// Git OID that was mapped, if any.
     ///
     /// The export visibility purge calls this to remove a state whose
     /// effective tier is no longer served by the export audience. Without it,
@@ -585,7 +577,6 @@ impl SyncMapping {
     pub(crate) fn remove(&mut self, change_id: &ChangeId) -> Option<ObjectId> {
         let git_oid = self.heddle_to_git.remove(change_id)?;
         self.git_to_heddle.remove(&git_oid);
-        self.git_lossy_entries.remove(&git_oid);
         Some(git_oid)
     }
 
@@ -594,77 +585,43 @@ impl SyncMapping {
         self.git_to_heddle.contains_key(&git_oid)
     }
 
-    pub(crate) fn set_git_lossy_entries(
-        &mut self,
-        git_oid: ObjectId,
-        entries: Vec<LossyImportEntry>,
-    ) {
-        if entries.is_empty() {
-            self.git_lossy_entries.remove(&git_oid);
-        } else {
-            self.git_lossy_entries.insert(git_oid, entries);
-        }
-    }
-
-    pub(crate) fn get_git_lossy_entries(&self, git_oid: ObjectId) -> Option<&[LossyImportEntry]> {
-        self.git_lossy_entries.get(&git_oid).map(Vec::as_slice)
-    }
-
     /// Iterate over mappings.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&ChangeId, &ObjectId)> {
         self.heddle_to_git.iter()
     }
 
     pub(crate) fn retain_git_objects(&mut self, repo: &SleyRepository) {
-        let retained: Vec<(ChangeId, ObjectId, Option<Vec<LossyImportEntry>>)> = self
+        let retained: Vec<(ChangeId, ObjectId)> = self
             .heddle_to_git
             .iter()
             .filter_map(|(change_id, git_oid)| {
-                repo.read_object(git_oid).ok().map(|_| {
-                    (
-                        *change_id,
-                        *git_oid,
-                        self.git_lossy_entries.get(git_oid).cloned(),
-                    )
-                })
+                repo.read_object(git_oid)
+                    .ok()
+                    .map(|_| (*change_id, *git_oid))
             })
             .collect();
 
         self.heddle_to_git.clear();
         self.git_to_heddle.clear();
-        self.git_lossy_entries.clear();
-        for (change_id, git_oid, lossy_entries) in retained {
+        for (change_id, git_oid) in retained {
             self.insert(change_id, git_oid);
-            if let Some(lossy_entries) = lossy_entries {
-                self.set_git_lossy_entries(git_oid, lossy_entries);
-            }
         }
     }
 
     #[cfg_attr(not(feature = "git-overlay"), allow(dead_code))]
     pub(crate) fn retain_git_object_set(&mut self, reachable: &HashSet<ObjectId>) -> usize {
         let before = self.heddle_to_git.len();
-        let retained: Vec<(ChangeId, ObjectId, Option<Vec<LossyImportEntry>>)> = self
+        let retained: Vec<(ChangeId, ObjectId)> = self
             .heddle_to_git
             .iter()
             .filter(|(_, git_oid)| reachable.contains(*git_oid))
-            .map(|(change_id, git_oid)| {
-                (
-                    *change_id,
-                    *git_oid,
-                    self.git_lossy_entries.get(git_oid).cloned(),
-                )
-            })
+            .map(|(change_id, git_oid)| (*change_id, *git_oid))
             .collect();
 
         self.heddle_to_git.clear();
         self.git_to_heddle.clear();
-        self.git_lossy_entries.clear();
-        for (change_id, git_oid, lossy_entries) in retained {
+        for (change_id, git_oid) in retained {
             self.insert(change_id, git_oid);
-            if let Some(lossy_entries) = lossy_entries {
-                self.set_git_lossy_entries(git_oid, lossy_entries);
-            }
         }
         before.saturating_sub(self.heddle_to_git.len())
     }
@@ -712,9 +669,6 @@ impl MappingFileSnapshot {
 }
 
 impl<'a> GitBridge<'a> {
-    /// Trailer keys used in Git commit messages for Heddle metadata.
-    pub(crate) const TRAILER_CHANGE_ID: &'static str = "Heddle-Change-Id";
-
     /// Create a new Git bridge for a Heddle repository.
     pub fn new(heddle_repo: &'a HeddleRepository) -> Self {
         Self {

@@ -832,7 +832,7 @@ fn semantic_large_diff_benchmark_matrix() {
             expect_parse_budget_fallback: true,
         },
         BenchRow {
-            name: "real Heddle PR #38 / bridge ingest provenance semantic hotspots",
+            name: "real Heddle PR #38 / ingest-backed import provenance semantic hotspots",
             fixture: BenchFixture::GitCommit {
                 commit: "ad04049b145304b46c327b5e2f3aeb9873555a1d",
                 max_files: None,

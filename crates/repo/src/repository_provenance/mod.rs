@@ -87,9 +87,9 @@ impl Repository {
         }
 
         // Walk every parent (not just first). For non-merge states this
-        // is a slice of length one; for merge commits — including the
-        // imported variants from `bridge git ingest` — it's the full
-        // parent set so a line introduced by the side branch gets
+        // is a slice of length one; for merge commits — including
+        // ingest-backed git imports — it's the full parent set so a line
+        // introduced by the side branch gets
         // attributed to *its* author rather than to whoever pressed
         // the merge button. Octopus merges (3+ parents) fall out for
         // free.

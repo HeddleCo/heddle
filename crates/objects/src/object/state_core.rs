@@ -227,7 +227,7 @@ pub struct State {
     /// came into being in its current form. `authored_at` is the
     /// *author* time — when someone actually wrote the change — which
     /// survives `git rebase`, cherry-pick, squash-merge, and `git
-    /// commit --amend`. The `bridge git ingest`/`import` importers fill
+    /// commit --amend`. The ingest-backed `bridge git import` path fills
     /// this from the git author time; native heddle commits leave it
     /// `None` and blame falls back to `created_at`.
     ///
@@ -303,13 +303,11 @@ pub struct State {
     #[serde(default)]
     pub raw_message: Option<Vec<u8>>,
     /// The SINGLE canonical "this state's content is NOT byte-faithful to the
-    /// original git object" marker (#567). Set to `true` by BOTH lossy
-    /// population paths — `bridge git import --lossy` and `bridge git ingest
-    /// --lossy` — whenever an unrepresentable tree entry was dropped or
+    /// original git object" marker (#567). Set to `true` by lossy import
+    /// population paths whenever an unrepresentable tree entry was dropped or
     /// converted during import, so the rebuilt tree (hence commit) no longer
     /// hashes to the original SHA. The git-export fidelity guard reads this one
-    /// flag to decide whether reconstruct-from-state is safe; covering every
-    /// lossy entry point (and any future one) with a single signal instead of
+    /// flag to decide whether reconstruct-from-state is safe, instead of
     /// enumerating import surfaces. `false` for native heddle commits and for
     /// lossless imports.
     ///

@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared utilities and helpers for Git bridge operations.
 
-use std::collections::HashMap;
-
 use ingest::LossyImportEntry;
 use objects::object::{State, Status};
 use sley::ObjectId as GitObjectId;
@@ -10,30 +8,6 @@ use sley::ObjectId as GitObjectId;
 use super::git_core::GitBridge;
 
 impl<'a> GitBridge<'a> {
-    /// Parse trailers from a commit message.
-    pub(crate) fn parse_trailers(message: &str) -> HashMap<String, String> {
-        let mut trailers = HashMap::new();
-
-        for line in message.lines().rev() {
-            if line.is_empty() {
-                break;
-            }
-
-            if let Some(pos) = line.find(':') {
-                let key = &line[..pos];
-                let value = line[pos + 1..].trim();
-
-                if key.starts_with("Heddle-") {
-                    trailers.insert(key.to_string(), value.to_string());
-                }
-            } else if !line.trim().is_empty() {
-                break;
-            }
-        }
-
-        trailers
-    }
-
     /// Build a Git commit message from a Heddle state.
     ///
     /// Phase B (post-2026-05) onward: this is just the state's intent text,
@@ -42,11 +16,6 @@ impl<'a> GitBridge<'a> {
     /// SHAs match the SHAs of imported commits — a prerequisite for any
     /// bidirectional sync where heddle and an upstream git host (e.g.
     /// GitHub) need to agree on which commits already exist.
-    ///
-    /// The legacy `Heddle-Change-Id:` / `Heddle-Status:` / `Heddle-Agent:` /
-    /// `Heddle-Confidence:` trailers are no longer written. The parser
-    /// (`parse_trailers`) is retained so historical commits that still
-    /// carry trailers can still be reconciled through the mapping loader.
     pub(crate) fn build_commit_message(state: &State) -> String {
         // Status is intentionally not surfaced here — published-vs-draft
         // belongs in heddle's note, not the commit message body, since
@@ -207,34 +176,10 @@ pub struct ImportStats {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_trailers() {
-        let message = r#"Add feature X
-
-This is the body.
-
-Heddle-Change-Id: hd-abc123
-Heddle-Agent: anthropic/claude
-Heddle-Confidence: 0.95
-"#;
-
-        let trailers = GitBridge::parse_trailers(message);
-        assert_eq!(
-            trailers.get("Heddle-Change-Id"),
-            Some(&"hd-abc123".to_string())
-        );
-        assert_eq!(
-            trailers.get("Heddle-Agent"),
-            Some(&"anthropic/claude".to_string())
-        );
-        assert_eq!(trailers.get("Heddle-Confidence"), Some(&"0.95".to_string()));
-    }
-
     // ── R6 — bridge footer ─────────────────────────────────────────────
-
     use objects::object::{Attribution, ChangeId, ContentHash, Principal};
+
+    use super::*;
 
     fn sample_state() -> State {
         State::new_snapshot(

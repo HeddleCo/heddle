@@ -897,7 +897,7 @@ fn export_tree_substitutes_stub_for_redacted_blob() {
 }
 
 #[test]
-fn import_all_rejects_gitlink_by_default_and_lossy_reports_conversion() {
+fn import_all_rejects_gitlink_by_default_and_lossy_reports_drop() {
     let (_git_temp, git_repo) = init_gitlink_repo();
 
     let default_heddle = TempDir::new().expect("heddle temp");
@@ -920,16 +920,16 @@ fn import_all_rejects_gitlink_by_default_and_lossy_reports_conversion() {
         Some(git_repo.workdir().expect("workdir").as_path()),
         ingest::ImportOptions { lossy: true },
     )
-    .expect("lossy import accepts gitlink conversion");
+    .expect("lossy import accepts gitlink drop");
 
     assert_eq!(stats.states_created, 1);
     assert_eq!(stats.lossy_entries.len(), 1);
     assert_eq!(stats.lossy_entries[0].path, "vendor");
-    assert!(stats.lossy_entries[0].summary_line().contains("converted"));
+    assert!(stats.lossy_entries[0].summary_line().contains("dropped"));
 }
 
 #[test]
-fn import_all_lossy_does_not_reattribute_cached_shared_subtree_entries() {
+fn import_all_lossy_reports_cached_shared_subtree_entries_without_mapping_sidecar() {
     let (_git_temp, git_repo) = init_git_repo();
     let shared_tree = gitlink_tree(&git_repo, "vendor");
 
@@ -949,7 +949,7 @@ fn import_all_lossy_does_not_reattribute_cached_shared_subtree_entries() {
     let second_tree = git_repo
         .write_tree(second_editor)
         .expect("write second tree");
-    let second_commit = commit_with_tree(
+    let _second_commit = commit_with_tree(
         &git_repo,
         Some("refs/heads/main"),
         second_tree,
@@ -970,35 +970,25 @@ fn import_all_lossy_does_not_reattribute_cached_shared_subtree_entries() {
     assert_eq!(stats.states_created, 2);
     assert_eq!(
         stats.lossy_entries.len(),
-        1,
-        "the cached shared subtree must not inflate lossy stats"
+        2,
+        "runtime stats should include both the original and cached ingest lossy entries"
     );
     assert_eq!(stats.lossy_entries[0].path, "shared/vendor");
+    assert_eq!(stats.lossy_entries[1].path, "shared/vendor");
 
     let mapping =
         std::fs::read_to_string(test_support::mapping_path(&bridge)).expect("mapping sidecar");
     let mapping: serde_json::Value = serde_json::from_str(&mapping).expect("mapping json");
     let entries = mapping["entries"].as_array().expect("mapping entries");
-    let first_entry = entries
-        .iter()
-        .find(|entry| entry["git_oid"] == first_commit.to_string())
-        .expect("first commit mapping");
-    let second_entry = entries
-        .iter()
-        .find(|entry| entry["git_oid"] == second_commit.to_string())
-        .expect("second commit mapping");
-
-    let first_lossy_entries = first_entry["lossy_entries"]
-        .as_array()
-        .expect("first lossy entries");
-    assert_eq!(first_lossy_entries.len(), 1);
-    assert_eq!(first_lossy_entries[0]["path"], "shared/vendor");
     assert!(
-        second_entry
-            .get("lossy_entries")
-            .and_then(|entries| entries.as_array())
-            .is_none_or(Vec::is_empty),
-        "second commit must not be attributed the parent's shared subtree loss"
+        entries
+            .iter()
+            .all(|entry| entry.get("lossy_entries").is_none()),
+        "bridge mapping must not persist lossy sidecar entries: {mapping}"
+    );
+    assert!(
+        !mapping.to_string().contains("shared/vendor"),
+        "bridge mapping must not name lossy paths: {mapping}"
     );
 }
 
@@ -1021,12 +1011,12 @@ fn import_all_default_fails_on_cached_lossy_commit_from_prior_run() {
     let mapping = std::fs::read_to_string(test_support::mapping_path(&first_bridge))
         .expect("mapping sidecar");
     assert!(
-        mapping.contains("lossy_entries"),
-        "bridge mapping must persist lossy entries: {mapping}"
+        !mapping.contains("lossy_entries"),
+        "bridge mapping must not persist lossy entries: {mapping}"
     );
     assert!(
-        mapping.contains("vendor"),
-        "bridge mapping must name the lossy path: {mapping}"
+        !mapping.contains("vendor"),
+        "bridge mapping must not name lossy paths: {mapping}"
     );
 
     let mut rerun_bridge = GitBridge::new(&repo);
@@ -1056,12 +1046,12 @@ fn import_all_lossy_reports_cached_lossy_commit_from_prior_run() {
         Some(git_path.as_path()),
         ingest::ImportOptions { lossy: true },
     )
-    .expect("lossy bridge rerun reports persisted lossy entries");
+    .expect("lossy bridge rerun reports ingest-cached lossy entries");
 
     assert_eq!(second.states_created, 0);
     assert_eq!(second.lossy_entries.len(), 1);
     assert_eq!(second.lossy_entries[0].path, "vendor");
-    assert!(second.lossy_entries[0].summary_line().contains("converted"));
+    assert!(second.lossy_entries[0].summary_line().contains("dropped"));
 }
 
 #[cfg(feature = "ingest")]
@@ -1217,12 +1207,12 @@ fn bridge_import_lossy_state_carries_canonical_git_lossy_marker() {
     assert_only_state_is_lossy_with_fidelity(&repo, "bridge import --lossy");
 }
 
-/// Close-the-class regression for #567 round 2: a `bridge git ingest --lossy`
-/// state carries the SAME canonical `git_lossy` marker that `import --lossy`
+/// Close-the-class regression for #567 round 2: an ingest-backed lossy state
+/// carries the SAME canonical `git_lossy` marker that `bridge import --lossy`
 /// sets. Before this fix, ingest states satisfied `has_git_fidelity` but
-/// carried no lossy signal reachable from an UNMAPPED state (ingest never
-/// populates the bridge mapping), so the export guard reconstructed them into
-/// wrong-SHA objects. Both paths now set ONE flag the guard reads.
+/// carried no lossy signal reachable from an UNMAPPED state, so the export
+/// guard reconstructed them into wrong-SHA objects. Both paths now set ONE flag
+/// the guard reads.
 #[cfg(feature = "ingest")]
 #[test]
 fn ingest_lossy_state_carries_canonical_git_lossy_marker() {
@@ -1243,16 +1233,16 @@ fn ingest_lossy_state_carries_canonical_git_lossy_marker() {
     );
 
     let repo = Repository::open(heddle_temp.path()).expect("open heddle repo");
-    assert_only_state_is_lossy_with_fidelity(&repo, "bridge git ingest --lossy");
+    assert_only_state_is_lossy_with_fidelity(&repo, "ingest-backed lossy import");
 }
 
-/// #567 round 3: a `bridge git ingest --lossy` state is UNMAPPED (ingest never
-/// populates the bridge mapping) yet carries git-fidelity (`raw_message`). Export
-/// must MINT it from its OWN raw metadata — there is no tracked original OID to
-/// match and no verbatim mirror bytes to fall back to, so the r2 `git_lossy` guard
-/// must NOT reject it into the (nonexistent) verbatim/mapped-OID path (the r2
-/// over-correction). The minted commit preserves the raw message verbatim; the
-/// native intent+footer mint would instead emit "No intent specified" + a
+/// #567 round 3: an ingest-backed lossy state is UNMAPPED yet carries
+/// git-fidelity (`raw_message`). Export must MINT it from its OWN raw metadata —
+/// there is no tracked original OID to match and no verbatim mirror bytes to
+/// fall back to, so the r2 `git_lossy` guard must NOT reject it into the
+/// (nonexistent) verbatim/mapped-OID path (the r2 over-correction). The minted
+/// commit preserves the raw message verbatim; the native intent+footer mint
+/// would instead emit "No intent specified" + a
 /// `Heddle-State` footer. The minted OID is DERIVED (there is no original to
 /// match); the load-bearing assertion is that the raw metadata survives the mint.
 #[cfg(feature = "ingest")]
@@ -1508,27 +1498,24 @@ fn mapping_persists_between_runs() {
 }
 
 #[test]
-fn legacy_mapping_is_migrated_out_of_git_dir() {
+fn mapping_rebuilds_from_heddle_notes() {
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
     let (_git_temp, git_repo) = init_git_repo();
 
+    let tree_oid = empty_tree_oid(&git_repo);
+    let commit_oid = commit_with_tree(&git_repo, Some("refs/heads/main"), tree_oid, "base", &[]);
     let change_id = ChangeId::generate();
-    let git_oid: ObjectId = "0808080808080808080808080808080808080808"
-        .parse()
-        .expect("oid");
-
-    let legacy_dir = repo.heddle_dir().join("git");
-    std::fs::create_dir_all(&legacy_dir).expect("create legacy dir");
-    std::fs::write(
-        legacy_dir.join("bridge-mapping.json"),
-        format!(
-            "{{\n  \"entries\": [\n    {{\"change_id\": \"{}\", \"git_oid\": \"{}\"}}\n  ]\n}}\n",
-            change_id.to_string_full(),
-            git_oid
-        ),
-    )
-    .expect("write legacy mapping");
+    let note = git_notes::HeddleNote {
+        change_id: change_id.to_string_full(),
+        agent: None,
+        confidence: None,
+        status: "published".to_string(),
+        omitted_annotations_breakdown: None,
+        signal_counts: None,
+        attribution: None,
+    };
+    git_notes::write_note(&git_repo, commit_oid, &note).expect("write heddle note");
 
     let mut bridge = GitBridge::new(&repo);
     test_support::build_existing_mapping(
@@ -1538,11 +1525,9 @@ fn legacy_mapping_is_migrated_out_of_git_dir() {
     .expect("build mapping");
 
     assert_eq!(
-        test_support::mapping(&bridge).get_git(&change_id),
-        Some(git_oid)
+        test_support::mapping(&bridge).get_heddle(commit_oid),
+        Some(change_id)
     );
-    assert!(test_support::mapping_path(&bridge).exists());
-    assert!(!repo.heddle_dir().join("git/bridge-mapping.json").exists());
 }
 
 #[test]
@@ -3328,45 +3313,6 @@ fn import_populates_mirror_with_identical_annotated_tag_object() {
     assert_eq!(source_tag.kind, GitObjectType::Tag);
     assert_eq!(mirror_tag.kind, source_tag.kind);
     assert_eq!(mirror_tag.data, source_tag.data);
-}
-
-#[test]
-fn import_honors_legacy_heddle_change_id_trailer() {
-    let heddle_temp = TempDir::new().expect("heddle temp");
-    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
-    let (_src_temp, source_repo) = init_git_repo();
-
-    // A commit message in the format pre-Phase-B builds wrote.
-    let legacy_change_id = "hd-fwsb54t27h1z2ktsjnd4wkaeg0";
-    let message = format!(
-        "Add feature X\n\n\
-         Heddle-Change-Id: {}\n\
-         Heddle-Status: published",
-        legacy_change_id
-    );
-
-    let tree_oid = empty_tree_oid(&source_repo);
-    let commit_oid = commit_with_tree(
-        &source_repo,
-        Some("refs/heads/main"),
-        tree_oid,
-        &message,
-        &[],
-    );
-
-    let mut bridge = GitBridge::new(&repo);
-    bridge
-        .import(Some(source_repo.workdir().expect("workdir").as_path()))
-        .expect("import legacy");
-
-    let recovered = test_support::mapping(&bridge)
-        .get_heddle(commit_oid)
-        .expect("legacy commit must be mapped");
-    assert_eq!(
-        recovered.to_string_full(),
-        legacy_change_id,
-        "Phase B: legacy trailer change_ids must round-trip"
-    );
 }
 
 #[test]

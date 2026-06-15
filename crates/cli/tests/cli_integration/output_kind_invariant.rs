@@ -178,7 +178,6 @@ const UNSWEPT_TODO: &[&str] = &[
     "agent release",
     "agent reserve",
     "bridge git export",
-    "bridge git ingest",
     "bridge git init",
     "bridge git reason",
     "collapse",
