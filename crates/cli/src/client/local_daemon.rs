@@ -29,6 +29,10 @@
 use std::{
     io,
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -134,6 +138,35 @@ pub async fn detect_local_daemon_with_connect_probe(
 #[cfg(unix)]
 static CHANNEL_CACHE: OnceMap<ProbeCacheKey, tonic::transport::Channel> = OnceMap::new();
 
+/// Per-heddle-dir count of how many times [`build_channel`] has
+/// actually opened a UDS, constructed a tonic channel, and run the
+/// `Health.Check` handshake. A cache hit in
+/// [`connect_local_daemon_channel`] returns a clone of the cached
+/// channel without entering `build_channel`, so it does not bump this
+/// counter.
+///
+/// Keyed per heddle dir (not process-global) so the count is
+/// deterministic regardless of which other tests run concurrently.
+///
+/// Test-support only — lets the serve_local test assert that the second
+/// `connect_local_daemon_channel` is a true O(1) cache hit (no rebuild)
+/// instead of comparing wall-clock time, which flakes on shared CI
+/// runners (issue #722).
+#[cfg(unix)]
+#[doc(hidden)]
+static CHANNEL_BUILD_COUNT: OnceMap<ProbeCacheKey, Arc<AtomicU64>> = OnceMap::new();
+
+/// Read the [`build_channel`] run count for `heddle_dir`. See
+/// [`CHANNEL_BUILD_COUNT`]. A dir whose channel was never built reads 0.
+#[cfg(unix)]
+#[doc(hidden)]
+pub fn channel_build_count(heddle_dir: &Path) -> u64 {
+    CHANNEL_BUILD_COUNT
+        .get(&heddle_dir.to_path_buf())
+        .map(|c| c.load(Ordering::Relaxed))
+        .unwrap_or(0)
+}
+
 /// Connect-and-handshake outcome for [`connect_local_daemon_channel`].
 ///
 /// `target` is repeated for the convenience of callers that only need
@@ -208,6 +241,9 @@ async fn build_channel(
     heddle_dir: &Path,
     connect_timeout: Duration,
 ) -> std::result::Result<LocalDaemonChannel, ChannelError> {
+    CHANNEL_BUILD_COUNT
+        .get_or_init_with(&heddle_dir.to_path_buf(), || Arc::new(AtomicU64::new(0)))
+        .fetch_add(1, Ordering::Relaxed);
     let target = detect_local_daemon(heddle_dir).ok_or(ChannelError::NoDaemon)?;
     // `unix:` URIs aren't usable as the *origin* on a HTTP/2 channel
     // (the authority pseudo-header has to be a plausible host). The
@@ -312,9 +348,39 @@ pub enum LocalDaemonStatus {
     Absent,
 }
 
+/// Per-heddle-dir count of how many times [`probe`] has actually run
+/// the file-stat / liveness syscalls (the "cold setup step"). The
+/// `DETECT_CACHE` lets the warm path skip this: a warm
+/// [`detect_local_daemon`] hit returns the cached `Option<UdsTarget>`
+/// without entering `probe` at all, so it does not bump this counter.
+///
+/// Keyed per heddle dir (not process-global) so a test reading the
+/// count for *its* daemon is unaffected by probes that a concurrently
+/// running test issues against a *different* temp dir — the counter is
+/// deterministic regardless of test parallelism.
+///
+/// Test-support only — lets the serve_local test assert the *mechanism*
+/// (warm path skips the probe) instead of comparing wall-clock time,
+/// which flakes on shared CI runners (issue #722).
+#[doc(hidden)]
+static PROBE_RUN_COUNT: OnceMap<ProbeCacheKey, Arc<AtomicU64>> = OnceMap::new();
+
+/// Read the [`probe`] run count for `heddle_dir`. See
+/// [`PROBE_RUN_COUNT`]. A never-probed dir reads 0.
+#[doc(hidden)]
+pub fn probe_run_count(heddle_dir: &Path) -> u64 {
+    PROBE_RUN_COUNT
+        .get(&heddle_dir.to_path_buf())
+        .map(|c| c.load(Ordering::Relaxed))
+        .unwrap_or(0)
+}
+
 /// Probe the per-repo daemon directory. Cheap (two file stats, `kill(pid, 0)`,
 /// and same-executable identity for live pids).
 pub fn probe(heddle_dir: &Path) -> LocalDaemonProbe {
+    PROBE_RUN_COUNT
+        .get_or_init_with(&heddle_dir.to_path_buf(), || Arc::new(AtomicU64::new(0)))
+        .fetch_add(1, Ordering::Relaxed);
     let socket_path = heddle_dir.join("sockets").join("grpc.sock");
     let pid_path = heddle_dir.join("sockets").join("grpc.pid");
     let status = match read_pid(&pid_path) {
