@@ -29,8 +29,8 @@ use cli::{
             cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
             cmd_daemon_status, cmd_daemon_stop, cmd_diagnose, cmd_diff, cmd_discuss,
             cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_fetch, cmd_fsck, cmd_hook,
-            cmd_init, cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_merge, cmd_pull,
-            cmd_push, cmd_query, cmd_ready, cmd_rebase, cmd_redo, cmd_remote, cmd_resolve,
+            cmd_init, cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_merge, cmd_oplog,
+            cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_rebase, cmd_redo, cmd_remote, cmd_resolve,
             cmd_retro, cmd_revert, cmd_review, cmd_run, cmd_schemas, cmd_session_end,
             cmd_session_list, cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell,
             cmd_show, cmd_snapshot, cmd_start, cmd_stash, cmd_status, cmd_switch_compat,
@@ -510,6 +510,8 @@ async fn async_main() -> Result<()> {
             repair,
             bridge,
         } => cmd_fsck(&cli, *full, *thorough, *repair, *bridge),
+
+        Commands::Oplog { command } => cmd_oplog(&cli, command.clone()),
 
         Commands::Collapse(CollapseArgs {
             states,

@@ -11,8 +11,9 @@ use serde::Serialize;
 use crate::cli::SemanticCommands;
 use crate::cli::{
     ActorCommands, AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands,
-    HookCommands, IntegrationCommands, MaintenanceCommands, PurgeCommands, RedactCommands,
-    RedactTrustCommands, RemoteCommands, SessionCommands, ShellCommands, StashCommands,
+    HookCommands, IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands,
+    RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands, ShellCommands,
+    StashCommands,
     ThreadCommands, ThreadMarkerCommands, VisibilityCommands,
     cli_args::{DiscussCommands, ReviewCommands, TransactionCommands},
     render::shell_quote,
@@ -1779,6 +1780,21 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["fsck"],
         category(documented_schemas(MUTATING, &["fsck"]), "recovery"),
+    ),
+    entry(&["oplog"], category(GROUP, "recovery")),
+    entry(
+        &["oplog", "recover"],
+        category(
+            json_discriminators(
+                opaque_schemas(MUTATING_NO_OP_ID, &["oplog recover"]),
+                &[json_discriminator(
+                    Some("oplog recover"),
+                    "output_kind",
+                    "oplog_recover",
+                )],
+            ),
+            "recovery",
+        ),
     ),
     entry(
         &["git-overlay"],
@@ -4311,6 +4327,9 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Merge(_) => vec!["merge"],
         Commands::Resolve(_) => vec!["resolve"],
         Commands::Fsck { .. } => vec!["fsck"],
+        Commands::Oplog { command } => match command {
+            OplogCommands::Recover => vec!["oplog", "recover"],
+        },
         Commands::Fetch { .. } => vec!["fetch"],
         Commands::Push(_) => vec!["push"],
         Commands::Pull(_) => vec!["pull"],
@@ -4586,6 +4605,7 @@ mod tests {
         sample(&["doctor", "schemas"], &["doctor", "schemas"]),
         sample(&["fetch"], &["fetch"]),
         sample(&["fsck"], &["fsck"]),
+        sample(&["oplog", "recover"], &["oplog", "recover"]),
         #[cfg(feature = "git-overlay")]
         sample(&["git-overlay"], &["git-overlay"]),
         sample(&["help"], &["help"]),
@@ -5733,6 +5753,7 @@ mod tests {
                 "doctor docs",
                 "doctor schemas",
                 "fetch",
+                "oplog recover",
                 "help",
                 "init",
                 // `log` appears twice: the entry advertises both `log` and the

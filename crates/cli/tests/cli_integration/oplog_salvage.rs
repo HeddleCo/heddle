@@ -74,6 +74,128 @@ fn truncated_packed_oplog_salvages_prefix_quarantines_tail_and_keeps_repo_usable
     }
 }
 
+#[test]
+fn oplog_recover_subcommand_reports_salvage_in_text_and_json() {
+    // Mid-record truncation: the footer is destroyed, so this exercises the
+    // forward-greedy path through the explicit operator entrypoint. The CLI's
+    // repo open auto-recovers the oplog before the handler runs, so the
+    // operator sees the salvage reported from the durable `.oplog.recovery`
+    // sidecar — the report is meaningful regardless of WHO triggered the
+    // salvage (auto-fallback or operator).
+    let temp = TempDir::new().unwrap();
+    seed_native_repo_with_three_captures(temp.path());
+
+    let oplog_path = temp.path().join(".heddle/oplog/oplog.bin");
+    let original = std::fs::read(&oplog_path).expect("read packed oplog");
+    let (entry_offsets, _entry_data_end) = current_entry_offsets(&original);
+    let recovered = 3usize;
+    let lost = entry_offsets.len() - recovered;
+    let truncate_at = entry_offsets[3] + ((entry_offsets[4] - entry_offsets[3]) / 2);
+
+    let mut truncated = original.clone();
+    truncated.truncate(truncate_at);
+    std::fs::write(&oplog_path, truncated).expect("write truncated packed oplog");
+
+    // Text mode: human-readable report naming the salvage detail.
+    let text =
+        heddle_output(&["oplog", "recover"], Some(temp.path())).expect("oplog recover should run");
+    let text_out = String::from_utf8_lossy(&text.stdout);
+    assert!(
+        text.status.success(),
+        "oplog recover should succeed; stdout={text_out} stderr={}",
+        String::from_utf8_lossy(&text.stderr)
+    );
+    assert!(
+        text_out.contains("forward-greedy")
+            && text_out.contains(&format!("Records recovered: {recovered}"))
+            && text_out.contains(&format!("Records lost: {lost}")),
+        "text report should describe the salvage: {text_out}"
+    );
+
+    // The damaged file was quarantined and a sidecar was written.
+    assert!(
+        temp.path().join(".heddle/oplog/oplog.bin.corrupt").exists(),
+        "damaged oplog must be quarantined"
+    );
+    assert!(
+        temp.path()
+            .join(".heddle/oplog/oplog.bin.oplog.recovery")
+            .exists(),
+        "recovery sidecar must be written"
+    );
+
+    // JSON mode reports the same salvage with machine-readable fields.
+    let json = heddle_output(&["oplog", "recover", "--output", "json"], Some(temp.path()))
+        .expect("oplog recover --output json should run");
+    assert!(
+        json.status.success(),
+        "recover --output json should succeed; stderr={}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let parsed: Value =
+        serde_json::from_slice(&json.stdout).expect("recover should emit JSON on stdout");
+    assert_eq!(parsed["strategy"], "forward-greedy", "{parsed}");
+    assert_eq!(
+        parsed["entries_recovered"].as_u64().unwrap(),
+        recovered as u64,
+        "{parsed}"
+    );
+    assert_eq!(
+        parsed["entries_lost"].as_u64().unwrap(),
+        lost as u64,
+        "{parsed}"
+    );
+    assert!(
+        parsed["sidecar_path"]
+            .as_str()
+            .is_some_and(|p| p.ends_with("oplog.bin.oplog.recovery")),
+        "report surfaces the recovery sidecar path: {parsed}"
+    );
+}
+
+#[test]
+fn oplog_recover_subcommand_json_reports_footer_guided_strategy() {
+    // Trailing bytes torn off after an intact footer: the standard parse fails
+    // but the footer survives, so recovery is footer-guided and lossless.
+    let temp = TempDir::new().unwrap();
+    seed_native_repo_with_three_captures(temp.path());
+
+    let oplog_path = temp.path().join(".heddle/oplog/oplog.bin");
+    let original = std::fs::read(&oplog_path).expect("read packed oplog");
+    let (entry_offsets, entry_data_end) = current_entry_offsets(&original);
+
+    let mut torn = original.clone();
+    torn.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+    std::fs::write(&oplog_path, &torn).expect("write torn packed oplog");
+
+    let json = heddle_output(&["oplog", "recover", "--output", "json"], Some(temp.path()))
+        .expect("oplog recover --output json should run");
+    assert!(
+        json.status.success(),
+        "recover should succeed; stderr={}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let parsed: Value =
+        serde_json::from_slice(&json.stdout).expect("recover should emit JSON on stdout");
+    assert_eq!(parsed["strategy"], "footer-guided", "{parsed}");
+    assert_eq!(
+        parsed["entries_recovered"].as_u64().unwrap(),
+        entry_offsets.len() as u64,
+        "footer-guided recovery is lossless: {parsed}"
+    );
+    assert_eq!(parsed["entries_lost"].as_u64().unwrap(), 0, "{parsed}");
+    assert_eq!(
+        parsed["damaged_byte_start"].as_u64().unwrap(),
+        entry_data_end as u64,
+        "damaged range begins at the footer's recorded entry-data-end: {parsed}"
+    );
+    assert_eq!(
+        parsed["damaged_byte_end"].as_u64().unwrap(),
+        torn.len() as u64,
+        "{parsed}"
+    );
+}
+
 struct TruncationCase {
     name: &'static str,
     truncate_at: usize,

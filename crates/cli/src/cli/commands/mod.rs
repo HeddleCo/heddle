@@ -51,6 +51,7 @@ mod mount_lifecycle;
 mod next_action;
 mod operator_core;
 mod operator_loop;
+mod oplog;
 mod oss;
 mod purge;
 mod query;
@@ -169,6 +170,7 @@ pub(crate) use merge::{bench_detect_renames, bench_find_merge_base, bench_three_
 pub use monitor::cmd_monitor;
 pub use operator_core::operator_emission_output_kinds;
 pub use operator_loop::{cmd_abort, cmd_continue, cmd_sync_smart};
+pub use oplog::cmd_oplog;
 #[cfg(feature = "git-overlay")]
 pub use oss::cmd_git_overlay_guide;
 pub use purge::cmd_purge;

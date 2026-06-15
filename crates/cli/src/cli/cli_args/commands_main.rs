@@ -9,8 +9,9 @@ use super::BridgeCommands;
 use super::SemanticCommands;
 use super::{
     AgentCommands, CheckpointArgs, CompletionSubject, ContextCommands, DiscussCommands,
-    HookCommands, IntegrationCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands,
-    ShellCommands, StashCommands, ThreadCommands, TransactionCommands, VisibilityCommands,
+    HookCommands, IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands,
+    ReviewCommands, ShellCommands, StashCommands, ThreadCommands, TransactionCommands,
+    VisibilityCommands,
     commands_args::{
         ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AdoptArgs,
         CloneArgs, CollapseArgs, CommitArgs, DiffArgs, DoctorArgs, ExpandArgs, InitArgs, LandArgs,
@@ -373,6 +374,16 @@ Examples:
         /// Include Git-overlay mirror, mapping, notes, and checkout checks.
         #[arg(long)]
         bridge: bool,
+    },
+
+    /// Inspect and repair the operation log.
+    ///
+    /// `heddle oplog recover` explicitly salvages a truncated or torn oplog,
+    /// reporting what was recovered — the operator-facing entrypoint over the
+    /// same recovery the everyday read path runs automatically.
+    Oplog {
+        #[command(subcommand)]
+        command: OplogCommands,
     },
 
     /// Download objects and refs from remote.

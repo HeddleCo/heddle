@@ -12,6 +12,7 @@ mod commands_discuss;
 mod commands_hook;
 mod commands_integration;
 mod commands_main;
+mod commands_oplog;
 mod commands_query;
 mod commands_redact;
 mod commands_remote;
@@ -57,6 +58,7 @@ pub use commands_main::PresenceCommands;
 pub use commands_main::{
     ActorCommands, Commands, DaemonCommands, MaintenanceCommands, SessionCommands,
 };
+pub use commands_oplog::OplogCommands;
 pub use commands_query::QueryArgs;
 pub use commands_redact::{
     PurgeApplyArgs, PurgeCommands, PurgeListArgs, RedactApplyArgs, RedactCommands, RedactListArgs,
