@@ -19,7 +19,7 @@ use super::{
         ConditionalCommitOutcome, IsolationPrecondition, OpBatch, OpEntry, OpRecord,
         is_transaction_commit, is_transaction_commit_for, isolation_keys_for_record,
     },
-    packed_oplog::{PackedOpLog, PackedOpLogIndex},
+    packed_oplog::{OplogRecoveryReport, PackedOpLog, PackedOpLogIndex, recover_oplog_at},
 };
 
 /// Operation log for tracking operations and enabling undo.
@@ -180,6 +180,32 @@ impl OpLog {
     pub fn refresh_cache(&self) -> Result<()> {
         let _guard = self.refresh_cached()?;
         Ok(())
+    }
+
+    /// Explicitly run the truncation-salvage path on this repository's oplog and
+    /// report what was salvaged.
+    ///
+    /// This is the operator entrypoint behind `heddle oplog recover`. It runs
+    /// the SAME recovery the silent auto-fallback in `load()`/`ensure_latest()`
+    /// would run — footer-guided first, then forward-greedy — quarantines the
+    /// damaged original to `.corrupt`, writes the `.oplog.recovery` sidecar, and
+    /// rebuilds `oplog.bin`. When the oplog is already healthy it returns an
+    /// `already_healthy` report with no side effects.
+    ///
+    /// Takes the oplog write lock so the salvage cannot race a concurrent
+    /// committer, and invalidates this handle's cache afterward.
+    pub fn recover(&self) -> Result<OplogRecoveryReport> {
+        let path = self.oplog_path();
+        if !path.exists() {
+            return Ok(OplogRecoveryReport::from_prior_sidecar(&path)
+                .unwrap_or_else(OplogRecoveryReport::healthy));
+        }
+        let _lock = self.write_lock()?;
+        let report = recover_oplog_at(&path)?;
+        // Drop any cached (now-stale) index view so subsequent reads see the
+        // rebuilt oplog.
+        *self.cached.lock().unwrap() = None;
+        Ok(report)
     }
 
     /// Get the last operation entry.

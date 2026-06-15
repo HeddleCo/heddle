@@ -1092,11 +1092,133 @@ fn load(bytes: &[u8]) -> Result<OplogData> {
     }
 }
 
+/// How the recovered prefix was located.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecoveryStrategy {
+    /// The surviving end-of-file footer was intact: its recorded
+    /// `entry_data_end` told us exactly where the complete entry stream ends,
+    /// so the recovered prefix is precise rather than greedily re-derived.
+    FooterGuided,
+    /// The footer was unrecoverable; the complete-record prefix was re-derived
+    /// by parsing entries forward and stopping at the first torn record.
+    ForwardGreedy,
+}
+
+impl RecoveryStrategy {
+    fn as_str(self) -> &'static str {
+        match self {
+            RecoveryStrategy::FooterGuided => "footer-guided",
+            RecoveryStrategy::ForwardGreedy => "forward-greedy",
+        }
+    }
+}
+
 struct TruncatedTailRecovery {
     data: OplogData,
     original_entry_count: Option<u64>,
     damaged_byte_start: usize,
     damaged_byte_end: usize,
+    strategy: RecoveryStrategy,
+}
+
+impl TruncatedTailRecovery {
+    fn recovered_records(&self) -> u64 {
+        self.data.entries.len() as u64
+    }
+
+    fn lost_records(&self) -> Option<u64> {
+        self.original_entry_count
+            .map(|count| count.saturating_sub(self.recovered_records()))
+    }
+}
+
+/// Structured outcome of an explicit (operator-invoked) or auto salvage.
+///
+/// Reuses the exact recovery planning that the auto-fallback path runs, so the
+/// `heddle oplog recover` operator entrypoint reports precisely what the
+/// silent fallback would have done — no second implementation.
+#[derive(Clone, Debug)]
+pub struct OplogRecoveryReport {
+    /// True when the file parsed cleanly and no salvage was needed *this run*.
+    /// May still carry sidecar-derived numbers from a prior recovery — see
+    /// [`prior_recovery`](Self::prior_recovery).
+    pub already_healthy: bool,
+    /// True when the reported numbers come from a `.oplog.recovery` sidecar
+    /// left by an EARLIER recovery (e.g. the silent auto-fallback ran first)
+    /// rather than from a salvage performed by this call.
+    pub prior_recovery: bool,
+    /// Which strategy located the recovered prefix (`None` when no recovery is
+    /// known): `footer-guided` or `forward-greedy`.
+    pub strategy: Option<String>,
+    /// Complete records kept.
+    pub entries_recovered: u64,
+    /// Records the original header claimed but that could not be salvaged.
+    /// `None` when the original count was itself unreadable.
+    pub entries_lost: Option<u64>,
+    /// First byte of the damaged tail (the truncation/tear offset).
+    pub damaged_byte_start: u64,
+    /// One-past-the-last damaged byte (original file length).
+    pub damaged_byte_end: u64,
+    /// Where the damaged original was quarantined (`None` when none this run).
+    pub quarantine_path: Option<PathBuf>,
+    /// Where the recovery sidecar lives (`None` when no recovery is known).
+    pub sidecar_path: Option<PathBuf>,
+}
+
+impl OplogRecoveryReport {
+    /// A report for an oplog that parsed cleanly with no known prior recovery.
+    pub(crate) fn healthy() -> Self {
+        Self {
+            already_healthy: true,
+            prior_recovery: false,
+            strategy: None,
+            entries_recovered: 0,
+            entries_lost: None,
+            damaged_byte_start: 0,
+            damaged_byte_end: 0,
+            quarantine_path: None,
+            sidecar_path: None,
+        }
+    }
+
+    /// Build an `already_healthy` report from a `.oplog.recovery` sidecar left
+    /// by a prior recovery, so the operator still sees the full salvage detail
+    /// even when the silent auto-fallback ran before they invoked `recover`.
+    /// Returns `None` if no readable, well-formed sidecar exists.
+    pub fn from_prior_sidecar(oplog_path: &Path) -> Option<Self> {
+        let sidecar_path = recovery_sidecar_path(oplog_path);
+        let contents = std::fs::read_to_string(&sidecar_path).ok()?;
+        let mut fields: HashMap<&str, &str> = HashMap::new();
+        for line in contents.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                fields.insert(key.trim(), value.trim());
+            }
+        }
+        let strategy = fields.get("strategy").map(|s| s.to_string());
+        let entries_recovered = fields.get("entries_recovered")?.parse().ok()?;
+        let entries_lost = fields
+            .get("entries_lost")
+            .and_then(|raw| raw.parse::<u64>().ok());
+        let damaged_byte_start = fields
+            .get("truncation_offset")
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(0);
+        let damaged_byte_end = fields
+            .get("damaged_byte_end")
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(0);
+        Some(Self {
+            already_healthy: true,
+            prior_recovery: true,
+            strategy,
+            entries_recovered,
+            entries_lost,
+            damaged_byte_start,
+            damaged_byte_end,
+            quarantine_path: None,
+            sidecar_path: Some(sidecar_path),
+        })
+    }
 }
 
 fn recover_truncated_latest(
@@ -1113,12 +1235,64 @@ fn recover_truncated_latest(
     let corrupt_path = next_corrupt_path(path);
     std::fs::rename(path, &corrupt_path)?;
     write_file_atomic(path, &recovered_bytes)?;
+    write_recovery_sidecar(path, &recovery)?;
     if let Some(parent) = path.parent() {
         sync_directory(parent)?;
     }
 
     emit_truncated_oplog_recovery_warning(path, &corrupt_path, &recovery);
     Ok(Some(recovery.data))
+}
+
+/// Operator entrypoint: explicitly run the salvage path and report what it did.
+///
+/// Routes through the same [`plan_truncated_latest_recovery`] +
+/// [`recover_truncated_latest`] machinery the silent auto-fallback uses, so the
+/// reported numbers always match what `load()`/`ensure_latest()` would do on
+/// their own. Returns an `already_healthy` report (no side effects) when the
+/// oplog parses cleanly.
+pub(crate) fn recover_oplog_at(path: &Path) -> Result<OplogRecoveryReport> {
+    let bytes = std::fs::read(path)?;
+    let source_error = match load(&bytes) {
+        Ok(_) => {
+            // Healthy this run. If an earlier recovery (e.g. the silent
+            // auto-fallback) already salvaged it, surface that sidecar's detail
+            // rather than a bare "nothing to recover".
+            return Ok(
+                OplogRecoveryReport::from_prior_sidecar(path).unwrap_or_else(OplogRecoveryReport::healthy)
+            );
+        }
+        Err(err) => err,
+    };
+
+    let Some(recovery) = plan_truncated_latest_recovery(&bytes, &source_error)? else {
+        // Not a truncation-shaped failure: surface the original error rather
+        // than silently claiming a healthy oplog.
+        return Err(source_error);
+    };
+
+    let mut recovered_bytes = Vec::new();
+    Latest::encode(&recovery.data, &mut recovered_bytes)?;
+    let corrupt_path = next_corrupt_path(path);
+    std::fs::rename(path, &corrupt_path)?;
+    write_file_atomic(path, &recovered_bytes)?;
+    let sidecar_path = write_recovery_sidecar(path, &recovery)?;
+    if let Some(parent) = path.parent() {
+        sync_directory(parent)?;
+    }
+    emit_truncated_oplog_recovery_warning(path, &corrupt_path, &recovery);
+
+    Ok(OplogRecoveryReport {
+        already_healthy: false,
+        prior_recovery: false,
+        strategy: Some(recovery.strategy.as_str().to_string()),
+        entries_recovered: recovery.recovered_records(),
+        entries_lost: recovery.lost_records(),
+        damaged_byte_start: recovery.damaged_byte_start as u64,
+        damaged_byte_end: recovery.damaged_byte_end as u64,
+        quarantine_path: Some(corrupt_path),
+        sidecar_path: Some(sidecar_path),
+    })
 }
 
 fn plan_truncated_latest_recovery(
@@ -1146,6 +1320,7 @@ fn plan_truncated_latest_recovery(
                 original_entry_count: None,
                 damaged_byte_start: 0,
                 damaged_byte_end: bytes.len(),
+                strategy: RecoveryStrategy::ForwardGreedy,
             }));
         }
     };
@@ -1158,6 +1333,17 @@ fn plan_truncated_latest_recovery(
     let schema = header.record_schema_version.ok_or_else(|| {
         HeddleError::InvalidObject("oplog v4 missing OpRecord schema version".to_string())
     })?;
+
+    // Footer-guided first: when only the trailing bytes (the index sections or
+    // a torn tail after the footer) are damaged but an intact footer survives,
+    // its recorded `entry_data_end` frames the complete prefix EXACTLY. That is
+    // more precise than re-deriving the boundary forward, so try it before the
+    // forward-greedy fallback below.
+    if let Some(recovery) =
+        scan_footer_guided_recovery(bytes, &header, header.header_len as usize, schema)
+    {
+        return Ok(Some(recovery));
+    }
 
     let mut entries = Vec::new();
     let mut damaged_byte_start = cursor.offset;
@@ -1186,7 +1372,178 @@ fn plan_truncated_latest_recovery(
         original_entry_count: Some(header.entry_count),
         damaged_byte_start,
         damaged_byte_end: bytes.len(),
+        strategy: RecoveryStrategy::ForwardGreedy,
     }))
+}
+
+/// Scan backward from EOF for the 8-byte footer magic and, on the first intact
+/// footer that frames a valid entry stream, recover footer-guided.
+///
+/// "Intact" means: correct magic, index version, and footer length; metadata
+/// that agrees with the header; and an `entry_data_end` that is a real entry
+/// boundary — i.e. exactly `header.entry_count` records parse and end precisely
+/// at `entry_data_end`. When found, the damaged tail is everything after
+/// `entry_data_end` (the torn index/footer region). Returns `None` when no
+/// surviving footer frames a clean prefix, so the caller falls through to the
+/// forward-greedy strategy.
+fn scan_footer_guided_recovery(
+    bytes: &[u8],
+    header: &PackedHeader,
+    entries_start: usize,
+    schema: OpRecordSchemaVersion,
+) -> Option<TruncatedTailRecovery> {
+    let footer_len = FOOTER_LEN as usize;
+    if bytes.len() < entries_start + footer_len {
+        return None;
+    }
+    // Highest offset at which a full footer could still begin.
+    let max_start = bytes.len() - footer_len;
+    let mut candidate = max_start;
+    loop {
+        if bytes[candidate..candidate + INDEX_MAGIC.len()] == *INDEX_MAGIC
+            && let Some(recovery) =
+                try_footer_guided_at(bytes, header, entries_start, schema, candidate)
+        {
+            return Some(recovery);
+        }
+        if candidate == entries_start {
+            return None;
+        }
+        candidate -= 1;
+    }
+}
+
+/// Attempt a footer-guided recovery using the footer that starts at
+/// `footer_start`. Returns `None` unless the footer parses, agrees with the
+/// header, and its `entry_data_end` is exactly the end of `entry_count`
+/// well-formed records.
+fn try_footer_guided_at(
+    bytes: &[u8],
+    header: &PackedHeader,
+    entries_start: usize,
+    schema: OpRecordSchemaVersion,
+    footer_start: usize,
+) -> Option<TruncatedTailRecovery> {
+    let footer = parse_footer_at(bytes, footer_start).ok()?;
+
+    // The recorded boundary must agree with the header and sit inside the
+    // entry region (after the header, at or before this footer).
+    if footer.entry_count != header.entry_count || footer.head_id != header.head_id {
+        return None;
+    }
+    let entry_data_end = usize::try_from(footer.entry_data_end).ok()?;
+    if entry_data_end < entries_start || entry_data_end > footer_start {
+        return None;
+    }
+
+    // The footer is only trustworthy if its boundary is a real record boundary:
+    // exactly `entry_count` records parse and consume up to `entry_data_end`.
+    let mut cursor = Cursor::new(&bytes[entries_start..entry_data_end]);
+    let mut entries = Vec::with_capacity(header.entry_count as usize);
+    for _ in 0..header.entry_count {
+        match parse_entry_with_schema(&mut cursor, schema) {
+            Ok(entry) => entries.push(entry),
+            Err(_) => return None,
+        }
+    }
+    if cursor.offset != entry_data_end - entries_start {
+        return None;
+    }
+
+    let head_id = entries.last().map(|entry| entry.id).unwrap_or(0);
+    Some(TruncatedTailRecovery {
+        data: OplogData { entries, head_id },
+        original_entry_count: Some(header.entry_count),
+        damaged_byte_start: entry_data_end,
+        damaged_byte_end: bytes.len(),
+        strategy: RecoveryStrategy::FooterGuided,
+    })
+}
+
+/// Parse a footer that begins at `footer_start` (not necessarily at EOF),
+/// validating only magic / index version / footer length. Field-level
+/// agreement with the header and the entry stream is checked by the caller.
+fn parse_footer_at(bytes: &[u8], footer_start: usize) -> Result<PackedFooter> {
+    let footer_len = FOOTER_LEN as usize;
+    if footer_start + footer_len > bytes.len() {
+        return Err(HeddleError::InvalidObject(
+            "oplog footer past end of file".to_string(),
+        ));
+    }
+    let mut cursor = Cursor::new(&bytes[footer_start..footer_start + footer_len]);
+    let magic = cursor.read_array::<8>()?;
+    if &magic != INDEX_MAGIC {
+        return Err(HeddleError::InvalidObject(
+            "invalid oplog index magic".to_string(),
+        ));
+    }
+    let index_version = cursor.read_u32()?;
+    if index_version != INDEX_VERSION {
+        return Err(HeddleError::InvalidObject(format!(
+            "unsupported oplog index version {index_version}"
+        )));
+    }
+    let footer_len_field = cursor.read_u32()?;
+    if footer_len_field != FOOTER_LEN as u32 {
+        return Err(HeddleError::InvalidObject(
+            "oplog index footer length mismatch".to_string(),
+        ));
+    }
+    Ok(PackedFooter {
+        entry_data_end: cursor.read_u64()?,
+        entry_offsets_offset: cursor.read_u64()?,
+        entry_offsets_count: cursor.read_u64()?,
+        batch_offsets_offset: cursor.read_u64()?,
+        batch_offsets_count: cursor.read_u64()?,
+        batch_dir_offset: cursor.read_u64()?,
+        batch_dir_count: cursor.read_u64()?,
+        tx_key_bytes_offset: cursor.read_u64()?,
+        tx_key_bytes_len: cursor.read_u64()?,
+        tx_dir_offset: cursor.read_u64()?,
+        tx_dir_count: cursor.read_u64()?,
+        entry_count: cursor.read_u64()?,
+        head_id: cursor.read_u64()?,
+    })
+}
+
+/// The sidecar filename suffix written next to `oplog.bin` after a recovery.
+const RECOVERY_SIDECAR_SUFFIX: &str = ".oplog.recovery";
+
+/// Write the `.oplog.recovery` sidecar recording that a salvage happened.
+///
+/// ADDITIVE alongside the `.corrupt` quarantine and the `state_corrupted`
+/// eprintln — gives tooling/operators a durable, machine-readable marker that a
+/// recovery occurred (truncation offset, counts, strategy, timestamp). The
+/// sidecar is named for the oplog file (`oplog.bin` → `oplog.bin.oplog.recovery`)
+/// and is overwritten on each recovery so it always reflects the latest event.
+fn write_recovery_sidecar(path: &Path, recovery: &TruncatedTailRecovery) -> Result<PathBuf> {
+    let sidecar_path = recovery_sidecar_path(path);
+    let lost = recovery
+        .lost_records()
+        .map(|count| count.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let timestamp = Utc::now().to_rfc3339();
+    let contents = format!(
+        "schema=1\n\
+         strategy={}\n\
+         truncation_offset={}\n\
+         damaged_byte_end={}\n\
+         entries_recovered={}\n\
+         entries_lost={}\n\
+         recovered_at={}\n",
+        recovery.strategy.as_str(),
+        recovery.damaged_byte_start,
+        recovery.damaged_byte_end,
+        recovery.recovered_records(),
+        lost,
+        timestamp,
+    );
+    write_file_atomic(&sidecar_path, contents.as_bytes())?;
+    Ok(sidecar_path)
+}
+
+fn recovery_sidecar_path(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}{RECOVERY_SIDECAR_SUFFIX}", path.display()))
 }
 
 fn is_truncation_shaped_error(err: &HeddleError) -> bool {
@@ -1224,16 +1581,16 @@ fn emit_truncated_oplog_recovery_warning(
     corrupt_path: &Path,
     recovery: &TruncatedTailRecovery,
 ) {
-    let recovered_records = recovery.data.entries.len() as u64;
+    let recovered_records = recovery.recovered_records();
     let lost_records = recovery
-        .original_entry_count
-        .map(|count| count.saturating_sub(recovered_records))
+        .lost_records()
         .map(|count| count.to_string())
         .unwrap_or_else(|| "unknown".to_string());
     eprintln!(
-        "Warning: kind=state_corrupted error=\"Packed oplog was truncated; recovered complete records\" path={} quarantined={} recovered_records={} lost_records={} damaged_byte_range={}..{} hint=\"Heddle kept complete oplog records, moved the damaged tail to .corrupt, and rebuilt oplog.bin; full fsck-style recovery remains a manual follow-up.\"",
+        "Warning: kind=state_corrupted error=\"Packed oplog was truncated; recovered complete records\" path={} quarantined={} strategy={} recovered_records={} lost_records={} damaged_byte_range={}..{} hint=\"Heddle kept complete oplog records, moved the damaged tail to .corrupt, wrote a .oplog.recovery sidecar, and rebuilt oplog.bin; full fsck-style recovery remains a manual follow-up.\"",
         path.display(),
         corrupt_path.display(),
+        recovery.strategy.as_str(),
         recovered_records,
         lost_records,
         recovery.damaged_byte_start,
@@ -3310,6 +3667,172 @@ mod tests {
         assert!(
             matches!(&err, HeddleError::InvalidObject(message) if message.contains("header/footer")),
             "metadata disagreement must reject loudly, got {err:?}"
+        );
+    }
+
+    fn build_three_entry_oplog(path: &Path) -> Vec<u8> {
+        let mut log = PackedOpLog::new(path.to_path_buf());
+        log.append(vec![
+            make_entry(1, None),
+            make_entry(2, None),
+            make_entry(3, None),
+        ]);
+        log.head_id = 3;
+        log.save().unwrap();
+        std::fs::read(path).unwrap()
+    }
+
+    #[test]
+    fn footer_guided_recovery_uses_surviving_footer_when_trailing_bytes_torn() {
+        // A V4 oplog whose entry stream + footer are intact, but trailing bytes
+        // were torn off AFTER the footer (e.g. a partial fsync/append of an
+        // unrelated tail). The standard parse rejects (file_len !=
+        // footer_start + FOOTER_LEN); the backward footer scan must find the
+        // intact footer and recover the full, valid prefix footer-guided.
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("source-oplog.bin");
+        let original = build_three_entry_oplog(&source);
+        let (_offsets, footer) = read_current_entry_offsets(&original);
+
+        let case_dir = TempDir::new().unwrap();
+        let path = case_dir.path().join("oplog.bin");
+        let mut torn = original.clone();
+        // Append garbage after the real footer so the EOF footer parse fails
+        // but the genuine footer still lives intact mid-file.
+        torn.extend_from_slice(&[0xAB, 0xCD, 0xEF, 0x01, 0x02]);
+        std::fs::write(&path, &torn).unwrap();
+
+        let report = recover_oplog_at(&path).unwrap();
+        assert!(!report.already_healthy);
+        assert_eq!(report.strategy.as_deref(), Some("footer-guided"));
+        assert_eq!(report.entries_recovered, 3, "all complete records kept");
+        assert_eq!(report.entries_lost, Some(0), "no complete record was lost");
+        assert_eq!(
+            report.damaged_byte_start, footer.entry_data_end,
+            "damaged range starts at the recorded entry-data-end"
+        );
+        assert_eq!(report.damaged_byte_end as usize, torn.len());
+
+        // The rebuilt oplog must load cleanly with the full prefix.
+        let loaded = PackedOpLog::load(&path).unwrap();
+        assert_eq!(loaded.entries.len(), 3);
+        assert_eq!(loaded.head_id, 3);
+
+        // Quarantine + sidecar both exist.
+        assert!(report.quarantine_path.unwrap().exists());
+        assert!(report.sidecar_path.unwrap().exists());
+    }
+
+    #[test]
+    fn footer_guided_preferred_over_forward_greedy_when_footer_intact() {
+        // Damage only the index sections between entry_data_end and the footer
+        // is harder to stage; instead validate the strategy selection directly:
+        // when the footer survives, plan_truncated_latest_recovery must pick
+        // footer-guided, not forward-greedy.
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("oplog.bin");
+        let original = build_three_entry_oplog(&source);
+
+        let mut torn = original.clone();
+        torn.push(0x00); // trailing tear after intact footer
+        let err = match load(&torn) {
+            Ok(_) => panic!("trailing tear after footer should fail the standard parse"),
+            Err(err) => err,
+        };
+        let recovery = plan_truncated_latest_recovery(&torn, &err)
+            .unwrap()
+            .expect("trailing tear after intact footer is recoverable");
+        assert_eq!(recovery.strategy, RecoveryStrategy::FooterGuided);
+        assert_eq!(recovery.data.entries.len(), 3);
+    }
+
+    #[test]
+    fn recovery_sidecar_records_offset_counts_and_strategy() {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("source-oplog.bin");
+        let original = build_three_entry_oplog(&source);
+        let (_offsets, footer) = read_current_entry_offsets(&original);
+
+        let case_dir = TempDir::new().unwrap();
+        let path = case_dir.path().join("oplog.bin");
+        let mut torn = original.clone();
+        torn.extend_from_slice(&[0xFF, 0xFF]);
+        std::fs::write(&path, &torn).unwrap();
+
+        let report = recover_oplog_at(&path).unwrap();
+        let sidecar = report.sidecar_path.clone().unwrap();
+        assert_eq!(
+            sidecar.file_name().unwrap().to_string_lossy(),
+            "oplog.bin.oplog.recovery"
+        );
+        let contents = std::fs::read_to_string(&sidecar).unwrap();
+        assert!(contents.contains("schema=1"), "{contents}");
+        assert!(contents.contains("strategy=footer-guided"), "{contents}");
+        assert!(
+            contents.contains(&format!("truncation_offset={}", footer.entry_data_end)),
+            "{contents}"
+        );
+        assert!(
+            contents.contains(&format!("damaged_byte_end={}", torn.len())),
+            "{contents}"
+        );
+        assert!(contents.contains("entries_recovered=3"), "{contents}");
+        assert!(contents.contains("entries_lost=0"), "{contents}");
+        assert!(contents.contains("recovered_at="), "{contents}");
+    }
+
+    #[test]
+    fn forward_greedy_recovery_still_writes_sidecar_for_mid_record_truncation() {
+        // A mid-record truncation destroys the footer, so footer-guided fails
+        // and forward-greedy takes over — the sidecar must still be written and
+        // must report the forward-greedy strategy.
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("source-oplog.bin");
+        let original = build_three_entry_oplog(&source);
+        let (offsets, _footer) = read_current_entry_offsets(&original);
+
+        let case_dir = TempDir::new().unwrap();
+        let path = case_dir.path().join("oplog.bin");
+        let mut truncated = original.clone();
+        // Cut in the middle of the third record: footer is gone.
+        let cut = (offsets[2].entry_offset
+            + ((offsets[2].entry_offset - offsets[1].entry_offset) / 2)) as usize;
+        truncated.truncate(cut);
+        std::fs::write(&path, &truncated).unwrap();
+
+        let report = recover_oplog_at(&path).unwrap();
+        assert_eq!(report.strategy.as_deref(), Some("forward-greedy"));
+        assert_eq!(report.entries_recovered, 2);
+        assert_eq!(report.entries_lost, Some(1));
+        let contents = std::fs::read_to_string(report.sidecar_path.unwrap()).unwrap();
+        assert!(contents.contains("strategy=forward-greedy"), "{contents}");
+        assert!(contents.contains("entries_recovered=2"), "{contents}");
+        assert!(contents.contains("entries_lost=1"), "{contents}");
+    }
+
+    #[test]
+    fn recover_on_healthy_oplog_is_a_noop_and_leaves_bytes_unchanged() {
+        // The intact-file path must be byte-for-byte unchanged: no quarantine,
+        // no sidecar, no rewrite.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("oplog.bin");
+        let original = build_three_entry_oplog(&path);
+
+        let report = recover_oplog_at(&path).unwrap();
+        assert!(report.already_healthy);
+        assert_eq!(report.strategy, None);
+        assert!(report.quarantine_path.is_none());
+        assert!(report.sidecar_path.is_none());
+
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(after, original, "healthy oplog must not be rewritten");
+        assert!(
+            !path.with_file_name("oplog.bin.corrupt").exists(),
+            "no quarantine for a healthy oplog"
+        );
+        assert!(
+            !path.with_file_name("oplog.bin.oplog.recovery").exists(),
+            "no sidecar for a healthy oplog"
         );
     }
 

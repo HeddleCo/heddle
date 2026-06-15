@@ -12566,6 +12566,23 @@
       "title": "MergePreviewSchema",
       "type": "object"
     },
+    "oplog recover": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": true,
+      "properties": {
+        "output_kind": {
+          "enum": [
+            "oplog_recover"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind"
+      ],
+      "title": "GenericJsonObjectSchema",
+      "type": "object"
+    },
     "pull": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {

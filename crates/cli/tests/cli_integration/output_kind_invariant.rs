@@ -131,6 +131,7 @@ const SWEPT: &[&str] = &[
     "maintenance gc",
     "maintenance index",
     "merge",
+    "oplog recover",
     "pull",
     "push",
     "query",
@@ -1107,6 +1108,24 @@ fn runtime_doc_case(output_kind: &str) -> Option<(TempDir, Vec<String>)> {
         // Stopping a daemon that is not running still exits 0 with the
         // full `daemon_stop` payload, so a bare init fixture suffices.
         "daemon_stop" => (init_fixture(), sv(&["daemon", "stop"])),
+        "oplog_recover" => {
+            // Seed three captures, then truncate the packed oplog mid-record so
+            // the footer is destroyed and the salvage takes the forward-greedy
+            // path. The CLI's repo open auto-recovers before the handler runs,
+            // so `oplog recover` reports the prior recovery from the sidecar —
+            // the realistic operator key set (no `quarantine_path`).
+            let t = init_fixture();
+            for i in 1..=3 {
+                std::fs::write(t.path().join("f.txt"), format!("v{i}")).unwrap();
+                heddle(&["commit", "-m", &format!("c{i}")], Some(t.path()))
+                    .expect("commit fixture capture");
+            }
+            let oplog = t.path().join(".heddle/oplog/oplog.bin");
+            let bytes = std::fs::read(&oplog).expect("read fixture oplog");
+            let cut = bytes.len() * 6 / 10;
+            std::fs::write(&oplog, &bytes[..cut]).expect("truncate fixture oplog");
+            (t, sv(&["oplog", "recover"]))
+        }
         _ => return None,
     };
     Some(case)

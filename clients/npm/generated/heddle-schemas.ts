@@ -1366,6 +1366,11 @@ export interface OperationRecordSchema {
   replayed: boolean;
 }
 
+export interface OplogRecoverSchema {
+  output_kind: "oplog_recover";
+  [key: string]: unknown;
+}
+
 export interface ParallelThreadInfoSchema {
   coordination_status: CoordinationStatusSchema;
   current_state?: string | null;
@@ -2823,6 +2828,7 @@ export interface HeddleVerbOutputs {
   "maintenance monitor": MaintenanceMonitorSchema;
   "maintenance run": MaintenanceRunSchema;
   "merge --preview": MergePreviewSchema;
+  "oplog recover": OplogRecoverSchema;
   pull: PullSchema;
   push: PushSchema;
   query: QuerySchema;
@@ -2993,6 +2999,7 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "maintenance monitor",
   "maintenance run",
   "merge --preview",
+  "oplog recover",
   "pull",
   "push",
   "query",
