@@ -97,6 +97,7 @@ pub use repository_snapshot::{SnapshotExecution, SnapshotProfile};
 pub use repository_thread_materialize::{CheckoutMaterialization, ThreadCaptureOutcome};
 pub use repository_tree::{TreeBuildProfile, WorktreeCompareProfile};
 pub use repository_worktree_status::{UntrackedSet, UntrackedSubtree, WorktreeStatusDetailed};
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use sley::{
     ObjectId as SleyObjectId, Reference as SleyReference, ReferenceTarget as SleyRefTarget,
@@ -1172,6 +1173,7 @@ impl Repository {
         let imported_threads: std::collections::HashSet<ThreadName> =
             self.refs().list_threads()?.into_iter().collect();
         let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
         let mut branch_tips = Vec::new();
 
@@ -1195,6 +1197,7 @@ impl Repository {
             let mapped_change = self.git_overlay_mapped_change_for_commit(
                 &git_commit,
                 &bridge_mapping,
+                &ingest_mapping,
                 &checkpoint_mapping,
             )?;
             let thread_name = ThreadName::from(name.as_str());
@@ -1246,6 +1249,7 @@ impl Repository {
         let imported_markers: std::collections::HashSet<MarkerName> =
             self.refs().list_markers()?.into_iter().collect();
         let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
         let mut tag_tips = Vec::new();
 
@@ -1268,6 +1272,7 @@ impl Repository {
             let mapped_change = self.git_overlay_mapped_change_for_commit(
                 &git_commit,
                 &bridge_mapping,
+                &ingest_mapping,
                 &checkpoint_mapping,
             )?;
             let marker_name = MarkerName::from(name.as_str());
@@ -1326,6 +1331,7 @@ impl Repository {
             .map(|short| format!("refs/remotes/{short}"))
             .unwrap_or_else(|| format!("refs/remotes/{name}"));
         let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
         for reference in git_repo.references().list_refs().map_err(|error| {
             HeddleError::Config(format!(
@@ -1345,6 +1351,7 @@ impl Repository {
             return self.git_overlay_mapped_change_for_commit(
                 &target.to_string(),
                 &bridge_mapping,
+                &ingest_mapping,
                 &checkpoint_mapping,
             );
         }
@@ -1516,6 +1523,58 @@ impl Repository {
             .collect())
     }
 
+    fn git_overlay_ingest_commit_mapping(&self) -> Result<HashMap<String, String>> {
+        let path = self.heddle_dir.join("ingest").join("sha_map.sqlite");
+        if !path.exists() {
+            return Ok(HashMap::new());
+        }
+
+        let conn = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|error| {
+            HeddleError::Config(format!(
+                "failed to open ingest SHA map at '{}': {}",
+                path.display(),
+                error
+            ))
+        })?;
+        let mut stmt = conn
+            .prepare_cached("SELECT git_sha, heddle_repr FROM sha_map WHERE kind = 0")
+            .map_err(|error| {
+                HeddleError::Config(format!(
+                    "failed to read ingest SHA map at '{}': {}",
+                    path.display(),
+                    error
+                ))
+            })?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| {
+                HeddleError::Config(format!(
+                    "failed to enumerate ingest SHA map at '{}': {}",
+                    path.display(),
+                    error
+                ))
+            })?;
+
+        let mut mapping = HashMap::new();
+        for row in rows {
+            let (git_sha, change_id) = row.map_err(|error| {
+                HeddleError::Config(format!(
+                    "failed to read ingest SHA map row at '{}': {}",
+                    path.display(),
+                    error
+                ))
+            })?;
+            mapping.insert(git_sha, change_id);
+        }
+        Ok(mapping)
+    }
+
     fn git_overlay_checkpoint_mapping(&self) -> Result<HashMap<String, String>> {
         Ok(self
             .list_git_checkpoints()?
@@ -1528,10 +1587,12 @@ impl Repository {
         &self,
         git_commit: &str,
         bridge_mapping: &HashMap<String, String>,
+        ingest_mapping: &HashMap<String, String>,
         checkpoint_mapping: &HashMap<String, String>,
     ) -> Result<Option<ChangeId>> {
         let Some(change) = bridge_mapping
             .get(git_commit)
+            .or_else(|| ingest_mapping.get(git_commit))
             .or_else(|| checkpoint_mapping.get(git_commit))
         else {
             return Ok(None);
@@ -1548,21 +1609,73 @@ impl Repository {
         }
     }
 
+    fn git_overlay_mapped_git_commit_for_change_in(
+        &self,
+        change_id: &ChangeId,
+        mapping: &HashMap<String, String>,
+    ) -> Result<Option<String>> {
+        for (git_commit, mapped_change) in mapping {
+            let mapped_change_id = ChangeId::parse(mapped_change).map_err(|error| {
+                HeddleError::Config(format!(
+                    "git commit {git_commit} maps to invalid Heddle change id '{mapped_change}': {error}"
+                ))
+            })?;
+            if mapped_change_id == *change_id {
+                return Ok(Some(git_commit.clone()));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn git_overlay_mapped_git_commit_for_change(
+        &self,
+        change_id: &ChangeId,
+    ) -> Result<Option<String>> {
+        let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        if let Some(git_commit) =
+            self.git_overlay_mapped_git_commit_for_change_in(change_id, &bridge_mapping)?
+        {
+            return Ok(Some(git_commit));
+        }
+
+        let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
+        if let Some(git_commit) =
+            self.git_overlay_mapped_git_commit_for_change_in(change_id, &ingest_mapping)?
+        {
+            return Ok(Some(git_commit));
+        }
+
+        let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
+        self.git_overlay_mapped_git_commit_for_change_in(change_id, &checkpoint_mapping)
+    }
+
+    pub fn git_overlay_mapped_change_for_git_commit(
+        &self,
+        git_commit: &str,
+    ) -> Result<Option<ChangeId>> {
+        let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
+        let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
+        self.git_overlay_mapped_change_for_commit(
+            git_commit,
+            &bridge_mapping,
+            &ingest_mapping,
+            &checkpoint_mapping,
+        )
+    }
+
     fn git_overlay_mapped_change_for_git_oid(
         &self,
         git_oid: SleyObjectId,
     ) -> Result<Option<ChangeId>> {
-        let git_commit = git_oid.to_string();
-        let bridge_mapping = self.git_overlay_bridge_mapping()?;
-        let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
-        self.git_overlay_mapped_change_for_commit(&git_commit, &bridge_mapping, &checkpoint_mapping)
+        self.git_overlay_mapped_change_for_git_commit(&git_oid.to_string())
     }
 
     /// Count the Git commits reachable from `tip_git_commit` that are not
-    /// represented in Heddle state (no bridge mapping and no checkpoint
-    /// mapping). The walk prunes at the first mapped commit on each lineage,
-    /// so the cost is proportional to the out-of-band suffix, capped at
-    /// `GIT_OVERLAY_OUT_OF_BAND_SCAN_LIMIT`.
+    /// represented in Heddle state (no served bridge mapping, ingest identity
+    /// mapping, or checkpoint mapping). The walk prunes at the first mapped
+    /// commit on each lineage, so the cost is proportional to the out-of-band
+    /// suffix, capped at `GIT_OVERLAY_OUT_OF_BAND_SCAN_LIMIT`.
     ///
     /// Returns `Ok(None)` when the repository is not a Git overlay or the tip
     /// cannot be resolved; callers should degrade to a countless report.
@@ -1582,6 +1695,7 @@ impl Repository {
         };
 
         let bridge_mapping = self.git_overlay_bridge_mapping()?;
+        let ingest_mapping = self.git_overlay_ingest_commit_mapping()?;
         let checkpoint_mapping = self.git_overlay_checkpoint_mapping()?;
 
         let mut pending = vec![tip];
@@ -1596,6 +1710,7 @@ impl Repository {
                 .git_overlay_mapped_change_for_commit(
                     &git_commit,
                     &bridge_mapping,
+                    &ingest_mapping,
                     &checkpoint_mapping,
                 )?
                 .is_some()

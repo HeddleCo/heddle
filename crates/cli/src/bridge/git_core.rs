@@ -1620,13 +1620,22 @@ impl<'a> GitBridge<'a> {
         thread: &str,
         state_id: &ChangeId,
     ) -> GitResult<WriteThroughOutcome> {
-        let Some(git_oid) = self.mapping.get_git(state_id) else {
+        let mirror_repo = self.open_git_repo()?;
+        let git_oid = if let Some(git_oid) = self.mapping.get_git(state_id) {
+            git_oid
+        } else if let Some(git_commit) = self
+            .heddle_repo
+            .git_overlay_mapped_git_commit_for_change(state_id)
+            .map_err(|error| GitBridgeError::Git(error.to_string()))?
+        {
+            ObjectId::from_hex(mirror_repo.object_format(), &git_commit)
+                .map_err(|error| GitBridgeError::InvalidMapping(error.to_string()))?
+        } else {
             return Ok(WriteThroughOutcome::Skipped(
                 WriteThroughSkipReason::NoMappedCommit,
             ));
         };
 
-        let mirror_repo = self.open_git_repo()?;
         let checkout_repo = SleyRepository::discover(self.heddle_repo.root()).map_err(git_err)?;
         if checkout_repo.git_dir() == mirror_repo.git_dir() {
             return Ok(WriteThroughOutcome::Skipped(

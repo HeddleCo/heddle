@@ -304,7 +304,6 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     let mut stats = ExportStats::default();
 
     bridge.build_existing_mapping(None)?;
-    let identity_cache = bridge.mapping.clone();
     let identity = git_config_identity_with_global_fallback(bridge.heddle_repo.root())?;
 
     // The Git bridge publishes the PUBLIC mirror — the export audience is
@@ -794,7 +793,7 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     stats.commits_total = counts.total;
     stats.states_exported = counts.newly;
 
-    bridge.save_mapping_to_disk_preserving(&identity_cache)?;
+    bridge.save_mapping_to_disk()?;
 
     Ok(stats)
 }

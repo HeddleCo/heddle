@@ -2291,6 +2291,7 @@ dependencies = [
  "libc",
  "notify",
  "rmp-serde",
+ "rusqlite",
  "serde",
  "serde_json",
  "sley",

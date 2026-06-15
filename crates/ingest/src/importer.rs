@@ -740,8 +740,9 @@ fn strip_trailing_heddle(p: &Path) -> &Path {
 
 /// Convenience: open a git repo at `git_path` and a Heddle repo at
 /// `heddle_path` (initializing it if missing), then run one import pass.
-/// Returns both the stats and the final sha map so callers can persist
-/// it alongside the heddle repo.
+/// Returns both the stats and the final sha map. The map is persisted
+/// under `.heddle/ingest/sha_map.sqlite`; bridge export owns its served
+/// `git-bridge/bridge-mapping.json` cache separately.
 ///
 /// `heddle_path` is the worktree root — `Repository::init` appends `.heddle`
 /// itself. For tolerance with callers who pass the `.heddle`-suffixed form
@@ -832,49 +833,7 @@ pub fn import_git_into_scoped_with_options_and_progress(
         }
         pollster::block_on(importer.run())?
     };
-    if repo.capability() == repo::RepositoryCapability::GitOverlay {
-        write_bridge_mapping_sidecar(&repo, &map)?;
-    }
     Ok((stats, map))
-}
-
-#[derive(serde::Serialize)]
-struct BridgeMappingFile {
-    entries: Vec<BridgeMappingEntry>,
-}
-
-#[derive(serde::Serialize)]
-struct BridgeMappingEntry {
-    change_id: String,
-    git_oid: String,
-}
-
-fn write_bridge_mapping_sidecar(repo: &repo::Repository, map: &ShaMap) -> crate::Result<()> {
-    let mut entries = map
-        .commit_shas()
-        .into_iter()
-        .filter_map(|git_oid| {
-            map.get_commit(&git_oid)
-                .map(|change_id| BridgeMappingEntry {
-                    change_id: change_id.to_string_full(),
-                    git_oid,
-                })
-        })
-        .collect::<Vec<_>>();
-    entries.sort_by(|left, right| left.git_oid.cmp(&right.git_oid));
-    let path = repo
-        .heddle_dir()
-        .join("git-bridge")
-        .join("bridge-mapping.json");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp_path = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(&BridgeMappingFile { entries })
-        .map_err(|error| IngestError::Other(format!("serialize bridge mapping: {error}")))?;
-    std::fs::write(&tmp_path, bytes)?;
-    std::fs::rename(&tmp_path, &path)?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1525,7 +1484,7 @@ mod tests {
     }
 
     #[test]
-    fn import_git_into_git_overlay_writes_bridge_mapping_without_mirror() {
+    fn import_git_into_git_overlay_persists_ingest_mapping_without_bridge_cache_or_mirror() {
         let gitdir = TempDir::new().unwrap();
         seed_multibranch_repo(gitdir.path());
 
@@ -1533,31 +1492,31 @@ mod tests {
 
         assert!(stats.commits_imported >= 2);
         assert_eq!(stats.states_created, map.commit_shas().len());
-        let mapping_path = gitdir
+        let map_path = gitdir
+            .path()
+            .join(".heddle")
+            .join("ingest")
+            .join("sha_map.sqlite");
+        assert!(map_path.is_file(), "ingest SHA map is missing");
+        let reloaded = ShaMap::open(&map_path).unwrap();
+        assert_eq!(reloaded.commit_shas().len(), map.commit_shas().len());
+        for git_oid in map.commit_shas() {
+            assert_eq!(reloaded.get_commit(&git_oid), map.get_commit(&git_oid));
+        }
+
+        let bridge_mapping_path = gitdir
             .path()
             .join(".heddle")
             .join("git-bridge")
             .join("bridge-mapping.json");
-        assert!(mapping_path.is_file(), "bridge mapping sidecar is missing");
+        assert!(
+            !bridge_mapping_path.exists(),
+            "ingest import must not publish the served bridge mapping cache"
+        );
         assert!(
             !gitdir.path().join(".heddle").join("git").exists(),
             "ingest-backed import must not create the legacy internal Git mirror"
         );
-
-        let value: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&mapping_path).unwrap()).unwrap();
-        let entries = value["entries"].as_array().expect("mapping entries");
-        assert_eq!(entries.len(), map.commit_shas().len());
-        for git_oid in map.commit_shas() {
-            let change_id = map.get_commit(&git_oid).unwrap().to_string_full();
-            assert!(
-                entries.iter().any(|entry| {
-                    entry["git_oid"].as_str() == Some(git_oid.as_str())
-                        && entry["change_id"].as_str() == Some(change_id.as_str())
-                }),
-                "missing sidecar entry for {git_oid}"
-            );
-        }
     }
 
     #[test]

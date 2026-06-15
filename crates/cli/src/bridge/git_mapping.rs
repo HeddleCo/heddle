@@ -165,20 +165,11 @@ impl<'a> GitBridge<'a> {
         self.commit_mapping_tmp_to_disk()
     }
 
-    pub(crate) fn save_mapping_to_disk_preserving(&self, preserved: &SyncMapping) -> GitResult<()> {
-        let mut combined = preserved.clone();
-        for (change_id, git_oid) in self.mapping.iter() {
-            combined.insert(*change_id, *git_oid);
-        }
-        self.write_mapping_tmp_value_to_disk(&combined)?;
-        objects::fault_inject::maybe_panic_at("mapping_after_tmp_before_commit");
-        self.commit_mapping_tmp_to_disk()
-    }
-
-    /// Build the identity mapping from portable metadata and local cache.
-    /// `refs/notes/heddle` is authoritative because it travels with Git history;
-    /// `bridge-mapping.json` is a rebuildable cache that fills entries with no
-    /// note yet (for example, before a commit has been exported with notes).
+    /// Build the export identity mapping from portable metadata and the served
+    /// bridge cache. `refs/notes/heddle` is authoritative because it travels
+    /// with Git history; `bridge-mapping.json` is the local served/export cache
+    /// after visibility filtering. Ingest identity lives separately at
+    /// `.heddle/ingest/sha_map.sqlite` and is intentionally not folded in here.
     pub(crate) fn build_existing_mapping(&mut self, git_repo_path: Option<&Path>) -> GitResult<()> {
         let repo = match git_repo_path {
             Some(path) => super::git_core::open_repo(path)?,
@@ -191,8 +182,6 @@ impl<'a> GitBridge<'a> {
         index.fill_gaps_from_cache(&cache);
         index.fill_gaps_from_cache(&live_cache);
         self.mapping = index.into_mapping();
-
-        self.save_mapping_to_disk()?;
         Ok(())
     }
 

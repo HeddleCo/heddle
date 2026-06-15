@@ -5,9 +5,9 @@
 //! (change_id, agent, confidence, status) without polluting the commit
 //! message — and so without changing the commit SHA.
 //!
-//! This is the history-carrying half of the Phase B identity model. The
-//! `bridge-mapping.json` sidecar is a local rebuild cache; notes are the
-//! portable source that survives plain Git clones and exports.
+//! This is the history-carrying half of the export identity model. The
+//! `bridge-mapping.json` sidecar is a local served/export cache; notes are
+//! the portable source that survives plain Git clones and exports.
 //!
 //! Sley provides the tree-backed notes plumbing; this module owns Heddle's
 //! JSON payload and the fixed `refs/notes/heddle` location.

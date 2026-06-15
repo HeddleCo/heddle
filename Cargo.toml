@@ -74,6 +74,7 @@ rand = "0.10"
 regex-lite = "0.1"
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls-no-provider"] }
 rmp-serde = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
 rsa = { version = "0.9", features = ["pem"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 s3s = "0.13.0"

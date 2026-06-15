@@ -976,19 +976,9 @@ fn import_all_lossy_reports_cached_shared_subtree_entries_without_mapping_sideca
     assert_eq!(stats.lossy_entries[0].path, "shared/vendor");
     assert_eq!(stats.lossy_entries[1].path, "shared/vendor");
 
-    let mapping =
-        std::fs::read_to_string(test_support::mapping_path(&bridge)).expect("mapping sidecar");
-    let mapping: serde_json::Value = serde_json::from_str(&mapping).expect("mapping json");
-    let entries = mapping["entries"].as_array().expect("mapping entries");
     assert!(
-        entries
-            .iter()
-            .all(|entry| entry.get("lossy_entries").is_none()),
-        "bridge mapping must not persist lossy sidecar entries: {mapping}"
-    );
-    assert!(
-        !mapping.to_string().contains("shared/vendor"),
-        "bridge mapping must not name lossy paths: {mapping}"
+        !test_support::mapping_path(&bridge).exists(),
+        "bridge import must not publish lossy entries through the served mapping cache"
     );
 }
 
@@ -1008,15 +998,9 @@ fn import_all_default_fails_on_cached_lossy_commit_from_prior_run() {
     .expect("initial lossy bridge import succeeds");
     assert_eq!(first.lossy_entries.len(), 1);
 
-    let mapping = std::fs::read_to_string(test_support::mapping_path(&first_bridge))
-        .expect("mapping sidecar");
     assert!(
-        !mapping.contains("lossy_entries"),
-        "bridge mapping must not persist lossy entries: {mapping}"
-    );
-    assert!(
-        !mapping.contains("vendor"),
-        "bridge mapping must not name lossy paths: {mapping}"
+        !test_support::mapping_path(&first_bridge).exists(),
+        "bridge import must not publish lossy entries through the served mapping cache"
     );
 
     let mut rerun_bridge = GitBridge::new(&repo);
@@ -1278,8 +1262,9 @@ fn export_mints_lossy_ingest_state_from_raw_metadata() {
         .clone()
         .expect("ingest records raw_message");
 
-    // The bridge mapping is empty after ingest (ingest populates no SyncMapping),
-    // so this is exactly the unmapped lossy case that export must MINT, not reject.
+    // Ingest records local identity in its SQLite map, not the served bridge
+    // mapping, so this is exactly the unmapped lossy case that export must MINT,
+    // not reject.
     let mut bridge = GitBridge::new(&repo);
 
     let dest_root = TempDir::new().expect("dest temp");
@@ -3532,6 +3517,16 @@ fn export_retracts_branch_when_public_commit_is_later_embargoed() {
     assert!(
         test_support::mapping(&bridge).get_git(&state_b).is_none(),
         "the now-Private B must be purged from the served mapping"
+    );
+    let mapping_cache = std::fs::read_to_string(test_support::mapping_path(&bridge))
+        .expect("mapping cache should be readable after export");
+    assert!(
+        !mapping_cache.contains(&state_b.to_string_full()),
+        "the served bridge mapping cache must not persist embargoed ChangeIds: {mapping_cache}"
+    );
+    assert!(
+        !mapping_cache.contains(&oid_b.to_string()),
+        "the served bridge mapping cache must not persist embargoed Git OIDs: {mapping_cache}"
     );
 
     // The mirror ref itself no longer serves B.
