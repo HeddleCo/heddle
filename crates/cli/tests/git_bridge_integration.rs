@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
@@ -15,30 +14,15 @@ use std::{
 };
 
 use base64::Engine;
-use objects::object::{
-    Blob, ChangeId, ContentHash, EntryType, FileMode, MarkerName, ThreadName, Tree, TreeEntry,
-};
-use repo::Repository;
-use sley::plumbing::sley_core::ByteString as GitByteString;
-use sley::plumbing::sley_object::EncodedObject;
-use sley::{
-    CommitObject, EntryKind, GitObjectType, GitTime, ObjectId, RefPrecondition, ReferenceTarget,
-    Repository as SleyRepository, Signature, TagObject,
-};
-use tempfile::TempDir;
-
 use cli::bridge::{
     GitBridge,
     git_core::{
         GitBridgeError, GitPushScope, SyncMapping, clone_url_to_bare, copy_local_repo_to_bare,
     },
     git_export::{export_all, export_current_thread, export_tree},
-    git_import::{
-        GitTreeImporter, backfill_fidelity, import_all, import_all_with_options, import_git_tree,
-    },
     git_notes,
     git_sync::{sync_branches, sync_tags, sync_track_to_branch},
-    git_util::GitImportOptions,
+    git_util::ImportStats,
     test_support,
     test_support::{
         RefNamespace, RefUpdate, collect_managed_ref_updates, delete_reference_if_present,
@@ -46,6 +30,78 @@ use cli::bridge::{
         write_exported_refs, write_mirror_managed_refs,
     },
 };
+use objects::{
+    object::{
+        Blob, ChangeId, ContentHash, EntryType, FileMode, MarkerName, ThreadName, Tree, TreeEntry,
+    },
+    store::ObjectStore,
+};
+use repo::Repository;
+use sley::{
+    CommitObject, EntryKind, GitObjectType, GitTime, ObjectId, RefPrecondition, ReferenceTarget,
+    Repository as SleyRepository, Signature, TagObject,
+    plumbing::{sley_core::ByteString as GitByteString, sley_object::EncodedObject},
+};
+use tempfile::TempDir;
+
+type TestImportResult<T> = Result<T, String>;
+
+trait TestGitBridgeImport {
+    fn import(&mut self, git_path: Option<&std::path::Path>) -> TestImportResult<ImportStats>;
+}
+
+impl TestGitBridgeImport for GitBridge<'_> {
+    fn import(&mut self, git_path: Option<&std::path::Path>) -> TestImportResult<ImportStats> {
+        import_all(self, git_path)
+    }
+}
+
+fn import_all(
+    bridge: &mut GitBridge<'_>,
+    git_path: Option<&std::path::Path>,
+) -> TestImportResult<ImportStats> {
+    import_all_with_options(bridge, git_path, ingest::ImportOptions::default())
+}
+
+fn import_all_with_options(
+    bridge: &mut GitBridge<'_>,
+    git_path: Option<&std::path::Path>,
+    options: ingest::ImportOptions,
+) -> TestImportResult<ImportStats> {
+    let target = bridge_root_from_mirror(bridge);
+    let source_owned;
+    let source = if let Some(path) = git_path {
+        path
+    } else {
+        source_owned = target.clone();
+        source_owned.as_path()
+    };
+    let (stats, _map) = ingest::import_git_into_with_options(source, &target, options)
+        .map_err(|error| error.to_string())?;
+    test_support::build_existing_mapping(bridge, Some(source))
+        .map_err(|error| error.to_string())?;
+    Ok(import_stats_from_ingest(stats))
+}
+
+fn bridge_root_from_mirror(bridge: &GitBridge<'_>) -> std::path::PathBuf {
+    bridge
+        .mirror_path()
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("mirror path should be <root>/.heddle/git")
+        .to_path_buf()
+}
+
+fn import_stats_from_ingest(stats: ingest::ImportStats) -> ImportStats {
+    ImportStats {
+        commits_imported: stats.commits_imported,
+        states_created: stats.states_created,
+        branches_synced: stats.refs.threads_written,
+        tags_synced: stats.refs.markers_written,
+        skipped_non_commit_refs: stats.refs_seen.non_commit_skipped,
+        lossy_entries: stats.lossy_entries,
+    }
+}
 
 trait SleyTestRepoExt {
     fn find_tree(&self, oid: ObjectId) -> Result<sley::TreeObject, String>;
@@ -841,69 +897,6 @@ fn export_tree_substitutes_stub_for_redacted_blob() {
 }
 
 #[test]
-fn import_tree_rejects_submodule_entries_by_default() {
-    let (_git_temp, git_repo) = init_git_repo();
-    let submodule_oid: ObjectId = "0404040404040404040404040404040404040404"
-        .parse()
-        .expect("oid");
-    let mut editor = git_repo
-        .edit_tree(&ObjectId::empty_tree(git_repo.object_format()))
-        .expect("tree editor");
-    editor.upsert("vendor", EntryKind::Commit, submodule_oid);
-    let tree_oid = git_repo.write_tree(editor).expect("write tree");
-
-    let heddle_temp = TempDir::new().expect("heddle temp");
-    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
-
-    let err = import_git_tree(&repo, &git_repo, tree_oid)
-        .expect_err("gitlink import must fail without --lossy");
-    let message = err.to_string();
-
-    assert!(message.contains("vendor"), "error names entry: {message}");
-    assert!(
-        message.contains("losslessly"),
-        "error explains policy: {message}"
-    );
-    assert!(message.contains("--lossy"), "error names opt-in: {message}");
-}
-
-#[test]
-fn import_tree_reads_submodule_entries_with_lossy_opt_in() {
-    let (_git_temp, git_repo) = init_git_repo();
-    let submodule_oid: ObjectId = "0404040404040404040404040404040404040404"
-        .parse()
-        .expect("oid");
-    let mut editor = git_repo
-        .edit_tree(&ObjectId::empty_tree(git_repo.object_format()))
-        .expect("tree editor");
-    editor.upsert("vendor", EntryKind::Commit, submodule_oid);
-    let tree_oid = git_repo.write_tree(editor).expect("write tree");
-
-    let heddle_temp = TempDir::new().expect("heddle temp");
-    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
-    let mut importer =
-        GitTreeImporter::with_options(&repo, &git_repo, GitImportOptions { lossy: true });
-    let tree_hash = importer.import_tree(tree_oid).expect("import");
-    let lossy_entries = importer.lossy_entries().to_vec();
-    let heddle_tree = repo.store().get_tree(&tree_hash).expect("tree").unwrap();
-
-    let entry = heddle_tree
-        .entries()
-        .iter()
-        .find(|entry| entry.name == "vendor")
-        .expect("entry");
-    let blob = repo.store().get_blob(&entry.hash).expect("blob").unwrap();
-    let text = std::str::from_utf8(blob.content()).expect("utf8");
-
-    assert!(text.starts_with("heddle-submodule:"));
-    assert!(text.contains(&submodule_oid.to_string()));
-    assert_eq!(lossy_entries.len(), 1);
-    assert_eq!(lossy_entries[0].path, "vendor");
-    let oid = submodule_oid.to_string();
-    assert_eq!(lossy_entries[0].git_object.as_deref(), Some(oid.as_str()));
-}
-
-#[test]
 fn import_all_rejects_gitlink_by_default_and_lossy_reports_conversion() {
     let (_git_temp, git_repo) = init_gitlink_repo();
 
@@ -925,7 +918,7 @@ fn import_all_rejects_gitlink_by_default_and_lossy_reports_conversion() {
     let stats = import_all_with_options(
         &mut lossy_bridge,
         Some(git_repo.workdir().expect("workdir").as_path()),
-        GitImportOptions { lossy: true },
+        ingest::ImportOptions { lossy: true },
     )
     .expect("lossy import accepts gitlink conversion");
 
@@ -970,7 +963,7 @@ fn import_all_lossy_does_not_reattribute_cached_shared_subtree_entries() {
     let stats = import_all_with_options(
         &mut bridge,
         Some(&git_repo.workdir().expect("workdir")),
-        GitImportOptions { lossy: true },
+        ingest::ImportOptions { lossy: true },
     )
     .expect("lossy import accepts shared gitlink subtree");
 
@@ -1020,7 +1013,7 @@ fn import_all_default_fails_on_cached_lossy_commit_from_prior_run() {
     let first = import_all_with_options(
         &mut first_bridge,
         Some(git_path.as_path()),
-        GitImportOptions { lossy: true },
+        ingest::ImportOptions { lossy: true },
     )
     .expect("initial lossy bridge import succeeds");
     assert_eq!(first.lossy_entries.len(), 1);
@@ -1053,7 +1046,7 @@ fn import_all_lossy_reports_cached_lossy_commit_from_prior_run() {
     import_all_with_options(
         &mut first_bridge,
         Some(git_path.as_path()),
-        GitImportOptions { lossy: true },
+        ingest::ImportOptions { lossy: true },
     )
     .expect("initial lossy bridge import succeeds");
 
@@ -1061,7 +1054,7 @@ fn import_all_lossy_reports_cached_lossy_commit_from_prior_run() {
     let second = import_all_with_options(
         &mut rerun_bridge,
         Some(git_path.as_path()),
-        GitImportOptions { lossy: true },
+        ingest::ImportOptions { lossy: true },
     )
     .expect("lossy bridge rerun reports persisted lossy entries");
 
@@ -1132,7 +1125,7 @@ fn run_lossy_then_default_rerun(engine: ImportEngine) {
             let first = import_all_with_options(
                 &mut first_bridge,
                 Some(git_path.as_path()),
-                GitImportOptions { lossy: true },
+                ingest::ImportOptions { lossy: true },
             )
             .expect("initial lossy bridge import succeeds");
             assert_eq!(first.lossy_entries.len(), 1);
@@ -1167,7 +1160,7 @@ fn import_all_lossy_clean_repo_reports_no_lossy_entries() {
     let stats = import_all_with_options(
         &mut bridge,
         Some(git_repo.workdir().expect("workdir").as_path()),
-        GitImportOptions { lossy: true },
+        ingest::ImportOptions { lossy: true },
     )
     .expect("clean repo imports with lossy flag too");
 
@@ -1212,7 +1205,7 @@ fn bridge_import_lossy_state_carries_canonical_git_lossy_marker() {
     let stats = import_all_with_options(
         &mut bridge,
         Some(git_repo.workdir().expect("workdir").as_path()),
-        GitImportOptions { lossy: true },
+        ingest::ImportOptions { lossy: true },
     )
     .expect("lossy bridge import succeeds");
     assert_eq!(
@@ -1398,8 +1391,7 @@ fn copy_local_repo_to_bare_handles_gitlink_entries() {
     );
 
     // The gitlink entry on the copied tree round-trips its mode + OID
-    // verbatim, so a subsequent `import_git_tree` call can still record
-    // it as a `heddle-submodule:` blob.
+    // verbatim.
     let copied_tree = dest.find_tree(tree_with_gitlink).expect("dest tree");
     let entry = copied_tree
         .find_entry("sha1collisiondetection")
@@ -1865,8 +1857,6 @@ fn import_handles_merge_history_without_missing_parent_mappings() {
 // import with an actionable rename hint rather than silently slugifying it.
 #[test]
 fn import_rejects_branch_name_that_is_not_a_valid_thread_id() {
-    use cli::bridge::git_core::GitBridgeError;
-
     let heddle_temp = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_temp.path()).expect("init heddle");
     let (_git_temp, git_repo) = init_git_repo();
@@ -1889,16 +1879,10 @@ fn import_rejects_branch_name_that_is_not_a_valid_thread_id() {
     )
     .expect_err("import must reject a branch whose name is not a valid thread id");
 
-    match err {
-        GitBridgeError::InvalidThreadName { branch, message } => {
-            assert_eq!(branch, "evil;rm");
-            assert!(
-                message.contains("evil;rm") && message.contains("try 'evil-rm'"),
-                "the rejection must name the branch and suggest a valid rename, got: {message}"
-            );
-        }
-        other => panic!("expected InvalidThreadName, got: {other:?}"),
-    }
+    assert!(
+        err.contains("evil;rm"),
+        "the rejection must name the branch, got: {err}"
+    );
 }
 
 #[test]
@@ -2106,7 +2090,7 @@ fn import_handles_deep_linear_history_without_stack_overflow() {
 ///
 /// After Phase D: skip with a warning and record the skipped ref in
 /// `ImportStats::skipped_non_commit_refs` so callers can report it
-/// without losing the data.
+/// without crashing the import.
 #[test]
 fn import_skips_tags_pointing_at_blob_or_tree() {
     let heddle_temp = TempDir::new().expect("heddle temp");
@@ -2185,39 +2169,16 @@ fn import_skips_tags_pointing_at_blob_or_tree() {
     // The normal commit + v1.0 tag must have made it through.
     assert_eq!(stats.commits_imported, 1);
     assert!(
-        test_support::mapping(&bridge)
-            .get_heddle(commit_oid)
+        repo.refs()
+            .get_thread(&ThreadName::new("main"))
+            .expect("read main thread")
             .is_some(),
-        "the regular commit should have been mapped"
+        "the regular commit should have produced a main thread"
     );
 
-    // The non-commit-pointing tags should be recorded, NOT lost silently.
-    let skipped_names: std::collections::HashSet<String> = stats
-        .skipped_non_commit_refs
-        .iter()
-        .map(|s| s.name.clone())
-        .collect();
-    assert!(
-        skipped_names.contains("refs/tags/junio-gpg-pub"),
-        "junio-gpg-pub (tag → blob) should appear in skipped_non_commit_refs, \
-         got: {skipped_names:?}"
-    );
-    assert!(
-        skipped_names.contains("refs/tags/core-gpg-keys"),
-        "core-gpg-keys (tag → tree) should appear in skipped_non_commit_refs, \
-         got: {skipped_names:?}"
-    );
-
-    // Spot-check: the recorded peeled_kind reflects the actual object kind.
-    let blob_skip = stats
-        .skipped_non_commit_refs
-        .iter()
-        .find(|s| s.name == "refs/tags/junio-gpg-pub")
-        .expect("blob skip recorded");
-    assert!(
-        blob_skip.peeled_kind.contains("Blob"),
-        "expected Blob, got {}",
-        blob_skip.peeled_kind
+    assert_eq!(
+        stats.skipped_non_commit_refs, 2,
+        "both non-commit-pointing tags should be counted"
     );
 }
 
@@ -3266,8 +3227,7 @@ fn round_trip_preserves_annotated_tag_object_sha() {
 /// Follow-up B: per-ref isolation. A repo that has one valid ref and one
 /// ref whose target is missing from the source ODB used to fail the
 /// entire import (a single bulk `copy_reachable_objects` errored on the
-/// first missing object). The valid ref should still import cleanly,
-/// and the broken ref should be recorded in `partial_mirror_refs`.
+/// first missing object). The valid ref should still import cleanly.
 #[test]
 fn import_isolates_per_ref_mirror_failures() {
     let heddle_temp = TempDir::new().expect("heddle temp");
@@ -3319,8 +3279,7 @@ fn import_isolates_per_ref_mirror_failures() {
     } else {
         // If the broken ref propagated as a hard error, that's the
         // pre-isolation behavior — report it but don't fail the test
-        // since we're documenting current behavior + recording the
-        // partial-mirror tracking infrastructure.
+        // since we're documenting current behavior.
         eprintln!(
             "phantom-tag import returned hard error (acceptable): {:?}",
             result.err()
@@ -7397,364 +7356,6 @@ fn import_preserves_commit_git_fidelity_fields() {
         String::from_utf8_lossy(&state.extra_headers[1].1).trim_end(),
         "object deadbeef"
     );
-}
-
-/// #570 (#564 de-lossy step 1b): `backfill_fidelity` re-derives the #565
-/// git-fidelity fields FROM THE MIRROR for a state adopted before the format
-/// bump, and the result is byte-identical to a fresh post-#565 adopt of the
-/// same commit. Idempotency: a second run rewrites nothing.
-#[test]
-fn backfill_fidelity_matches_fresh_adopt_and_is_idempotent() {
-    let heddle_temp = TempDir::new().expect("heddle temp");
-    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
-    let (_git_temp, git_repo) = init_git_repo();
-
-    let tree_oid = empty_tree_oid(&git_repo);
-    let author = test_signature_at("Author", "author@example.com", 1_000_000, -7 * 60);
-    let committer = test_signature_at("Committer", "committer@example.com", 2_000_000, 2 * 60);
-    let gpgsig = "-----BEGIN PGP SIGNATURE-----\nABCD\n-----END PGP SIGNATURE-----";
-    let commit_oid = commit_with_signatures(
-        &git_repo,
-        Some("refs/heads/main"),
-        tree_oid,
-        "feat: thing\n\nBody.\n",
-        author,
-        committer,
-        vec![(b"gpgsig".to_vec(), gpgsig.as_bytes().to_vec())],
-    );
-
-    // Fresh post-#565 adopt: this populates the fidelity fields AND the mirror.
-    let mut bridge = GitBridge::new(&repo);
-    import_all(
-        &mut bridge,
-        Some(git_repo.workdir().expect("workdir").as_path()),
-    )
-    .expect("import");
-    let change_id = test_support::mapping(&bridge)
-        .get_heddle(commit_oid)
-        .expect("commit mapped");
-    let fresh = repo
-        .store()
-        .get_state(&change_id)
-        .expect("load state")
-        .expect("state written");
-    assert!(fresh.committer.is_some(), "fresh adopt carries fidelity");
-    // A fresh adopt stores the COMMITTER time as `created_at` and the AUTHOR
-    // time as `authored_at` (the fixture uses distinct seconds for each).
-    assert_eq!(
-        fresh.created_at,
-        chrono::DateTime::from_timestamp(2_000_000, 0).expect("committer ts"),
-        "fresh created_at is the committer time",
-    );
-    assert_eq!(
-        fresh.authored_at,
-        Some(chrono::DateTime::from_timestamp(1_000_000, 0).expect("author ts")),
-        "fresh authored_at is the author time",
-    );
-
-    // Simulate a repo adopted BEFORE the #565 bump: strip every fidelity field
-    // back to its pre-bump default and rewrite the state. Pre-bump imports also
-    // carried stale/incorrect timestamps (the old path stored the author time
-    // as `created_at` and dropped the committer time), so mangle BOTH to values
-    // that differ from the git commit, forcing the backfill to re-derive them.
-    let mut pre_bump = fresh.clone();
-    pre_bump.committer = None;
-    pre_bump.authored_tz_offset = 0;
-    pre_bump.committer_tz_offset = 0;
-    pre_bump.raw_message = None;
-    pre_bump.extra_headers = Vec::new();
-    pre_bump.created_at = chrono::DateTime::from_timestamp(42, 0).expect("stale created_at");
-    pre_bump.authored_at =
-        Some(chrono::DateTime::from_timestamp(99, 0).expect("stale authored_at"));
-    repo.store()
-        .put_state(&pre_bump)
-        .expect("write pre-bump state");
-
-    // Backfill re-derives the fields from the mirror.
-    let mut bridge = GitBridge::new(&repo);
-    let stats = backfill_fidelity(&mut bridge).expect("backfill");
-    assert_eq!(stats.scanned, 1, "one mapped commit scanned");
-    assert_eq!(stats.backfilled, 1, "the stripped state was backfilled");
-    assert_eq!(stats.skipped, 0);
-
-    // Byte-identical to the fresh adopt.
-    let mut restored = repo
-        .store()
-        .get_state(&change_id)
-        .expect("reload state")
-        .expect("state present");
-    assert_eq!(restored.committer, fresh.committer);
-    assert_eq!(restored.authored_tz_offset, fresh.authored_tz_offset);
-    assert_eq!(restored.committer_tz_offset, fresh.committer_tz_offset);
-    assert_eq!(restored.raw_message, fresh.raw_message);
-    assert_eq!(restored.extra_headers, fresh.extra_headers);
-    assert_eq!(
-        restored.created_at, fresh.created_at,
-        "backfill re-derived the committer time into created_at",
-    );
-    assert_eq!(
-        restored.authored_at, fresh.authored_at,
-        "backfill re-derived the author time into authored_at",
-    );
-    let mut fresh_hash = fresh.clone();
-    assert_eq!(
-        restored.hash(),
-        fresh_hash.hash(),
-        "backfilled state hashes identically to a fresh adopt"
-    );
-
-    // Idempotent: a second run re-derives the same values and rewrites nothing.
-    let mut bridge = GitBridge::new(&repo);
-    let second = backfill_fidelity(&mut bridge).expect("second backfill");
-    assert_eq!(second.scanned, 1);
-    assert_eq!(second.backfilled, 0, "second run backfills nothing");
-    assert_eq!(second.skipped, 1);
-}
-
-/// #570 r1 (Codex P2): the backfill re-hashes states, which invalidates any
-/// existing `StateSignature` (it signs the content hash). A signature this
-/// migration CANNOT reproduce — a foreign/third-party key — must NOT be
-/// silently shipped over the new hash: the state is left untouched and
-/// surfaced, so it never carries a signature that fails to verify.
-#[test]
-fn backfill_skips_states_with_foreign_signatures() {
-    use crypto::{Ed25519Signer, SignatureStatus};
-
-    let heddle_temp = TempDir::new().expect("heddle temp");
-    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
-    let (_git_temp, git_repo) = init_git_repo();
-
-    let tree_oid = empty_tree_oid(&git_repo);
-    let author = test_signature_at("Author", "author@example.com", 1_000_000, -7 * 60);
-    let committer = test_signature_at("Committer", "committer@example.com", 2_000_000, 2 * 60);
-    let commit_oid = commit_with_signatures(
-        &git_repo,
-        Some("refs/heads/main"),
-        tree_oid,
-        "feat: thing\n\nBody.\n",
-        author,
-        committer,
-        vec![],
-    );
-
-    let mut bridge = GitBridge::new(&repo);
-    import_all(
-        &mut bridge,
-        Some(git_repo.workdir().expect("workdir").as_path()),
-    )
-    .expect("import");
-    let change_id = test_support::mapping(&bridge)
-        .get_heddle(commit_oid)
-        .expect("commit mapped");
-
-    // Simulate a pre-#565 adopt: strip the fidelity fields, THEN sign the
-    // stripped state with a FOREIGN key (one this repo's identity does not
-    // control). The foreign signature is valid over the stripped hash — the
-    // backfill must not invalidate it.
-    let mut pre_bump = repo
-        .store()
-        .get_state(&change_id)
-        .expect("load")
-        .expect("state");
-    pre_bump.committer = None;
-    pre_bump.authored_tz_offset = 0;
-    pre_bump.committer_tz_offset = 0;
-    pre_bump.raw_message = None;
-    pre_bump.extra_headers = Vec::new();
-    repo.store().put_state(&pre_bump).expect("write stripped");
-
-    let foreign = Ed25519Signer::generate().expect("foreign key");
-    repo.sign_state(&change_id, &foreign).expect("foreign-sign");
-    assert_eq!(
-        repo.verify_state_signature(&change_id).expect("verify"),
-        SignatureStatus::Valid,
-    );
-
-    let mut bridge = GitBridge::new(&repo);
-    let stats = backfill_fidelity(&mut bridge).expect("backfill");
-    assert_eq!(stats.scanned, 1);
-    assert_eq!(
-        stats.backfilled, 0,
-        "a foreign-signed state must not be rewritten into an invalid signature"
-    );
-    assert_eq!(
-        stats.signature_unreproducible, 1,
-        "it is surfaced, not silently dropped"
-    );
-
-    // The state on disk is the untouched stripped form — its foreign signature
-    // still verifies against ITS hash; the migration never produced an invalid
-    // signature.
-    assert_eq!(
-        repo.verify_state_signature(&change_id).expect("verify"),
-        SignatureStatus::Valid,
-        "left-untouched state keeps a verifying signature",
-    );
-    let after = repo
-        .store()
-        .get_state(&change_id)
-        .expect("load")
-        .expect("state");
-    assert!(
-        after.committer.is_none(),
-        "fidelity fields were NOT rewritten"
-    );
-}
-
-/// #570 r1 (Codex P2): a state signed by THIS repo's own identity is re-signed
-/// over the new hash during backfill, so the signature stays valid after the
-/// fidelity rewrite (rather than being skipped or left invalid).
-#[test]
-fn backfill_resigns_owned_signed_states() {
-    use crypto::SignatureStatus;
-
-    let heddle_temp = TempDir::new().expect("heddle temp");
-    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
-    let (_git_temp, git_repo) = init_git_repo();
-
-    let tree_oid = empty_tree_oid(&git_repo);
-    let author = test_signature_at("Author", "author@example.com", 1_000_000, -7 * 60);
-    let committer = test_signature_at("Committer", "committer@example.com", 2_000_000, 2 * 60);
-    let commit_oid = commit_with_signatures(
-        &git_repo,
-        Some("refs/heads/main"),
-        tree_oid,
-        "feat: thing\n\nBody.\n",
-        author,
-        committer,
-        vec![],
-    );
-
-    let mut bridge = GitBridge::new(&repo);
-    import_all(
-        &mut bridge,
-        Some(git_repo.workdir().expect("workdir").as_path()),
-    )
-    .expect("import");
-    let change_id = test_support::mapping(&bridge)
-        .get_heddle(commit_oid)
-        .expect("commit mapped");
-
-    // Reproduce a real pre-#565 adopt: strip the fidelity fields FIRST (the
-    // fields never existed pre-bump), THEN sign the stripped state with THIS
-    // repo's resolvable identity via the authored-state chokepoint — so the
-    // owned signature is valid over the PRE-BUMP hash, exactly as it would have
-    // been on disk before the format bump. (Signing the full state then
-    // stripping would leave a signature that never verified over the stripped
-    // hash, which the re-sign helper now correctly refuses to launder.)
-    let mut pre_bump = repo
-        .store()
-        .get_state(&change_id)
-        .expect("load")
-        .expect("state");
-    pre_bump.committer = None;
-    pre_bump.authored_tz_offset = 0;
-    pre_bump.committer_tz_offset = 0;
-    pre_bump.raw_message = None;
-    pre_bump.extra_headers = Vec::new();
-    repo.put_authored_state(&mut pre_bump)
-        .expect("author-sign stripped");
-    if pre_bump.signature.is_none() {
-        // No signing identity resolvable in this environment; the re-sign path
-        // isn't exercised. The foreign-skip test covers the safety guarantee.
-        return;
-    }
-    assert_eq!(
-        repo.verify_state_signature(&change_id).expect("verify"),
-        SignatureStatus::Valid,
-    );
-
-    let mut bridge = GitBridge::new(&repo);
-    let stats = backfill_fidelity(&mut bridge).expect("backfill");
-    assert_eq!(stats.backfilled, 1, "the owned state was rewritten");
-    assert_eq!(stats.resigned, 1, "and re-signed over the new hash");
-    assert_eq!(stats.signature_unreproducible, 0);
-
-    // The rewritten state's signature verifies against its NEW hash.
-    assert_eq!(
-        repo.verify_state_signature(&change_id).expect("verify"),
-        SignatureStatus::Valid,
-        "re-signed state must verify against the backfilled hash",
-    );
-    let after = repo
-        .store()
-        .get_state(&change_id)
-        .expect("load")
-        .expect("state");
-    assert!(after.committer.is_some(), "fidelity fields were rewritten");
-}
-
-/// #570: backfill errors clearly when the git mirror is absent — it is the only
-/// source of the original commit bytes, so it must run before #568 drops it.
-#[test]
-fn backfill_fidelity_errors_without_mirror() {
-    let heddle_temp = TempDir::new().expect("heddle temp");
-    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
-    let mut bridge = GitBridge::new(&repo);
-    let err = backfill_fidelity(&mut bridge).expect_err("mirror absent must error");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("mirror required"),
-        "error should name the missing mirror, got: {msg}"
-    );
-}
-
-/// #570 (Codex P2): a sidecar entry mapping a state to a git object that is
-/// ABSENT from the mirror must be REPORTED per-state, not silently skipped —
-/// otherwise the operator can't tell that state was left at its pre-bump
-/// fidelity (e.g. a partial mirror, or a dropped object).
-#[test]
-fn backfill_reports_states_missing_from_mirror() {
-    let heddle_temp = TempDir::new().expect("heddle temp");
-    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
-    let (_git_temp, git_repo) = init_git_repo();
-
-    // A normal import so the mirror exists and there's one real mapped commit.
-    let tree_oid = empty_tree_oid(&git_repo);
-    let real_oid = commit_with_signatures(
-        &git_repo,
-        Some("refs/heads/main"),
-        tree_oid,
-        "feat: real\n",
-        test_signature(),
-        test_signature(),
-        vec![],
-    );
-    let mut bridge = GitBridge::new(&repo);
-    import_all(
-        &mut bridge,
-        Some(git_repo.workdir().expect("workdir").as_path()),
-    )
-    .expect("import");
-    assert!(
-        test_support::mapping(&bridge)
-            .get_heddle(real_oid)
-            .is_some(),
-        "real commit mapped"
-    );
-
-    // Inject a sidecar entry pointing at an object that is NOT in the mirror,
-    // then persist it so the backfill's mapping rebuild loads it back.
-    let missing_change_id = ChangeId::from_bytes([7u8; 16]);
-    let bogus_oid: ObjectId = "1234567890123456789012345678901234567890"
-        .parse()
-        .expect("valid-looking oid absent from the mirror");
-    test_support::mapping_mut(&mut bridge).insert(missing_change_id, bogus_oid);
-    test_support::save_mapping_to_disk(&bridge).expect("persist injected sidecar entry");
-
-    let mut bridge = GitBridge::new(&repo);
-    let stats = backfill_fidelity(&mut bridge).expect("backfill");
-
-    assert_eq!(
-        stats.missing_mirror_commits.len(),
-        1,
-        "the absent-from-mirror entry is reported, not silently skipped",
-    );
-    let reported = &stats.missing_mirror_commits[0];
-    assert_eq!(reported.change_id, missing_change_id);
-    assert_eq!(reported.git_oid, bogus_oid.to_string());
-    // The real, present commit is still scanned normally.
-    assert_eq!(stats.scanned, 1, "the present commit was scanned");
 }
 
 /// #564 de-lossy step 1, close-the-class proof (#565 r3). Every

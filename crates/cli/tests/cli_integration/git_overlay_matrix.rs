@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-use super::*;
 use oplog::{OpLogBackend, OpRecord};
+
+use super::*;
 
 /// The `bisect` verb was removed in the whole-CLI consolidation (heddle#473),
 /// but the operation-status layer still detects a lingering `BISECT_STATE`

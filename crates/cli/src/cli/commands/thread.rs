@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Thread commands.
 
-use objects::store::ObjectStore;
 use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
@@ -12,7 +11,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use objects::{
     object::{ChangeId, State, ThreadName, Tree},
-    store::{AgentEntry, AgentRegistry, AgentStatus, current_boot_id},
+    store::{AgentEntry, AgentRegistry, AgentStatus, ObjectStore, current_boot_id},
 };
 use oplog::OpLogBackend;
 use refs::{Head, RefExpectation, RefUpdate};

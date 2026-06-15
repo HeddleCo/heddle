@@ -32,7 +32,6 @@
 //! the print sites short-circuit on JSON mode before any styled
 //! helper runs.
 
-use objects::store::ObjectStore;
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -46,7 +45,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use notify::{Config as NotifyConfig, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use objects::object::ChangeId;
+use objects::{object::ChangeId, store::ObjectStore};
 use oplog::{OpEntry, OpLog, OpLogBackend, OpRecord};
 use repo::Repository;
 use serde::Serialize;

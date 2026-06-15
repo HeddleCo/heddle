@@ -6,7 +6,6 @@
 //! NOTE: These tests run the built binary via CARGO_BIN_EXE_heddle so they can
 //! execute from temporary directories without relying on `cargo run`.
 
-use objects::store::ObjectStore;
 use std::{
     io::Write,
     path::Path,
@@ -14,14 +13,15 @@ use std::{
     str,
 };
 
+use objects::store::ObjectStore;
 use repo::Repository;
 use serde_json::Value;
-use sley::plumbing::sley_core::ByteString as GitByteString;
-use sley::plumbing::sley_object::EncodedObject;
-use sley::plumbing::sley_refs::ReflogEntry;
 use sley::{
     CommitObject, EntryKind, GitObjectType, GitTime, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository, Signature, TagObject,
+    plumbing::{
+        sley_core::ByteString as GitByteString, sley_object::EncodedObject, sley_refs::ReflogEntry,
+    },
 };
 use tempfile::TempDir;
 

@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Sync threads/markers functionality for Git bridge.
 
-use objects::object::{MarkerName, ThreadName};
+use objects::object::{ChangeId, MarkerName, ThreadName};
 use refs::RefExpectation;
 use sley::{
     ObjectId as SleyObjectId, RefPrecondition, ReferenceTarget, Repository as SleyRepository,
 };
 
-use crate::bridge::{
-    git_core::{GitBridge, GitBridgeError, GitResult, git_err},
-    git_import::thread_can_adopt_change,
+use crate::bridge::git_core::{
+    GitBridge, GitBridgeError, GitResult, git_err, thread_is_unclaimed_bootstrap,
 };
 
 /// Sync Heddle threads to Git branches.
@@ -63,7 +62,7 @@ pub fn sync_branches(bridge: &mut GitBridge) -> GitResult<usize> {
         if let Some(change_id) = bridge.mapping.get_heddle(target) {
             let tn = ThreadName::new(name);
             if let Some(existing) = bridge.heddle_repo.refs().get_thread(&tn)?
-                && !thread_can_adopt_change(bridge.heddle_repo, &existing, &change_id)?
+                && !thread_can_adopt_change(bridge, &existing, &change_id)?
             {
                 return Err(GitBridgeError::GitHeddleThreadDiverged {
                     thread: name.to_string(),
@@ -79,6 +78,21 @@ pub fn sync_branches(bridge: &mut GitBridge) -> GitResult<usize> {
     }
 
     Ok(stats)
+}
+
+fn thread_can_adopt_change(
+    bridge: &GitBridge<'_>,
+    existing: &ChangeId,
+    change_id: &ChangeId,
+) -> GitResult<bool> {
+    if existing == change_id {
+        return Ok(true);
+    }
+    if thread_is_unclaimed_bootstrap(bridge.heddle_repo, existing)? {
+        return Ok(true);
+    }
+    proto::is_ancestor(bridge.heddle_repo.store(), *existing, *change_id)
+        .map_err(|err| GitBridgeError::InvalidMapping(err.to_string()))
 }
 
 /// Sync Git tags to Heddle markers.

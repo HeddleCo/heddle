@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-use super::*;
 use objects::store::ObjectStore;
+
+use super::*;
 
 #[test]
 fn test_long_history_traversal() {

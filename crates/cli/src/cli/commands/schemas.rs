@@ -1580,7 +1580,6 @@ pub struct AdoptSchema {
     pub branches_synced: usize,
     pub tags_synced: usize,
     pub skipped_non_commit_refs: usize,
-    pub partial_mirror_refs: usize,
     pub already_in_sync: bool,
     pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
@@ -2643,8 +2642,7 @@ pub struct BridgeImportSchema {
     pub branches_synced: u64,
     pub tags_synced: u64,
     pub skipped_non_commit_refs: u64,
-    pub partial_mirror_refs: u64,
-    pub lossy_entries: Vec<LossyGitImportEntrySchema>,
+    pub lossy_entries: Vec<LossyImportEntrySchema>,
     pub already_in_sync: bool,
     pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
@@ -2652,7 +2650,7 @@ pub struct BridgeImportSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct LossyGitImportEntrySchema {
+pub struct LossyImportEntrySchema {
     pub path: String,
     pub action: String,
     pub reason: String,

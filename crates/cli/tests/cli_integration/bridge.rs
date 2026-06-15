@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-use super::*;
 use objects::object::ThreadName;
+
+use super::*;
 
 /// Initialize a colocated (drop-in) Git repo on `main` with one
 /// committed file, mirroring the bootstrap the overlay tests use.

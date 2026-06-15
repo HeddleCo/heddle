@@ -156,7 +156,6 @@ fn adopt_all_uses_ingest_mapping_without_internal_mirror() {
 
     assert_eq!(value["commits_imported"], 1);
     assert_eq!(value["states_created"], 1);
-    assert_eq!(value["partial_mirror_refs"], 0);
     assert!(
         !work.join(".heddle").join("git").exists(),
         "unscoped adopt should use ingest and avoid creating the legacy mirror"

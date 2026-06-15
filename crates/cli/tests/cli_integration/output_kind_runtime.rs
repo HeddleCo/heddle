@@ -14,11 +14,10 @@
 
 use std::fs;
 
+use cli::cli::commands::{build_command_catalog, operator_envelope_verbs};
 use repo::{OutputFormat, RepoConfig};
 use serde_json::Value;
 use tempfile::TempDir;
-
-use cli::cli::commands::{build_command_catalog, operator_envelope_verbs};
 
 use super::{heddle, heddle_output};
 

@@ -994,8 +994,9 @@ impl OpBatch {
 
 #[cfg(test)]
 mod verb_catalog_tests {
-    use super::*;
     use objects::object::{ChangeId, ContentHash, VisibilityTier};
+
+    use super::*;
 
     fn cid() -> ChangeId {
         ChangeId::from_bytes([7; 16])

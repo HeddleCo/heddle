@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use std::fs;
 
 use objects::{
     object::{Blob, ChangeId, ThreadName, Tree, TreeEntry},
+    store::ObjectStore,
     util::symlink_target_bytes,
 };
 use oplog::{OpLogBackend, OpRecord};
@@ -11,8 +11,10 @@ use refs::Head;
 use serde_json::json;
 use tempfile::TempDir;
 
-use super::repo_config::SUPPORTED_REPO_FORMAT;
-use super::repository_snapshot::{SnapshotFault, with_snapshot_fault};
+use super::{
+    repo_config::SUPPORTED_REPO_FORMAT,
+    repository_snapshot::{SnapshotFault, with_snapshot_fault},
+};
 use crate::{
     ChangedPathFilters, HeddleError, HistoryQuery, RepoConfig, Repository, RepositoryCapability,
     ThreadFreshness, ThreadManager, WorktreeIndex,
@@ -1473,9 +1475,8 @@ mod blob_hydrator_callback {
     use objects::{
         error::Result,
         object::{Blob, ContentHash},
+        store::ObjectStore,
     };
-
-    use objects::store::ObjectStore;
 
     use super::create_test_repo;
     use crate::{BlobHydrator, HeddleError, Repository};
@@ -1767,8 +1768,10 @@ mod require_tree_callback {
     //! `crates/cli/tests/state_management/missing_tree_integrity.rs`
     //! cover the on-disk wiring.
 
-    use objects::object::{ContentHash, Tree};
-    use objects::store::ObjectStore;
+    use objects::{
+        object::{ContentHash, Tree},
+        store::ObjectStore,
+    };
 
     use super::create_test_repo;
     use crate::{HeddleError, Repository};

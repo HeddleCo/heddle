@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Rebase state persistence and commit-graph traversal.
 
-use objects::store::ObjectStore;
 use std::{fs, io::Write};
 
 use anyhow::{Result, anyhow};
-use objects::object::ChangeId;
+use objects::{object::ChangeId, store::ObjectStore};
 use oplog::OpRecord;
 use repo::Repository;
 

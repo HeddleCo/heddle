@@ -2,8 +2,6 @@
 //! Fetch command - download objects and refs from remote.
 
 #[cfg(feature = "client")]
-use objects::store::ObjectStore;
-#[cfg(feature = "client")]
 use std::collections::HashSet;
 
 #[cfg(feature = "client")]
@@ -12,6 +10,8 @@ use anyhow::Result;
 #[cfg(feature = "client")]
 use objects::object::ChangeId;
 use objects::object::{MarkerName, ThreadName};
+#[cfg(feature = "client")]
+use objects::store::ObjectStore;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 

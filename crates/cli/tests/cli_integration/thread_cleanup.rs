@@ -18,11 +18,10 @@
 //! storage and visibility halves are what `thread list` and
 //! `thread cleanup` actually read.
 
-use objects::store::ObjectStore;
 use std::fs;
 
 use chrono::{Duration, Utc};
-use objects::object::ThreadName;
+use objects::{object::ThreadName, store::ObjectStore};
 use repo::{
     Repository, Thread, ThreadConfidenceSummary, ThreadFreshness, ThreadIntegrationPolicy,
     ThreadManager, ThreadMode, ThreadState, ThreadVerificationSummary,

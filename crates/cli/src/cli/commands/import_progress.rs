@@ -3,9 +3,9 @@
 
 use std::io::{self, IsTerminal, Write};
 
+use ingest::ImportProgressEvent;
 use repo::Repository;
 
-use crate::bridge::git_util::ImportProgressEvent;
 use crate::cli::{Cli, should_output_json, style};
 
 /// Redraw the live commit counter at most once per this many commits, so a

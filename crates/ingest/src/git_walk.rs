@@ -528,12 +528,37 @@ impl GitSource {
         Ok(out)
     }
 
+    /// Iterate reflog entries only for the selected local branch/tag refs.
+    ///
+    /// Deliberately excludes `HEAD`: checkout/reset entries in `HEAD` can
+    /// mention unrelated branch tips as their previous target, which would
+    /// make a scoped import unexpectedly pull in commits outside the selected
+    /// refs. Remote-tracking refs usually have no local reflog, so they are
+    /// imported from their live tip only.
+    pub fn collect_reflog_for_refs(&self, heads: &[RefHead]) -> crate::Result<Vec<ReflogEntry>> {
+        let mut out = Vec::new();
+        let refs = self.repo.references();
+        for head in heads {
+            if matches!(head.namespace, RefNamespace::Branch | RefNamespace::Tag) {
+                collect_one_reflog(&refs, &head.full_name, &mut out)?;
+            }
+        }
+        Ok(out)
+    }
+
     /// Every distinct commit SHA referenced by any reflog entry that still
     /// exists in the object database. Intended to be merged into the seed
     /// set for [`Self::commits_topo`] so force-pushed or amended commits
     /// still get translated into Heddle states.
     pub fn reflog_commit_shas(&self) -> crate::Result<Vec<String>> {
         let entries = self.collect_reflog()?;
+        Ok(self.reflog_commit_shas_from_entries(&entries))
+    }
+
+    /// Deduplicate and filter commit SHAs from a caller-provided reflog set.
+    /// Scoped import uses this after it has selected the reflogs that belong
+    /// to the requested refs.
+    pub fn reflog_commit_shas_from_entries(&self, entries: &[ReflogEntry]) -> Vec<String> {
         let mut seen: HashSet<String> = HashSet::new();
         let mut out = Vec::new();
         for entry in entries {
@@ -548,7 +573,7 @@ impl GitSource {
             }
         }
         out.sort();
-        Ok(out)
+        out
     }
 
     /// `true` if `sha` resolves to a commit still present in the odb.

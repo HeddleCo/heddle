@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared worktree apply planning and execution.
 
-use objects::store::ObjectStore;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -12,6 +11,7 @@ use std::{
 use objects::{
     fs_atomic::{enrich_fs_error, is_directory_not_empty as fs_is_directory_not_empty},
     object::{EntryType, Tree, TreeEntry},
+    store::ObjectStore,
     worktree::should_ignore as should_ignore_path,
 };
 use tracing::{debug, warn};

@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //! In-memory commit graph index with persistence and Bloom filter support.
 
-use objects::store::ObjectStore;
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
 };
 
 use anyhow::Result;
-use objects::object::{ChangeId, ContentHash, Tree, diff_trees};
+use objects::{
+    object::{ChangeId, ContentHash, Tree, diff_trees},
+    store::ObjectStore,
+};
 use tracing::warn;
 
 use super::{

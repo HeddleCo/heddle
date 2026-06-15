@@ -21,7 +21,6 @@ use grpc::heddle::v1::{
     SignalAnchor as ProtoSignalAnchor, SigningFooter,
     state_review_service_server::StateReviewService,
 };
-use objects::store::ObjectStore;
 use objects::{
     lock::RepositoryLockExt,
     object::{
@@ -29,6 +28,7 @@ use objects::{
         ReviewScope, ReviewSignature, ReviewSignaturesBlob, RiskSignalBlob, State, SymbolAnchor,
         signing_payload,
     },
+    store::ObjectStore,
     worktree::diff_blobs,
 };
 use prost::Message;

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Clone command - clone from remote.
 
-use objects::store::ObjectStore;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -13,9 +12,11 @@ use anyhow::Context;
 use anyhow::{Result, anyhow};
 #[cfg(feature = "client")]
 use heddle_client::grpc_hosted::PullMaterialization;
+use ingest::ImportOptions;
 use objects::{
     error::{HeddleError, Result as HeddleResult},
     object::{Blob, ContentHash, ThreadName},
+    store::ObjectStore,
 };
 use refs::Head;
 use repo::{BlobHydrator, Repository};
@@ -37,7 +38,7 @@ use crate::{
     bridge::{
         GitBridge,
         git_core::{clone_url_to_bare, copy_local_repo_to_bare, open_repo, set_reference},
-        git_import::{import_all, import_selected_refs},
+        git_ingest::import_git_history,
     },
     cli::{Cli, should_output_json, style},
     client::LocalSync,
@@ -285,9 +286,8 @@ fn clone_git_overlay_path(
 /// Reject `--depth` / `--lazy` / `--filter` for Git-overlay clones before
 /// any filesystem or network work runs. The wire-level plumbing in
 /// `clone_url_to_bare` can already negotiate shallow + partial-clone
-/// capabilities, but the import step (`import_all` →
-/// `GitTreeImporter::import_blob` + ancestry walk) requires every blob
-/// and parent commit to be present locally. Until the importer learns
+/// capabilities, but the ingest-backed import step requires every blob
+/// and parent commit to be present locally. Until ingest learns
 /// to tolerate missing objects, accepting these flags would just trade
 /// an upfront rejection for a half-built clone that fails partway
 /// through import. Each flag has its own message so the error stays
@@ -346,28 +346,25 @@ fn finish_git_overlay_clone(
     write_git_overlay_origin(local_path, &remote_label)?;
     let repo = Repository::init(local_path)?;
     let mut bridge = GitBridge::new(&repo);
-    let stats = if let Some(thread) = options.thread.as_ref() {
-        import_selected_refs(
-            &mut bridge,
-            Some(&local_path.join(".git")),
-            std::slice::from_ref(thread),
-        )
-        .map_err(|err| {
-            anyhow!(clone_git_overlay_import_failed_advice(
-                Some(thread),
-                &remote_label,
-                err.to_string()
-            ))
-        })?
-    } else {
-        import_all(&mut bridge, Some(&local_path.join(".git"))).map_err(|err| {
-            anyhow!(clone_git_overlay_import_failed_advice(
-                None,
-                &remote_label,
-                err.to_string()
-            ))
-        })?
-    };
+    let refs = options
+        .thread
+        .as_ref()
+        .map(|thread| vec![thread.clone()])
+        .unwrap_or_default();
+    let stats = import_git_history(
+        &mut bridge,
+        Some(&local_path.join(".git")),
+        &refs,
+        ImportOptions::default(),
+        None,
+    )
+    .map_err(|err| {
+        anyhow!(clone_git_overlay_import_failed_advice(
+            options.thread.as_deref(),
+            &remote_label,
+            err.to_string()
+        ))
+    })?;
 
     let track_name = select_clone_thread(
         &repo,

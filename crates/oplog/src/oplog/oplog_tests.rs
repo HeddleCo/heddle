@@ -8,8 +8,7 @@ use std::{
 use objects::object::{ChangeId, ContentHash, MarkerName, ThreadName};
 use tempfile::TempDir;
 
-use super::oplog_backend::OpLogBackend;
-use super::{OpLog, OpRecord};
+use super::{OpLog, OpRecord, oplog_backend::OpLogBackend};
 
 fn create_oplog() -> (TempDir, OpLog) {
     let temp_dir = TempDir::new().unwrap();
@@ -890,11 +889,12 @@ mod default_backend {
     use std::sync::{Arc, Mutex};
 
     use chrono::Utc;
-    use objects::error::Result;
-    use objects::object::Principal;
+    use objects::{error::Result, object::Principal};
 
-    use super::super::oplog_types::{OpBatch, OpEntry, OpRecord};
-    use super::OpLogBackend;
+    use super::{
+        super::oplog_types::{OpBatch, OpEntry, OpRecord},
+        OpLogBackend,
+    };
 
     #[derive(Default)]
     struct MemOpLog {

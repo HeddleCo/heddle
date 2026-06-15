@@ -18,6 +18,7 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use objects::{
@@ -34,7 +35,9 @@ use tracing::info;
 
 use crate::{
     IngestError,
-    git_walk::{CommitEntry, GitSource, RefDiscoveryStats, TreeChild, TreeChildKind},
+    git_walk::{
+        CommitEntry, GitSource, RefDiscoveryStats, RefHead, RefNamespace, TreeChild, TreeChildKind,
+    },
     import_options::{
         ImportOptions, LossyImportEntry, entry_relative_to_prefix, fail_lossy_entry,
         join_tree_path, rebase_lossy_entry,
@@ -44,6 +47,8 @@ use crate::{
     sha_map::ShaMap,
     state_writer::state_from_commit,
 };
+
+static IMPORT_RUN_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Counters reported back from [`Importer::run`] — the post-import
 /// equivalent of `git log --reflog --all | wc -l`.
@@ -78,6 +83,92 @@ pub struct ImportStats {
     pub lossy_entries: Vec<LossyImportEntry>,
 }
 
+/// Which Git refs a mechanical import should ingest.
+///
+/// The default is all refs. A non-empty ref list scopes the importer to
+/// matching commit-pointing heads before it walks commits, writes refs, or
+/// replays reflogs.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ImportScope {
+    refs: Vec<String>,
+}
+
+impl ImportScope {
+    pub fn all() -> Self {
+        Self { refs: Vec::new() }
+    }
+
+    pub fn refs(refs: Vec<String>) -> Self {
+        Self { refs }
+    }
+
+    pub fn is_all(&self) -> bool {
+        self.refs.is_empty()
+    }
+
+    pub fn requested_refs(&self) -> &[String] {
+        &self.refs
+    }
+
+    fn resolve_heads(
+        &self,
+        heads: Vec<RefHead>,
+        refs_seen: RefDiscoveryStats,
+    ) -> crate::Result<(Vec<RefHead>, RefDiscoveryStats)> {
+        if self.is_all() {
+            return Ok((heads, refs_seen));
+        }
+
+        let mut matched = vec![false; self.refs.len()];
+        let mut selected = Vec::new();
+        for head in heads {
+            let mut selected_head = false;
+            for (idx, spec) in self.refs.iter().enumerate() {
+                if ref_head_matches(&head, spec) {
+                    matched[idx] = true;
+                    selected_head = true;
+                }
+            }
+            if selected_head {
+                selected.push(head);
+            }
+        }
+
+        let missing = self
+            .refs
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, spec)| (!matched[idx]).then(|| spec.clone()))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(IngestError::Git(format!(
+                "requested ref(s) not found or not commit-pointing: {}",
+                missing.join(", ")
+            )));
+        }
+
+        let refs_seen = ref_stats_from_heads(&selected);
+        Ok((selected, refs_seen))
+    }
+}
+
+fn ref_head_matches(head: &RefHead, spec: &str) -> bool {
+    let spec = spec.trim();
+    !spec.is_empty() && (spec == head.full_name || spec == head.short_name)
+}
+
+fn ref_stats_from_heads(heads: &[RefHead]) -> RefDiscoveryStats {
+    let mut stats = RefDiscoveryStats::default();
+    for head in heads {
+        match head.namespace {
+            RefNamespace::Branch => stats.local_branches += 1,
+            RefNamespace::Tag => stats.tags += 1,
+            RefNamespace::RemoteBranch => stats.remote_branches += 1,
+        }
+    }
+    stats
+}
+
 /// Orchestrates one import pass.
 ///
 /// Generic over the ref, object-store, and oplog backends — the store `S`
@@ -93,6 +184,7 @@ pub struct Importer<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend = OpLog> 
     map: &'a mut ShaMap,
     oplog: Option<&'a O>,
     options: ImportOptions,
+    scope: ImportScope,
     /// Where the streaming pack builder writes its in-flight pack
     /// file and 512 index-bucket files. Both are removed on a clean
     /// finalize. Defaults to `std::env::temp_dir()/heddle-ingest-<pid>`
@@ -124,6 +216,7 @@ impl<'a, R: RefBackend, S: ObjectStore> Importer<'a, R, S, OpLog> {
             map,
             oplog: None,
             options: ImportOptions::default(),
+            scope: ImportScope::all(),
             pack_staging_dir: None,
             progress: None,
         }
@@ -145,6 +238,7 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             map: self.map,
             oplog: Some(oplog),
             options: self.options,
+            scope: self.scope,
             pack_staging_dir: self.pack_staging_dir,
             progress: self.progress,
         }
@@ -152,6 +246,11 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
 
     pub fn with_options(mut self, options: ImportOptions) -> Self {
         self.options = options;
+        self
+    }
+
+    pub fn with_scope(mut self, scope: ImportScope) -> Self {
+        self.scope = scope;
         self
     }
 
@@ -180,6 +279,7 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
     /// read; for the local `RefManager` the future is immediately ready.
     pub async fn run(&mut self) -> crate::Result<ImportStats> {
         let (heads, refs_seen) = self.git.collect_refs_detailed()?;
+        let (heads, refs_seen) = self.scope.resolve_heads(heads, refs_seen)?;
         info!(
             local_branches = refs_seen.local_branches,
             tags = refs_seen.tags,
@@ -193,8 +293,13 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
         // Seed commits = live refs + anything the reflog still mentions.
         // Reflog SHAs are filtered to those still in the odb, so this
         // can't steer us into dangling territory.
+        let reflog_entries = if self.scope.is_all() {
+            self.git.collect_reflog()?
+        } else {
+            self.git.collect_reflog_for_refs(&heads)?
+        };
         let live_shas: Vec<String> = heads.iter().map(|h| h.target_sha.clone()).collect();
-        let reflog_shas = self.git.reflog_commit_shas()?;
+        let reflog_shas = self.git.reflog_commit_shas_from_entries(&reflog_entries);
         let mut seed_seen: HashSet<String> = live_shas.iter().cloned().collect();
         let reflog_only_commits = reflog_shas
             .iter()
@@ -256,8 +361,9 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             ))
         })?;
         let run_id = format!(
-            "import-{}-{}",
+            "import-{}-{}-{}",
             std::process::id(),
+            IMPORT_RUN_COUNTER.fetch_add(1, Ordering::Relaxed),
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
         );
         let pack_path = staging_dir.join(format!("{run_id}.pack"));
@@ -356,10 +462,9 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
         // that definitely exist in the store. Skipped entirely when no
         // backend was attached (tests that don't care about undo history).
         let oplog_stats = if let Some(oplog) = self.oplog {
-            let entries = self.git.collect_reflog()?;
             let stats = OplogEmitter::new(oplog, self.map)
                 .with_scope("ingest")
-                .emit(&entries)?;
+                .emit(&reflog_entries)?;
             info!(
                 gotos = stats.gotos,
                 thread_creates = stats.thread_creates,
@@ -662,6 +767,31 @@ pub fn import_git_into_with_options_and_progress(
     options: ImportOptions,
     progress: Option<&mut dyn FnMut(ImportProgressEvent)>,
 ) -> crate::Result<(ImportStats, ShaMap)> {
+    import_git_into_scoped_with_options_and_progress(
+        git_path,
+        heddle_path,
+        options,
+        ImportScope::all(),
+        progress,
+    )
+}
+
+pub fn import_git_into_scoped_with_options(
+    git_path: impl AsRef<Path>,
+    heddle_path: impl AsRef<Path>,
+    options: ImportOptions,
+    scope: ImportScope,
+) -> crate::Result<(ImportStats, ShaMap)> {
+    import_git_into_scoped_with_options_and_progress(git_path, heddle_path, options, scope, None)
+}
+
+pub fn import_git_into_scoped_with_options_and_progress(
+    git_path: impl AsRef<Path>,
+    heddle_path: impl AsRef<Path>,
+    options: ImportOptions,
+    scope: ImportScope,
+    progress: Option<&mut dyn FnMut(ImportProgressEvent)>,
+) -> crate::Result<(ImportStats, ShaMap)> {
     let git = GitSource::open(git_path)?;
     let heddle_path = heddle_path.as_ref();
     let root = strip_trailing_heddle(heddle_path);
@@ -691,6 +821,7 @@ pub fn import_git_into_with_options_and_progress(
     let stats = {
         let mut importer = Importer::new(&git, repo.store(), repo.refs(), &mut map)
             .with_options(options)
+            .with_scope(scope)
             .with_oplog(repo.oplog())
             .with_pack_staging_dir(staging_dir);
         if let Some(progress) = progress {
@@ -902,6 +1033,93 @@ mod tests {
             refs.get_thread(&ThreadName::new("feature/x"))
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn scoped_import_only_imports_selected_branch_ref() {
+        let gitdir = TempDir::new().unwrap();
+        let heddledir = TempDir::new().unwrap();
+        seed_multibranch_repo(gitdir.path());
+
+        let git = GitSource::open(gitdir.path()).unwrap();
+        let store = InMemoryStore::new();
+        let refs = RefManager::new(heddledir.path());
+        refs.init().unwrap();
+        let mut map = ShaMap::new();
+
+        let stats = pollster::block_on(
+            Importer::new(&git, &store, &refs, &mut map)
+                .with_scope(ImportScope::refs(vec!["main".to_string()]))
+                .run(),
+        )
+        .unwrap();
+
+        assert_eq!(stats.refs_seen.local_branches, 1);
+        assert_eq!(stats.refs_seen.tags, 0);
+        assert_eq!(stats.refs.threads_written, 1);
+        assert_eq!(stats.refs.markers_written, 0);
+        assert_eq!(stats.commits_imported, 1);
+        assert!(refs.get_thread(&ThreadName::new("main")).unwrap().is_some());
+        assert!(
+            refs.get_thread(&ThreadName::new("feature/x"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            refs.get_marker(&objects::object::MarkerName::new("v0.1"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn scoped_import_accepts_full_ref_name() {
+        let gitdir = TempDir::new().unwrap();
+        let heddledir = TempDir::new().unwrap();
+        seed_multibranch_repo(gitdir.path());
+
+        let git = GitSource::open(gitdir.path()).unwrap();
+        let store = InMemoryStore::new();
+        let refs = RefManager::new(heddledir.path());
+        refs.init().unwrap();
+        let mut map = ShaMap::new();
+
+        let stats = pollster::block_on(
+            Importer::new(&git, &store, &refs, &mut map)
+                .with_scope(ImportScope::refs(vec!["refs/heads/main".to_string()]))
+                .run(),
+        )
+        .unwrap();
+
+        assert_eq!(stats.refs_seen.local_branches, 1);
+        assert_eq!(stats.refs.threads_written, 1);
+        assert!(refs.get_thread(&ThreadName::new("main")).unwrap().is_some());
+    }
+
+    #[test]
+    fn scoped_import_errors_for_missing_ref() {
+        let gitdir = TempDir::new().unwrap();
+        let heddledir = TempDir::new().unwrap();
+        seed_multibranch_repo(gitdir.path());
+
+        let git = GitSource::open(gitdir.path()).unwrap();
+        let store = InMemoryStore::new();
+        let refs = RefManager::new(heddledir.path());
+        refs.init().unwrap();
+        let mut map = ShaMap::new();
+
+        let err = pollster::block_on(
+            Importer::new(&git, &store, &refs, &mut map)
+                .with_scope(ImportScope::refs(vec!["missing".to_string()]))
+                .run(),
+        )
+        .expect_err("missing scoped ref should fail");
+        let message = err.to_string();
+
+        assert!(
+            message.contains("requested ref(s) not found or not commit-pointing: missing"),
+            "unexpected error: {message}"
         );
     }
 

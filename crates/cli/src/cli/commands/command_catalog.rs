@@ -1354,20 +1354,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["bridge", "backfill-fidelity"],
-        surface(
-            json_discriminators(
-                opaque_schemas(DATA_MUTATION, &["bridge backfill-fidelity"]),
-                &[json_discriminator(
-                    Some("bridge backfill-fidelity"),
-                    "output_kind",
-                    "bridge_backfill_fidelity",
-                )],
-            ),
-            "git_adapter",
-        ),
-    ),
-    entry(
         &["capture"],
         category(
             json_discriminators(
@@ -4397,7 +4383,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 #[cfg(feature = "ingest")]
                 GitCommands::Reason { .. } => vec!["bridge", "git", "reason"],
             },
-            BridgeCommands::BackfillFidelity => vec!["bridge", "backfill-fidelity"],
         },
         #[cfg(feature = "semantic")]
         Commands::Semantic { command } => match command {
@@ -4505,11 +4490,6 @@ mod tests {
             &["agent", "release", "--session", "session-1"],
         ),
         sample(&["agent", "list"], &["agent", "list"]),
-        #[cfg(feature = "git-overlay")]
-        sample(
-            &["bridge", "backfill-fidelity"],
-            &["bridge", "backfill-fidelity"],
-        ),
         #[cfg(feature = "git-overlay")]
         sample(&["bridge", "git", "status"], &["bridge", "git", "status"]),
         #[cfg(feature = "git-overlay")]
@@ -5721,7 +5701,6 @@ mod tests {
                 "bridge git reconcile",
                 "bridge git push",
                 "bridge git pull",
-                "bridge backfill-fidelity",
                 "capture",
                 "checkpoint",
                 "cherry-pick",
@@ -5841,8 +5820,9 @@ mod tests {
     /// separately by `tests/cli_integration/output_kind_invariant.rs`.
     #[test]
     fn schema_output_kind_discriminators_are_complete_and_consistent() {
-        use crate::cli::commands::schema_for_verb;
         use std::collections::BTreeSet;
+
+        use crate::cli::commands::schema_for_verb;
 
         fn resolve_schema_ref<'a>(
             root: &'a serde_json::Value,

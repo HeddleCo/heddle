@@ -975,10 +975,9 @@ fn shell_escape(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use clap::Parser;
 
+    use super::*;
     use crate::cli::Commands;
 
     struct HomeEnvGuard(Option<std::ffi::OsString>);

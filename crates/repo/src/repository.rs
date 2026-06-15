@@ -76,12 +76,6 @@ use objects::{
 use oplog::{OpLog, OpLogBackend, OpRecord};
 pub use refs::RefSummaryIndexInspection;
 use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
-use sley::{
-    ObjectId as SleyObjectId, Reference as SleyReference, ReferenceTarget as SleyRefTarget,
-    Repository as SleyRepository,
-};
-
-use crate::git_worktree_status::GitWorktreeEntryState;
 pub use repo_config::{HostedConfig, OutputFormat, RedactConfig, RepoConfig, TrustedKey};
 // Review-epic config types — re-exported here so the new
 // `repository_signals.rs` (and external crates wanting to construct a
@@ -104,6 +98,12 @@ pub use repository_thread_materialize::{CheckoutMaterialization, ThreadCaptureOu
 pub use repository_tree::{TreeBuildProfile, WorktreeCompareProfile};
 pub use repository_worktree_status::{UntrackedSet, UntrackedSubtree, WorktreeStatusDetailed};
 use serde::{Deserialize, Serialize};
+use sley::{
+    ObjectId as SleyObjectId, Reference as SleyReference, ReferenceTarget as SleyRefTarget,
+    Repository as SleyRepository,
+};
+
+use crate::git_worktree_status::GitWorktreeEntryState;
 
 const GIT_CHECKPOINTS_FILE: &str = "git-checkpoints.json";
 const GIT_OVERLAY_LOCAL_EXCLUDE_PATTERNS: &[&str] = &[".heddle/"];

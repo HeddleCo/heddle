@@ -22,7 +22,6 @@
 //! identical ids, which preserves the "redact is idempotent" property
 //! from the build brief.
 
-use objects::store::ObjectStore;
 use std::{collections::HashSet, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
@@ -31,6 +30,7 @@ use crypto::verify_payload_signature;
 use objects::{
     fs_atomic::write_file_atomic,
     object::{ChangeId, ContentHash, Principal, Redaction, RedactionsBlob, Tree},
+    store::ObjectStore,
 };
 
 use crate::repository::Repository;

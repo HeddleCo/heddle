@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-use super::*;
 use objects::object::{MarkerName, ThreadName};
+
+use super::*;
 
 fn heddle_without_git_for_remote_tests(args: &[&str], cwd: &std::path::Path) -> String {
     let output = heddle_output_with_env(args, Some(cwd), &[("PATH", ""), ("NO_COLOR", "1")])

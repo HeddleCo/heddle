@@ -2,8 +2,7 @@
 //! Marker commands.
 
 use anyhow::{Result, anyhow};
-use objects::object::MarkerName;
-use objects::store::ObjectStore;
+use objects::{object::MarkerName, store::ObjectStore};
 use oplog::OpLogBackend;
 use repo::Repository;
 use serde::Serialize;

@@ -29,8 +29,9 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use ingest::{
-    GitSource, ImportOptions, ReasoningPipeline, ReasoningPipelineParams, Result, ShaMap,
-    TranscriptRoots, import_git_into_with_options, load_transcripts, pipeline_default_commits,
+    GitSource, ImportOptions, ImportScope, ReasoningPipeline, ReasoningPipelineParams, Result,
+    ShaMap, TranscriptRoots, import_git_into_scoped_with_options, load_transcripts,
+    pipeline_default_commits,
 };
 use tracing::info;
 
@@ -75,6 +76,13 @@ enum Command {
         /// prints an end-of-run summary of every affected entry.
         #[arg(long)]
         lossy: bool,
+        /// Import only this Git ref. Repeat to import multiple refs.
+        ///
+        /// Accepts full refs (`refs/heads/main`) or short names (`main`,
+        /// `v0.1`, `origin/main`). When omitted, all local branches, tags,
+        /// and remote-tracking branches are imported.
+        #[arg(long = "ref", value_name = "REF")]
+        refs: Vec<String>,
     },
     /// Mine agent chat transcripts for reasoning annotations and attach
     /// them to the matching imported states. Requires `import` to have
@@ -165,7 +173,12 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Map { path, action } => run_map(&path, action),
-        Command::Import { git, heddle, lossy } => run_import(&git, &heddle, lossy),
+        Command::Import {
+            git,
+            heddle,
+            lossy,
+            refs,
+        } => run_import(&git, &heddle, lossy, &refs),
         Command::Reason {
             git,
             heddle,
@@ -200,11 +213,16 @@ fn run_import(
     git_path: &std::path::Path,
     heddle_path: &std::path::Path,
     lossy: bool,
+    refs: &[String],
 ) -> Result<()> {
     // `import_git_into` handles init-vs-open, the sha-map sidecar, and
     // every walker/writer in the right order. We just surface the stats.
-    let (stats, _map) =
-        import_git_into_with_options(git_path, heddle_path, ImportOptions { lossy })?;
+    let (stats, _map) = import_git_into_scoped_with_options(
+        git_path,
+        heddle_path,
+        ImportOptions { lossy },
+        ImportScope::refs(refs.to_vec()),
+    )?;
     let r = &stats.refs_seen;
     let walked = r.local_branches
         + r.tags

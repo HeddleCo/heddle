@@ -6,8 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use objects::object::ThreadName;
-use objects::worktree::WorktreeStatus;
+use objects::{object::ThreadName, worktree::WorktreeStatus};
 use refs::Head;
 use repo::{
     CommitGraphIndex, GitOverlayBranchTip, GitOverlayImportHint, GitOverlayOutOfBandCommits,
@@ -3838,8 +3837,7 @@ mod tests {
     /// new file.
     #[test]
     fn plain_git_worktree_status_preserves_staged_removal_alongside_untracked() {
-        use std::path::PathBuf;
-        use std::process::Command;
+        use std::{path::PathBuf, process::Command};
 
         let dir = TempDir::new().expect("tempdir");
         let root = dir.path();

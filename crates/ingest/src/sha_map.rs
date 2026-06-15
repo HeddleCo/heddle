@@ -537,9 +537,8 @@ fn normalize_git_sha(sha: &str) -> Result<String, ShaMapError> {
 mod tests {
     use tempfile::TempDir;
 
-    use crate::import_options::LossyImportEntry;
-
     use super::*;
+    use crate::import_options::LossyImportEntry;
 
     fn deterministic_content_hash(tag: &str) -> ContentHash {
         ContentHash::compute(tag.as_bytes())

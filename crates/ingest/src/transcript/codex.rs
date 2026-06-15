@@ -35,8 +35,10 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracing::debug;
 
-use super::stream::{CwdSignal, StreamEvent, fold_transcript, read_session_text};
-use super::types::{FileTouch, Provider, TouchKind};
+use super::{
+    stream::{CwdSignal, StreamEvent, fold_transcript, read_session_text},
+    types::{FileTouch, Provider, TouchKind},
+};
 use crate::Transcript;
 
 pub fn load(path: impl AsRef<Path>) -> crate::Result<Option<Transcript>> {

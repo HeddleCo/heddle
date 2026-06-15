@@ -21,8 +21,10 @@
 //!
 //! See HeddleCo/heddle#133 for the audit motivation.
 
-use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
 use tree_sitter::Node;
 

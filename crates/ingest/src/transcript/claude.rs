@@ -33,8 +33,10 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use tracing::debug;
 
-use super::stream::{CwdSignal, StreamEvent, fold_transcript, read_session_text};
-use super::types::{FileTouch, Provider, TouchKind};
+use super::{
+    stream::{CwdSignal, StreamEvent, fold_transcript, read_session_text},
+    types::{FileTouch, Provider, TouchKind},
+};
 use crate::Transcript;
 
 /// Load a single session `.jsonl`, returning `Ok(None)` if the file

@@ -2,8 +2,7 @@
 //! Stash command implementation.
 
 use anyhow::{Result, anyhow};
-use objects::object::ContentHash;
-use objects::store::ObjectStore;
+use objects::{object::ContentHash, store::ObjectStore};
 use repo::{DiffKind, Repository};
 use serde::Serialize;
 

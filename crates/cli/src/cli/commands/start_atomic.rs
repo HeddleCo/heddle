@@ -38,15 +38,19 @@
 //! checkout. No thread/ref/git domain knowledge leaks into the primitive — it
 //! all lives here, exactly like undo/redo's `EntrySteps`.
 
-use std::cell::Cell;
-use std::collections::BTreeSet;
 #[cfg(unix)]
 use std::fs::File;
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::{
+    cell::Cell,
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
-use objects::error::{HeddleError, Result as HeddleResult};
-use objects::object::{ChangeId, ThreadName};
+use objects::{
+    error::{HeddleError, Result as HeddleResult},
+    object::{ChangeId, ThreadName},
+};
 use oplog::{IsolationKey, OpRecord};
 use refs::RefExpectation;
 use repo::{
@@ -54,9 +58,9 @@ use repo::{
     atomic::{AtomicMutation, StagedCommit, Tx},
 };
 
-use super::mount_lifecycle::{self, MountOwnership};
-use super::worktree_cmd::{
-    helpers::write_isolated_checkout, hydrate, shared_target::write_cargo_config,
+use super::{
+    mount_lifecycle::{self, MountOwnership},
+    worktree_cmd::{helpers::write_isolated_checkout, hydrate, shared_target::write_cargo_config},
 };
 
 /// Classify an `anyhow` error from a materialize/hydrate helper into the
@@ -1152,15 +1156,20 @@ fn symlink_unsupported_error(link: &str) -> HeddleError {
 
 #[cfg(test)]
 mod tests {
-    use super::super::thread::{
-        find_active_thread_entry, resolve_start_epoch, start_thread, start_transaction_id,
-    };
-    use super::super::thread_cmd::drop_thread_silent;
-    use super::super::worktree_cmd::helpers::plan_worktree_target;
-    use super::*;
-    use crate::cli::{ThreadStartArgs, WorkspaceModeArg};
     use repo::Repository;
     use tempfile::TempDir;
+
+    use super::{
+        super::{
+            thread::{
+                find_active_thread_entry, resolve_start_epoch, start_thread, start_transaction_id,
+            },
+            thread_cmd::drop_thread_silent,
+            worktree_cmd::helpers::plan_worktree_target,
+        },
+        *,
+    };
+    use crate::cli::{ThreadStartArgs, WorkspaceModeArg};
 
     /// heddle#571 (Bug 1): a non-conflict failure on the start path must NOT be
     /// reported as `conflict:`. The macOS regression was a `clonefile` ENOENT

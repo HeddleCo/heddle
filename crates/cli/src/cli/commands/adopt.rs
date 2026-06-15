@@ -15,14 +15,7 @@ use super::{
     git_overlay_health::{RepositoryVerificationState, build_repository_verification_state},
     import_progress::ImportProgress,
 };
-use crate::{
-    bridge::{
-        GitBridge,
-        git_import::{import_all_with_progress, import_selected_refs_with_progress},
-        git_util::ImportProgressEvent as BridgeImportProgressEvent,
-    },
-    cli::{AdoptArgs, Cli, should_output_json, style},
-};
+use crate::cli::{AdoptArgs, Cli, should_output_json, style};
 
 #[derive(Debug, Serialize)]
 struct AdoptOutput {
@@ -38,7 +31,6 @@ struct AdoptOutput {
     branches_synced: usize,
     tags_synced: usize,
     skipped_non_commit_refs: usize,
-    partial_mirror_refs: usize,
     already_in_sync: bool,
     recommended_action: Option<String>,
     recommended_action_template: Option<ActionTemplate>,
@@ -57,7 +49,6 @@ struct AdoptImportStats {
     branches_synced: usize,
     tags_synced: usize,
     skipped_non_commit_refs: usize,
-    partial_mirror_refs: usize,
 }
 
 pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
@@ -114,7 +105,6 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
         branches_synced: stats.branches_synced,
         tags_synced: stats.tags_synced,
         skipped_non_commit_refs: stats.skipped_non_commit_refs,
-        partial_mirror_refs: stats.partial_mirror_refs,
         already_in_sync,
         recommended_action,
         recommended_action_template: trust.recommended_action_template.clone(),
@@ -128,33 +118,30 @@ fn import_git_history_for_adopt(
     refs: &[String],
     progress: &mut ImportProgress,
 ) -> Result<AdoptImportStats> {
-    if refs.is_empty() {
-        return import_all_for_adopt(repo, progress);
-    }
-    import_selected_refs_for_adopt(repo, refs, progress)
+    let scope = if refs.is_empty() {
+        ingest::ImportScope::all()
+    } else {
+        ingest::ImportScope::refs(refs.to_vec())
+    };
+    import_ingest_for_adopt(repo, scope, progress)
 }
 
-#[cfg(feature = "ingest")]
-fn import_all_for_adopt(
+fn import_ingest_for_adopt(
     repo: &Repository,
+    scope: ingest::ImportScope,
     progress: &mut ImportProgress,
 ) -> Result<AdoptImportStats> {
     progress.detail("checking Heddle notes");
     crate::bridge::git_core::GitBridge::hydrate_checkout_heddle_notes_without_mirror(repo.root());
     progress.detail("ordering commits");
-    use ingest::{ImportOptions, import_git_into_with_options_and_progress};
+    use ingest::{ImportOptions, import_git_into_scoped_with_options_and_progress};
 
-    let mut on_commit = |event: ingest::ImportProgressEvent| {
-        progress.commit_tick(BridgeImportProgressEvent {
-            commits_imported: event.commits_imported,
-            total_commits: event.total_commits,
-            states_created: event.states_created,
-        });
-    };
-    let (stats, _map) = import_git_into_with_options_and_progress(
+    let mut on_commit = |event: ingest::ImportProgressEvent| progress.commit_tick(event);
+    let (stats, _map) = import_git_into_scoped_with_options_and_progress(
         repo.root(),
         repo.root(),
         ImportOptions::default(),
+        scope,
         Some(&mut on_commit),
     )?;
     Ok(AdoptImportStats {
@@ -163,51 +150,6 @@ fn import_all_for_adopt(
         branches_synced: stats.refs.threads_written,
         tags_synced: stats.refs.markers_written,
         skipped_non_commit_refs: stats.refs_seen.non_commit_skipped,
-        partial_mirror_refs: 0,
-    })
-}
-
-#[cfg(not(feature = "ingest"))]
-fn import_all_for_adopt(
-    repo: &Repository,
-    progress: &mut ImportProgress,
-) -> Result<AdoptImportStats> {
-    import_bridge_for_adopt(repo, &[], progress)
-}
-
-fn import_selected_refs_for_adopt(
-    repo: &Repository,
-    refs: &[String],
-    progress: &mut ImportProgress,
-) -> Result<AdoptImportStats> {
-    import_bridge_for_adopt(repo, refs, progress)
-}
-
-fn import_bridge_for_adopt(
-    repo: &Repository,
-    refs: &[String],
-    progress: &mut ImportProgress,
-) -> Result<AdoptImportStats> {
-    let mut bridge = GitBridge::new(repo);
-    let _ = bridge.hydrate_checkout_heddle_notes_from_configured_remotes();
-    let mut on_commit = |event| progress.commit_tick(event);
-    let stats = if refs.is_empty() {
-        import_all_with_progress(&mut bridge, Some(repo.root()), Some(&mut on_commit))?
-    } else {
-        import_selected_refs_with_progress(
-            &mut bridge,
-            Some(repo.root()),
-            refs,
-            Some(&mut on_commit),
-        )?
-    };
-    Ok(AdoptImportStats {
-        commits_imported: stats.commits_imported,
-        states_created: stats.states_created,
-        branches_synced: stats.branches_synced,
-        tags_synced: stats.tags_synced,
-        skipped_non_commit_refs: stats.skipped_non_commit_refs.len(),
-        partial_mirror_refs: stats.partial_mirror_refs.len(),
     })
 }
 
@@ -394,13 +336,6 @@ fn render_adopt(output: &AdoptOutput, json: bool) -> Result<()> {
             "{} skipped {} Git names that do not point at commits",
             style::warn_marker(),
             style::bold(&output.skipped_non_commit_refs.to_string())
-        );
-    }
-    if output.partial_mirror_refs > 0 {
-        println!(
-            "{} partial Git mirror for {} names; exact SHA export degraded",
-            style::warn_marker(),
-            style::bold(&output.partial_mirror_refs.to_string())
         );
     }
     println!(

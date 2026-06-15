@@ -1,18 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Export Heddle states to Git commits functionality.
 
-use objects::store::ObjectStore;
 use std::collections::HashSet;
 
 use objects::{
     error::HeddleError,
     object::{ChangeId, ContentHash, FileMode, MarkerName, Principal, State, ThreadName},
+    store::ObjectStore,
 };
 use repo::{AudienceTier, Repository as HeddleRepository, visible};
-use sley::plumbing::sley_object::EncodedObject;
 use sley::{
     CommitObject, EntryKind, GitObjectType, ObjectFormat, ObjectId, RefPrecondition,
-    Repository as SleyRepository, Signature,
+    Repository as SleyRepository, Signature, plumbing::sley_object::EncodedObject,
 };
 
 use crate::bridge::{
@@ -1136,8 +1135,9 @@ fn submodule_oid_from_blob(content: &[u8]) -> Option<ObjectId> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use objects::object::{Attribution, ContentHash, Principal, State};
+
+    use super::*;
 
     fn fidelity_state() -> State {
         State::new(

@@ -15,8 +15,9 @@
 
 use std::process::Command;
 
-use super::*;
 use oplog::{OpLogBackend, OpRecord};
+
+use super::*;
 
 /// R9: bridge mapping persistence.
 ///

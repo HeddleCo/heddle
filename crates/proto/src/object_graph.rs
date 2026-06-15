@@ -504,8 +504,10 @@ pub fn is_ancestor(
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use objects::object::{Principal, Redaction, StateVisibility, VisibilityTier};
-    use objects::store::ObjectStore;
+    use objects::{
+        object::{Principal, Redaction, StateVisibility, VisibilityTier},
+        store::ObjectStore,
+    };
     use repo::Repository;
     use tempfile::TempDir;
 

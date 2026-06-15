@@ -8,21 +8,19 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ingest::LossyImportEntry;
 use objects::object::ChangeId;
 use serde::{Deserialize, Serialize};
 use sley::{ObjectFormat, ObjectId as SleyObjectId, ReferenceTarget, Repository as SleyRepository};
 
-use super::{
-    git_core::{GitBridge, GitBridgeError, GitResult, git_err},
-    git_util::LossyGitImportEntry,
-};
+use super::git_core::{GitBridge, GitBridgeError, GitResult, git_err};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct MappingEntry {
     change_id: String,
     git_oid: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    lossy_entries: Vec<LossyGitImportEntry>,
+    lossy_entries: Vec<LossyImportEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -243,9 +241,8 @@ impl<'a> GitBridge<'a> {
 }
 
 /// Walk all branch- and tag-tipped commit ancestry. Skips refs that peel
-/// to non-commit objects (annotated-tag-points-at-blob/tree); see
-/// `git_import::peel_to_commit_oid` for the full rationale and the
-/// `SkippedRef` recording layer.
+/// to non-commit objects (annotated-tag-points-at-blob/tree), matching the
+/// marker model's current commit-target-only constraint.
 fn collect_commit_oids(repo: &SleyRepository) -> GitResult<Vec<SleyObjectId>> {
     let mut tips = Vec::new();
 

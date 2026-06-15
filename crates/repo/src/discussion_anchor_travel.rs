@@ -30,12 +30,13 @@
 
 #![cfg(feature = "tree-sitter-symbols")]
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use objects::object::{Discussion, SymbolAnchor};
-use semantic::analysis::{SimilarityMethod, detect_file_renames};
-use semantic::symbol_resolver::resolve_symbol_lines;
+use semantic::{
+    analysis::{SimilarityMethod, detect_file_renames},
+    symbol_resolver::resolve_symbol_lines,
+};
 
 /// Confidence threshold for accepting a file rename when re-anchoring a
 /// discussion. Below this we'd rather mark the discussion `orphaned`
@@ -223,8 +224,9 @@ fn extract_body(source: &[u8], start_line: u32, end_line: u32) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use objects::object::{ChangeId, DiscussionResolution, DiscussionTurn};
+
+    use super::*;
 
     fn discussion(id: &str, file: &str, symbol: &str) -> Discussion {
         Discussion {

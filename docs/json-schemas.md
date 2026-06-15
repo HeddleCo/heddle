@@ -1719,7 +1719,6 @@ imports the requested Git refs, and returns the post-adoption verification proof
   "branches_synced": 2,
   "tags_synced": 1,
   "skipped_non_commit_refs": 0,
-  "partial_mirror_refs": 0,
   "already_in_sync": false
 }
 ```
@@ -1732,7 +1731,7 @@ imports the requested Git refs, and returns the post-adoption verification proof
 | `path` | string | required | Path to the Heddle sidecar data. |
 | `refs` | array<string> | required | Refs explicitly requested with `--ref`; empty means all local refs were imported. |
 | `commits_imported`, `states_created`, `branches_synced`, `tags_synced` | int | required | Git import counts. |
-| `skipped_non_commit_refs`, `partial_mirror_refs` | int | required | Degraded import counts that may require inspection. |
+| `skipped_non_commit_refs` | int | required | Non-commit Git refs skipped during import. |
 | `verification` | object | required | Post-adoption repository verification proof. |
 
 ---
@@ -2291,7 +2290,7 @@ key naming:
 |------|-------|
 | `init` | `{"initialized": true, "path": "..."}` |
 | `export` | `{"states_exported": N, "threads_synced": N, "markers_synced": N, "destination": "..."}` |
-| `import` | `{"output_kind": "bridge_git_import", "commits_imported": N, "states_created": N, "branches_synced": N, "tags_synced": N, "skipped_non_commit_refs": N, "partial_mirror_refs": N, "lossy_entries": [], "already_in_sync": false}` |
+| `import` | `{"output_kind": "bridge_git_import", "commits_imported": N, "states_created": N, "branches_synced": N, "tags_synced": N, "skipped_non_commit_refs": N, "lossy_entries": [], "already_in_sync": false}` |
 | `sync` | `{"output_kind": "bridge_git_sync", "states_exported": N, "commits_imported": N, "threads_synced": N, "markers_synced": N}` |
 | `push` | `{"output_kind": "bridge_git_push", "action": "bridge git push", "status": "pushed", "success": true, "pushed": true, "changed": true, "transport": "git", "remote": "origin"}` |
 | `pull` | `{"output_kind": "bridge_git_pull", "action": "bridge git pull", "status": "updated", "success": true, "pulled": true, "changed": true, "transport": "git", "remote": "origin"}` |
@@ -2311,7 +2310,7 @@ key naming:
 `heddle bridge git import --output json` emits:
 
 ```json
-{"output_kind": "bridge_git_import", "commits_imported": 4, "states_created": 4, "branches_synced": 2, "tags_synced": 1, "skipped_non_commit_refs": 0, "partial_mirror_refs": 0, "lossy_entries": [], "already_in_sync": false}
+{"output_kind": "bridge_git_import", "commits_imported": 4, "states_created": 4, "branches_synced": 2, "tags_synced": 1, "skipped_non_commit_refs": 0, "lossy_entries": [], "already_in_sync": false}
 ```
 
 `heddle bridge git sync --output json` emits:
@@ -2758,12 +2757,6 @@ required:
 
 ```json
 {"ingested": true, "commits_imported": 2, "states_created": 2, "reason": "mirror update", "remote": "origin"}
-```
-
-`heddle bridge backfill-fidelity --output json` emits the scanned/backfilled/skipped counts for the one-time #565 git-fidelity migration. `states_resigned` counts backfilled states whose own signature was re-signed over the new hash; `states_signature_unreproducible` counts states left untouched because they carry a signature this migration cannot reproduce (a foreign key or no local signer), so it never ships an invalid signature. `missing_mirror_commits` lists any mapping entries whose git object is absent from the mirror — those states could not be backfilled and are reported (as `{change_id, git_oid}`) rather than silently skipped:
-
-```json
-{"output_kind": "bridge_backfill_fidelity", "action": "bridge backfill-fidelity", "states_scanned": 2, "states_backfilled": 2, "states_skipped": 0, "states_resigned": 0, "states_signature_unreproducible": 0, "missing_mirror_commits": []}
 ```
 
 `heddle cherry-pick --output json` emits the committed shape by default;

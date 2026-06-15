@@ -50,7 +50,7 @@ async-trait.workspace = true
 # end-to-end. Without these breaks, every dep's own default-on `zstd`
 # would re-enable compression even when the user explicitly built
 # with `--no-default-features`.
-ingest = { path = "../ingest", package = "heddle-ingest", version = "0.2", default-features = false, optional = true }
+ingest = { path = "../ingest", package = "heddle-ingest", version = "0.2", default-features = false }
 oplog = { path = "../oplog", package = "heddle-oplog", version = "0.2" }
 proto = { path = "../proto", package = "heddle-proto", version = "0.2", default-features = false }
 refs = { path = "../refs", package = "heddle-refs", version = "0.2" }
@@ -147,11 +147,11 @@ local = []
 git-overlay = ["repo/git-overlay", "ingest"]
 native = ["repo/native"]
 client = ["dep:heddle-client", "dep:tokio-tungstenite"]
-# Deep git import + AI-session reasoning extraction. Pulls in the sley
-# Git substrate, `rusqlite` for OpenCode, and the transcript matchers.
-# Auto-enabled by `git-overlay` since import is part of the overlay flow;
-# can also be enabled standalone for the `heddle-ingest` binary use case.
-ingest = ["dep:ingest"]
+# Deep git import + AI-session reasoning extraction now backs every Git
+# overlay import path. Kept as a feature name for existing feature sets,
+# but the dependency is always present so no legacy bridge importer is
+# compiled as a fallback.
+ingest = []
 s3 = ["repo/s3"]
 semantic = ["dep:semantic", "repo/tree-sitter-symbols"]
 semantic-extended = ["semantic", "semantic?/extended-languages"]
@@ -169,7 +169,7 @@ zstd = [
     "objects/zstd",
     "proto/zstd",
     "repo/zstd",
-    "ingest?/zstd",
+    "ingest/zstd",
 ]
 # Wire the content-addressed mount through the CLI. Off by
 # default — each native backend pulls in a kernel-side dep that

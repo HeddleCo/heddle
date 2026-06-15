@@ -17,14 +17,20 @@
 //! first-class content-addressed objects; lightweight tags need no object (just
 //! a ref at the commit).
 
-use objects::object::{Principal, State};
-use objects::store::{ObjectStore, StoreError};
+use objects::{
+    object::{Principal, State},
+    store::{ObjectStore, StoreError},
+};
 use repo::Repository as HeddleRepository;
-use sley::plumbing::sley_object::EncodedObject;
-use sley::{GitObjectType, ObjectFormat, ObjectId, Repository as SleyRepository};
+use sley::{
+    GitObjectType, ObjectFormat, ObjectId, Repository as SleyRepository,
+    plumbing::sley_object::EncodedObject,
+};
 
-use crate::bridge::git_core::{GitBridge, GitBridgeError, GitResult, SyncMapping, git_err};
-use crate::bridge::git_export::export_tree;
+use crate::bridge::{
+    git_core::{GitBridge, GitBridgeError, GitResult, SyncMapping, git_err},
+    git_export::export_tree,
+};
 
 /// Frame an object's content for hashing per spike §0:
 /// `<kind> <ascii-decimal-len>\0<content>`. A git object's id is the SHA-1 of
@@ -313,8 +319,9 @@ impl GitBridge<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use objects::object::parse_commit_extension_headers;
+
+    use super::*;
 
     #[test]
     fn tz_offset_renders_sign_hours_minutes() {

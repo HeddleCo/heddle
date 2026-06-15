@@ -8,29 +8,29 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use ingest::LossyImportEntry;
 use objects::{
     error::HeddleError,
-    lock::{RepositoryLockExt, WriteLockGuard},
     object::{ChangeId, ChangeIdParseError, ContentHash, FileMode, Principal, ThreadName, Tree},
     store::ObjectStore,
 };
 use refs::Head;
 use repo::Repository as HeddleRepository;
-use sley::plumbing::sley_core::ByteString as GitByteString;
-use sley::remote::{
-    FetchOptions, LsRemoteFilter, NoCredentials, PushActionPlan, PushCommand, PushOptions,
-    SilentProgress,
-};
 use sley::{
     BString as GitBString, DeleteRef, FullName, GitObjectType, GitTime, Index, IndexEntry,
     IndexWriteOptions, ObjectFormat, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository, Signature,
+    plumbing::sley_core::ByteString as GitByteString,
+    remote::{
+        FetchOptions, LsRemoteFilter, NoCredentials, PushActionPlan, PushCommand, PushOptions,
+        SilentProgress,
+    },
 };
 
 use super::{
     git_export::{export_all, export_current_thread},
-    git_import::import_all,
-    git_util::{ImportStats, LossyGitImportEntry},
+    git_ingest::import_git_history,
+    git_util::ImportStats,
 };
 
 /// Errors specific to Git bridge operations.
@@ -505,7 +505,7 @@ pub struct SyncMapping {
     git_to_heddle: HashMap<ObjectId, ChangeId>,
     /// Git commits whose imported Heddle states were produced under
     /// `bridge git import --lossy`, with root-relative lossy entries.
-    git_lossy_entries: HashMap<ObjectId, Vec<LossyGitImportEntry>>,
+    git_lossy_entries: HashMap<ObjectId, Vec<LossyImportEntry>>,
 }
 
 impl SyncMapping {
@@ -597,7 +597,7 @@ impl SyncMapping {
     pub(crate) fn set_git_lossy_entries(
         &mut self,
         git_oid: ObjectId,
-        entries: Vec<LossyGitImportEntry>,
+        entries: Vec<LossyImportEntry>,
     ) {
         if entries.is_empty() {
             self.git_lossy_entries.remove(&git_oid);
@@ -606,10 +606,7 @@ impl SyncMapping {
         }
     }
 
-    pub(crate) fn get_git_lossy_entries(
-        &self,
-        git_oid: ObjectId,
-    ) -> Option<&[LossyGitImportEntry]> {
+    pub(crate) fn get_git_lossy_entries(&self, git_oid: ObjectId) -> Option<&[LossyImportEntry]> {
         self.git_lossy_entries.get(&git_oid).map(Vec::as_slice)
     }
 
@@ -619,7 +616,7 @@ impl SyncMapping {
     }
 
     pub(crate) fn retain_git_objects(&mut self, repo: &SleyRepository) {
-        let retained: Vec<(ChangeId, ObjectId, Option<Vec<LossyGitImportEntry>>)> = self
+        let retained: Vec<(ChangeId, ObjectId, Option<Vec<LossyImportEntry>>)> = self
             .heddle_to_git
             .iter()
             .filter_map(|(change_id, git_oid)| {
@@ -647,7 +644,7 @@ impl SyncMapping {
     #[cfg_attr(not(feature = "git-overlay"), allow(dead_code))]
     pub(crate) fn retain_git_object_set(&mut self, reachable: &HashSet<ObjectId>) -> usize {
         let before = self.heddle_to_git.len();
-        let retained: Vec<(ChangeId, ObjectId, Option<Vec<LossyGitImportEntry>>)> = self
+        let retained: Vec<(ChangeId, ObjectId, Option<Vec<LossyImportEntry>>)> = self
             .heddle_to_git
             .iter()
             .filter(|(_, git_oid)| reachable.contains(*git_oid))
@@ -717,9 +714,6 @@ impl MappingFileSnapshot {
 impl<'a> GitBridge<'a> {
     /// Trailer keys used in Git commit messages for Heddle metadata.
     pub(crate) const TRAILER_CHANGE_ID: &'static str = "Heddle-Change-Id";
-    pub(crate) const TRAILER_AGENT: &'static str = "Heddle-Agent";
-    pub(crate) const TRAILER_CONFIDENCE: &'static str = "Heddle-Confidence";
-    pub(crate) const TRAILER_STATUS: &'static str = "Heddle-Status";
 
     /// Create a new Git bridge for a Heddle repository.
     pub fn new(heddle_repo: &'a HeddleRepository) -> Self {
@@ -729,24 +723,6 @@ impl<'a> GitBridge<'a> {
             mapping: SyncMapping::new(),
             commit_message_overrides: HashMap::new(),
         }
-    }
-
-    /// Acquire THE canonical repository write lock — the single
-    /// `.heddle/locks/repo.lock` that `Repository::locker()` guards and that
-    /// every state-mutating writer (snapshot/capture, merge, the #570 fidelity
-    /// backfill, AND bridge import) serializes on.
-    ///
-    /// This is the one chokepoint so the lock class stays closed: a new writer
-    /// must call THIS, not invent its own lock. Two writers on two different
-    /// lock files don't exclude each other — e.g. before this, the fidelity
-    /// backfill held `repo.lock` while a concurrent bridge import wrote states
-    /// under no lock at all, so they could race. Both now take this same lock,
-    /// making a fourth "different lock" finding impossible (heddle#570).
-    pub(crate) fn acquire_write_lock(&self) -> GitResult<WriteLockGuard> {
-        self.heddle_repo
-            .locker()
-            .write()
-            .map_err(|e| GitBridgeError::Git(format!("acquire repo write lock: {e}")))
     }
 
     /// Initialize a Git mirror in the .heddle/git directory.
@@ -851,11 +827,6 @@ impl<'a> GitBridge<'a> {
 
     pub(crate) fn set_commit_message_override(&mut self, state_id: ChangeId, message: String) {
         self.commit_message_overrides.insert(state_id, message);
-    }
-
-    /// Import Git commits into Heddle states.
-    pub fn import(&mut self, git_path: Option<&Path>) -> GitResult<super::git_util::ImportStats> {
-        import_all(self, git_path)
     }
 
     pub(crate) fn with_mapping_rollback<T>(
@@ -1177,76 +1148,13 @@ impl<'a> GitBridge<'a> {
         Ok(())
     }
 
-    /// Best-effort adoption preflight for raw `git clone` checkouts.
+    /// Best-effort adoption preflight for the ingest-backed path.
     ///
     /// Plain Git clones do not fetch `refs/notes/heddle` by default, but
     /// Heddle-pushed overlay remotes use that ref to preserve Git commit
-    /// -> Heddle state identity. Before import, try each checkout-configured
-    /// remote and mirror any available Heddle notes into both the internal
-    /// mirror and the working checkout. Remote failures are deliberately
-    /// non-fatal: offline Git history can still be adopted, and push
-    /// fast-forward guards prevent a missing notes ref from overwriting
-    /// one that exists upstream.
-    pub(crate) fn hydrate_checkout_heddle_notes_from_configured_remotes(&mut self) -> bool {
-        if checkout_note_ref_exists(self.heddle_repo.root()).unwrap_or(false) {
-            return true;
-        }
-
-        let mut remotes = match checkout_remote_url_items(self.heddle_repo.root()) {
-            Ok(remotes) => remotes
-                .into_iter()
-                .map(|(name, _)| name)
-                .collect::<Vec<_>>(),
-            Err(error) => {
-                tracing::debug!(
-                    error = %error,
-                    "skipping configured remote note hydration before git-overlay adopt"
-                );
-                return false;
-            }
-        };
-        remotes.sort_by(|left, right| {
-            match (left.as_str() == "origin", right.as_str() == "origin") {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => left.cmp(right),
-            }
-        });
-        remotes.dedup();
-        tracing::debug!(
-            remotes = ?remotes,
-            "discovered configured remotes for Heddle note hydration"
-        );
-
-        for remote in remotes {
-            match self.fetch_with_scope(
-                &remote,
-                GitFetchScope::BranchesAndNotes,
-                RefreshCheckoutAfterFetch::Yes,
-            ) {
-                Ok(()) if checkout_note_ref_exists(self.heddle_repo.root()).unwrap_or(false) => {
-                    return true;
-                }
-                Ok(()) => {}
-                Err(error) => {
-                    tracing::debug!(
-                        remote = remote.as_str(),
-                        error = %error,
-                        "configured remote did not provide Heddle notes during git-overlay adopt"
-                    );
-                }
-            }
-        }
-
-        false
-    }
-
-    /// Best-effort adoption preflight for the ingest-backed path.
-    ///
-    /// This mirrors [`Self::hydrate_checkout_heddle_notes_from_configured_remotes`]
-    /// without initializing `.heddle/git`: ingest reads directly from the
-    /// checkout, so it only needs `refs/notes/heddle` hydrated in the checkout's
-    /// own object database before `GitSource` opens the repository.
+    /// -> Heddle state identity. Ingest reads directly from the checkout, so
+    /// it only needs `refs/notes/heddle` hydrated in the checkout's own object
+    /// database before `GitSource` opens the repository.
     pub(crate) fn hydrate_checkout_heddle_notes_without_mirror(root: &Path) -> bool {
         if checkout_note_ref_exists(root).unwrap_or(false) {
             return true;
@@ -1310,7 +1218,8 @@ impl<'a> GitBridge<'a> {
             RefreshCheckoutAfterFetch::No,
         )?;
         self.preflight_attached_pull_fast_forward(remote_name, attached_before.as_ref())?;
-        let stats = self.import(None)?;
+        let mirror_path = self.mirror_path();
+        let stats = import_git_history(self, Some(&mirror_path), &[], Default::default(), None)?;
 
         let mut materialized_attached_thread = false;
         if let Some((thread, old_state)) = attached_before
