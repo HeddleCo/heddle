@@ -12,7 +12,7 @@ use objects::object::ChangeId;
 use serde::{Deserialize, Serialize};
 use sley::{ObjectFormat, ObjectId as SleyObjectId, ReferenceTarget, Repository as SleyRepository};
 
-use super::git_core::{GitBridge, GitBridgeError, GitResult, git_err};
+use super::git_core::{GitBridge, GitBridgeError, GitResult, SyncMapping, git_err};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct MappingEntry {
@@ -23,6 +23,37 @@ struct MappingEntry {
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct MappingFile {
     entries: Vec<MappingEntry>,
+}
+
+#[derive(Debug, Default)]
+struct GitIdentityIndex {
+    mapping: SyncMapping,
+}
+
+impl GitIdentityIndex {
+    fn from_notes(repo: &SleyRepository) -> GitResult<Self> {
+        let mut index = Self::default();
+        for (change_id, git_oid) in super::git_notes::read_identity_mappings(repo)? {
+            index.mapping.insert_checked(change_id, git_oid)?;
+        }
+        Ok(index)
+    }
+
+    fn fill_gaps_from_cache(&mut self, cache: &SyncMapping) {
+        for (change_id, git_oid) in cache.iter() {
+            if self.mapping.get_git(change_id) == Some(*git_oid) {
+                continue;
+            }
+            if self.mapping.has_heddle(change_id) || self.mapping.has_git(*git_oid) {
+                continue;
+            }
+            self.mapping.insert(*change_id, *git_oid);
+        }
+    }
+
+    fn into_mapping(self) -> SyncMapping {
+        self.mapping
+    }
 }
 
 impl<'a> GitBridge<'a> {
@@ -37,24 +68,25 @@ impl<'a> GitBridge<'a> {
         self.mapping_path().with_extension("json.tmp")
     }
 
-    pub(crate) fn load_mapping_from_disk(&mut self) -> GitResult<()> {
+    fn read_mapping_cache_from_disk(&self) -> GitResult<SyncMapping> {
         self.recover_mapping_tmp()?;
         let path = self.mapping_path();
         if !path.exists() {
-            return Ok(());
+            return Ok(SyncMapping::new());
         }
 
         let data = fs::read_to_string(&path)?;
         let file: MappingFile = serde_json::from_str(&data)
             .map_err(|err| GitBridgeError::InvalidMapping(err.to_string()))?;
 
+        let mut mapping = SyncMapping::new();
         for entry in file.entries {
             let change_id = ChangeId::parse(&entry.change_id)?;
             let git_oid = parse_stored_git_oid(&entry.git_oid)?;
-            self.mapping.insert_checked(change_id, git_oid)?;
+            mapping.insert_checked(change_id, git_oid)?;
         }
 
-        Ok(())
+        Ok(mapping)
     }
 
     fn recover_mapping_tmp(&self) -> GitResult<()> {
@@ -71,9 +103,8 @@ impl<'a> GitBridge<'a> {
         Ok(())
     }
 
-    fn mapping_bytes(&self) -> GitResult<Vec<u8>> {
-        let entries = self
-            .mapping
+    fn mapping_bytes(mapping: &SyncMapping) -> GitResult<Vec<u8>> {
+        let entries = mapping
             .iter()
             .map(|(change_id, git_oid)| MappingEntry {
                 change_id: change_id.to_string_full(),
@@ -95,7 +126,7 @@ impl<'a> GitBridge<'a> {
             parent_file.sync_all()?;
         }
 
-        let data = self.mapping_bytes()?;
+        let data = Self::mapping_bytes(&self.mapping)?;
         let mut file = File::create(&tmp_path)?;
         file.write_all(&data)?;
         file.sync_all()?;
@@ -123,37 +154,29 @@ impl<'a> GitBridge<'a> {
         self.write_mapping_tmp_to_disk()?;
         // Fault-injection checkpoint: a crash here leaves the
         // sidecar in tmp form (`bridge-mapping.json.tmp`) without a
-        // committed `bridge-mapping.json`. The next `save_mapping_to_disk`
-        // call invokes `recover_mapping_tmp` (in `load_mapping_from_disk`)
-        // which atomically renames the tmp into place. Tested by
+        // committed `bridge-mapping.json`. The next mapping-cache read
+        // atomically renames the tmp into place. Tested by
         // `bridge_recovers_from_crash_after_tmp_before_commit`.
         objects::fault_inject::maybe_panic_at("mapping_after_tmp_before_commit");
         self.commit_mapping_tmp_to_disk()
     }
 
-    /// Build the mapping from existing commits and persisted data. Sources,
-    /// in order:
-    ///   1. The on-disk sidecar (`bridge-mapping.json`).
-    ///   2. The git notes ref (`refs/notes/heddle`).
-    ///
-    /// Notes must agree with anything already in the sidecar (via
-    /// `insert_checked`) or the build aborts — this is what catches a
-    /// corrupted sidecar that disagrees with the git side of the bridge.
+    /// Build the identity mapping from portable metadata and local cache.
+    /// `refs/notes/heddle` is authoritative because it travels with Git history;
+    /// `bridge-mapping.json` is a rebuildable cache that fills entries with no
+    /// note yet (for example, before a commit has been exported with notes).
     pub(crate) fn build_existing_mapping(&mut self, git_repo_path: Option<&Path>) -> GitResult<()> {
-        self.load_mapping_from_disk()?;
-
         let repo = match git_repo_path {
             Some(path) => super::git_core::open_repo(path)?,
             None => self.open_git_repo()?,
         };
 
-        // Notes carry change_ids without altering commit SHAs, so they're
-        // our preferred fallback source after the sidecar.
-        let notes = super::git_notes::read_all_notes(&repo)?;
-        for (oid, note) in &notes {
-            let change_id = ChangeId::parse(&note.change_id)?;
-            self.mapping.insert_checked(change_id, *oid)?;
-        }
+        let cache = self.read_mapping_cache_from_disk()?;
+        let live_cache = self.mapping.clone();
+        let mut index = GitIdentityIndex::from_notes(&repo)?;
+        index.fill_gaps_from_cache(&cache);
+        index.fill_gaps_from_cache(&live_cache);
+        self.mapping = index.into_mapping();
 
         self.save_mapping_to_disk()?;
         Ok(())
@@ -162,7 +185,7 @@ impl<'a> GitBridge<'a> {
     #[cfg_attr(not(feature = "git-overlay"), allow(dead_code))]
     pub(crate) fn prune_unreachable_mapping_entries(&mut self) -> GitResult<usize> {
         let repo = self.open_git_repo()?;
-        self.load_mapping_from_disk()?;
+        self.mapping = self.read_mapping_cache_from_disk()?;
         let reachable: HashSet<_> = collect_commit_oids(&repo)?.into_iter().collect();
         let removed = self.mapping.retain_git_object_set(&reachable);
         if removed > 0 {

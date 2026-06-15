@@ -43,21 +43,31 @@ impl ImportProgress {
         self.step(label);
     }
 
-    pub(crate) fn detail(&self, label: &str) {
-        self.step(label);
+    pub(crate) fn begin_commit_import(&mut self) {
+        self.advance("importing commits");
+    }
+
+    pub(crate) fn checking_notes(&self) {
+        self.step("checking Heddle notes");
+    }
+
+    pub(crate) fn ordering_commits(&self) {
+        self.step("ordering commits");
+    }
+
+    pub(crate) fn begin_ref_write(&mut self) {
+        self.advance("writing refs");
     }
 
     /// Live per-commit counter for the import phase. Renders only to a TTY
-    /// (throttled); under `--json`/agent output or a piped stdout it is a
-    /// no-op so no control codes leak into machine-readable output (#550).
+    /// with redraw control codes. Piped human output gets throttled plain
+    /// lines; under `--json`/agent output it is a no-op so progress never
+    /// leaks into machine-readable stdout (#550).
     pub(crate) fn commit_tick(&mut self, event: ImportProgressEvent) {
-        if !self.enabled || !io::stdout().is_terminal() {
+        if !self.enabled {
             return;
         }
-        let should_render = event.commits_imported == 0
-            || event.commits_imported == event.total_commits
-            || event.commits_imported.is_multiple_of(COMMIT_TICK_INTERVAL);
-        if !should_render {
+        if !should_render_commit_progress(event) {
             return;
         }
         let label = if event.total_commits == 0 {
@@ -65,16 +75,18 @@ impl ImportProgress {
         } else {
             "importing commits"
         };
-        print!(
-            "\r{}\x1b[K",
-            style::dim(&format!(
-                "[{}/{}] {label}… {}",
-                self.current + 1,
-                self.total,
-                format_commit_progress(event),
-            ))
+        let line = format!(
+            "[{}/{}] {label}... {}",
+            self.current + 1,
+            self.total,
+            format_commit_progress(event),
         );
-        io::stdout().flush().ok();
+        if io::stdout().is_terminal() {
+            print!("\r{}\x1b[K", style::dim(&line));
+            io::stdout().flush().ok();
+        } else {
+            println!("{}", style::dim(&line));
+        }
     }
 
     pub(crate) fn finish(&mut self) {
@@ -108,6 +120,12 @@ impl ImportProgress {
             );
         }
     }
+}
+
+fn should_render_commit_progress(event: ImportProgressEvent) -> bool {
+    event.commits_imported == 0
+        || event.commits_imported == event.total_commits
+        || event.commits_imported.is_multiple_of(COMMIT_TICK_INTERVAL)
 }
 
 fn format_commit_progress(event: ImportProgressEvent) -> String {
@@ -154,5 +172,29 @@ mod tests {
             rendered,
             "0 inspected, counting reachable commits, 0 new states"
         );
+    }
+
+    #[test]
+    fn import_commit_progress_is_throttled_but_keeps_edges() {
+        assert!(should_render_commit_progress(ImportProgressEvent {
+            commits_imported: 0,
+            total_commits: 128,
+            states_created: 0,
+        }));
+        assert!(should_render_commit_progress(ImportProgressEvent {
+            commits_imported: 64,
+            total_commits: 128,
+            states_created: 40,
+        }));
+        assert!(should_render_commit_progress(ImportProgressEvent {
+            commits_imported: 128,
+            total_commits: 128,
+            states_created: 80,
+        }));
+        assert!(!should_render_commit_progress(ImportProgressEvent {
+            commits_imported: 63,
+            total_commits: 128,
+            states_created: 39,
+        }));
     }
 }

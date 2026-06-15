@@ -77,9 +77,9 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
     };
     let source_label = repo.root().display().to_string();
     let mut progress = ImportProgress::start(cli, &repo, &scope, &source_label);
-    progress.advance("importing commits");
+    progress.begin_commit_import();
     let stats = import_git_history_for_adopt(&repo, &args.refs, &mut progress)?;
-    progress.advance("writing refs");
+    progress.begin_ref_write();
     progress.finish();
     let trust = build_repository_verification_state(&repo);
     let already_in_sync = stats.states_created == 0 && stats.commits_imported > 0;
@@ -131,9 +131,9 @@ fn import_ingest_for_adopt(
     scope: ingest::ImportScope,
     progress: &mut ImportProgress,
 ) -> Result<AdoptImportStats> {
-    progress.detail("checking Heddle notes");
+    progress.checking_notes();
     crate::bridge::git_core::GitBridge::hydrate_checkout_heddle_notes_without_mirror(repo.root());
-    progress.detail("ordering commits");
+    progress.ordering_commits();
     use ingest::{ImportOptions, import_git_into_scoped_with_options_and_progress};
 
     let mut on_commit = |event: ingest::ImportProgressEvent| progress.commit_tick(event);

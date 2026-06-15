@@ -320,7 +320,9 @@ async fn async_main() -> Result<()> {
             Some(cli::cli::DoctorCommands::Docs(docs_args)) => {
                 cmd_doctor_docs(&cli, docs_args.clone())
             }
-            Some(cli::cli::DoctorCommands::Schemas) => cmd_doctor_schemas(&cli),
+            Some(cli::cli::DoctorCommands::Schemas(schema_args)) => {
+                cmd_doctor_schemas(&cli, schema_args.clone())
+            }
         },
 
         Commands::Schemas { verb } => cmd_schemas(&cli, verb),

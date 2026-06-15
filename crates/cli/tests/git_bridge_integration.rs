@@ -1531,6 +1531,64 @@ fn mapping_rebuilds_from_heddle_notes() {
 }
 
 #[test]
+fn mapping_rebuild_prefers_heddle_notes_over_stale_cache() {
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+    let (_git_temp, git_repo) = init_git_repo();
+
+    let tree_oid = empty_tree_oid(&git_repo);
+    let commit_oid = commit_with_tree(&git_repo, Some("refs/heads/main"), tree_oid, "base", &[]);
+    let change_id = ChangeId::generate();
+    let stale_oid: ObjectId = "abababababababababababababababababababab"
+        .parse()
+        .expect("oid");
+
+    let note = git_notes::HeddleNote {
+        change_id: change_id.to_string_full(),
+        agent: None,
+        confidence: None,
+        status: "published".to_string(),
+        omitted_annotations_breakdown: None,
+        signal_counts: None,
+        attribution: None,
+    };
+    git_notes::write_note(&git_repo, commit_oid, &note).expect("write heddle note");
+
+    let mut stale_bridge = GitBridge::new(&repo);
+    test_support::mapping_mut(&mut stale_bridge).insert(change_id, stale_oid);
+    test_support::save_mapping_to_disk(&stale_bridge).expect("save stale cache");
+
+    let mut bridge = GitBridge::new(&repo);
+    test_support::build_existing_mapping(
+        &mut bridge,
+        Some(git_repo.workdir().expect("workdir").as_path()),
+    )
+    .expect("notes should rebuild over stale cache");
+
+    assert_eq!(
+        test_support::mapping(&bridge).get_git(&change_id),
+        Some(commit_oid),
+        "refs/notes/heddle is authoritative for exported Git identity"
+    );
+    assert_eq!(
+        test_support::mapping(&bridge).get_heddle(stale_oid),
+        None,
+        "stale cache-only identity must be discarded when a note supersedes it"
+    );
+
+    let mapping = std::fs::read_to_string(test_support::mapping_path(&bridge))
+        .expect("rewritten mapping cache");
+    assert!(
+        mapping.contains(&commit_oid.to_string()),
+        "rebuilt cache should persist the note-derived identity"
+    );
+    assert!(
+        !mapping.contains(&stale_oid.to_string()),
+        "rebuilt cache should not keep the stale identity"
+    );
+}
+
+#[test]
 fn test_sync_mapping() {
     let mut mapping = SyncMapping::new();
     let change_id = ChangeId::generate();
@@ -3391,7 +3449,7 @@ fn export_lags_public_branch_to_frontier_emitting_absence_for_embargoed_tip() {
 
 /// #316 / PR #528 Finding 1: a commit exported while PUBLIC, then later marked
 /// `Private`, must NOT keep being served on the next export. The stale
-/// ChangeId→OID mapping is rebuilt from the notes/sidecar every run, so the
+/// ChangeId→OID mapping is rebuilt from the notes/cache every run, so the
 /// export must re-validate current visibility and retract the public branch
 /// down to the served frontier (here, the still-public base A).
 #[test]
@@ -4254,7 +4312,7 @@ fn export_deletes_tag_when_marker_retargeted_to_private() {
 /// The trigger that drives a SERVED marker target out of the mapping (the only
 /// way the `None` arm is reached for a public target) is a RETARGET to a
 /// not-yet-minted out-of-scope public state: a stationary marker's target stays
-/// in the mapping via the notes/sidecar rebuild, so it goes through the `Some`
+/// in the mapping via the notes/cache rebuild, so it goes through the `Some`
 /// arm. The symmetric `Private`-retarget case (genuinely unserved) is covered by
 /// [`export_deletes_tag_when_marker_retargeted_to_private`] — together they prove
 /// the reconcile distinguishes served-but-unminted (preserve) from unserved

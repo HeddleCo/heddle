@@ -571,7 +571,7 @@ impl SyncMapping {
     /// The export visibility purge calls this to remove a state whose
     /// effective tier is no longer served by the export audience. Without it,
     /// a stale ChangeId→OID mapping (minted while the state was public, kept
-    /// alive by the notes/sidecar rebuild on the next export) makes the
+    /// alive by the notes/cache rebuild on the next export) makes the
     /// frontier walk and the tag/note sync treat a now-embargoed commit as
     /// served — leaking it via `refs/heads/<thread>` or a tag.
     pub(crate) fn remove(&mut self, change_id: &ChangeId) -> Option<ObjectId> {
@@ -1218,7 +1218,7 @@ impl<'a> GitBridge<'a> {
         let Some((thread, state_id)) = attached_before else {
             return Ok(());
         };
-        self.load_mapping_from_disk()?;
+        self.build_existing_mapping(None)?;
         let Some(local_git_oid) = self.mapping.get_git(state_id) else {
             return Ok(());
         };

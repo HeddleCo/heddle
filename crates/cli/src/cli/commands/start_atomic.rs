@@ -994,20 +994,31 @@ impl StartThread {
     fn stage_mount(
         &self,
         tx: &mut Tx<'_>,
-    ) -> HeddleResult<Option<mount_lifecycle::FskitReadinessReport>> {
+    ) -> HeddleResult<mount_lifecycle::VirtualizedMountOutcome> {
         let repo = tx.repo();
         let root = repo.root().to_path_buf();
         let abs = self.abs_path.clone();
         let fwd_name = self.name.clone();
         let inv_name = self.name.clone();
         let ownership = self.mount_ownership;
+        let mounted_owner = Rc::new(Cell::new(None));
+        let fwd_owner = Rc::clone(&mounted_owner);
+        let inv_owner = Rc::clone(&mounted_owner);
+        let inv_root = root.clone();
         tx.step(
             move || {
-                mount_lifecycle::establish_virtualized_mount(&root, &fwd_name, &abs, ownership)
-                    .map_err(apply_error)
+                let outcome =
+                    mount_lifecycle::establish_virtualized_mount(&root, &fwd_name, &abs, ownership)
+                        .map_err(apply_error)?;
+                fwd_owner.set(Some(outcome.owner));
+                Ok(outcome)
             },
             move || {
-                mount_lifecycle::unmount_thread_if_mounted(&inv_name);
+                let Some(owner) = inv_owner.get() else {
+                    return Ok(());
+                };
+                mount_lifecycle::cleanup_virtualized_mount(&inv_root, &inv_name, owner)
+                    .map_err(apply_error)?;
                 Ok(())
             },
         )
@@ -1104,7 +1115,7 @@ impl AtomicMutation for StartThread {
                 }
             }
             ThreadMode::Virtualized => {
-                fskit_readiness = self.stage_mount(tx)?;
+                fskit_readiness = self.stage_mount(tx)?.fskit_readiness;
                 Vec::new()
             }
         };

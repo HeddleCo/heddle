@@ -2428,66 +2428,12 @@ surface.
 Validate this document against the runtime schema registry and report
 catalog-wide schema coverage.
 
+The command-contract coverage portion of this sample is generated from
+runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
+
 ```json
 {
-  "output_kind": "doctor_schemas",
-  "status": "available",
-  "verified": true,
-  "summary": "188 command(s), 158 JSON command(s), 97 mutating command(s), 96 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 49 accepted opaque schema(s) outside clean verification",
-  "recommended_action": null,
-  "recovery_commands": [],
-  "registered_verbs": ["status", "verify", "try"],
-  "documented_verbs": ["status", "verify", "try"],
-  "undocumented_verbs": [],
-  "unmatched_verbs": [],
-  "passing_verbs": ["status", "verify", "try"],
-  "issues": [],
   "command_contract_schema_coverage": {
-    "status": "available",
-    "verified_scope": "everyday_and_agent",
-    "advanced_scope": "advanced_internal_admin",
-    "summary": "188 command(s), 158 JSON command(s), 97 mutating command(s), 96 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 49 accepted opaque schema(s) outside clean verification",
-    "catalog_commands_total": 188,
-    "catalog_mutating_commands_total": 97,
-    "json_commands_total": 158,
-    "json_mutating_commands_total": 96,
-    "json_commands_with_schema": 109,
-    "json_commands_with_accepted_opaque_schema": 49,
-    "json_commands_without_schema": 0,
-    "verified_scope_json_commands_total": 37,
-    "verified_scope_json_commands_with_schema": 37,
-    "verified_scope_json_commands_with_accepted_opaque_schema": 0,
-    "verified_scope_json_commands_without_schema": 0,
-    "advanced_scope_json_commands_total": 121,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 49,
-    "mutating_commands_total": 96,
-    "mutating_commands_with_schema": 69,
-    "mutating_commands_with_accepted_opaque_schema": 27,
-    "mutating_commands_without_schema": 0,
-    "verified_scope_mutating_commands_total": 23,
-    "verified_scope_mutating_commands_with_schema": 23,
-    "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
-    "verified_scope_mutating_commands_without_schema": 0,
-    "advanced_scope_mutating_commands_total": 73,
-    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
-    "undocumented_schema_verbs_total": 0,
-    "opaque_schema_verbs_total": 49,
-    "accepted_opaque_schema_verbs_total": 49,
-    "unaccepted_opaque_schema_verbs_total": 0,
-    "missing_schema_examples": [],
-    "missing_mutating_schema_examples": [],
-    "verified_scope_missing_schema_examples": [],
-    "verified_scope_accepted_opaque_schema_examples": [],
-    "advanced_scope_accepted_opaque_schema_examples": [
-      "help",
-      "transaction begin",
-      "transaction abort",
-      "transaction status",
-      "redact apply",
-      "redact list",
-      "redact show",
-      "redact trust add"
-    ],
     "accepted_opaque_schema_examples": [
       "help",
       "transaction begin",
@@ -2498,10 +2444,79 @@ catalog-wide schema coverage.
       "redact show",
       "redact trust add"
     ],
+    "accepted_opaque_schema_verbs_total": 49,
+    "advanced_scope": "advanced_internal_admin",
+    "advanced_scope_accepted_opaque_schema_examples": [
+      "help",
+      "transaction begin",
+      "transaction abort",
+      "transaction status",
+      "redact apply",
+      "redact list",
+      "redact show",
+      "redact trust add"
+    ],
+    "advanced_scope_json_commands_total": 121,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 49,
+    "advanced_scope_mutating_commands_total": 73,
+    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
+    "catalog_commands_total": 188,
+    "catalog_mutating_commands_total": 97,
+    "json_commands_total": 158,
+    "json_commands_with_accepted_opaque_schema": 49,
+    "json_commands_with_schema": 109,
+    "json_commands_without_schema": 0,
+    "json_mutating_commands_total": 96,
+    "missing_mutating_schema_examples": [],
+    "missing_schema_examples": [],
+    "mutating_commands_total": 96,
+    "mutating_commands_with_accepted_opaque_schema": 27,
+    "mutating_commands_with_schema": 69,
+    "mutating_commands_without_schema": 0,
+    "opaque_schema_verbs_total": 49,
+    "status": "available",
+    "summary": "188 command(s), 158 JSON command(s), 97 mutating command(s), 96 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 49 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
-    "undocumented_schema_examples": []
+    "unaccepted_opaque_schema_verbs_total": 0,
+    "undocumented_schema_examples": [],
+    "undocumented_schema_verbs_total": 0,
+    "verified_scope": "everyday_and_agent",
+    "verified_scope_accepted_opaque_schema_examples": [],
+    "verified_scope_json_commands_total": 37,
+    "verified_scope_json_commands_with_accepted_opaque_schema": 0,
+    "verified_scope_json_commands_with_schema": 37,
+    "verified_scope_json_commands_without_schema": 0,
+    "verified_scope_missing_schema_examples": [],
+    "verified_scope_mutating_commands_total": 23,
+    "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
+    "verified_scope_mutating_commands_with_schema": 23,
+    "verified_scope_mutating_commands_without_schema": 0
   },
-  "doc_path": "/repo/docs/json-schemas.md"
+  "doc_path": "/repo/docs/json-schemas.md",
+  "documented_verbs": [
+    "status",
+    "verify",
+    "try"
+  ],
+  "issues": [],
+  "output_kind": "doctor_schemas",
+  "passing_verbs": [
+    "status",
+    "verify",
+    "try"
+  ],
+  "recommended_action": null,
+  "recovery_commands": [],
+  "registered_verbs": [
+    "status",
+    "verify",
+    "try"
+  ],
+  "status": "available",
+  "summary": "188 command(s), 158 JSON command(s), 97 mutating command(s), 96 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 49 accepted opaque schema(s) outside clean verification",
+  "undocumented_verbs": [],
+  "unmatched_verbs": [],
+  "verified": true
 }
 ```
 

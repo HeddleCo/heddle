@@ -34,13 +34,14 @@ pub use commands_args::{
     ActorDoneArgs, ActorExplainArgs, ActorListArgs, ActorShowArgs, ActorSpawnArgs, AdoptArgs,
     AgentApiListArgs, AgentCaptureArgs, AgentHeartbeatArgs, AgentReadyArgs, AgentReleaseArgs,
     AgentReleaseStatusArg, AgentReserveArgs, CloneArgs, CollapseArgs, CommitArgs, DiagnoseArgs,
-    DiffArgs, DoctorArgs, DoctorCommands, DoctorDocsArgs, ExpandArgs, InitArgs, LandArgs, LogArgs,
-    MergeArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs, RevertArgs, RunArgs,
-    SessionEndArgs, SessionListArgs, SessionSegmentArgs, SessionShowArgs, SessionStartArgs,
-    SnapshotArgs, SwitchArgs, SyncArgs, ThreadAbsorbArgs, ThreadApprovalsArgs, ThreadApproveArgs,
-    ThreadCapturesArgs, ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs,
-    ThreadPromoteArgs, ThreadRenameArgs, ThreadResolveArgs, ThreadRevokeApprovalArgs,
-    ThreadShowArgs, ThreadStartArgs, TryArgs, UndoArgs, WatchArgs, WorkspaceModeArg,
+    DiffArgs, DoctorArgs, DoctorCommands, DoctorDocsArgs, DoctorSchemasArgs, ExpandArgs, InitArgs,
+    LandArgs, LogArgs, MergeArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RetroArgs,
+    RevertArgs, RunArgs, SessionEndArgs, SessionListArgs, SessionSegmentArgs, SessionShowArgs,
+    SessionStartArgs, SnapshotArgs, SwitchArgs, SyncArgs, ThreadAbsorbArgs, ThreadApprovalsArgs,
+    ThreadApproveArgs, ThreadCapturesArgs, ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs,
+    ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs, ThreadResolveArgs,
+    ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs, TryArgs, UndoArgs, WatchArgs,
+    WorkspaceModeArg,
 };
 #[cfg(feature = "git-overlay")]
 pub use commands_bridge::{BridgeCommands, GitCommands, GitSource};

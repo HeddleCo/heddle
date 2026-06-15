@@ -5,10 +5,9 @@
 //! (change_id, agent, confidence, status) without polluting the commit
 //! message — and so without changing the commit SHA.
 //!
-//! This is the "fallback channel" half of the Phase B identity model. The
-//! primary channel is the `bridge-mapping.json` sidecar; notes are consulted
-//! when the sidecar is missing or empty (e.g., a developer ran `git clone
-//! <url>` of a heddle-exported repo without copying the heddle dir).
+//! This is the history-carrying half of the Phase B identity model. The
+//! `bridge-mapping.json` sidecar is a local rebuild cache; notes are the
+//! portable source that survives plain Git clones and exports.
 //!
 //! Sley provides the tree-backed notes plumbing; this module owns Heddle's
 //! JSON payload and the fixed `refs/notes/heddle` location.
@@ -18,7 +17,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use objects::object::{State, Status};
+use objects::object::{ChangeId, State, Status};
 use serde::{Deserialize, Serialize};
 use sley::{ObjectId, Repository};
 
@@ -221,9 +220,16 @@ pub fn read_note(repo: &Repository, commit_oid: ObjectId) -> GitResult<Option<He
     HeddleNote::from_json_bytes(&bytes).map(Some)
 }
 
-/// Read every (commit_oid → note) entry under `refs/notes/heddle`. Used by
-/// the import path's identity-recovery scan.
-pub fn read_all_notes(repo: &Repository) -> GitResult<HashMap<ObjectId, HeddleNote>> {
+/// Read every portable Git↔Heddle identity recorded under `refs/notes/heddle`.
+pub(crate) fn read_identity_mappings(repo: &Repository) -> GitResult<Vec<(ChangeId, ObjectId)>> {
+    read_all_notes(repo)?
+        .into_iter()
+        .map(|(oid, note)| Ok((ChangeId::parse(&note.change_id)?, oid)))
+        .collect()
+}
+
+/// Read every (commit_oid → note) entry under `refs/notes/heddle`.
+pub(crate) fn read_all_notes(repo: &Repository) -> GitResult<HashMap<ObjectId, HeddleNote>> {
     let mut out = HashMap::new();
     for note_entry in repo.list_notes(&notes_ref()).map_err(git_err)? {
         let object = repo.read_object(&note_entry.blob).map_err(git_err)?;

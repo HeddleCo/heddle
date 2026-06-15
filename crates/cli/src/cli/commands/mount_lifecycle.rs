@@ -17,7 +17,7 @@
 
 use std::path::Path;
 
-use anyhow::anyhow;
+use anyhow::{Result, anyhow};
 use serde::Serialize;
 
 /// Machine-readable FSKit readiness detail surfaced by `heddle start
@@ -33,7 +33,76 @@ pub(crate) struct FskitReadinessReport {
 }
 
 pub(crate) struct SpawnedMount {
+    pub owner: VirtualizedMountOwner,
     pub fskit_readiness: Option<FskitReadinessReport>,
+}
+
+/// Kernel/user-space backend that actually owns a virtualized mount.
+#[allow(dead_code)] // Variants are target-gated; a single-host check sees only one subset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VirtualizedMountBackend {
+    FuseWorker,
+    FsKit,
+    ProjFs,
+    Nfs,
+}
+
+/// Process that owns the mount lifetime.
+///
+/// `Daemon` mounts outlive this CLI process and must be unwound via the daemon
+/// RPC path. `InProcess` mounts live in this process' registry and must be
+/// unwound there, but we still keep the concrete backend for diagnostics and
+/// tests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VirtualizedMountOwner {
+    Daemon,
+    InProcess(VirtualizedMountBackend),
+}
+
+/// Fully typed result of establishing a virtualized workspace mount.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VirtualizedMountOutcome {
+    pub owner: VirtualizedMountOwner,
+    pub fskit_readiness: Option<FskitReadinessReport>,
+}
+
+impl VirtualizedMountOutcome {
+    fn daemon() -> Self {
+        Self {
+            owner: VirtualizedMountOwner::Daemon,
+            fskit_readiness: None,
+        }
+    }
+
+    fn in_process(mounted: SpawnedMount) -> Self {
+        Self {
+            owner: mounted.owner,
+            fskit_readiness: mounted.fskit_readiness,
+        }
+    }
+}
+
+/// Run mount setup/teardown on a plain OS thread whenever the caller is already
+/// on a Tokio runtime thread. The NFS fallback owns an internal Tokio runtime;
+/// constructing or dropping it from a Tokio worker has historically produced
+/// nested-runtime panics on macOS fallback paths. The synchronous CLI still gets
+/// the direct path.
+fn run_mount_io<T, F>(label: &'static str, work: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    if tokio::runtime::Handle::try_current().is_err() {
+        return work();
+    }
+
+    let thread_name = format!("heddle-mount-{label}");
+    let join = std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(work)
+        .map_err(|error| anyhow!("spawn {label} mount worker: {error}"))?;
+    join.join()
+        .map_err(|_| anyhow!("{label} mount worker panicked"))?
 }
 
 /// Anchored error for any build that has no native mount adapter
@@ -140,8 +209,11 @@ mod linux {
         // a still-open handle.
         drop(repo);
 
-        let session = match spawn_fuse_worker(&root, thread_id, mountpoint) {
-            Ok(sup) => BackingSession::FuseWorker(sup),
+        let (session, owner) = match spawn_fuse_worker(&root, thread_id, mountpoint) {
+            Ok(sup) => (
+                BackingSession::FuseWorker(sup),
+                super::VirtualizedMountOwner::InProcess(super::VirtualizedMountBackend::FuseWorker),
+            ),
             Err(native_err) => {
                 warn!(
                     thread = thread_id,
@@ -151,13 +223,16 @@ mod linux {
                     .map_err(|e| anyhow!("reopen repo for NFS fallback: {e}"))?;
                 let mount = ContentAddressedMount::new(reopened, thread_id)
                     .map_err(|e| anyhow!("open mount for {thread_id} (NFS fallback): {e}"))?;
-                BackingSession::Nfs(NfsShell::new(mount).mount_background(mountpoint).map_err(
-                    |e| {
-                        anyhow!(
-                            "FUSE worker spawn failed ({native_err}); NFS fallback also failed: {e}"
-                        )
-                    },
-                )?)
+                (
+                    BackingSession::Nfs(NfsShell::new(mount).mount_background(mountpoint).map_err(
+                        |e| {
+                            anyhow!(
+                                "FUSE worker spawn failed ({native_err}); NFS fallback also failed: {e}"
+                            )
+                        },
+                    )?),
+                    super::VirtualizedMountOwner::InProcess(super::VirtualizedMountBackend::Nfs),
+                )
             }
         };
 
@@ -167,6 +242,7 @@ mod linux {
         });
         REGISTRY.insert(thread_id.to_string(), std::sync::Arc::clone(&handle));
         Ok(super::SpawnedMount {
+            owner,
             fskit_readiness: None,
         })
     }
@@ -321,6 +397,61 @@ mod macos {
 
     static REGISTRY: OnceMap<String, std::sync::Arc<MountHandle>> = OnceMap::new();
 
+    struct MountedSession {
+        session: BackingSession,
+        owner: super::VirtualizedMountOwner,
+    }
+
+    impl MountedSession {
+        fn fskit(session: FsKitMount) -> Self {
+            Self {
+                session: BackingSession::FsKit(session),
+                owner: super::VirtualizedMountOwner::InProcess(
+                    super::VirtualizedMountBackend::FsKit,
+                ),
+            }
+        }
+
+        fn nfs(session: NfsSession) -> Self {
+            Self {
+                session: BackingSession::Nfs(session),
+                owner: super::VirtualizedMountOwner::InProcess(super::VirtualizedMountBackend::Nfs),
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct FsKitMountReport {
+        state: &'static str,
+        action: &'static str,
+        settings_url: Option<&'static str>,
+    }
+
+    impl FsKitMountReport {
+        fn readiness(self, backend: &'static str) -> FskitReadinessReport {
+            FskitReadinessReport {
+                state: self.state,
+                backend,
+                action: self.action,
+                settings_url: self.settings_url,
+            }
+        }
+    }
+
+    struct MacOsMountOutcome {
+        mounted: MountedSession,
+        fskit_readiness: Option<FskitReadinessReport>,
+    }
+
+    impl MacOsMountOutcome {
+        fn nfs(mounted: MountedSession, fskit_readiness: Option<FskitReadinessReport>) -> Self {
+            Self {
+                mounted,
+                fskit_readiness,
+            }
+        }
+    }
+
     /// Mount `thread_id` into `mountpoint`. On macOS 26.0+ this
     /// probes FSKit readiness first; if the extension is enabled,
     /// mounts via `mount -F -t heddle`. If the extension is installed
@@ -336,8 +467,7 @@ mod macos {
             .with_context(|| format!("create mount point {}", mountpoint.display()))?;
 
         let root = repo.root().to_path_buf();
-        let mut fskit_readiness = None;
-        let session = if macos_supports_fskit() {
+        let outcome = if macos_supports_fskit() {
             match readiness::probe() {
                 Readiness::Ready => {
                     info!(
@@ -350,10 +480,11 @@ mod macos {
                         &root,
                         thread_id,
                         mountpoint,
-                        &mut fskit_readiness,
-                        "ready",
-                        "mounted",
-                        None,
+                        FsKitMountReport {
+                            state: "ready",
+                            action: "mounted",
+                            settings_url: None,
+                        },
                     )?
                 }
                 Readiness::NeedsApproval => {
@@ -369,68 +500,80 @@ mod macos {
                             &root,
                             thread_id,
                             mountpoint,
-                            &mut fskit_readiness,
-                            "ready_after_approval",
-                            "mounted_after_poll",
-                            Some(settings_url),
+                            FsKitMountReport {
+                                state: "ready_after_approval",
+                                action: "mounted_after_poll",
+                                settings_url: Some(settings_url),
+                            },
                         )?
                     } else {
                         eprintln!(
                             "Heddle FSKit extension still disabled after 60s; using NFS for this run. Enable it and re-run for the fast path."
                         );
-                        fskit_readiness = Some(FskitReadinessReport {
-                            state: "needs_approval",
-                            backend: "nfs",
-                            action: "poll_timeout_fell_back",
-                            settings_url: Some(settings_url),
-                        });
-                        mount_via_nfs(&root, thread_id, mountpoint)?
+                        MacOsMountOutcome::nfs(
+                            mount_via_nfs(&root, thread_id, mountpoint)?,
+                            Some(FskitReadinessReport {
+                                state: "needs_approval",
+                                backend: "nfs",
+                                action: "poll_timeout_fell_back",
+                                settings_url: Some(settings_url),
+                            }),
+                        )
                     }
                 }
                 Readiness::NotInstalled => {
                     eprintln!("{FSKIT_INSTALL_HINT}");
-                    fskit_readiness = Some(FskitReadinessReport {
-                        state: "not_installed",
-                        backend: "nfs",
-                        action: "fell_back",
-                        settings_url: None,
-                    });
-                    mount_via_nfs(&root, thread_id, mountpoint)?
+                    MacOsMountOutcome::nfs(
+                        mount_via_nfs(&root, thread_id, mountpoint)?,
+                        Some(FskitReadinessReport {
+                            state: "not_installed",
+                            backend: "nfs",
+                            action: "fell_back",
+                            settings_url: None,
+                        }),
+                    )
                 }
                 Readiness::UnsupportedMacOS => {
                     eprintln!("{}", readiness::unsupported_macos_hint());
-                    fskit_readiness = Some(FskitReadinessReport {
-                        state: "unsupported_macos",
-                        backend: "nfs",
-                        action: "fell_back",
-                        settings_url: None,
-                    });
-                    mount_via_nfs(&root, thread_id, mountpoint)?
+                    MacOsMountOutcome::nfs(
+                        mount_via_nfs(&root, thread_id, mountpoint)?,
+                        Some(FskitReadinessReport {
+                            state: "unsupported_macos",
+                            backend: "nfs",
+                            action: "fell_back",
+                            settings_url: None,
+                        }),
+                    )
                 }
                 Readiness::Unknown => {
                     // Probe failed for an environmental reason. Preserve the
                     // existing quiet NFS fallback.
-                    mount_via_nfs(&root, thread_id, mountpoint)?
+                    MacOsMountOutcome::nfs(mount_via_nfs(&root, thread_id, mountpoint)?, None)
                 }
             }
         } else {
             debug!("macOS version is below FSKit's supported runtime floor; using NFS fallback");
             eprintln!("{}", readiness::unsupported_macos_hint());
-            fskit_readiness = Some(FskitReadinessReport {
-                state: "unsupported_macos",
-                backend: "nfs",
-                action: "fell_back",
-                settings_url: None,
-            });
-            mount_via_nfs(&root, thread_id, mountpoint)?
+            MacOsMountOutcome::nfs(
+                mount_via_nfs(&root, thread_id, mountpoint)?,
+                Some(FskitReadinessReport {
+                    state: "unsupported_macos",
+                    backend: "nfs",
+                    action: "fell_back",
+                    settings_url: None,
+                }),
+            )
         };
 
         let handle = std::sync::Arc::new(MountHandle {
-            session: Mutex::new(Some(session)),
+            session: Mutex::new(Some(outcome.mounted.session)),
             mountpoint: mountpoint.to_path_buf(),
         });
         REGISTRY.insert(thread_id.to_string(), std::sync::Arc::clone(&handle));
-        Ok(super::SpawnedMount { fskit_readiness })
+        Ok(super::SpawnedMount {
+            owner: outcome.mounted.owner,
+            fskit_readiness: outcome.fskit_readiness,
+        })
     }
 
     fn macos_supports_fskit() -> bool {
@@ -530,7 +673,7 @@ mod macos {
         repo_root: &Path,
         thread_id: &str,
         mountpoint: &Path,
-    ) -> Result<BackingSession> {
+    ) -> Result<MountedSession> {
         let repo = Repository::open(repo_root)
             .with_context(|| format!("reopen repo for NFS mount at {}", repo_root.display()))?;
         let mount = ContentAddressedMount::new(repo, thread_id)
@@ -546,28 +689,20 @@ mod macos {
             thread = thread_id,
             "using NFS fallback (install + enable the Heddle FSKit extension for a faster path)"
         );
-        Ok(BackingSession::Nfs(session))
+        Ok(MountedSession::nfs(session))
     }
 
     fn mount_via_fskit_or_nfs(
         repo_root: &Path,
         thread_id: &str,
         mountpoint: &Path,
-        fskit_readiness: &mut Option<FskitReadinessReport>,
-        success_state: &'static str,
-        success_action: &'static str,
-        settings_url: Option<&'static str>,
-    ) -> Result<BackingSession> {
+        success: FsKitMountReport,
+    ) -> Result<MacOsMountOutcome> {
         match FsKitMount::mount(repo_root, thread_id, mountpoint) {
-            Ok(mount) => {
-                *fskit_readiness = Some(FskitReadinessReport {
-                    state: success_state,
-                    backend: "fskit",
-                    action: success_action,
-                    settings_url,
-                });
-                Ok(BackingSession::FsKit(mount))
-            }
+            Ok(mount) => Ok(MacOsMountOutcome {
+                mounted: MountedSession::fskit(mount),
+                fskit_readiness: Some(success.readiness("fskit")),
+            }),
             Err(error) => {
                 warn!(
                     thread = thread_id,
@@ -578,15 +713,19 @@ mod macos {
                     "Heddle FSKit mount failed ({error:#}); using NFS fallback for this run.\n\
                      If this follows a Heddle update, reinstall or re-enable the Heddle host app so macOS reloads the current File System Extension."
                 );
-                *fskit_readiness = Some(FskitReadinessReport {
-                    state: "mount_failed",
-                    backend: "nfs",
-                    action: "fell_back",
-                    settings_url,
-                });
-                mount_via_nfs(repo_root, thread_id, mountpoint).with_context(|| {
-                    format!("FSKit mount failed ({error:#}); NFS fallback also failed")
-                })
+                let mounted =
+                    mount_via_nfs(repo_root, thread_id, mountpoint).with_context(|| {
+                        format!("FSKit mount failed ({error:#}); NFS fallback also failed")
+                    })?;
+                Ok(MacOsMountOutcome::nfs(
+                    mounted,
+                    Some(FskitReadinessReport {
+                        state: "mount_failed",
+                        backend: "nfs",
+                        action: "fell_back",
+                        settings_url: success.settings_url,
+                    }),
+                ))
             }
         }
     }
@@ -595,10 +734,11 @@ mod macos {
         let Some(handle) = REGISTRY.remove(&thread_id.to_string()) else {
             return false;
         };
-        if let Err(err) = handle.unmount() {
+        let mountpoint = handle.mountpoint().to_path_buf();
+        if let Err(err) = super::run_mount_io("macos-unmount", move || handle.unmount()) {
             warn!(
                 thread = thread_id,
-                mountpoint = %handle.mountpoint().display(),
+                mountpoint = %mountpoint.display(),
                 "unmount failed: {err}"
             );
         }
@@ -695,9 +835,12 @@ mod windows {
             );
         }
 
-        let session = if runtime_available {
+        let (session, owner) = if runtime_available {
             match ProjFsShell::new(mount).mount_background(mountpoint) {
-                Ok(s) => BackingSession::ProjFs(s),
+                Ok(s) => (
+                    BackingSession::ProjFs(s),
+                    super::VirtualizedMountOwner::InProcess(super::VirtualizedMountBackend::ProjFs),
+                ),
                 Err(native_err) => {
                     // DLL loaded but the mount itself failed —
                     // could be a non-NTFS root, a stale
@@ -711,13 +854,20 @@ mod windows {
                         .map_err(|e| anyhow!("reopen repo for NFS fallback: {e}"))?;
                     let mount = ContentAddressedMount::new(reopened, thread_id)
                         .map_err(|e| anyhow!("open mount for {thread_id} (NFS fallback): {e}"))?;
-                    BackingSession::Nfs(NfsShell::new(mount).mount_background(mountpoint).map_err(
-                        |e| {
-                            anyhow!(
-                                "ProjFS mount failed ({native_err}); NFS fallback also failed: {e}"
-                            )
-                        },
-                    )?)
+                    (
+                        BackingSession::Nfs(
+                            NfsShell::new(mount)
+                                .mount_background(mountpoint)
+                                .map_err(|e| {
+                                    anyhow!(
+                                        "ProjFS mount failed ({native_err}); NFS fallback also failed: {e}"
+                                    )
+                                })?,
+                        ),
+                        super::VirtualizedMountOwner::InProcess(
+                            super::VirtualizedMountBackend::Nfs,
+                        ),
+                    )
                 }
             }
         } else {
@@ -725,17 +875,18 @@ mod windows {
             // burning a mount attempt. `mount` here is the
             // already-constructed ContentAddressedMount; we don't
             // need to reopen the repo.
-            BackingSession::Nfs(
-                NfsShell::new(mount)
-                    .mount_background(mountpoint)
-                    .map_err(|e| {
+            (
+                BackingSession::Nfs(NfsShell::new(mount).mount_background(mountpoint).map_err(
+                    |e| {
                         anyhow!(
                             "ProjFS unavailable and NFS fallback failed: {e}. \
-                             Install the 'Projected File System' Windows optional feature \
-                             (admin PowerShell: `Enable-WindowsOptionalFeature -Online \
-                             -FeatureName Client-ProjFS`) or ensure the NFS client is enabled."
+                                 Install the 'Projected File System' Windows optional feature \
+                                 (admin PowerShell: `Enable-WindowsOptionalFeature -Online \
+                                 -FeatureName Client-ProjFS`) or ensure the NFS client is enabled."
                         )
-                    })?,
+                    },
+                )?),
+                super::VirtualizedMountOwner::InProcess(super::VirtualizedMountBackend::Nfs),
             )
         };
 
@@ -745,6 +896,7 @@ mod windows {
         });
         REGISTRY.insert(thread_id.to_string(), std::sync::Arc::clone(&handle));
         Ok(super::SpawnedMount {
+            owner,
             fskit_readiness: None,
         })
     }
@@ -875,26 +1027,58 @@ pub(crate) fn establish_virtualized_mount(
     thread_id: &str,
     mountpoint: &Path,
     ownership: MountOwnership,
-) -> anyhow::Result<Option<FskitReadinessReport>> {
+) -> anyhow::Result<VirtualizedMountOutcome> {
     match ownership {
         MountOwnership::PreferDaemon => {
             let attempt = crate::cli::commands::daemon_client::mount_via_daemon_classified(
                 repo_root, thread_id, mountpoint,
             );
             match classify_daemon_attempt(attempt, thread_id) {
-                DaemonAttemptResolution::Daemon => Ok(None),
-                DaemonAttemptResolution::FallbackInProcess => {
-                    let mount_repo = repo::Repository::open(repo_root)?;
-                    let mounted = spawn_mount_for_thread(mount_repo, thread_id, mountpoint)?;
-                    Ok(mounted.fskit_readiness)
-                }
+                DaemonAttemptResolution::Daemon => Ok(VirtualizedMountOutcome::daemon()),
+                DaemonAttemptResolution::FallbackInProcess => spawn_in_process_mount(
+                    repo_root.to_path_buf(),
+                    thread_id.to_string(),
+                    mountpoint.to_path_buf(),
+                ),
                 DaemonAttemptResolution::Fatal(err) => Err(err),
             }
         }
-        MountOwnership::InProcess => {
-            let mount_repo = repo::Repository::open(repo_root)?;
-            let mounted = spawn_mount_for_thread(mount_repo, thread_id, mountpoint)?;
-            Ok(mounted.fskit_readiness)
+        MountOwnership::InProcess => spawn_in_process_mount(
+            repo_root.to_path_buf(),
+            thread_id.to_string(),
+            mountpoint.to_path_buf(),
+        ),
+    }
+}
+
+fn spawn_in_process_mount(
+    repo_root: std::path::PathBuf,
+    thread_id: String,
+    mountpoint: std::path::PathBuf,
+) -> anyhow::Result<VirtualizedMountOutcome> {
+    run_mount_io("in-process-spawn", move || {
+        let mount_repo = repo::Repository::open(&repo_root)?;
+        let mounted = spawn_mount_for_thread(mount_repo, &thread_id, &mountpoint)?;
+        Ok(VirtualizedMountOutcome::in_process(mounted))
+    })
+}
+
+pub(crate) fn cleanup_virtualized_mount(
+    repo_root: &Path,
+    thread_id: &str,
+    owner: VirtualizedMountOwner,
+) -> anyhow::Result<()> {
+    match owner {
+        VirtualizedMountOwner::Daemon => {
+            crate::cli::commands::daemon_client::unmount_via_daemon(repo_root, thread_id)?;
+            Ok(())
+        }
+        VirtualizedMountOwner::InProcess(_) => {
+            let thread_id = thread_id.to_string();
+            run_mount_io("in-process-unmount", move || {
+                unmount_thread_if_mounted(&thread_id);
+                Ok(())
+            })
         }
     }
 }
@@ -1011,6 +1195,49 @@ mod tests {
         let resolution =
             classify_daemon_attempt(Ok(std::path::PathBuf::from("/tmp/some-mount")), "thread-x");
         assert!(matches!(resolution, DaemonAttemptResolution::Daemon));
+    }
+
+    #[test]
+    fn daemon_outcome_records_daemon_owner_without_fskit_report() {
+        let outcome = VirtualizedMountOutcome::daemon();
+        assert_eq!(outcome.owner, VirtualizedMountOwner::Daemon);
+        assert_eq!(outcome.fskit_readiness, None);
+    }
+
+    #[test]
+    fn in_process_outcome_preserves_backend_and_fskit_report() {
+        let readiness = FskitReadinessReport {
+            state: "mount_failed",
+            backend: "nfs",
+            action: "fell_back",
+            settings_url: Some("x-apple.systempreferences:test"),
+        };
+        let outcome = VirtualizedMountOutcome::in_process(SpawnedMount {
+            owner: VirtualizedMountOwner::InProcess(VirtualizedMountBackend::Nfs),
+            fskit_readiness: Some(readiness.clone()),
+        });
+        assert_eq!(
+            outcome.owner,
+            VirtualizedMountOwner::InProcess(VirtualizedMountBackend::Nfs)
+        );
+        assert_eq!(outcome.fskit_readiness, Some(readiness));
+    }
+
+    #[test]
+    fn run_mount_io_leaves_tokio_runtime_thread() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime");
+        let runtime_thread = std::thread::current().id();
+        let mount_thread = runtime.block_on(async move {
+            run_mount_io("test-thread", move || Ok(std::thread::current().id()))
+                .expect("mount io helper should run")
+        });
+        assert_ne!(
+            runtime_thread, mount_thread,
+            "mount IO must leave a live Tokio runtime thread"
+        );
     }
 
     /// `Unavailable` is the canonical "host can't run the daemon

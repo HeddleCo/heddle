@@ -4214,7 +4214,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Doctor(args) => match &args.command {
             None => vec!["doctor"],
             Some(DoctorCommands::Docs(_)) => vec!["doctor", "docs"],
-            Some(DoctorCommands::Schemas) => vec!["doctor", "schemas"],
+            Some(DoctorCommands::Schemas(_)) => vec!["doctor", "schemas"],
         },
         #[cfg(feature = "git-overlay")]
         Commands::GitOverlay => vec!["git-overlay"],

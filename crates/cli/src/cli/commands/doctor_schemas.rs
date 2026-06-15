@@ -31,7 +31,7 @@ use super::{
     git_overlay_health::{MachineContractCoverage, machine_contract_coverage},
     schemas::{documented_schema_verbs, schema_for_verb, schema_verbs},
 };
-use crate::cli::{Cli, should_output_json};
+use crate::cli::{Cli, DoctorSchemasArgs, should_output_json};
 
 /// One drift finding.
 #[derive(Debug, Clone, Serialize)]
@@ -204,7 +204,7 @@ impl From<MachineContractCoverage> for CommandContractSchemaCoverage {
 }
 
 /// Public entrypoint for `heddle doctor schemas`.
-pub fn cmd_doctor_schemas(cli: &Cli) -> Result<()> {
+pub fn cmd_doctor_schemas(cli: &Cli, args: DoctorSchemasArgs) -> Result<()> {
     let json = should_output_json(cli, None);
     let repo_root = cli.repo.clone().map(Ok).unwrap_or_else(|| {
         std::env::current_dir().map(|cwd| find_repo_root(&cwd).unwrap_or(cwd))
@@ -214,9 +214,46 @@ pub fn cmd_doctor_schemas(cli: &Cli) -> Result<()> {
     if !doc_path.exists() {
         return Err(anyhow!(doctor_schemas_doc_missing_advice(&repo_root)));
     }
-    let doc = std::fs::read_to_string(&doc_path)
+    let mut doc = std::fs::read_to_string(&doc_path)
         .with_context(|| format!("read {}", doc_path.display()))?;
 
+    if args.update_docs {
+        let coverage = current_command_contract_schema_coverage();
+        let updated = refresh_command_contract_coverage_sample(&doc, &coverage)
+            .with_context(|| format!("update {}", doc_path.display()))?;
+        if updated != doc {
+            std::fs::write(&doc_path, updated.as_bytes())
+                .with_context(|| format!("write {}", doc_path.display()))?;
+            doc = updated;
+            if !json {
+                println!(
+                    "Updated command-contract schema coverage sample in {}",
+                    doc_path.display()
+                );
+                println!();
+            }
+        } else if !json {
+            println!(
+                "Command-contract schema coverage sample is already current in {}",
+                doc_path.display()
+            );
+            println!();
+        }
+    }
+
+    let report = build_schema_report(&doc_path, &doc)?;
+    validate_report(&report)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        render_human(&report);
+    }
+
+    Ok(())
+}
+
+fn build_schema_report(doc_path: &Path, doc: &str) -> Result<SchemaReport> {
     let samples = extract_samples(&doc);
 
     let mut issues = Vec::new();
@@ -349,7 +386,7 @@ pub fn cmd_doctor_schemas(cli: &Cli) -> Result<()> {
         vec!["heddle doctor schemas --output json".to_string()]
     };
 
-    let report = SchemaReport {
+    Ok(SchemaReport {
         output_kind: "doctor_schemas",
         status,
         verified,
@@ -365,17 +402,64 @@ pub fn cmd_doctor_schemas(cli: &Cli) -> Result<()> {
         issues,
         command_contract_schema_coverage: coverage,
         doc_path: doc_path.display().to_string(),
+    })
+}
+
+fn current_command_contract_schema_coverage() -> CommandContractSchemaCoverage {
+    machine_contract_coverage().into()
+}
+
+fn refresh_command_contract_coverage_sample(
+    doc: &str,
+    coverage: &CommandContractSchemaCoverage,
+) -> Result<String> {
+    let (start, end) = doctor_schemas_json_sample_span(doc)?;
+    let sample_text = &doc[start..end];
+    let mut sample: Value =
+        serde_json::from_str(sample_text).context("parse doctor schemas JSON sample")?;
+    let Some(object) = sample.as_object_mut() else {
+        return Err(anyhow!(
+            "`heddle doctor schemas --output json` sample must be a JSON object"
+        ));
     };
 
-    validate_report(&report)?;
+    object.insert(
+        "summary".to_string(),
+        Value::String(coverage.summary.clone()),
+    );
+    object.insert(
+        "command_contract_schema_coverage".to_string(),
+        serde_json::to_value(coverage).context("serialize command-contract schema coverage")?,
+    );
 
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        render_human(&report);
-    }
+    let rendered =
+        serde_json::to_string_pretty(&sample).context("render doctor schemas JSON sample")?;
+    let mut updated = String::with_capacity(doc.len() + rendered.len());
+    updated.push_str(&doc[..start]);
+    updated.push_str(&rendered);
+    updated.push_str(&doc[end..]);
+    Ok(updated)
+}
 
-    Ok(())
+fn doctor_schemas_json_sample_span(doc: &str) -> Result<(usize, usize)> {
+    let heading = "## `heddle doctor schemas --output json`";
+    let heading_start = doc
+        .find(heading)
+        .ok_or_else(|| anyhow!("missing `{heading}` section"))?;
+    let after_heading = &doc[heading_start..];
+    let fence_rel = after_heading
+        .find("```json")
+        .ok_or_else(|| anyhow!("missing JSON fence under `{heading}`"))?;
+    let fence_start = heading_start + fence_rel;
+    let content_start = doc[fence_start..]
+        .find('\n')
+        .map(|newline| fence_start + newline + 1)
+        .ok_or_else(|| anyhow!("unterminated JSON fence under `{heading}`"))?;
+    let content_end = doc[content_start..]
+        .find("\n```")
+        .map(|closing| content_start + closing)
+        .ok_or_else(|| anyhow!("unterminated JSON fence under `{heading}`"))?;
+    Ok((content_start, content_end))
 }
 
 fn validate_report(report: &SchemaReport) -> Result<()> {
@@ -1117,6 +1201,50 @@ Some prose.
         assert!(fields.contains(&"command_contract_schema_coverage.summary"));
         assert!(fields.contains(&"command_contract_schema_coverage.json_commands_with_schema"));
         assert!(issues.iter().all(|issue| issue.line == 42));
+    }
+
+    #[test]
+    fn update_docs_refreshes_command_contract_coverage_sample() {
+        let coverage = current_command_contract_schema_coverage();
+        let doc = r#"
+## `heddle doctor schemas --output json`
+
+```json
+{
+  "output_kind": "doctor_schemas",
+  "status": "available",
+  "verified": true,
+  "summary": "stale",
+  "recommended_action": null,
+  "recovery_commands": [],
+  "registered_verbs": ["status"],
+  "documented_verbs": ["status"],
+  "undocumented_verbs": [],
+  "unmatched_verbs": [],
+  "passing_verbs": ["status"],
+  "issues": [],
+  "command_contract_schema_coverage": {
+    "summary": "stale",
+    "catalog_commands_total": 0
+  },
+  "doc_path": "/repo/docs/json-schemas.md"
+}
+```
+"#;
+
+        let updated =
+            refresh_command_contract_coverage_sample(doc, &coverage).expect("refresh sample");
+        let samples = extract_samples(&updated);
+        let sample = samples
+            .iter()
+            .find(|sample| sample.heading == "`heddle doctor schemas --output json`")
+            .expect("doctor schemas sample should still parse");
+
+        assert_eq!(sample.json["summary"], serde_json::json!(coverage.summary));
+        assert_eq!(
+            sample.json["command_contract_schema_coverage"],
+            serde_json::to_value(&coverage).unwrap()
+        );
     }
 
     #[test]

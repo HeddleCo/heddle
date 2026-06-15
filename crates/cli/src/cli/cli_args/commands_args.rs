@@ -123,7 +123,7 @@ pub enum DoctorCommands {
     /// sample is declared in the schema. Exits non-zero on drift.
     /// Pair with `--output json` for CI. Run alongside `heddle doctor docs`
     /// on every PR.
-    Schemas,
+    Schemas(DoctorSchemasArgs),
 }
 
 /// Arguments for `heddle doctor docs`.
@@ -139,6 +139,15 @@ pub struct DoctorDocsArgs {
     /// Scan every tracked `.md` file in the repository.
     #[arg(long)]
     pub all: bool,
+}
+
+/// Arguments for `heddle doctor schemas`.
+#[derive(Clone, Debug, clap::Args)]
+pub struct DoctorSchemasArgs {
+    /// Refresh the generated command-contract coverage sample in
+    /// `docs/json-schemas.md`, then run the normal schema drift check.
+    #[arg(long)]
+    pub update_docs: bool,
 }
 
 fn parse_confidence(s: &str) -> Result<f32, String> {

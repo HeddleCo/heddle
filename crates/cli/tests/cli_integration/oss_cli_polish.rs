@@ -11350,6 +11350,86 @@ fn doctor_schemas_reports_runtime_and_documented_coverage() {
 }
 
 #[test]
+fn doctor_schemas_update_docs_refreshes_runtime_coverage_sample() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root");
+    let source_doc_path = repo_root.join("docs/json-schemas.md");
+    let source_doc =
+        std::fs::read_to_string(&source_doc_path).expect("read workspace json schema docs");
+    let stale_doc = replace_doctor_schemas_catalog_total(&source_doc, "0");
+
+    let temp = TempDir::new().unwrap();
+    std::fs::create_dir_all(temp.path().join("docs")).unwrap();
+    let temp_doc_path = temp.path().join("docs/json-schemas.md");
+    std::fs::write(&temp_doc_path, stale_doc).unwrap();
+
+    let repo_arg = temp.path().to_str().expect("temp path should be utf8");
+    let output = heddle(
+        &[
+            "--repo",
+            repo_arg,
+            "doctor",
+            "schemas",
+            "--update-docs",
+            "--output",
+            "json",
+        ],
+        Some(temp.path()),
+    )
+    .expect("heddle doctor schemas --update-docs --output json");
+    let parsed: serde_json::Value = serde_json::from_str(&output)
+        .unwrap_or_else(|err| panic!("doctor schemas update should emit JSON: {err}: {output}"));
+
+    assert_eq!(parsed["verified"], true, "{output}");
+    let runtime_total = parsed["command_contract_schema_coverage"]["catalog_commands_total"]
+        .as_u64()
+        .expect("runtime catalog total should be numeric")
+        .to_string();
+    let updated_doc = std::fs::read_to_string(&temp_doc_path).expect("read updated docs");
+    assert_eq!(
+        doctor_schemas_catalog_total(&updated_doc),
+        runtime_total,
+        "update-docs should refresh the docs sample from runtime coverage"
+    );
+}
+
+fn doctor_schemas_catalog_total(doc: &str) -> String {
+    let heading = "## `heddle doctor schemas --output json`";
+    let field = "\"catalog_commands_total\": ";
+    let heading_start = doc.find(heading).expect("doctor schemas section");
+    let field_start = heading_start
+        + doc[heading_start..]
+            .find(field)
+            .expect("catalog total field")
+        + field.len();
+    let digit_count = doc[field_start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .count();
+    doc[field_start..field_start + digit_count].to_string()
+}
+
+fn replace_doctor_schemas_catalog_total(doc: &str, replacement: &str) -> String {
+    let heading = "## `heddle doctor schemas --output json`";
+    let field = "\"catalog_commands_total\": ";
+    let heading_start = doc.find(heading).expect("doctor schemas section");
+    let field_start = heading_start
+        + doc[heading_start..]
+            .find(field)
+            .expect("catalog total field")
+        + field.len();
+    let digit_count = doc[field_start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .count();
+    let mut updated = doc.to_string();
+    updated.replace_range(field_start..field_start + digit_count, replacement);
+    updated
+}
+
+#[test]
 fn push_without_default_remote_uses_typed_json_recovery() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();

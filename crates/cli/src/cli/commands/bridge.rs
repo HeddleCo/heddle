@@ -726,7 +726,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                 format!("{} ref(s): {}", refs.len(), refs.join(", "))
             };
             let mut progress = ImportProgress::start(cli, &repo, &scope, &source_label);
-            progress.advance("importing commits");
+            progress.begin_commit_import();
             let import_options = ImportOptions { lossy };
             let mut on_commit = |event| progress.commit_tick(event);
             let source_path = resolved
@@ -740,7 +740,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                 import_options,
                 Some(&mut on_commit),
             )?;
-            progress.advance("writing refs");
+            progress.begin_ref_write();
             progress.finish();
 
             let already_in_sync = stats.states_created == 0 && stats.commits_imported > 0;
