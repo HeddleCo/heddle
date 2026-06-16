@@ -502,16 +502,33 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             pushed = true;
             pushed_remote = Some(remote_name);
         }
+        let resolved_manually = merge_thread
+            .integration_policy_result
+            .conflicts_resolved_manually;
         clear_manual_resolution_state(&repo, &merge_thread.id)?;
         let trust = build_repository_verification_state(&repo);
         let post_land_action = integrated_land_next_action(true, pushed, &trust);
         let mut operator = OperatorCommandOutput {
             status: "landed".to_string(),
             action: OperatorAction::Land,
-            message: format!(
-                "Landed thread '{}' from a manually resolved integration state",
-                merge_thread.id
-            ),
+            // Both genuine manual resolutions and fully-automatic conflict-free
+            // integrations are adopted through this `manual_resolution_state`
+            // branch (e.g. two threads forked from the same base that touch
+            // disjoint files merge cleanly via a 3-way merge, yet still record a
+            // resolution state to mark the thread land-ready). Only the former
+            // should be reported as "manually resolved" — claiming a manual
+            // resolution for an auto-clean merge is misleading.
+            message: if resolved_manually {
+                format!(
+                    "Landed thread '{}' from a manually resolved integration state",
+                    merge_thread.id
+                )
+            } else {
+                format!(
+                    "Landed thread '{}' via an automatic integration merge",
+                    merge_thread.id
+                )
+            },
             blockers: Vec::new(),
             warnings: Vec::new(),
             next_action: post_land_action.clone(),
@@ -1061,6 +1078,9 @@ fn update_integration_policy(
         status: Some(next_status.to_string()),
         reason: Some(next_reason),
         manual_resolution_state: thread.integration_policy_result.manual_resolution_state,
+        conflicts_resolved_manually: thread
+            .integration_policy_result
+            .conflicts_resolved_manually,
     };
     manager.save(&thread)?;
     Ok(())
@@ -1075,6 +1095,7 @@ fn clear_manual_resolution_state(repo: &Repository, thread_id: &str) -> Result<(
         ))
     })?;
     thread.integration_policy_result.manual_resolution_state = None;
+    thread.integration_policy_result.conflicts_resolved_manually = false;
     Ok(manager.save(&thread)?)
 }
 

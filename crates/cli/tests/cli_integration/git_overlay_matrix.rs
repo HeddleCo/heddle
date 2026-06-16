@@ -6055,6 +6055,101 @@ fn git_overlay_matrix_stale_thread_can_recover_via_sync_then_ship() {
             "push(not requested)"
         ])
     );
+
+    // The thread refreshed cleanly via an automatic conflict-free 3-way merge
+    // (thread touched feature.txt; main advanced base.txt — disjoint paths).
+    // No human resolved anything, so the land message must NOT claim a manual
+    // resolution. HeddleCo/heddle: misleading "manually resolved" wording.
+    let message = land["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("via an automatic integration merge"),
+        "auto-clean land must report an automatic integration merge: {land}"
+    );
+    assert!(
+        !message.contains("manually resolved"),
+        "auto-clean land must not claim a manual resolution: {land}"
+    );
+}
+
+// Companion to `..._stale_thread_can_recover_via_sync_then_ship` above: that
+// test lands a *conflict-free* (automatic 3-way) integration; this one lands a
+// thread whose conflicts the operator *actually resolved by hand*. The land
+// message must differ between the two — only the genuine manual-resolution path
+// may say "from a manually resolved integration state". Both threads reach land
+// through the same `manual_resolution_state` adoption branch, so the wording is
+// driven by `conflicts_resolved_manually`, not by which branch ran.
+#[test]
+fn git_overlay_matrix_manual_conflict_land_reports_manual_resolution() {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "feature/drop-in");
+    std::fs::write(temp.path().join("conflict.txt"), "base\n").unwrap();
+    git_commit_all(temp.path(), "seed branch");
+    heddle_adopt(temp.path());
+
+    let started = json(
+        temp.path(),
+        &[
+            "--output",
+            "json",
+            "start",
+            "feature/manual",
+            "--workspace",
+            "materialized",
+        ],
+    );
+    let thread_path = std::path::PathBuf::from(started["execution_path"].as_str().unwrap());
+
+    // Both sides edit the SAME file divergently so the refresh genuinely
+    // conflicts and forces a manual resolution (disjoint edits would 3-way
+    // merge cleanly — that is the auto-clean test above).
+    std::fs::write(thread_path.join("conflict.txt"), "thread change\n").unwrap();
+    heddle(&["capture", "-m", "thread change"], Some(&thread_path)).unwrap();
+
+    std::fs::write(temp.path().join("conflict.txt"), "main change\n").unwrap();
+    json(
+        temp.path(),
+        &["--output", "json", "commit", "-m", "advance main"],
+    );
+
+    // sync materializes the conflict in the thread's own checkout and blocks.
+    let sync = json(
+        temp.path(),
+        &["--output", "json", "sync", "--thread", "feature/manual"],
+    );
+    assert_eq!(sync["status"], "blocked", "{sync}");
+
+    // The operator resolves the conflict by hand (here: take the thread side)
+    // and finishes the in-progress merge in the thread checkout.
+    let resolve = json(
+        &thread_path,
+        &["--output", "json", "resolve", "--all", "--theirs"],
+    );
+    assert_eq!(resolve["remaining"], serde_json::json!([]), "{resolve}");
+    let continued = json(&thread_path, &["--output", "json", "continue"]);
+    assert_eq!(continued["status"], "continued", "{continued}");
+
+    let after_resolve = json(
+        temp.path(),
+        &["thread", "show", "feature/manual", "--output", "json"],
+    );
+    assert_eq!(after_resolve["freshness"], "current", "{after_resolve}");
+
+    let land = json(
+        temp.path(),
+        &["--output", "json", "land", "--thread", "feature/manual", "--no-push"],
+    );
+    assert_eq!(land["status"], "landed", "{land}");
+
+    let message = land["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("from a manually resolved integration state"),
+        "a land after genuine manual conflict resolution must report the manual \
+         resolution: {land}"
+    );
+    assert!(
+        !message.contains("automatic integration merge"),
+        "a manually resolved land must not be reported as automatic: {land}"
+    );
 }
 
 #[test]

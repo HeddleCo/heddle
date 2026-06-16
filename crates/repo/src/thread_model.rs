@@ -293,6 +293,17 @@ pub struct ThreadIntegrationPolicy {
     pub reason: Option<String>,
     #[serde(default)]
     pub manual_resolution_state: Option<String>,
+    /// True only when `manual_resolution_state` was captured by an actual
+    /// human conflict resolution (`heddle sync` materialized conflicts, then
+    /// `heddle resolve` cleared them). False when the same field was set by a
+    /// fully-automatic conflict-free integration (e.g. a clean 3-way merge of
+    /// two threads that touch disjoint files). Both populate
+    /// `manual_resolution_state` to mark the thread land-ready, but only the
+    /// former should be reported as "manually resolved" to the operator.
+    /// Pre-existing on-disk records have no field and serde defaults to
+    /// `false`, so a stale clean-merge record never claims a manual resolution.
+    #[serde(default)]
+    pub conflicts_resolved_manually: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

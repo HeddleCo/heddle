@@ -1261,6 +1261,9 @@ fn mark_merge_previewed(repo: &Repository, thread_id: &str) -> Result<()> {
         status: Some("previewed".to_string()),
         reason: Some("clean merge preview established land path".to_string()),
         manual_resolution_state: thread.integration_policy_result.manual_resolution_state,
+        conflicts_resolved_manually: thread
+            .integration_policy_result
+            .conflicts_resolved_manually,
     };
     manager.save(&thread)?;
     Ok(())
