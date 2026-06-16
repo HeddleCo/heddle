@@ -3569,6 +3569,193 @@ fn export_retracts_branch_when_public_commit_is_later_embargoed() {
     );
 }
 
+/// #737 EXPORT-path regression: lock the embargo `seed → purge → save` ordering
+/// invariant on `export_scoped`.
+///
+/// `export_scoped` runs, in this exact order:
+///   1. `seed_ingest_identity_mappings_from_mirror` — re-hydrates the in-memory
+///      mapping from the PERSISTENT ingest SHA map (`.heddle/ingest/sha_map.sqlite`),
+///      so a commit imported earlier is re-mapped ChangeId→OID even on a brand-new
+///      bridge whose live mapping is empty;
+///   2. `purge_unserved_mappings` — drops every mapping whose state (or a reachable
+///      ancestor) is not served at the Public tier;
+///   3. `save_mapping_to_disk` — writes the surviving mapping to the SERVED cache
+///      `.heddle/git-bridge/bridge-mapping.json`.
+///
+/// An earlier intermediate `save_mapping_to_disk_preserving` helper snapshotted the
+/// mapping BEFORE the purge, so a seeded-but-embargoed entry resurrected into the
+/// served `bridge-mapping.json` — a visibility leak. That helper is gone; the fix
+/// relies on seed-before-purge-before-save. PR #737 added the IMPORT-path test
+/// `adopt_all_uses_ingest_mapping_without_internal_mirror`; this is its EXPORT-path
+/// analogue: an embargoed SHA that the SEED re-introduces from the ingest map must
+/// NOT survive into the served mapping after `export_scoped`.
+///
+/// The two earlier #316 tests above mint-then-purge a NATIVE tip in one run, so
+/// they never exercise the seed re-introducing an already-persisted embargoed OID.
+/// This test imports first (populating the durable ingest map), embargoes the tip,
+/// then exports on a FRESH bridge — making the seed the live reintroduction vector.
+#[test]
+fn export_purge_drops_seeded_embargoed_sha_before_serving_mapping() {
+    use chrono::Utc;
+    use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+    let heddle_temp = TempDir::new().expect("heddle temp");
+    let repo = Repository::init(heddle_temp.path()).expect("init heddle");
+
+    // A source git repo with a linear history: base A, then tip B.
+    let (_source_temp, source_repo) = init_git_repo();
+    let tree_oid = empty_tree_oid(&source_repo);
+    let git_a = commit_with_tree(&source_repo, None, tree_oid, "base", &[]);
+    let git_b = commit_with_tree(
+        &source_repo,
+        Some("refs/heads/main"),
+        tree_oid,
+        "embargoed fix",
+        &[git_a],
+    );
+    let source_workdir = source_repo.workdir().expect("workdir").to_path_buf();
+
+    // Import populates the DURABLE ingest SHA map at .heddle/ingest/sha_map.sqlite
+    // (kind=0) with git_a→change_a and git_b→change_b. This is the persistent
+    // store the export-time seed reads from on a fresh bridge.
+    let mut import_bridge = GitBridge::new(&repo);
+    import_bridge
+        .import(Some(source_workdir.as_path()))
+        .expect("import source git history");
+    let change_a = test_support::mapping(&import_bridge)
+        .get_heddle(git_a)
+        .expect("base A mapped after import");
+    let change_b = test_support::mapping(&import_bridge)
+        .get_heddle(git_b)
+        .expect("tip B mapped after import");
+    assert_ne!(change_a, change_b);
+    drop(import_bridge);
+
+    // The ingest map must actually carry B — otherwise the seed can't re-introduce
+    // it and the test would pass vacuously.
+    let ingest_map = repo
+        .git_overlay_ingest_commit_mapping()
+        .expect("read ingest commit mapping");
+    assert!(
+        ingest_map.values().any(|c| c == &change_b.to_string_full()),
+        "precondition: ingest SHA map must hold the (to-be-embargoed) tip B"
+    );
+
+    // Embargo B at the strictest Private tier (downward-closure leaves A served).
+    repo.put_state_visibility(StateVisibility {
+        state: change_b,
+        tier: VisibilityTier::Private {
+            scope_label: "sec-embargo".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Heddle Test".into(),
+            email: "heddle@test".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .expect("embargo tip B");
+
+    // Precondition: the SEED, run in isolation on a fresh bridge, WOULD re-introduce
+    // B's OID from the ingest map (the seed is visibility-blind — it maps any state
+    // that exists, embargoed or not). This proves the purge is what must remove it,
+    // not the seed declining to add it.
+    {
+        let mut seed_probe = GitBridge::new(&repo);
+        test_support::set_git_repo_path(&mut seed_probe, source_workdir.clone());
+        let mirror = test_support::open_git_repo(&seed_probe).expect("open mirror for seed probe");
+        test_support::seed_ingest_identity_mappings_from_mirror(&mut seed_probe, &mirror)
+            .expect("seed from ingest map");
+        assert_eq!(
+            test_support::mapping(&seed_probe).get_git(&change_b),
+            Some(git_b),
+            "precondition: the seed re-introduces the embargoed tip B from the ingest map"
+        );
+    }
+
+    // Export on a FRESH bridge: build_existing_mapping starts empty, the seed
+    // re-hydrates B from the durable ingest map, then the purge must drop B before
+    // save writes the served bridge-mapping.json.
+    let mut export_bridge = GitBridge::new(&repo);
+    export_all(&mut export_bridge).expect("export with seeded embargoed tip");
+
+    // In-memory: the embargoed tip is gone; the public base survives.
+    assert!(
+        test_support::mapping(&export_bridge)
+            .get_git(&change_b)
+            .is_none(),
+        "the purge must drop the seeded-but-embargoed tip B from the served mapping"
+    );
+    assert_eq!(
+        test_support::mapping(&export_bridge).get_git(&change_a),
+        Some(git_a),
+        "the still-public base A must remain served"
+    );
+
+    // The CRITICAL leak surface: the served bridge-mapping.json on disk. A
+    // pre-purge save (the resurrected `save_mapping_to_disk_preserving` bug) would
+    // leak B's ChangeId and OID here even though the in-memory purge ran.
+    let served = std::fs::read_to_string(test_support::mapping_path(&export_bridge))
+        .expect("served bridge-mapping.json must exist after export");
+    assert!(
+        !served.contains(&change_b.to_string_full()),
+        "served mapping must NOT contain the embargoed ChangeId B (seed→purge→save leak): {served}"
+    );
+    assert!(
+        !served.contains(&git_b.to_string()),
+        "served mapping must NOT contain the embargoed Git OID B (seed→purge→save leak): {served}"
+    );
+    assert!(
+        served.contains(&change_a.to_string_full()) && served.contains(&git_a.to_string()),
+        "served mapping must still publish the public base A: {served}"
+    );
+}
+
+/// #737 structural guard: fail if anyone reintroduces a pre-purge save into the
+/// export path. Pairs with `export_purge_drops_seeded_embargoed_sha_before_serving_mapping`
+/// — that test catches the LEAK; this one catches the most likely REGRESSION SHAPE
+/// (a `save_mapping_to_disk_preserving`-style helper, or a save call moved ahead of
+/// the purge) directly at the source level, before any repo fixture runs.
+#[test]
+fn export_path_saves_mapping_strictly_after_the_embargo_purge() {
+    let src_path = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/bridge/git_export.rs"
+    ));
+    let src = std::fs::read_to_string(&src_path)
+        .unwrap_or_else(|e| panic!("read git_export.rs at {}: {e}", src_path.display()));
+
+    // 1. The pre-purge snapshot helper that caused the #737 leak must stay gone.
+    assert!(
+        !src.contains("save_mapping_to_disk_preserving"),
+        "git_export.rs reintroduced a pre-purge save helper \
+         (save_mapping_to_disk_preserving) — this resurrects the #737 embargo leak"
+    );
+
+    // 2. The export path's single served-mapping save must sit AFTER the purge.
+    //    Both calls are unique in the file, so a byte-offset comparison pins the
+    //    ordering: seed (already before) → purge → save.
+    let purge_at = src
+        .find("purge_unserved_mappings(")
+        .expect("git_export.rs must call purge_unserved_mappings in the export path");
+    let save_at = src
+        .find("save_mapping_to_disk()")
+        .expect("git_export.rs must call save_mapping_to_disk in the export path");
+    assert!(
+        src.matches("save_mapping_to_disk()").count() == 1,
+        "expected exactly one save_mapping_to_disk() call site in the export path; \
+         a second one may bypass the purge"
+    );
+    assert!(
+        save_at > purge_at,
+        "save_mapping_to_disk() (offset {save_at}) must run AFTER \
+         purge_unserved_mappings() (offset {purge_at}) — saving the mapping before \
+         the embargo purge resurrects the #737 leak"
+    );
+}
+
 /// #316 / PR #528 r3 Finding 2: when a public commit is later embargoed, the
 /// purge drops its ChangeId→OID mapping AND its `refs/notes/heddle` entry must
 /// be retracted too. `collect_ref_updates` copies `refs/notes/*` to the mirror
