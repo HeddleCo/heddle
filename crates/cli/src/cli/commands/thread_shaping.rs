@@ -301,6 +301,12 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                 refreshed_thread
                     .integration_policy_result
                     .manual_resolution_state = resolved_state;
+                // The stale thread refreshed cleanly (no conflicts surfaced
+                // for the user to resolve), so the land message must not
+                // claim a manual resolution.
+                refreshed_thread
+                    .integration_policy_result
+                    .conflicts_resolved_manually = false;
                 save_thread_update_with_oplog(
                     &repo,
                     &manager,
@@ -422,6 +428,10 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
             .refs()
             .get_thread(&ThreadName::new(&thread.thread))?
             .map(|id| id.short());
+        // Reached only after the conflict preview above came back clean
+        // because the operator had captured a resolution in their checkout —
+        // this is the genuine `heddle resolve` manual-resolution path.
+        thread.integration_policy_result.conflicts_resolved_manually = true;
         save_thread_update_with_oplog(&repo, &manager, &thread, before_update, thread_state)?;
     }
     let recommended_action = if blockers.is_empty() {

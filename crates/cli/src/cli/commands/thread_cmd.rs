@@ -571,6 +571,7 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
             thread.integration_policy_result.reason =
                 Some("manual integration resolution captured".to_string());
             thread.integration_policy_result.manual_resolution_state = Some(current_state.short());
+            thread.integration_policy_result.conflicts_resolved_manually = true;
         } else {
             // Rebase replays commits one at a time and can flag a
             // conflict on intermediate states even when the *final*
@@ -594,6 +595,10 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
                         Some("thread refreshed cleanly via 3-way merge fallback".to_string());
                     thread.integration_policy_result.manual_resolution_state =
                         Some(new_state.short());
+                    // Conflict-free auto-merge of disjoint changes: no human
+                    // resolved anything, so this must NOT be reported as a
+                    // manual resolution at land time.
+                    thread.integration_policy_result.conflicts_resolved_manually = false;
                 }
                 Ok(ThreeWayMergeRefresh::Conflicted {
                     tree,
@@ -639,6 +644,8 @@ pub(crate) fn refresh_thread(repo: &Repository, thread_id: &str, _cli: &Cli) -> 
     thread.integration_policy_result.reason =
         Some("thread refreshed cleanly onto target".to_string());
     thread.integration_policy_result.manual_resolution_state = Some(current_state.short());
+    // Clean rebase/refresh onto target — automatic, nothing manually resolved.
+    thread.integration_policy_result.conflicts_resolved_manually = false;
     thread.updated_at = Utc::now();
     thread.freshness = ThreadFreshness::Current;
     save_thread_update_with_oplog(repo, &manager, &thread, before_update, current_state)?;

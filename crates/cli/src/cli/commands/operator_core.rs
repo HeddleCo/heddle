@@ -517,6 +517,7 @@ fn complete_current_thread_manual_resolution(repo: &Repository) -> Result<Option
         status: Some("manual_resolved".to_string()),
         reason: Some("manual conflict resolution captured".to_string()),
         manual_resolution_state: Some(current_state.short()),
+        conflicts_resolved_manually: true,
     };
     thread.updated_at = Utc::now();
     let thread_id = thread.id.clone();
