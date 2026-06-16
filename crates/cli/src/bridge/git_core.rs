@@ -1360,6 +1360,38 @@ impl<'a> GitBridge<'a> {
         Ok(())
     }
 
+    pub(crate) fn stage_ingest_source_in_mirror(
+        &mut self,
+        source: &Path,
+        refs: &[String],
+    ) -> GitResult<()> {
+        let source_repo = open_repo(source)?;
+        let updates = collect_import_source_ref_updates(&source_repo, refs)?;
+        if updates.is_empty() {
+            return Ok(());
+        }
+
+        self.init_mirror()?;
+        let mirror_repo = self.open_git_repo()?;
+        copy_reachable_objects(
+            &source_repo,
+            &mirror_repo,
+            updates.iter().map(|update| update.target),
+        )?;
+        apply_ref_updates(
+            &mirror_repo,
+            &updates,
+            &format!("heddle: stage ingest source from {}", source.display()),
+        )?;
+
+        let mut record = read_or_seed_mirror_managed_refs(&mirror_repo)?;
+        for update in &updates {
+            record.insert(full_ref_name(update), update.target);
+        }
+        write_mirror_managed_refs(&mirror_repo, &record)?;
+        Ok(())
+    }
+
     /// Make the checkout's real `.git` view agree with the current Heddle
     /// thread: copy exported objects from the internal mirror, advance the
     /// matching Git branch, attach HEAD, and rebuild the Git index from the
@@ -2758,6 +2790,29 @@ fn collect_ref_updates_for_fetch(
             .filter(|update| matches!(update.namespace, RefNamespace::Branch | RefNamespace::Note))
             .collect()),
     }
+}
+
+fn collect_import_source_ref_updates(
+    repo: &SleyRepository,
+    refs: &[String],
+) -> GitResult<Vec<RefUpdate>> {
+    let updates = collect_ref_updates(repo)?;
+    if refs.is_empty() {
+        return Ok(updates);
+    }
+
+    let wanted: HashSet<&str> = refs.iter().map(String::as_str).collect();
+    Ok(updates
+        .into_iter()
+        .filter(|update| {
+            matches_import_ref(update, &wanted) || matches!(update.namespace, RefNamespace::Note)
+        })
+        .collect())
+}
+
+fn matches_import_ref(update: &RefUpdate, wanted: &HashSet<&str>) -> bool {
+    let full = full_ref_name(update);
+    wanted.contains(update.name.as_str()) || wanted.contains(full.as_str())
 }
 
 fn full_ref_name(update: &RefUpdate) -> String {

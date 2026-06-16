@@ -23,6 +23,7 @@
 #![cfg(unix)]
 
 use std::{
+    io::ErrorKind,
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -32,6 +33,7 @@ use cli::client::local_daemon::{
     probe, probe_run_count,
 };
 use daemon::local_daemon::{LocalDaemonConfig, serve};
+use objects::error::HeddleError;
 use repo::Repository;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
@@ -39,18 +41,19 @@ use tokio::sync::oneshot;
 /// Spin up a local daemon for the duration of one test. Returns the
 /// repo's `.heddle/` dir, a shutdown handle, and the join handle of
 /// the daemon task.
-async fn spawn_local_daemon() -> (
+async fn spawn_local_daemon() -> Option<(
     TempDir,
     PathBuf,
     oneshot::Sender<()>,
     tokio::task::JoinHandle<()>,
-) {
+)> {
     let temp = TempDir::new().expect("temp repo dir");
     let repo = Repository::init_default(temp.path()).expect("init heddle repo");
     let heddle_dir = repo.heddle_dir().to_path_buf();
     let config = LocalDaemonConfig::from_repo(&repo);
 
     let (tx, rx) = oneshot::channel::<()>();
+    let (startup_tx, mut startup_rx) = oneshot::channel::<HeddleError>();
     let task = tokio::spawn(async move {
         let shutdown = async move {
             let _ = rx.await;
@@ -58,6 +61,7 @@ async fn spawn_local_daemon() -> (
         // The serve future borrows `repo` by value; the task owns it.
         if let Err(err) = serve(repo, config, shutdown).await {
             eprintln!("serve_local test daemon exited: {err}");
+            let _ = startup_tx.send(err);
         }
     });
 
@@ -77,15 +81,35 @@ async fn spawn_local_daemon() -> (
                 socket.exists()
             );
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::select! {
+            err = &mut startup_rx => match err {
+                Ok(err) if is_permission_denied(&err) => {
+                    eprintln!(
+                        "skipping serve_local daemon cache test: local UDS daemon startup denied: {err}"
+                    );
+                    let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+                    return None;
+                }
+                Ok(err) => panic!("local daemon exited before startup: {err}"),
+                Err(_) => panic!("local daemon exited before startup without an error"),
+            },
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
     }
 
-    (temp, heddle_dir, tx, task)
+    Some((temp, heddle_dir, tx, task))
+}
+
+fn is_permission_denied(err: &HeddleError) -> bool {
+    matches!(err, HeddleError::Io(io) if io.kind() == ErrorKind::PermissionDenied)
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(process_global)]
 async fn detect_local_daemon_warm_path_skips_the_cold_probe() {
-    let (_temp, heddle_dir, shutdown, task) = spawn_local_daemon().await;
+    let Some((_temp, heddle_dir, shutdown, task)) = spawn_local_daemon().await else {
+        return;
+    };
 
     // Prime the process-wide `DETECT_CACHE` so the first (cache-filling)
     // call doesn't count against the warm sample. After this, the entry
@@ -152,6 +176,7 @@ async fn detect_local_daemon_warm_path_skips_the_cold_probe() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial(process_global)]
 async fn channel_cache_returns_clones_without_rebuilding() {
     // The first `connect_local_daemon_channel` does the real work:
     // open the UDS, build the tonic channel, run the `Health.Check`
@@ -163,7 +188,9 @@ async fn channel_cache_returns_clones_without_rebuilding() {
     // bumps a process-wide counter, so a cache hit leaves the counter
     // untouched. (The old revision compared wall-clock ratios, which
     // flaked under CI load — issue #722.)
-    let (_temp, heddle_dir, shutdown, task) = spawn_local_daemon().await;
+    let Some((_temp, heddle_dir, shutdown, task)) = spawn_local_daemon().await else {
+        return;
+    };
 
     let builds_before = channel_build_count(&heddle_dir);
 

@@ -96,7 +96,10 @@ fn open_refuses_newer_repository_format_with_recovery_advice() {
             found,
             supported,
         } => {
-            assert_eq!(path, &config_path);
+            assert_eq!(
+                path.canonicalize().unwrap(),
+                config_path.canonicalize().unwrap()
+            );
             assert_eq!(*found, 99);
             assert_eq!(*supported, SUPPORTED_REPO_FORMAT);
         }

@@ -484,6 +484,7 @@ fn heddle_output(args: &[&str], cwd: Option<&std::path::Path>) -> Result<Output,
     let config_path = default_test_user_config_path(&dir);
     seed_default_test_user_config(&config_path, &dir)?;
     cmd.env("HEDDLE_CONFIG", config_path);
+    cmd.env("HOME", default_test_home_path(&dir));
 
     cmd.output().map_err(|e| e.to_string())
 }
@@ -534,6 +535,7 @@ fn heddle_output_with_env_removed(
     let config_path = default_test_user_config_path(&dir);
     seed_default_test_user_config(&config_path, &dir)?;
     cmd.env("HEDDLE_CONFIG", config_path);
+    cmd.env("HOME", default_test_home_path(&dir));
     cmd.env_remove("NO_COLOR");
     for key in remove_envs {
         cmd.env_remove(key);
@@ -556,6 +558,7 @@ fn heddle_output_with_stdin(
     let config_path = default_test_user_config_path(cwd);
     seed_default_test_user_config(&config_path, cwd)?;
     cmd.env("HEDDLE_CONFIG", config_path);
+    cmd.env("HOME", default_test_home_path(cwd));
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -684,18 +687,30 @@ fn seed_default_test_user_config(
 }
 
 fn default_test_user_config_path(cwd: &std::path::Path) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "heddle-cli-test-user-{}-{:016x}.toml",
+        std::process::id(),
+        test_path_hash(cwd)
+    ))
+}
+
+fn default_test_home_path(cwd: &std::path::Path) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "heddle-cli-test-home-{}-{:016x}",
+        std::process::id(),
+        test_path_hash(cwd)
+    ))
+}
+
+fn test_path_hash(path: &std::path::Path) -> u64 {
     use std::{
         collections::hash_map::DefaultHasher,
         hash::{Hash, Hasher},
     };
 
     let mut hasher = DefaultHasher::new();
-    cwd.hash(&mut hasher);
-    std::env::temp_dir().join(format!(
-        "heddle-cli-test-user-{}-{:016x}.toml",
-        std::process::id(),
-        hasher.finish()
-    ))
+    path.hash(&mut hasher);
+    hasher.finish()
 }
 
 fn git_empty_tree_oid(repo: &SleyRepository) -> ObjectId {

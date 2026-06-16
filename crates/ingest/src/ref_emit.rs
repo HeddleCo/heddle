@@ -98,6 +98,12 @@ impl<'a, R: RefBackend, S: ObjectStore> RefEmitter<'a, R, S> {
                     // slash separation prevents collisions between a
                     // local `main` and `origin/main`; refs stores
                     // slashed names as nested paths under `refs/threads/`.
+                    repo::validate_thread_id(&head.short_name).map_err(|error| {
+                        IngestError::Other(format!(
+                            "Git branch '{}' cannot be imported as a Heddle thread: {error}",
+                            head.short_name
+                        ))
+                    })?;
                     let thread_name = ThreadName::from(head.short_name.as_str());
                     if let Some(existing) = self
                         .refs

@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use objects::object::ChangeId;
+use objects::{object::ChangeId, store::ObjectStore};
 use serde::{Deserialize, Serialize};
 use sley::{ObjectFormat, ObjectId as SleyObjectId, ReferenceTarget, Repository as SleyRepository};
 
@@ -179,9 +179,31 @@ impl<'a> GitBridge<'a> {
         let cache = self.read_mapping_cache_from_disk()?;
         let live_cache = self.mapping.clone();
         let mut index = GitIdentityIndex::from_notes(&repo)?;
-        index.fill_gaps_from_cache(&cache);
         index.fill_gaps_from_cache(&live_cache);
+        index.fill_gaps_from_cache(&cache);
         self.mapping = index.into_mapping();
+        Ok(())
+    }
+
+    pub(crate) fn seed_ingest_identity_mappings_from_mirror(
+        &mut self,
+        repo: &SleyRepository,
+    ) -> GitResult<()> {
+        let ingest = self.heddle_repo.git_overlay_ingest_commit_mapping()?;
+        for (git_sha, change_id) in ingest {
+            let change_id = ChangeId::parse(&change_id)?;
+            if self.heddle_repo.store().get_state(&change_id)?.is_none() {
+                continue;
+            }
+            if self.mapping.has_heddle(&change_id) {
+                continue;
+            }
+            let git_oid = parse_stored_git_oid(&git_sha)?;
+            if self.mapping.has_git(git_oid) || repo.read_object(&git_oid).is_err() {
+                continue;
+            }
+            self.mapping.insert(change_id, git_oid);
+        }
         Ok(())
     }
 

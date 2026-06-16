@@ -36,6 +36,8 @@ fn ingest_into_bridge(
     let target = test_support::heddle_repo(bridge).root();
     ingest::import_git_into_with_options(source, target, ingest::ImportOptions { lossy })
         .map_err(|error| error.to_string())?;
+    test_support::stage_ingest_source_in_mirror(bridge, source, &[])
+        .map_err(|error| error.to_string())?;
     test_support::build_existing_mapping(bridge, Some(source)).map_err(|error| error.to_string())
 }
 

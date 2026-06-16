@@ -150,6 +150,13 @@ where
 }
 
 fn performance_budget(release: Duration, debug: Duration) -> Duration {
+    if coverage_instrumented() {
+        // Coverage instrumentation distorts wall-clock perf checks enough that
+        // the production/debug budget is no longer a meaningful signal. Keep
+        // these bounded so accidental hangs still fail loudly, but don't fail
+        // CI coverage because llvm-cov added subprocess overhead.
+        return debug.saturating_mul(3);
+    }
     if cfg!(debug_assertions) {
         // Comprehensive perf checks run in the default parallel harness beside
         // other subprocess-heavy tests. Keep debug-mode budgets loose enough to
@@ -159,4 +166,8 @@ fn performance_budget(release: Duration, debug: Duration) -> Duration {
     } else {
         release
     }
+}
+
+fn coverage_instrumented() -> bool {
+    std::env::var_os("LLVM_PROFILE_FILE").is_some() || std::env::var_os("CARGO_LLVM_COV").is_some()
 }

@@ -208,6 +208,37 @@ fn second_fs_store_sees_packs_installed_after_its_construction() {
 }
 
 #[test]
+fn list_states_sees_packs_installed_after_store_construction() {
+    let temp_dir = TempDir::new().unwrap();
+    let heddle_dir = temp_dir.path().join(".heddle");
+
+    let store_a = FsStore::new(&heddle_dir);
+    store_a.init().unwrap();
+    let store_b = FsStore::new(&heddle_dir);
+
+    assert!(store_a.list_states().unwrap().is_empty());
+
+    let tree_hash = ContentHash::compute(b"packed tree");
+    let attribution = Attribution::human(Principal::new("Pack Test", "pack@example.com"));
+    let state = State::new(tree_hash, vec![], attribution).with_intent("packed state");
+
+    let mut builder = PackBuilder::new(CompressionConfig::disabled());
+    builder.add_id(
+        PackObjectId::ChangeId(state.change_id),
+        PackObjectType::State,
+        rmp_serde::to_vec_named(&state).unwrap(),
+    );
+    let (pack_data, index_data, _) = builder.build().unwrap();
+    store_b.install_pack(&pack_data, &index_data).unwrap();
+
+    assert_eq!(
+        store_a.list_states().unwrap(),
+        vec![state.change_id],
+        "stale pack manager must refresh before enumerating packed states"
+    );
+}
+
+#[test]
 fn put_blobs_packed_with_empty_input_is_a_noop() {
     // Snapshots that re-snapshot an unchanged worktree end up with
     // an empty pending list. Calling through must not write a

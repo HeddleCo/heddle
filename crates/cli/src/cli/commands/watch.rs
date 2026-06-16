@@ -326,28 +326,46 @@ fn tail_loop(
                 // Coalesce a burst of modify events: drain anything
                 // already queued before re-reading the file.
                 while let Ok(_extra) = rx.try_recv() {}
-                let entries = drain_pending(heddle_dir, watermark, repo, None, MAX_TAIL_WINDOW)?;
-                for emitted in &entries {
-                    renderer.emit(emitted);
-                }
-                if let Some(last) = entries.iter().map(|e| e.entry.id).max() {
-                    watermark = last;
-                }
-                iterations += 1;
-                if max_iterations.is_some_and(|limit| iterations >= limit) {
-                    break;
+                if drain_and_emit_pending(heddle_dir, repo, renderer, &mut watermark)? {
+                    iterations += 1;
+                    if max_iterations.is_some_and(|limit| iterations >= limit) {
+                        break;
+                    }
                 }
             }
             Ok(Err(_err)) => {
                 // notify-side error (rename, vanished file). Keep
                 // looping; the next modify will recover.
             }
-            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Timeout) => {
+                if drain_and_emit_pending(heddle_dir, repo, renderer, &mut watermark)? {
+                    iterations += 1;
+                    if max_iterations.is_some_and(|limit| iterations >= limit) {
+                        break;
+                    }
+                }
+            }
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
 
     Ok(())
+}
+
+fn drain_and_emit_pending(
+    heddle_dir: &Path,
+    repo: &Repository,
+    renderer: &Renderer,
+    watermark: &mut u64,
+) -> Result<bool> {
+    let entries = drain_pending(heddle_dir, *watermark, repo, None, MAX_TAIL_WINDOW)?;
+    for emitted in &entries {
+        renderer.emit(emitted);
+    }
+    if let Some(last) = entries.iter().map(|e| e.entry.id).max() {
+        *watermark = last;
+    }
+    Ok(!entries.is_empty())
 }
 
 /// Returns `true` for the notify event kinds that indicate the

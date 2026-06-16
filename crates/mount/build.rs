@@ -65,6 +65,8 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let static_lib = out_dir.join("libHeddleFSKit.a");
     let object = out_dir.join("HeddleFSKit.o");
+    let clang_module_cache = out_dir.join("clang-module-cache");
+    std::fs::create_dir_all(&clang_module_cache).expect("failed to create clang module cache dir");
 
     // `-parse-as-library`: this is a library, not a script with a
     //   top-level entry point.
@@ -98,9 +100,17 @@ fn main() {
             "-import-objc-header",
         ])
         .arg(&bridging)
+        .arg("-module-cache-path")
+        .arg(&clang_module_cache)
+        .arg("-Xcc")
+        .arg(format!(
+            "-fmodules-cache-path={}",
+            clang_module_cache.display()
+        ))
         .args(["-o"])
         .arg(&object)
         .arg(&swift_src)
+        .env("CLANG_MODULE_CACHE_PATH", &clang_module_cache)
         .status()
         .expect("failed to invoke swiftc; install Xcode command line tools");
     assert!(

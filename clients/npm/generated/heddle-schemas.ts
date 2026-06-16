@@ -140,7 +140,6 @@ export interface AdoptSchema {
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
   output_kind: "adopt";
-  partial_mirror_refs: number;
   path: string;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
@@ -327,15 +326,6 @@ export interface BlameSchema {
   status?: string | null;
 }
 
-export interface BridgeBackfillFidelitySchema {
-  idempotency_status?: string | null;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  output_kind: "bridge_backfill_fidelity";
-  replayed?: boolean | null;
-  [key: string]: unknown;
-}
-
 export interface BridgeExportSchema {
   branches: ExportedRefSchema[];
   commits_total: number;
@@ -348,14 +338,6 @@ export interface BridgeExportSchema {
   states_exported: number;
   tags: ExportedRefSchema[];
   threads_synced: number;
-}
-
-export interface BridgeGitIngestSchema {
-  idempotency_status?: string | null;
-  op_id?: string | null;
-  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
-  replayed?: boolean | null;
-  [key: string]: unknown;
 }
 
 export interface BridgeGitReasonSchema {
@@ -403,11 +385,10 @@ export interface BridgeImportSchema {
   branches_synced: number;
   commits_imported: number;
   idempotency_status?: string | null;
-  lossy_entries: LossyGitImportEntrySchema[];
+  lossy_entries: LossyImportEntrySchema[];
   op_id?: string | null;
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
   output_kind: "bridge_git_import";
-  partial_mirror_refs: number;
   recommended_action?: string | null;
   recommended_action_template?: ActionTemplateSchema | null;
   recovery_commands: string[];
@@ -1247,7 +1228,7 @@ export interface LogSchema {
   storage_model: string;
 }
 
-export interface LossyGitImportEntrySchema {
+export interface LossyImportEntrySchema {
   action: string;
   git_object?: string | null;
   path: string;
@@ -2761,10 +2742,8 @@ export interface HeddleVerbOutputs {
   "agent serve": AgentServeSchema;
   "agent status": AgentDaemonStatusSchema;
   "agent stop": AgentStopSchema;
-  "bridge backfill-fidelity": BridgeBackfillFidelitySchema;
   "bridge git export": BridgeExportSchema;
   "bridge git import": BridgeImportSchema;
-  "bridge git ingest": BridgeGitIngestSchema;
   "bridge git init": BridgeInitSchema;
   "bridge git pull": BridgePullSchema;
   "bridge git push": BridgePushSchema;
@@ -2932,10 +2911,8 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "agent serve",
   "agent status",
   "agent stop",
-  "bridge backfill-fidelity",
   "bridge git export",
   "bridge git import",
-  "bridge git ingest",
   "bridge git init",
   "bridge git pull",
   "bridge git push",

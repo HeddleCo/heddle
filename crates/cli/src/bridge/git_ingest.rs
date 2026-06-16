@@ -30,7 +30,10 @@ pub(crate) fn import_git_history(
         progress,
     )
     .map_err(map_ingest_error)?;
+    bridge.stage_ingest_source_in_mirror(source, refs)?;
     bridge.build_existing_mapping(Some(source))?;
+    let mirror_repo = bridge.open_git_repo()?;
+    bridge.seed_ingest_identity_mappings_from_mirror(&mirror_repo)?;
     Ok(import_stats_from_ingest(stats))
 }
 

@@ -11,7 +11,7 @@ use objects::{
 use repo::{AudienceTier, Repository as HeddleRepository, visible};
 use sley::{
     CommitObject, EntryKind, GitObjectType, ObjectFormat, ObjectId, RefPrecondition,
-    Repository as SleyRepository, Signature, plumbing::sley_object::EncodedObject,
+    ReferenceTarget, Repository as SleyRepository, Signature, plumbing::sley_object::EncodedObject,
 };
 
 use crate::bridge::{
@@ -320,6 +320,7 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     let repo = bridge.open_git_repo()?;
     bridge.mapping.retain_git_objects(&repo);
     bridge.seed_git_checkpoint_mappings_from_checkout(&repo)?;
+    bridge.seed_ingest_identity_mappings_from_mirror(&repo)?;
 
     // The desired/actual ref sets span the WHOLE mirror, not just this export's
     // scoped thread: a prior all-thread export can leave `refs/heads`/`refs/tags`
@@ -728,7 +729,8 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
 
     for name in &tag_names {
         let tag_ref = format!("refs/tags/{name}");
-        let existing_oid = branch_tip_oid(&repo, &tag_ref);
+        let existing_raw_oid = direct_ref_oid(&repo, &tag_ref);
+        let existing_oid = existing_raw_oid.and_then(|oid| peel_to_commit_oid(&repo, oid));
         let desired_oid = desired.get(&tag_ref).copied();
         let in_scope = thread.is_none();
         // A live marker whose served target was NOT minted into the mapping this
@@ -746,6 +748,19 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
             }
             None => false,
         };
+        if let (Some(desired), Some(raw), Some(peeled)) =
+            (desired_oid, existing_raw_oid, existing_oid)
+            && raw != desired
+            && peeled == desired
+        {
+            managed_record.insert(tag_ref.clone(), raw);
+            stats.markers_synced += 1;
+            stats.tags.push(ExportedRef {
+                name: name.clone(),
+                tip: raw,
+            });
+            continue;
+        }
         match reconcile_ref(
             ReconcileNs::Tag,
             desired_oid,
@@ -981,6 +996,13 @@ fn branch_tip_oid(repo: &SleyRepository, ref_name: &str) -> Option<ObjectId> {
         .ok()
         .flatten()?;
     peel_to_commit_oid(repo, oid)
+}
+
+fn direct_ref_oid(repo: &SleyRepository, ref_name: &str) -> Option<ObjectId> {
+    match repo.find_reference(ref_name).ok()??.target {
+        ReferenceTarget::Direct(oid) => Some(oid),
+        ReferenceTarget::Symbolic(_) => None,
+    }
 }
 
 fn peel_to_commit_oid(repo: &SleyRepository, mut oid: ObjectId) -> Option<ObjectId> {

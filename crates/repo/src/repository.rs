@@ -1523,7 +1523,7 @@ impl Repository {
             .collect())
     }
 
-    fn git_overlay_ingest_commit_mapping(&self) -> Result<HashMap<String, String>> {
+    pub fn git_overlay_ingest_commit_mapping(&self) -> Result<HashMap<String, String>> {
         let path = self.heddle_dir.join("ingest").join("sha_map.sqlite");
         if !path.exists() {
             return Ok(HashMap::new());

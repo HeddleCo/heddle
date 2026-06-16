@@ -189,17 +189,24 @@ mod tests {
         fs,
         panic::{AssertUnwindSafe, catch_unwind},
         path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::*;
+
+    static TEST_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time before unix epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("{prefix}-{unique}-{}", std::process::id()))
+        let counter = TEST_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "{prefix}-{unique}-{}-{counter}",
+            std::process::id()
+        ))
     }
 
     fn with_home_dir<T>(home: PathBuf, f: impl FnOnce() -> T) -> T {
