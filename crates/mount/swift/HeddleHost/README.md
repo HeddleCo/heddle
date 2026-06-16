@@ -82,7 +82,7 @@ Possible results:
 
 | State | What CLI does |
 |---|---|
-| `Ready` (line starts with `+`) | Runs `mount -t heddle -o t=<thread> <repo> <mp>` via the kernel route |
+| `Ready` (line starts with `+`) | Runs `mount -F -t heddle -o t=<thread> <repo> <mp>` via the kernel route; `-F` forces FSKit routing, and the extension declares `-o` in `FSActivateOptionSyntax` and parses `t=` from that payload |
 | `NeedsApproval` (line starts with `-`) | Prints a setup block with `System Settings → General → Login Items & Extensions → File System Extensions → enable 'Heddle'`, opens System Settings with a version-aware deep link, polls readiness for about 60 seconds, then mounts via FSKit as soon as the probe reports `Ready`; if the timer elapses, falls back to NFS for this run |
 | `NotInstalled` (no line for our ID) | Prints a one-line host-app install hint, then falls back to NFS |
 | `UnsupportedMacOS` (macOS < 26.0) | Prints an older-macOS notice, then falls back to NFS because URL-backed FSKit resources are unavailable |
@@ -194,25 +194,21 @@ static func stableUUID(for resource: FSResource) -> UUID {
 
 ### 3. `FSRequiresSecurityScopedPathURLResources = false`
 
-Setting this to `true` in `Info.plist` breaks `mount -t heddle`
+Setting this to `true` in `Info.plist` breaks `mount -F -t heddle`
 because mount(8) doesn't go through the security-scoped URL path.
 Leave it `false` and call `startAccessingSecurityScopedResource()`
 on the URL inside `loadResource` if you need broader sandbox grants.
 
-### 4. Path-access entitlements: single string, not array
+### 4. Do not request broad temporary path exceptions
 
-On macOS 26.4, the array form of
-`com.apple.security.temporary-exception.files.absolute-path.read-write`
-is silently ignored. The single-string form works:
-
-```xml
-<key>com.apple.security.temporary-exception.files.absolute-path.read-write</key>
-<string>/</string>
-```
-
-Cross-referenced with Apple Developer Forums thread 808246. This is
-the only known reliable shape for granting an FSKit module
-read/write across arbitrary paths on 26.4.
+Developer ID provisioning profiles for Heddle's FSKit extension do
+not authorize the sandbox temporary-exception path entitlements. If
+the extension is signed with
+`com.apple.security.temporary-exception.files.*`, PlugInKit may still
+register the bundle, but macOS can reject the extension binary at
+validation/launch time. Keep repository access on the FSKit resource
+URL path and activate any security-scoped grant with
+`startAccessingSecurityScopedResource()` inside `loadResource`.
 
 ### 5. **Both** host and extension need `com.apple.developer.fskit.fsmodule`
 
@@ -226,8 +222,8 @@ both provisioning profiles include the FSKit capability.
 
 You cannot disable `com.apple.security.app-sandbox` once the FSKit
 capability is enabled; Xcode silently re-adds it on every build.
-Plan path access through the temporary-exception entitlement (above)
-rather than fighting the sandbox.
+Plan path access through the FSKit resource URL rather than broad
+sandbox temporary exceptions.
 
 ### 7. Settings UI bug: app-grouped view doesn't toggle on 26.4
 
@@ -332,7 +328,7 @@ first stable release that publishes `Heddle-v<version>-macos-universal.dmg`.
 | Rust C ABI bridge | `heddle_fskit_open_thread` connects extension → mount core |
 | Readiness probe | `pluginkit`-based, wired into `mount_lifecycle.rs` and host onboarding |
 | NFS fallback | Always-available, picks up when FSKit isn't ready |
-| End-to-end mount + read | Working on macOS 26.4 (`mount -t heddle … && cat <mp>/file` succeeds) |
+| End-to-end mount + read | Working on macOS 26.4 (`mount -F -t heddle … && cat <mp>/file` succeeds) |
 | `mtime` on returned items | Wired through the C ABI; shows mount bootstrap time in `ls -l` |
 | `-o t=<thread>` option parsing | Parsed from `FSTaskOptions.taskOptions` in `loadResource`; defaults to `"main"` |
 | Entitlement request | Not yet filed |

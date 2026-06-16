@@ -6,8 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use objects::object::ThreadName;
-use objects::worktree::WorktreeStatus;
+use objects::{object::ThreadName, worktree::WorktreeStatus};
 use refs::Head;
 use repo::{
     CommitGraphIndex, GitOverlayBranchTip, GitOverlayImportHint, GitOverlayOutOfBandCommits,
@@ -1143,7 +1142,7 @@ pub(crate) fn unimported_git_history_advice(
         format!("Run `{primary_command}` before retrying `heddle {action}`."),
         format!("Git branch(es) waiting for Heddle import: {branch_summary}"),
         format!(
-            "{action} would capture or checkpoint the current tree before Heddle has adopted the existing Git history"
+            "{action} would write new Heddle state before Heddle has adopted the existing Git history"
         ),
         "Git refs, Heddle refs, and worktree files were left unchanged",
         primary_command.clone(),
@@ -2464,12 +2463,7 @@ pub(crate) fn remote_drift_decision(
             }
             let import = canonical_bridge_import_ref_command(upstream);
             let reconcile = canonical_bridge_reconcile_ref_preview_command(None, upstream);
-            let imported = repo
-                .refs()
-                .get_thread(&ThreadName::new(upstream))
-                .ok()
-                .flatten()
-                .is_some();
+            let imported = upstream_thread_matches_current_git_tip(repo, upstream);
             RemoteDriftDecision {
                 status,
                 verified_as_clean: false,
@@ -2494,6 +2488,29 @@ pub(crate) fn remote_drift_decision(
             requires_clean_worktree: false,
         },
     }
+}
+
+fn upstream_thread_matches_current_git_tip(repo: &Repository, upstream: &str) -> bool {
+    let Some(thread_tip) = repo
+        .refs()
+        .get_thread(&ThreadName::new(upstream))
+        .ok()
+        .flatten()
+    else {
+        return false;
+    };
+    repo.git_overlay_mapped_change_for_branch(upstream)
+        .or(Ok(None))
+        .and_then(|mapped| {
+            if mapped.is_some() {
+                Ok(mapped)
+            } else {
+                repo.git_overlay_mapped_change_for_remote_tracking_ref(upstream)
+            }
+        })
+        .ok()
+        .flatten()
+        .is_some_and(|mapped_tip| mapped_tip == thread_tip)
 }
 
 fn remote_untracked_action(remote: &GitRemoteTrackingStatus) -> String {
@@ -3759,7 +3776,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_drift_decision_prefers_import_until_upstream_thread_exists() {
+    fn remote_drift_decision_prefers_import_until_upstream_thread_matches_git_tip() {
         let (_temp, repo) = test_repo();
         let diverged = remote("main", "origin/main", 1, 1, "heddle fetch");
 
@@ -3781,14 +3798,17 @@ mod tests {
         repo.refs()
             .set_thread(&ThreadName::new("origin/main"), &head)
             .unwrap();
-        let imported = remote_drift_decision(&repo, &diverged);
+        let stale_thread = remote_drift_decision(&repo, &diverged);
         assert_eq!(
-            imported.primary_action.as_deref(),
-            Some("heddle bridge git reconcile --ref origin/main --preview")
+            stale_thread.primary_action.as_deref(),
+            Some("heddle bridge git import --ref origin/main")
         );
         assert_eq!(
-            imported.recovery_commands,
-            vec!["heddle bridge git reconcile --ref origin/main --preview"]
+            stale_thread.recovery_commands,
+            vec![
+                "heddle bridge git import --ref origin/main",
+                "heddle bridge git reconcile --ref origin/main --preview"
+            ]
         );
     }
 
@@ -3838,8 +3858,7 @@ mod tests {
     /// new file.
     #[test]
     fn plain_git_worktree_status_preserves_staged_removal_alongside_untracked() {
-        use std::path::PathBuf;
-        use std::process::Command;
+        use std::{path::PathBuf, process::Command};
 
         let dir = TempDir::new().expect("tempdir");
         let root = dir.path();

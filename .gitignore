@@ -9,3 +9,7 @@
 .vscode/
 publish-0.2.0.log
 .zed/
+
+# coverage report (never commit)
+lcov.info
+*.lcov

@@ -1,57 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared utilities and helpers for Git bridge operations.
 
-use std::collections::HashMap;
-
+use ingest::LossyImportEntry;
 use objects::object::{State, Status};
-use serde::{Deserialize, Serialize};
 use sley::ObjectId as GitObjectId;
 
 use super::git_core::GitBridge;
 
 impl<'a> GitBridge<'a> {
-    /// Parse trailers from a commit message.
-    pub(crate) fn parse_trailers(message: &str) -> HashMap<String, String> {
-        let mut trailers = HashMap::new();
-
-        for line in message.lines().rev() {
-            if line.is_empty() {
-                break;
-            }
-
-            if let Some(pos) = line.find(':') {
-                let key = &line[..pos];
-                let value = line[pos + 1..].trim();
-
-                if key.starts_with("Heddle-") {
-                    trailers.insert(key.to_string(), value.to_string());
-                }
-            } else if !line.trim().is_empty() {
-                break;
-            }
-        }
-
-        trailers
-    }
-
-    /// Extract intent (commit subject) from message.
-    pub(crate) fn extract_intent(message: &str) -> Option<String> {
-        let lines: Vec<&str> = message.lines().collect();
-
-        for line in &lines {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if trimmed.starts_with("Heddle-") && trimmed.contains(':') {
-                break;
-            }
-            return Some(trimmed.to_string());
-        }
-
-        None
-    }
-
     /// Build a Git commit message from a Heddle state.
     ///
     /// Phase B (post-2026-05) onward: this is just the state's intent text,
@@ -60,11 +16,6 @@ impl<'a> GitBridge<'a> {
     /// SHAs match the SHAs of imported commits — a prerequisite for any
     /// bidirectional sync where heddle and an upstream git host (e.g.
     /// GitHub) need to agree on which commits already exist.
-    ///
-    /// The legacy `Heddle-Change-Id:` / `Heddle-Status:` / `Heddle-Agent:` /
-    /// `Heddle-Confidence:` trailers are no longer written. The parser
-    /// (`parse_trailers`) is retained so historical commits that still
-    /// carry trailers can be read; see `git_import::resolve_identity`.
     pub(crate) fn build_commit_message(state: &State) -> String {
         // Status is intentionally not surfaced here — published-vs-draft
         // belongs in heddle's note, not the commit message body, since
@@ -217,147 +168,18 @@ pub struct ImportStats {
     /// currently requires the target to be a commit. The full-fidelity
     /// fix is to extend the marker model with a non-commit-ref variant;
     /// until then we record them here so callers can surface what was
-    /// skipped (and so a future export can restore them by reading the
-    /// preserved git mirror).
-    pub skipped_non_commit_refs: Vec<SkippedRef>,
-    /// Refs whose object reachability could not be fully copied into
-    /// the bridge mirror — see [`PartialMirrorRef`]. SHA-stable export
-    /// is degraded for these refs.
-    pub partial_mirror_refs: Vec<PartialMirrorRef>,
+    /// skipped.
+    pub skipped_non_commit_refs: usize,
     /// Git tree entries converted under an explicit lossy import opt-in.
-    pub lossy_entries: Vec<LossyGitImportEntry>,
-}
-
-/// Policy knobs for bridge git import.
-#[derive(Debug, Clone, Default, Eq, PartialEq)]
-pub struct GitImportOptions {
-    pub lossy: bool,
-}
-
-/// One git tree entry that bridge import could not represent losslessly.
-#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
-pub struct LossyGitImportEntry {
-    pub path: String,
-    pub git_object: Option<String>,
-    pub action: LossyGitImportAction,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
-pub enum LossyGitImportAction {
-    Dropped,
-    Converted,
-}
-
-impl LossyGitImportAction {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            LossyGitImportAction::Dropped => "dropped",
-            LossyGitImportAction::Converted => "converted",
-        }
-    }
-}
-
-impl LossyGitImportEntry {
-    pub fn dropped(path: String, git_object: Option<String>, reason: impl Into<String>) -> Self {
-        Self {
-            path,
-            git_object,
-            action: LossyGitImportAction::Dropped,
-            reason: reason.into(),
-        }
-    }
-
-    pub fn converted(path: String, git_object: Option<String>, reason: impl Into<String>) -> Self {
-        Self {
-            path,
-            git_object,
-            action: LossyGitImportAction::Converted,
-            reason: reason.into(),
-        }
-    }
-
-    pub fn summary_line(&self) -> String {
-        match &self.git_object {
-            Some(object) => format!(
-                "{} {} ({}): {}",
-                self.action.as_str(),
-                self.path,
-                object,
-                self.reason
-            ),
-            None => format!("{} {}: {}", self.action.as_str(), self.path, self.reason),
-        }
-    }
-}
-
-/// A ref that pointed at a non-commit object during import.
-#[derive(Debug, Clone)]
-pub struct SkippedRef {
-    pub name: String,
-    pub peeled_oid: String,
-    pub peeled_kind: String,
-}
-
-/// A ref whose object reachability could not be fully copied into the
-/// bridge mirror — typically because the source ODB is missing some
-/// object referenced from the ref's commit graph (a real-world failure
-/// mode in repos like `expressjs/express` and `git-lfs/git-lfs`, where
-/// pack data references objects that aren't actually present and that
-/// `git fsck` doesn't catch because they're not reachable from any
-/// other ref).
-///
-/// SHA-stable export will fall back to recreating commits from heddle
-/// state for the affected refs; their git_oids in the destination will
-/// be heddle-derived rather than verbatim copies.
-#[derive(Debug, Clone)]
-pub struct PartialMirrorRef {
-    pub name: String,
-    pub error: String,
+    pub lossy_entries: Vec<LossyImportEntry>,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_trailers() {
-        let message = r#"Add feature X
-
-This is the body.
-
-Heddle-Change-Id: hd-abc123
-Heddle-Agent: anthropic/claude
-Heddle-Confidence: 0.95
-"#;
-
-        let trailers = GitBridge::parse_trailers(message);
-        assert_eq!(
-            trailers.get("Heddle-Change-Id"),
-            Some(&"hd-abc123".to_string())
-        );
-        assert_eq!(
-            trailers.get("Heddle-Agent"),
-            Some(&"anthropic/claude".to_string())
-        );
-        assert_eq!(trailers.get("Heddle-Confidence"), Some(&"0.95".to_string()));
-    }
-
-    #[test]
-    fn test_extract_intent() {
-        let message = "Add feature X\n\nBody here\n\nHeddle-Change-Id: hd-abc123";
-        assert_eq!(
-            GitBridge::extract_intent(message),
-            Some("Add feature X".to_string())
-        );
-
-        let message2 = "Heddle-Change-Id: hd-abc123";
-        assert_eq!(GitBridge::extract_intent(message2), None);
-    }
-
     // ── R6 — bridge footer ─────────────────────────────────────────────
-
     use objects::object::{Attribution, ChangeId, ContentHash, Principal};
+
+    use super::*;
 
     fn sample_state() -> State {
         State::new_snapshot(

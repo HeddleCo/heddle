@@ -1238,8 +1238,9 @@ mod git_overlay_config_atomic_tests {
     //! after the helper returns, the file is the full new content; a
     //! prior interrupted write that left the file partially-written
     //! must not leak back into the result.
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     fn init_dot_git(root: &Path) {
         fs::create_dir_all(root.join(".git")).unwrap();

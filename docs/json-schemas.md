@@ -198,37 +198,37 @@ in-progress operation.
       "status": "available",
       "verified_scope": "everyday_and_agent",
       "advanced_scope": "advanced_internal_admin",
-      "summary": "190 command(s), 160 JSON command(s), 99 mutating command(s), 98 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 51 accepted opaque schema(s) outside clean verification",
-      "catalog_commands_total": 190,
-      "catalog_mutating_commands_total": 99,
-      "json_commands_total": 160,
-      "json_mutating_commands_total": 98,
+      "summary": "188 command(s), 158 JSON command(s), 97 mutating command(s), 96 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 49 accepted opaque schema(s) outside clean verification",
+      "catalog_commands_total": 188,
+      "catalog_mutating_commands_total": 97,
+      "json_commands_total": 158,
+      "json_mutating_commands_total": 96,
       "json_commands_with_schema": 109,
-      "json_commands_with_accepted_opaque_schema": 51,
+      "json_commands_with_accepted_opaque_schema": 49,
       "json_commands_without_schema": 0,
       "verified_scope_json_commands_total": 37,
       "verified_scope_json_commands_with_schema": 37,
       "verified_scope_json_commands_with_accepted_opaque_schema": 0,
       "verified_scope_json_commands_without_schema": 0,
-      "advanced_scope_json_commands_total": 123,
-      "advanced_scope_json_commands_with_accepted_opaque_schema": 51,
-      "mutating_commands_total": 98,
+      "advanced_scope_json_commands_total": 121,
+      "advanced_scope_json_commands_with_accepted_opaque_schema": 49,
+      "mutating_commands_total": 96,
       "mutating_commands_with_schema": 69,
-      "mutating_commands_with_accepted_opaque_schema": 29,
+      "mutating_commands_with_accepted_opaque_schema": 27,
       "mutating_commands_without_schema": 0,
       "verified_scope_mutating_commands_total": 23,
       "verified_scope_mutating_commands_with_schema": 23,
       "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
       "verified_scope_mutating_commands_without_schema": 0,
-      "advanced_scope_mutating_commands_total": 75,
-      "advanced_scope_mutating_commands_with_accepted_opaque_schema": 29,
-      "schema_verbs_total": 165,
-      "documented_schema_verbs_total": 165,
+      "advanced_scope_mutating_commands_total": 73,
+      "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
+      "schema_verbs_total": 163,
+      "documented_schema_verbs_total": 163,
       "undocumented_schema_verbs_total": 0,
-      "opaque_schema_verbs_total": 51,
-      "accepted_opaque_schema_verbs_total": 51,
+      "opaque_schema_verbs_total": 49,
+      "accepted_opaque_schema_verbs_total": 49,
       "unaccepted_opaque_schema_verbs_total": 0,
-      "supports_op_id_total": 93,
+      "supports_op_id_total": 91,
       "jsonl_commands_total": 4,
       "missing_schema_examples": [],
       "missing_mutating_schema_examples": [],
@@ -1719,7 +1719,6 @@ imports the requested Git refs, and returns the post-adoption verification proof
   "branches_synced": 2,
   "tags_synced": 1,
   "skipped_non_commit_refs": 0,
-  "partial_mirror_refs": 0,
   "already_in_sync": false
 }
 ```
@@ -1732,7 +1731,7 @@ imports the requested Git refs, and returns the post-adoption verification proof
 | `path` | string | required | Path to the Heddle sidecar data. |
 | `refs` | array<string> | required | Refs explicitly requested with `--ref`; empty means all local refs were imported. |
 | `commits_imported`, `states_created`, `branches_synced`, `tags_synced` | int | required | Git import counts. |
-| `skipped_non_commit_refs`, `partial_mirror_refs` | int | required | Degraded import counts that may require inspection. |
+| `skipped_non_commit_refs` | int | required | Non-commit Git refs skipped during import. |
 | `verification` | object | required | Post-adoption repository verification proof. |
 
 ---
@@ -2291,7 +2290,7 @@ key naming:
 |------|-------|
 | `init` | `{"initialized": true, "path": "..."}` |
 | `export` | `{"states_exported": N, "threads_synced": N, "markers_synced": N, "destination": "..."}` |
-| `import` | `{"output_kind": "bridge_git_import", "commits_imported": N, "states_created": N, "branches_synced": N, "tags_synced": N, "skipped_non_commit_refs": N, "partial_mirror_refs": N, "lossy_entries": [], "already_in_sync": false}` |
+| `import` | `{"output_kind": "bridge_git_import", "commits_imported": N, "states_created": N, "branches_synced": N, "tags_synced": N, "skipped_non_commit_refs": N, "lossy_entries": [], "already_in_sync": false}` |
 | `sync` | `{"output_kind": "bridge_git_sync", "states_exported": N, "commits_imported": N, "threads_synced": N, "markers_synced": N}` |
 | `push` | `{"output_kind": "bridge_git_push", "action": "bridge git push", "status": "pushed", "success": true, "pushed": true, "changed": true, "transport": "git", "remote": "origin"}` |
 | `pull` | `{"output_kind": "bridge_git_pull", "action": "bridge git pull", "status": "updated", "success": true, "pulled": true, "changed": true, "transport": "git", "remote": "origin"}` |
@@ -2311,7 +2310,7 @@ key naming:
 `heddle bridge git import --output json` emits:
 
 ```json
-{"output_kind": "bridge_git_import", "commits_imported": 4, "states_created": 4, "branches_synced": 2, "tags_synced": 1, "skipped_non_commit_refs": 0, "partial_mirror_refs": 0, "lossy_entries": [], "already_in_sync": false}
+{"output_kind": "bridge_git_import", "commits_imported": 4, "states_created": 4, "branches_synced": 2, "tags_synced": 1, "skipped_non_commit_refs": 0, "lossy_entries": [], "already_in_sync": false}
 ```
 
 `heddle bridge git sync --output json` emits:
@@ -2429,66 +2428,12 @@ surface.
 Validate this document against the runtime schema registry and report
 catalog-wide schema coverage.
 
+The command-contract coverage portion of this sample is generated from
+runtime facts. Refresh it with `heddle doctor schemas --update-docs`.
+
 ```json
 {
-  "output_kind": "doctor_schemas",
-  "status": "available",
-  "verified": true,
-  "summary": "190 command(s), 160 JSON command(s), 99 mutating command(s), 98 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 51 accepted opaque schema(s) outside clean verification",
-  "recommended_action": null,
-  "recovery_commands": [],
-  "registered_verbs": ["status", "verify", "try"],
-  "documented_verbs": ["status", "verify", "try"],
-  "undocumented_verbs": [],
-  "unmatched_verbs": [],
-  "passing_verbs": ["status", "verify", "try"],
-  "issues": [],
   "command_contract_schema_coverage": {
-    "status": "available",
-    "verified_scope": "everyday_and_agent",
-    "advanced_scope": "advanced_internal_admin",
-    "summary": "190 command(s), 160 JSON command(s), 99 mutating command(s), 98 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 51 accepted opaque schema(s) outside clean verification",
-    "catalog_commands_total": 190,
-    "catalog_mutating_commands_total": 99,
-    "json_commands_total": 160,
-    "json_mutating_commands_total": 98,
-    "json_commands_with_schema": 109,
-    "json_commands_with_accepted_opaque_schema": 51,
-    "json_commands_without_schema": 0,
-    "verified_scope_json_commands_total": 37,
-    "verified_scope_json_commands_with_schema": 37,
-    "verified_scope_json_commands_with_accepted_opaque_schema": 0,
-    "verified_scope_json_commands_without_schema": 0,
-    "advanced_scope_json_commands_total": 123,
-    "advanced_scope_json_commands_with_accepted_opaque_schema": 51,
-    "mutating_commands_total": 98,
-    "mutating_commands_with_schema": 69,
-    "mutating_commands_with_accepted_opaque_schema": 29,
-    "mutating_commands_without_schema": 0,
-    "verified_scope_mutating_commands_total": 23,
-    "verified_scope_mutating_commands_with_schema": 23,
-    "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
-    "verified_scope_mutating_commands_without_schema": 0,
-    "advanced_scope_mutating_commands_total": 75,
-    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 29,
-    "undocumented_schema_verbs_total": 0,
-    "opaque_schema_verbs_total": 51,
-    "accepted_opaque_schema_verbs_total": 51,
-    "unaccepted_opaque_schema_verbs_total": 0,
-    "missing_schema_examples": [],
-    "missing_mutating_schema_examples": [],
-    "verified_scope_missing_schema_examples": [],
-    "verified_scope_accepted_opaque_schema_examples": [],
-    "advanced_scope_accepted_opaque_schema_examples": [
-      "help",
-      "transaction begin",
-      "transaction abort",
-      "transaction status",
-      "redact apply",
-      "redact list",
-      "redact show",
-      "redact trust add"
-    ],
     "accepted_opaque_schema_examples": [
       "help",
       "transaction begin",
@@ -2499,10 +2444,79 @@ catalog-wide schema coverage.
       "redact show",
       "redact trust add"
     ],
+    "accepted_opaque_schema_verbs_total": 49,
+    "advanced_scope": "advanced_internal_admin",
+    "advanced_scope_accepted_opaque_schema_examples": [
+      "help",
+      "transaction begin",
+      "transaction abort",
+      "transaction status",
+      "redact apply",
+      "redact list",
+      "redact show",
+      "redact trust add"
+    ],
+    "advanced_scope_json_commands_total": 121,
+    "advanced_scope_json_commands_with_accepted_opaque_schema": 49,
+    "advanced_scope_mutating_commands_total": 73,
+    "advanced_scope_mutating_commands_with_accepted_opaque_schema": 27,
+    "catalog_commands_total": 188,
+    "catalog_mutating_commands_total": 97,
+    "json_commands_total": 158,
+    "json_commands_with_accepted_opaque_schema": 49,
+    "json_commands_with_schema": 109,
+    "json_commands_without_schema": 0,
+    "json_mutating_commands_total": 96,
+    "missing_mutating_schema_examples": [],
+    "missing_schema_examples": [],
+    "mutating_commands_total": 96,
+    "mutating_commands_with_accepted_opaque_schema": 27,
+    "mutating_commands_with_schema": 69,
+    "mutating_commands_without_schema": 0,
+    "opaque_schema_verbs_total": 49,
+    "status": "available",
+    "summary": "188 command(s), 158 JSON command(s), 97 mutating command(s), 96 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 49 accepted opaque schema(s) outside clean verification",
     "unaccepted_opaque_schema_examples": [],
-    "undocumented_schema_examples": []
+    "unaccepted_opaque_schema_verbs_total": 0,
+    "undocumented_schema_examples": [],
+    "undocumented_schema_verbs_total": 0,
+    "verified_scope": "everyday_and_agent",
+    "verified_scope_accepted_opaque_schema_examples": [],
+    "verified_scope_json_commands_total": 37,
+    "verified_scope_json_commands_with_accepted_opaque_schema": 0,
+    "verified_scope_json_commands_with_schema": 37,
+    "verified_scope_json_commands_without_schema": 0,
+    "verified_scope_missing_schema_examples": [],
+    "verified_scope_mutating_commands_total": 23,
+    "verified_scope_mutating_commands_with_accepted_opaque_schema": 0,
+    "verified_scope_mutating_commands_with_schema": 23,
+    "verified_scope_mutating_commands_without_schema": 0
   },
-  "doc_path": "/repo/docs/json-schemas.md"
+  "doc_path": "/repo/docs/json-schemas.md",
+  "documented_verbs": [
+    "status",
+    "verify",
+    "try"
+  ],
+  "issues": [],
+  "output_kind": "doctor_schemas",
+  "passing_verbs": [
+    "status",
+    "verify",
+    "try"
+  ],
+  "recommended_action": null,
+  "recovery_commands": [],
+  "registered_verbs": [
+    "status",
+    "verify",
+    "try"
+  ],
+  "status": "available",
+  "summary": "188 command(s), 158 JSON command(s), 97 mutating command(s), 96 mutating JSON command(s); verified everyday/agent machine surface has 37 concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry 49 accepted opaque schema(s) outside clean verification",
+  "undocumented_verbs": [],
+  "unmatched_verbs": [],
+  "verified": true
 }
 ```
 
@@ -2754,16 +2768,10 @@ required:
 {"output_kind": "query_attribution", "status": "completed", "file": "src/lib.rs", "lines": [{"line_number": 1, "content": "pub fn run() {}", "change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z", "origins": [{"change_id": "hd-sqr398dvx9ay", "principal": {"name": "A. Engineer", "email": "a@example.com"}, "agent": {"provider": "anthropic", "model": "claude-opus-4-7"}, "timestamp": "2026-01-01T00:00:00Z"}]}]}
 ```
 
-`heddle bridge git ingest|reason --output json` emit:
+`heddle bridge git reason --output json` emits:
 
 ```json
-{"ingested": true, "commits_imported": 2, "states_created": 2, "reason": "mirror update", "remote": "origin"}
-```
-
-`heddle bridge backfill-fidelity --output json` emits the scanned/backfilled/skipped counts for the one-time #565 git-fidelity migration. `states_resigned` counts backfilled states whose own signature was re-signed over the new hash; `states_signature_unreproducible` counts states left untouched because they carry a signature this migration cannot reproduce (a foreign key or no local signer), so it never ships an invalid signature. `missing_mirror_commits` lists any mapping entries whose git object is absent from the mirror — those states could not be backfilled and are reported (as `{change_id, git_oid}`) rather than silently skipped:
-
-```json
-{"output_kind": "bridge_backfill_fidelity", "action": "bridge backfill-fidelity", "states_scanned": 2, "states_backfilled": 2, "states_skipped": 0, "states_resigned": 0, "states_signature_unreproducible": 0, "missing_mirror_commits": []}
+{"commits_scanned":2,"commits_with_matches":1,"sessions_mined":3,"points_extracted":4,"states_updated":1,"annotations_written":4}
 ```
 
 `heddle cherry-pick --output json` emits the committed shape by default;

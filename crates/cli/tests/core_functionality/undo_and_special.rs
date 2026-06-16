@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-use super::*;
 use objects::object::ThreadName;
+
+use super::*;
 
 /// Convenience: read the current state's short change-id by opening the repo
 /// directly. Used by undo tests that assert HEAD has moved to a specific state.

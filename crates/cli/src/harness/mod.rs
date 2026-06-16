@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
@@ -13,7 +12,7 @@ use chrono::Utc;
 use objects::{
     fs_atomic::write_file_atomic,
     object::{DiffKind, Session, ThreadName, Tree},
-    store::{AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary},
+    store::{AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ObjectStore},
 };
 use oplog::OpLogBackend;
 use proto::{

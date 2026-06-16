@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::DeserializeOwned};
 
 use crate::{
     Result,
@@ -539,13 +538,15 @@ fn parse_name_email(raw: &str) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use serde_json::json;
     use std::collections::VecDeque;
+
+    use serde_json::json;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
     };
+
+    use super::*;
 
     struct MockResponse {
         status: u16,
@@ -568,8 +569,17 @@ mod tests {
         }
     }
 
-    async fn spawn_server(build_responses: impl FnOnce(&str) -> Vec<MockResponse>) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    async fn spawn_server(
+        build_responses: impl FnOnce(&str) -> Vec<MockResponse>,
+    ) -> Option<String> {
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping GitHub REST mock-server test: local TCP bind denied: {err}");
+                return None;
+            }
+            Err(err) => panic!("bind GitHub REST mock server: {err}"),
+        };
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let mut responses = VecDeque::from(build_responses(&base_url));
         tokio::spawn(async move {
@@ -602,7 +612,7 @@ mod tests {
                 socket.shutdown().await.unwrap();
             }
         });
-        base_url
+        Some(base_url)
     }
 
     fn review_key() -> ReviewJobKey {
@@ -786,7 +796,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_pull_request_accepts_complete_data() {
-        let base_url = spawn_server(|_| {
+        let Some(base_url) = spawn_server(|_| {
             vec![
                 MockResponse::json(200, metadata_body()),
                 MockResponse::json(200, file_page(0, 1)),
@@ -795,7 +805,10 @@ mod tests {
                 MockResponse::json(200, comment_page(1, 1)),
             ]
         })
-        .await;
+        .await
+        else {
+            return;
+        };
         let data = client_for(&base_url)
             .fetch_pull_request(&review_key(), None)
             .await
@@ -817,7 +830,10 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_files_accepts_single_page() {
-        let base_url = spawn_server(|_| vec![MockResponse::json(200, file_page(0, 2))]).await;
+        let Some(base_url) = spawn_server(|_| vec![MockResponse::json(200, file_page(0, 2))]).await
+        else {
+            return;
+        };
         let files = client_for(&base_url)
             .fetch_files(&review_key(), None)
             .await
@@ -828,7 +844,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_files_accepts_multi_page_complete_result() {
-        let base_url = spawn_server(|base_url| {
+        let Some(base_url) = spawn_server(|base_url| {
             vec![
                 MockResponse::json(200, file_page(0, GITHUB_PER_PAGE)).with_header(
                     "Link",
@@ -839,7 +855,10 @@ mod tests {
                 MockResponse::json(200, file_page(GITHUB_PER_PAGE, 2)),
             ]
         })
-        .await;
+        .await
+        else {
+            return;
+        };
         let files = client_for(&base_url)
             .fetch_files(&review_key(), None)
             .await
@@ -850,7 +869,11 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_files_accepts_genuinely_empty_page() {
-        let base_url = spawn_server(|_| vec![MockResponse::json(200, "[]".to_string())]).await;
+        let Some(base_url) =
+            spawn_server(|_| vec![MockResponse::json(200, "[]".to_string())]).await
+        else {
+            return;
+        };
         let files = client_for(&base_url)
             .fetch_files(&review_key(), None)
             .await
@@ -860,7 +883,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_files_errors_on_mid_pagination_failure() {
-        let base_url = spawn_server(|base_url| {
+        let Some(base_url) = spawn_server(|base_url| {
             vec![
                 MockResponse::json(200, file_page(0, GITHUB_PER_PAGE)).with_header(
                     "Link",
@@ -871,7 +894,10 @@ mod tests {
                 MockResponse::json(500, "[]".to_string()),
             ]
         })
-        .await;
+        .await
+        else {
+            return;
+        };
         let err = client_for(&base_url)
             .fetch_files(&review_key(), None)
             .await
@@ -881,8 +907,11 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_files_accepts_exact_full_page_without_link_header() {
-        let base_url =
-            spawn_server(|_| vec![MockResponse::json(200, file_page(0, GITHUB_PER_PAGE))]).await;
+        let Some(base_url) =
+            spawn_server(|_| vec![MockResponse::json(200, file_page(0, GITHUB_PER_PAGE))]).await
+        else {
+            return;
+        };
         let files = client_for(&base_url)
             .fetch_files(&review_key(), None)
             .await
@@ -893,7 +922,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_files_accepts_exact_full_page_terminal_link_without_next() {
-        let base_url = spawn_server(|base_url| {
+        let Some(base_url) = spawn_server(|base_url| {
             vec![
                 MockResponse::json(200, file_page(0, GITHUB_PER_PAGE)).with_header(
                     "Link",
@@ -911,7 +940,10 @@ mod tests {
                 ),
             ]
         })
-        .await;
+        .await
+        else {
+            return;
+        };
         let files = client_for(&base_url)
             .fetch_files(&review_key(), None)
             .await
@@ -922,13 +954,16 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_files_errors_on_malformed_link_header() {
-        let base_url = spawn_server(|_| {
+        let Some(base_url) = spawn_server(|_| {
             vec![
                 MockResponse::json(200, file_page(0, GITHUB_PER_PAGE))
                     .with_header("Link", "not a link"),
             ]
         })
-        .await;
+        .await
+        else {
+            return;
+        };
         let err = client_for(&base_url)
             .fetch_files(&review_key(), None)
             .await
@@ -938,7 +973,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_files_rejects_cross_origin_pagination_url() {
-        let base_url = spawn_server(|_| {
+        let Some(base_url) = spawn_server(|_| {
             // Same host, but a port nothing answers on — a stand-in for an
             // attacker-controlled `next` redirecting pagination off-origin
             // (e.g. at a cloud metadata endpoint). Validation must refuse it
@@ -949,7 +984,10 @@ mod tests {
                 "<http://127.0.0.1:1/repos/heddle/repo/pulls/439/files?per_page=100&page=2>; rel=\"next\"",
             )]
         })
-        .await;
+        .await
+        else {
+            return;
+        };
         let err = client_for(&base_url)
             .fetch_files(&review_key(), None)
             .await
@@ -970,13 +1008,16 @@ mod tests {
         // With redirects disabled, the `302` surfaces as a non-success
         // status and the fetch fails loudly *without* ever connecting to
         // the dead port — proving the redirect was not chased.
-        let base_url = spawn_server(|_| {
+        let Some(base_url) = spawn_server(|_| {
             vec![MockResponse::json(302, String::new()).with_header(
                 "Location",
                 "http://127.0.0.1:1/repos/heddle/repo/pulls/439/files?per_page=100&page=2",
             )]
         })
-        .await;
+        .await
+        else {
+            return;
+        };
         let err = client_for(&base_url)
             .fetch_files(&review_key(), None)
             .await
@@ -989,12 +1030,15 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_files_returns_rate_limit_error() {
-        let base_url = spawn_server(|_| {
+        let Some(base_url) = spawn_server(|_| {
             vec![
                 MockResponse::json(403, "[]".to_string()).with_header("x-ratelimit-remaining", "0"),
             ]
         })
-        .await;
+        .await
+        else {
+            return;
+        };
         let err = client_for(&base_url)
             .fetch_files(&review_key(), None)
             .await
@@ -1004,7 +1048,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_contributors_errors_instead_of_returning_partial_on_failure() {
-        let base_url = spawn_server(|base_url| {
+        let Some(base_url) = spawn_server(|base_url| {
             vec![
                 MockResponse::json(200, commit_page(0, GITHUB_PER_PAGE)).with_header(
                     "Link",
@@ -1015,7 +1059,10 @@ mod tests {
                 MockResponse::json(502, "[]".to_string()),
             ]
         })
-        .await;
+        .await
+        else {
+            return;
+        };
         let err = client_for(&base_url)
             .fetch_contributors(&review_key(), None)
             .await
@@ -1028,7 +1075,7 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_comment_pages_errors_instead_of_returning_partial_on_failure() {
-        let base_url = spawn_server(|base_url| {
+        let Some(base_url) = spawn_server(|base_url| {
             vec![
                 MockResponse::json(200, comment_page(0, GITHUB_PER_PAGE)).with_header(
                     "Link",
@@ -1039,7 +1086,10 @@ mod tests {
                 MockResponse::json(404, "[]".to_string()),
             ]
         })
-        .await;
+        .await
+        else {
+            return;
+        };
         let err = client_for(&base_url)
             .fetch_comment_pages(
                 format!("{base_url}/repos/heddle/repo/issues/439/comments?per_page=100"),

@@ -29,6 +29,13 @@ fn commit_file(path: &std::path::Path, file: &str, body: &str, message: &str) ->
     git(path, &["rev-parse", "HEAD"])
 }
 
+fn ingest_mapped_change(path: &std::path::Path, git_sha: &str) -> Option<String> {
+    let map_path = path.join(".heddle").join("ingest").join("sha_map.sqlite");
+    let map = ingest::ShaMap::open(map_path).expect("open ingest SHA map");
+    map.get_commit(git_sha)
+        .map(|change_id| change_id.to_string_full())
+}
+
 #[test]
 fn git_overlay_sync_adopts_fast_forward_upstream_tip() {
     let temp = TempDir::new().unwrap();
@@ -139,6 +146,39 @@ fn adopt_renders_in_repo_paths_relative_to_repo_root() {
     assert!(
         !json.contains(&format!("{abs}/.heddle")),
         "adopt JSON should not contain an absolute in-repo path: {json}"
+    );
+}
+
+#[test]
+fn adopt_all_uses_ingest_mapping_without_internal_mirror() {
+    let temp = TempDir::new().unwrap();
+    let work = temp.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    git(&work, &["init", "-b", "main"]);
+    configure_git_identity(&work);
+    let git_tip = commit_file(&work, "story.txt", "one\n", "seed");
+
+    let json = heddle(&["adopt", "--output", "json"], Some(&work)).unwrap();
+    let value: Value = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(value["commits_imported"], 1);
+    assert_eq!(value["states_created"], 1);
+    assert!(
+        !work.join(".heddle").join("git").exists(),
+        "unscoped adopt should use ingest and avoid creating the legacy mirror"
+    );
+    let mapped_change = ingest_mapped_change(&work, &git_tip);
+    assert!(
+        mapped_change.as_ref().is_some_and(|id| !id.is_empty()),
+        "adopt should persist the Git tip in the ingest identity map"
+    );
+    assert!(
+        !work
+            .join(".heddle")
+            .join("git-bridge")
+            .join("bridge-mapping.json")
+            .exists(),
+        "adopt/import must not publish the served bridge mapping cache"
     );
 }
 

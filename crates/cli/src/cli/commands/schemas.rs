@@ -21,7 +21,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{RecoveryAdvice, command_catalog, command_runtime_contract};
+use super::{RecoveryAdvice, command_catalog};
 use crate::cli::{Cli, should_output_json};
 
 static SCHEMA_VERBS: OnceLock<Vec<&'static str>> = OnceLock::new();
@@ -412,16 +412,8 @@ fn add_json_discriminator_to_schema_object(schema: &mut Value, field: &str, valu
 }
 
 fn schema_verb_supports_op_id(verb: &str) -> bool {
-    command_runtime_contract(verb).is_some_and(|contract| contract.supports_op_id)
-        || command_runtime_contract(&verb_without_flags(verb))
-            .is_some_and(|contract| contract.supports_op_id)
-}
-
-fn verb_without_flags(verb: &str) -> String {
-    verb.split_whitespace()
-        .filter(|part| !part.starts_with('-'))
-        .collect::<Vec<_>>()
-        .join(" ")
+    command_catalog::command_runtime_contract_for_schema_verb(verb)
+        .is_some_and(|contract| contract.supports_op_id)
 }
 
 /// Public entrypoint for `heddle schemas [<verb>]`.
@@ -508,7 +500,7 @@ fn suggested_schema_verbs<'a>(verb: &str, known_verbs: &'a [&'a str]) -> Vec<&'a
     if normalized.is_empty() {
         return Vec::new();
     }
-    let bare = verb_without_flags(normalized);
+    let bare = command_catalog::schema_verb_without_flags(normalized);
     if bare.is_empty() {
         return Vec::new();
     }
@@ -517,7 +509,8 @@ fn suggested_schema_verbs<'a>(verb: &str, known_verbs: &'a [&'a str]) -> Vec<&'a
         .iter()
         .copied()
         .filter(|known| {
-            known.starts_with(normalized) || verb_without_flags(known).starts_with(&bare)
+            known.starts_with(normalized)
+                || command_catalog::schema_verb_without_flags(known).starts_with(&bare)
         })
         .take(5)
         .collect()
@@ -534,7 +527,7 @@ fn matching_schema_verbs<'a>(verb: &str, known_verbs: &'a [&'a str]) -> Vec<&'a 
     if normalized.is_empty() {
         return Vec::new();
     }
-    let bare = verb_without_flags(normalized);
+    let bare = command_catalog::schema_verb_without_flags(normalized);
     let prefix = format!("{bare} ");
     known_verbs
         .iter()
@@ -543,7 +536,7 @@ fn matching_schema_verbs<'a>(verb: &str, known_verbs: &'a [&'a str]) -> Vec<&'a 
             *known != normalized
                 && (*known == bare
                     || known.starts_with(&prefix)
-                    || verb_without_flags(known) == bare)
+                    || command_catalog::schema_verb_without_flags(known) == bare)
         })
         .collect()
 }
@@ -1580,7 +1573,6 @@ pub struct AdoptSchema {
     pub branches_synced: usize,
     pub tags_synced: usize,
     pub skipped_non_commit_refs: usize,
-    pub partial_mirror_refs: usize,
     pub already_in_sync: bool,
     pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
@@ -2643,8 +2635,7 @@ pub struct BridgeImportSchema {
     pub branches_synced: u64,
     pub tags_synced: u64,
     pub skipped_non_commit_refs: u64,
-    pub partial_mirror_refs: u64,
-    pub lossy_entries: Vec<LossyGitImportEntrySchema>,
+    pub lossy_entries: Vec<LossyImportEntrySchema>,
     pub already_in_sync: bool,
     pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplateSchema>,
@@ -2652,7 +2643,7 @@ pub struct BridgeImportSchema {
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
-pub struct LossyGitImportEntrySchema {
+pub struct LossyImportEntrySchema {
     pub path: String,
     pub action: String,
     pub reason: String,
@@ -3175,7 +3166,6 @@ mod tests {
             "bridge git reconcile",
             "bridge git push",
             "bridge git pull",
-            "bridge git ingest",
             "bridge git reason",
             "git-overlay",
         ] {

@@ -637,6 +637,17 @@ fn realworld_git_gc_prunes_unreachable_mapping_entries() {
     )
     .unwrap();
     heddle_without_git(&["bridge", "import"], &work).unwrap();
+    let export = temp.path().join("export.git");
+    heddle_without_git(
+        &[
+            "bridge",
+            "export",
+            "--destination",
+            export.to_str().unwrap(),
+        ],
+        &work,
+    )
+    .unwrap();
 
     let mapping_path = work
         .join(".heddle")

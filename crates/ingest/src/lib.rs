@@ -49,7 +49,11 @@ pub mod tree_translate;
 
 pub use git_walk::{CommitEntry, GitSource, RefHead, RefNamespace, ReflogEntry};
 pub use import_options::{ImportOptions, LossyImportAction, LossyImportEntry};
-pub use importer::{ImportStats, Importer, import_git_into, import_git_into_with_options};
+pub use importer::{
+    ImportProgressEvent, ImportScope, ImportStats, Importer, import_git_into,
+    import_git_into_scoped_with_options, import_git_into_scoped_with_options_and_progress,
+    import_git_into_with_options, import_git_into_with_options_and_progress,
+};
 pub use oplog_emit::{OplogEmitStats, OplogEmitter};
 pub use reasoning::{ReasoningEvidence, ReasoningPoint, ReasoningTarget};
 pub use reasoning_emit::{ReasoningEmitStats, ReasoningEmitter};
@@ -78,6 +82,15 @@ pub enum IngestError {
     Git(String),
     #[error("heddle: {0}")]
     Heddle(#[from] objects::error::HeddleError),
+    #[error(
+        "Heddle thread '{thread}' and Git ref '{branch}' diverged: thread {existing}, branch {incoming}"
+    )]
+    ThreadDiverged {
+        thread: String,
+        branch: String,
+        existing: objects::object::ChangeId,
+        incoming: objects::object::ChangeId,
+    },
     #[error("sha map: {0}")]
     ShaMap(#[from] sha_map::ShaMapError),
     #[error("io: {0}")]

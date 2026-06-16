@@ -11,8 +11,10 @@
 //! unchanged contract produces a no-op diff. The `gen_ts_types` example writes
 //! it to disk; `tests/ts_types_in_sync.rs` asserts the checked-in files match.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
+};
 
 use serde_json::{Map, Value};
 
@@ -599,8 +601,9 @@ fn emit_jsdoc(out: &mut String, desc: &str, indent: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     /// Two verbs whose schemas share a `title` must each emit their own root
     /// body — neither overwritten. Regression guard for the title-keyed roots

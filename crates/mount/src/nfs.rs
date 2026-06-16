@@ -153,9 +153,13 @@ impl NfsShell {
         // a UNIX-domain socket (nfsserve supports it), which
         // limits the surface to filesystem permissions — the
         // sentinel we want at this layer. Tracked separately.
-        let listener = runtime
-            .block_on(NFSTcpListener::bind("127.0.0.1:0", fs))
-            .map_err(|e| MountError::Store(objects::error::HeddleError::Io(e)))?;
+        let listener = match bind_nfs_listener(&runtime, fs) {
+            Ok(listener) => listener,
+            Err(error) => {
+                runtime.shutdown_background();
+                return Err(error);
+            }
+        };
         let port = listener.get_listen_port();
         debug!(port, "heddle nfs server listening");
 
@@ -171,11 +175,14 @@ impl NfsShell {
         // Hand the OS the mount request. Failure here means the
         // user lacks privileges, the optional feature isn't
         // installed (Windows), or the mountpoint is unusable.
-        invoke_mount(&mountpoint, port).map_err(|e| {
-            // The server task gets cleaned up when `runtime` is
-            // dropped at the end of this scope.
-            MountError::Store(objects::error::HeddleError::Io(e))
-        })?;
+        if let Err(e) = invoke_mount(&mountpoint, port) {
+            // `mount_background` is often called from the async CLI
+            // runtime. Dropping a Tokio runtime in that context panics,
+            // so tear down the fallback server explicitly before
+            // returning the mount error.
+            runtime.shutdown_background();
+            return Err(MountError::Store(objects::error::HeddleError::Io(e)));
+        }
 
         Ok(NfsSession {
             runtime: Some(runtime),
@@ -184,6 +191,26 @@ impl NfsShell {
             unmounted: false,
         })
     }
+}
+
+fn bind_nfs_listener(runtime: &Runtime, fs: HeddleNFS) -> Result<NFSTcpListener<HeddleNFS>> {
+    // `mount_background` can be called from the async CLI runtime
+    // when FSKit/FUSE falls back to NFS. Running `block_on` on
+    // that thread would panic, so do the one-time async bind from
+    // a plain OS thread while still using the NFS session runtime.
+    let handle = runtime.handle().clone();
+    let join = std::thread::Builder::new()
+        .name("heddle-nfs-bind".to_string())
+        .spawn(move || handle.block_on(NFSTcpListener::bind("127.0.0.1:0", fs)))
+        .map_err(|e| MountError::Store(objects::error::HeddleError::Io(e)))?;
+
+    join.join()
+        .map_err(|_| {
+            MountError::Store(objects::error::HeddleError::Io(std::io::Error::other(
+                "nfs bind thread panicked",
+            )))
+        })?
+        .map_err(|e| MountError::Store(objects::error::HeddleError::Io(e)))
 }
 
 pub struct NfsSession {

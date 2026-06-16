@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Thread command implementation.
 
-use objects::store::ObjectStore;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -12,7 +11,7 @@ use chrono::Utc;
 use objects::{
     fs_ops::remove_path_recursively,
     object::{ChangeId, ThreadName},
-    store::AgentRegistry,
+    store::{AgentRegistry, ObjectStore},
 };
 use oplog::{OpLogBackend, ThreadUpdateSnapshots};
 use refs::Head;

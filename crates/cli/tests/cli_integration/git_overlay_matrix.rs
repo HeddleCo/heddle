@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-use super::*;
 use oplog::{OpLogBackend, OpRecord};
+
+use super::*;
 
 /// The `bisect` verb was removed in the whole-CLI consolidation (heddle#473),
 /// but the operation-status layer still detects a lingering `BISECT_STATE`
@@ -4729,10 +4730,9 @@ fn git_overlay_matrix_manual_git_commits_reconcile_round_trip() {
         out_of_band_head,
         "reconcile must import the out-of-band tip, not rewrite Git history"
     );
-    assert_eq!(
-        mirror_git_stdout(temp.path(), &["rev-parse", "refs/heads/feature/drop-in"]),
-        out_of_band_head,
-        "the internal Git mirror branch should land on the identical out-of-band SHA"
+    assert!(
+        !temp.path().join(".heddle/git").exists(),
+        "ingest-backed import should not recreate the legacy internal Git mirror"
     );
     let verify = json(temp.path(), &["verify", "--output", "json"]);
     assert_eq!(verify["verified"], true);

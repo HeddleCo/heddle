@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Git-muscle-memory compatibility shims.
 
-use objects::store::ObjectStore;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -14,6 +13,7 @@ use objects::{
         Agent, Blob, ChangeId, ContentHash, EntryType, FileMode, Principal, ThreadName, Tree,
         TreeEntry,
     },
+    store::ObjectStore,
     worktree::should_ignore as should_ignore_path,
 };
 use oplog::{OpBatch, OpLogBackend, OpRecord};

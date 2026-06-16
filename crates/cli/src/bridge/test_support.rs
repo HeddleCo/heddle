@@ -223,6 +223,21 @@ pub fn build_existing_mapping(
     bridge.build_existing_mapping(git_repo_path)
 }
 
+pub fn stage_ingest_source_in_mirror(
+    bridge: &mut GitBridge<'_>,
+    source: &Path,
+    refs: &[String],
+) -> GitResult<()> {
+    bridge.stage_ingest_source_in_mirror(source, refs)
+}
+
+pub fn seed_ingest_identity_mappings_from_mirror(
+    bridge: &mut GitBridge<'_>,
+    repo: &SleyRepository,
+) -> GitResult<()> {
+    bridge.seed_ingest_identity_mappings_from_mirror(repo)
+}
+
 pub fn open_git_repo(bridge: &GitBridge<'_>) -> GitResult<SleyRepository> {
     bridge.open_git_repo()
 }

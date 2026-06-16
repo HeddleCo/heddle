@@ -27,8 +27,7 @@
 //!
 //! Skips on hosts without `/dev/fuse`.
 
-#![cfg(all(target_os = "linux", feature = "fuse"))]
-
+#[cfg(all(target_os = "linux", feature = "fuse"))]
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -36,9 +35,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(all(target_os = "linux", feature = "fuse"))]
 use mount::worker::Supervisor;
+#[cfg(all(target_os = "linux", feature = "fuse"))]
 use tempfile::TempDir;
 
+#[cfg(all(target_os = "linux", feature = "fuse"))]
 fn worker_binary_path() -> PathBuf {
     // Build-script gymnastics avoided: `cargo bench` exposes the
     // worker as a sibling artifact at `target/<profile>/heddle-fuse-worker`.
@@ -57,6 +59,7 @@ fn worker_binary_path() -> PathBuf {
     target_profile.join("heddle-fuse-worker")
 }
 
+#[cfg(all(target_os = "linux", feature = "fuse"))]
 fn main() {
     if !Path::new("/dev/fuse").exists() {
         eprintln!("skipping fuse_worker_ipc bench: /dev/fuse not present");
@@ -82,6 +85,12 @@ fn main() {
     run_bench(&worker_bin);
 }
 
+#[cfg(not(all(target_os = "linux", feature = "fuse")))]
+fn main() {
+    eprintln!("skipping fuse_worker_ipc bench: requires Linux with the fuse feature enabled");
+}
+
+#[cfg(all(target_os = "linux", feature = "fuse"))]
 fn run_bench(worker_bin: &Path) {
     // Build a tiny repo + snapshot.
     let repo_dir = TempDir::new().expect("repo tempdir");

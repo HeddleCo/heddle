@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Result, bail};
+use ingest::ImportOptions;
 use objects::object::{Principal, ThreadName, Tree};
 use refs::Head;
 use repo::{Repository, RepositoryCapability, ThreadId};
@@ -27,7 +28,7 @@ use super::{
 use crate::{
     bridge::{
         GitBridge, WriteThroughOutcome, git_core::git_config_identity_with_global_fallback,
-        git_import::import_all,
+        git_ingest::import_git_history,
     },
     cli::{Cli, InitArgs, is_tty, should_output_json, style, worktree_status_options},
     config::UserConfig,
@@ -103,9 +104,9 @@ struct QuickstartPreflight {
     proceed: bool,
     persist_principal: Option<(String, String)>,
     attachment: QuickstartAttachmentPlan,
-    /// Harnesses the user agreed to connect, decided at the prompt before
-    /// any write. Installed only after the repo is created so a Ctrl-C at
-    /// the harness prompt leaves the directory untouched.
+    /// Harnesses explicitly selected for connection before any write.
+    /// Installed only after the repo is created so scope errors leave the
+    /// directory untouched.
     harness_install: Vec<String>,
 }
 
@@ -747,11 +748,9 @@ fn quickstart_preflight(
     }
 
     let persist_principal = resolve_quickstart_identity(cli, args, root, is_git_overlay, json)?;
-    // The harness-install prompt is the LAST interactive gate, decided
-    // here before any write so Ctrl-C at it leaves the directory
-    // untouched. Detect/prompt at the SAME resolved root the install writes
-    // to (`repo.root()` in `cmd_init`), not the raw cwd. The install itself
-    // runs post-write in `cmd_init`.
+    // Resolve explicit harness installs before any write, at the SAME
+    // resolved root the install writes to (`repo.root()` in `cmd_init`),
+    // not the raw cwd. The install itself runs post-write in `cmd_init`.
     let harness_install = super::prompt_init_install_decision(cli, root, args, json)?;
     Ok(QuickstartPreflight {
         proceed: true,
@@ -1110,7 +1109,13 @@ fn run_quickstart_actions(
     // Git repos (no commits) and native repos skip this.
     if repo.capability() == RepositoryCapability::GitOverlay && git_has_commits(repo.root()) {
         let mut bridge = GitBridge::new(repo);
-        import_all(&mut bridge, Some(repo.root()))?;
+        import_git_history(
+            &mut bridge,
+            Some(repo.root()),
+            &[],
+            ImportOptions::default(),
+            None,
+        )?;
     }
 
     let thread = args

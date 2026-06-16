@@ -372,12 +372,12 @@ impl RecoveryAdvice {
     }
 
     pub(crate) fn bridge_ingest_required(map_path: &str, git_path: &str) -> Self {
-        let command = format!("heddle bridge ingest --path {git_path}");
+        let command = format!("heddle bridge git import --path {git_path}");
         Self::safety_refusal(
             "bridge_ingest_required",
             format!("No Git SHA map exists at {map_path}"),
             format!("Build the SHA map with `{command}`, then retry."),
-            format!("bridge ingest metadata is missing at {map_path}"),
+            format!("bridge import metadata is missing at {map_path}"),
             "reasoning import cannot map transcript references to Git commits without the SHA map",
             "repository state, refs, metadata, and worktree files were left unchanged",
             command.clone(),

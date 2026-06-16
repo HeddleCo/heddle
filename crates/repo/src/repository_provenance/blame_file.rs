@@ -56,10 +56,12 @@
 //! path, so every caller — `heddle blame`, the gRPC `GetBlame` RPC,
 //! the web app — benefits without any client-side change.
 
-use objects::store::ObjectStore;
 use std::{collections::HashMap, path::Path};
 
-use objects::object::{ChangeId, ContentHash, FileProvenance, Origin, State};
+use objects::{
+    object::{ChangeId, ContentHash, FileProvenance, Origin, State},
+    store::ObjectStore,
+};
 
 use super::{
     Repository, Result,

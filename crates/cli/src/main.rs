@@ -10,7 +10,7 @@ use cli::cli::commands::cmd_semantic;
 #[cfg(feature = "git-overlay")]
 use cli::cli::{
     BridgeCommands,
-    commands::{cmd_bridge_backfill_fidelity, cmd_bridge_git, cmd_git_overlay_guide},
+    commands::{cmd_bridge_git, cmd_git_overlay_guide},
 };
 use cli::{
     cli::{
@@ -30,8 +30,8 @@ use cli::{
             cmd_daemon_status, cmd_daemon_stop, cmd_diagnose, cmd_diff, cmd_discuss,
             cmd_doctor_docs, cmd_doctor_schemas, cmd_expand, cmd_fetch, cmd_fsck, cmd_hook,
             cmd_init, cmd_integration, cmd_land, cmd_log, cmd_maintenance, cmd_merge, cmd_oplog,
-            cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_rebase, cmd_redo, cmd_remote, cmd_resolve,
-            cmd_retro, cmd_revert, cmd_review, cmd_run, cmd_schemas, cmd_session_end,
+            cmd_pull, cmd_push, cmd_query, cmd_ready, cmd_rebase, cmd_redo, cmd_remote,
+            cmd_resolve, cmd_retro, cmd_revert, cmd_review, cmd_run, cmd_schemas, cmd_session_end,
             cmd_session_list, cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell,
             cmd_show, cmd_snapshot, cmd_start, cmd_stash, cmd_status, cmd_switch_compat,
             cmd_sync_smart, cmd_thread, cmd_transaction, cmd_try, cmd_undo, cmd_verify, cmd_watch,
@@ -320,7 +320,9 @@ async fn async_main() -> Result<()> {
             Some(cli::cli::DoctorCommands::Docs(docs_args)) => {
                 cmd_doctor_docs(&cli, docs_args.clone())
             }
-            Some(cli::cli::DoctorCommands::Schemas) => cmd_doctor_schemas(&cli),
+            Some(cli::cli::DoctorCommands::Schemas(schema_args)) => {
+                cmd_doctor_schemas(&cli, schema_args.clone())
+            }
         },
 
         Commands::Schemas { verb } => cmd_schemas(&cli, verb),
@@ -699,7 +701,6 @@ async fn async_main() -> Result<()> {
         #[cfg(feature = "git-overlay")]
         Commands::Bridge { command } => match command {
             BridgeCommands::Git { command } => cmd_bridge_git(&cli, command.clone()),
-            BridgeCommands::BackfillFidelity => cmd_bridge_backfill_fidelity(&cli),
         },
 
         #[cfg(feature = "semantic")]

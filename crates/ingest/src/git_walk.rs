@@ -101,6 +101,10 @@ pub struct CommitEntry {
     /// position (not split out) so a non-canonical header order reconstructs
     /// byte-identically. #564 step 1.
     pub extra_headers: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Optional Heddle metadata note from `refs/notes/heddle`, if present.
+    /// The state writer parses this to preserve exported Heddle identity and
+    /// metadata during a fresh ingest of a Git repo.
+    pub heddle_note: Option<Vec<u8>>,
 }
 
 /// Author/committer identity + timestamp.
@@ -410,6 +414,7 @@ impl GitSource {
         let message = commit.message.to_vec();
 
         let extra_headers = collect_commit_extra_headers(&object.body);
+        let heddle_note = self.read_heddle_note_bytes(&oid.to_string())?;
 
         Ok(CommitEntry {
             sha: oid.to_string(),
@@ -421,7 +426,18 @@ impl GitSource {
             authored_at,
             committed_at,
             extra_headers,
+            heddle_note,
         })
+    }
+
+    /// Read Heddle's metadata note for `sha`, if the source repository
+    /// carries `refs/notes/heddle`.
+    pub fn read_heddle_note_bytes(&self, sha: &str) -> crate::Result<Option<Vec<u8>>> {
+        let oid = parse_oid(self.repo.object_format(), sha)?;
+        let notes_ref = sley::notes::NotesRef::expand("refs/notes/heddle");
+        self.repo
+            .read_note_bytes(&notes_ref, &oid)
+            .map_err(|e| IngestError::Git(format!("read Heddle note for {sha}: {e}")))
     }
 
     /// Read the direct children of a git tree (non-recursive).
@@ -512,12 +528,37 @@ impl GitSource {
         Ok(out)
     }
 
+    /// Iterate reflog entries only for the selected local branch/tag refs.
+    ///
+    /// Deliberately excludes `HEAD`: checkout/reset entries in `HEAD` can
+    /// mention unrelated branch tips as their previous target, which would
+    /// make a scoped import unexpectedly pull in commits outside the selected
+    /// refs. Remote-tracking refs usually have no local reflog, so they are
+    /// imported from their live tip only.
+    pub fn collect_reflog_for_refs(&self, heads: &[RefHead]) -> crate::Result<Vec<ReflogEntry>> {
+        let mut out = Vec::new();
+        let refs = self.repo.references();
+        for head in heads {
+            if matches!(head.namespace, RefNamespace::Branch | RefNamespace::Tag) {
+                collect_one_reflog(&refs, &head.full_name, &mut out)?;
+            }
+        }
+        Ok(out)
+    }
+
     /// Every distinct commit SHA referenced by any reflog entry that still
     /// exists in the object database. Intended to be merged into the seed
     /// set for [`Self::commits_topo`] so force-pushed or amended commits
     /// still get translated into Heddle states.
     pub fn reflog_commit_shas(&self) -> crate::Result<Vec<String>> {
         let entries = self.collect_reflog()?;
+        Ok(self.reflog_commit_shas_from_entries(&entries))
+    }
+
+    /// Deduplicate and filter commit SHAs from a caller-provided reflog set.
+    /// Scoped import uses this after it has selected the reflogs that belong
+    /// to the requested refs.
+    pub fn reflog_commit_shas_from_entries(&self, entries: &[ReflogEntry]) -> Vec<String> {
         let mut seen: HashSet<String> = HashSet::new();
         let mut out = Vec::new();
         for entry in entries {
@@ -532,7 +573,7 @@ impl GitSource {
             }
         }
         out.sort();
-        Ok(out)
+        out
     }
 
     /// `true` if `sha` resolves to a commit still present in the odb.
@@ -557,10 +598,23 @@ impl GitSource {
         &self,
         heads: impl IntoIterator<Item = String>,
     ) -> crate::Result<Vec<CommitEntry>> {
+        self.commits_topo_with_progress(heads, None)
+    }
+
+    /// [`Self::commits_topo`] with a callback that reports how many commits
+    /// have been read while the final total is still being discovered.
+    pub fn commits_topo_with_progress(
+        &self,
+        heads: impl IntoIterator<Item = String>,
+        mut progress: Option<&mut dyn FnMut(usize)>,
+    ) -> crate::Result<Vec<CommitEntry>> {
         // BFS from heads; dedupe on SHA.
         let mut queue: VecDeque<String> = heads.into_iter().collect();
         let mut seen: HashSet<String> = HashSet::new();
         let mut entries: HashMap<String, CommitEntry> = HashMap::new();
+        if let Some(progress) = progress.as_deref_mut() {
+            progress(0);
+        }
 
         while let Some(sha) = queue.pop_front() {
             if seen.contains(&sha) {
@@ -574,6 +628,9 @@ impl GitSource {
                 }
             }
             entries.insert(sha, entry);
+            if let Some(progress) = progress.as_deref_mut() {
+                progress(entries.len());
+            }
         }
 
         // Kahn's algorithm for a stable parent-before-child order.
@@ -1421,6 +1478,7 @@ mod tests {
             authored_at: Utc::now(),
             committed_at: Utc::now(),
             extra_headers: Vec::new(),
+            heddle_note: None,
         };
         let commits = vec![
             make("A", &[]),

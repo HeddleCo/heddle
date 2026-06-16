@@ -24,10 +24,10 @@
 //! representation (e.g. when handing it to a gRPC service stub).
 
 use anyhow::{Result, anyhow};
-use objects::store::ObjectStore;
 use objects::{
     error::HeddleError,
     object::{ChangeId, State},
+    store::ObjectStore,
 };
 use repo::Repository;
 

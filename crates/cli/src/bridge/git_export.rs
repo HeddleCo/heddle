@@ -1,18 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Export Heddle states to Git commits functionality.
 
-use objects::store::ObjectStore;
 use std::collections::HashSet;
 
 use objects::{
     error::HeddleError,
     object::{ChangeId, ContentHash, FileMode, MarkerName, Principal, State, ThreadName},
+    store::ObjectStore,
 };
 use repo::{AudienceTier, Repository as HeddleRepository, visible};
-use sley::plumbing::sley_object::EncodedObject;
 use sley::{
     CommitObject, EntryKind, GitObjectType, ObjectFormat, ObjectId, RefPrecondition,
-    Repository as SleyRepository, Signature,
+    ReferenceTarget, Repository as SleyRepository, Signature, plumbing::sley_object::EncodedObject,
 };
 
 use crate::bridge::{
@@ -64,13 +63,10 @@ fn identity_is_byte_faithful(who: &Principal) -> bool {
 ///   2. lossy imports, where unrepresentable tree entries were dropped/converted
 ///      so the rebuilt tree — hence commit — OID diverges.
 ///
-/// (2) is read off ONE canonical signal — [`State::git_lossy`] — that BOTH lossy
-/// population paths (`bridge git import --lossy` AND `bridge git ingest --lossy`)
-/// set, rather than enumerating import surfaces or keying off the mirror's
-/// per-OID lossy log. That log is unreachable for an UNMAPPED state (an ingest
-/// import never populates the bridge mapping), which is exactly the gap that let
-/// an ingest-lossy commit reconstruct to a wrong SHA (#567 round 2); the state
-/// flag closes the whole class, including any future lossy entry point.
+/// (2) is read off ONE canonical signal — [`State::git_lossy`] — that lossy
+/// import population paths set, rather than enumerating import surfaces or
+/// relying on bridge mapping sidecar state. The state flag closes the whole
+/// class, including any future lossy entry point.
 ///
 /// When false the caller MUST keep the verbatim mirror bytes / preserved mapped
 /// OID (or fall through to the native mint) rather than mint a wrong-SHA
@@ -135,12 +131,12 @@ pub(crate) fn export_state(
     // mirror bytes to fall back to. Every unmapped fidelity state therefore MINTS
     // from its own raw metadata — a `--lossy` one is NOT rejected into a
     // nonexistent verbatim source (the r2 over-correction, #567 round 3):
-    //   * byte-faithful (a clean `bridge git ingest`, native heddle commit with
-    //     fidelity, ...) → the derived OID coincides with the original commit SHA;
-    //   * lossy / non-UTF8 (`bridge git ingest --lossy`) → a DERIVED OID that
-    //     still preserves raw_message/identities/headers. With no original to
-    //     match this is correct, not the wrong-SHA bug the r2 `git_lossy` guard
-    //     (rightly) blocks ONLY for a MAPPED commit.
+    //   * byte-faithful (a clean ingest-backed import, native heddle commit with
+    //     fidelity, ...) -> the derived OID coincides with the original commit SHA;
+    //   * lossy / non-UTF8 (ingest-backed import with lossy tree conversion) -> a
+    //     DERIVED OID that still preserves raw_message/identities/headers. With
+    //     no original to match this is correct, not the wrong-SHA bug the r2
+    //     `git_lossy` guard (rightly) blocks ONLY for a MAPPED commit.
     if has_git_fidelity(&state) {
         let content = reconstruct_commit_bytes(heddle_repo, repo, mapping, &state)?;
         return Ok(Some(write_commit_object(repo, &content)?));
@@ -324,6 +320,7 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
     let repo = bridge.open_git_repo()?;
     bridge.mapping.retain_git_objects(&repo);
     bridge.seed_git_checkpoint_mappings_from_checkout(&repo)?;
+    bridge.seed_ingest_identity_mappings_from_mirror(&repo)?;
 
     // The desired/actual ref sets span the WHOLE mirror, not just this export's
     // scoped thread: a prior all-thread export can leave `refs/heads`/`refs/tags`
@@ -732,7 +729,8 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
 
     for name in &tag_names {
         let tag_ref = format!("refs/tags/{name}");
-        let existing_oid = branch_tip_oid(&repo, &tag_ref);
+        let existing_raw_oid = direct_ref_oid(&repo, &tag_ref);
+        let existing_oid = existing_raw_oid.and_then(|oid| peel_to_commit_oid(&repo, oid));
         let desired_oid = desired.get(&tag_ref).copied();
         let in_scope = thread.is_none();
         // A live marker whose served target was NOT minted into the mapping this
@@ -750,6 +748,19 @@ fn export_scoped(bridge: &mut GitBridge, thread: Option<&str>) -> GitResult<Expo
             }
             None => false,
         };
+        if let (Some(desired), Some(raw), Some(peeled)) =
+            (desired_oid, existing_raw_oid, existing_oid)
+            && raw != desired
+            && peeled == desired
+        {
+            managed_record.insert(tag_ref.clone(), raw);
+            stats.markers_synced += 1;
+            stats.tags.push(ExportedRef {
+                name: name.clone(),
+                tip: raw,
+            });
+            continue;
+        }
         match reconcile_ref(
             ReconcileNs::Tag,
             desired_oid,
@@ -987,6 +998,13 @@ fn branch_tip_oid(repo: &SleyRepository, ref_name: &str) -> Option<ObjectId> {
     peel_to_commit_oid(repo, oid)
 }
 
+fn direct_ref_oid(repo: &SleyRepository, ref_name: &str) -> Option<ObjectId> {
+    match repo.find_reference(ref_name).ok()??.target {
+        ReferenceTarget::Direct(oid) => Some(oid),
+        ReferenceTarget::Symbolic(_) => None,
+    }
+}
+
 fn peel_to_commit_oid(repo: &SleyRepository, mut oid: ObjectId) -> Option<ObjectId> {
     loop {
         let object = repo.read_object(&oid).ok()?;
@@ -1136,8 +1154,9 @@ fn submodule_oid_from_blob(content: &[u8]) -> Option<ObjectId> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use objects::object::{Attribution, ContentHash, Principal, State};
+
+    use super::*;
 
     fn fidelity_state() -> State {
         State::new(

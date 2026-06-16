@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Blame command - show line-by-line attribution for files.
 
-use objects::store::ObjectStore;
 use std::{collections::HashMap, path::Path};
 
 use anyhow::{Result, anyhow};
-use objects::object::{
-    AnnotationStatus, Attribution, ChangeId, ContentHash, ContextTarget, FileProvenance,
-    ProvenanceError, Tree,
+use objects::{
+    object::{
+        AnnotationStatus, Attribution, ChangeId, ContentHash, ContextTarget, FileProvenance,
+        ProvenanceError, Tree,
+    },
+    store::ObjectStore,
 };
 use repo::Repository;
 use serde::Serialize;
@@ -453,8 +455,9 @@ fn fit_author(s: &str, max_len: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use objects::object::{Agent, Attribution, Principal, State};
+
+    use super::*;
 
     fn human() -> Attribution {
         Attribution::human(Principal::new("Ada Lovelace", "ada@example.com"))

@@ -13,7 +13,7 @@
 //
 // FSKit invokes `loadResource` with:
 //   * `resource: FSResource` — typically `FSPathURLResource`
-//     wrapping the path the user gave `mount -t heddle <path>`.
+//     wrapping the path the user gave `mount -F -t heddle <path>`.
 //   * `options: FSTaskOptions` — the `-o key=value,…` options
 //     declared by `FSActivateOptionSyntax` in Info.plist.
 //
@@ -22,10 +22,10 @@
 //   * `-o t=<thread>` → which thread to mount (defaults to "main")
 //
 // `threadID(from:)` below parses the argv shape FSKit hands us
-// based on `FSActivateOptionSyntax.shortOptions = "t:"` in
+// based on `FSActivateOptionSyntax.shortOptions = "o:"` in
 // Info.plist. The `crates/cli/src/cli/commands/mount_lifecycle.rs`
-// macOS path now issues real `mount -t heddle -o t=<thread> ...`
-// commands, so this lookup is live.
+// macOS path issues `mount -F -t heddle -o t=<thread> ...`;
+// mount(8) forwards the whole `-o` payload into FSKit task options.
 
 import CryptoKit
 import Foundation
@@ -91,11 +91,9 @@ final class HeddleFSModuleFileSystem: FSUnaryFileSystem,
         options: FSTaskOptions,
         replyHandler: @escaping (FSVolume?, (any Error)?) -> Void
     ) {
-        // Pull the URL — keep the URL handle around, not just the
-        // string, so we can call startAccessingSecurityScopedResource
-        // on it. Per `FSRequiresSecurityScopedPathURLResources=true`
-        // in our Info.plist, FSKit hands us a security-scoped URL
-        // that the sandbox honors for the duration of the access.
+        // Pull the URL and keep the URL handle around, not just the
+        // path string, so any security-scoped grant FSKit attaches to
+        // the resource can stay active for the mount lifetime.
         guard let resourceURL = Self.repoURL(from: resource) else {
             log.error("loadResource: resource is not a file URL")
             replyHandler(nil, POSIXError(.EINVAL))
@@ -165,21 +163,37 @@ final class HeddleFSModuleFileSystem: FSUnaryFileSystem,
         // deinits. Nothing extension-scoped to clean up here.
     }
 
-    /// Parse the thread name out of `mount -t heddle -o t=<thread> …`.
+    /// Parse the thread name out of `mount -F -t heddle -o t=<thread> …`.
     ///
-    /// FSKit translates `-o t=foo` into the `taskOptions` argv array
-    /// using whatever `FSActivateOptionSyntax.shortOptions` declares.
-    /// We registered `"t:"` so the argv we see is one of:
-    ///   * `["-t", "foo"]`
-    ///   * `["-t=foo"]`
-    ///   * `["-tfoo"]`  (legacy short-option packing)
-    /// All three forms are accepted; whichever comes first wins.
-    /// Returns nil if no `-t` is present so the caller can default.
+    /// FSKit receives the mount(8) option payload as `-o`, so the normal
+    /// CLI shape is one of:
+    ///   * `["-o", "t=foo"]`
+    ///   * `["-o=t=foo"]`
+    ///   * `["-ot=foo"]`
+    /// The parser also accepts old direct `-t` forms for compatibility.
+    /// Returns nil if no thread option is present so the caller can default.
     static func threadID(from options: FSTaskOptions) -> String? {
         let argv = options.taskOptions
         var i = 0
         while i < argv.count {
             let arg = argv[i]
+            if arg == "-o" {
+                if i + 1 < argv.count, let thread = threadID(fromMountOptions: argv[i + 1]) {
+                    return thread
+                }
+                i += 2
+                continue
+            }
+            if arg.hasPrefix("-o=") {
+                if let thread = threadID(fromMountOptions: String(arg.dropFirst(3))) {
+                    return thread
+                }
+            }
+            if arg.hasPrefix("-o") && arg.count > 2 {
+                if let thread = threadID(fromMountOptions: String(arg.dropFirst(2))) {
+                    return thread
+                }
+            }
             if arg == "-t" {
                 if i + 1 < argv.count {
                     let value = argv[i + 1]
@@ -194,6 +208,21 @@ final class HeddleFSModuleFileSystem: FSUnaryFileSystem,
                 return String(arg.dropFirst(2))
             }
             i += 1
+        }
+        return nil
+    }
+
+    private static func threadID(fromMountOptions raw: String) -> String? {
+        for option in raw.split(separator: ",") {
+            let trimmed = option.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let parts = trimmed.split(separator: "=", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            let key = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            if (key == "t" || key == "thread") && !value.isEmpty {
+                return value
+            }
         }
         return nil
     }

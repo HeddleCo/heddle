@@ -2640,11 +2640,6 @@
           ],
           "type": "string"
         },
-        "partial_mirror_refs": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
         "path": {
           "type": "string"
         },
@@ -2711,7 +2706,6 @@
         "branches_synced",
         "tags_synced",
         "skipped_non_commit_refs",
-        "partial_mirror_refs",
         "already_in_sync",
         "verification",
         "output_kind"
@@ -5342,71 +5336,6 @@
       "title": "AgentStopSchema",
       "type": "object"
     },
-    "bridge backfill-fidelity": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": true,
-      "properties": {
-        "idempotency_status": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "op_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "operation_record": {
-          "anyOf": [
-            {
-              "properties": {
-                "command": {
-                  "type": "string"
-                },
-                "idempotency_status": {
-                  "type": "string"
-                },
-                "op_id": {
-                  "type": "string"
-                },
-                "replayed": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "command",
-                "idempotency_status",
-                "op_id",
-                "replayed"
-              ],
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "output_kind": {
-          "enum": [
-            "bridge_backfill_fidelity"
-          ],
-          "type": "string"
-        },
-        "replayed": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "output_kind"
-      ],
-      "title": "GenericJsonObjectSchema",
-      "type": "object"
-    },
     "bridge git export": {
       "$defs": {
         "ExportedRefSchema": {
@@ -5555,7 +5484,7 @@
           ],
           "type": "object"
         },
-        "LossyGitImportEntrySchema": {
+        "LossyImportEntrySchema": {
           "properties": {
             "action": {
               "type": "string"
@@ -5610,7 +5539,7 @@
         },
         "lossy_entries": {
           "items": {
-            "$ref": "#/$defs/LossyGitImportEntrySchema"
+            "$ref": "#/$defs/LossyImportEntrySchema"
           },
           "type": "array"
         },
@@ -5655,11 +5584,6 @@
             "bridge_git_import"
           ],
           "type": "string"
-        },
-        "partial_mirror_refs": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
         },
         "recommended_action": {
           "type": [
@@ -5719,69 +5643,12 @@
         "branches_synced",
         "tags_synced",
         "skipped_non_commit_refs",
-        "partial_mirror_refs",
         "lossy_entries",
         "already_in_sync",
         "recovery_commands",
         "output_kind"
       ],
       "title": "BridgeImportSchema",
-      "type": "object"
-    },
-    "bridge git ingest": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "additionalProperties": true,
-      "properties": {
-        "idempotency_status": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "op_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "operation_record": {
-          "anyOf": [
-            {
-              "properties": {
-                "command": {
-                  "type": "string"
-                },
-                "idempotency_status": {
-                  "type": "string"
-                },
-                "op_id": {
-                  "type": "string"
-                },
-                "replayed": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "command",
-                "idempotency_status",
-                "op_id",
-                "replayed"
-              ],
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "replayed": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        }
-      },
-      "title": "GenericJsonObjectSchema",
       "type": "object"
     },
     "bridge git init": {

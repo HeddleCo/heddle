@@ -32,16 +32,30 @@
 //! Tag-object reconstruction (`reconstruct_tag_bytes`) is deferred to #575,
 //! where annotated tags become first-class content-addressed objects.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
-use cli::Repository;
-use cli::bridge::git_core::GitBridge;
-use cli::bridge::git_import::import_all_with_options;
-use cli::bridge::git_reconstruct::commit_object_id;
-use cli::bridge::git_util::GitImportOptions;
+use cli::{
+    Repository,
+    bridge::{git_core::GitBridge, git_reconstruct::commit_object_id, test_support},
+};
 use sley::{ObjectId, Repository as SleyRepository};
 use tempfile::TempDir;
+
+fn ingest_into_bridge(bridge: &mut GitBridge<'_>, source: &Path) -> Result<(), String> {
+    let target = test_support::heddle_repo(bridge).root();
+    ingest::import_git_into_with_options(source, target, ingest::ImportOptions { lossy: false })
+        .map_err(|error| error.to_string())?;
+    test_support::stage_ingest_source_in_mirror(bridge, source, &[])
+        .map_err(|error| error.to_string())?;
+    test_support::build_existing_mapping(bridge, Some(source))
+        .map_err(|error| error.to_string())?;
+    let mirror_repo = test_support::open_git_repo(bridge).map_err(|error| error.to_string())?;
+    test_support::seed_ingest_identity_mappings_from_mirror(bridge, &mirror_repo)
+        .map_err(|error| error.to_string())
+}
 
 /// Pinned identity + config so the in-process fixtures produce stable SHAs
 /// regardless of when/where the test runs. A default commit date is pinned too
@@ -271,7 +285,7 @@ fn assert_all_commits_reconstruct(case: &str, source: &Path) {
     let heddle_home = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_home.path()).expect("init heddle repo");
     let mut bridge = GitBridge::new(&repo);
-    import_all_with_options(&mut bridge, Some(source), GitImportOptions { lossy: false })
+    ingest_into_bridge(&mut bridge, source)
         .unwrap_or_else(|e| panic!("[{case}] import from git failed: {e}"));
 
     // A writable odb for tree-OID resolution (git trees are content-addressed,
@@ -326,7 +340,7 @@ fn assert_all_commits_export_from_state(case: &str, source: &Path) {
     let heddle_home = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_home.path()).expect("init heddle repo");
     let mut bridge = GitBridge::new(&repo);
-    import_all_with_options(&mut bridge, Some(source), GitImportOptions { lossy: false })
+    ingest_into_bridge(&mut bridge, source)
         .unwrap_or_else(|e| panic!("[{case}] import from git failed: {e}"));
 
     // A FRESH bare repo, separate from the bridge mirror: it has never held any

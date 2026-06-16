@@ -749,6 +749,8 @@ impl ObjectStore for FsStore {
 
     #[instrument(skip(self))]
     fn list_states(&self) -> Result<Vec<ChangeId>> {
+        self.reload_packs_if_stale()?;
+
         let dir = states_dir(&self.root);
         if !dir.exists() {
             return Ok(Vec::new());

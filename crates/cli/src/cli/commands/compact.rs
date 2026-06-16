@@ -18,8 +18,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use super::command_catalog::ActionTemplate;
-use super::thread::CoordinationStatus;
+use super::{command_catalog::ActionTemplate, thread::CoordinationStatus};
 
 const COMPACT_ALLOWED_KEYS: &[&str] = &[
     "output_kind",

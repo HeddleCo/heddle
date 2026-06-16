@@ -2,8 +2,10 @@
 //! Undo and redo commands.
 
 use anyhow::{Result, anyhow};
-use objects::object::{ChangeId, ContentHash};
-use objects::store::ObjectStore;
+use objects::{
+    object::{ChangeId, ContentHash},
+    store::ObjectStore,
+};
 use oplog::{OpBatch, RedactionUndoClass};
 use refs::UNDO_RECOVERY_HANDLE;
 use repo::{Repository, ThreadManager};

@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>Heddle</string>
+	<string>heddle</string>
 	<key>CFBundleIconName</key>
 	<string>AppIcon</string>
 	<key>CFBundleName</key>
-	<string>Heddle</string>
+	<string>heddle</string>
 	<key>EXAppExtensionAttributes</key>
 	<dict>
 		<key>EXExtensionPointIdentifier</key>
@@ -27,13 +27,17 @@
 		<key>FSSupportsPathURLs</key>
 		<true/>
 		<key>FSSupportsGenericURLResources</key>
-		<false/>
+		<true/>
+		<key>FSSupportedSchemes</key>
+		<array>
+			<string>file</string>
+		</array>
 		<key>FSSupportsServerURLs</key>
 		<false/>
 		<key>FSActivateOptionSyntax</key>
 		<dict>
 			<key>shortOptions</key>
-			<string>t:</string>
+			<string>o:</string>
 		</dict>
 		<key>FSCheckOptionSyntax</key>
 		<dict>

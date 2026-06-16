@@ -15,12 +15,13 @@
 
 use std::process::Command;
 
-use super::*;
 use oplog::{OpLogBackend, OpRecord};
+
+use super::*;
 
 /// R9: bridge mapping persistence.
 ///
-/// `bridge import` writes the heddle↔git mapping to disk via a
+/// `bridge export` writes the served heddle↔git mapping to disk via a
 /// tmp-rename-rename pattern (`bridge-mapping.json.tmp` →
 /// `bridge-mapping.json`). The fault checkpoint
 /// `mapping_after_tmp_before_commit` panics in the gap between those
@@ -38,6 +39,7 @@ fn bridge_recovers_from_crash_after_tmp_before_commit() {
     let temp = TempDir::new().unwrap();
     let origin = temp.path().join("origin.git");
     let work = temp.path().join("work");
+    let export = temp.path().join("export.git");
 
     // Build a small synthetic upstream so the mapping has real
     // entries to write (not just empty tables, which would
@@ -60,19 +62,19 @@ fn bridge_recovers_from_crash_after_tmp_before_commit() {
     )
     .expect("initial clone succeeds");
 
-    // ── Phase 1: spawn the import with fault injection armed ──
+    // ── Phase 1: spawn the export with fault injection armed ──
     //
     // The process should panic with our intentional message rather
-    // than completing the bridge import. We explicitly assert the
+    // than completing the bridge export. We explicitly assert the
     // panic message so a regression that silently no-ops the
     // checkpoint surfaces here, not three commits downstream.
     let crashed = Command::new(env!("CARGO_BIN_EXE_heddle"))
         .args([
             "bridge",
             "git",
-            "import",
-            "--path",
-            origin.to_str().unwrap(),
+            "export",
+            "--destination",
+            export.to_str().unwrap(),
         ])
         .current_dir(&work)
         .env("HEDDLE_FAULT_INJECT", "mapping_after_tmp_before_commit")
@@ -116,23 +118,23 @@ fn bridge_recovers_from_crash_after_tmp_before_commit() {
     // No fault injection this time. The bridge load path runs
     // `recover_mapping_tmp`, atomically renames any leftover .tmp
     // into the canonical position, and proceeds with a normal
-    // import. Final assertion: the canonical mapping file exists,
+    // export. Final assertion: the canonical mapping file exists,
     // is non-empty, and parses as the expected shape.
     let recovered = heddle_output_with_env(
         &[
             "bridge",
             "git",
-            "import",
-            "--path",
-            origin.to_str().unwrap(),
+            "export",
+            "--destination",
+            export.to_str().unwrap(),
         ],
         Some(&work),
         &[],
     )
-    .expect("recovery import succeeds");
+    .expect("recovery export succeeds");
     assert!(
         recovered.status.success(),
-        "post-crash import should succeed cleanly: stderr={}",
+        "post-crash export should succeed cleanly: stderr={}",
         String::from_utf8_lossy(&recovered.stderr)
     );
     assert!(

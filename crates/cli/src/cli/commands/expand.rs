@@ -1,16 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Expand a squashed land back to its constituent captures.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use objects::object::{Agent, ChangeId, State};
 use oplog::{OpLogBackend, OpRecord};
 use repo::{Repository, format_confidence};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use super::{
     advice::RecoveryAdvice,
@@ -60,17 +57,6 @@ struct CollapseRecord {
     sources: Vec<ChangeId>,
     result: ChangeId,
     thread: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct BridgeMappingFile {
-    entries: Vec<BridgeMappingEntry>,
-}
-
-#[derive(Deserialize)]
-struct BridgeMappingEntry {
-    change_id: String,
-    git_oid: String,
 }
 
 pub fn cmd_expand(cli: &Cli, reference: String) -> Result<()> {
@@ -148,43 +134,8 @@ fn resolve_expand_target(repo: &Repository, reference: &str) -> Result<ChangeId>
 }
 
 fn mapped_change_for_git_oid(repo: &Repository, git_oid: &str) -> Result<Option<ChangeId>> {
-    if let Some(change) = bridge_mapped_change_for_git_oid(repo, git_oid)? {
-        return Ok(Some(change));
-    }
-    if let Some(record) = repo
-        .list_git_checkpoints()?
-        .into_iter()
-        .rev()
-        .find(|record| record.git_commit == git_oid)
-    {
-        return Ok(Some(ChangeId::parse(&record.change_id)?));
-    }
-    Ok(None)
-}
-
-fn bridge_mapped_change_for_git_oid(repo: &Repository, git_oid: &str) -> Result<Option<ChangeId>> {
-    let path = repo
-        .heddle_dir()
-        .join("git-bridge")
-        .join("bridge-mapping.json");
-    if !path.exists() {
-        return Ok(None);
-    }
-    let contents =
-        fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    if contents.trim().is_empty() {
-        return Ok(None);
-    }
-    let mapping: BridgeMappingFile =
-        serde_json::from_str(&contents).context("parsing git bridge mapping")?;
-    if let Some(entry) = mapping
-        .entries
-        .into_iter()
-        .find(|entry| entry.git_oid == git_oid)
-    {
-        return Ok(Some(ChangeId::parse(&entry.change_id)?));
-    }
-    Ok(None)
+    repo.git_overlay_mapped_change_for_git_commit(git_oid)
+        .map_err(Into::into)
 }
 
 fn find_collapse_for_result(

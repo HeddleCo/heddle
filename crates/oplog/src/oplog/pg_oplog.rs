@@ -12,8 +12,10 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use objects::error::{HeddleError, Result};
-use objects::object::{OperationId, Principal};
+use objects::{
+    error::{HeddleError, Result},
+    object::{OperationId, Principal},
+};
 use runtime_bridge::RuntimeBridge;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;

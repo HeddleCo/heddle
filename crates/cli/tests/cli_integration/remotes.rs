@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-use super::*;
 use objects::object::{MarkerName, ThreadName};
+
+use super::*;
 
 fn heddle_without_git_for_remote_tests(args: &[&str], cwd: &std::path::Path) -> String {
     let output = heddle_output_with_env(args, Some(cwd), &[("PATH", ""), ("NO_COLOR", "1")])
@@ -2390,7 +2391,7 @@ fn test_cli_raw_git_clone_adopt_fetches_notes_before_import() {
         "plain git clone should start without the Heddle notes ref; adopt must fetch it"
     );
 
-    heddle(&["adopt", "--ref", "main"], Some(&raw_clone))
+    heddle(&["adopt"], Some(&raw_clone))
         .expect("raw Git clone adopt should fetch notes before importing");
     let raw_status_json = heddle(&["--output", "json", "status"], Some(&raw_clone)).unwrap();
     let raw_status: Value = serde_json::from_str(&raw_status_json).expect("status JSON parses");
@@ -2399,6 +2400,10 @@ fn test_cli_raw_git_clone_adopt_fetches_notes_before_import() {
         "raw Git clone adoption should reuse note-backed Heddle identity instead of deriving a second id"
     );
     git_ok(&["show-ref", "--verify", "refs/notes/heddle"], &raw_clone);
+    assert!(
+        !raw_clone.join(".heddle").join("git").exists(),
+        "unscoped raw Git clone adopt should hydrate notes without creating the legacy mirror"
+    );
 
     std::fs::write(
         raw_clone.join("README.md"),

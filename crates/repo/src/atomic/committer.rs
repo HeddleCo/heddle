@@ -9,8 +9,10 @@
 
 use std::path::{Path, PathBuf};
 
-use objects::error::{HeddleError, Result};
-use objects::object::Principal;
+use objects::{
+    error::{HeddleError, Result},
+    object::Principal,
+};
 use oplog::{OpLog, OpLogBackend, OpRecord};
 use refs::RefCommitter;
 

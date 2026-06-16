@@ -21,7 +21,6 @@
 //!   on-read hydration completes against a real promisor remote. Run
 //!   it with `cargo test -p heddle-cli --test lazy_blob_hydration_kernel -- --include-ignored`.
 
-use objects::store::ObjectStore;
 use std::{
     path::Path,
     sync::Arc,
@@ -29,14 +28,14 @@ use std::{
 };
 
 use cli::{bridge::git_core::clone_url_to_bare, cli::commands::GitOverlayBlobHydrator};
-use objects::object::Blob;
+use objects::{object::Blob, store::ObjectStore};
 use repo::Repository;
-use sley::plumbing::sley_core::ByteString as GitByteString;
-use sley::plumbing::sley_object::EncodedObject;
-use sley::plumbing::sley_refs::ReflogEntry;
 use sley::{
     CommitObject, EntryKind, GitObjectType, GitTime, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository, Signature,
+    plumbing::{
+        sley_core::ByteString as GitByteString, sley_object::EncodedObject, sley_refs::ReflogEntry,
+    },
 };
 use tempfile::TempDir;
 

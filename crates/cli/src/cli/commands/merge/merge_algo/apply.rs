@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use std::{collections::HashMap, fs, path::Path};
 
 use anyhow::{Result, anyhow};
-use objects::object::{Tree, TreeEntry};
+use objects::{
+    object::{Tree, TreeEntry},
+    store::ObjectStore,
+};
 use repo::Repository;
 
 use super::super::prepare_dir_for_file_replacement;

@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn parses_macos_major_versions() {
         assert_eq!(parse_macos_major_version("15.4"), Some(15));
-        assert_eq!(parse_macos_major_version("26.5.1"), Some(26));
+        assert_eq!(parse_macos_major_version("26.0.1"), Some(26));
         assert_eq!(parse_macos_major_version(""), None);
         assert_eq!(parse_macos_major_version("not-a-version"), None);
     }

@@ -445,8 +445,9 @@ fn command_path_from_raw_help_request(cmd: &clap::Command, raw: &[String]) -> Op
 /// mechanism differs (HeddleCo/heddle#381). Help is repo-, cwd-, and
 /// env-independent, so this is safe to call from parallel tests.
 pub fn render_for_args(args: &[&str]) -> Option<String> {
-    use crate::cli::cli_args::{Cli, Commands};
     use clap::{CommandFactory, Parser};
+
+    use crate::cli::cli_args::{Cli, Commands};
 
     let command = Cli::command();
     let raw: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
@@ -1197,8 +1198,9 @@ mod tests {
     /// `main.rs` makes (`matches!(cli.command, Commands::Capture(a) if
     /// a.help_agent)`), driven entirely by clap's parse.
     fn wants_reveal(args: &[&str]) -> bool {
-        use crate::cli::cli_args::{Cli, Commands};
         use clap::Parser;
+
+        use crate::cli::cli_args::{Cli, Commands};
         let argv = std::iter::once("heddle").chain(args.iter().copied());
         match Cli::try_parse_from(argv) {
             Ok(cli) => matches!(&cli.command, Commands::Capture(a) if a.help_agent),

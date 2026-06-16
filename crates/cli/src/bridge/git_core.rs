@@ -10,27 +10,26 @@ use std::{
 
 use objects::{
     error::HeddleError,
-    lock::{RepositoryLockExt, WriteLockGuard},
     object::{ChangeId, ChangeIdParseError, ContentHash, FileMode, Principal, ThreadName, Tree},
     store::ObjectStore,
 };
 use refs::Head;
 use repo::Repository as HeddleRepository;
-use sley::plumbing::sley_core::ByteString as GitByteString;
-use sley::remote::{
-    FetchOptions, LsRemoteFilter, NoCredentials, PushActionPlan, PushCommand, PushOptions,
-    SilentProgress,
-};
 use sley::{
     BString as GitBString, DeleteRef, FullName, GitObjectType, GitTime, Index, IndexEntry,
     IndexWriteOptions, ObjectFormat, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository, Signature,
+    plumbing::sley_core::ByteString as GitByteString,
+    remote::{
+        FetchOptions, LsRemoteFilter, NoCredentials, PushActionPlan, PushCommand, PushOptions,
+        SilentProgress,
+    },
 };
 
 use super::{
     git_export::{export_all, export_current_thread},
-    git_import::import_all,
-    git_util::{ImportStats, LossyGitImportEntry},
+    git_ingest::import_git_history,
+    git_util::ImportStats,
 };
 
 /// Errors specific to Git bridge operations.
@@ -377,6 +376,12 @@ pub struct GitPullOutcome {
     pub materialized_checkout: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PullPreflight {
+    UpToDate,
+    ImportRequired,
+}
+
 fn pull_outcome(stats: &ImportStats, materialized_checkout: bool) -> GitPullOutcome {
     GitPullOutcome {
         changed: materialized_checkout || stats.states_created > 0,
@@ -503,9 +508,6 @@ pub struct SyncMapping {
     heddle_to_git: HashMap<ChangeId, ObjectId>,
     /// Maps Git object id -> Heddle ChangeId
     git_to_heddle: HashMap<ObjectId, ChangeId>,
-    /// Git commits whose imported Heddle states were produced under
-    /// `bridge git import --lossy`, with root-relative lossy entries.
-    git_lossy_entries: HashMap<ObjectId, Vec<LossyGitImportEntry>>,
 }
 
 impl SyncMapping {
@@ -518,9 +520,6 @@ impl SyncMapping {
     pub fn insert(&mut self, change_id: ChangeId, git_oid: ObjectId) {
         if let Some(previous_git) = self.heddle_to_git.remove(&change_id) {
             self.git_to_heddle.remove(&previous_git);
-            if previous_git != git_oid {
-                self.git_lossy_entries.remove(&previous_git);
-            }
         }
         if let Some(previous_change) = self.git_to_heddle.remove(&git_oid) {
             self.heddle_to_git.remove(&previous_change);
@@ -572,20 +571,18 @@ impl SyncMapping {
         self.heddle_to_git.contains_key(change_id)
     }
 
-    /// Drop the mapping for `change_id`, clearing both directions and any
-    /// lossy-import entries for the now-unmapped Git object. Returns the Git
-    /// OID that was mapped, if any.
+    /// Drop the mapping for `change_id`, clearing both directions. Returns the
+    /// Git OID that was mapped, if any.
     ///
     /// The export visibility purge calls this to remove a state whose
     /// effective tier is no longer served by the export audience. Without it,
     /// a stale ChangeId→OID mapping (minted while the state was public, kept
-    /// alive by the notes/sidecar rebuild on the next export) makes the
+    /// alive by the notes/cache rebuild on the next export) makes the
     /// frontier walk and the tag/note sync treat a now-embargoed commit as
     /// served — leaking it via `refs/heads/<thread>` or a tag.
     pub(crate) fn remove(&mut self, change_id: &ChangeId) -> Option<ObjectId> {
         let git_oid = self.heddle_to_git.remove(change_id)?;
         self.git_to_heddle.remove(&git_oid);
-        self.git_lossy_entries.remove(&git_oid);
         Some(git_oid)
     }
 
@@ -594,80 +591,43 @@ impl SyncMapping {
         self.git_to_heddle.contains_key(&git_oid)
     }
 
-    pub(crate) fn set_git_lossy_entries(
-        &mut self,
-        git_oid: ObjectId,
-        entries: Vec<LossyGitImportEntry>,
-    ) {
-        if entries.is_empty() {
-            self.git_lossy_entries.remove(&git_oid);
-        } else {
-            self.git_lossy_entries.insert(git_oid, entries);
-        }
-    }
-
-    pub(crate) fn get_git_lossy_entries(
-        &self,
-        git_oid: ObjectId,
-    ) -> Option<&[LossyGitImportEntry]> {
-        self.git_lossy_entries.get(&git_oid).map(Vec::as_slice)
-    }
-
     /// Iterate over mappings.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&ChangeId, &ObjectId)> {
         self.heddle_to_git.iter()
     }
 
     pub(crate) fn retain_git_objects(&mut self, repo: &SleyRepository) {
-        let retained: Vec<(ChangeId, ObjectId, Option<Vec<LossyGitImportEntry>>)> = self
+        let retained: Vec<(ChangeId, ObjectId)> = self
             .heddle_to_git
             .iter()
             .filter_map(|(change_id, git_oid)| {
-                repo.read_object(git_oid).ok().map(|_| {
-                    (
-                        *change_id,
-                        *git_oid,
-                        self.git_lossy_entries.get(git_oid).cloned(),
-                    )
-                })
+                repo.read_object(git_oid)
+                    .ok()
+                    .map(|_| (*change_id, *git_oid))
             })
             .collect();
 
         self.heddle_to_git.clear();
         self.git_to_heddle.clear();
-        self.git_lossy_entries.clear();
-        for (change_id, git_oid, lossy_entries) in retained {
+        for (change_id, git_oid) in retained {
             self.insert(change_id, git_oid);
-            if let Some(lossy_entries) = lossy_entries {
-                self.set_git_lossy_entries(git_oid, lossy_entries);
-            }
         }
     }
 
     #[cfg_attr(not(feature = "git-overlay"), allow(dead_code))]
     pub(crate) fn retain_git_object_set(&mut self, reachable: &HashSet<ObjectId>) -> usize {
         let before = self.heddle_to_git.len();
-        let retained: Vec<(ChangeId, ObjectId, Option<Vec<LossyGitImportEntry>>)> = self
+        let retained: Vec<(ChangeId, ObjectId)> = self
             .heddle_to_git
             .iter()
             .filter(|(_, git_oid)| reachable.contains(*git_oid))
-            .map(|(change_id, git_oid)| {
-                (
-                    *change_id,
-                    *git_oid,
-                    self.git_lossy_entries.get(git_oid).cloned(),
-                )
-            })
+            .map(|(change_id, git_oid)| (*change_id, *git_oid))
             .collect();
 
         self.heddle_to_git.clear();
         self.git_to_heddle.clear();
-        self.git_lossy_entries.clear();
-        for (change_id, git_oid, lossy_entries) in retained {
+        for (change_id, git_oid) in retained {
             self.insert(change_id, git_oid);
-            if let Some(lossy_entries) = lossy_entries {
-                self.set_git_lossy_entries(git_oid, lossy_entries);
-            }
         }
         before.saturating_sub(self.heddle_to_git.len())
     }
@@ -715,12 +675,6 @@ impl MappingFileSnapshot {
 }
 
 impl<'a> GitBridge<'a> {
-    /// Trailer keys used in Git commit messages for Heddle metadata.
-    pub(crate) const TRAILER_CHANGE_ID: &'static str = "Heddle-Change-Id";
-    pub(crate) const TRAILER_AGENT: &'static str = "Heddle-Agent";
-    pub(crate) const TRAILER_CONFIDENCE: &'static str = "Heddle-Confidence";
-    pub(crate) const TRAILER_STATUS: &'static str = "Heddle-Status";
-
     /// Create a new Git bridge for a Heddle repository.
     pub fn new(heddle_repo: &'a HeddleRepository) -> Self {
         Self {
@@ -729,24 +683,6 @@ impl<'a> GitBridge<'a> {
             mapping: SyncMapping::new(),
             commit_message_overrides: HashMap::new(),
         }
-    }
-
-    /// Acquire THE canonical repository write lock — the single
-    /// `.heddle/locks/repo.lock` that `Repository::locker()` guards and that
-    /// every state-mutating writer (snapshot/capture, merge, the #570 fidelity
-    /// backfill, AND bridge import) serializes on.
-    ///
-    /// This is the one chokepoint so the lock class stays closed: a new writer
-    /// must call THIS, not invent its own lock. Two writers on two different
-    /// lock files don't exclude each other — e.g. before this, the fidelity
-    /// backfill held `repo.lock` while a concurrent bridge import wrote states
-    /// under no lock at all, so they could race. Both now take this same lock,
-    /// making a fourth "different lock" finding impossible (heddle#570).
-    pub(crate) fn acquire_write_lock(&self) -> GitResult<WriteLockGuard> {
-        self.heddle_repo
-            .locker()
-            .write()
-            .map_err(|e| GitBridgeError::Git(format!("acquire repo write lock: {e}")))
     }
 
     /// Initialize a Git mirror in the .heddle/git directory.
@@ -769,6 +705,8 @@ impl<'a> GitBridge<'a> {
         } else {
             fs::create_dir_all(&git_dir)?;
             let _ = SleyRepository::init_bare(&git_dir).map_err(git_err)?;
+            let mirror_repo = open_repo(&git_dir)?;
+            seed_checkout_note_refs_into_mirror(self.heddle_repo.root(), &mirror_repo)?;
             true
         };
 
@@ -849,11 +787,6 @@ impl<'a> GitBridge<'a> {
 
     pub(crate) fn set_commit_message_override(&mut self, state_id: ChangeId, message: String) {
         self.commit_message_overrides.insert(state_id, message);
-    }
-
-    /// Import Git commits into Heddle states.
-    pub fn import(&mut self, git_path: Option<&Path>) -> GitResult<super::git_util::ImportStats> {
-        import_all(self, git_path)
     }
 
     pub(crate) fn with_mapping_rollback<T>(
@@ -1175,22 +1108,19 @@ impl<'a> GitBridge<'a> {
         Ok(())
     }
 
-    /// Best-effort adoption preflight for raw `git clone` checkouts.
+    /// Best-effort adoption preflight for the ingest-backed path.
     ///
     /// Plain Git clones do not fetch `refs/notes/heddle` by default, but
     /// Heddle-pushed overlay remotes use that ref to preserve Git commit
-    /// -> Heddle state identity. Before import, try each checkout-configured
-    /// remote and mirror any available Heddle notes into both the internal
-    /// mirror and the working checkout. Remote failures are deliberately
-    /// non-fatal: offline Git history can still be adopted, and push
-    /// fast-forward guards prevent a missing notes ref from overwriting
-    /// one that exists upstream.
-    pub(crate) fn hydrate_checkout_heddle_notes_from_configured_remotes(&mut self) -> bool {
-        if checkout_note_ref_exists(self.heddle_repo.root()).unwrap_or(false) {
+    /// -> Heddle state identity. Ingest reads directly from the checkout, so
+    /// it only needs `refs/notes/heddle` hydrated in the checkout's own object
+    /// database before `GitSource` opens the repository.
+    pub(crate) fn hydrate_checkout_heddle_notes_without_mirror(root: &Path) -> bool {
+        if checkout_note_ref_exists(root).unwrap_or(false) {
             return true;
         }
 
-        let mut remotes = match checkout_remote_url_items(self.heddle_repo.root()) {
+        let mut remotes = match checkout_remote_url_items(root) {
             Ok(remotes) => remotes
                 .into_iter()
                 .map(|(name, _)| name)
@@ -1198,7 +1128,7 @@ impl<'a> GitBridge<'a> {
             Err(error) => {
                 tracing::debug!(
                     error = %error,
-                    "skipping configured remote note hydration before git-overlay adopt"
+                    "skipping configured remote note hydration before ingest-backed adopt"
                 );
                 return false;
             }
@@ -1211,26 +1141,16 @@ impl<'a> GitBridge<'a> {
             }
         });
         remotes.dedup();
-        tracing::debug!(
-            remotes = ?remotes,
-            "discovered configured remotes for Heddle note hydration"
-        );
 
         for remote in remotes {
-            match self.fetch_with_scope(
-                &remote,
-                GitFetchScope::BranchesAndNotes,
-                RefreshCheckoutAfterFetch::Yes,
-            ) {
-                Ok(()) if checkout_note_ref_exists(self.heddle_repo.root()).unwrap_or(false) => {
-                    return true;
-                }
+            match hydrate_checkout_notes_from_remote_without_mirror(root, &remote) {
+                Ok(()) if checkout_note_ref_exists(root).unwrap_or(false) => return true,
                 Ok(()) => {}
                 Err(error) => {
                     tracing::debug!(
                         remote = remote.as_str(),
                         error = %error,
-                        "configured remote did not provide Heddle notes during git-overlay adopt"
+                        "configured remote did not provide Heddle notes during ingest-backed adopt"
                     );
                 }
             }
@@ -1257,8 +1177,17 @@ impl<'a> GitBridge<'a> {
             GitFetchScope::AllRefs,
             RefreshCheckoutAfterFetch::No,
         )?;
-        self.preflight_attached_pull_fast_forward(remote_name, attached_before.as_ref())?;
-        let stats = self.import(None)?;
+        if self.preflight_attached_pull_fast_forward(remote_name, attached_before.as_ref())?
+            == PullPreflight::UpToDate
+        {
+            if let Some(thread) = attached_thread {
+                self.refresh_checkout_remote_tracking_ref(remote_name, &thread)?;
+            }
+            self.refresh_checkout_note_refs_from_mirror()?;
+            return Ok(GitPullOutcome::default());
+        }
+        let mirror_path = self.mirror_path();
+        let stats = import_git_history(self, Some(&mirror_path), &[], Default::default(), None)?;
 
         let mut materialized_attached_thread = false;
         if let Some((thread, old_state)) = attached_before
@@ -1299,26 +1228,27 @@ impl<'a> GitBridge<'a> {
         &mut self,
         remote_name: &str,
         attached_before: Option<&(String, ChangeId)>,
-    ) -> GitResult<()> {
+    ) -> GitResult<PullPreflight> {
         let Some((thread, state_id)) = attached_before else {
-            return Ok(());
+            return Ok(PullPreflight::ImportRequired);
         };
-        self.load_mapping_from_disk()?;
+        self.build_existing_mapping(None)?;
         let Some(local_git_oid) = self.mapping.get_git(state_id) else {
-            return Ok(());
+            return Ok(PullPreflight::ImportRequired);
         };
         let mirror_repo = self.open_git_repo()?;
         let branch_ref = format!("refs/heads/{thread}");
         let Some(reference) = mirror_repo.find_reference(&branch_ref).map_err(git_err)? else {
-            return Ok(());
+            return Ok(PullPreflight::ImportRequired);
         };
         let Some(remote_git_oid) = reference.peeled_oid(&mirror_repo).map_err(git_err)? else {
-            return Ok(());
+            return Ok(PullPreflight::ImportRequired);
         };
-        if remote_git_oid == local_git_oid
-            || commit_is_descendant_of(&mirror_repo, remote_git_oid, local_git_oid)?
-        {
-            return Ok(());
+        if remote_git_oid == local_git_oid {
+            return Ok(PullPreflight::UpToDate);
+        }
+        if commit_is_descendant_of(&mirror_repo, remote_git_oid, local_git_oid)? {
+            return Ok(PullPreflight::ImportRequired);
         }
         Err(GitBridgeError::RemoteDiverged {
             branch: thread.clone(),
@@ -1427,6 +1357,38 @@ impl<'a> GitBridge<'a> {
             }
         }
 
+        Ok(())
+    }
+
+    pub(crate) fn stage_ingest_source_in_mirror(
+        &mut self,
+        source: &Path,
+        refs: &[String],
+    ) -> GitResult<()> {
+        let source_repo = open_repo(source)?;
+        let updates = collect_import_source_ref_updates(&source_repo, refs)?;
+        if updates.is_empty() {
+            return Ok(());
+        }
+
+        self.init_mirror()?;
+        let mirror_repo = self.open_git_repo()?;
+        copy_reachable_objects(
+            &source_repo,
+            &mirror_repo,
+            updates.iter().map(|update| update.target),
+        )?;
+        apply_ref_updates(
+            &mirror_repo,
+            &updates,
+            &format!("heddle: stage ingest source from {}", source.display()),
+        )?;
+
+        let mut record = read_or_seed_mirror_managed_refs(&mirror_repo)?;
+        for update in &updates {
+            record.insert(full_ref_name(update), update.target);
+        }
+        write_mirror_managed_refs(&mirror_repo, &record)?;
         Ok(())
     }
 
@@ -1642,7 +1604,9 @@ impl<'a> GitBridge<'a> {
         self.write_thread_checkout_from_existing_mirror(thread)
     }
 
-    fn write_current_checkout_from_existing_mirror(&mut self) -> GitResult<WriteThroughOutcome> {
+    pub(crate) fn write_current_checkout_from_existing_mirror(
+        &mut self,
+    ) -> GitResult<WriteThroughOutcome> {
         if !self.heddle_repo.root().join(".git").exists() {
             return Ok(WriteThroughOutcome::Skipped(
                 WriteThroughSkipReason::MissingDotGit,
@@ -1688,13 +1652,22 @@ impl<'a> GitBridge<'a> {
         thread: &str,
         state_id: &ChangeId,
     ) -> GitResult<WriteThroughOutcome> {
-        let Some(git_oid) = self.mapping.get_git(state_id) else {
+        let mirror_repo = self.open_git_repo()?;
+        let git_oid = if let Some(git_oid) = self.mapping.get_git(state_id) {
+            git_oid
+        } else if let Some(git_commit) = self
+            .heddle_repo
+            .git_overlay_mapped_git_commit_for_change(state_id)
+            .map_err(|error| GitBridgeError::Git(error.to_string()))?
+        {
+            ObjectId::from_hex(mirror_repo.object_format(), &git_commit)
+                .map_err(|error| GitBridgeError::InvalidMapping(error.to_string()))?
+        } else {
             return Ok(WriteThroughOutcome::Skipped(
                 WriteThroughSkipReason::NoMappedCommit,
             ));
         };
 
-        let mirror_repo = self.open_git_repo()?;
         let checkout_repo = SleyRepository::discover(self.heddle_repo.root()).map_err(git_err)?;
         if checkout_repo.git_dir() == mirror_repo.git_dir() {
             return Ok(WriteThroughOutcome::Skipped(
@@ -2014,6 +1987,111 @@ fn checkout_note_ref_exists(root: &Path) -> GitResult<bool> {
         .find_reference(super::git_notes::NOTES_REF)
         .map_err(git_err)?
         .is_some())
+}
+
+fn seed_checkout_note_refs_into_mirror(root: &Path, mirror_repo: &SleyRepository) -> GitResult<()> {
+    if !root.join(".git").exists() {
+        return Ok(());
+    }
+
+    let checkout_repo = match SleyRepository::discover(root) {
+        Ok(repo) => repo,
+        Err(_) => return Ok(()),
+    };
+    if checkout_repo.git_dir() == mirror_repo.git_dir() {
+        return Ok(());
+    }
+    let object_repo = common_repo_for_worktree(&checkout_repo)?;
+    let note_updates = collect_ref_updates(&object_repo)?
+        .into_iter()
+        .filter(|update| update.namespace == RefNamespace::Note)
+        .collect::<Vec<_>>();
+    if note_updates.is_empty() {
+        return Ok(());
+    }
+
+    copy_reachable_objects(
+        &object_repo,
+        mirror_repo,
+        note_updates.iter().map(|update| update.target),
+    )?;
+    apply_ref_updates(
+        mirror_repo,
+        &note_updates,
+        "heddle: seed mirror note refs from checkout",
+    )
+}
+
+fn hydrate_checkout_notes_from_remote_without_mirror(
+    root: &Path,
+    remote_name: &str,
+) -> GitResult<()> {
+    reject_reserved_git_remote_name(remote_name)?;
+    let checkout_repo = SleyRepository::discover(root).map_err(git_err)?;
+    let object_repo = common_repo_for_worktree(&checkout_repo)?;
+    let url = remote_fetch_url_from_checkout_config(root, remote_name)?
+        .ok_or_else(|| GitBridgeError::Git(format!("remote '{remote_name}' has no fetch URL")))?;
+
+    if let Some(path) = local_path_from_url(&url)? {
+        let remote_repo = open_repo(&path)?;
+        let note_updates = collect_ref_updates(&remote_repo)?
+            .into_iter()
+            .filter(|update| update.namespace == RefNamespace::Note)
+            .collect::<Vec<_>>();
+        if note_updates.is_empty() {
+            return Ok(());
+        }
+        copy_reachable_objects(
+            &remote_repo,
+            &object_repo,
+            note_updates.iter().map(|update| update.target),
+        )?;
+        apply_ref_updates(
+            &object_repo,
+            &note_updates,
+            &format!("heddle: hydrate notes from {remote_name}"),
+        )?;
+        return Ok(());
+    }
+
+    fetch_heddle_notes_into_repo(&object_repo, remote_name, &url)
+}
+
+fn fetch_heddle_notes_into_repo(
+    repo: &SleyRepository,
+    remote_name: &str,
+    url: &str,
+) -> GitResult<()> {
+    let mut credentials = NoCredentials;
+    let mut progress = SilentProgress;
+    let refspec = RefSpec::forced("refs/notes/*", "refs/notes/*")?.to_git_format();
+    repo.fetch(
+        url,
+        &[refspec],
+        FetchOptions {
+            quiet: true,
+            auto_follow_tags: false,
+            fetch_all_tags: false,
+            prune: false,
+            dry_run: false,
+            append: false,
+            write_fetch_head: true,
+            tag_option_explicit: true,
+            prune_option_explicit: true,
+            depth: None,
+            merge_src: None,
+            filter: None,
+            cloning: false,
+            update_shallow: false,
+            deepen_relative: false,
+            deepen_since: None,
+            deepen_not: Vec::new(),
+        },
+        &mut credentials,
+        &mut progress,
+    )
+    .map(|_| ())
+    .map_err(|err| GitBridgeError::Git(format!("failed to fetch notes from {remote_name}: {err}")))
 }
 
 fn parse_remote_url_items_from_config(
@@ -2712,6 +2790,29 @@ fn collect_ref_updates_for_fetch(
             .filter(|update| matches!(update.namespace, RefNamespace::Branch | RefNamespace::Note))
             .collect()),
     }
+}
+
+fn collect_import_source_ref_updates(
+    repo: &SleyRepository,
+    refs: &[String],
+) -> GitResult<Vec<RefUpdate>> {
+    let updates = collect_ref_updates(repo)?;
+    if refs.is_empty() {
+        return Ok(updates);
+    }
+
+    let wanted: HashSet<&str> = refs.iter().map(String::as_str).collect();
+    Ok(updates
+        .into_iter()
+        .filter(|update| {
+            matches_import_ref(update, &wanted) || matches!(update.namespace, RefNamespace::Note)
+        })
+        .collect())
+}
+
+fn matches_import_ref(update: &RefUpdate, wanted: &HashSet<&str>) -> bool {
+    let full = full_ref_name(update);
+    wanted.contains(update.name.as_str()) || wanted.contains(full.as_str())
 }
 
 fn full_ref_name(update: &RefUpdate) -> String {

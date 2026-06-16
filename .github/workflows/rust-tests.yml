@@ -246,19 +246,19 @@ jobs:
             echo "::endgroup::"
           done < benchmark-plan.tsv
 
-      # 3d. Compile gate for the `postgres` (server / weft) feature. This is
-      #     the silent-rot guard: `--features postgres` is NOT exercised by
-      #     the default-feature build above, so a server-path regression
-      #     (e.g. a backend that wasn't updated after a newtype migration)
-      #     compiles fine on the OSS build and lands undetected. heddle#259
-      #     hit exactly this — `PgRefBackend` rotted after the
+      # 3d. Compile gate for the `postgres` storage backends used by hosted /
+      #     weft code. This is the silent-rot guard: these backends are not
+      #     exercised by the default-feature build above, so a server-path
+      #     regression (e.g. a backend that wasn't updated after a newtype
+      #     migration) compiles fine on the OSS build and lands undetected.
+      #     heddle#259 hit exactly this — `PgRefBackend` rotted after the
       #     `ThreadName`/`MarkerName` migration. Build + clippy need no DB;
       #     the integration tests live in the separate `postgres-tests` job.
-      - name: Build (postgres feature)
-        run: cargo build --locked --workspace --tests --features postgres
+      - name: Build (postgres storage backends)
+        run: cargo build --locked -p heddle-refs -p heddle-oplog --tests --features heddle-refs/postgres,heddle-oplog/postgres
 
-      - name: Clippy (postgres feature)
-        run: cargo clippy --locked --workspace --all-targets --features postgres -- -D warnings
+      - name: Clippy (postgres storage backends)
+        run: cargo clippy --locked -p heddle-refs -p heddle-oplog --all-targets --features heddle-refs/postgres,heddle-oplog/postgres -- -D warnings
 
       # 4. Verify the OSS build flavors compile. `cargo check` is fast on
       #    a warm cache; the feature-delta from defaults is small.
@@ -824,15 +824,14 @@ jobs:
       - name: sccache stats
         run: sccache --show-stats
 
-  # The fskit feature is cfg(target_os = "macos") and OFF by default, so no
-  # other lane ever compiles it (release.yml builds default features; this
-  # workflow runs on Linux). Without this job, FSKit changes land
+  # The fskit feature is cfg(target_os = "macos") and most PR lanes run on
+  # Linux. Without this job, FSKit changes can land
   # compile-unverified — caught on PR #667, whose FSKit fix was authored on
   # a Linux box. `cargo check` also exercises build.rs's swiftc compile of
   # the HeddleFSKit bridge, so the Swift side is validated too.
   fskit-check:
     name: FSKit compile check (macOS)
-    runs-on: macos-14
+    runs-on: macos-26
     timeout-minutes: 30
     env:
       # The workflow-level RUSTC_WRAPPER points at sccache, which only the

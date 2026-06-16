@@ -13,8 +13,7 @@ use crate::cli::{
     ActorCommands, AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands,
     HookCommands, IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands,
     RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands, ShellCommands,
-    StashCommands,
-    ThreadCommands, ThreadMarkerCommands, VisibilityCommands,
+    StashCommands, ThreadCommands, ThreadMarkerCommands, VisibilityCommands,
     cli_args::{DiscussCommands, ReviewCommands, TransactionCommands},
     render::shell_quote,
 };
@@ -1341,30 +1340,9 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["bridge", "git", "ingest"],
-        surface(
-            opaque_schemas(IMPORTING_MUTATION, &["bridge git ingest"]),
-            "git_adapter",
-        ),
-    ),
-    entry(
         &["bridge", "git", "reason"],
         surface(
             opaque_schemas(DATA_MUTATION, &["bridge git reason"]),
-            "git_adapter",
-        ),
-    ),
-    entry(
-        &["bridge", "backfill-fidelity"],
-        surface(
-            json_discriminators(
-                opaque_schemas(DATA_MUTATION, &["bridge backfill-fidelity"]),
-                &[json_discriminator(
-                    Some("bridge backfill-fidelity"),
-                    "output_kind",
-                    "bridge_backfill_fidelity",
-                )],
-            ),
             "git_adapter",
         ),
     ),
@@ -3630,6 +3608,21 @@ pub fn command_runtime_contract(command_name: &str) -> Option<CommandRuntimeCont
     runtime_contract_for_path(command_name.split_whitespace())
 }
 
+pub(crate) fn command_runtime_contract_for_schema_verb(
+    schema_verb: &str,
+) -> Option<CommandRuntimeContract> {
+    command_runtime_contract(schema_verb)
+        .or_else(|| command_runtime_contract(&schema_verb_without_flags(schema_verb)))
+}
+
+pub(crate) fn schema_verb_without_flags(schema_verb: &str) -> String {
+    schema_verb
+        .split_whitespace()
+        .filter(|part| !part.starts_with('-'))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn runtime_contract_for_path<'a>(
     path: impl IntoIterator<Item = &'a str>,
 ) -> Option<CommandRuntimeContract> {
@@ -4221,7 +4214,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Doctor(args) => match &args.command {
             None => vec!["doctor"],
             Some(DoctorCommands::Docs(_)) => vec!["doctor", "docs"],
-            Some(DoctorCommands::Schemas) => vec!["doctor", "schemas"],
+            Some(DoctorCommands::Schemas(_)) => vec!["doctor", "schemas"],
         },
         #[cfg(feature = "git-overlay")]
         Commands::GitOverlay => vec!["git-overlay"],
@@ -4394,11 +4387,8 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 GitCommands::Push { .. } => vec!["bridge", "git", "push"],
                 GitCommands::Pull { .. } => vec!["bridge", "git", "pull"],
                 #[cfg(feature = "ingest")]
-                GitCommands::Ingest { .. } => vec!["bridge", "git", "ingest"],
-                #[cfg(feature = "ingest")]
                 GitCommands::Reason { .. } => vec!["bridge", "git", "reason"],
             },
-            BridgeCommands::BackfillFidelity => vec!["bridge", "backfill-fidelity"],
         },
         #[cfg(feature = "semantic")]
         Commands::Semantic { command } => match command {
@@ -4507,11 +4497,6 @@ mod tests {
         ),
         sample(&["agent", "list"], &["agent", "list"]),
         #[cfg(feature = "git-overlay")]
-        sample(
-            &["bridge", "backfill-fidelity"],
-            &["bridge", "backfill-fidelity"],
-        ),
-        #[cfg(feature = "git-overlay")]
         sample(&["bridge", "git", "status"], &["bridge", "git", "status"]),
         #[cfg(feature = "git-overlay")]
         sample(&["bridge", "git", "init"], &["bridge", "git", "init"]),
@@ -4538,11 +4523,6 @@ mod tests {
         sample(&["bridge", "git", "push"], &["bridge", "git", "push"]),
         #[cfg(feature = "git-overlay")]
         sample(&["bridge", "git", "pull"], &["bridge", "git", "pull"]),
-        #[cfg(all(feature = "git-overlay", feature = "ingest"))]
-        sample(
-            &["bridge", "git", "ingest"],
-            &["bridge", "git", "ingest", "--path", "."],
-        ),
         #[cfg(all(feature = "git-overlay", feature = "ingest"))]
         sample(
             &["bridge", "git", "reason"],
@@ -5565,7 +5545,6 @@ mod tests {
             "bridge git reconcile",
             "bridge git push",
             "bridge git pull",
-            "bridge git ingest",
             "bridge git reason",
             "git-overlay",
         ] {
@@ -5722,7 +5701,6 @@ mod tests {
                 "bridge git reconcile",
                 "bridge git push",
                 "bridge git pull",
-                "bridge backfill-fidelity",
                 "capture",
                 "checkpoint",
                 "cherry-pick",
@@ -5842,8 +5820,9 @@ mod tests {
     /// separately by `tests/cli_integration/output_kind_invariant.rs`.
     #[test]
     fn schema_output_kind_discriminators_are_complete_and_consistent() {
-        use crate::cli::commands::schema_for_verb;
         use std::collections::BTreeSet;
+
+        use crate::cli::commands::schema_for_verb;
 
         fn resolve_schema_ref<'a>(
             root: &'a serde_json::Value,

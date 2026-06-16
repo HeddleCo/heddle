@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Thread storage and lifecycle management.
 
-use objects::store::ObjectStore;
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use chrono::{DateTime, Utc};
 use objects::{
     lock::RepoLock,
     object::ChangeId,
-    store::{HeddleError, Result},
+    store::{HeddleError, ObjectStore, Result},
 };
 
 use crate::{

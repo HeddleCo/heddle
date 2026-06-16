@@ -5,8 +5,10 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::object::hash::{ChangeId, ContentHash};
-use crate::object::visibility_tier::VisibilityTier;
+use crate::object::{
+    hash::{ChangeId, ContentHash},
+    visibility_tier::VisibilityTier,
+};
 
 const FILE_TARGET_ROOT: &str = "__files";
 const STATE_TARGET_ROOT: &str = "__states";

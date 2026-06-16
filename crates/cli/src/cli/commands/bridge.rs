@@ -7,7 +7,8 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use objects::object::ThreadName;
+use ingest::{ImportOptions, LossyImportEntry};
+use objects::object::{ChangeId, ThreadName};
 use refs::Head;
 use repo::Repository;
 use serde::Serialize;
@@ -27,14 +28,8 @@ use super::{
 };
 use crate::{
     bridge::{
-        GitBridge,
-        git_core::clone_url_to_bare,
-        git_export::export_all,
-        git_import::{
-            backfill_fidelity, import_all, import_all_with_options, import_selected_refs,
-            import_selected_refs_with_options,
-        },
-        git_util::{ExportedRef, GitImportOptions, LossyGitImportEntry},
+        GitBridge, git_core::clone_url_to_bare, git_export::export_all,
+        git_ingest::import_git_history, git_util::ExportedRef,
     },
     cli::{Cli, GitCommands, cli_args::GitSource, should_output_json, style},
 };
@@ -220,8 +215,7 @@ struct BridgeGitImportOutput {
     branches_synced: usize,
     tags_synced: usize,
     skipped_non_commit_refs: usize,
-    partial_mirror_refs: usize,
-    lossy_entries: Vec<BridgeLossyGitImportEntryOutput>,
+    lossy_entries: Vec<BridgeLossyImportEntryOutput>,
     already_in_sync: bool,
     #[serde(serialize_with = "serialize_empty_action_as_null")]
     recommended_action: String,
@@ -233,7 +227,7 @@ struct BridgeGitImportOutput {
 }
 
 #[derive(Serialize)]
-struct BridgeLossyGitImportEntryOutput {
+struct BridgeLossyImportEntryOutput {
     path: String,
     action: String,
     reason: String,
@@ -500,13 +494,6 @@ fn render_bridge_git_import(
             style::bold(&output.skipped_non_commit_refs.to_string())
         );
     }
-    if output.partial_mirror_refs > 0 {
-        println!(
-            "{} partial mirror for {} refs; SHA-stable export degraded",
-            style::warn_marker(),
-            style::bold(&output.partial_mirror_refs.to_string())
-        );
-    }
     if !output.lossy_entries.is_empty() {
         println!(
             "{} lossy import accepted for {} tree entries",
@@ -539,12 +526,10 @@ fn render_bridge_git_import(
     Ok(())
 }
 
-fn bridge_lossy_import_entries(
-    entries: &[LossyGitImportEntry],
-) -> Vec<BridgeLossyGitImportEntryOutput> {
+fn bridge_lossy_import_entries(entries: &[LossyImportEntry]) -> Vec<BridgeLossyImportEntryOutput> {
     entries
         .iter()
-        .map(|entry| BridgeLossyGitImportEntryOutput {
+        .map(|entry| BridgeLossyImportEntryOutput {
             path: entry.path.clone(),
             action: entry.action.as_str().to_string(),
             reason: entry.reason.clone(),
@@ -589,128 +574,6 @@ fn git_import_required_summary(branches: &[String], total: usize) -> String {
         "Git {noun} waiting for Heddle import: {}",
         crate::cli::render::preview_list(branches, total)
     )
-}
-
-#[derive(Serialize)]
-struct BridgeBackfillFidelityOutput {
-    output_kind: &'static str,
-    action: &'static str,
-    states_scanned: usize,
-    states_backfilled: usize,
-    states_skipped: usize,
-    /// Backfilled states whose owned signature was re-signed over the new hash.
-    states_resigned: usize,
-    /// States skipped because they carry a signature this migration cannot
-    /// reproduce (foreign key / no local signer); left untouched so they never
-    /// ship an invalid signature.
-    states_signature_unreproducible: usize,
-    /// Mapping entries whose git object is absent from the mirror, so the state
-    /// could not be backfilled. Reported per-state rather than silently skipped.
-    missing_mirror_commits: Vec<BridgeMissingMirrorCommitOutput>,
-}
-
-#[derive(Serialize)]
-struct BridgeMissingMirrorCommitOutput {
-    change_id: String,
-    git_oid: String,
-}
-
-/// Execute `heddle bridge backfill-fidelity`: re-derive the #565 git-fidelity
-/// fields from the mirror for every state adopted before the format bump.
-pub fn cmd_bridge_backfill_fidelity(cli: &Cli) -> Result<()> {
-    let repo = match &cli.repo {
-        Some(path) => Repository::open(path)?,
-        None => Repository::open(std::env::current_dir()?)?,
-    };
-    let mut bridge = GitBridge::new(&repo);
-    let stats = backfill_fidelity(&mut bridge)?;
-
-    let output = BridgeBackfillFidelityOutput {
-        output_kind: "bridge_backfill_fidelity",
-        action: "bridge backfill-fidelity",
-        states_scanned: stats.scanned,
-        states_backfilled: stats.backfilled,
-        states_skipped: stats.skipped,
-        states_resigned: stats.resigned,
-        states_signature_unreproducible: stats.signature_unreproducible,
-        missing_mirror_commits: stats
-            .missing_mirror_commits
-            .iter()
-            .map(|m| BridgeMissingMirrorCommitOutput {
-                change_id: m.change_id.to_string(),
-                git_oid: m.git_oid.clone(),
-            })
-            .collect(),
-    };
-
-    if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(&output)?);
-    } else {
-        println!(
-            "{} backfilled git-fidelity fields from the mirror",
-            style::ok_marker()
-        );
-        println!(
-            "  {}",
-            style::field("scanned", &style::bold(&output.states_scanned.to_string()))
-        );
-        println!(
-            "  {}",
-            style::field(
-                "backfilled",
-                &style::bold(&output.states_backfilled.to_string())
-            )
-        );
-        println!(
-            "  {}",
-            style::field("skipped", &style::bold(&output.states_skipped.to_string()))
-        );
-        if output.states_resigned > 0 {
-            println!(
-                "  {}",
-                style::field(
-                    "re-signed",
-                    &style::bold(&output.states_resigned.to_string())
-                )
-            );
-        }
-        if output.states_signature_unreproducible > 0 {
-            println!(
-                "  {}",
-                style::field(
-                    "skipped (unreproducible signature)",
-                    &style::bold(&output.states_signature_unreproducible.to_string())
-                )
-            );
-            println!(
-                "  {} {} state(s) carry a signature this migration cannot reproduce \
-                 (foreign key or no local signer); they were left untouched to avoid \
-                 shipping an invalid signature. Re-derive them with the original signer \
-                 before the mirror is removed (#568).",
-                style::warn_marker(),
-                output.states_signature_unreproducible,
-            );
-        }
-        if !output.missing_mirror_commits.is_empty() {
-            println!(
-                "  {}",
-                style::field(
-                    "missing from mirror",
-                    &style::bold(&output.missing_mirror_commits.len().to_string())
-                )
-            );
-            println!(
-                "  {} {} state(s) map to a git object absent from the mirror, so they \
-                 could not be backfilled and remain at their pre-bump fidelity:",
-                style::warn_marker(),
-                output.missing_mirror_commits.len(),
-            );
-            for missing in &output.missing_mirror_commits {
-                println!("    {} -> {}", missing.change_id, missing.git_oid);
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Execute bridge subcommands.
@@ -863,30 +726,30 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                 format!("{} ref(s): {}", refs.len(), refs.join(", "))
             };
             let mut progress = ImportProgress::start(cli, &repo, &scope, &source_label);
-            progress.advance("importing commits");
-            let import_options = GitImportOptions { lossy };
-            let stats = match &resolved {
-                Some(r) if refs.is_empty() => {
-                    import_all_with_options(&mut bridge, Some(r.path()), import_options)?
-                }
-                Some(r) => import_selected_refs_with_options(
-                    &mut bridge,
-                    Some(r.path()),
-                    &refs,
-                    import_options,
-                )?,
-                None if refs.is_empty() => {
-                    import_all_with_options(&mut bridge, Some(default_source), import_options)?
-                }
-                None => import_selected_refs_with_options(
-                    &mut bridge,
-                    Some(default_source),
-                    &refs,
-                    import_options,
-                )?,
+            progress.begin_commit_import();
+            let import_options = ImportOptions { lossy };
+            let mut on_commit = |event| progress.commit_tick(event);
+            let source_path = resolved
+                .as_ref()
+                .map(ResolvedSource::path)
+                .unwrap_or(default_source);
+            let attached_before = match repo.head_ref()? {
+                Head::Attached { thread } => repo
+                    .refs()
+                    .get_thread(&thread)?
+                    .map(|state| (thread, state)),
+                Head::Detached { .. } => None,
             };
-            progress.advance("writing refs");
+            let stats = import_git_history(
+                &mut bridge,
+                Some(source_path),
+                &refs,
+                import_options,
+                Some(&mut on_commit),
+            )?;
+            progress.begin_ref_write();
             progress.finish();
+            materialize_imported_attached_thread(&mut bridge, attached_before.as_ref())?;
 
             let already_in_sync = stats.states_created == 0 && stats.commits_imported > 0;
             let trust = build_repository_verification_state(&repo);
@@ -924,8 +787,7 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                 states_created: stats.states_created,
                 branches_synced: stats.branches_synced,
                 tags_synced: stats.tags_synced,
-                skipped_non_commit_refs: stats.skipped_non_commit_refs.len(),
-                partial_mirror_refs: stats.partial_mirror_refs.len(),
+                skipped_non_commit_refs: stats.skipped_non_commit_refs,
                 lossy_entries: bridge_lossy_import_entries(&stats.lossy_entries),
                 already_in_sync,
                 recommended_action: trust.recommended_action.clone(),
@@ -947,14 +809,26 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
 
             // Then import any new Git commits
             let import_stats = match &resolved {
-                Some(r) => import_all(&mut bridge, Some(r.path()))?,
-                None => import_all(&mut bridge, None)?,
+                Some(r) => import_git_history(
+                    &mut bridge,
+                    Some(r.path()),
+                    &[],
+                    ImportOptions::default(),
+                    None,
+                )?,
+                None => import_git_history(
+                    &mut bridge,
+                    Some(repo.root()),
+                    &[],
+                    ImportOptions::default(),
+                    None,
+                )?,
             };
 
             // sync's `commits_imported` keeps the historical "newly
             // imported commits" meaning. After heddle#147, the import
             // walker's `commits_imported` counts every commit it
-            // visited (mirroring `bridge git ingest` so a re-import
+            // visited (mirroring the ingest-backed import path so a re-import
             // doesn't read 0). That would make a no-op sync of an
             // already-synced overlay look like it pulled the whole
             // history again — exactly the operator signal sync is
@@ -1071,10 +945,12 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                     .ok_or_else(|| reconcile_direction_required_advice(&ref_name))?;
                 match prefer {
                     "git" => {
-                        let stats = import_selected_refs(
+                        let stats = import_git_history(
                             &mut bridge,
                             Some(repo.root()),
                             std::slice::from_ref(&ref_name),
+                            ImportOptions::default(),
+                            None,
                         )?;
                         if repo.git_overlay_current_branch()?.as_deref() == Some(ref_name.as_str())
                         {
@@ -1238,12 +1114,6 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
         }
 
         #[cfg(feature = "ingest")]
-        GitCommands::Ingest { path, lossy } => {
-            let resolved = resolve_source(&repo, path)?;
-            run_ingest(cli, &repo, resolved.path(), lossy)?;
-        }
-
-        #[cfg(feature = "ingest")]
         GitCommands::Reason {
             path,
             max_sessions_per_commit,
@@ -1267,6 +1137,38 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
         )?,
     }
 
+    Ok(())
+}
+
+fn materialize_imported_attached_thread(
+    bridge: &mut GitBridge<'_>,
+    attached_before: Option<&(ThreadName, ChangeId)>,
+) -> Result<()> {
+    let Some((thread, old_state)) = attached_before else {
+        return Ok(());
+    };
+    let Some(new_state) = bridge.heddle_repo.refs().get_thread(thread)? else {
+        return Ok(());
+    };
+    if new_state == *old_state {
+        return Ok(());
+    }
+
+    bridge.heddle_repo.refs().set_thread(thread, old_state)?;
+    bridge.heddle_repo.refs().write_head(&Head::Attached {
+        thread: thread.clone(),
+    })?;
+    bridge
+        .heddle_repo
+        .goto_verified_clean_without_record(&new_state)?;
+    bridge.heddle_repo.refs().set_thread(thread, &new_state)?;
+    bridge.heddle_repo.refs().write_head(&Head::Attached {
+        thread: thread.clone(),
+    })?;
+
+    if bridge.heddle_repo.root().join(".git").exists() {
+        bridge.write_current_checkout_from_existing_mirror()?;
+    }
     Ok(())
 }
 
@@ -1340,92 +1242,6 @@ fn reconcile_write_through_skipped_advice(ref_name: &str, reason: String) -> Rec
         preview_command.clone(),
         vec![preview_command],
     )
-}
-
-#[cfg(feature = "ingest")]
-fn run_ingest(cli: &Cli, repo: &Repository, git_path: &std::path::Path, lossy: bool) -> Result<()> {
-    use ingest::{ImportOptions, import_git_into_with_options};
-
-    let (stats, _map) =
-        import_git_into_with_options(git_path, repo.root(), ImportOptions { lossy })?;
-    if should_output_json(cli, Some(repo.config())) {
-        let lossy_entries = stats
-            .lossy_entries
-            .iter()
-            .map(|entry| {
-                serde_json::json!({
-                    "path": entry.path,
-                    "action": entry.action.as_str(),
-                    "reason": entry.reason,
-                    "git_object": entry.git_object,
-                })
-            })
-            .collect::<Vec<_>>();
-        let out = serde_json::json!({
-            "commits_imported": stats.commits_imported,
-            "trees_imported": stats.trees_imported,
-            "blobs_imported": stats.blobs_imported,
-            "local_branches": stats.refs_seen.local_branches,
-            "tags": stats.refs_seen.tags,
-            "remote_branches": stats.refs_seen.remote_branches,
-            "symbolic_skipped": stats.refs_seen.symbolic_skipped,
-            "peel_failed": stats.refs_seen.peel_failed,
-            "non_commit_skipped": stats.refs_seen.non_commit_skipped,
-            "reflog_only_commits": stats.reflog_only_commits,
-            "lossy_entries": lossy_entries,
-        });
-        println!("{out}");
-    } else {
-        let r = &stats.refs_seen;
-        let walked = r.local_branches
-            + r.tags
-            + r.remote_branches
-            + r.symbolic_skipped
-            + r.peel_failed
-            + r.non_commit_skipped;
-        let kept = r.local_branches + r.tags + r.remote_branches;
-        let ignored = r.symbolic_skipped + r.peel_failed + r.non_commit_skipped;
-        println!("imported from {}", git_path.display());
-        println!("refs:  walked: {walked}  kept: {kept}  ignored: {ignored}");
-        println!("    local branches:  {}", r.local_branches);
-        println!("    tags:            {}", r.tags);
-        println!("    remote branches: {}", r.remote_branches);
-        if r.symbolic_skipped > 0 {
-            println!("    symbolic refs:   {} ignored", r.symbolic_skipped);
-        }
-        if r.peel_failed > 0 {
-            println!("    peel-failed:     {} ignored", r.peel_failed);
-        }
-        if r.non_commit_skipped > 0 {
-            println!(
-                "    non-commit refs: {} ignored (annotated tag → blob/tree)",
-                r.non_commit_skipped
-            );
-        }
-        println!("commits:  imported: {}", stats.commits_imported);
-        if stats.reflog_only_commits > 0 {
-            println!("    reflog-only:   {}", stats.reflog_only_commits);
-        }
-        println!("trees:    {}", stats.trees_imported);
-        println!("blobs:    {}", stats.blobs_imported);
-        println!("threads written:  {}", stats.refs.threads_written);
-        println!("markers written:  {}", stats.refs.markers_written);
-        if !stats.lossy_entries.is_empty() {
-            println!(
-                "lossy import accepted for {} tree entries:",
-                stats.lossy_entries.len()
-            );
-            for entry in &stats.lossy_entries {
-                println!("  {}", entry.summary_line());
-            }
-        }
-        println!();
-        println!(
-            "Next: `heddle bridge reason --path {}` to attach AI-session reasoning.",
-            git_path.display()
-        );
-    }
-    Ok(())
 }
 
 #[cfg(feature = "ingest")]

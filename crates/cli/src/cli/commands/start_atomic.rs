@@ -38,15 +38,19 @@
 //! checkout. No thread/ref/git domain knowledge leaks into the primitive — it
 //! all lives here, exactly like undo/redo's `EntrySteps`.
 
-use std::cell::Cell;
-use std::collections::BTreeSet;
 #[cfg(unix)]
 use std::fs::File;
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::{
+    cell::Cell,
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
-use objects::error::{HeddleError, Result as HeddleResult};
-use objects::object::{ChangeId, ThreadName};
+use objects::{
+    error::{HeddleError, Result as HeddleResult},
+    object::{ChangeId, ThreadName},
+};
 use oplog::{IsolationKey, OpRecord};
 use refs::RefExpectation;
 use repo::{
@@ -54,9 +58,9 @@ use repo::{
     atomic::{AtomicMutation, StagedCommit, Tx},
 };
 
-use super::mount_lifecycle::{self, MountOwnership};
-use super::worktree_cmd::{
-    helpers::write_isolated_checkout, hydrate, shared_target::write_cargo_config,
+use super::{
+    mount_lifecycle::{self, MountOwnership},
+    worktree_cmd::{helpers::write_isolated_checkout, hydrate, shared_target::write_cargo_config},
 };
 
 /// Classify an `anyhow` error from a materialize/hydrate helper into the
@@ -990,20 +994,31 @@ impl StartThread {
     fn stage_mount(
         &self,
         tx: &mut Tx<'_>,
-    ) -> HeddleResult<Option<mount_lifecycle::FskitReadinessReport>> {
+    ) -> HeddleResult<mount_lifecycle::VirtualizedMountOutcome> {
         let repo = tx.repo();
         let root = repo.root().to_path_buf();
         let abs = self.abs_path.clone();
         let fwd_name = self.name.clone();
         let inv_name = self.name.clone();
         let ownership = self.mount_ownership;
+        let mounted_owner = Rc::new(Cell::new(None));
+        let fwd_owner = Rc::clone(&mounted_owner);
+        let inv_owner = Rc::clone(&mounted_owner);
+        let inv_root = root.clone();
         tx.step(
             move || {
-                mount_lifecycle::establish_virtualized_mount(&root, &fwd_name, &abs, ownership)
-                    .map_err(apply_error)
+                let outcome =
+                    mount_lifecycle::establish_virtualized_mount(&root, &fwd_name, &abs, ownership)
+                        .map_err(apply_error)?;
+                fwd_owner.set(Some(outcome.owner));
+                Ok(outcome)
             },
             move || {
-                mount_lifecycle::unmount_thread_if_mounted(&inv_name);
+                let Some(owner) = inv_owner.get() else {
+                    return Ok(());
+                };
+                mount_lifecycle::cleanup_virtualized_mount(&inv_root, &inv_name, owner)
+                    .map_err(apply_error)?;
                 Ok(())
             },
         )
@@ -1100,7 +1115,7 @@ impl AtomicMutation for StartThread {
                 }
             }
             ThreadMode::Virtualized => {
-                fskit_readiness = self.stage_mount(tx)?;
+                fskit_readiness = self.stage_mount(tx)?.fskit_readiness;
                 Vec::new()
             }
         };
@@ -1152,15 +1167,20 @@ fn symlink_unsupported_error(link: &str) -> HeddleError {
 
 #[cfg(test)]
 mod tests {
-    use super::super::thread::{
-        find_active_thread_entry, resolve_start_epoch, start_thread, start_transaction_id,
-    };
-    use super::super::thread_cmd::drop_thread_silent;
-    use super::super::worktree_cmd::helpers::plan_worktree_target;
-    use super::*;
-    use crate::cli::{ThreadStartArgs, WorkspaceModeArg};
     use repo::Repository;
     use tempfile::TempDir;
+
+    use super::{
+        super::{
+            thread::{
+                find_active_thread_entry, resolve_start_epoch, start_thread, start_transaction_id,
+            },
+            thread_cmd::drop_thread_silent,
+            worktree_cmd::helpers::plan_worktree_target,
+        },
+        *,
+    };
+    use crate::cli::{ThreadStartArgs, WorkspaceModeArg};
 
     /// heddle#571 (Bug 1): a non-conflict failure on the start path must NOT be
     /// reported as `conflict:`. The macOS regression was a `clonefile` ENOENT

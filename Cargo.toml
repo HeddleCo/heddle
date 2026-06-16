@@ -50,7 +50,7 @@ clap_complete = "4"
 ed25519-dalek = { version = "2", features = ["pem", "rand_core"] }
 fs2 = "0.4.3"
 futures = "0.3"
-sley = { version = "0.0.1", features = ["mmap", "fast-sha1"] }
+sley = { version = "0.0.2", features = ["mmap", "fast-sha1"] }
 hex = "0.4"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 ignore = "0.4"
@@ -74,6 +74,7 @@ rand = "0.10"
 regex-lite = "0.1"
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls-no-provider"] }
 rmp-serde = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
 rsa = { version = "0.9", features = ["pem"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 s3s = "0.13.0"

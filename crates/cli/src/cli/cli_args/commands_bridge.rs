@@ -47,17 +47,6 @@ pub enum BridgeCommands {
         #[command(subcommand)]
         command: GitCommands,
     },
-
-    /// Backfill git-fidelity fields on states adopted before the #565 format
-    /// bump.
-    ///
-    /// One-time migration: for every Heddle state that maps to a git commit in
-    /// the mirror, re-derive the committer identity, timezone offsets, verbatim
-    /// message, and ordered extension headers from the mirror (the ground
-    /// truth) and rewrite the state, so dropping the mirror later (#568) stays
-    /// lossless. Idempotent — a second run rewrites nothing. Requires the
-    /// mirror, so run it before #568 eliminates it.
-    BackfillFidelity,
 }
 
 #[derive(Subcommand, Clone)]
@@ -91,9 +80,9 @@ pub enum GitCommands {
 
     /// Import Git commits to Heddle.
     ///
-    /// Walks **local branches and tags only** in the source repository.
-    /// Remote-tracking refs (`refs/remotes/*`) and reflog history are
-    /// ignored; for those, use `bridge git ingest` instead.
+    /// Walks local branches and tags by default. To import remote-tracking
+    /// refs (`refs/remotes/*`), name them explicitly with `--ref`.
+    /// Reflog-only history is not part of the public bridge import surface.
     ///
     /// `--path` accepts either a local filesystem path
     /// (`/tmp/some-repo`, `./.git`) or a git URL — `https://...`,
@@ -158,28 +147,9 @@ pub enum GitCommands {
         remote: Option<String>,
     },
 
-    /// Deep import: walk every git ref (local + tags + remotes) and the
-    /// reflog, translate each commit into a Heddle state with full agent
-    /// attribution, and replay reflog entries into the oplog. Distinct
-    /// from `bridge git import` which only mirrors local branches.
-    /// Requires the `ingest` feature (on by default).
-    #[cfg(feature = "ingest")]
-    Ingest {
-        /// Source git repository (local path or URL) to import from.
-        #[arg(long, value_parser = parse_git_source)]
-        path: GitSource,
-        /// Accept git tree entries Heddle cannot represent losslessly.
-        ///
-        /// By default ingest fails on the first unrepresentable tree entry.
-        /// With this flag, ingest restores the historical drop behavior and
-        /// prints an end-of-run summary of every affected entry.
-        #[arg(long)]
-        lossy: bool,
-    },
-
     /// Mine local AI-coding-agent sessions (Claude / Codex / OpenCode)
     /// for reasoning notecards and attach them as `context` annotations
-    /// to the matching imported states. Requires `bridge git ingest` to
+    /// to the matching imported states. Requires `bridge git import` to
     /// have already run (needs the SHA map sidecar).
     /// Requires the `ingest` feature (on by default).
     #[cfg(feature = "ingest")]

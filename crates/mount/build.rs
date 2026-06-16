@@ -65,13 +65,15 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let static_lib = out_dir.join("libHeddleFSKit.a");
     let object = out_dir.join("HeddleFSKit.o");
+    let clang_module_cache = out_dir.join("clang-module-cache");
+    std::fs::create_dir_all(&clang_module_cache).expect("failed to create clang module cache dir");
 
     // `-parse-as-library`: this is a library, not a script with a
     //   top-level entry point.
     // `-emit-object`: produce a .o, not a .swiftmodule.
     // `-static`: emit code for a static lib (no `_swift_FORCE_LOAD_*`
     //   weak refs that need a Swift dylib at runtime).
-    // `-target arm64-apple-macos26.0`: Heddle's FSKit path-resource
+    // `-target arm64-apple-macos26.0`: Heddle's FSKit URL-resource
     //   mount uses FSKit V2 URL resource APIs, which are available
     //   from macOS 26.0 in the local SDK.
     // `-import-objc-header`: import the cbindgen-generated bridging
@@ -98,9 +100,17 @@ fn main() {
             "-import-objc-header",
         ])
         .arg(&bridging)
+        .arg("-module-cache-path")
+        .arg(&clang_module_cache)
+        .arg("-Xcc")
+        .arg(format!(
+            "-fmodules-cache-path={}",
+            clang_module_cache.display()
+        ))
         .args(["-o"])
         .arg(&object)
         .arg(&swift_src)
+        .env("CLANG_MODULE_CACHE_PATH", &clang_module_cache)
         .status()
         .expect("failed to invoke swiftc; install Xcode command line tools");
     assert!(

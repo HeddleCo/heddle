@@ -12,29 +12,29 @@
 //! userspace FS callbacks in the hot path. Disk usage is the
 //! ~zero-cost clonefile share until the agent diverges blocks.
 
-use chrono::{DateTime, Utc};
-use objects::store::ObjectStore;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
 
+use chrono::{DateTime, Utc};
 use objects::{
     lock::RepositoryLockExt,
-    object::{ChangeId, State, ThreadName, Tree},
+    object::{ChangeId, State, ThreadName, Tree, VisibilityTier},
+    store::ObjectStore,
 };
 use oplog::OpRecord;
 use refs::RefExpectation;
 use tracing::{debug, instrument};
 
 use super::{HeddleError, Repository, Result};
-use crate::thread_manifest::{ManifestFile, ThreadManifest, read_manifest, write_manifest};
-use crate::visibility::{AudienceTier, visible};
 use crate::{
-    ThreadWorktreeTargetDisposition, ThreadWorktreeTargetError, validate_thread_worktree_target,
+    ThreadWorktreeTargetDisposition, ThreadWorktreeTargetError,
+    thread_manifest::{ManifestFile, ThreadManifest, read_manifest, write_manifest},
+    validate_thread_worktree_target,
+    visibility::{AudienceTier, visible},
 };
-use objects::object::VisibilityTier;
 
 /// Filename of the operator-local courtesy placeholder written when a
 /// checked-out state's tier is not visible to the operator's audience.

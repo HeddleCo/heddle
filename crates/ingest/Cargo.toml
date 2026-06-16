@@ -30,7 +30,7 @@ chrono.workspace = true
 clap.workspace = true
 # `bundled` vendors the SQLite C source so ingest doesn't depend on a
 # system libsqlite3 version. OpenCode's SQLite is read-only to us.
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite.workspace = true
 # Drives the now-`async` ref/oplog backend reads to completion on the
 # import path. The local `RefManager`/`OpLog` futures are always
 # immediately-ready, and `pollster` is not a Tokio runtime, so blocking

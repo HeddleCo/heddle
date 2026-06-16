@@ -23,13 +23,12 @@
 //! All handlers are best-effort. Errors are logged via `tracing` and
 //! swallowed so a transient failure cannot block the harness.
 
-use objects::store::ObjectStore;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use objects::{
     object::{AnnotationKind, AnnotationScope, AnnotationStatus, ContextTarget},
-    store::{AgentRegistry, AgentStatus},
+    store::{AgentRegistry, AgentStatus, ObjectStore},
 };
 use refs::Head;
 use repo::{Repository, RepositorySnapshot, SessionManager, StackNextAction};

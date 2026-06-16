@@ -20,16 +20,26 @@
 //!      top of the transitive ref-tip guarantee); and
 //!   3. `git fsck --full` on the export reports no corruption.
 
-use std::collections::BTreeMap;
-use std::path::Path;
-use std::process::Command;
+use std::{collections::BTreeMap, path::Path, process::Command};
 
-use cli::ObjectStore;
-use cli::Repository;
-use cli::bridge::git_core::GitBridge;
-use cli::bridge::git_import::import_all_with_options;
-use cli::bridge::git_util::GitImportOptions;
+use cli::{
+    ObjectStore, Repository,
+    bridge::{git_core::GitBridge, test_support},
+};
 use tempfile::TempDir;
+
+fn ingest_into_bridge(
+    bridge: &mut GitBridge<'_>,
+    source: &Path,
+    lossy: bool,
+) -> Result<(), String> {
+    let target = test_support::heddle_repo(bridge).root();
+    ingest::import_git_into_with_options(source, target, ingest::ImportOptions { lossy })
+        .map_err(|error| error.to_string())?;
+    test_support::stage_ingest_source_in_mirror(bridge, source, &[])
+        .map_err(|error| error.to_string())?;
+    test_support::build_existing_mapping(bridge, Some(source)).map_err(|error| error.to_string())
+}
 
 /// Deterministic identity + dates so every fixture produces stable SHAs
 /// regardless of when/where the test runs. A drifting SHA here would be a
@@ -140,7 +150,7 @@ fn assert_roundtrip_fidelity_opts(case: &str, source: &Path, lossy: bool) {
     let heddle_home = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_home.path()).expect("init heddle repo");
     let mut bridge = GitBridge::new(&repo);
-    import_all_with_options(&mut bridge, Some(source), GitImportOptions { lossy })
+    ingest_into_bridge(&mut bridge, source, lossy)
         .unwrap_or_else(|e| panic!("[{case}] import from git failed: {e}"));
 
     let dest_home = TempDir::new().expect("dest temp");
@@ -446,8 +456,7 @@ fn roundtrip_empty_and_nested_trees() {
 /// Run a git command feeding `stdin`, returning trimmed stdout. The `git`
 /// helper above can't write stdin, which `hash-object --stdin` needs.
 fn git_stdin(dir: &Path, args: &[&str], stdin: &[u8]) -> String {
-    use std::io::Write;
-    use std::process::Stdio;
+    use std::{io::Write, process::Stdio};
     let mut child = Command::new("git")
         .args(args)
         .current_dir(dir)
@@ -521,8 +530,7 @@ fn import_preserves_noncanonical_extension_header_order() {
     let heddle_home = TempDir::new().expect("heddle temp");
     let repo = Repository::init(heddle_home.path()).expect("init heddle repo");
     let mut bridge = GitBridge::new(&repo);
-    import_all_with_options(&mut bridge, Some(dir), GitImportOptions { lossy: false })
-        .expect("import from git failed");
+    ingest_into_bridge(&mut bridge, dir, false).expect("import from git failed");
 
     // Re-open to read the freshly installed states without a borrow tangle.
     let repo = Repository::open(heddle_home.path()).expect("reopen heddle repo");

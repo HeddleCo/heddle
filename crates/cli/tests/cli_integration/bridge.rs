@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-use super::*;
 use objects::object::ThreadName;
+
+use super::*;
 
 /// Initialize a colocated (drop-in) Git repo on `main` with one
 /// committed file, mirroring the bootstrap the overlay tests use.
@@ -139,7 +140,7 @@ fn bridge_git_import_refuses_gitlink_by_default_and_lossy_summarizes() {
         "lossy import should emit an end-of-run summary: {lossy}"
     );
     assert!(lossy.contains("vendor"), "summary names entry: {lossy}");
-    assert!(lossy.contains("converted"), "summary names action: {lossy}");
+    assert!(lossy.contains("dropped"), "summary names action: {lossy}");
 }
 
 #[test]

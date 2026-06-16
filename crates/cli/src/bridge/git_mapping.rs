@@ -8,26 +8,52 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use objects::object::ChangeId;
+use objects::{object::ChangeId, store::ObjectStore};
 use serde::{Deserialize, Serialize};
 use sley::{ObjectFormat, ObjectId as SleyObjectId, ReferenceTarget, Repository as SleyRepository};
 
-use super::{
-    git_core::{GitBridge, GitBridgeError, GitResult, git_err},
-    git_util::LossyGitImportEntry,
-};
+use super::git_core::{GitBridge, GitBridgeError, GitResult, SyncMapping, git_err};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct MappingEntry {
     change_id: String,
     git_oid: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    lossy_entries: Vec<LossyGitImportEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct MappingFile {
     entries: Vec<MappingEntry>,
+}
+
+#[derive(Debug, Default)]
+struct GitIdentityIndex {
+    mapping: SyncMapping,
+}
+
+impl GitIdentityIndex {
+    fn from_notes(repo: &SleyRepository) -> GitResult<Self> {
+        let mut index = Self::default();
+        for (change_id, git_oid) in super::git_notes::read_identity_mappings(repo)? {
+            index.mapping.insert_checked(change_id, git_oid)?;
+        }
+        Ok(index)
+    }
+
+    fn fill_gaps_from_cache(&mut self, cache: &SyncMapping) {
+        for (change_id, git_oid) in cache.iter() {
+            if self.mapping.get_git(change_id) == Some(*git_oid) {
+                continue;
+            }
+            if self.mapping.has_heddle(change_id) || self.mapping.has_git(*git_oid) {
+                continue;
+            }
+            self.mapping.insert(*change_id, *git_oid);
+        }
+    }
+
+    fn into_mapping(self) -> SyncMapping {
+        self.mapping
+    }
 }
 
 impl<'a> GitBridge<'a> {
@@ -42,64 +68,25 @@ impl<'a> GitBridge<'a> {
         self.mapping_path().with_extension("json.tmp")
     }
 
-    fn legacy_mapping_path(&self) -> PathBuf {
-        self.heddle_repo
-            .heddle_dir()
-            .join("git")
-            .join("bridge-mapping.json")
-    }
-
-    fn remove_legacy_mapping_file(&self) -> GitResult<()> {
-        let legacy_path = self.legacy_mapping_path();
-        if !legacy_path.exists() {
-            return Ok(());
-        }
-
-        fs::remove_file(&legacy_path)?;
-        Ok(())
-    }
-
-    fn migrate_legacy_mapping_if_needed(&self) -> GitResult<PathBuf> {
-        let path = self.mapping_path();
-        let legacy_path = self.legacy_mapping_path();
-
-        if path.exists() {
-            self.remove_legacy_mapping_file()?;
-            return Ok(path);
-        }
-
-        if !legacy_path.exists() {
-            return Ok(path);
-        }
-
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        fs::rename(&legacy_path, &path)?;
-        Ok(path)
-    }
-
-    pub(crate) fn load_mapping_from_disk(&mut self) -> GitResult<()> {
+    fn read_mapping_cache_from_disk(&self) -> GitResult<SyncMapping> {
         self.recover_mapping_tmp()?;
-        let path = self.migrate_legacy_mapping_if_needed()?;
+        let path = self.mapping_path();
         if !path.exists() {
-            return Ok(());
+            return Ok(SyncMapping::new());
         }
 
         let data = fs::read_to_string(&path)?;
         let file: MappingFile = serde_json::from_str(&data)
             .map_err(|err| GitBridgeError::InvalidMapping(err.to_string()))?;
 
+        let mut mapping = SyncMapping::new();
         for entry in file.entries {
             let change_id = ChangeId::parse(&entry.change_id)?;
             let git_oid = parse_stored_git_oid(&entry.git_oid)?;
-            self.mapping.insert_checked(change_id, git_oid)?;
-            self.mapping
-                .set_git_lossy_entries(git_oid, entry.lossy_entries);
+            mapping.insert_checked(change_id, git_oid)?;
         }
 
-        Ok(())
+        Ok(mapping)
     }
 
     fn recover_mapping_tmp(&self) -> GitResult<()> {
@@ -116,18 +103,12 @@ impl<'a> GitBridge<'a> {
         Ok(())
     }
 
-    fn mapping_bytes(&self) -> GitResult<Vec<u8>> {
-        let entries = self
-            .mapping
+    fn mapping_bytes(mapping: &SyncMapping) -> GitResult<Vec<u8>> {
+        let entries = mapping
             .iter()
             .map(|(change_id, git_oid)| MappingEntry {
                 change_id: change_id.to_string_full(),
                 git_oid: git_oid.to_string(),
-                lossy_entries: self
-                    .mapping
-                    .get_git_lossy_entries(*git_oid)
-                    .map(|entries| entries.to_vec())
-                    .unwrap_or_default(),
             })
             .collect();
 
@@ -137,6 +118,10 @@ impl<'a> GitBridge<'a> {
     }
 
     pub(crate) fn write_mapping_tmp_to_disk(&self) -> GitResult<PathBuf> {
+        self.write_mapping_tmp_value_to_disk(&self.mapping)
+    }
+
+    fn write_mapping_tmp_value_to_disk(&self, mapping: &SyncMapping) -> GitResult<PathBuf> {
         let path = self.mapping_path();
         let tmp_path = self.mapping_tmp_path();
         if let Some(parent) = path.parent() {
@@ -145,7 +130,7 @@ impl<'a> GitBridge<'a> {
             parent_file.sync_all()?;
         }
 
-        let data = self.mapping_bytes()?;
+        let data = Self::mapping_bytes(mapping)?;
         let mut file = File::create(&tmp_path)?;
         file.write_all(&data)?;
         file.sync_all()?;
@@ -166,7 +151,6 @@ impl<'a> GitBridge<'a> {
             let parent_file = File::open(parent)?;
             parent_file.sync_all()?;
         }
-        self.remove_legacy_mapping_file()?;
         Ok(())
     }
 
@@ -174,65 +158,59 @@ impl<'a> GitBridge<'a> {
         self.write_mapping_tmp_to_disk()?;
         // Fault-injection checkpoint: a crash here leaves the
         // sidecar in tmp form (`bridge-mapping.json.tmp`) without a
-        // committed `bridge-mapping.json`. The next `save_mapping_to_disk`
-        // call invokes `recover_mapping_tmp` (in `load_mapping_from_disk`)
-        // which atomically renames the tmp into place. Tested by
+        // committed `bridge-mapping.json`. The next mapping-cache read
+        // atomically renames the tmp into place. Tested by
         // `bridge_recovers_from_crash_after_tmp_before_commit`.
         objects::fault_inject::maybe_panic_at("mapping_after_tmp_before_commit");
         self.commit_mapping_tmp_to_disk()
     }
 
-    /// Build the mapping from existing commits and persisted data. Sources,
-    /// in order:
-    ///   1. The on-disk sidecar (`bridge-mapping.json`).
-    ///   2. The git notes ref (`refs/notes/heddle`) — Phase B and later.
-    ///   3. Legacy `Heddle-Change-Id:` trailers in commit messages.
-    ///
-    /// Sources 2 and 3 must agree with anything already in the sidecar (via
-    /// `insert_checked`) or the build aborts — this is what catches a
-    /// corrupted sidecar that disagrees with the git side of the bridge.
+    /// Build the export identity mapping from portable metadata and the served
+    /// bridge cache. `refs/notes/heddle` is authoritative because it travels
+    /// with Git history; `bridge-mapping.json` is the local served/export cache
+    /// after visibility filtering. Ingest identity lives separately at
+    /// `.heddle/ingest/sha_map.sqlite` and is intentionally not folded in here.
     pub(crate) fn build_existing_mapping(&mut self, git_repo_path: Option<&Path>) -> GitResult<()> {
-        self.load_mapping_from_disk()?;
-
         let repo = match git_repo_path {
             Some(path) => super::git_core::open_repo(path)?,
             None => self.open_git_repo()?,
         };
 
-        // Phase B: scan refs/notes/heddle first. Notes carry change_ids
-        // without altering commit SHAs, so they're our preferred fallback
-        // source after the sidecar.
-        let notes = super::git_notes::read_all_notes(&repo)?;
-        for (oid, note) in &notes {
-            let change_id = ChangeId::parse(&note.change_id)?;
-            self.mapping.insert_checked(change_id, *oid)?;
-        }
+        let cache = self.read_mapping_cache_from_disk()?;
+        let live_cache = self.mapping.clone();
+        let mut index = GitIdentityIndex::from_notes(&repo)?;
+        index.fill_gaps_from_cache(&live_cache);
+        index.fill_gaps_from_cache(&cache);
+        self.mapping = index.into_mapping();
+        Ok(())
+    }
 
-        // Legacy: scan commit-message trailers for any commits not already
-        // covered by the sidecar or notes. Future-proofing for repos that
-        // were exported by pre-Phase-B builds.
-        let commit_oids = collect_commit_oids(&repo)?;
-        for oid in commit_oids {
-            if self.mapping.has_git(oid) {
+    pub(crate) fn seed_ingest_identity_mappings_from_mirror(
+        &mut self,
+        repo: &SleyRepository,
+    ) -> GitResult<()> {
+        let ingest = self.heddle_repo.git_overlay_ingest_commit_mapping()?;
+        for (git_sha, change_id) in ingest {
+            let change_id = ChangeId::parse(&change_id)?;
+            if self.heddle_repo.store().get_state(&change_id)?.is_none() {
                 continue;
             }
-            let commit = repo.read_commit(&oid).map_err(git_err)?;
-            let message = String::from_utf8_lossy(&commit.message);
-            let trailers = GitBridge::parse_trailers(&message);
-            if let Some(change_id) = trailers.get(GitBridge::TRAILER_CHANGE_ID) {
-                let change_id = ChangeId::parse(change_id)?;
-                self.mapping.insert_checked(change_id, oid)?;
+            if self.mapping.has_heddle(&change_id) {
+                continue;
             }
+            let git_oid = parse_stored_git_oid(&git_sha)?;
+            if self.mapping.has_git(git_oid) || repo.read_object(&git_oid).is_err() {
+                continue;
+            }
+            self.mapping.insert(change_id, git_oid);
         }
-
-        self.save_mapping_to_disk()?;
         Ok(())
     }
 
     #[cfg_attr(not(feature = "git-overlay"), allow(dead_code))]
     pub(crate) fn prune_unreachable_mapping_entries(&mut self) -> GitResult<usize> {
         let repo = self.open_git_repo()?;
-        self.load_mapping_from_disk()?;
+        self.mapping = self.read_mapping_cache_from_disk()?;
         let reachable: HashSet<_> = collect_commit_oids(&repo)?.into_iter().collect();
         let removed = self.mapping.retain_git_object_set(&reachable);
         if removed > 0 {
@@ -243,9 +221,8 @@ impl<'a> GitBridge<'a> {
 }
 
 /// Walk all branch- and tag-tipped commit ancestry. Skips refs that peel
-/// to non-commit objects (annotated-tag-points-at-blob/tree); see
-/// `git_import::peel_to_commit_oid` for the full rationale and the
-/// `SkippedRef` recording layer.
+/// to non-commit objects (annotated-tag-points-at-blob/tree), matching the
+/// marker model's current commit-target-only constraint.
 fn collect_commit_oids(repo: &SleyRepository) -> GitResult<Vec<SleyObjectId>> {
     let mut tips = Vec::new();
 

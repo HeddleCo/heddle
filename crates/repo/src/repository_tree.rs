@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Tree building and materialization helpers.
 
-use objects::store::ObjectStore;
 use std::{collections::HashSet, fs, path::Path, time::Instant};
 
 use objects::{
     object::{Blob, ContentHash, Tree, TreeEntry},
+    store::ObjectStore,
     worktree::WorktreeStatus,
 };
 use tracing::{debug, instrument, trace, warn};

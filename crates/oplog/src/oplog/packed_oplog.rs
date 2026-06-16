@@ -5,11 +5,13 @@
 //! that model: v2 is accepted only as a migration source, and v3 is the latest
 //! single-file container with an EOF index footer.
 
-use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap};
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, HashMap},
+    fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+};
 
 use chrono::{TimeZone, Utc};
 use objects::{
@@ -538,8 +540,16 @@ impl PackedOpLogIndex {
             let len = usize::try_from(record.entry_count).map_err(|_| {
                 HeddleError::InvalidObject("batch entry count too large".to_string())
             })?;
+            let end = first.checked_add(len).ok_or_else(|| {
+                HeddleError::InvalidObject("oplog batch directory range overflows".to_string())
+            })?;
+            if end > batch_offsets.len() {
+                return Err(HeddleError::InvalidObject(
+                    "oplog batch directory range points outside offset list".to_string(),
+                ));
+            }
             let mut entries = Vec::with_capacity(len);
-            for offset in &batch_offsets[first..first + len] {
+            for offset in &batch_offsets[first..end] {
                 let entry = read_entry_at(&mut file, *offset, self.record_schema()?)?;
                 if entry.id > since_head_id {
                     entries.push(entry);
@@ -1258,9 +1268,8 @@ pub(crate) fn recover_oplog_at(path: &Path) -> Result<OplogRecoveryReport> {
             // Healthy this run. If an earlier recovery (e.g. the silent
             // auto-fallback) already salvaged it, surface that sidecar's detail
             // rather than a bare "nothing to recover".
-            return Ok(
-                OplogRecoveryReport::from_prior_sidecar(path).unwrap_or_else(OplogRecoveryReport::healthy)
-            );
+            return Ok(OplogRecoveryReport::from_prior_sidecar(path)
+                .unwrap_or_else(OplogRecoveryReport::healthy));
         }
         Err(err) => err,
     };
@@ -2523,8 +2532,10 @@ mod tests {
     use objects::object::ChangeId;
     use tempfile::TempDir;
 
-    use super::super::op_record_codec::tests_support::{encode_atomic_no_head, encode_pre_atomic};
-    use super::*;
+    use super::{
+        super::op_record_codec::tests_support::{encode_atomic_no_head, encode_pre_atomic},
+        *,
+    };
 
     fn make_entry(id: u64, scope: Option<&str>) -> OpEntry {
         let state = ChangeId::generate();

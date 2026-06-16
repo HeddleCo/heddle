@@ -3,19 +3,19 @@
 
 #![cfg(feature = "tree-sitter-symbols")]
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
-use objects::object::{
-    Blob, ChangeId, ContentHash, Discussion, DiscussionResolution, DiscussionsBlob, EntryType,
-    State, Tree,
+use objects::{
+    object::{
+        Blob, ChangeId, ContentHash, Discussion, DiscussionResolution, DiscussionsBlob, EntryType,
+        State, Tree,
+    },
+    store::ObjectStore,
 };
-use objects::store::ObjectStore;
 use oplog::OpLogBackend;
 use refs::RefBackend;
 
-use crate::discussion_anchor_travel::travel_anchors;
-use crate::{HeddleError, Repository, Result};
+use crate::{HeddleError, Repository, Result, discussion_anchor_travel::travel_anchors};
 
 impl<R, O, S> Repository<R, O, S>
 where

@@ -8,8 +8,7 @@
 //! [`execute`](super::execute) reaches `commit`. The ledger is a LIFO stack of
 //! inverse closures, popped in reverse on any unwind.
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use objects::error::{HeddleError, Result};
 use oplog::{

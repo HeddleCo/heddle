@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use std::collections::HashSet;
 
 use anyhow::Result;
-use objects::object::{ContentHash, Tree};
+use objects::{
+    object::{ContentHash, Tree},
+    store::ObjectStore,
+};
 use repo::Repository;
 
 use super::{FsckError, make_error};

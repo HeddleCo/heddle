@@ -6,8 +6,7 @@
 
 pub mod git_core;
 pub mod git_export;
-pub mod git_import;
-pub(crate) mod git_import_tree;
+pub(crate) mod git_ingest;
 pub mod git_mapping;
 pub mod git_notes;
 pub mod git_reconstruct;
