@@ -48,19 +48,26 @@ cask "heddle" do
   version "$VERSION"
   sha256 "$SHA256"
 
-  url "https://github.com/HeddleCo/heddle/releases/download/v#{version}/Heddle-v#{version}-macos-universal.dmg"
+  url "https://github.com/HeddleCo/heddle/releases/download/v#{version}/Heddle-v#{version}-macos-universal.dmg",
+      verified: "github.com/HeddleCo/heddle/"
   name "Heddle"
   desc "AI-native version control system"
-  homepage "https://heddle.sh"
+  homepage "https://heddle.sh/"
 
-  depends_on macos: ">= :tahoe"
+  livecheck do
+    url :url
+    strategy :github_latest
+  end
+
+  depends_on macos: :tahoe
 
   app "Heddle.app"
   binary "#{appdir}/Heddle.app/Contents/Resources/bin/heddle", target: "heddle"
 
   postflight do
-    system_command "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
-                   args: ["-f", "#{appdir}/Heddle.app"]
+    lsregister = "/System/Library/Frameworks/CoreServices.framework/" \\
+                 "Frameworks/LaunchServices.framework/Support/lsregister"
+    system_command lsregister, args: ["-f", "#{appdir}/Heddle.app"]
   end
 
   zap trash: [
