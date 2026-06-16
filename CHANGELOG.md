@@ -11,46 +11,96 @@ recorded here. Hosted-product work (Postgres, Biscuit, the web app,
 GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 `HeddleCo/tapestry` repos.
 
-## 0.3.0 - 2026-05-17
+## 0.3.0 - 2026-06-16
+
+Git operations move onto a native-Rust substrate, the command surface is
+consolidated, lossless git round-trip becomes a hard guarantee, and the
+release ships signed macOS + Homebrew distribution.
 
 ### Breaking
 
-- **RPC rename `AuthService.FinishWebAuthnRegistration` →
-  `RegisterPublicKey`.** Consumers pinned to `^0.2` must update
-  generated client/server stubs before upgrading. Bumped to `0.3.0`
-  (not `0.2.5`) so pre-1.0 Cargo callers don't auto-resolve into the
-  breaking change.
+- Semantic merge is the default merge strategy; the redundant `--semantic` flag is removed (#669)
+- Verb-surface consolidation: ~85 top-level verbs reduced to ~28 canonical ones. Save verbs collapse onto `commit`/`ready`/`land`/`sync` (#478); redundant roots are deleted from the command tree, dispatch, catalog, and schemas, not just hidden (#681)
+- `git import` refuses lossy conversions by default; unrepresentable tree entries now fail hard, with explicit `--lossy` opt-in (#453)
+- `FullRematerialize` refuses to run against a dirty worktree by default; the destructive discard is opt-in (#442)
+- `OutputMode::Auto` removed — output no longer silently switches to JSON when piped; `--output json` is explicit (#280)
+- `OpRecord` v2 record variants collapsed and a schema-versioning migration added for legacy oplog repos (#670, #452)
+- RPC rename `AuthService.FinishWebAuthnRegistration` → `RegisterPublicKey` (`crates/grpc/proto/heddle/v1/service.proto`; #63). The old name reflected WebAuthn ceremony state; the new name reflects what the call actually does — store a public key + attestation. `BeginWebAuthnRegistration` keeps its name (generic challenge-init); the request message is renamed in lockstep (`FinishWebAuthnRegistrationRequest` → `RegisterPublicKeyRequest`). All field numbers are preserved, so wire-compatible consumers that don't pin the message-type name keep decoding existing payloads, but consumers pinned to `^0.2` must update generated client/server stubs before upgrading
 
 ### Changed
 
-- **`AuthService.FinishWebAuthnRegistration` renamed to
-  `RegisterPublicKey`** (HeddleCo/heddle#63;
-  `crates/grpc/proto/heddle/v1/service.proto`). The old name
-  reflected WebAuthn ceremony state; the new name reflects what
-  the call actually does — store a public key + attestation.
-  `BeginWebAuthnRegistration` keeps its name (it's a generic
-  challenge-init).
-  - The request message is renamed in lockstep:
-    `FinishWebAuthnRegistrationRequest` →
-    `RegisterPublicKeyRequest`.
-  - All field numbers are preserved, so any wire-compatible
-    consumer that doesn't pin the message-type name continues to
-    decode existing payloads.
+- Squash-by-default land: a landed thread exports as one atomic Git commit while preserving per-State Heddle history; `--no-squash` and a `[land] squash` config override remain (#680)
+- `heddle start --path` is the canonical isolated-checkout path; `thread create`/`thread promote` demoted off the advertised surface; thread checkouts land under `.heddle/threads/` for sandbox-friendliness (#685, #576)
+- Object reads and hashing route through a native-Rust `git_substrate` adapter backed by [sley](https://crates.io/crates/sley) `0.0.3`; remaining `gix` usage is cut over so there is no git shell-out on the hot path (#733, #738, #595)
+- `Repository` genericized over its ref/object backends — `dyn` dispatch replaced with type parameters, removing vtable overhead (#282, #293)
+- Native ref primitives: `parse_git_ref` + `RefSpec`/`NegativeRefSpec` ported from jj; `.git/config` remotes parsed via `gix_config` instead of by hand (#296, #288)
+- Captured new files are marked intent-to-add in the colocated Git index, matching `git add -N` semantics (#300)
+- `output_kind` wire normalization across thread/operator envelopes and the read/stream paths (inspect/show, rebase JSONL, conflict-show), so `--output json` is stable end to end; an invariant lint guards the class (#671, #660, #281)
+- Help and onboarding overhaul: `heddle init --quickstart` one-command first run (#349), grouped advanced command list, single-sourced `--output` help, `help threads`/`help advanced`/Git-concept topics, and de-bloated per-command help (#663, #658, #688, #174)
 
 ### Added
 
-- **Device-key binding-signature fields on `RegisterPublicKeyRequest`**
-  (HeddleCo/weft#131; tags 16/17/18). Lets the client prove that
-  the same WebAuthn authenticator that issued the attestation also
-  signs the renewal-anchor `device_public_key`, closing a gap where
-  a client could attach an unrelated Ed25519 key to a real
-  attestation. The server-side verifier lives in `weft-server` and
-  enforces the binding iff `device_public_key` is non-empty.
+- `heddle oplog recover` / operator recover: reconstructs a truncated oplog from the EOF footer plus a salvage sidecar, so a truncated log no longer bricks a repo (#682, #736, #618)
+- Packed oplog v3: single-file tail format with an EOF footer carrying entry-offset, batch, and sorted `transaction_id` indexes (#429)
+- Lossless git round-trip: git-fidelity fields (committer, tz offsets, verbatim message, ordered extra headers, GPG sig) captured on import with a format bump (#569); a byte-exact `reconstruct_commit_bytes` serializer + conformance harness (#579); export reconstructs commit objects from state (#591); and a `bridge backfill-fidelity` migration for pre-bump repos (#587)
+- Automatic ed25519 state signing on capture/commit/merge, wiring the device key into every recorded state (#486)
+- Function-level semantic merge driver: AST-aware three-way merge plus a native hunk-level (diff3-style) text merger; Rust `use` re-exports merge as path-keyed items (#114, #84, #477)
+- Cross-thread undo, undoable rebase (transaction grouping), `FastForward`/`FastForwardV2` merge undo, and a pre-undo recovery marker so undo never silently loses worktree edits (#112, #218, #109, #118, #314)
+- `heddle expand <oid|state|thread>` reconstructs the constituent captures of a collapsed squashed land (#721)
+- Partial clone: `clone --depth` and `clone --filter blob:none` (synonym for `--lazy`) wired through the Git-overlay clone, plus lazy on-read blob hydration via a `BlobHydrator` trait (#52, #51, #53)
+- Dynamic shell completion (`__complete`) and a `heddle shell prompt` segment (#731)
+- Structured `blame --output json` with per-line principal + agent attribution (#322)
+- npm/TypeScript client: a transport-agnostic `Heddle` class over the CLI's JSON contract, backed by generated TS types and full JSON-contract coverage for harness ops (#592, #588)
+- `daemon` transaction-replay state machine for crash recovery of leftover transaction sentinels (#47)
+- `push --mirror` for ad-hoc dual-push (#227)
+- Device-key binding-signature fields on `RegisterPublicKeyRequest` (`crates/grpc/proto/heddle/v1/service.proto`; tags 16/17/18). Let a client prove that the same WebAuthn authenticator that issued the attestation also signs the renewal-anchor `device_public_key`, closing a gap where a client could attach an unrelated Ed25519 key to a real attestation. The challenge the assertion signs is `base64url(SHA256("heddle-device-binding-v1" || 0x00 || device_public_key))` (#131)
   - `bytes device_binding_client_data_json = 16;`
   - `bytes device_binding_authenticator_data = 17;`
   - `bytes device_binding_signature = 18;`
-  - The challenge the assertion signs is
-    `base64url(SHA256("heddle-device-binding-v1" || 0x00 || device_public_key))`.
+
+### Fixed
+
+- P0 semantic-merge corruption: containers modeled as first-class tree nodes so 3-way merge no longer silently mis-nests or erases subtrees (#506, #92)
+- Conflict markers anchored at column 0; indented conflict-marker recognition fixed (#82, #724)
+- Lossy attribution for cached git subtrees no longer double-counts on importer cache hits (#711)
+- `undo` thread `base_state` restore corrected; thread-base refresh now routes through the oplog so it round-trips (#677)
+- Mount/FUSE made to work end-to-end on Linux (three production-blocking bugs), with an out-of-process `heddle-fuse-worker` subprocess for callback isolation; Windows ProjFS production-hardened (#85, #225, #96)
+- Fail-loud fixes across the read/sync/config paths: broken GitHub REST pagination, unreadable hydration state, and TLS/auth config-read failures now error instead of silently degrading (#450, #448, #446)
+- Dozens of correctness and durability fixes across the oplog, pack, refs, and objects paths — checked arithmetic in the pack-size/offset decoder, per-entry content-hash validation on `install_pack`, advisory-lock stale-lock reaping, atomic transaction-sentinel writes, and HEAD reconstruction from Snapshot/Goto records (#396, #395, #447, #527, #394, and others)
+
+### Security
+
+- Path-traversal hardening: a `..`-traversal bypass in namespace/repo access checks closed via a shared segment-aware helper; namespace scope grants downward access only (#638, #628)
+- Materialized symlink targets validated against the repo root (capture already checked them; materialization did not) (#430)
+- Atomic secret-write primitive: temp files created `0600` before any bytes are written, with hard errors on bad perms (#428)
+- Daemon hardening: `SO_PEERCRED` peer-identity enforcement, secured socket bind, and a validated `transaction_id` at the RPC boundary to close a path-traversal vector (#626, #699, #441)
+- Bounded received-blob sizes on redaction / state-visibility / native-pack transfers to cap untrusted input (#530, #417)
+- Supply-chain gate: `cargo-audit` + `cargo-deny` added to CI; dropped a yanked dependency and scrubbed real personal data from example/test fixtures (#40, #376)
+
+### Performance
+
+- `tree_diff` rewritten as a sorted merge-join with deterministic order and no per-entry allocations; internal-iteration `diff_trees_visit` for streaming/early-exit consumers (#422, #399, #635)
+- `status` sped up: deduped redundant git-overlay passes, an index stat fast-path, and reduced `compare_worktree` `get_tree` overhead (#560, #556)
+- Pack and push hot paths: zero-copy `install_pack` validation, eliminated whole-pack `to_vec()` clones, and dropped a redundant second proto-object encode on push (#421, #416, #544)
+- `adopt`/import routed through the streaming pack builder and written as a single pack; `O(entries²)` oplog batch collection made single-pass; `O(n²)` reflog SHA dedup eliminated (#558, #719, #415, #704)
+- Native-git engine micro-benchmarks (hashing, compression, pack I/O, tree-diff, delta) and an oplog throughput bench, gated by a weekly scheduled CI workflow (#432, #433, #435)
+
+### Distribution
+
+- Homebrew cask: `brew install --cask heddleco/heddle/heddle` (tap `heddleco/heddle`) — the default install on macOS, with a brew-audit-clean generated cask (#740)
+- Signed, notarized universal `Heddle.app` DMG with the embedded FSKit module and version-aware enable UX ships alongside the CLI (#666, #686, #687)
+- Prebuilt binaries on [GitHub Releases](https://github.com/HeddleCo/heddle/releases) for macOS (arm64, x86_64), Linux (arm64, x86_64), and Windows (x86_64); the binary release pipeline cosign-keyless signs every artifact with a `SHA256SUMS` manifest (#69)
+- Linux builds pinned to a glibc 2.35 floor (Debian 12 / Ubuntu 22.04) for broad portability (#554)
+- Workspace crates auto-publish to crates.io on push-to-main (#73)
+
+### sley (native git substrate)
+
+The git substrate behind `git_substrate` reached crates.io 0.0.3 (20 `sley-*`
+crates) and closed a large slice of git-parity over this window:
+
+- Shared CLI-layer engines instead of per-command handlers: a parse-options engine + `DateMode`, `setup_revisions`, shared `DiffOptions`, a `strbuf_expand` format substrate, a `grep-source` engine, and an `unpack-trees` tree-merge engine — with `log`, `rev-list`, `branch`, `diff`, `show`, `for-each-ref`, `format-patch`, and others migrated onto them ([sley #51, #61, #56, #64, #71, #84](https://github.com/HeddleCo/sley/pulls))
+- Conformance gains against the git oracle: `fsck` (object-content checker), `reset` (ORIG_HEAD, parse-options), `status` (config-aware format + submodule summary), `format-patch` (headers, cover letter, threading), `am`/`apply` (3-way fallback), `rm`, and `update-ref --stdin` ([sley #94, #92, #88, #89, #100, #90, #103](https://github.com/HeddleCo/sley/pulls))
+- Read- and write-path perf: mmap commit-graph, loose-object presence cache, buffer reuse, and a once-per-command `.gitattributes` matcher ([sley #98, #79, #101, #78](https://github.com/HeddleCo/sley/pulls))
 
 ## 0.2.4 - 2026-05-14
 
