@@ -1,0 +1,159 @@
+syntax = "proto3";
+
+package heddle.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// ───────────────────────────────────────────────────────────────
+// FeedService — Mission Control Stream (V1: review readiness)
+// ───────────────────────────────────────────────────────────────
+
+service FeedService {
+  // Server-streaming: delivers priority-ranked feed items in real-time.
+  // Client opens one stream after initial snapshot load.
+  rpc StreamFeed(StreamFeedRequest) returns (stream FeedItem);
+
+  // Unary: initial page load. Returns current feed state.
+  rpc GetFeedSnapshot(GetFeedSnapshotRequest) returns (FeedSnapshot);
+
+  // Unary: record a user interaction for ranking personalization.
+  // Fire-and-forget from the client perspective.
+  rpc RecordInteraction(RecordInteractionRequest) returns (RecordInteractionResponse);
+
+  // Unary: dismiss, pin, or act on a feed item.
+  rpc UpdateFeedItem(UpdateFeedItemRequest) returns (UpdateFeedItemResponse);
+}
+
+// --- Feed Requests ---
+
+message StreamFeedRequest {
+  // Optional: only stream items for specific repos
+  repeated string repo_paths = 1;
+  // Optional: only stream specific kinds
+  repeated FeedItemKind kinds = 2;
+  // Resume token: the item_id of the last received FeedItem.
+  // On reconnect, server queries feed_items WHERE id > resume_after_item_id
+  // to catch up, then switches to live streaming. Format: numeric string (feed_items.id).
+  // Empty/omitted: stream from "now" (only new items, no catch-up).
+  string resume_after_item_id = 3;
+}
+
+message GetFeedSnapshotRequest {
+  // Max items to return (default 50). V1: capped at 50 with no pagination.
+  uint32 limit = 1;
+  // Filter by resolution status (default: PENDING only)
+  repeated FeedItemResolution resolution_filter = 2;
+  // Optional repo filter
+  repeated string repo_paths = 3;
+}
+
+message RecordInteractionRequest {
+  // Subject (user) is resolved server-side from the authenticated Biscuit claim.
+  InteractionKind kind = 1;
+  string resource_path = 2; // e.g. "luke/objects/-/changes/abc123"
+  string feed_item_id = 3; // optional: the feed item that led to this interaction
+}
+
+message UpdateFeedItemRequest {
+  string item_id = 1;
+  FeedItemResolution resolution = 2; // dismiss, pin, mark acted_on
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+// --- Feed Responses ---
+
+message FeedSnapshot {
+  repeated FeedItem items = 1;
+  uint32 total_pending = 2; // total pending items (may exceed returned limit)
+  string resume_token = 3; // item_id of last item; pass to StreamFeed.resume_after_item_id
+}
+
+message RecordInteractionResponse {}
+
+message UpdateFeedItemResponse {
+  FeedItem item = 1;
+}
+
+// --- Feed Core Types ---
+
+message FeedItem {
+  string item_id = 1;
+  FeedItemKind kind = 2;
+  uint32 priority_score = 3; // 0-1000, server-computed
+  string headline = 4; // "objects: 3 files changed, 2 breaking API changes"
+  string detail = 5; // truncated diff summary, pre-populated by materializer
+  string repo_path = 6;
+  string resource_id = 7; // change_id, session_id, etc.
+  FeedItemResolution resolution = 8;
+  float confidence = 9; // 0.0-1.0, for future auto-resolution
+  repeated FeedItemAction actions = 10;
+  google.protobuf.Timestamp created_at = 11;
+  google.protobuf.Timestamp expires_at = 12;
+  // Populated by FeedMaterializer in V1 (used in priority scoring and card metadata):
+  string actor_subject = 13; // who/what caused this item
+  bool has_agent_reasoning = 14; // context annotations attached? (+25 priority boost)
+  uint32 files_changed = 15; // count from diff (feeds card metadata line)
+  uint32 breaking_changes = 16; // count from semantic diff (+200 priority boost)
+  string top_annotation = 17; // most important WHY/GOTCHA annotation text (max 80 chars)
+  bool confidence_computed = 18; // false in V1; true in V2 when confidence is set
+  bool security_sensitive = 19; // stored for score reproducibility
+  float affinity_multiplier = 20; // stored for score reproducibility (default 1.0)
+  repeated FileChangeSummary top_files = 21; // top changed file paths (max 5)
+  repeated BreakingChangeSummary breaking_summaries = 22; // top breaking semantic changes (max 3)
+}
+
+message FileChangeSummary {
+  string path = 1;
+  FileChangeKind kind = 2;
+}
+
+enum FileChangeKind {
+  FILE_CHANGE_KIND_UNSPECIFIED = 0;
+  FILE_CHANGE_KIND_ADDED = 1;
+  FILE_CHANGE_KIND_MODIFIED = 2;
+  FILE_CHANGE_KIND_DELETED = 3;
+}
+
+message BreakingChangeSummary {
+  string kind = 1; // e.g. "function_deleted", "dependency_removed"
+  string path = 2; // file path where the break was detected
+  string symbol = 3; // symbol/name involved (function, dependency, etc.)
+}
+
+message FeedItemAction {
+  string action_id = 1; // "review", "dismiss", "pin", "acted_on"
+  string label = 2; // "Review", "Dismiss", "Pin"
+  string url = 3; // deep link into the app
+  bool is_primary = 4;
+}
+
+enum FeedItemKind {
+  FEED_ITEM_KIND_UNSPECIFIED = 0;
+  FEED_ITEM_KIND_REVIEW_READY = 1; // V1: thread/change ready for review
+  FEED_ITEM_KIND_AGENT_COMPLETED = 2; // V2: agent session finished
+  FEED_ITEM_KIND_SECURITY_SURFACE = 3; // V2: stale token, over-scoped grant
+  FEED_ITEM_KIND_DRIFT_ALERT = 4; // V2: thread diverged significantly
+  FEED_ITEM_KIND_REPO_QUIET = 5; // V2: repo inactive with open threads
+}
+
+enum FeedItemResolution {
+  FEED_ITEM_RESOLUTION_UNSPECIFIED = 0;
+  FEED_ITEM_RESOLUTION_PENDING = 1;
+  FEED_ITEM_RESOLUTION_DISMISSED = 2;
+  FEED_ITEM_RESOLUTION_ACTED_ON = 3;
+  FEED_ITEM_RESOLUTION_AUTO_RESOLVED = 4; // V2: AI handled it
+  FEED_ITEM_RESOLUTION_EXPIRED = 5;
+  FEED_ITEM_RESOLUTION_PINNED = 6;
+}
+
+enum InteractionKind {
+  INTERACTION_KIND_UNSPECIFIED = 0;
+  INTERACTION_KIND_VIEWED_REPO = 1;
+  INTERACTION_KIND_OPENED_REVIEW = 2;
+  INTERACTION_KIND_COMPLETED_REVIEW = 3;
+  INTERACTION_KIND_DISMISSED_ITEM = 4;
+  INTERACTION_KIND_EXPANDED_SESSION = 5;
+  INTERACTION_KIND_VIEWED_DIFF = 6;
+  INTERACTION_KIND_SEARCHED = 7; // V2+: requires stream search feature
+}

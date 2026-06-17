@@ -3,7 +3,7 @@
 
 use anyhow::{Result, anyhow};
 use objects::{object::MarkerName, store::ObjectStore};
-use oplog::OpLogBackend;
+use oplog::OpLogRecorder;
 use repo::Repository;
 use serde::Serialize;
 

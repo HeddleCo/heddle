@@ -25,7 +25,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, 
 use objects::object::{ChangeId, Principal};
 use oplog::{
     ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpEntry, OpLog, OpLogBackend,
-    OpRecord,
+    OpLogRecorder, OpRecord,
 };
 use tempfile::TempDir;
 

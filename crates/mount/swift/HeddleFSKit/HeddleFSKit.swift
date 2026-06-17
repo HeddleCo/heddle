@@ -11,8 +11,7 @@
 //   * a `Box<dyn PlatformShell>` (the `ContentAddressedMount`)
 //     plus a tiny callback registry that converts each Swift
 //     request into a trait method invocation
-//   * mount-point lifetime (the Drop on `FSKitShell` triggers
-//     `heddle_fskit_unmount`)
+//   * session lifetime for the System Extension bootstrap path
 //
 // SDK-verification result (plan §6.1):
 //
@@ -181,31 +180,6 @@ public func heddle_fskit_session_new(
     return unmanaged.toOpaque()
 }
 
-@_cdecl("heddle_fskit_session_mount")
-public func heddle_fskit_session_mount(
-    handle: HeddleFSKitSessionHandle?,
-    mountpoint: UnsafePointer<CChar>?
-) -> Int32 {
-    guard let handle = handle else { return Int32(EINVAL) }
-    guard let mountpoint = mountpoint else { return Int32(EINVAL) }
-    let session = Unmanaged<HeddleFSKitSession>
-        .fromOpaque(handle)
-        .takeUnretainedValue()
-    let path = String(cString: mountpoint)
-    return session.mount(at: path)
-}
-
-@_cdecl("heddle_fskit_session_unmount")
-public func heddle_fskit_session_unmount(
-    handle: HeddleFSKitSessionHandle?
-) -> Int32 {
-    guard let handle = handle else { return Int32(EINVAL) }
-    let session = Unmanaged<HeddleFSKitSession>
-        .fromOpaque(handle)
-        .takeUnretainedValue()
-    return session.unmount()
-}
-
 @_cdecl("heddle_fskit_session_free")
 public func heddle_fskit_session_free(
     handle: HeddleFSKitSessionHandle?
@@ -272,33 +246,6 @@ final class HeddleFSKitSession {
         drop?(userData)
     }
 
-    func mount(at path: String) -> Int32 {
-        // FSKit on macOS 15.4+ has no programmatic in-process
-        // `mount(at:)`. Mounting requires a code-signed `.fsmodule`
-        // System Extension that registers via
-        // `OSSystemExtensionRequest.activationRequest(...)` and is
-        // then driven by `mount(8)` from userspace. The CLI process
-        // cannot host the live FS.
-        //
-        // Returning ENOSYS keeps the existing contract intact: the
-        // Rust side surfaces it as a `MountError`, the FSKit smoke
-        // test treats `HEDDLE_FSKIT_AVAILABLE=1` as an entitlement
-        // probe, and the CLI falls back through to its existing
-        // error path.
-        //
-        // To finish the macOS path: package a `.fsmodule` bundle
-        // that links this static library, request the FSKit
-        // entitlement, and add `OSSystemExtensionRequest` activation
-        // to the CLI. See `crates/mount/README.md`.
-        _ = path
-        return Int32(ENOSYS)
-    }
-
-    func unmount() -> Int32 {
-        // Symmetric with `mount(at:)`: nothing was actually mounted
-        // in-process, so unmount is a successful no-op.
-        return 0
-    }
 }
 
 #if canImport(FSKit) && os(macOS)

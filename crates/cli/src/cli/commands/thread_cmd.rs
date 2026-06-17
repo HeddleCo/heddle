@@ -13,7 +13,7 @@ use objects::{
     object::{ChangeId, ThreadName},
     store::{AgentRegistry, ObjectStore},
 };
-use oplog::{OpLogBackend, ThreadUpdateSnapshots};
+use oplog::{OpLogRecorder, ThreadUpdateSnapshots};
 use refs::Head;
 use repo::{
     Repository, Thread, ThreadFreshness, ThreadManager, ThreadMode, ThreadState,

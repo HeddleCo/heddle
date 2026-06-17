@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::{
+    collections::BTreeSet,
     env, fs,
     path::{Path, PathBuf},
     process::Command,
@@ -374,9 +375,9 @@ end_of_record
 }
 
 /// Audit-idempotency check: fail when any state-changing RPC's request
-/// message lacks `string client_operation_id = 15`. The service.proto
-/// comment block explicitly reserves tag 15 for this; this audit is
-/// what keeps the convention from rotting.
+/// message lacks `string client_operation_id = 15`. The proto schema
+/// reserves tag 15 for this; this audit is what keeps the convention
+/// from rotting.
 ///
 /// Rules the audit applies:
 ///   1. State-changing RPCs are detected by RPC name prefix
@@ -400,9 +401,9 @@ fn run_audit_idempotency() -> Result<()> {
         .parent()
         .and_then(|path| path.parent())
         .context("failed to locate workspace root")?;
-    let proto_path = workspace_root.join("crates/grpc/proto/heddle/v1/service.proto");
-    let source = fs::read_to_string(&proto_path)
-        .with_context(|| format!("read {}", proto_path.display()))?;
+    let proto_root = workspace_root.join("crates/grpc/proto");
+    let proto_path = proto_root.join("heddle/v1/service.proto");
+    let source = read_proto_source_tree(&proto_path, &proto_root)?;
 
     let rpcs = extract_rpcs(&source);
     let messages = extract_messages(&source);
@@ -456,6 +457,61 @@ fn run_audit_idempotency() -> Result<()> {
         audited
     );
     Ok(())
+}
+
+fn read_proto_source_tree(entrypoint: &Path, proto_root: &Path) -> Result<String> {
+    fn visit(
+        path: &Path,
+        proto_root: &Path,
+        seen: &mut BTreeSet<PathBuf>,
+        out: &mut String,
+    ) -> Result<()> {
+        if !seen.insert(path.to_path_buf()) {
+            return Ok(());
+        }
+
+        let source =
+            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        out.push_str("\n// ---- ");
+        out.push_str(&path.display().to_string());
+        out.push_str(" ----\n");
+        out.push_str(&source);
+        out.push('\n');
+
+        for import in proto_imports(&source) {
+            let imported = proto_root.join(import);
+            if imported.exists() {
+                visit(&imported, proto_root, seen, out)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut out = String::new();
+    visit(entrypoint, proto_root, &mut seen, &mut out)?;
+    Ok(out)
+}
+
+fn proto_imports(source: &str) -> Vec<String> {
+    let mut imports = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed
+            .strip_prefix("import public ")
+            .or_else(|| trimmed.strip_prefix("import "))
+        else {
+            continue;
+        };
+        let spec = rest.trim().trim_end_matches(';').trim();
+        if let Some(after_quote) = spec.strip_prefix('"')
+            && let Some((path, _)) = after_quote.split_once('"')
+        {
+            imports.push(path.to_string());
+        }
+    }
+    imports
 }
 
 #[derive(Debug)]
@@ -768,24 +824,26 @@ mod tests_proto_single_source {
             .to_path_buf()
     }
 
-    // Heddle ships exactly one canonical `service.proto`, at
-    // `crates/grpc/proto/heddle/v1/service.proto`. The historical
-    // mirrors at `proto/heddle/v1/` and `proto/proto/heddle/v1/`
-    // drifted (missing `RedactionTransfer` before heddle#63 r1).
+    // Heddle ships one canonical proto tree under
+    // `crates/grpc/proto/heddle/v1/`. The historical mirrors at
+    // `proto/heddle/v1/` and `proto/proto/heddle/v1/` drifted
+    // (missing `RedactionTransfer` before heddle#63 r1).
     #[test]
-    fn only_canonical_proto_exists() {
+    fn only_canonical_proto_tree_exists() {
         let root = workspace_root();
-        let canonical = root.join("crates/grpc/proto/heddle/v1/service.proto");
+        let canonical = root.join("crates/grpc/proto/heddle/v1");
         assert!(
-            canonical.exists(),
-            "canonical proto missing at {}",
+            canonical.join("service.proto").exists(),
+            "canonical proto entrypoint missing under {}",
+            canonical.display()
+        );
+        assert!(
+            canonical.join("common.proto").exists(),
+            "canonical proto shared types missing under {}",
             canonical.display()
         );
 
-        for mirror in [
-            "proto/heddle/v1/service.proto",
-            "proto/proto/heddle/v1/service.proto",
-        ] {
+        for mirror in ["proto/heddle/v1", "proto/proto/heddle/v1"] {
             let p = root.join(mirror);
             assert!(
                 !p.exists(),

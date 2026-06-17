@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+package heddle.v1;
+
+import "heddle/v1/state_review.proto";
+
+// Risk signal computation + repo-level health.
+service SignalService {
+  rpc ComputeStateSignals(ComputeStateSignalsRequest) returns (ComputeStateSignalsResponse);
+  rpc GetRepoSignalHealth(GetRepoSignalHealthRequest) returns (RepoSignalHealthReport);
+  rpc SubscribeSignalUpdates(SubscribeSignalUpdatesRequest) returns (stream SignalUpdate);
+}
+
+message ComputeStateSignalsRequest {
+  string repo_path = 1;
+  bytes state_id = 2;
+  // Optional prior state to diff against; server defaults to the
+  // state's first parent.
+  bytes prior_state_id = 3;
+}
+
+message ComputeStateSignalsResponse {
+  repeated RiskSignal signals = 1;
+  uint32 tick_budget = 2;
+}
+
+message GetRepoSignalHealthRequest {
+  string repo_path = 1;
+  // Number of recent states to include in the rolling window. Server
+  // applies a sane default when zero.
+  uint32 window_states = 2;
+}
+
+message RepoSignalHealthReport {
+  repeated SignalHealthEntry entries = 1;
+  uint32 window_states = 2;
+}
+
+message SignalHealthEntry {
+  string module_id = 1;
+  float fire_rate = 2;
+  bool warn = 3;
+}
+
+message SubscribeSignalUpdatesRequest {
+  string repo_path = 1;
+}
+
+message SignalUpdate {
+  bytes state_id = 1;
+  repeated RiskSignal signals = 2;
+}

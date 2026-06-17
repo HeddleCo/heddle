@@ -38,10 +38,7 @@ pub use message_hosted::{
     UpdateNamespace, UsageTotals, WorktreeChangeBaseline,
 };
 pub use message_objects::{HaveObjects, ObjectData, ObjectRequest, SendObjects, WantObjects};
-pub use message_pushpull::{
-    PARTIAL_FETCH_DISABLED, PARTIAL_FETCH_ENABLED, PARTIAL_FETCH_REQUIRED, PullComplete, PullReady,
-    PullRequest, PushComplete, PushReady, PushRequest, TRANSPORT_MODE_NATIVE_PACK,
-};
+pub use message_pushpull::{PullComplete, PushComplete};
 pub use message_refs::{HeadInfo, ListRefs, RefEntry, RefFilter, RefUpdated, RefsList, UpdateRef};
 pub use message_status::{Error, ErrorCode, Status, StatusCode};
 pub use native_pack::{

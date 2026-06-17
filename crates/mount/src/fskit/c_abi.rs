@@ -23,7 +23,7 @@
 //!     emits prototypes for these in declaration order.
 
 use std::{
-    ffi::{CStr, c_char, c_void},
+    ffi::{c_char, c_void, CStr},
     ptr,
 };
 
@@ -154,17 +154,6 @@ unsafe extern "C" {
         flush: HeddleFlushCallback,
         drop: HeddleDropCallback,
     ) -> HeddleFSKitSessionHandle;
-
-    /// Mount the session at `mountpoint_utf8`. Returns 0 on success
-    /// or a libc errno (currently `ENOSYS` until `FSModuleHost`
-    /// registration lands).
-    pub fn heddle_fskit_session_mount(
-        handle: HeddleFSKitSessionHandle,
-        mountpoint_utf8: *const c_char,
-    ) -> i32;
-
-    /// Unmount the session. Idempotent; safe to call after free.
-    pub fn heddle_fskit_session_unmount(handle: HeddleFSKitSessionHandle) -> i32;
 
     /// Release the session. Triggers the `drop` callback exactly once.
     pub fn heddle_fskit_session_free(handle: HeddleFSKitSessionHandle);

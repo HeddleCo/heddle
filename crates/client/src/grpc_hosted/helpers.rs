@@ -7,11 +7,7 @@ use grpc::heddle::v1::{
     TransferCheckpoint, TransportMode,
 };
 use objects::object::{ChangeId, ContentHash};
-use proto::{
-    CAPABILITY_CHUNKED_TRANSFER, CAPABILITY_PACK_TRANSFER, CAPABILITY_PARTIAL_FETCH,
-    CAPABILITY_RESUMABLE_TRANSFER, Capabilities, CapabilitySet, ObjectId, ObjectInfo, ObjectType,
-    ProtocolError,
-};
+use proto::{ObjectId, ObjectInfo, ObjectType, ProtocolError};
 use tonic::Status;
 
 #[derive(Debug, Clone)]
@@ -19,40 +15,16 @@ pub(crate) struct HostedTransportPolicy {
     pub chunk_size: usize,
     pub max_inflight_objects: usize,
     pub resume_attempts: usize,
-    pub negotiated: CapabilitySet,
 }
 
 impl HostedTransportPolicy {
     pub fn from_client_config(config: &ClientConfig) -> Self {
-        let mut client_caps = Capabilities::default()
-            .with_chunk_size(config.chunk_size.min(u32::MAX as usize) as u32);
-        if config.chunked_transfer {
-            client_caps = client_caps.with_flag(CAPABILITY_CHUNKED_TRANSFER);
-        }
-        if config.resumable_transfer {
-            client_caps = client_caps.with_flag(CAPABILITY_RESUMABLE_TRANSFER);
-        }
-        if config.pack_transfer {
-            client_caps = client_caps.with_flag(CAPABILITY_PACK_TRANSFER);
-        }
-        if config.partial_fetch {
-            client_caps = client_caps.with_flag(CAPABILITY_PARTIAL_FETCH);
-        }
-
-        let server_caps = Capabilities::default()
-            .with_flag(CAPABILITY_CHUNKED_TRANSFER)
-            .with_flag(CAPABILITY_RESUMABLE_TRANSFER)
-            .with_flag(CAPABILITY_PACK_TRANSFER)
-            .with_flag(CAPABILITY_PARTIAL_FETCH)
-            .with_chunk_size(config.chunk_size.min(u32::MAX as usize) as u32);
-        let negotiated = CapabilitySet::new(&client_caps, &server_caps);
-        let chunk_size = negotiated.chunk_size().max(1);
+        let chunk_size = config.chunk_size.max(1);
         let max_inflight_objects = (chunk_size / (16 * 1024)).clamp(1, 16);
         Self {
             chunk_size,
             max_inflight_objects,
             resume_attempts: 2,
-            negotiated,
         }
     }
 

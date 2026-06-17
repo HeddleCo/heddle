@@ -48,7 +48,7 @@
 //!   that case to keep the log faithful.
 
 use objects::object::{MarkerName, ThreadName};
-use oplog::oplog::OpLogBackend;
+use oplog::oplog::{OpLogBackend, OpLogRecorder};
 use tracing::warn;
 
 use crate::{IngestError, git_walk::ReflogEntry, sha_map::ShaMap};

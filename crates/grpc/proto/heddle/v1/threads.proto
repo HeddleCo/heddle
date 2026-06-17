@@ -1,0 +1,172 @@
+syntax = "proto3";
+
+package heddle.v1;
+
+import "google/protobuf/timestamp.proto";
+import "heddle/v1/common.proto";
+
+service ThreadWorkflowService {
+  rpc StartThread(StartThreadRequest) returns (ThreadSummary);
+  rpc ListThreads(ListThreadsRequest) returns (ListThreadsResponse);
+  rpc GetWorkspaceSummary(GetWorkspaceSummaryRequest) returns (WorkspaceSummary);
+  rpc StreamWorkspaceSummary(GetWorkspaceSummaryRequest) returns (stream WorkspaceSummary);
+  rpc GetThread(GetThreadRequest) returns (ThreadSummary);
+  rpc CaptureThread(CaptureThreadRequest) returns (CaptureThreadResponse);
+  rpc CompleteThread(CompleteThreadRequest) returns (ThreadSummary);
+  rpc WatchThreads(WatchThreadsRequest) returns (stream ThreadEvent);
+}
+
+message ThreadSummary {
+  string name = 1;
+  optional bytes base_state = 2;
+  optional bytes current_state = 3;
+  optional string path = 4;
+  optional string provider = 5;
+  optional string model = 6;
+  string coordination_status = 7;
+  bool is_current = 8;
+  bool is_isolated = 9;
+  optional string target_thread = 10;
+  optional string parent_thread = 11;
+  optional string task = 12;
+  optional string thread_mode = 13;
+  optional string thread_state = 14;
+  optional string freshness = 15;
+  ThreadVerificationSummary verification_summary = 16;
+  ThreadConfidenceSummary confidence_summary = 17;
+  ThreadIntegrationPolicy integration_policy_result = 18;
+  optional string harness = 19;
+  optional string thinking_level = 20;
+  UsageSummary usage_summary = 21;
+  optional google.protobuf.Timestamp last_progress_at = 22;
+  optional string report_flush_state = 23;
+  optional string heddle_session_id = 24;
+  optional string attach_reason = 25;
+  optional string native_actor_key = 26;
+  optional string native_parent_actor_key = 27;
+  optional string probe_source = 28;
+  optional float probe_confidence = 29;
+  optional string recommended_action = 30;
+  repeated string blockers = 31;
+  optional string thread_health = 32;
+  bool promotion_suggested = 33;
+  repeated string child_threads = 34;
+  uint32 stack_depth = 35;
+  optional google.protobuf.Timestamp last_activity_at = 36;
+  optional string visibility = 37;
+  repeated string changed_paths = 38;
+  repeated string impact_categories = 39;
+  repeated string heavy_impact_paths = 40;
+}
+
+message ThreadVerificationSummary {
+  optional bool tests_passed = 1;
+  uint32 tests_failed = 2;
+  optional float coverage_pct = 3;
+  optional uint32 lint_warnings = 4;
+}
+
+message ThreadConfidenceSummary {
+  optional float value = 1;
+  optional string band = 2;
+}
+
+message ThreadIntegrationPolicy {
+  string status = 1;
+  string reason = 2;
+}
+
+message ThreadMetadata {
+  string name = 1;
+  optional string target_thread = 2;
+  optional string parent_thread = 3;
+  optional string task = 4;
+  string thread_mode = 5;
+  string thread_state = 6;
+  string freshness = 7;
+  bytes base_state = 8;
+  bytes base_root = 9;
+  optional bytes current_state = 10;
+  optional bytes merged_state = 11;
+  repeated string changed_paths = 12;
+  repeated string impact_categories = 13;
+  repeated string heavy_impact_paths = 14;
+  bool promotion_suggested = 15;
+  ThreadVerificationSummary verification_summary = 16;
+  ThreadConfidenceSummary confidence_summary = 17;
+  ThreadIntegrationPolicy integration_policy_result = 18;
+  google.protobuf.Timestamp created_at = 19;
+  google.protobuf.Timestamp updated_at = 20;
+}
+
+message StartThreadRequest {
+  string repo_path = 1;
+  string name = 2;
+  string from_state = 3;
+  string path = 4;
+  string provider = 5;
+  string model = 6;
+}
+
+message ListThreadsRequest {
+  string repo_path = 1;
+}
+
+message ListThreadsResponse {
+  repeated ThreadSummary threads = 1;
+}
+
+message GetWorkspaceSummaryRequest {
+  string repo_path = 1;
+}
+
+message WorkspaceThreadGroup {
+  string id = 1;
+  string label = 2;
+  repeated ThreadSummary threads = 3;
+}
+
+message WorkspaceSummary {
+  string repo_path = 1;
+  optional string current_thread = 2;
+  repeated WorkspaceThreadGroup groups = 3;
+  uint32 thread_count = 4;
+}
+
+message GetThreadRequest {
+  string repo_path = 1;
+  string name = 2;
+}
+
+message CaptureThreadRequest {
+  string repo_path = 1;
+  string name = 2;
+  string intent = 3;
+  optional float confidence = 4;
+}
+
+message CaptureThreadResponse {
+  string thread = 1;
+  bytes change_id = 2;
+  string coordination_status = 3;
+}
+
+message CompleteThreadRequest {
+  string repo_path = 1;
+  string name = 2;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message WatchThreadsRequest {
+  string repo_path = 1;
+  int64 after_event_id = 2;
+}
+
+message ThreadEvent {
+  int64 event_id = 1;
+  string thread = 2;
+  string event_type = 3;
+  ThreadSummary summary = 4;
+  google.protobuf.Timestamp created_at = 5;
+}

@@ -19,7 +19,7 @@ use crate::{
         ThreadIntegrationPolicy, ThreadMode, ThreadRecord, ThreadRuntimeOverlay, ThreadState,
         ThreadVerificationSummary, ThreadView,
     },
-    thread_record_store::{FilesystemThreadRecordStore, ThreadRecordStore},
+    thread_record_store::FilesystemThreadRecordStore,
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -400,7 +400,17 @@ impl ThreadManager {
     }
 
     pub fn find_record_by_thread(&self, thread: &str) -> Result<Option<ThreadRecord>> {
-        ThreadRecordStore::find_record_by_thread(self, thread)
+        let mut records = self
+            .list_records()?
+            .into_iter()
+            .filter(|record| record.thread == thread)
+            .collect::<Vec<_>>();
+        records.sort_by(|a, b| {
+            a.updated_at
+                .cmp(&b.updated_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(records.pop())
     }
 
     pub fn find_synced_record_by_thread(
@@ -467,24 +477,6 @@ impl ThreadManager {
         rmp_serde::from_slice(bytes).map_err(|e| {
             HeddleError::Serialization(format!("decode thread record snapshot: {}", e))
         })
-    }
-}
-
-impl ThreadRecordStore for ThreadManager {
-    fn load_record(&self, thread_id: &str) -> Result<Option<ThreadRecord>> {
-        ThreadManager::load_record(self, thread_id)
-    }
-
-    fn save_record(&self, record: &ThreadRecord) -> Result<()> {
-        ThreadManager::save_record(self, record)
-    }
-
-    fn list_records(&self) -> Result<Vec<ThreadRecord>> {
-        ThreadManager::list_records(self)
-    }
-
-    fn delete_record(&self, thread_id: &str) -> Result<()> {
-        ThreadManager::delete_record(self, thread_id)
     }
 }
 

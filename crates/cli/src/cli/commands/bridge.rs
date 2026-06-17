@@ -24,6 +24,7 @@ use super::{
         canonical_bridge_reconcile_ref_preview_command, serialize_empty_action_as_null,
     },
     import_progress::ImportProgress,
+    next_action::{NextActionValidationContext, write_full_command_json},
     remote::resolve_default_remote_name,
 };
 use crate::{
@@ -349,17 +350,20 @@ fn cmd_bridge_git_status(cli: &Cli, repo: &Repository) -> Result<()> {
         &output,
         should_output_json(cli, Some(repo.config())),
         cli.verbose > 0,
-    );
+        NextActionValidationContext::new(&["bridge", "git", "status"], repo.capability()),
+    )?;
     Ok(())
 }
 
-fn render_bridge_git_status(output: &BridgeGitStatusOutput, json: bool, verbose: bool) {
+fn render_bridge_git_status(
+    output: &BridgeGitStatusOutput,
+    json: bool,
+    verbose: bool,
+    context: NextActionValidationContext<'_>,
+) -> Result<()> {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string(output).expect("bridge git status JSON serializes")
-        );
-        return;
+        write_full_command_json(output, context)?;
+        return Ok(());
     }
     // Mode preamble is read-path noise (heddle#275); keep it under `-v`.
     if verbose {
@@ -440,6 +444,7 @@ fn render_bridge_git_status(output: &BridgeGitStatusOutput, json: bool, verbose:
     if let Some(command) = output.trust.recovery_commands.first() {
         println!("Recovery: {}", style::bold(command));
     }
+    Ok(())
 }
 
 fn render_bridge_git_import(
@@ -448,7 +453,10 @@ fn render_bridge_git_import(
     output: &BridgeGitImportOutput,
 ) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(output)?);
+        write_full_command_json(
+            output,
+            NextActionValidationContext::new(&["bridge", "git", "import"], repo.capability()),
+        )?;
         return Ok(());
     }
 
@@ -544,7 +552,10 @@ fn render_bridge_git_reconcile(
     output: &BridgeGitReconcileOutput,
 ) -> Result<()> {
     if should_output_json(cli, Some(repo.config())) {
-        println!("{}", serde_json::to_string(output)?);
+        write_full_command_json(
+            output,
+            NextActionValidationContext::new(&["bridge", "git", "reconcile"], repo.capability()),
+        )?;
     } else {
         println!("{}", output.summary);
         println!(
@@ -620,7 +631,12 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                 recovery_commands: probe.trust.recovery_commands.clone(),
                 trust: probe.trust,
             };
-            render_bridge_git_status(&output, should_output_json(cli, None), cli.verbose > 0);
+            render_bridge_git_status(
+                &output,
+                should_output_json(cli, None),
+                cli.verbose > 0,
+                NextActionValidationContext::without_repo(&["bridge", "git", "status"]),
+            )?;
             return Ok(());
         }
     }
@@ -867,7 +883,10 @@ pub fn cmd_bridge_git(cli: &Cli, command: GitCommands) -> Result<()> {
                 trust,
             };
             if should_output_json(cli, Some(repo.config())) {
-                println!("{}", serde_json::to_string(&sync_output)?);
+                write_full_command_json(
+                    &sync_output,
+                    NextActionValidationContext::new(&["bridge", "git", "sync"], repo.capability()),
+                )?;
             } else {
                 println!("{} synced Git overlay", style::ok_marker());
                 println!(

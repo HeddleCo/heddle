@@ -1,0 +1,255 @@
+syntax = "proto3";
+
+package heddle.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "heddle/v1/common.proto";
+
+// ── Approval groups ─────────────────────────────────────────────────
+//
+// A reusable approver pool. Membership is computed lazily through the
+// grants graph (anyone with `required_role` on `namespace_path` is in
+// the group); these messages just hold the rules.
+
+message ApprovalGroup {
+  string id = 1; // UUID
+  string repo_path = 2;
+  string name = 3; // unique within (repo_path, name)
+  string description = 4;
+  google.protobuf.Timestamp created_at = 5; // unix seconds
+}
+
+message ApprovalGroupMember {
+  string id = 1;
+  string group_id = 2;
+  string namespace_path = 3;
+  // 'reader' | 'developer' | 'maintainer' | 'admin' | 'owner'
+  HostedRole required_role = 4;
+}
+
+message CreateApprovalGroupRequest {
+  string repo_path = 1;
+  string name = 2;
+  string description = 3;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message ListApprovalGroupsRequest {
+  string repo_path = 1;
+}
+
+message ListApprovalGroupsResponse {
+  repeated ApprovalGroup groups = 1;
+  // Members keyed by group id, surfaced inline so the UI doesn't
+  // have to N+1 query.
+  map<string, ApprovalGroupMembers> members_by_group = 2;
+}
+
+message ApprovalGroupMembers {
+  repeated ApprovalGroupMember members = 1;
+}
+
+message DeleteApprovalGroupRequest {
+  string id = 1;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message AddApprovalGroupMemberRequest {
+  string group_id = 1;
+  string namespace_path = 2;
+  HostedRole required_role = 3;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message RemoveApprovalGroupMemberRequest {
+  string id = 1;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+// ── Thread policies (branch protection) ─────────────────────────────
+
+message ThreadPolicy {
+  string id = 1;
+  string repo_path = 2;
+  // Glob pattern: "main", "release/*", "*", etc.
+  string target_thread_pattern = 3;
+  // 'merge' | 'force_push' | 'complete'
+  string gated_action = 4;
+  // Flat-role requirement. `required_role` is one of
+  // 'reader' | 'developer' | 'maintainer' | 'admin' | 'owner'.
+  // When `required_approvals` == 0, the flat-role requirement is
+  // skipped (only group-based requirements apply).
+  uint32 required_approvals = 5;
+  HostedRole required_role = 6;
+  // CODEOWNERS-style: policy fires only when the diff intersects
+  // one of these globs. Empty = applies to every change.
+  repeated string required_paths = 7;
+  // Approver may not be the author of any state on the source thread.
+  // Only enforceable when the merge call passes `author_user_id`.
+  bool forbid_author_approval = 8;
+  bool stale_on_update = 9;
+  // Wall-clock approval expiry; 0 = no expiry.
+  google.protobuf.Duration approval_ttl_secs = 10;
+  google.protobuf.Timestamp created_at = 11;
+  google.protobuf.Timestamp updated_at = 12;
+}
+
+message PolicyGroupRequirement {
+  string id = 1;
+  string policy_id = 2;
+  string group_id = 3;
+  uint32 required_approvals = 4;
+  // Conditional trigger: requirement applies only when diff
+  // intersects one of these globs. Empty = always applies.
+  repeated string only_if_paths_match = 5;
+}
+
+message CreateThreadPolicyRequest {
+  string repo_path = 1;
+  string target_thread_pattern = 2;
+  string gated_action = 3;
+  uint32 required_approvals = 4; // 0 = skip flat-role check
+  HostedRole required_role = 5;
+  repeated string required_paths = 6;
+  bool forbid_author_approval = 7;
+  bool stale_on_update = 8;
+  google.protobuf.Duration approval_ttl_secs = 9; // 0 = no expiry
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message ListThreadPoliciesRequest {
+  string repo_path = 1;
+}
+
+message ListThreadPoliciesResponse {
+  repeated ThreadPolicy policies = 1;
+  // Group requirements keyed by policy id.
+  map<string, PolicyGroupRequirements> requirements_by_policy = 2;
+}
+
+message PolicyGroupRequirements {
+  repeated PolicyGroupRequirement requirements = 1;
+}
+
+message DeleteThreadPolicyRequest {
+  string id = 1;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message AddPolicyGroupRequirementRequest {
+  string policy_id = 1;
+  string group_id = 2;
+  uint32 required_approvals = 3;
+  repeated string only_if_paths_match = 4;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message RemovePolicyGroupRequirementRequest {
+  string id = 1;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+// ── Thread merge approvals ──────────────────────────────────────────
+//
+// An approval is a record that a particular user signed off on a
+// particular (source_thread → target_thread) merge at a specific
+// `source_state` (the change_id at the source's head). The merge
+// gate consumes these rows and matches them against every policy
+// whose target glob matches `target_thread`.
+
+message ThreadApproval {
+  string id = 1;
+  string repo_path = 2;
+  string source_thread = 3;
+  string target_thread = 4;
+  // Change id at source thread's head when this approval was
+  // recorded. Used for stale-on-update detection.
+  bytes source_state = 5;
+  string approver_user_id = 6;
+  // Biscuit session id of the approver — full audit attribution.
+  string approver_sid = 7;
+  string note = 8;
+  google.protobuf.Timestamp approved_at = 9;
+  // 0 when the policy did not specify a TTL.
+  google.protobuf.Timestamp expires_at = 10;
+}
+
+message ApproveThreadRequest {
+  string repo_path = 1;
+  string source_thread = 2;
+  string target_thread = 3;
+  bytes source_state = 4;
+  string note = 5;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message RevokeApprovalRequest {
+  string id = 1;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message ListThreadApprovalsRequest {
+  string repo_path = 1;
+  string source_thread = 2;
+  string target_thread = 3;
+}
+
+message ListThreadApprovalsResponse {
+  repeated ThreadApproval approvals = 1;
+}
+
+// Eligibility check: caller asks "can <source> merge into <target>
+// at <source_state>?" given the file paths the diff touches. The
+// server runs every matching policy and reports satisfied vs unmet
+// requirements without performing the merge.
+
+message CheckMergeEligibilityRequest {
+  string repo_path = 1;
+  string source_thread = 2;
+  string target_thread = 3;
+  bytes source_state = 4;
+  // 'merge' | 'force_push' | 'complete'. Defaults to 'merge' when empty.
+  string gated_action = 5;
+  // Paths touched by the source thread relative to the diff against
+  // target. Empty list = "we don't know" — every path-conditional
+  // requirement is treated as triggered (fail-closed).
+  repeated string changed_paths = 6;
+  // Optional: the user_id of the change author. Used for
+  // forbid_author_approval. Empty = unknown / not enforced.
+  string author_user_id = 7;
+}
+
+message CheckMergeEligibilityResponse {
+  bool allowed = 1;
+  // Each unmet requirement, with a human-readable reason. Empty
+  // when `allowed = true`.
+  repeated UnmetRequirement unmet = 2;
+  // Approvals the gate considered valid (matching change_id, not
+  // expired, not self-approval when forbidden, etc.).
+  repeated ThreadApproval valid_approvals = 3;
+}
+
+message UnmetRequirement {
+  // Policy id this requirement came from.
+  string policy_id = 1;
+  // 'flat_role' | 'group' — which kind of requirement is unmet.
+  string kind = 2;
+  // For 'group' requirements, the group id; empty otherwise.
+  string group_id = 3;
+  // Human-readable explanation: "needs 2 maintainer approvals on
+  // org/acme/heddle/threads/main; have 1".
+  string reason = 4;
+  uint32 needed = 5;
+  uint32 have = 6;
+}

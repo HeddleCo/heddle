@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package heddle.v1;
+
+// Structured query over the operation log + cross-cutting index.
+service OperationLogQueryService {
+  rpc QueryOperations(QueryOperationsRequest) returns (QueryOperationsResponse);
+  rpc StreamOperations(StreamOperationsRequest) returns (stream OperationHit);
+}
+
+message QueryOperationsRequest {
+  string repo_path = 1;
+  string actor = 2;
+  string symbol = 3;
+  string signal_kind = 4;
+  string thread = 5;
+  repeated string verbs = 6;
+  int64 since_secs = 7;
+  int64 until_secs = 8;
+  uint32 limit = 9;
+  bool include_checkpoints = 10;
+}
+
+message QueryOperationsResponse {
+  repeated OperationHit hits = 1;
+}
+
+message OperationHit {
+  uint64 seq = 1;
+  int64 timestamp_secs = 2;
+  string verb = 3;
+  string actor_email = 4;
+  string operation_id = 5;
+  string thread = 6;
+  repeated string symbols = 7;
+  repeated string signal_kinds = 8;
+  bytes change_id = 9;
+}
+
+message StreamOperationsRequest {
+  string repo_path = 1;
+  // Same shape as QueryOperationsRequest but streamed; server may
+  // chunk via a cursor for very large windows.
+  QueryOperationsRequest query = 2;
+}

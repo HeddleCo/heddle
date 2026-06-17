@@ -10,27 +10,6 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use crate::thread_model::ThreadRecord;
 
-pub trait ThreadRecordStore {
-    fn load_record(&self, thread_id: &str) -> Result<Option<ThreadRecord>>;
-    fn save_record(&self, record: &ThreadRecord) -> Result<()>;
-    fn list_records(&self) -> Result<Vec<ThreadRecord>>;
-    fn delete_record(&self, thread_id: &str) -> Result<()>;
-
-    fn find_record_by_thread(&self, thread: &str) -> Result<Option<ThreadRecord>> {
-        let mut records = self
-            .list_records()?
-            .into_iter()
-            .filter(|record| record.thread == thread)
-            .collect::<Vec<_>>();
-        records.sort_by(|a, b| {
-            a.updated_at
-                .cmp(&b.updated_at)
-                .then_with(|| a.id.cmp(&b.id))
-        });
-        Ok(records.pop())
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct FilesystemThreadRecordStore {
     root: PathBuf,
@@ -119,27 +98,39 @@ impl FilesystemThreadRecordStore {
         }
         Ok(())
     }
-}
 
-impl ThreadRecordStore for FilesystemThreadRecordStore {
-    fn load_record(&self, thread_id: &str) -> Result<Option<ThreadRecord>> {
+    pub fn load_record(&self, thread_id: &str) -> Result<Option<ThreadRecord>> {
         self.load_value(thread_id)
     }
 
-    fn save_record(&self, record: &ThreadRecord) -> Result<()> {
+    pub fn save_record(&self, record: &ThreadRecord) -> Result<()> {
         let _lock = self.write_lock()?;
         self.save_value(&record.id, record)
     }
 
-    fn list_records(&self) -> Result<Vec<ThreadRecord>> {
+    pub fn list_records(&self) -> Result<Vec<ThreadRecord>> {
         let mut records: Vec<ThreadRecord> = self.list_values()?;
         records.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(records)
     }
 
-    fn delete_record(&self, thread_id: &str) -> Result<()> {
+    pub fn delete_record(&self, thread_id: &str) -> Result<()> {
         let _lock = self.write_lock()?;
         self.delete_value(thread_id)
+    }
+
+    pub fn find_record_by_thread(&self, thread: &str) -> Result<Option<ThreadRecord>> {
+        let mut records = self
+            .list_records()?
+            .into_iter()
+            .filter(|record| record.thread == thread)
+            .collect::<Vec<_>>();
+        records.sort_by(|a, b| {
+            a.updated_at
+                .cmp(&b.updated_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(records.pop())
     }
 }
 

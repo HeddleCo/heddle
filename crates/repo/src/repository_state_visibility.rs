@@ -33,7 +33,7 @@ use objects::{
     lock::RepositoryLockExt,
     object::{ChangeId, ContentHash, StateVisibility, StateVisibilityBlob, VisibilityTier},
 };
-use oplog::{OpLogBackend, OpRecord, VisibilitySidecarSnapshots};
+use oplog::{OpLogRecorder, OpRecord, VisibilitySidecarSnapshots};
 
 use crate::{
     namespace_policy::{VisibilityResolutionContext, resolve_default_visibility},
@@ -854,6 +854,7 @@ mod tests {
 
     use chrono::{TimeZone, Utc};
     use objects::object::{Principal, VisibilityTier};
+    use oplog::OpLogBackend;
     use tempfile::TempDir;
 
     use super::*;
@@ -1378,7 +1379,7 @@ mod tests {
                     new_sidecar,
                     ..
                 } => Some(RecordedVisibilitySet {
-                    record_id: *record_id,
+                    record_id: record_id.clone(),
                     prior: prior_sidecar.clone(),
                     new: new_sidecar.clone(),
                 }),

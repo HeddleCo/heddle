@@ -10,7 +10,7 @@ use objects::{
         current_boot_id,
     },
 };
-use oplog::OpLogBackend;
+use oplog::OpLogRecorder;
 use refs::{Head, RefExpectation};
 use repo::{
     Repository, Thread, ThreadConfidenceSummary, ThreadFreshness, ThreadId,

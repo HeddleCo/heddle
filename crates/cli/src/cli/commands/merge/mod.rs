@@ -8,7 +8,7 @@ use objects::{
     object::{Attribution, ChangeId, ThreadName, Tree},
     store::ObjectStore,
 };
-use oplog::{OpBatch, OpLogBackend, OpRecord};
+use oplog::{OpBatch, OpLogBackend, OpLogRecorder, OpRecord};
 use refs::Head;
 use repo::{
     AgentRegistry, AgentStatus, Repository, Thread, ThreadFreshness, ThreadIntegrationPolicy,

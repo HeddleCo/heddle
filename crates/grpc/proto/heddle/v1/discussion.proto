@@ -1,0 +1,99 @@
+syntax = "proto3";
+
+package heddle.v1;
+
+import "google/protobuf/timestamp.proto";
+import "heddle/v1/content.proto";
+import "heddle/v1/state_review.proto";
+
+// Discussion CRUD over the per-state `Discussion` blob.
+service DiscussionService {
+  rpc OpenDiscussion(OpenDiscussionRequest) returns (Discussion);
+  rpc AppendTurn(AppendTurnRequest) returns (Discussion);
+  rpc ResolveDiscussion(ResolveDiscussionRequest) returns (Discussion);
+  rpc ListByState(ListDiscussionsByStateRequest) returns (ListDiscussionsResponse);
+  rpc ListBySymbol(ListDiscussionsBySymbolRequest) returns (ListDiscussionsResponse);
+  rpc GetDiscussion(GetDiscussionRequest) returns (Discussion);
+}
+
+message OpenDiscussionRequest {
+  string repo_path = 1;
+  bytes state_id = 2;
+  PathSymbolRef anchor = 3;
+  string body = 4;
+  // Optional override; server defaults to the namespace policy.
+  string visibility = 5;
+  string thread_ref = 6;
+  string client_operation_id = 15;
+}
+
+message AppendTurnRequest {
+  string repo_path = 1;
+  string discussion_id = 2;
+  string body = 3;
+  string client_operation_id = 15;
+}
+
+message ResolveDiscussionRequest {
+  string repo_path = 1;
+  string discussion_id = 2;
+  // The resolution mode is a strict oneof — exactly one of the three
+  // shapes lands per request, and each shape carries the fields that
+  // are meaningful for it.
+  oneof resolution {
+    ResolveIntoAnnotation into_annotation = 3;
+    ResolveByEdit by_edit = 4;
+    ResolveDismissed dismissed = 5;
+  }
+  string client_operation_id = 15;
+
+  message ResolveIntoAnnotation {
+    ContextAnnotationKind kind = 1;
+    string content = 2;
+    repeated string tags = 3;
+  }
+  message ResolveByEdit {
+    // Optional pin to the state where the resolving edit landed; empty
+    // means "use the discussion's anchor state".
+    bytes state_id = 1;
+  }
+  message ResolveDismissed {
+    string reason = 1;
+  }
+}
+
+message Discussion {
+  string id = 1;
+  PathSymbolRef anchor = 2;
+  bytes opened_against_state = 3;
+  google.protobuf.Timestamp opened_at = 4;
+  string thread_ref = 5;
+  repeated DiscussionTurn turns = 6;
+  DiscussionResolution resolution = 7;
+  bool body_changed_since_open = 8;
+  bool orphaned = 9;
+  string visibility = 10;
+  string resolved_annotation_id = 11;
+}
+
+message ListDiscussionsByStateRequest {
+  string repo_path = 1;
+  bytes state_id = 2;
+  // "open" | "resolved" | "all" | "orphaned"
+  string status = 3;
+}
+
+message ListDiscussionsBySymbolRequest {
+  string repo_path = 1;
+  PathSymbolRef anchor = 2;
+  string status = 3;
+}
+
+message ListDiscussionsResponse {
+  repeated Discussion discussions = 1;
+}
+
+message GetDiscussionRequest {
+  string repo_path = 1;
+  string discussion_id = 2;
+}

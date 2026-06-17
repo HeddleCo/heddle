@@ -23,8 +23,8 @@
 //! | [`reasoning`]     | [`ReasoningPoint`] schema — shared with the TS extractor |
 //! | [`sha_map`]       | `git_sha ↔ heddle ChangeId` persistent sidecar          |
 //! | [`git_walk`]      | reflog+refs walker → ordered commit stream            |
-//! | [`tree_translate`]| git tree/blob → Heddle tree/blob (memoized on oid)      |
-//! | [`state_writer`]  | git commit → Heddle State with attribution              |
+//! | [`importer`]      | git tree/blob/commit → Heddle objects and refs         |
+//! | [`state_writer`]  | git commit metadata → Heddle State fields              |
 //! | [`thread_writer`] | refs → Heddle threads/markers                           |
 //! | [`oplog_emit`]    | reflog entries → Heddle oplog OpRecords                 |
 //!
@@ -45,7 +45,6 @@ pub mod semantic_cache;
 pub mod sha_map;
 pub mod state_writer;
 pub mod transcript;
-pub mod tree_translate;
 
 pub use git_walk::{CommitEntry, GitSource, RefHead, RefNamespace, ReflogEntry};
 pub use import_options::{ImportOptions, LossyImportAction, LossyImportEntry};
@@ -68,12 +67,11 @@ pub use reasoning_pipeline::{
 pub use ref_emit::{RefEmitStats, RefEmitter};
 pub use semantic_cache::{IngestSemanticCache, IngestSemanticCacheStats};
 pub use sha_map::{ShaMap, ShaMapError};
-pub use state_writer::{StateWriter, parse_attribution};
+pub use state_writer::parse_attribution;
 pub use transcript::{
     FileTouch, Match, MatchParams, Provider, TouchKind, Transcript, TranscriptMatcher,
     TranscriptRoots, load_all as load_transcripts,
 };
-pub use tree_translate::TreeTranslator;
 
 /// Errors that can bubble up from any ingest stage.
 #[derive(Debug, thiserror::Error)]
