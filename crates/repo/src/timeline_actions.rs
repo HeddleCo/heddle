@@ -36,6 +36,7 @@ pub struct TimelineRecoverOutcome {
 }
 
 impl Repository {
+    #[allow(clippy::too_many_arguments)]
     pub fn fork_timeline_from_selector(
         &self,
         store: &TimelineStore,
@@ -82,6 +83,7 @@ impl Repository {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn reset_timeline_cursor(
         &self,
         store: &TimelineStore,

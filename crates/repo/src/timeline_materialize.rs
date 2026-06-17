@@ -225,6 +225,7 @@ impl Repository {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn materialize_timeline_cursor_constrained_with_reason(
         &self,
         store: &TimelineStore,
@@ -554,6 +555,8 @@ fn dirty_status_paths(status: &WorktreeStatusDetailed) -> Vec<String> {
     paths.into_iter().collect()
 }
 
+// Used as a fn-value over `&PathBuf` items, so the signature can't take `&Path`.
+#[allow(clippy::ptr_arg)]
 fn display_path(path: &PathBuf) -> String {
     path.to_string_lossy().replace('\\', "/")
 }

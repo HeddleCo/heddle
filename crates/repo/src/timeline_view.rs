@@ -791,7 +791,7 @@ fn incremental_replay_is_ordered(
     let Some(last_replay_key) = last_replay_key else {
         return true;
     };
-    new_records.first().map_or(true, |record| {
+    new_records.first().is_none_or(|record| {
         operation_replay_key(record) >= *last_replay_key
     })
 }
