@@ -101,6 +101,8 @@ schema_registry! {
     (&["expand"], ExpandSchema),
     (&["log"], LogSchema),
     (&["log --reflog"], LogReflogSchema),
+    (&["log --timeline"], TimelineLogSchema),
+    (&["timeline fork", "timeline reset", "timeline recover"], TimelineActionSchema),
     (&["show"], ShowSchema),
     (&["thread list"], ThreadListSchema),
     (&["schemas"], SchemasListSchema),
@@ -144,6 +146,7 @@ schema_registry! {
     (&["session list"], SessionListSchema),
     (&["git-overlay"], GitOverlayGuideSchema),
     (&["watch"], WatchLineSchema),
+    (&["integration list", "integration doctor"], IntegrationStatusListSchema),
     (&["try"], TrySchema),
     (&["fsck"], FsckSchema),
     (&["resolve"], ResolveSchema),
@@ -671,6 +674,22 @@ pub struct GitIndexInfoSchema {
 pub struct GenericJsonObjectSchema {
     #[serde(flatten)]
     pub fields: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct IntegrationStatusListSchema(pub Vec<IntegrationStatusSchema>);
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct IntegrationStatusSchema {
+    pub harness: String,
+    pub scope: String,
+    pub method: String,
+    pub status: String,
+    pub healthy: bool,
+    pub paths: Vec<String>,
+    pub capabilities: Vec<String>,
+    pub capability_paths: Vec<String>,
+    pub path_mode: String,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -2238,6 +2257,121 @@ pub struct StateEntrySchema {
 pub struct CollapsedEntrySchema {
     pub expandable: bool,
     pub source_count: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TimelineLogSchema {
+    pub output_kind: String,
+    pub status: String,
+    pub repository_capability: String,
+    pub storage_model: String,
+    pub thread: String,
+    pub cursor: TimelineCursorSchema,
+    pub branches: Vec<TimelineBranchSchema>,
+    pub steps: Vec<TimelineStepSchema>,
+    pub active_branch_path: Vec<String>,
+    pub actions: TimelineActionsSchema,
+    pub recovery: Option<TimelineRecoverySchema>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TimelineCursorSchema {
+    pub branch_id: Option<String>,
+    pub step_id: Option<String>,
+    pub state: Option<String>,
+    pub state_full: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TimelineBranchSchema {
+    pub branch_id: String,
+    pub parent_branch_id: Option<String>,
+    pub forked_from_step_id: Option<String>,
+    pub forked_from_state: Option<String>,
+    pub reason: Option<String>,
+    pub created_at_ms: Option<i64>,
+    pub step_ids: Vec<String>,
+    pub is_active: bool,
+    pub is_on_active_path: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TimelineStepSchema {
+    pub step_id: String,
+    pub branch_id: String,
+    pub parent_step_id: Option<String>,
+    pub native: Option<TimelineNativeSchema>,
+    pub tool_name: Option<String>,
+    pub status: Option<String>,
+    pub changed: Option<bool>,
+    pub touched_paths: Vec<String>,
+    pub labels: Vec<String>,
+    pub before_state: Option<String>,
+    pub after_state: Option<String>,
+    pub capture_state: Option<String>,
+    pub cursor_state: Option<String>,
+    pub cursor_state_full: Option<String>,
+    pub payload_summary: Option<String>,
+    pub payload_hash: Option<String>,
+    pub capture_oplog_batch_id: Option<u64>,
+    pub started_at_ms: Option<i64>,
+    pub finished_at_ms: Option<i64>,
+    pub operation_ids: Vec<String>,
+    pub is_current: bool,
+    pub is_on_active_branch_path: bool,
+    pub can_seek: bool,
+    pub can_fork: bool,
+    pub can_reset: bool,
+    pub can_materialize: bool,
+    pub has_boundary_warning: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TimelineNativeSchema {
+    pub harness: String,
+    pub session_id: Option<String>,
+    pub message_id: Option<String>,
+    pub tool_call_id: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TimelineActionsSchema {
+    pub can_undo: bool,
+    pub can_redo: bool,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TimelineRecoverySchema {
+    pub status: String,
+    pub branch_id: String,
+    pub from_step_id: Option<String>,
+    pub to_step_id: Option<String>,
+    pub from_state: String,
+    pub to_state: String,
+    pub reason: String,
+    pub moved_at_ms: i64,
+    pub checkout_state: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TimelineActionSchema {
+    pub output_kind: String,
+    pub status: String,
+    pub action: String,
+    pub thread: String,
+    pub branch_id: Option<String>,
+    pub parent_branch_id: Option<String>,
+    pub from_step_id: Option<String>,
+    pub cursor_branch_id: Option<String>,
+    pub cursor_step_id: Option<String>,
+    pub operation_id: Option<String>,
+    pub recovered_operation_id: Option<String>,
+    pub materialized: Option<bool>,
+    pub materialization_status: Option<String>,
+    pub recovery_status: Option<String>,
+    pub blocker_count: usize,
+    pub branch_count: usize,
+    pub step_count: usize,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

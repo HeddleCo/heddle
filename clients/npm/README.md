@@ -53,6 +53,72 @@ Covered harness ops have convenience methods (`adopt`, `init`, `status`,
 `bridge git export`); any schema-backed verb is reachable via
 `heddle.run(verb, args, opts)`.
 
+### Timeline helpers for agent experimentation
+
+OpenCode-style agents can use structured helpers instead of spelling CLI
+flags by hand. These methods still go through the same JSON contract and
+`--op-id` retry path as other mutating operations.
+
+```ts
+const timeline = await heddle.timeline({ thread: "main" });
+
+await heddle.timelineFork(
+  {
+    kind: "tool-call",
+    thread: "main",
+    toolCallId: "call_123",
+    sessionId: "ses_456",
+  },
+  { branch: "tlb-fanout", reason: "fan-out" },
+  { opId: crypto.randomUUID() },
+);
+
+await heddle.timelineReset(
+  { kind: "step", thread: "main", fromBranch: "tlb-main", stepId: "tls-one" },
+  { materialize: true, mode: "fail-if-dirty" },
+  { opId: crypto.randomUUID() },
+);
+
+await heddle.timelineRecover({ thread: "main" }, { opId: crypto.randomUUID() });
+```
+
+Targets are discriminated unions: `kind: "step"` selects a Heddle timeline
+step, `kind: "tool-call"` selects a native harness tool-call id (default
+`harness: "opencode"`), and `kind: "undo" | "redo" | "current"` follows the
+current cursor.
+
+### Daemon timeline adapter
+
+For daemon-first integrations, `HeddleTimelineDaemon` maps the same
+`TimelineTarget` union into proto-shaped `TimelineService` requests without
+pulling in a specific JS gRPC runtime. Pass any generated transport whose
+methods match the service names.
+
+```ts
+import { HeddleTimelineDaemon } from "@heddle/cli";
+
+const timeline = new HeddleTimelineDaemon(grpcTimelineClient, {
+  repoPath: "/repo",
+  thread: "main",
+});
+
+await timeline.forkTimelineFromSelector(
+  { kind: "tool-call", toolCallId: "call_123", sessionId: "ses_456" },
+  { branch: "tlb-fanout", reason: "fan-out" },
+  { opId: crypto.randomUUID() },
+);
+
+await timeline.resetTimelineCursor(
+  { kind: "undo" },
+  { materialize: true, mode: "fail-if-dirty" },
+  { opId: crypto.randomUUID() },
+);
+```
+
+The adapter intentionally stays dependency-free: projects can use
+`@grpc/grpc-js`, Connect, proto-loader, or another generated client and adapt
+that client to the exported `TimelineDaemonTransport` interface.
+
 ### Transport seam (#586)
 
 Dispatch goes through an `Executor` interface; the default `SpawnExecutor`

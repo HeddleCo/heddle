@@ -1147,7 +1147,7 @@ export interface InitSchema {
   status: string;
 }
 
-export type IntegrationDoctorSchema = Record<string, unknown>;
+export type IntegrationDoctorSchema = IntegrationStatusSchema[];
 
 export interface IntegrationInstallSchema {
   idempotency_status?: string | null;
@@ -1157,7 +1157,7 @@ export interface IntegrationInstallSchema {
   [key: string]: unknown;
 }
 
-export type IntegrationListSchema = Record<string, unknown>;
+export type IntegrationListSchema = IntegrationStatusSchema[];
 
 export interface IntegrationRelaySchema {
   idempotency_status?: string | null;
@@ -1165,6 +1165,18 @@ export interface IntegrationRelaySchema {
   operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
   replayed?: boolean | null;
   [key: string]: unknown;
+}
+
+export interface IntegrationStatusSchema {
+  capabilities: string[];
+  capability_paths: string[];
+  harness: string;
+  healthy: boolean;
+  method: string;
+  path_mode: string;
+  paths: string[];
+  scope: string;
+  status: string;
 }
 
 export interface IntegrationUninstallSchema {
@@ -2544,6 +2556,165 @@ export interface ThreadSwitchSchema {
   thread?: ThreadSummarySchema | null;
 }
 
+export interface TimelineActionsSchema {
+  can_redo: boolean;
+  can_undo: boolean;
+}
+
+export interface TimelineBranchSchema {
+  branch_id: string;
+  created_at_ms?: number | null;
+  forked_from_state?: string | null;
+  forked_from_step_id?: string | null;
+  is_active: boolean;
+  is_on_active_path: boolean;
+  parent_branch_id?: string | null;
+  reason?: string | null;
+  step_ids: string[];
+}
+
+export interface TimelineCursorSchema {
+  branch_id?: string | null;
+  state?: string | null;
+  state_full?: string | null;
+  step_id?: string | null;
+}
+
+export interface TimelineForkSchema {
+  action: string;
+  blocker_count: number;
+  branch_count: number;
+  branch_id?: string | null;
+  cursor_branch_id?: string | null;
+  cursor_step_id?: string | null;
+  from_step_id?: string | null;
+  idempotency_status?: string | null;
+  materialization_status?: string | null;
+  materialized?: boolean | null;
+  op_id?: string | null;
+  operation_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "timeline_action";
+  parent_branch_id?: string | null;
+  recovered_operation_id?: string | null;
+  recovery_status?: string | null;
+  replayed?: boolean | null;
+  status: string;
+  step_count: number;
+  thread: string;
+}
+
+export interface TimelineLogSchema {
+  actions: TimelineActionsSchema;
+  active_branch_path: string[];
+  branches: TimelineBranchSchema[];
+  cursor: TimelineCursorSchema;
+  output_kind: "timeline_log";
+  recovery?: TimelineRecoverySchema | null;
+  repository_capability: string;
+  status: string;
+  steps: TimelineStepSchema[];
+  storage_model: string;
+  thread: string;
+}
+
+export interface TimelineNativeSchema {
+  harness: string;
+  message_id?: string | null;
+  session_id?: string | null;
+  tool_call_id: string;
+}
+
+export interface TimelineRecoverSchema {
+  action: string;
+  blocker_count: number;
+  branch_count: number;
+  branch_id?: string | null;
+  cursor_branch_id?: string | null;
+  cursor_step_id?: string | null;
+  from_step_id?: string | null;
+  idempotency_status?: string | null;
+  materialization_status?: string | null;
+  materialized?: boolean | null;
+  op_id?: string | null;
+  operation_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "timeline_action";
+  parent_branch_id?: string | null;
+  recovered_operation_id?: string | null;
+  recovery_status?: string | null;
+  replayed?: boolean | null;
+  status: string;
+  step_count: number;
+  thread: string;
+}
+
+export interface TimelineRecoverySchema {
+  branch_id: string;
+  checkout_state?: string | null;
+  from_state: string;
+  from_step_id?: string | null;
+  moved_at_ms: number;
+  reason: string;
+  status: string;
+  to_state: string;
+  to_step_id?: string | null;
+}
+
+export interface TimelineResetSchema {
+  action: string;
+  blocker_count: number;
+  branch_count: number;
+  branch_id?: string | null;
+  cursor_branch_id?: string | null;
+  cursor_step_id?: string | null;
+  from_step_id?: string | null;
+  idempotency_status?: string | null;
+  materialization_status?: string | null;
+  materialized?: boolean | null;
+  op_id?: string | null;
+  operation_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "timeline_action";
+  parent_branch_id?: string | null;
+  recovered_operation_id?: string | null;
+  recovery_status?: string | null;
+  replayed?: boolean | null;
+  status: string;
+  step_count: number;
+  thread: string;
+}
+
+export interface TimelineStepSchema {
+  after_state?: string | null;
+  before_state?: string | null;
+  branch_id: string;
+  can_fork: boolean;
+  can_materialize: boolean;
+  can_reset: boolean;
+  can_seek: boolean;
+  capture_oplog_batch_id?: number | null;
+  capture_state?: string | null;
+  changed?: boolean | null;
+  cursor_state?: string | null;
+  cursor_state_full?: string | null;
+  finished_at_ms?: number | null;
+  has_boundary_warning: boolean;
+  is_current: boolean;
+  is_on_active_branch_path: boolean;
+  labels: string[];
+  native?: TimelineNativeSchema | null;
+  operation_ids: string[];
+  parent_step_id?: string | null;
+  payload_hash?: string | null;
+  payload_summary?: string | null;
+  started_at_ms?: number | null;
+  status?: string | null;
+  step_id: string;
+  tool_name?: string | null;
+  touched_paths: string[];
+}
+
 export interface TransactionAbortSchema {
   idempotency_status?: string | null;
   op_id?: string | null;
@@ -2801,6 +2972,7 @@ export interface HeddleVerbOutputs {
   land: LandSchema;
   log: LogSchema;
   "log --reflog": LogReflogSchema;
+  "log --timeline": TimelineLogSchema;
   "maintenance gc": MaintenanceGcSchema;
   "maintenance index": IndexSchema;
   "maintenance inspect": MaintenanceInspectSchema;
@@ -2875,6 +3047,9 @@ export interface HeddleVerbOutputs {
   "thread revoke-approval": ThreadRevokeApprovalSchema;
   "thread show": ThreadShowSchema;
   "thread switch": ThreadSwitchSchema;
+  "timeline fork": TimelineForkSchema;
+  "timeline recover": TimelineRecoverSchema;
+  "timeline reset": TimelineResetSchema;
   "transaction abort": TransactionAbortSchema;
   "transaction begin": TransactionBeginSchema;
   "transaction commit": TransactionCommitSchema;
@@ -2970,6 +3145,7 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "land",
   "log",
   "log --reflog",
+  "log --timeline",
   "maintenance gc",
   "maintenance index",
   "maintenance inspect",
@@ -3044,6 +3220,9 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "thread revoke-approval",
   "thread show",
   "thread switch",
+  "timeline fork",
+  "timeline recover",
+  "timeline reset",
   "transaction abort",
   "transaction begin",
   "transaction commit",

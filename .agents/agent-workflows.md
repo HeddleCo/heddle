@@ -109,7 +109,17 @@ Notes:
 - repo-local install is preferred when the harness supports it
 - Codex currently uses a user-scope `notify` install path
 - Claude Code uses hooks and an optional Heddle-owned status line command
-- OpenCode uses a Heddle-managed plugin file
+- OpenCode uses a Heddle-managed plugin file plus a
+  `heddle.timeline.json` capability manifest. The manifest advertises the
+  shipped timeline commands agents and desktop integrations can call:
+  `log --timeline`, `timeline fork`, `timeline reset`, and
+  `timeline recover`.
+- `heddle integration list --output json` and
+  `heddle integration doctor --output json` expose `capabilities` and
+  `capability_paths` for installed integrations.
+- The OpenCode plugin currently relays events. Native OpenCode tool
+  registration should be added only after the OpenCode plugin tool API is
+  verified; until then, use the capability manifest or TS SDK helpers.
 
 ## Current Caveats
 

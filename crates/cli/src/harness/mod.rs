@@ -11,7 +11,12 @@ use base64::Engine as _;
 use chrono::Utc;
 use objects::{
     fs_atomic::write_file_atomic,
-    object::{DiffKind, Session, ThreadName, Tree},
+    object::{
+        ChangeId, ContentHash, DiffKind, NativeToolCallRefV1, Session, ThreadName,
+        TimelineBranchId, TimelineLabel, TimelineOperationBodyV1, TimelineOperationEnvelope,
+        TimelineStepId, TimelineToolCallStatus, TimelineToolPayloadMetadata, ToolCallFinishedV1,
+        ToolCallStartedV1, Tree,
+    },
     store::{AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ObjectStore},
 };
 use oplog::OpLogRecorder;
@@ -22,7 +27,7 @@ use proto::{
 use refs::Head;
 use repo::{
     Repository, SessionManager, Thread, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
-    ThreadMode, ThreadState,
+    ThreadMode, ThreadState, TimelineStore, TimelineView,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -35,7 +40,10 @@ use crate::{
     cli::{
         Cli,
         commands::{
-            snapshot::{summarize_confidence, summarize_verification},
+            snapshot::{
+                SnapshotAgentOverrides, create_snapshot, summarize_confidence,
+                summarize_verification,
+            },
             worktree_cmd::helpers::{prepare_worktree_target, write_isolated_checkout},
         },
         style, worktree_status_options,
@@ -498,15 +506,337 @@ fn relay_opencode(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Val
         probe_metadata: metadata.clone(),
         ..OpenSessionParams::default()
     })?;
+    let session_id = opened.heddle_session_id.clone();
     runtime.update_progress(UpdateProgressParams {
-        heddle_session_id: opened.heddle_session_id,
+        heddle_session_id: session_id.clone(),
         harness: Some("opencode".to_string()),
         status: Some(event.to_string()),
         touched_paths: csv_from_value(metadata.get("touched_paths")),
         probe_metadata: metadata,
         ..UpdateProgressParams::default()
     })?;
+    if let Err(err) = record_opencode_timeline_event(runtime, event, payload, &opened) {
+        tracing::debug!(?err, event, "heddle OpenCode timeline recording skipped");
+    }
     Ok(())
+}
+
+fn record_opencode_timeline_event(
+    runtime: &mut HarnessBridgeRuntime,
+    event: &str,
+    payload: &Value,
+    opened: &OpenSessionResult,
+) -> Result<()> {
+    match event {
+        "tool.execute.before" => record_opencode_tool_started(runtime, payload, opened),
+        "tool.execute.after" => record_opencode_tool_finished(runtime, payload, opened),
+        _ => Ok(()),
+    }
+}
+
+fn record_opencode_tool_started(
+    runtime: &mut HarnessBridgeRuntime,
+    payload: &Value,
+    opened: &OpenSessionResult,
+) -> Result<()> {
+    let Some(native) = opencode_native_tool_call(payload) else {
+        return Ok(());
+    };
+    let Some(before_state) = current_change_id(&runtime.repo)? else {
+        return Ok(());
+    };
+    let thread = opencode_timeline_thread(runtime, opened)?;
+    let store = TimelineStore::open(runtime.repo.heddle_dir())?;
+    let view = TimelineView::rebuild(&store)?;
+    let step_id = stable_opencode_step_id(&native);
+    let (branch_id, parent_step_id) = timeline_position_for_new_tool_step(&view, &thread, &step_id);
+    let envelope = TimelineOperationEnvelope::new(
+        TimelineOperationBodyV1::ToolCallStarted(ToolCallStartedV1 {
+            thread,
+            step_id,
+            branch_id,
+            parent_step_id,
+            native,
+            tool_name: opencode_tool_name(payload),
+            before_state,
+            payload: Some(opencode_payload_metadata("tool.execute.before", payload)?),
+            started_at_ms: Utc::now().timestamp_millis(),
+        }),
+        vec![TimelineLabel::ExternalSideEffectsUnknown],
+    );
+    store.write_operation(&envelope)?;
+    Ok(())
+}
+
+fn record_opencode_tool_finished(
+    runtime: &mut HarnessBridgeRuntime,
+    payload: &Value,
+    opened: &OpenSessionResult,
+) -> Result<()> {
+    let Some(native) = opencode_native_tool_call(payload) else {
+        return Ok(());
+    };
+    let Some(fallback_state) = current_change_id(&runtime.repo)? else {
+        return Ok(());
+    };
+    let thread = opencode_timeline_thread(runtime, opened)?;
+    let store = TimelineStore::open(runtime.repo.heddle_dir())?;
+    let before_view = TimelineView::rebuild(&store)?;
+    let step_id = stable_opencode_step_id(&native);
+    let (branch_id, _) = timeline_position_for_new_tool_step(&before_view, &thread, &step_id);
+    let before_state = before_view
+        .step(&thread, &step_id)
+        .and_then(|step| step.before_state)
+        .unwrap_or(fallback_state);
+    let touched_paths_before_capture = collect_worktree_changes(&runtime.repo)?
+        .into_keys()
+        .collect::<Vec<_>>();
+    let capture_state = if touched_paths_before_capture.is_empty() {
+        None
+    } else {
+        let intent = format!(
+            "OpenCode {} tool call {}",
+            opencode_tool_name(payload),
+            native.tool_call_id
+        );
+        create_snapshot(
+            &runtime.repo,
+            &runtime.user_config,
+            Some(intent),
+            None,
+            SnapshotAgentOverrides {
+                provider: opened.provider.clone(),
+                model: opened.model.clone(),
+                session: native.session_id.clone(),
+                segment: None,
+                policy: None,
+                no_policy: false,
+                no_agent: false,
+            },
+        )?;
+        runtime.repo.head()?
+    };
+    let after_state = current_change_id(&runtime.repo)?.unwrap_or(fallback_state);
+    let mut touched_paths = opencode_touched_paths(payload);
+    merge_string_vec(&mut touched_paths, touched_paths_before_capture);
+    let changed = capture_state.is_some();
+    let labels = if changed {
+        vec![
+            TimelineLabel::RepoReversible,
+            TimelineLabel::ExternalSideEffectsUnknown,
+        ]
+    } else {
+        vec![TimelineLabel::ExternalSideEffectsUnknown]
+    };
+    let envelope = TimelineOperationEnvelope::new(
+        TimelineOperationBodyV1::ToolCallFinished(ToolCallFinishedV1 {
+            thread,
+            step_id,
+            branch_id,
+            native,
+            status: opencode_tool_status(payload),
+            before_state,
+            after_state,
+            capture_state,
+            capture_oplog_batch_id: None,
+            changed,
+            touched_paths,
+            payload: Some(opencode_payload_metadata("tool.execute.after", payload)?),
+            finished_at_ms: Utc::now().timestamp_millis(),
+        }),
+        labels,
+    );
+    store.write_operation(&envelope)?;
+    Ok(())
+}
+
+fn opencode_native_tool_call(payload: &Value) -> Option<NativeToolCallRefV1> {
+    let tool_call_id = first_value_string(
+        payload,
+        &[
+            &["toolCallID"],
+            &["tool_call_id"],
+            &["toolCallId"],
+            &["callID"],
+            &["call_id"],
+            &["tool", "callID"],
+            &["tool", "call_id"],
+            &["tool", "id"],
+            &["toolCall", "id"],
+            &["tool_call", "id"],
+            &["id"],
+        ],
+    )?;
+    Some(NativeToolCallRefV1 {
+        harness: "opencode".to_string(),
+        session_id: value_string(payload, &["sessionID"])
+            .or_else(|| value_string(payload, &["session_id"])),
+        message_id: value_string(payload, &["messageID"])
+            .or_else(|| value_string(payload, &["message_id"]))
+            .or_else(|| value_string(payload, &["message", "id"])),
+        tool_call_id,
+    })
+}
+
+fn stable_opencode_step_id(native: &NativeToolCallRefV1) -> TimelineStepId {
+    let key = format!(
+        "{}\0{}\0{}\0{}",
+        native.harness,
+        native.session_id.as_deref().unwrap_or(""),
+        native.message_id.as_deref().unwrap_or(""),
+        native.tool_call_id
+    );
+    let hash = ContentHash::compute_typed("opencode-native-tool-call", key.as_bytes()).to_hex();
+    TimelineStepId::new(format!("tls-{}", &hash[..24]))
+}
+
+fn opencode_timeline_thread(
+    runtime: &HarnessBridgeRuntime,
+    opened: &OpenSessionResult,
+) -> Result<String> {
+    if let Some(report) = runtime.reports.load(&opened.heddle_session_id)?
+        && let Some(thread) = report.thread
+    {
+        return Ok(thread);
+    }
+    match runtime.repo.head_ref()? {
+        Head::Attached { thread } => Ok(thread.to_string()),
+        Head::Detached { .. } => Ok("main".to_string()),
+    }
+}
+
+fn timeline_position_for_new_tool_step(
+    view: &TimelineView,
+    thread: &str,
+    step_id: &TimelineStepId,
+) -> (TimelineBranchId, Option<TimelineStepId>) {
+    let branch_id = view
+        .status(thread)
+        .and_then(|status| status.current_branch_id.clone())
+        .unwrap_or_else(|| TimelineBranchId::new("tlb-main"));
+    let parent_step_id = view
+        .status(thread)
+        .and_then(|status| status.current_step_id.clone())
+        .filter(|current| current != step_id);
+    (branch_id, parent_step_id)
+}
+
+fn current_change_id(repo: &Repository) -> Result<Option<ChangeId>> {
+    Ok(repo
+        .current_state()?
+        .map(|state| state.change_id)
+        .or(repo.head()?))
+}
+
+fn opencode_tool_name(payload: &Value) -> String {
+    first_value_string(
+        payload,
+        &[
+            &["tool", "name"],
+            &["toolName"],
+            &["tool_name"],
+            &["tool"],
+            &["name"],
+        ],
+    )
+    .unwrap_or_else(|| "tool".to_string())
+}
+
+fn opencode_tool_status(payload: &Value) -> TimelineToolCallStatus {
+    let status = first_value_string(
+        payload,
+        &[
+            &["status"],
+            &["tool", "status"],
+            &["result", "status"],
+            &["output", "status"],
+        ],
+    )
+    .unwrap_or_default()
+    .to_ascii_lowercase();
+    if status.contains("cancel") {
+        TimelineToolCallStatus::Cancelled
+    } else if status.contains("fail")
+        || status.contains("error")
+        || payload.get("error").is_some()
+        || payload.get("exception").is_some()
+    {
+        TimelineToolCallStatus::Failed
+    } else {
+        TimelineToolCallStatus::Succeeded
+    }
+}
+
+fn opencode_payload_metadata(event: &str, payload: &Value) -> Result<TimelineToolPayloadMetadata> {
+    let tool_name = opencode_tool_name(payload);
+    let tool_call_id = opencode_native_tool_call(payload)
+        .map(|native| native.tool_call_id)
+        .unwrap_or_default();
+    let raw = serde_json::to_vec(payload)?;
+    let hash = ContentHash::compute_typed("timeline-tool-payload", &raw);
+    let summary = if tool_call_id.is_empty() {
+        format!("OpenCode {event}: {tool_name}")
+    } else {
+        format!("OpenCode {event}: {tool_name} ({tool_call_id})")
+    };
+    Ok(TimelineToolPayloadMetadata {
+        summary: Some(summary),
+        hash: Some(hash),
+    })
+}
+
+fn opencode_touched_paths(payload: &Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    for path in [
+        value_string(payload, &["file", "path"]),
+        value_string(payload, &["path"]),
+        value_string(payload, &["tool", "path"]),
+        value_string(payload, &["tool", "input", "file_path"]),
+        value_string(payload, &["input", "file_path"]),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !path.trim().is_empty() && !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    for value_path in [
+        &["paths"][..],
+        &["files"][..],
+        &["tool", "input", "paths"][..],
+        &["input", "paths"][..],
+    ] {
+        if let Some(items) = value_string_array(payload, value_path) {
+            merge_string_vec(&mut paths, items);
+        }
+    }
+    paths
+}
+
+fn first_value_string(value: &Value, paths: &[&[&str]]) -> Option<String> {
+    paths.iter().find_map(|path| value_string(value, path))
+}
+
+fn value_string_array(value: &Value, path: &[&str]) -> Option<Vec<String>> {
+    let mut current = value;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    current.as_array().map(|items| {
+        items
+            .iter()
+            .filter_map(|item| item.as_str().map(ToString::to_string))
+            .collect()
+    })
+}
+
+fn merge_string_vec(target: &mut Vec<String>, incoming: Vec<String>) {
+    for item in incoming {
+        if !item.trim().is_empty() && !target.contains(&item) {
+            target.push(item);
+        }
+    }
 }
 
 fn value_string(value: &Value, path: &[&str]) -> Option<String> {
@@ -3676,6 +4006,124 @@ mod tests {
         });
         // Should succeed without writing any stdout or erroring.
         relay_claude(&mut runtime, "PreToolUse", &payload).unwrap();
+    }
+
+    #[test]
+    fn relay_opencode_tool_execute_before_records_timeline_step() {
+        let (_temp, repo) = init_repo();
+        let root = repo.root().to_path_buf();
+        std::fs::write(root.join("seed.txt"), b"hello").unwrap();
+        let seed = repo.snapshot(Some("seed".into()), None).unwrap();
+        let mut runtime = HarnessBridgeRuntime::new(repo, UserConfig::default());
+        let payload = opencode_tool_payload("call-1");
+
+        relay_opencode(&mut runtime, "tool.execute.before", &payload).unwrap();
+
+        let store = TimelineStore::open(runtime.repo.heddle_dir()).unwrap();
+        let view = TimelineView::rebuild(&store).unwrap();
+        let steps = view.steps_for_thread("main");
+        assert_eq!(steps.len(), 1);
+        let step = steps[0];
+        assert_eq!(step.native.as_ref().unwrap().harness, "opencode");
+        assert_eq!(step.native.as_ref().unwrap().tool_call_id, "call-1");
+        assert_eq!(step.tool_name.as_deref(), Some("bash"));
+        assert_eq!(step.before_state, Some(seed.change_id));
+        assert!(step.status.is_none());
+        assert!(step.payload_summary.as_deref().unwrap().contains("call-1"));
+        assert!(step.payload_hash.is_some());
+        assert!(
+            step.labels
+                .contains(&TimelineLabel::ExternalSideEffectsUnknown)
+        );
+    }
+
+    #[test]
+    fn relay_opencode_tool_execute_after_captures_dirty_worktree() {
+        let (_temp, repo) = init_repo();
+        let root = repo.root().to_path_buf();
+        std::fs::write(root.join("tracked.txt"), b"one\n").unwrap();
+        let seed = repo.snapshot(Some("seed".into()), None).unwrap();
+        let user_config = UserConfig {
+            principal: Some(crate::config::UserPrincipalConfig {
+                name: "Ada Lovelace".to_string(),
+                email: "ada@example.com".to_string(),
+            }),
+            ..UserConfig::default()
+        };
+        let mut runtime = HarnessBridgeRuntime::new(repo, user_config);
+        let payload = opencode_tool_payload("call-2");
+
+        relay_opencode(&mut runtime, "tool.execute.before", &payload).unwrap();
+        std::fs::write(root.join("tracked.txt"), b"two\n").unwrap();
+        relay_opencode(&mut runtime, "tool.execute.after", &payload).unwrap();
+
+        let head = runtime.repo.head().unwrap().expect("capture advanced HEAD");
+        assert_ne!(head, seed.change_id);
+        let store = TimelineStore::open(runtime.repo.heddle_dir()).unwrap();
+        let view = TimelineView::rebuild(&store).unwrap();
+        let steps = view.steps_for_thread("main");
+        assert_eq!(steps.len(), 1, "before/after should merge by native id");
+        let step = steps[0];
+        assert_eq!(step.operation_ids.len(), 2);
+        assert_eq!(step.status, Some(TimelineToolCallStatus::Succeeded));
+        assert_eq!(step.before_state, Some(seed.change_id));
+        assert_eq!(step.after_state, Some(head));
+        assert_eq!(step.capture_state, Some(head));
+        assert_eq!(step.changed, Some(true));
+        assert!(step.touched_paths.contains(&"tracked.txt".to_string()));
+        assert!(step.labels.contains(&TimelineLabel::RepoReversible));
+        assert!(
+            step.labels
+                .contains(&TimelineLabel::ExternalSideEffectsUnknown)
+        );
+        assert!(!step.payload_summary.as_deref().unwrap().contains("SECRET"));
+        assert!(step.payload_hash.is_some());
+    }
+
+    #[test]
+    fn relay_opencode_tool_execute_missing_tool_id_does_not_fail_or_record_timeline() {
+        let (_temp, repo) = init_repo();
+        let root = repo.root().to_path_buf();
+        std::fs::write(root.join("seed.txt"), b"hello").unwrap();
+        let _ = repo.snapshot(Some("seed".into()), None).unwrap();
+        let mut runtime = HarnessBridgeRuntime::new(repo, UserConfig::default());
+        let payload = serde_json::json!({
+            "sessionID": "opencode-session",
+            "model": "gpt-5.4",
+            "provider": "openai",
+            "tool": {"name": "bash"},
+        });
+
+        relay_opencode(&mut runtime, "tool.execute.before", &payload).unwrap();
+
+        let store = TimelineStore::open(runtime.repo.heddle_dir()).unwrap();
+        let view = TimelineView::rebuild(&store).unwrap();
+        assert!(view.steps_for_thread("main").is_empty());
+        let report_count = std::fs::read_dir(root.join(".heddle/state/session-reports"))
+            .unwrap()
+            .count();
+        assert!(
+            report_count > 0,
+            "session progress should still be recorded"
+        );
+    }
+
+    fn opencode_tool_payload(call_id: &str) -> Value {
+        serde_json::json!({
+            "sessionID": "opencode-session",
+            "messageID": "message-1",
+            "toolCallID": call_id,
+            "model": "gpt-5.4",
+            "provider": "openai",
+            "tool": {
+                "name": "bash",
+                "input": {
+                    "command": "echo SECRET",
+                    "file_path": "tracked.txt"
+                }
+            },
+            "status": "success"
+        })
     }
 
     #[test]

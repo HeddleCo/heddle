@@ -1,7 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Heddle, HeddleError, HeddleStreamingVerbError, ExecStreamError, type Executor, type ExecRequest, type ExecResult } from "../src/index.js";
-import type { StatusSchema, WatchLineSchema } from "../generated/heddle-schemas.js";
+import type {
+  StatusSchema,
+  TimelineForkSchema,
+  TimelineLogSchema,
+  WatchLineSchema,
+} from "../generated/heddle-schemas.js";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
@@ -21,6 +26,48 @@ const STATUS_JSON: StatusSchema = {
   branch: "main",
   output_kind: "status",
 } as unknown as StatusSchema;
+
+const TIMELINE_LOG_JSON: TimelineLogSchema = {
+  output_kind: "timeline_log",
+  status: "completed",
+  repository_capability: "git-overlay",
+  storage_model: "git+heddle-sidecar",
+  thread: "main",
+  cursor: {
+    branch_id: "tlb-main",
+    step_id: "tls-one",
+    state: "hd-state",
+    state_full: "hd-state-full",
+  },
+  branches: [],
+  steps: [],
+  active_branch_path: ["tlb-main"],
+  actions: {
+    can_undo: false,
+    can_redo: false,
+  },
+  recovery: null,
+};
+
+const TIMELINE_ACTION_JSON: TimelineForkSchema = {
+  output_kind: "timeline_action",
+  status: "completed",
+  action: "fork",
+  thread: "main",
+  branch_id: "tlb-child",
+  parent_branch_id: "tlb-main",
+  from_step_id: "tls-one",
+  cursor_branch_id: "tlb-main",
+  cursor_step_id: "tls-one",
+  operation_id: "hto-op",
+  recovered_operation_id: null,
+  materialized: null,
+  materialization_status: null,
+  recovery_status: null,
+  blocker_count: 0,
+  branch_count: 2,
+  step_count: 1,
+};
 
 test("parses a success payload into the typed shape", async () => {
   const fake = new FakeExecutor({ exitCode: 0, stdout: JSON.stringify(STATUS_JSON), stderr: "" });
@@ -215,6 +262,100 @@ test("stream() over a watch-mode verb maps a non-zero exit via ExecStreamError",
       return true;
     },
   );
+});
+
+test("timeline() drives the timeline log schema verb", async () => {
+  const fake = new FakeExecutor({
+    exitCode: 0,
+    stdout: JSON.stringify(TIMELINE_LOG_JSON),
+    stderr: "",
+  });
+  const heddle = new Heddle({ executor: fake });
+
+  const timeline = await heddle.timeline({ thread: "main" });
+
+  assert.equal(timeline.output_kind, "timeline_log");
+  assert.equal(fake.lastRequest?.verb, "log --timeline");
+  assert.deepEqual(fake.lastRequest?.args, ["--thread", "main"]);
+});
+
+test("timelineFork() builds an OpenCode native tool-call selector", async () => {
+  const fake = new FakeExecutor({
+    exitCode: 0,
+    stdout: JSON.stringify(TIMELINE_ACTION_JSON),
+    stderr: "",
+  });
+  const heddle = new Heddle({ executor: fake });
+
+  const forked = await heddle.timelineFork(
+    {
+      kind: "tool-call",
+      thread: "main",
+      toolCallId: "call_123",
+      sessionId: "ses_456",
+      messageId: "msg_789",
+    },
+    { branch: "tlb-child", reason: "fan-out" },
+    { opId: "op-fork" },
+  );
+
+  assert.equal(forked.output_kind, "timeline_action");
+  assert.equal(fake.lastRequest?.verb, "timeline fork");
+  assert.equal(fake.lastRequest?.opId, "op-fork");
+  assert.deepEqual(fake.lastRequest?.args, [
+    "--thread", "main",
+    "--tool-call", "call_123",
+    "--harness", "opencode",
+    "--session", "ses_456",
+    "--message", "msg_789",
+    "--branch", "tlb-child",
+    "--reason", "fan-out",
+  ]);
+});
+
+test("timelineReset() supports step targets and materialization options", async () => {
+  const fake = new FakeExecutor({
+    exitCode: 0,
+    stdout: JSON.stringify({ ...TIMELINE_ACTION_JSON, action: "reset" }),
+    stderr: "",
+  });
+  const heddle = new Heddle({ executor: fake });
+
+  await heddle.timelineReset(
+    {
+      kind: "step",
+      thread: "main",
+      fromBranch: "tlb-main",
+      stepId: "tls-one",
+    },
+    { materialize: true, mode: "fail-if-dirty" },
+    { opId: "op-reset" },
+  );
+
+  assert.equal(fake.lastRequest?.verb, "timeline reset");
+  assert.equal(fake.lastRequest?.opId, "op-reset");
+  assert.deepEqual(fake.lastRequest?.args, [
+    "--thread", "main",
+    "--from-branch", "tlb-main",
+    "--step", "tls-one",
+    "--materialize",
+    "--mode", "fail-if-dirty",
+  ]);
+});
+
+test("timelineRecover() targets a thread", async () => {
+  const fake = new FakeExecutor({
+    exitCode: 0,
+    stdout: JSON.stringify({ ...TIMELINE_ACTION_JSON, action: "recover" }),
+    stderr: "",
+  });
+  const heddle = new Heddle({ executor: fake });
+
+  await heddle.timelineRecover({ thread: "main" }, { opId: "op-recover" });
+
+  assert.equal(fake.lastRequest?.verb, "timeline recover");
+  assert.equal(fake.lastRequest?.opId, "op-recover");
+  assert.deepEqual(fake.lastRequest?.args, ["--thread", "main"]);
 });
 
 test("run() rejects every jsonl-capable verb", async () => {

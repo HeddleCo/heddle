@@ -200,6 +200,12 @@ Current shipped behavior:
 - installed hooks/plugins relay into that bridge through an internal `heddle integration relay ...` command
 - session reports are persisted locally under `.heddle/state/session-reports/`
 - actor attach is probe-first and based on harness-native keys when available
+- OpenCode installs a Heddle-owned plugin and a `heddle.timeline.json`
+  capability manifest. The plugin relays OpenCode events; the manifest
+  advertises shipped timeline navigation commands (`log --timeline`,
+  `timeline fork`, `timeline reset`, `timeline recover`) for agents and
+  desktop integrations without relying on an unverified native OpenCode tool
+  registration API.
 
 Current install flow:
 
