@@ -1962,7 +1962,7 @@ fn git_overlay_matrix_low_confidence_blocks_ready_and_ship_with_recapture_action
     // thread's confidence, so the recovery must scope the recapture to the
     // thread via the global `--repo` flag. (Contrast the in-thread `ready`
     // recovery above, which stays unscoped.)
-    // The thread's checkout lives under `.heddle/threads/<encoded>/root`, and
+    // The thread's checkout lives under `.heddle/threads/<encoded>/<repo-name>`, and
     // the slash in `feature/land-low-confidence` is percent-encoded into one
     // path segment (`feature%2Fland-low-confidence`, heddle#572 r2). The `%`
     // is outside `shell_quote`'s bare set, so the breadcrumb single-quotes the

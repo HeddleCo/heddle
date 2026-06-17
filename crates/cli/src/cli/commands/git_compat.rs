@@ -747,7 +747,7 @@ fn git_index_intent_for_root_with_ignore_and_repo(
         if entry.mode == GIT_MODE_COMMIT {
             continue;
         }
-        if worktree_entry_changed(root, path, entry)? {
+        if worktree_entry_changed(root, git, path, entry)? {
             intent.extra_paths.push(format!("unstaged: {path}"));
         }
     }
@@ -988,10 +988,16 @@ fn index_entries_by_path(index: &Index) -> BTreeMap<String, IndexEntryIntent> {
         .collect()
 }
 
-fn worktree_entry_changed(root: &Path, path: &str, entry: &IndexEntryIntent) -> Result<bool> {
-    let state =
-        repo::git_worktree_status::git_worktree_entry_state(root, path, entry.id, entry.mode, None)
-            .with_context(|| format!("failed to inspect worktree path before commit: {path}"))?;
+fn worktree_entry_changed(
+    root: &Path,
+    git: &SleyRepository,
+    path: &str,
+    entry: &IndexEntryIntent,
+) -> Result<bool> {
+    let state = repo::git_worktree_status::git_worktree_entry_state_in_repo(
+        git, root, path, entry.id, entry.mode, None,
+    )
+    .with_context(|| format!("failed to inspect worktree path before commit: {path}"))?;
     Ok(state != GitWorktreeEntryState::Clean)
 }
 

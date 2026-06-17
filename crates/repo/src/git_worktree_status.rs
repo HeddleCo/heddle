@@ -44,6 +44,18 @@ pub fn git_worktree_entry_state(
     index_probe: Option<IndexStatProbe>,
 ) -> Result<GitWorktreeEntryState> {
     let repo = sley::Repository::discover(root).map_err(sley_error)?;
+    git_worktree_entry_state_in_repo(&repo, root, path, expected_oid, mode, index_probe)
+}
+
+/// Compare a worktree file using an already-discovered Git repository handle.
+pub fn git_worktree_entry_state_in_repo(
+    repo: &sley::Repository,
+    root: &Path,
+    path: &str,
+    expected_oid: sley::ObjectId,
+    mode: u32,
+    index_probe: Option<IndexStatProbe>,
+) -> Result<GitWorktreeEntryState> {
     let workdir = repo.workdir().unwrap_or_else(|| root.to_path_buf());
     let state = sley::plumbing::sley_worktree::worktree_entry_state_by_git_path(
         &workdir,

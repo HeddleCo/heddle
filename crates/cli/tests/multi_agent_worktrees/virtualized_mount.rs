@@ -68,7 +68,7 @@ fn virtualized_thread_round_trip() {
         .to_string();
     assert!(
         mount_path.contains("/.heddle/threads/"),
-        "mount path should sit under the managed .heddle/threads/ root \
+        "mount path should sit under the managed .heddle/threads/ tree \
          (got {mount_path:?})"
     );
 

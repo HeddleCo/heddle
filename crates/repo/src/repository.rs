@@ -670,14 +670,15 @@ impl Repository {
     ///   (per-checkout cached state).
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let start_path = path.as_ref().canonicalize()?;
-        // A virtualized thread mounts at `.heddle/threads/<encoded>/root` and
-        // writes no checkout metadata of its own. Without this guard, the
-        // upward walk below would sail past the metadata-less mount and open
-        // the PARENT repo, so status/capture/thread operations would silently
-        // hit the wrong checkout. Refuse rather than resolve to the parent
-        // (heddle#572 r2). Solid/materialized checkouts have their own
-        // `.heddle` pointer and are handled by the worktree branch below, so
-        // this only fires for a virtualized (or torn-down) mount root.
+        // A virtualized thread mounts at
+        // `.heddle/threads/<encoded>/<repo-name>` and writes no checkout
+        // metadata of its own. Without this guard, the upward walk below would
+        // sail past the metadata-less mount and open the PARENT repo, so
+        // status/capture/thread operations would silently hit the wrong
+        // checkout. Refuse rather than resolve to the parent (heddle#572 r2).
+        // Solid/materialized checkouts have their own `.heddle` pointer and
+        // are handled by the worktree branch below, so this only fires for a
+        // virtualized (or torn-down) mount root.
         if let Some(mount_root) = metadataless_managed_thread_root(&start_path) {
             return Err(HeddleError::Config(format!(
                 "'{}' is a Heddle-managed virtualized thread mount with no checkout \
@@ -849,6 +850,27 @@ impl Repository {
         &self.heddle_dir
     }
 
+    /// Root whose directory name should be used for managed thread checkout
+    /// leaves.
+    ///
+    /// For the main checkout this is `repo.root()`. For an isolated checkout,
+    /// `repo.root()` is the checkout's own directory (possibly custom-named),
+    /// while `heddle_dir` points back at the shared source repository's
+    /// `.heddle`; use that shared parent so child threads keep the original
+    /// repo name.
+    pub fn managed_checkout_source_root(&self) -> &Path {
+        self.heddle_dir.parent().unwrap_or(self.root.as_path())
+    }
+
+    /// Default managed checkout path for `thread`.
+    pub fn managed_checkout_path(&self, thread: &str) -> PathBuf {
+        crate::thread_manifest::managed_checkout_path(
+            &self.heddle_dir,
+            thread,
+            self.managed_checkout_source_root(),
+        )
+    }
+
     pub fn capability(&self) -> RepositoryCapability {
         self.capability
     }
@@ -867,6 +889,14 @@ impl Repository {
             return Ok(Some(repo));
         }
 
+        let mut cached = self
+            .git_overlay_repo
+            .write()
+            .map_err(|_| HeddleError::Config("git overlay repo cache lock poisoned".into()))?;
+        if let Some(repo) = cached.clone() {
+            return Ok(Some(repo));
+        }
+
         let repo = SleyRepository::discover(&self.root).map_err(|error| {
             HeddleError::Config(format!(
                 "failed to inspect Git repository at '{}': {}",
@@ -874,11 +904,7 @@ impl Repository {
                 error
             ))
         })?;
-        *self
-            .git_overlay_repo
-            .write()
-            .map_err(|_| HeddleError::Config("git overlay repo cache lock poisoned".into()))? =
-            Some(repo.clone());
+        *cached = Some(repo.clone());
         Ok(Some(repo))
     }
 
@@ -1412,7 +1438,8 @@ impl Repository {
             if ignored_git_overlay_status_path(path) {
                 continue;
             }
-            match crate::git_worktree_status::git_worktree_entry_state(
+            match crate::git_worktree_status::git_worktree_entry_state_in_repo(
+                &git_repo,
                 &self.root,
                 path,
                 *oid,
@@ -2467,8 +2494,8 @@ fn has_git_metadata(path: &Path) -> bool {
 }
 
 /// If `start_path` lies inside a *managed virtualized thread root*
-/// (`<repo>/.heddle/threads/<encoded>/root`) that carries NO checkout
-/// metadata of its own, return that mount root.
+/// (`<repo>/.heddle/threads/<encoded>/<repo-name>`) that carries NO
+/// checkout metadata of its own, return that mount root.
 ///
 /// Solid and materialized thread checkouts write their own `.heddle`
 /// objectstore pointer at the checkout root, so [`Repository::open`]
@@ -2477,13 +2504,12 @@ fn has_git_metadata(path: &Path) -> bool {
 /// writes no such pointer, so a bare upward walk would sail past the
 /// metadata-less mount and open the PARENT repo. The flat
 /// `thread_manifest::thread_dir` encoding guarantees `<encoded>` is exactly
-/// one path component, so the `root → <encoded> → threads → .heddle`
-/// shape is unambiguous (heddle#572 r2).
+/// one path component, so any direct checkout leaf below it has the
+/// unambiguous `<leaf> → <encoded> → threads → .heddle` shape (heddle#572 r2).
 fn metadataless_managed_thread_root(start_path: &Path) -> Option<PathBuf> {
     let mut cur: Option<&Path> = Some(start_path);
     while let Some(dir) = cur {
-        if dir.file_name().and_then(|n| n.to_str()) == Some("root")
-            && let Some(thread_dir) = dir.parent()
+        if let Some(thread_dir) = dir.parent()
             && let Some(threads) = thread_dir.parent()
             && threads.file_name().and_then(|n| n.to_str()) == Some("threads")
             && let Some(heddle) = threads.parent()

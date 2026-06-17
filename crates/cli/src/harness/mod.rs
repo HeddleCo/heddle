@@ -2206,9 +2206,9 @@ fn default_private_thread_path(repo: &Repository, name: &str) -> PathBuf {
     // use — NOT a harness-local re-sanitisation. Harness subagent/root-actor
     // names are commonly slash-namespaced (`parent/task`); a local
     // `sanitize_name` flattened `parent/task` and `parent-task` onto the same
-    // `.heddle/threads/parent-task/root`, colliding two distinct threads and
+    // `.heddle/threads/parent-task/<repo-name>`, colliding two distinct threads and
     // diverging from the manifest/checkout layout (heddle#572 r2).
-    repo::thread_manifest::thread_dir(repo.heddle_dir(), name).join("root")
+    repo.managed_checkout_path(name)
 }
 
 fn sanitize_name(name: &str) -> String {
@@ -2927,18 +2927,18 @@ mod tests {
     }
 
     /// Harness subagent/root-actor checkout paths must use the SAME canonical
-    /// `thread_manifest::thread_dir(...).join("root")` derivation `start` and
-    /// the per-thread manifest use — for the slash-namespaced names the
-    /// harness commonly mints (`parent/task`). Before this, a harness-local
-    /// `sanitize_name` flattened `parent/task` and `parent-task` onto the same
-    /// `.heddle/threads/parent-task/root`, colliding distinct threads
+    /// managed checkout path derivation `start` and the per-thread manifest use
+    /// — for the slash-namespaced names the harness commonly mints
+    /// (`parent/task`). Before this, a harness-local `sanitize_name` flattened
+    /// `parent/task` and `parent-task` onto the same
+    /// `.heddle/threads/parent-task/<repo-name>`, colliding distinct threads
     /// (heddle#572 r2).
     #[test]
     fn harness_default_path_matches_canonical_thread_dir() {
         let (_temp, repo) = init_repo();
         for id in ["foo", "parent/task", "feature/foo", "team@scope"] {
             let harness_path = default_private_thread_path(&repo, id);
-            let canonical = repo::thread_manifest::thread_dir(repo.heddle_dir(), id).join("root");
+            let canonical = repo.managed_checkout_path(id);
             assert_eq!(
                 harness_path, canonical,
                 "harness default must match the canonical thread_dir for {id:?}"
