@@ -1379,7 +1379,7 @@ mod tests {
                     new_sidecar,
                     ..
                 } => Some(RecordedVisibilitySet {
-                    record_id: record_id.clone(),
+                    record_id: *record_id,
                     prior: prior_sidecar.clone(),
                     new: new_sidecar.clone(),
                 }),
