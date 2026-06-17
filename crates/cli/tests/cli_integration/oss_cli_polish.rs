@@ -5627,7 +5627,11 @@ fn parent_status_ignores_default_thread_checkout_under_heddle() {
     );
     assert!(
         temp.path()
-            .join(".heddle/threads/pollution-check/root/.heddle")
+            .join(".heddle")
+            .join("threads")
+            .join("pollution-check")
+            .join(temp.path().file_name().unwrap())
+            .join(".heddle")
             .exists(),
         "thread checkout should materialize under .heddle/threads/"
     );
@@ -5661,14 +5665,14 @@ fn start_explicit_path_under_heddle_threads_is_accepted() {
 
     // The inverted guard allows an explicit `--path` under `.heddle/`
     // (heddle's reserved dir) even though it's inside the repo directory — as
-    // long as it is a per-thread checkout LEAF (`<slot>/root`), so the manifest
-    // sidecar stays OUTSIDE the checkout.
+    // long as it is a per-thread checkout LEAF (`<slot>/<repo-name>`), so the
+    // manifest sidecar stays OUTSIDE the checkout.
     let custom = temp
         .path()
         .join(".heddle")
         .join("threads")
         .join("explicit-custom")
-        .join("root");
+        .join(temp.path().file_name().unwrap());
     let custom_arg = custom.to_str().unwrap();
     let started = json_value(
         temp.path(),
@@ -5684,12 +5688,12 @@ fn start_explicit_path_under_heddle_threads_is_accepted() {
     assert_eq!(started["thread"]["name"], "explicit-under-heddle");
     assert!(
         custom.join(".heddle").exists(),
-        "explicit .heddle/threads/<slot>/root path should be accepted and materialized: {started}"
+        "explicit .heddle/threads/<slot>/<repo-name> path should be accepted and materialized: {started}"
     );
 }
 
 /// heddle#572 r3 Finding #4: a managed `--path` that is the bare per-thread
-/// directory `.heddle/threads/<slot>` (no `root` leaf) is refused — the
+/// directory `.heddle/threads/<slot>` (no checkout leaf) is refused — the
 /// per-thread `manifest.toml` sidecar lives there, so a checkout would swallow
 /// it. The sidecar must stay a SIBLING of the checkout, never a child.
 #[test]
@@ -5713,10 +5717,10 @@ fn start_managed_path_without_leaf_is_refused() {
 }
 
 /// heddle#572 r3 Finding #2: a fresh `start` must NOT reuse another thread's
-/// reserved canonical root. Two threads sharing one execution path is a
+/// reserved canonical checkout. Two threads sharing one execution path is a
 /// corruption hazard; only a same-thread promote may re-occupy it.
 #[test]
-fn start_cannot_reuse_another_threads_reserved_root() {
+fn start_cannot_reuse_another_threads_reserved_checkout() {
     let temp = TempDir::new().unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
@@ -5727,24 +5731,30 @@ fn start_cannot_reuse_another_threads_reserved_root() {
         temp.path(),
         &["--output", "json", "start", "owner", "--workspace", "solid"],
     );
-    // `owner`'s reserved root is `.heddle/threads/owner/root`. A different
-    // thread aiming there must be refused.
-    let owner_root = temp.path().join(".heddle/threads/owner/root");
+    // `owner`'s reserved checkout is
+    // `.heddle/threads/owner/<repo-name>`. A different thread aiming there
+    // must be refused.
+    let owner_root = temp
+        .path()
+        .join(".heddle")
+        .join("threads")
+        .join("owner")
+        .join(temp.path().file_name().unwrap());
     let err = heddle(
         &["start", "intruder", "--path", owner_root.to_str().unwrap()],
         Some(temp.path()),
     )
-    .expect_err("reusing another thread's reserved root must be refused");
+    .expect_err("reusing another thread's reserved checkout must be refused");
     assert!(
         err.contains("nested inside an existing thread"),
-        "unexpected error reusing another thread's root: {err}"
+        "unexpected error reusing another thread's checkout: {err}"
     );
 }
 
 /// heddle#572 r3 Finding #3: a materialized thread is already checked out at
-/// its canonical `.heddle/threads/<name>/root` — the promote default. Promotion
-/// must succeed by converting that checkout in place to a solid one, not refuse
-/// because the slot is occupied.
+/// its canonical `.heddle/threads/<name>/<repo-name>` — the promote default.
+/// Promotion must succeed by converting that checkout in place to a solid one,
+/// not refuse because the slot is occupied.
 #[test]
 fn promote_materialized_thread_converts_in_place() {
     let temp = TempDir::new().unwrap();
@@ -5764,7 +5774,12 @@ fn promote_materialized_thread_converts_in_place() {
             "materialized",
         ],
     );
-    let checkout = temp.path().join(".heddle/threads/promo/root");
+    let checkout = temp
+        .path()
+        .join(".heddle")
+        .join("threads")
+        .join("promo")
+        .join(temp.path().file_name().unwrap());
     assert!(
         checkout.join(".heddle").exists(),
         "materialized checkout present"
@@ -5774,9 +5789,9 @@ fn promote_materialized_thread_converts_in_place() {
     assert_eq!(promoted["thread"]["mode"], "solid", "{promoted}");
     assert!(
         checkout.join(".heddle").exists(),
-        "the in-place converted solid checkout must still exist at the canonical root: {promoted}"
+        "the in-place converted solid checkout must still exist at the canonical checkout path: {promoted}"
     );
-    // The sidecar stayed OUTSIDE the checkout (a sibling of `root`).
+    // The sidecar stayed OUTSIDE the checkout (a sibling of the checkout leaf).
     assert!(
         temp.path()
             .join(".heddle/threads/promo/manifest.toml")
@@ -5786,7 +5801,7 @@ fn promote_materialized_thread_converts_in_place() {
 }
 
 /// heddle#572 r3 Finding #5 (the isolation guard): a thread checkout under
-/// `.heddle/threads/<t>/root` is a boundary-delimited worktree. A command run
+/// `.heddle/threads/<t>/<repo-name>` is a boundary-delimited worktree. A command run
 /// INSIDE it must resolve the THREAD's own HEAD/branch — never climb to the
 /// git-overlay parent and adopt the parent branch. The checkout's own `.heddle`
 /// pointer is that boundary (git's analogue is the linked-worktree `.git`
@@ -5806,7 +5821,12 @@ fn inside_thread_checkout_resolves_thread_not_parent_branch() {
             temp.path(),
             &["--output", "json", "start", &name, "--workspace", mode],
         );
-        let checkout = temp.path().join(format!(".heddle/threads/{name}/root"));
+        let checkout = temp
+            .path()
+            .join(".heddle")
+            .join("threads")
+            .join(&name)
+            .join(temp.path().file_name().unwrap());
         assert!(
             checkout.join(".heddle").exists(),
             "{mode} checkout should materialize at {}",

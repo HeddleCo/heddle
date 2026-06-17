@@ -503,7 +503,7 @@ fn test_merge_fast_forward_advances_current_thread() {
 /// directory the operator happened to invoke `heddle` from.
 ///
 /// This is the YC-demo workflow: operator stays at the project root
-/// and never `cd`s into `.heddle/threads/<thread>/root/`. The fix
+/// and never `cd`s into `.heddle/threads/<thread>/<repo-name>/`. The fix
 /// lives in `Repository::active_worktree_path` + the merge entry point.
 #[test]
 fn test_merge_from_main_worktree_targets_active_thread_lightweight_worktree() {

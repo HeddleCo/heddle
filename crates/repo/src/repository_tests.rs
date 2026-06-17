@@ -2116,7 +2116,7 @@ fn midsession_ignore_broadening_masks_untracked_without_unlink_git_overlay() {
 }
 
 /// heddle#572 r2: a virtualized thread mounts at
-/// `.heddle/threads/<encoded>/root` with no checkout metadata of its own.
+/// `.heddle/threads/<encoded>/<repo-name>` with no checkout metadata of its own.
 /// `Repository::open` from inside such a mount must REFUSE rather than climb
 /// past the metadata-less mount and open the PARENT repo (which would apply
 /// status/capture/thread operations to the wrong checkout). Solid/materialized
@@ -2124,11 +2124,10 @@ fn midsession_ignore_broadening_masks_untracked_without_unlink_git_overlay() {
 #[test]
 fn open_refuses_metadataless_virtualized_thread_mount() {
     let (_temp, repo) = create_test_repo();
-    let heddle = repo.heddle_dir().to_path_buf();
 
     // Simulate a virtualized thread `virt`: its mount root exists but has no
     // `.heddle` checkout metadata of its own.
-    let mount_root = crate::thread_manifest::thread_dir(&heddle, "virt").join("root");
+    let mount_root = repo.managed_checkout_path("virt");
     fs::create_dir_all(&mount_root).unwrap();
 
     // `Repository` isn't `Debug`, so match rather than `expect_err`.
@@ -2154,7 +2153,7 @@ fn open_refuses_metadataless_virtualized_thread_mount() {
 
     // The detection is narrow: a solid/materialized checkout root carries its
     // own `.heddle`, so it is NOT treated as a metadata-less mount.
-    let solid_root = crate::thread_manifest::thread_dir(&heddle, "solid").join("root");
+    let solid_root = repo.managed_checkout_path("solid");
     fs::create_dir_all(solid_root.join(".heddle")).unwrap();
     assert!(
         super::metadataless_managed_thread_root(&solid_root).is_none(),
@@ -2172,8 +2171,29 @@ fn open_refuses_metadataless_virtualized_thread_mount() {
     );
 }
 
+#[test]
+fn managed_checkout_path_uses_source_repo_name_from_custom_checkout() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_root = temp.path().join("source-repo");
+    let repo = Repository::init_default(&source_root).unwrap();
+    let custom_checkout = temp.path().join("custom-agent");
+
+    Repository::init_worktree(&custom_checkout, repo.heddle_dir()).unwrap();
+    let opened = Repository::open(&custom_checkout).unwrap();
+    let shared_heddle = repo.heddle_dir().canonicalize().unwrap();
+
+    assert_eq!(
+        opened.managed_checkout_path("child"),
+        shared_heddle
+            .join("threads")
+            .join("child")
+            .join("source-repo"),
+        "managed child threads should keep the original repo directory name, not the current checkout leaf"
+    );
+}
+
 /// heddle#572 r3 Finding #5: a solid/materialized thread checkout under
-/// `.heddle/threads/<encoded>/root` is a boundary-delimited worktree. Its own
+/// `.heddle/threads/<encoded>/<repo-name>` is a boundary-delimited worktree. Its own
 /// `.heddle` pointer is the discovery boundary (git's analogue is the
 /// linked-worktree `.git` file): `Repository::open` from inside it must root at
 /// the checkout — capability derived from the checkout's OWN `.git` (absent →
@@ -2192,9 +2212,9 @@ fn open_solid_checkout_roots_at_boundary_not_git_overlay_parent() {
     let heddle = repo.heddle_dir().to_path_buf();
 
     // Mimic write_isolated_checkout for a solid thread `feature`: a checkout
-    // root under `.heddle/threads/feature/root` carrying its OWN `.heddle`
+    // root under `.heddle/threads/feature/<repo-name>` carrying its OWN `.heddle`
     // pointer + per-checkout HEAD (`ref: feature`), but no `.git` of its own.
-    let checkout = crate::thread_manifest::thread_dir(&heddle, "feature").join("root");
+    let checkout = repo.managed_checkout_path("feature");
     let co_heddle = checkout.join(".heddle");
     fs::create_dir_all(&co_heddle).unwrap();
     fs::write(
@@ -2214,10 +2234,10 @@ fn open_solid_checkout_roots_at_boundary_not_git_overlay_parent() {
         RepositoryCapability::NativeHeddle,
         "capability must root at the checkout boundary, not the parent .git"
     );
-    assert!(
-        opened.root().ends_with("threads/feature/root"),
-        "open must root AT the checkout, got {}",
-        opened.root().display()
+    assert_eq!(
+        opened.root(),
+        checkout.canonicalize().unwrap().as_path(),
+        "open must root AT the checkout"
     );
     // HEAD is the thread's own, never the parent branch.
     assert!(
