@@ -4857,6 +4857,15 @@ mod tests {
             &["thread", "marker", "show"],
             &["thread", "marker", "show", "checkpoint"],
         ),
+        sample(
+            &["timeline", "fork"],
+            &["timeline", "fork", "--step", "tls-abc"],
+        ),
+        sample(
+            &["timeline", "reset"],
+            &["timeline", "reset", "--step", "tls-abc"],
+        ),
+        sample(&["timeline", "recover"], &["timeline", "recover"]),
         sample(&["transaction", "begin"], &["transaction", "begin"]),
         sample(
             &["transaction", "commit"],
@@ -5796,8 +5805,10 @@ mod tests {
                 "oplog recover",
                 "help",
                 "init",
-                // `log` appears twice: the entry advertises both `log` and the
-                // `log --reflog` variant (`log_reflog`), mirroring `undo`/`clone`.
+                // `log` appears three times: the entry advertises `log`,
+                // `log --reflog`, and `log --timeline` variants, mirroring
+                // `undo`/`clone`.
+                "log",
                 "log",
                 "log",
                 "maintenance gc",
@@ -5851,6 +5862,9 @@ mod tests {
                 "thread marker create",
                 "thread marker delete",
                 "thread marker show",
+                "timeline fork",
+                "timeline reset",
+                "timeline recover",
                 "verify",
                 "visibility set",
                 "visibility promote",
