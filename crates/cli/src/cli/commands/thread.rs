@@ -2668,7 +2668,8 @@ pub(crate) fn cmd_thread_switch(
 
     // "Invisible thread directories" rule: switching to a thread that has
     // its *own* dedicated worktree (the one `heddle start --workspace
-    // private|virtualized` recorded under `.heddle/threads/<name>/root/`)
+    // materialized|virtualized` recorded under
+    // `.heddle/threads/<name>/<repo-name>/`)
     // is a metadata-only operation. The on-disk worktree at the
     // recorded path is already X's worktree — it was set up by `start`
     // and is kept in sync by the metadata-driven merge/rebase/goto/land
@@ -3414,7 +3415,7 @@ fn non_empty_action(action: &str) -> Option<String> {
 }
 
 /// Default checkout directory for a thread, for every workspace mode:
-/// `<repo>/.heddle/threads/<encoded>/root`.
+/// `<repo>/.heddle/threads/<encoded>/<repo-name>`.
 ///
 /// Keyed off the SAME `thread_manifest::thread_dir` derivation the
 /// per-thread `manifest.toml` sidecar uses — the prefix-safe single-segment
@@ -3424,11 +3425,13 @@ fn non_empty_action(action: &str) -> Option<String> {
 /// checkout root and the manifest sit in the same per-thread directory and
 /// that no id can ever be a directory prefix of another (heddle#572 r2).
 ///
-/// The `root/` leaf is load-bearing, not cosmetic: nesting the worktree
-/// bytes one level down at `<encoded>/root` keeps `manifest.toml` a
-/// *sibling* of the checkout rather than a stray file inside it.
+/// The checkout leaf is load-bearing, not cosmetic: nesting the worktree
+/// bytes one level down at `<encoded>/<repo-name>` keeps `manifest.toml` a
+/// *sibling* of the checkout rather than a stray file inside it, while making
+/// the managed path read like the original repository instead of generic
+/// `root`.
 fn default_thread_checkout_path(repo: &Repository, name: &str) -> PathBuf {
-    repo::thread_manifest::thread_dir(repo.heddle_dir(), name).join("root")
+    repo.managed_checkout_path(name)
 }
 
 fn default_thread_path(repo: &Repository, name: &str) -> PathBuf {
@@ -3523,14 +3526,14 @@ fn normalize_path_for_containment(path: &Path) -> Result<PathBuf> {
 }
 
 /// Lightweight (materialized) checkout path:
-/// `<repo>/.heddle/threads/<name>/root`.
+/// `<repo>/.heddle/threads/<name>/<repo-name>`.
 fn default_lightweight_thread_path(repo: &Repository, name: &str) -> PathBuf {
     default_thread_checkout_path(repo, name)
 }
 
 /// Mount-point path for a virtualized thread:
-/// `<repo>/.heddle/threads/<name>/root`. Shares the same managed
-/// `.heddle/threads/<name>/root` layout as solid/lightweight checkouts
+/// `<repo>/.heddle/threads/<name>/<repo-name>`. Shares the same managed
+/// `.heddle/threads/<name>/<repo-name>` layout as solid/lightweight checkouts
 /// (thread names are unique per repo), keeping the per-thread
 /// `manifest.toml` sidecar a sibling of the mount point rather than a
 /// stray entry inside it.
@@ -3591,8 +3594,8 @@ mod tests {
 
     /// A slashed thread id must map the default checkout root and the
     /// per-thread manifest to the SAME `.heddle/threads/<encoded>` directory
-    /// (the checkout's `root/` a sibling of `manifest.toml`), neither may
-    /// escape `.heddle/threads/`, and the encoded segment must be a single,
+    /// (the checkout leaf is a sibling of `manifest.toml`), neither may escape
+    /// `.heddle/threads/`, and the encoded segment must be a single,
     /// prefix-safe path component so a slashed id can never nest under
     /// another thread's directory (heddle#572 r2).
     #[test]
@@ -3605,11 +3608,14 @@ mod tests {
         let threads_root = repo.heddle_dir().join("threads");
 
         // Both live in the same per-thread directory: checkout at
-        // `<dir>/root`, manifest at `<dir>/manifest.toml`.
+        // `<dir>/<repo-name>`, manifest at `<dir>/manifest.toml`.
         assert_eq!(checkout.parent().unwrap(), manifest.parent().unwrap());
         // The slash is encoded into ONE segment directly under `threads/`.
         assert_eq!(checkout.parent().unwrap(), threads_root.join("foo%2Fbar"));
-        assert_eq!(checkout.file_name().unwrap(), "root");
+        assert_eq!(
+            checkout.file_name().unwrap(),
+            repo.managed_checkout_source_root().file_name().unwrap()
+        );
 
         // Neither escapes `.heddle/threads/`.
         assert!(checkout.starts_with(&threads_root));

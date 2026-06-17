@@ -16,6 +16,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -174,14 +175,36 @@ impl ManifestFile {
 /// r2).
 ///
 /// This is the ONE derivation every thread-path consumer keys off — the
-/// `manifest.toml` sidecar, the worktree checkout root (`<dir>/root`) for
-/// all three workspace modes, the harness subagent/root-actor paths, and
+/// `manifest.toml` sidecar, the worktree checkout root
+/// (`<dir>/<repo-name>`) for all three workspace modes, the harness
+/// subagent/root-actor paths, and
 /// the promote default — so the manifest and the checkout can never
 /// diverge or collide for a given thread.
 pub fn thread_dir(heddle_dir: &Path, thread: &str) -> PathBuf {
     heddle_dir
         .join("threads")
         .join(encode_thread_segment(thread))
+}
+
+/// Managed checkout leaf for a materialized/virtualized thread.
+///
+/// The per-thread directory itself holds Heddle sidecars such as
+/// `manifest.toml`; the checkout must live one level below it. Use the
+/// source repository's top-level directory name for that leaf so a managed
+/// checkout reads as `.heddle/threads/<thread>/<repo-name>` instead of a
+/// generic leaf. Repositories whose root has no final component use the
+/// neutral `checkout` fallback.
+pub fn managed_checkout_leaf(repo_root: &Path) -> OsString {
+    repo_root
+        .file_name()
+        .filter(|name| !name.to_string_lossy().is_empty())
+        .map(OsString::from)
+        .unwrap_or_else(|| OsString::from("checkout"))
+}
+
+/// Default managed checkout path for `thread`.
+pub fn managed_checkout_path(heddle_dir: &Path, thread: &str, repo_root: &Path) -> PathBuf {
+    thread_dir(heddle_dir, thread).join(managed_checkout_leaf(repo_root))
 }
 
 /// Encode a thread id into a single, filesystem-safe, prefix-free path
@@ -247,8 +270,8 @@ pub fn decode_thread_segment(segment: &str) -> Option<String> {
 /// Where this thread's manifest lives on disk, given the repo's
 /// `heddle_dir` and a thread name:
 /// `<heddle_dir>/threads/<encoded>/manifest.toml`, a sibling of the
-/// checkout root `<encoded>/root`. Derives from [`thread_dir`] so it
-/// shares the one prefix-safe encoding.
+/// managed checkout leaf. Derives from [`thread_dir`] so it shares the
+/// one prefix-safe encoding.
 pub fn manifest_path(heddle_dir: &Path, thread: &str) -> PathBuf {
     thread_dir(heddle_dir, thread).join("manifest.toml")
 }
@@ -281,7 +304,7 @@ pub struct MaterializedThreadSummary {
 /// thread name is the *decoded* directory segment and there is nothing to
 /// recurse into. Directories whose segment doesn't decode (foreign / hand-
 /// placed) are skipped. This also keeps the scan out of each thread's
-/// `root/` worktree, which has no thread `manifest.toml` of its own.
+/// managed checkout, which has no thread `manifest.toml` of its own.
 pub fn list_thread_manifests(heddle_dir: &Path) -> io::Result<Vec<MaterializedThreadSummary>> {
     let threads_dir = heddle_dir.join("threads");
     let entries = match fs::read_dir(&threads_dir) {
@@ -731,13 +754,23 @@ mod tests {
         // The slash is percent-encoded into ONE path segment, so the id can
         // never nest under (or swallow) another thread's directory.
         assert_eq!(dir, Path::new("/repo/.heddle/threads/feature%2Ffoo"));
-        // The manifest is a child of the shared per-thread dir, so a checkout
-        // root at `<dir>/root` is its sibling.
+        // The manifest is a child of the shared per-thread dir, so a managed
+        // checkout leaf is its sibling.
         assert_eq!(
             manifest_path(heddle, "feature/foo"),
             dir.join("manifest.toml")
         );
         assert!(manifest_path(heddle, "feature/foo").starts_with(heddle.join("threads")));
+    }
+
+    #[test]
+    fn managed_checkout_path_uses_repo_directory_name() {
+        let heddle = Path::new("/workspace/repo/.heddle");
+        let repo_root = Path::new("/workspace/repo");
+        assert_eq!(
+            managed_checkout_path(heddle, "feature/foo", repo_root),
+            Path::new("/workspace/repo/.heddle/threads/feature%2Ffoo/repo")
+        );
     }
 
     /// The close-the-class proof for the prefix-nesting bug: a thread id that
@@ -753,7 +786,7 @@ mod tests {
         let pairs = [
             ("feature/f", "feature/foo"),
             ("feature", "feature/foo"),
-            ("foo", "foo/root"),
+            ("foo", "foo/bar"),
         ];
         for (a, b) in pairs {
             let da = thread_dir(heddle, a);

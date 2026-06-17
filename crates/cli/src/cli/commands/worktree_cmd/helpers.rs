@@ -121,16 +121,18 @@ fn validate_worktree_target(
         if path == threads_root {
             return Err(anyhow::anyhow!(worktree_target_nested_thread_advice(path)));
         }
-        // A managed checkout must be a per-thread *leaf* (`threads/<seg>/root`),
-        // never the bare per-thread directory `threads/<seg>` itself. The
+        // A managed checkout must be a per-thread *leaf*
+        // (`threads/<seg>/<repo-name>`), never the bare per-thread directory
+        // `threads/<seg>` itself. The
         // per-thread `manifest.toml` sidecar lives AT `threads/<encoded>/`
-        // (a sibling of `root/`); a checkout placed on the per-thread dir
-        // itself would make the sidecar a CHILD of the worktree — git keeps
-        // its worktree metadata at the worktree root, outside tracked content,
-        // and so must we. So `start foo --path .heddle/threads/foo` (no `root`
-        // leaf) would write `manifest.toml` inside foo's own checkout, starting
-        // it dirty and able to capture the sidecar as user content. Require the
-        // leaf so the sidecar stays OUTSIDE the checkout (heddle#572 r3).
+        // (a sibling of the checkout leaf); a checkout placed on the
+        // per-thread dir itself would make the sidecar a CHILD of the worktree
+        // — git keeps its worktree metadata at the worktree root, outside
+        // tracked content, and so must we. So `start foo --path
+        // .heddle/threads/foo` (no checkout leaf) would write `manifest.toml`
+        // inside foo's own checkout, starting it dirty and able to capture the
+        // sidecar as user content. Require the leaf so the sidecar stays
+        // OUTSIDE the checkout (heddle#572 r3).
         if path.parent() == Some(threads_root.as_path()) {
             return Err(anyhow::anyhow!(worktree_target_managed_needs_leaf_advice(
                 path
@@ -144,9 +146,9 @@ fn validate_worktree_target(
         // (solid, materialized, AND virtualized) via its record + the shared
         // `thread_dir` derivation, so an explicit `--path` nested inside
         // another thread's checkout is rejected for any workspace mode. The
-        // thread's OWN reserved root is exempt only for `self_thread` (a
+        // thread's OWN reserved checkout is exempt only for `self_thread` (a
         // promote/re-materialize of that same thread), so one thread can never
-        // reuse another's reserved root (heddle#572 r2/r3).
+        // reuse another's reserved checkout (heddle#572 r2/r3).
         if is_inside_existing_thread(repo, &threads_root, path, self_thread)? {
             return Err(anyhow::anyhow!(worktree_target_nested_thread_advice(path)));
         }
@@ -186,22 +188,22 @@ fn worktree_target_shape_advice(error: repo::ThreadWorktreeTargetError) -> anyho
 ///     silently missed them — heddle#572 r1/r2);
 ///   * the thread's DURABLE recorded `execution_path` / `materialized_path`
 ///     (filtered to ones under `threads_root`). A thread started with a custom
-///     `--path .heddle/threads/<custom>/root` checks out OUTSIDE its canonical
-///     `thread_dir`, so a canonical-only check would let a later `--path` nest
-///     under that custom checkout. Consulting the recorded paths closes that
-///     gap (heddle#572 r3).
+///     `--path .heddle/threads/<custom>/<repo-name>` checks out OUTSIDE its
+///     canonical `thread_dir`, so a canonical-only check would let a later
+///     `--path` nest under that custom checkout. Consulting the recorded paths
+///     closes that gap (heddle#572 r3).
 ///
 /// The record is written strictly AFTER target validation for a *new* thread
 /// (the atomic `start` stages it inside `execute`; the harness `save`s it after
 /// `prepare_worktree_target`), so a brand-new thread is never in this set — its
-/// fresh `.heddle/threads/<new>/root` slot is correctly allowed.
+/// fresh `.heddle/threads/<new>/<repo-name>` slot is correctly allowed.
 ///
-/// A thread's OWN reserved root (canonical `<encoded>/root`, or its recorded
-/// checkout path) is exempt ONLY for `self_thread` — the same thread being
-/// promoted/re-materialized, whose record is already present at validation
-/// time. For every OTHER caller the exemption does NOT apply, so a fresh
-/// `start other --path .heddle/threads/<existing>/root` can never reuse another
-/// thread's reserved root (heddle#572 r3 Finding #2).
+/// A thread's OWN reserved checkout (canonical `<encoded>/<repo-name>`, or its
+/// recorded checkout path) is exempt ONLY for `self_thread` — the same thread
+/// being promoted/re-materialized, whose record is already present at
+/// validation time. For every OTHER caller the exemption does NOT apply, so a
+/// fresh `start other --path .heddle/threads/<existing>/<repo-name>` can never
+/// reuse another thread's reserved checkout (heddle#572 r3 Finding #2).
 fn is_inside_existing_thread(
     repo: &Repository,
     threads_root: &Path,
@@ -217,7 +219,8 @@ fn is_inside_existing_thread(
 
         // Canonical per-thread directory.
         let dir = repo::thread_manifest::thread_dir(repo.heddle_dir(), &thread.thread);
-        if candidate.starts_with(&dir) && !(is_self && candidate == dir.join("root")) {
+        let canonical_checkout = repo.managed_checkout_path(&thread.thread);
+        if candidate.starts_with(&dir) && !(is_self && candidate == canonical_checkout) {
             return Ok(true);
         }
 
@@ -349,15 +352,15 @@ fn worktree_target_managed_needs_leaf_advice(path: &Path) -> RecoveryAdvice {
             "managed worktree target '{}' must be a per-thread checkout leaf, not the per-thread directory itself",
             path.display()
         ),
-        "Append a `root` leaf, e.g. `<path>/root`, or choose a sibling directory outside the repository.",
+        "Append a checkout leaf such as the repository directory name, or choose a sibling directory outside the repository.",
         format!(
             "target path '{}' is the bare `.heddle/threads/<name>` directory, where the per-thread manifest sidecar lives",
             path.display()
         ),
         "checking out onto the per-thread directory would write Heddle's `manifest.toml` sidecar inside the worktree, starting it dirty",
         "no thread, checkout, repository object, ref, or worktree file was changed",
-        "heddle start <name> --path <path>/root",
-        vec!["heddle start <name> --path <path>/root".to_string()],
+        "heddle start <name> --path <path>/<repo-name>",
+        vec!["heddle start <name> --path <path>/<repo-name>".to_string()],
     )
 }
 
@@ -605,7 +608,7 @@ mod gate_tests {
     /// An explicit `--path` may live under `.heddle/threads/<newname>` (the
     /// managed home for checkouts) but must NOT nest inside an EXISTING
     /// thread's reserved subtree — that would land the new checkout inside
-    /// another thread's `root/` worktree or mount. The guard enumerates
+    /// another thread's managed worktree or mount. The guard enumerates
     /// threads from their records, so it covers EVERY workspace mode —
     /// including `virtualized`, which writes no `manifest.toml` (heddle#572
     /// r2). A fresh leaf, the threads-root, the bare per-thread dir, custom
@@ -615,14 +618,17 @@ mod gate_tests {
         let repo_dir = TempDir::new().unwrap();
         let repo = Repository::init_default(repo_dir.path()).unwrap();
         let threads_root = repo.heddle_dir().join("threads");
+        let checkout_leaf = PathBuf::from(repo::thread_manifest::managed_checkout_leaf(
+            repo.managed_checkout_source_root(),
+        ));
 
         // An existing MATERIALIZED thread `foo` and an existing VIRTUALIZED
-        // thread `virt`. Both occupy `.heddle/threads/<name>/` with a `root/`
-        // worktree/mount; only `foo` has a `manifest.toml`.
+        // thread `virt`. Both occupy `.heddle/threads/<name>/` with a
+        // `<repo-name>/` worktree/mount; only `foo` has a `manifest.toml`.
         register_thread(&repo, "foo", repo::ThreadMode::Materialized);
         register_thread(&repo, "virt", repo::ThreadMode::Virtualized);
         for name in ["foo", "virt"] {
-            let nested = threads_root.join(name).join("root").join("nested");
+            let nested = threads_root.join(name).join(&checkout_leaf).join("nested");
             let err = validate_worktree_target(&repo, &nested, None).unwrap_err();
             assert!(
                 err.to_string().contains("nested inside an existing thread"),
@@ -634,7 +640,7 @@ mod gate_tests {
         validate_worktree_target(&repo, &threads_root, None)
             .expect_err("the .heddle/threads metadata root must be rejected");
 
-        // The bare per-thread directory (no `root` leaf) is rejected: the
+        // The bare per-thread directory (no checkout leaf) is rejected: the
         // manifest sidecar lives there, so a checkout would swallow it
         // (heddle#572 r3 Finding #4).
         let err = validate_worktree_target(&repo, &threads_root.join("brandnew"), None)
@@ -645,21 +651,26 @@ mod gate_tests {
         );
 
         // A fresh per-thread checkout LEAF is accepted.
-        validate_worktree_target(&repo, &threads_root.join("brandnew").join("root"), None)
-            .expect("a fresh .heddle/threads/<name>/root checkout is allowed");
+        validate_worktree_target(
+            &repo,
+            &threads_root.join("brandnew").join(&checkout_leaf),
+            None,
+        )
+        .expect("a fresh .heddle/threads/<name>/<repo-name> checkout is allowed");
 
-        // Finding #2: an EXISTING thread's OWN canonical `root` is reserved.
+        // Finding #2: an EXISTING thread's OWN canonical checkout is reserved.
         // A *different* caller (e.g. a fresh `start other`) must NOT reuse it,
         // but a same-thread promote/re-materialize of `foo` may.
-        validate_worktree_target(&repo, &threads_root.join("foo").join("root"), None)
-            .expect_err("another thread must not reuse foo's reserved root");
-        validate_worktree_target(&repo, &threads_root.join("foo").join("root"), Some("foo"))
-            .expect("re-materializing foo's own canonical root slot is allowed");
+        let foo_checkout = repo.managed_checkout_path("foo");
+        validate_worktree_target(&repo, &foo_checkout, None)
+            .expect_err("another thread must not reuse foo's reserved checkout");
+        validate_worktree_target(&repo, &foo_checkout, Some("foo"))
+            .expect("re-materializing foo's own canonical checkout slot is allowed");
 
         // Finding #1: a thread checked out at a CUSTOM `--path` reserves that
         // recorded location too — a later `--path` nested under it is rejected
         // even though it lies outside the thread's canonical `thread_dir`.
-        let custom_root = threads_root.join("custom-slot").join("root");
+        let custom_root = threads_root.join("custom-slot").join(&checkout_leaf);
         register_thread_at(
             &repo,
             "custom",
