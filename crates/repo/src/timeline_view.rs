@@ -2,9 +2,9 @@
 //! Rebuildable derived views over canonical agent timeline operations.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use objects::{
@@ -16,11 +16,14 @@ use objects::{
         TimelineToolCallStatus,
     },
 };
+use serde::{Deserialize, Serialize};
 
 use crate::TimelineStore;
 
+const TIMELINE_VIEW_CHECKPOINT_SCHEMA_VERSION: u16 = 1;
+
 /// Native harness identity for a tool call.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TimelineNativeToolKey {
     pub harness: String,
     pub session_id: Option<String>,
@@ -40,7 +43,7 @@ impl From<&NativeToolCallRefV1> for TimelineNativeToolKey {
 }
 
 /// Thread-local step key.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TimelineStepKey {
     pub thread: String,
     pub step_id: TimelineStepId,
@@ -56,7 +59,7 @@ impl TimelineStepKey {
 }
 
 /// Thread-local branch key.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TimelineBranchKey {
     pub thread: String,
     pub branch_id: TimelineBranchId,
@@ -71,14 +74,14 @@ impl TimelineBranchKey {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 struct TimelineNativeIndexKey {
     thread: String,
     native: TimelineNativeToolKey,
 }
 
 /// Rebuilt current cursor status for a thread.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineThreadStatus {
     pub thread: String,
     pub current_branch_id: Option<TimelineBranchId>,
@@ -100,7 +103,7 @@ impl TimelineThreadStatus {
 }
 
 /// Rebuilt branch summary with ordered unique steps.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineBranchSummary {
     pub thread: String,
     pub branch_id: TimelineBranchId,
@@ -130,7 +133,7 @@ impl TimelineBranchSummary {
 }
 
 /// Rebuilt step summary. Native payload details are limited to summaries and hashes.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineStepSummary {
     pub thread: String,
     pub step_id: TimelineStepId,
@@ -190,7 +193,7 @@ impl TimelineStepSummary {
 }
 
 /// A resolved cursor target. This slice does not materialize the worktree.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineSeekTarget {
     pub thread: String,
     pub branch_id: TimelineBranchId,
@@ -199,7 +202,7 @@ pub struct TimelineSeekTarget {
 }
 
 /// Command used to append a canonical cursor movement operation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineCursorMoveRecord {
     pub thread: String,
     pub branch_id: TimelineBranchId,
@@ -213,7 +216,7 @@ pub struct TimelineCursorMoveRecord {
 }
 
 /// Deterministic derived timeline view rebuilt from canonical operation bytes.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelineView {
     operation_ids: Vec<TimelineOperationId>,
     threads: BTreeMap<String, TimelineThreadStatus>,
@@ -225,20 +228,34 @@ pub struct TimelineView {
 impl TimelineView {
     /// Rebuild the derived view from all canonical operations in the store.
     pub fn rebuild(store: &TimelineStore) -> Result<Self> {
-        let mut records = read_timeline_operation_records(store)?;
-        records.sort_by_key(|record| {
-            (
-                operation_timestamp(&record.envelope),
-                operation_kind_order(record.envelope.kind),
-                record.id.to_hex(),
+        let operation_ids = read_timeline_operation_ids(store)?;
+        if let Some(checkpoint) = read_timeline_view_checkpoint(store)?
+            && checkpoint_processed_prefix_matches(
+                &checkpoint.processed_operation_ids,
+                &operation_ids,
             )
-        });
+        {
+            let new_operation_ids = &operation_ids[checkpoint.processed_operation_ids.len()..];
+            if new_operation_ids.is_empty() {
+                return Ok(checkpoint.view);
+            }
 
-        let mut view = Self::default();
-        for record in records {
-            view.operation_ids.push(record.id);
-            view.apply_operation(record.id, record.envelope);
+            let mut new_records =
+                read_timeline_operation_records_by_id(store, new_operation_ids)?;
+            sort_operation_records(&mut new_records);
+            if incremental_replay_is_ordered(checkpoint.last_replay_key.as_ref(), &new_records) {
+                let mut view = checkpoint.view;
+                for record in new_records {
+                    view.operation_ids.push(record.id);
+                    view.apply_operation(record.id, record.envelope);
+                }
+                write_timeline_view_checkpoint(store, &operation_ids, &view)?;
+                return Ok(view);
+            }
         }
+
+        let view = rebuild_timeline_view_from_ids(store, &operation_ids)?;
+        write_timeline_view_checkpoint(store, &operation_ids, &view)?;
         Ok(view)
     }
 
@@ -614,27 +631,77 @@ struct TimelineOperationRecord {
     envelope: TimelineOperationEnvelope,
 }
 
-fn read_timeline_operation_records(store: &TimelineStore) -> Result<Vec<TimelineOperationRecord>> {
-    let mut paths = Vec::new();
-    collect_operation_paths(&store.root().join("ops"), &mut paths)?;
-    paths.sort();
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+struct TimelineOperationReplayKey {
+    timestamp_ms: i64,
+    kind_order: u8,
+    operation_id_hex: String,
+}
 
-    let mut records = Vec::with_capacity(paths.len());
-    for path in paths {
-        let bytes = fs::read(&path)?;
-        let id = TimelineOperationId::for_bytes(&bytes);
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct TimelineViewCheckpoint {
+    schema_version: u16,
+    processed_operation_ids: Vec<TimelineOperationId>,
+    last_replay_key: Option<TimelineOperationReplayKey>,
+    view: TimelineView,
+}
+
+fn read_timeline_operation_records_by_id(
+    store: &TimelineStore,
+    operation_ids: &[TimelineOperationId],
+) -> Result<Vec<TimelineOperationRecord>> {
+    let mut records = Vec::with_capacity(operation_ids.len());
+    for id in operation_ids {
+        let Some(bytes) = store.read_operation_bytes(id)? else {
+            continue;
+        };
+        let computed_id = TimelineOperationId::for_bytes(&bytes);
+        if computed_id != *id {
+            return Err(HeddleError::InvalidObject(format!(
+                "timeline operation id mismatch: expected {}, decoded {}",
+                id.short(),
+                computed_id.short()
+            )));
+        }
         let envelope = TimelineOperationEnvelope::decode(&bytes).map_err(|err| {
             HeddleError::InvalidObject(format!(
                 "decode timeline operation '{}': {err}",
-                path.display()
+                store.operation_path(id).display()
             ))
         })?;
-        records.push(TimelineOperationRecord { id, envelope });
+        records.push(TimelineOperationRecord { id: *id, envelope });
     }
     Ok(records)
 }
 
-fn collect_operation_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+fn read_timeline_operation_ids(store: &TimelineStore) -> Result<Vec<TimelineOperationId>> {
+    let mut canonical_ids = Vec::new();
+    collect_operation_ids(&store.root().join("ops"), &mut canonical_ids)?;
+    canonical_ids.sort();
+    canonical_ids.dedup();
+
+    let canonical_set = canonical_ids.iter().copied().collect::<BTreeSet<_>>();
+    let indexed_operation_ids = store
+        .read_operation_index()
+        .unwrap_or(None)
+        .unwrap_or_default();
+    let mut operation_ids = indexed_operation_ids.clone();
+    operation_ids.retain(|id| canonical_set.contains(id));
+
+    let indexed_set = operation_ids.iter().copied().collect::<BTreeSet<_>>();
+    operation_ids.extend(
+        canonical_ids
+            .into_iter()
+            .filter(|id| !indexed_set.contains(id)),
+    );
+
+    if indexed_operation_ids != operation_ids {
+        store.write_operation_index(&operation_ids)?;
+    }
+    Ok(operation_ids)
+}
+
+fn collect_operation_ids(dir: &Path, ids: &mut Vec<TimelineOperationId>) -> Result<()> {
     match fs::read_dir(dir) {
         Ok(entries) => {
             for entry in entries {
@@ -642,11 +709,11 @@ fn collect_operation_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
                 let path = entry.path();
                 let file_type = entry.file_type()?;
                 if file_type.is_dir() {
-                    collect_operation_paths(&path, paths)?;
+                    collect_operation_ids(&path, ids)?;
                 } else if file_type.is_file()
                     && path.extension().is_some_and(|ext| ext == "msgpack")
                 {
-                    paths.push(path);
+                    ids.push(operation_id_from_path(&path)?);
                 }
             }
             Ok(())
@@ -654,6 +721,131 @@ fn collect_operation_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err.into()),
     }
+}
+
+fn operation_id_from_path(path: &Path) -> Result<TimelineOperationId> {
+    let prefix = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            HeddleError::InvalidObject(format!(
+                "timeline operation path has no shard prefix: {}",
+                path.display()
+            ))
+        })?;
+    let rest = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            HeddleError::InvalidObject(format!(
+                "timeline operation path has no file stem: {}",
+                path.display()
+            ))
+        })?;
+    let raw = hex::decode(format!("{prefix}{rest}")).map_err(|err| {
+        HeddleError::InvalidObject(format!(
+            "timeline operation path has invalid id '{}': {err}",
+            path.display()
+        ))
+    })?;
+    TimelineOperationId::try_from_slice(&raw).map_err(|err| {
+        HeddleError::InvalidObject(format!(
+            "timeline operation path has invalid id length '{}': {err}",
+            path.display()
+        ))
+    })
+}
+
+fn rebuild_timeline_view_from_ids(
+    store: &TimelineStore,
+    operation_ids: &[TimelineOperationId],
+) -> Result<TimelineView> {
+    let mut records = read_timeline_operation_records_by_id(store, operation_ids)?;
+    sort_operation_records(&mut records);
+
+    let mut view = TimelineView::default();
+    for record in records {
+        view.operation_ids.push(record.id);
+        view.apply_operation(record.id, record.envelope);
+    }
+    Ok(view)
+}
+
+fn sort_operation_records(records: &mut [TimelineOperationRecord]) {
+    records.sort_by_key(operation_replay_key);
+}
+
+fn operation_replay_key(record: &TimelineOperationRecord) -> TimelineOperationReplayKey {
+    TimelineOperationReplayKey {
+        timestamp_ms: operation_timestamp(&record.envelope),
+        kind_order: operation_kind_order(record.envelope.kind),
+        operation_id_hex: record.id.to_hex(),
+    }
+}
+
+fn incremental_replay_is_ordered(
+    last_replay_key: Option<&TimelineOperationReplayKey>,
+    new_records: &[TimelineOperationRecord],
+) -> bool {
+    let Some(last_replay_key) = last_replay_key else {
+        return true;
+    };
+    new_records.first().map_or(true, |record| {
+        operation_replay_key(record) >= *last_replay_key
+    })
+}
+
+fn checkpoint_processed_prefix_matches(
+    checkpoint_ids: &[TimelineOperationId],
+    operation_ids: &[TimelineOperationId],
+) -> bool {
+    checkpoint_ids.len() <= operation_ids.len()
+        && checkpoint_ids
+            .iter()
+            .zip(operation_ids.iter())
+            .all(|(checkpoint, current)| checkpoint == current)
+}
+
+fn read_timeline_view_checkpoint(
+    store: &TimelineStore,
+) -> Result<Option<TimelineViewCheckpoint>> {
+    let Some(bytes) = store.read_view_checkpoint_bytes()? else {
+        return Ok(None);
+    };
+    let Ok(checkpoint) = rmp_serde::from_slice::<TimelineViewCheckpoint>(&bytes) else {
+        return Ok(None);
+    };
+    if checkpoint.schema_version != TIMELINE_VIEW_CHECKPOINT_SCHEMA_VERSION {
+        return Ok(None);
+    }
+    Ok(Some(checkpoint))
+}
+
+fn write_timeline_view_checkpoint(
+    store: &TimelineStore,
+    processed_operation_ids: &[TimelineOperationId],
+    view: &TimelineView,
+) -> Result<()> {
+    let last_replay_key = if let Some(last_id) = view.operation_ids().last() {
+        store.read_operation(last_id)?.map(|envelope| {
+            operation_replay_key(&TimelineOperationRecord {
+                id: *last_id,
+                envelope,
+            })
+        })
+    } else {
+        None
+    };
+    let checkpoint = TimelineViewCheckpoint {
+        schema_version: TIMELINE_VIEW_CHECKPOINT_SCHEMA_VERSION,
+        processed_operation_ids: processed_operation_ids.to_vec(),
+        last_replay_key,
+        view: view.clone(),
+    };
+    let bytes = rmp_serde::to_vec_named(&checkpoint)
+        .map_err(|err| HeddleError::Serialization(err.to_string()))?;
+    store.write_view_checkpoint_bytes(&bytes)
 }
 
 fn operation_timestamp(envelope: &TimelineOperationEnvelope) -> i64 {
@@ -890,6 +1082,37 @@ mod tests {
         assert_eq!(first.payload_summary.as_deref(), Some("created src/lib.rs"));
         assert_eq!(first.operation_ids.len(), 2);
         assert_eq!(first.labels, vec![TimelineLabel::RepoReversible]);
+    }
+
+    #[test]
+    fn timeline_view_uses_checkpoint_for_later_monotonic_operations() {
+        let (_temp, store) = temp_store();
+        write_main_two_steps(&store);
+
+        let view = TimelineView::rebuild(&store).unwrap();
+        assert!(store.read_view_checkpoint_bytes().unwrap().is_some());
+        let checkpointed_id = *view.operation_ids().first().unwrap();
+        std::fs::write(store.operation_path(&checkpointed_id), b"corrupt old op").unwrap();
+
+        store
+            .record_cursor_move(TimelineCursorMoveRecord {
+                thread: "main".to_string(),
+                branch_id: branch("tlb-main"),
+                from_step_id: Some(step("tls-two")),
+                to_step_id: Some(step("tls-one")),
+                from_state: state(2),
+                to_state: state(1),
+                reason: TimelineCursorMoveReason::Undo,
+                moved_at_ms: 6,
+                labels: Vec::new(),
+            })
+            .unwrap();
+
+        let rebuilt = TimelineView::rebuild(&store).unwrap();
+        assert_eq!(rebuilt.operation_ids().len(), 6);
+        let status = rebuilt.status("main").unwrap();
+        assert_eq!(status.current_step_id, Some(step("tls-one")));
+        assert_eq!(status.current_state, Some(state(1)));
     }
 
     #[test]

@@ -173,10 +173,7 @@ impl Repository {
                     can_fork: can_target,
                     can_reset: can_target,
                     can_materialize: can_target,
-                    has_boundary_warning: step
-                        .labels
-                        .iter()
-                        .any(|label| *label != TimelineLabel::RepoReversible),
+                    has_boundary_warning: step.labels.iter().any(label_has_boundary_warning),
                 }
             })
             .collect();
@@ -266,6 +263,16 @@ fn timeline_cursor_matches_recovery(
             && status.current_step_id == record.to_step_id
             && status.current_state == Some(record.to_state)
     })
+}
+
+fn label_has_boundary_warning(label: &TimelineLabel) -> bool {
+    matches!(
+        label,
+        TimelineLabel::IgnoredPathTouched
+            | TimelineLabel::OutsideRepoTouched
+            | TimelineLabel::PurgeBoundary
+            | TimelineLabel::CaptureFailed
+    )
 }
 
 #[cfg(test)]
@@ -482,5 +489,76 @@ mod tests {
             outcome.recovery.status,
             crate::TimelineMaterializationRecoveryStatus::CursorRecorded
         );
+    }
+
+    #[test]
+    fn navigation_boundary_warning_ignores_external_unknown_only() {
+        let (temp, repo, store) = create_repo();
+        let state0 = repo.head().unwrap().unwrap();
+        let state1 = write_state(&repo, temp.path(), "tracked.txt", "one\n");
+
+        store
+            .write_operation(&TimelineOperationEnvelope::new(
+                TimelineOperationBodyV1::ToolCallFinished(ToolCallFinishedV1 {
+                    thread: "main".to_string(),
+                    step_id: step("tls-external"),
+                    branch_id: branch("tlb-main"),
+                    native: native("call-external"),
+                    status: objects::object::TimelineToolCallStatus::Succeeded,
+                    before_state: state0,
+                    after_state: state1,
+                    capture_state: Some(state1),
+                    capture_oplog_batch_id: None,
+                    changed: true,
+                    touched_paths: Vec::new(),
+                    payload: None,
+                    finished_at_ms: 1,
+                }),
+                vec![
+                    TimelineLabel::RepoReversible,
+                    TimelineLabel::ExternalSideEffectsUnknown,
+                ],
+            ))
+            .unwrap();
+        store
+            .write_operation(&TimelineOperationEnvelope::new(
+                TimelineOperationBodyV1::ToolCallFinished(ToolCallFinishedV1 {
+                    thread: "main".to_string(),
+                    step_id: step("tls-ignored"),
+                    branch_id: branch("tlb-main"),
+                    native: native("call-ignored"),
+                    status: objects::object::TimelineToolCallStatus::Succeeded,
+                    before_state: state1,
+                    after_state: state1,
+                    capture_state: Some(state1),
+                    capture_oplog_batch_id: None,
+                    changed: true,
+                    touched_paths: vec!["ignored.log".to_string()],
+                    payload: None,
+                    finished_at_ms: 2,
+                }),
+                vec![
+                    TimelineLabel::RepoReversible,
+                    TimelineLabel::IgnoredPathTouched,
+                ],
+            ))
+            .unwrap();
+
+        let snapshot = repo.timeline_navigation_snapshot(&store, "main").unwrap();
+        let external_id = step("tls-external");
+        let ignored_id = step("tls-ignored");
+        let external = snapshot
+            .steps
+            .iter()
+            .find(|candidate| candidate.step_id == external_id)
+            .expect("external step");
+        let ignored = snapshot
+            .steps
+            .iter()
+            .find(|candidate| candidate.step_id == ignored_id)
+            .expect("ignored step");
+
+        assert!(!external.has_boundary_warning);
+        assert!(ignored.has_boundary_warning);
     }
 }

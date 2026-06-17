@@ -521,34 +521,159 @@ fn relay_opencode(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Val
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimelineToolEvent {
+    Started,
+    Finished,
+}
+
+trait HarnessTimelineExtractor {
+    fn timeline_event(&self, event: &str) -> Option<TimelineToolEvent>;
+    fn native_tool_call(&self, payload: &Value) -> Option<NativeToolCallRefV1>;
+    fn tool_name(&self, payload: &Value) -> String;
+    fn tool_status(&self, payload: &Value) -> TimelineToolCallStatus;
+    fn payload_metadata(
+        &self,
+        event: &str,
+        payload: &Value,
+    ) -> Result<TimelineToolPayloadMetadata>;
+    fn touched_paths(&self, payload: &Value) -> Vec<String>;
+    fn capture_intent(&self, native: &NativeToolCallRefV1, payload: &Value) -> String;
+
+    fn timeline_thread(
+        &self,
+        runtime: &HarnessBridgeRuntime,
+        opened: &OpenSessionResult,
+    ) -> Result<String> {
+        if let Some(report) = runtime.reports.load(&opened.heddle_session_id)?
+            && let Some(thread) = report.thread
+        {
+            return Ok(thread);
+        }
+        match runtime.repo.head_ref()? {
+            Head::Attached { thread } => Ok(thread.to_string()),
+            Head::Detached { .. } => Ok("main".to_string()),
+        }
+    }
+
+    fn stable_step_id(&self, native: &NativeToolCallRefV1) -> TimelineStepId {
+        let key = format!(
+            "{}\0{}\0{}\0{}",
+            native.harness,
+            native.session_id.as_deref().unwrap_or(""),
+            native.message_id.as_deref().unwrap_or(""),
+            native.tool_call_id
+        );
+        let hash =
+            ContentHash::compute_typed("timeline-native-tool-call-v1", key.as_bytes()).to_hex();
+        TimelineStepId::new(format!("tls-{}", &hash[..24]))
+    }
+
+    fn started_labels(&self, _payload: &Value) -> Vec<TimelineLabel> {
+        vec![TimelineLabel::ExternalSideEffectsUnknown]
+    }
+
+    fn finished_labels(&self, changed: bool, _payload: &Value) -> Vec<TimelineLabel> {
+        if changed {
+            vec![
+                TimelineLabel::RepoReversible,
+                TimelineLabel::ExternalSideEffectsUnknown,
+            ]
+        } else {
+            vec![TimelineLabel::ExternalSideEffectsUnknown]
+        }
+    }
+}
+
+struct OpenCodeTimelineExtractor;
+
+impl HarnessTimelineExtractor for OpenCodeTimelineExtractor {
+    fn timeline_event(&self, event: &str) -> Option<TimelineToolEvent> {
+        match event {
+            "tool.execute.before" => Some(TimelineToolEvent::Started),
+            "tool.execute.after" => Some(TimelineToolEvent::Finished),
+            _ => None,
+        }
+    }
+
+    fn native_tool_call(&self, payload: &Value) -> Option<NativeToolCallRefV1> {
+        opencode_native_tool_call(payload)
+    }
+
+    fn tool_name(&self, payload: &Value) -> String {
+        opencode_tool_name(payload)
+    }
+
+    fn tool_status(&self, payload: &Value) -> TimelineToolCallStatus {
+        opencode_tool_status(payload)
+    }
+
+    fn payload_metadata(
+        &self,
+        event: &str,
+        payload: &Value,
+    ) -> Result<TimelineToolPayloadMetadata> {
+        opencode_payload_metadata(event, payload)
+    }
+
+    fn touched_paths(&self, payload: &Value) -> Vec<String> {
+        opencode_touched_paths(payload)
+    }
+
+    fn capture_intent(&self, native: &NativeToolCallRefV1, payload: &Value) -> String {
+        format!(
+            "OpenCode {} tool call {}",
+            self.tool_name(payload),
+            native.tool_call_id
+        )
+    }
+}
+
 fn record_opencode_timeline_event(
     runtime: &mut HarnessBridgeRuntime,
     event: &str,
     payload: &Value,
     opened: &OpenSessionResult,
 ) -> Result<()> {
-    match event {
-        "tool.execute.before" => record_opencode_tool_started(runtime, payload, opened),
-        "tool.execute.after" => record_opencode_tool_finished(runtime, payload, opened),
-        _ => Ok(()),
+    record_timeline_event(runtime, event, payload, opened, &OpenCodeTimelineExtractor)
+}
+
+fn record_timeline_event<E: HarnessTimelineExtractor>(
+    runtime: &mut HarnessBridgeRuntime,
+    event: &str,
+    payload: &Value,
+    opened: &OpenSessionResult,
+    extractor: &E,
+) -> Result<()> {
+    match extractor.timeline_event(event) {
+        Some(TimelineToolEvent::Started) => {
+            record_timeline_tool_started(runtime, event, payload, opened, extractor)
+        }
+        Some(TimelineToolEvent::Finished) => {
+            record_timeline_tool_finished(runtime, event, payload, opened, extractor)
+        }
+        None => Ok(()),
     }
 }
 
-fn record_opencode_tool_started(
+fn record_timeline_tool_started<E: HarnessTimelineExtractor>(
     runtime: &mut HarnessBridgeRuntime,
+    event: &str,
     payload: &Value,
     opened: &OpenSessionResult,
+    extractor: &E,
 ) -> Result<()> {
-    let Some(native) = opencode_native_tool_call(payload) else {
+    let Some(native) = extractor.native_tool_call(payload) else {
         return Ok(());
     };
     let Some(before_state) = current_change_id(&runtime.repo)? else {
         return Ok(());
     };
-    let thread = opencode_timeline_thread(runtime, opened)?;
+    let thread = extractor.timeline_thread(runtime, opened)?;
     let store = TimelineStore::open(runtime.repo.heddle_dir())?;
+    let _record_guard = store.lock_recording(&thread)?;
     let view = TimelineView::rebuild(&store)?;
-    let step_id = stable_opencode_step_id(&native);
+    let step_id = extractor.stable_step_id(&native);
     let (branch_id, parent_step_id) = timeline_position_for_new_tool_step(&view, &thread, &step_id);
     let envelope = TimelineOperationEnvelope::new(
         TimelineOperationBodyV1::ToolCallStarted(ToolCallStartedV1 {
@@ -557,48 +682,46 @@ fn record_opencode_tool_started(
             branch_id,
             parent_step_id,
             native,
-            tool_name: opencode_tool_name(payload),
+            tool_name: extractor.tool_name(payload),
             before_state,
-            payload: Some(opencode_payload_metadata("tool.execute.before", payload)?),
+            payload: Some(extractor.payload_metadata(event, payload)?),
             started_at_ms: Utc::now().timestamp_millis(),
         }),
-        vec![TimelineLabel::ExternalSideEffectsUnknown],
+        extractor.started_labels(payload),
     );
     store.write_operation(&envelope)?;
     Ok(())
 }
 
-fn record_opencode_tool_finished(
+fn record_timeline_tool_finished<E: HarnessTimelineExtractor>(
     runtime: &mut HarnessBridgeRuntime,
+    event: &str,
     payload: &Value,
     opened: &OpenSessionResult,
+    extractor: &E,
 ) -> Result<()> {
-    let Some(native) = opencode_native_tool_call(payload) else {
+    let Some(native) = extractor.native_tool_call(payload) else {
         return Ok(());
     };
     let Some(fallback_state) = current_change_id(&runtime.repo)? else {
         return Ok(());
     };
-    let thread = opencode_timeline_thread(runtime, opened)?;
+    let thread = extractor.timeline_thread(runtime, opened)?;
     let store = TimelineStore::open(runtime.repo.heddle_dir())?;
+    let _record_guard = store.lock_recording(&thread)?;
     let before_view = TimelineView::rebuild(&store)?;
-    let step_id = stable_opencode_step_id(&native);
+    let step_id = extractor.stable_step_id(&native);
     let (branch_id, _) = timeline_position_for_new_tool_step(&before_view, &thread, &step_id);
     let before_state = before_view
         .step(&thread, &step_id)
         .and_then(|step| step.before_state)
         .unwrap_or(fallback_state);
-    let touched_paths_before_capture = collect_worktree_changes(&runtime.repo)?
-        .into_keys()
-        .collect::<Vec<_>>();
-    let capture_state = if touched_paths_before_capture.is_empty() {
+    let has_worktree_changes_before_capture =
+        !collect_worktree_changes(&runtime.repo)?.is_empty();
+    let capture_state = if !has_worktree_changes_before_capture {
         None
     } else {
-        let intent = format!(
-            "OpenCode {} tool call {}",
-            opencode_tool_name(payload),
-            native.tool_call_id
-        );
+        let intent = extractor.capture_intent(&native, payload);
         create_snapshot(
             &runtime.repo,
             &runtime.user_config,
@@ -617,31 +740,27 @@ fn record_opencode_tool_finished(
         runtime.repo.head()?
     };
     let after_state = current_change_id(&runtime.repo)?.unwrap_or(fallback_state);
-    let mut touched_paths = opencode_touched_paths(payload);
-    merge_string_vec(&mut touched_paths, touched_paths_before_capture);
-    let changed = capture_state.is_some();
-    let labels = if changed {
-        vec![
-            TimelineLabel::RepoReversible,
-            TimelineLabel::ExternalSideEffectsUnknown,
-        ]
-    } else {
-        vec![TimelineLabel::ExternalSideEffectsUnknown]
-    };
+    let mut touched_paths = extractor.touched_paths(payload);
+    merge_string_vec(
+        &mut touched_paths,
+        changed_paths_between_states(&runtime.repo, before_state, after_state)?,
+    );
+    let changed = before_state != after_state;
+    let labels = extractor.finished_labels(changed, payload);
     let envelope = TimelineOperationEnvelope::new(
         TimelineOperationBodyV1::ToolCallFinished(ToolCallFinishedV1 {
             thread,
             step_id,
             branch_id,
             native,
-            status: opencode_tool_status(payload),
+            status: extractor.tool_status(payload),
             before_state,
             after_state,
             capture_state,
             capture_oplog_batch_id: None,
             changed,
             touched_paths,
-            payload: Some(opencode_payload_metadata("tool.execute.after", payload)?),
+            payload: Some(extractor.payload_metadata(event, payload)?),
             finished_at_ms: Utc::now().timestamp_millis(),
         }),
         labels,
@@ -676,33 +795,6 @@ fn opencode_native_tool_call(payload: &Value) -> Option<NativeToolCallRefV1> {
             .or_else(|| value_string(payload, &["message", "id"])),
         tool_call_id,
     })
-}
-
-fn stable_opencode_step_id(native: &NativeToolCallRefV1) -> TimelineStepId {
-    let key = format!(
-        "{}\0{}\0{}\0{}",
-        native.harness,
-        native.session_id.as_deref().unwrap_or(""),
-        native.message_id.as_deref().unwrap_or(""),
-        native.tool_call_id
-    );
-    let hash = ContentHash::compute_typed("opencode-native-tool-call", key.as_bytes()).to_hex();
-    TimelineStepId::new(format!("tls-{}", &hash[..24]))
-}
-
-fn opencode_timeline_thread(
-    runtime: &HarnessBridgeRuntime,
-    opened: &OpenSessionResult,
-) -> Result<String> {
-    if let Some(report) = runtime.reports.load(&opened.heddle_session_id)?
-        && let Some(thread) = report.thread
-    {
-        return Ok(thread);
-    }
-    match runtime.repo.head_ref()? {
-        Head::Attached { thread } => Ok(thread.to_string()),
-        Head::Detached { .. } => Ok("main".to_string()),
-    }
 }
 
 fn timeline_position_for_new_tool_step(
@@ -2900,6 +2992,33 @@ fn collect_worktree_changes(repo: &Repository) -> Result<BTreeMap<String, DiffKi
     Ok(changes)
 }
 
+fn changed_paths_between_states(
+    repo: &Repository,
+    before_state: ChangeId,
+    after_state: ChangeId,
+) -> Result<Vec<String>> {
+    if before_state == after_state {
+        return Ok(Vec::new());
+    }
+    let Some(before_state_obj) = repo.store().get_state(&before_state)? else {
+        return Err(anyhow!(
+            "timeline before state not found: {}",
+            before_state.short()
+        ));
+    };
+    let Some(after_state_obj) = repo.store().get_state(&after_state)? else {
+        return Err(anyhow!(
+            "timeline after state not found: {}",
+            after_state.short()
+        ));
+    };
+    let mut paths = BTreeSet::new();
+    for change in repo.diff_trees(&before_state_obj.tree, &after_state_obj.tree)? {
+        paths.insert(change.path);
+    }
+    Ok(paths.into_iter().collect())
+}
+
 fn diff_kind_name(kind: DiffKind) -> &'static str {
     match kind {
         DiffKind::Added => "added",
@@ -3913,6 +4032,22 @@ mod tests {
                 .any(|path| path == "preexisting.txt")
         );
         assert_eq!(closed.diff_summary.changed_file_count, 0);
+    }
+
+    #[test]
+    fn timeline_state_delta_paths_ignore_uncaptured_worktree_changes() {
+        let (temp, repo) = init_repo();
+        let repo_root = repo.root().to_path_buf();
+        std::fs::write(repo_root.join("tracked.txt"), b"one\n").unwrap();
+        let before = repo.snapshot(Some("seed".into()), None).unwrap();
+        std::fs::write(repo_root.join("tracked.txt"), b"two\n").unwrap();
+        let after = repo.snapshot(Some("advance".into()), None).unwrap();
+        std::fs::write(temp.path().join("ambient.txt"), b"not in the state delta\n").unwrap();
+
+        assert_eq!(
+            changed_paths_between_states(&repo, before.change_id, after.change_id).unwrap(),
+            vec!["tracked.txt"]
+        );
     }
 
     #[test]

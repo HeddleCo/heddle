@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use crate::thread_manifest::encode_thread_segment;
 
 pub const TIMELINE_MATERIALIZATION_RECOVERY_SCHEMA_VERSION: u16 = 1;
+pub const TIMELINE_OPERATION_INDEX_SCHEMA_VERSION: u16 = 1;
 const TIMELINE_DIR: &str = "timeline";
 const OPS_DIR: &str = "ops";
 const INDEXES_DIR: &str = "indexes";
@@ -30,7 +31,15 @@ const RECOVERY_DIR: &str = "recovery";
 const LOCKS_DIR: &str = "locks";
 const TMP_DIR: &str = "tmp";
 const LOCK_FILE: &str = "timeline.lock";
+const OPERATION_INDEX_FILE: &str = "operations.msgpack";
+const VIEW_CHECKPOINT_FILE: &str = "timeline-view.msgpack";
 const MATERIALIZATION_RECOVERY_EXT: &str = "materialization.msgpack";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct TimelineOperationIndex {
+    schema_version: u16,
+    operation_ids: Vec<TimelineOperationId>,
+}
 
 /// Versioned sidecar used to complete a timeline cursor move after crash.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,6 +141,14 @@ impl TimelineStore {
             }
             write_file_atomic(&path, bytes)?;
         }
+        let index_path = self.operation_index_path();
+        let mut operation_ids = read_operation_index_unlocked(&index_path)
+            .unwrap_or(None)
+            .unwrap_or_default();
+        if !operation_ids.contains(&id) {
+            operation_ids.push(id);
+            write_operation_index_unlocked(&index_path, &operation_ids)?;
+        }
         Ok(id)
     }
 
@@ -164,6 +181,41 @@ impl TimelineStore {
         let hex = id.to_hex();
         let (prefix, rest) = hex.split_at(2);
         self.ops_dir().join(prefix).join(format!("{rest}.msgpack"))
+    }
+
+    pub(crate) fn read_operation_index(&self) -> Result<Option<Vec<TimelineOperationId>>> {
+        let path = self.operation_index_path();
+        let _guard = self.lock.read().map_err(timeline_lock_error)?;
+        read_operation_index_unlocked(&path)
+    }
+
+    pub(crate) fn write_operation_index(
+        &self,
+        operation_ids: &[TimelineOperationId],
+    ) -> Result<()> {
+        let path = self.operation_index_path();
+        let _guard = self.lock.write().map_err(timeline_lock_error)?;
+        write_operation_index_unlocked(&path, operation_ids)
+    }
+
+    pub(crate) fn read_view_checkpoint_bytes(&self) -> Result<Option<Vec<u8>>> {
+        let path = self.view_checkpoint_path();
+        let _guard = self.lock.read().map_err(timeline_lock_error)?;
+        match fs::read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub(crate) fn write_view_checkpoint_bytes(&self, bytes: &[u8]) -> Result<()> {
+        let path = self.view_checkpoint_path();
+        let _guard = self.lock.write().map_err(timeline_lock_error)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        write_file_atomic(&path, bytes)?;
+        Ok(())
     }
 
     pub fn stage_materialization_recovery(
@@ -239,13 +291,67 @@ impl TimelineStore {
         ))
     }
 
+    pub fn lock_recording(&self, thread: &str) -> Result<WriteLockGuard> {
+        RepoLock::at(self.recording_lock_path(thread))
+            .write()
+            .map_err(timeline_lock_error)
+    }
+
+    pub fn recording_lock_path(&self, thread: &str) -> PathBuf {
+        self.root
+            .join(LOCKS_DIR)
+            .join(format!("{}.recording.lock", encode_thread_segment(thread)))
+    }
+
     fn ops_dir(&self) -> PathBuf {
         self.root.join(OPS_DIR)
+    }
+
+    fn operation_index_path(&self) -> PathBuf {
+        self.root.join(INDEXES_DIR).join(OPERATION_INDEX_FILE)
+    }
+
+    fn view_checkpoint_path(&self) -> PathBuf {
+        self.root.join(VIEWS_DIR).join(VIEW_CHECKPOINT_FILE)
     }
 
     fn lock_path(&self) -> PathBuf {
         self.root.join(LOCK_FILE)
     }
+}
+
+fn read_operation_index_unlocked(path: &Path) -> Result<Option<Vec<TimelineOperationId>>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    let index: TimelineOperationIndex =
+        rmp_serde::from_slice(&bytes).map_err(|err| HeddleError::InvalidObject(err.to_string()))?;
+    if index.schema_version != TIMELINE_OPERATION_INDEX_SCHEMA_VERSION {
+        return Err(HeddleError::InvalidObject(format!(
+            "unsupported timeline operation index schema version {}",
+            index.schema_version
+        )));
+    }
+    Ok(Some(index.operation_ids))
+}
+
+fn write_operation_index_unlocked(
+    path: &Path,
+    operation_ids: &[TimelineOperationId],
+) -> Result<()> {
+    let index = TimelineOperationIndex {
+        schema_version: TIMELINE_OPERATION_INDEX_SCHEMA_VERSION,
+        operation_ids: operation_ids.to_vec(),
+    };
+    let bytes = rmp_serde::to_vec_named(&index)
+        .map_err(|err| HeddleError::Serialization(err.to_string()))?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    write_file_atomic(path, &bytes)?;
+    Ok(())
 }
 
 fn timeline_codec_error(err: TimelineCodecError) -> HeddleError {
@@ -306,6 +412,18 @@ mod tests {
             store.read_operation_bytes(&id).unwrap().unwrap(),
             envelope.encode().unwrap()
         );
+    }
+
+    #[test]
+    fn timeline_store_repairs_corrupt_operation_index_on_write() {
+        let temp = TempDir::new().unwrap();
+        let heddle_dir = temp.path().join(".heddle");
+        let store = TimelineStore::open(&heddle_dir).unwrap();
+        let id = store.write_operation(&sample_envelope()).unwrap();
+        std::fs::write(store.operation_index_path(), b"not msgpack").unwrap();
+
+        assert_eq!(store.write_operation(&sample_envelope()).unwrap(), id);
+        assert_eq!(store.read_operation_index().unwrap(), Some(vec![id]));
     }
 
     #[test]
