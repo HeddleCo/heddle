@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared worktree walking infrastructure.
 
-use objects::store::ObjectStore;
 use std::{
     fs::{self, File},
     io::Read,
@@ -12,6 +11,7 @@ use std::{
 use objects::{
     error::{HeddleError, Result},
     object::{ContentHash, Tree, TreeEntry},
+    store::ObjectStore,
 };
 
 use crate::{
@@ -539,8 +539,9 @@ fn path_stays_within_base_lexically(base: &Path, path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_symlink_target;
     use std::path::Path;
+
+    use super::validate_symlink_target;
 
     #[test]
     #[cfg(unix)]

@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Stash worktree helper operations.
 
-use objects::store::ObjectStore;
 use std::fs;
 
 use anyhow::{Result, anyhow};
 use objects::{
     fs_ops::remove_path_recursively,
     object::{Blob, ContentHash, Tree, TreeEntry},
+    store::ObjectStore,
     worktree::WorktreeStatus,
 };
 use repo::{Repository, StashEntry};

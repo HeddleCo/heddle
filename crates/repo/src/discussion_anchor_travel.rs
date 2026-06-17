@@ -30,12 +30,13 @@
 
 #![cfg(feature = "tree-sitter-symbols")]
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 use objects::object::{Discussion, SymbolAnchor};
-use semantic::analysis::{SimilarityMethod, detect_file_renames};
-use semantic::symbol_resolver::resolve_symbol_lines;
+use semantic::{
+    analysis::{SimilarityMethod, detect_file_renames},
+    symbol_resolver::resolve_symbol_lines,
+};
 
 /// Confidence threshold for accepting a file rename when re-anchoring a
 /// discussion. Below this we'd rather mark the discussion `orphaned`
@@ -92,17 +93,12 @@ fn travel_one(
     renamed: &HashMap<String, String>,
 ) -> DiscussionAnchorUpdate {
     let original = &discussion.anchor;
-    let old_body =
-        old_files
-            .get(&original.file)
-            .and_then(|src| match resolve_symbol_lines(
-                src,
-                Path::new(&original.file),
-                &original.symbol,
-            ) {
-                Ok((start, end)) => Some(extract_body(src, start, end)),
-                Err(_) => None,
-            });
+    let old_body = old_files.get(&original.file).and_then(|src| {
+        match resolve_symbol_lines(src, Path::new(&original.file), &original.symbol) {
+            Ok((start, end)) => Some(extract_body(src, start, end)),
+            Err(_) => None,
+        }
+    });
 
     // Case 1/2: file present in new tree, symbol resolves there.
     if let Some(new_src) = new_files.get(&original.file)
@@ -167,12 +163,22 @@ fn compute_renames(
     let deleted: Vec<(std::path::PathBuf, String)> = old_files
         .iter()
         .filter(|(p, _)| !new_files.contains_key(*p))
-        .map(|(p, bytes)| (std::path::PathBuf::from(p), String::from_utf8_lossy(bytes).into_owned()))
+        .map(|(p, bytes)| {
+            (
+                std::path::PathBuf::from(p),
+                String::from_utf8_lossy(bytes).into_owned(),
+            )
+        })
         .collect();
     let added: Vec<(std::path::PathBuf, String)> = new_files
         .iter()
         .filter(|(p, _)| !old_files.contains_key(*p))
-        .map(|(p, bytes)| (std::path::PathBuf::from(p), String::from_utf8_lossy(bytes).into_owned()))
+        .map(|(p, bytes)| {
+            (
+                std::path::PathBuf::from(p),
+                String::from_utf8_lossy(bytes).into_owned(),
+            )
+        })
         .collect();
     if deleted.is_empty() || added.is_empty() {
         return HashMap::new();
@@ -218,8 +224,9 @@ fn extract_body(source: &[u8], start_line: u32, end_line: u32) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use objects::object::{ChangeId, DiscussionResolution, DiscussionTurn};
+
+    use super::*;
 
     fn discussion(id: &str, file: &str, symbol: &str) -> Discussion {
         Discussion {

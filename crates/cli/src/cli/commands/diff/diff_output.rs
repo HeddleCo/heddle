@@ -9,9 +9,11 @@ use std::{
 
 use objects::object::FileMode;
 
-use super::diff_compute::trim_added_decorations_for_display;
-use super::diff_types::{
-    DiffOutput, FileChange, LineDiff, SemanticChangeEntry, should_render_modified_pair,
+use super::{
+    diff_compute::trim_added_decorations_for_display,
+    diff_types::{
+        DiffOutput, FileChange, LineDiff, SemanticChangeEntry, should_render_modified_pair,
+    },
 };
 use crate::cli::style;
 
@@ -1489,8 +1491,7 @@ mod tests {
 
     #[cfg(unix)]
     fn pipe_git_apply(dir: &std::path::Path, args: &[&str], patch: &[u8]) -> std::process::Output {
-        use std::io::Write;
-        use std::process::Stdio;
+        use std::{io::Write, process::Stdio};
 
         let mut child = hermetic_git_command(dir, args)
             .stdin(Stdio::piped())

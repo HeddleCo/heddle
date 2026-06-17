@@ -27,14 +27,13 @@
 
 use std::collections::BTreeSet;
 
-use serde_json::Value;
-use tempfile::TempDir;
-
 use cli::cli::commands::{
     CLONE_CONNECTION_OUTPUT_KIND, CLONE_OUTPUT_KIND, build_command_catalog,
     documented_samples_with_bound_verbs, operator_emission_output_kinds, operator_envelope_verbs,
     schema_for_verb,
 };
+use serde_json::Value;
+use tempfile::TempDir;
 
 use super::{heddle, heddle_output};
 

@@ -350,14 +350,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
-    use std::path::Path;
+    use std::{cell::Cell, path::Path};
 
     use objects::object::{DiffKind, FileChangeSet};
 
     use super::*;
-    use crate::cache::SemanticParseCache;
-    use crate::diff::SemanticBudget;
+    use crate::{cache::SemanticParseCache, diff::SemanticBudget};
 
     #[test]
     fn diff_budget_skips_load_past_cap() {

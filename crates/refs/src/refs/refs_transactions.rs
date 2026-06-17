@@ -496,14 +496,18 @@ impl RefManager {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
 
     use objects::object::MarkerName;
     use tempfile::TempDir;
 
-    use super::super::reconcile::{LoadRequest, Loaded, ReconcileOutcome, RefReconciler};
-    use super::*;
+    use super::{
+        super::reconcile::{LoadRequest, Loaded, ReconcileOutcome, RefReconciler},
+        *,
+    };
 
     fn create_ref_manager() -> (TempDir, RefManager) {
         let temp_dir = TempDir::new().unwrap();

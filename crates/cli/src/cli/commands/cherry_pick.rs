@@ -2,8 +2,7 @@
 //! Cherry-pick command - apply specific commits.
 
 use anyhow::Result;
-use objects::object::Attribution;
-use objects::store::ObjectStore;
+use objects::{object::Attribution, store::ObjectStore};
 use repo::Repository;
 
 use super::{advice::RecoveryAdvice, worktree_safety::ensure_worktree_clean};

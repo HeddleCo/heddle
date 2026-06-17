@@ -7,11 +7,13 @@ mod context_query;
 use anyhow::{Result, anyhow};
 pub use context_mutate::*;
 pub use context_query::*;
-use objects::object::{
-    Annotation, AnnotationKind, AnnotationScope, AnnotationStatus, ContentHash, ContextTarget,
-    State,
+use objects::{
+    object::{
+        Annotation, AnnotationKind, AnnotationScope, AnnotationStatus, ContentHash, ContextTarget,
+        State,
+    },
+    store::ObjectStore,
 };
-use objects::store::ObjectStore;
 use refs::Head;
 use repo::Repository;
 use serde::Serialize;

@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Import Git commits into Heddle states functionality.
 
-use objects::store::ObjectStore;
 use std::{collections::HashSet, path::Path};
 
 use chrono::{DateTime, TimeZone, Utc};
-use objects::object::{
-    Agent, Attribution, ChangeId, MarkerName, Principal, State, Status, ThreadName,
-    parse_commit_extension_headers,
+use objects::{
+    object::{
+        Agent, Attribution, ChangeId, MarkerName, Principal, State, Status, ThreadName,
+        parse_commit_extension_headers,
+    },
+    store::ObjectStore,
 };
 use refs::{Head, RefExpectation};
 use repo::{Repository as HeddleRepository, ResignOutcome, ThreadId};

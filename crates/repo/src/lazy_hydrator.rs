@@ -247,8 +247,10 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use objects::object::{Blob, ContentHash};
-    use objects::store::ObjectStore;
+    use objects::{
+        object::{Blob, ContentHash},
+        store::ObjectStore,
+    };
     use tempfile::TempDir;
 
     use super::*;

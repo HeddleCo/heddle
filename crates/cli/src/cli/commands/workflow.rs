@@ -2,8 +2,10 @@
 use std::collections::HashSet;
 
 use anyhow::{Context, Result, anyhow};
-use objects::object::{ChangeId, State, ThreadName};
-use objects::store::ObjectStore;
+use objects::{
+    object::{ChangeId, State, ThreadName},
+    store::ObjectStore,
+};
 use oplog::{OpBatch, OpLogBackend, OpRecord};
 use repo::{Repository, Thread, ThreadIntegrationPolicy, thread_flag};
 use serde::Serialize;
@@ -1535,9 +1537,10 @@ fn land_text_step(step: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::*;
     use crate::cli::commands::command_catalog::validate_recommended_action;
-    use std::path::{Path, PathBuf};
 
     fn thread_with_execution_path(execution_path: PathBuf) -> Thread {
         Thread {

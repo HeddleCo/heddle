@@ -534,11 +534,15 @@ fn undo_recovery_is_scoped_per_checkout_on_shared_ref_root() {
 // record-before-publish ordering — without the `repo`/`oplog` layer.
 
 mod chokepoint {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    };
 
-    use objects::error::Result;
-    use objects::object::{ChangeId, MarkerName, ThreadName};
+    use objects::{
+        error::Result,
+        object::{ChangeId, MarkerName, ThreadName},
+    };
     use tempfile::TempDir;
 
     use super::super::{

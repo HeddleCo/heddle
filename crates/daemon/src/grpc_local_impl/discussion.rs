@@ -18,11 +18,13 @@ use grpc::heddle::v1::{
     ListDiscussionsResponse, OpenDiscussionRequest, PathSymbolRef, ResolveDiscussionRequest,
     discussion_service_server::DiscussionService,
 };
-use objects::object::{
-    Blob, ChangeId, Discussion, DiscussionResolution, DiscussionTurn, DiscussionsBlob, Principal,
-    State, SymbolAnchor, VisibilityTier,
+use objects::{
+    object::{
+        Blob, ChangeId, Discussion, DiscussionResolution, DiscussionTurn, DiscussionsBlob,
+        Principal, State, SymbolAnchor, VisibilityTier,
+    },
+    store::ObjectStore,
 };
-use objects::store::ObjectStore;
 use prost::Message;
 use repo::Repository;
 use tonic::{Request, Response, Status};

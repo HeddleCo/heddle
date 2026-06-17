@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Tree types: entries, structure, and supporting enums.
 
-use std::fmt;
-use std::path::Path;
+use std::{fmt, path::Path};
 
 use serde::{Deserialize, Serialize};
 

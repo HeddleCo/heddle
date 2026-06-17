@@ -4,8 +4,10 @@
 use std::sync::Arc;
 
 use crypto::{Signer, StateSigningExt, load_signer, verify_state_signature_bytes};
-use objects::object::{ChangeId, ContentHash, SignatureStatus, State, StateSignature};
-use objects::store::ObjectStore;
+use objects::{
+    object::{ChangeId, ContentHash, SignatureStatus, State, StateSignature},
+    store::ObjectStore,
+};
 use tracing::{debug, instrument};
 
 use super::{HeddleError, Repository, Result};

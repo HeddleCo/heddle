@@ -13,13 +13,13 @@
 //! logic in one place and lets `crates/mount` avoid pulling in
 //! `crates/cli` deps.
 
-use objects::store::ObjectStore;
 use std::path::Path;
 
 use chrono::Utc;
 use objects::{
     error::HeddleError,
     object::{ChangeId, State, ThreadName, Tree, Verification},
+    store::ObjectStore,
 };
 
 use crate::{

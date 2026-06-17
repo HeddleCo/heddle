@@ -15,7 +15,6 @@
 //! path) so a leaked secret is scrubbed everywhere it appears — across
 //! renames, copies, and parallel branches.
 
-use objects::store::ObjectStore;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
@@ -23,6 +22,7 @@ use chrono::Utc;
 use crypto::{Signer, load_signer, verify_payload_signature};
 use objects::{
     object::{ChangeId, ContentHash, Redaction, RedactionsBlob, StateSignature},
+    store::ObjectStore,
     worktree::should_ignore,
 };
 use oplog::OpLogBackend;

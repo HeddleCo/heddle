@@ -60,7 +60,10 @@ impl From<&OplogRecoveryReport> for RecoverOutput {
                 .quarantine_path
                 .as_ref()
                 .map(|p| p.display().to_string()),
-            sidecar_path: report.sidecar_path.as_ref().map(|p| p.display().to_string()),
+            sidecar_path: report
+                .sidecar_path
+                .as_ref()
+                .map(|p| p.display().to_string()),
         }
     }
 }

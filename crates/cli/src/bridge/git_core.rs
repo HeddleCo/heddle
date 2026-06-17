@@ -16,15 +16,15 @@ use objects::{
 };
 use refs::Head;
 use repo::Repository as HeddleRepository;
-use sley::plumbing::sley_core::ByteString as GitByteString;
-use sley::remote::{
-    FetchOptions, LsRemoteFilter, NoCredentials, PushActionPlan, PushCommand, PushOptions,
-    SilentProgress,
-};
 use sley::{
     BString as GitBString, DeleteRef, FullName, GitObjectType, GitTime, Index, IndexEntry,
     IndexWriteOptions, ObjectFormat, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository, Signature,
+    plumbing::sley_core::ByteString as GitByteString,
+    remote::{
+        FetchOptions, LsRemoteFilter, NoCredentials, PushActionPlan, PushCommand, PushOptions,
+        SilentProgress,
+    },
 };
 
 use super::{

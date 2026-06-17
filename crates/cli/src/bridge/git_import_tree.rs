@@ -8,17 +8,21 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use objects::object::{Blob, ChangeId, ContentHash, FileMode, State, Tree, TreeEntry};
-use objects::store::{
-    CompressionConfig, ObjectStore,
-    pack::{ObjectType as PackObjectType, PackObjectId, StreamingPackBuilder},
+use objects::{
+    object::{Blob, ChangeId, ContentHash, FileMode, State, Tree, TreeEntry},
+    store::{
+        CompressionConfig, ObjectStore,
+        pack::{ObjectType as PackObjectType, PackObjectId, StreamingPackBuilder},
+    },
+    util::{GitTreeNameClassification, GitTreeNameLossyAction, classify_git_tree_name},
 };
-use objects::util::{GitTreeNameClassification, GitTreeNameLossyAction, classify_git_tree_name};
 use repo::Repository as HeddleRepository;
 use sley::{GitObjectType, ObjectId as SleyObjectId, Repository as SleyRepository};
 
-use crate::bridge::git_core::{GitBridgeError, GitResult};
-use crate::bridge::git_util::{GitImportOptions, LossyGitImportEntry};
+use crate::bridge::{
+    git_core::{GitBridgeError, GitResult},
+    git_util::{GitImportOptions, LossyGitImportEntry},
+};
 
 const SUBMODULE_PREFIX: &str = "heddle-submodule:";
 

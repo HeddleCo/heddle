@@ -13,8 +13,7 @@ use crate::cli::{
     ActorCommands, AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands,
     HookCommands, IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands,
     RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands, ShellCommands,
-    StashCommands,
-    ThreadCommands, ThreadMarkerCommands, VisibilityCommands,
+    StashCommands, ThreadCommands, ThreadMarkerCommands, VisibilityCommands,
     cli_args::{DiscussCommands, ReviewCommands, TransactionCommands},
     render::shell_quote,
 };
@@ -5842,8 +5841,9 @@ mod tests {
     /// separately by `tests/cli_integration/output_kind_invariant.rs`.
     #[test]
     fn schema_output_kind_discriminators_are_complete_and_consistent() {
-        use crate::cli::commands::schema_for_verb;
         use std::collections::BTreeSet;
+
+        use crate::cli::commands::schema_for_verb;
 
         fn resolve_schema_ref<'a>(
             root: &'a serde_json::Value,

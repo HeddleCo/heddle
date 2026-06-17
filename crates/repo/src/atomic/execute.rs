@@ -15,8 +15,10 @@ use std::{
 use objects::error::{HeddleError, Result};
 use oplog::IsolationPrecondition;
 
-use super::traits::{AtomicMutation, StagedCommit};
-use super::tx::{CommitOutcome, Tx};
+use super::{
+    traits::{AtomicMutation, StagedCommit},
+    tx::{CommitOutcome, Tx},
+};
 use crate::Repository;
 
 /// Run a mutation as one all-or-nothing transaction.

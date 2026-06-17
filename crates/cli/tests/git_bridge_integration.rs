@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
@@ -15,18 +14,6 @@ use std::{
 };
 
 use base64::Engine;
-use objects::object::{
-    Blob, ChangeId, ContentHash, EntryType, FileMode, MarkerName, ThreadName, Tree, TreeEntry,
-};
-use repo::Repository;
-use sley::plumbing::sley_core::ByteString as GitByteString;
-use sley::plumbing::sley_object::EncodedObject;
-use sley::{
-    CommitObject, EntryKind, GitObjectType, GitTime, ObjectId, RefPrecondition, ReferenceTarget,
-    Repository as SleyRepository, Signature, TagObject,
-};
-use tempfile::TempDir;
-
 use cli::bridge::{
     GitBridge,
     git_core::{
@@ -46,6 +33,19 @@ use cli::bridge::{
         write_exported_refs, write_mirror_managed_refs,
     },
 };
+use objects::{
+    object::{
+        Blob, ChangeId, ContentHash, EntryType, FileMode, MarkerName, ThreadName, Tree, TreeEntry,
+    },
+    store::ObjectStore,
+};
+use repo::Repository;
+use sley::{
+    CommitObject, EntryKind, GitObjectType, GitTime, ObjectId, RefPrecondition, ReferenceTarget,
+    Repository as SleyRepository, Signature, TagObject,
+    plumbing::{sley_core::ByteString as GitByteString, sley_object::EncodedObject},
+};
+use tempfile::TempDir;
 
 trait SleyTestRepoExt {
     fn find_tree(&self, oid: ObjectId) -> Result<sley::TreeObject, String>;

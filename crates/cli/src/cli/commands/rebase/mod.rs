@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Rebase command - replay commits onto another thread.
 
-use objects::store::ObjectStore;
 use std::fs;
 
 use anyhow::{Context, Result, anyhow};
-use objects::object::ThreadName;
+use objects::{object::ThreadName, store::ObjectStore};
 use refs::Head;
 use repo::Repository;
 use serde_json::{Value, json};
@@ -33,13 +32,13 @@ mod rebase_state;
 use rebase_ops::{
     flush_rebase_batch, mint_rebase_transaction_id, replay_commits, replay_commits_silent,
 };
-
-use super::ff_record::ff_advance_deferred;
 pub(crate) use rebase_state::load_rebase_state as load_persisted_rebase_state;
 use rebase_state::{
     RebaseState, collect_commits_to_rebase, is_ancestor_of, load_rebase_state,
     load_rebase_state_for_abort, save_rebase_state,
 };
+
+use super::ff_record::ff_advance_deferred;
 
 const REBASE_STATE_FILE: &str = "REBASE_STATE";
 

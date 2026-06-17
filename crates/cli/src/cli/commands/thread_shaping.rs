@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Heddle-native thread shaping helpers.
 
-use objects::store::ObjectStore;
 use std::{fs, path::Path};
 
 use anyhow::{Result, anyhow};
 use objects::{
     fs_ops::remove_path_recursively,
     object::{ChangeId, ThreadName},
+    store::ObjectStore,
 };
 use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, Repository, RepositoryOperationStatus};
 use serde::Serialize;

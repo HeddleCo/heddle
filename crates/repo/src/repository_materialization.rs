@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Tree materialization helpers.
 
-use objects::store::ObjectStore;
 use std::{
     collections::BTreeSet,
     fs,
@@ -15,6 +14,7 @@ use std::{
 use objects::{
     fs_atomic::enrich_fs_error,
     object::{ChangeId, ContentHash, EntryType, Tree},
+    store::ObjectStore,
 };
 use tracing::{debug, instrument};
 
@@ -934,8 +934,7 @@ fn requested_materialization_threads() -> Option<NonZeroUsize> {
 mod tests {
     use std::{num::NonZeroUsize, path::PathBuf};
 
-    use objects::store::ObjectStore;
-    use objects::{fs_clone::filesystem_supports_reflink, object::Blob};
+    use objects::{fs_clone::filesystem_supports_reflink, object::Blob, store::ObjectStore};
     use tempfile::TempDir;
 
     use super::{

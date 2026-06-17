@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use objects::object::ChangeId;
+use objects::{object::ChangeId, store::ObjectStore};
 use repo::{AudienceTier, CheckoutMaterialization, Repository};
 
 use super::super::advice::RecoveryAdvice;
@@ -481,10 +480,11 @@ fn worktree_target_existing_heddle_advice(path: &Path) -> RecoveryAdvice {
 
 #[cfg(test)]
 mod gate_tests {
-    use super::*;
     use chrono::Utc;
     use objects::object::{Principal, StateVisibility, ThreadName, VisibilityTier};
     use tempfile::TempDir;
+
+    use super::*;
 
     // The operator-local courtesy placeholder filename written by the gated
     // checkout chokepoint when a state is under-tier for the audience. Mirrored

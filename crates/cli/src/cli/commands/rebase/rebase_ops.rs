@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Rebase operation execution — applying commits onto a new base.
 
-use objects::store::ObjectStore;
 use std::fs;
 
 use anyhow::{Result, anyhow};
-use objects::object::{Blob, ChangeId, ContentHash, EntryType, State};
+use objects::{
+    object::{Blob, ChangeId, ContentHash, EntryType, State},
+    store::ObjectStore,
+};
 use oplog::OpRecord;
 use refs::Head;
 use repo::Repository;
@@ -906,9 +908,11 @@ mod tests {
     /// barrier to maximise the chance of concurrent clock reads.
     #[test]
     fn mint_rebase_transaction_id_is_unique_under_thread_contention() {
-        use std::collections::HashSet;
-        use std::sync::{Arc, Barrier};
-        use std::thread;
+        use std::{
+            collections::HashSet,
+            sync::{Arc, Barrier},
+            thread,
+        };
 
         const N_THREADS: usize = 32;
         const N_PER_THREAD: usize = 64;
@@ -972,8 +976,10 @@ mod tests {
     /// so exactly one batch lands regardless of contention.
     #[test]
     fn flush_rebase_batch_is_atomic_across_concurrent_continues() {
-        use std::sync::{Arc, Barrier};
-        use std::thread;
+        use std::{
+            sync::{Arc, Barrier},
+            thread,
+        };
 
         const N_THREADS: usize = 8;
 

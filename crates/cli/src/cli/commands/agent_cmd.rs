@@ -3,10 +3,12 @@
 
 use anyhow::{Result, anyhow};
 use chrono::Utc;
-use objects::object::ThreadName;
-use objects::store::ObjectStore;
-use objects::store::{
-    AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ReserveOutcome, current_boot_id,
+use objects::{
+    object::ThreadName,
+    store::{
+        AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ObjectStore, ReserveOutcome,
+        current_boot_id,
+    },
 };
 use oplog::OpLogBackend;
 use refs::{Head, RefExpectation};

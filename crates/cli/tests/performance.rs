@@ -2,7 +2,6 @@
 //!
 //! Tests for verifying system behavior with large repositories and files.
 
-use objects::store::ObjectStore;
 use std::{
     path::Path,
     process::Command,
@@ -11,7 +10,10 @@ use std::{
 
 use objects::{
     object::{Blob, ChangeId, ContentHash},
-    store::{CompressionConfig, PackBuilder, PackObjectId, pack::ObjectType as PackObjectType},
+    store::{
+        CompressionConfig, ObjectStore, PackBuilder, PackObjectId,
+        pack::ObjectType as PackObjectType,
+    },
 };
 use proto::{ObjectData, ObjectId, ObjectType};
 use repo::Repository;

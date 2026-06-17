@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pull, remote management, and serve commands.
 
-use objects::store::ObjectStore;
 #[cfg(feature = "client")]
 use std::net::SocketAddr;
 use std::{
@@ -16,14 +15,17 @@ use heddle_client::grpc_hosted::{HostedAuthMode, PullMaterialization};
 use objects::{
     fs_atomic::write_file_atomic,
     object::{ChangeId, ThreadName, Tree},
+    store::ObjectStore,
 };
 use refs::Head;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
-use sley::plumbing::sley_config::{
-    ConfigIncludeContext, ConfigOriginKind, ConfigScope, ConfigStack, ConfigStackEntry,
+use sley::{
+    GitConfig, Repository as SleyRepository,
+    plumbing::sley_config::{
+        ConfigIncludeContext, ConfigOriginKind, ConfigScope, ConfigStack, ConfigStackEntry,
+    },
 };
-use sley::{GitConfig, Repository as SleyRepository};
 
 use super::super::{
     action_line::print_next,

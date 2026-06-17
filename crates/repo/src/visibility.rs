@@ -184,8 +184,9 @@ pub fn visible(visibility: &VisibilityTier, audience: &AudienceTier) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use objects::object::{Annotation, AnnotationScope, AnnotationStatus, VisibilityTier};
+
+    use super::*;
 
     fn ann(id: &str, vis: VisibilityTier) -> Annotation {
         Annotation {

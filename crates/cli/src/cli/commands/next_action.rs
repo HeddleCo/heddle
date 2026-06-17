@@ -6,12 +6,14 @@ use repo::{GitOverlayImportHint, GitRemoteTrackingStatus, RepositoryOperationSta
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::cli::render::write_stdout;
-
-use super::command_catalog::{split_recommended_action, validate_recommended_action};
-use super::git_overlay_health::{
-    RepositoryVerificationState, import_hint_includes_active_branch, remote_tracking_next_action,
+use super::{
+    command_catalog::{split_recommended_action, validate_recommended_action},
+    git_overlay_health::{
+        RepositoryVerificationState, import_hint_includes_active_branch,
+        remote_tracking_next_action,
+    },
 };
+use crate::cli::render::write_stdout;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NextActionScope {
@@ -447,8 +449,9 @@ pub(crate) fn non_empty_action(action: Option<&str>) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     fn ctx(command: &'static [&'static str]) -> NextActionValidationContext<'static> {
         NextActionValidationContext::new(command, repo::RepositoryCapability::NativeHeddle)

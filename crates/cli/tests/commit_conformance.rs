@@ -32,14 +32,18 @@
 //! Tag-object reconstruction (`reconstruct_tag_bytes`) is deferred to #575,
 //! where annotated tags become first-class content-addressed objects.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
-use cli::Repository;
-use cli::bridge::git_core::GitBridge;
-use cli::bridge::git_import::import_all_with_options;
-use cli::bridge::git_reconstruct::commit_object_id;
-use cli::bridge::git_util::GitImportOptions;
+use cli::{
+    Repository,
+    bridge::{
+        git_core::GitBridge, git_import::import_all_with_options,
+        git_reconstruct::commit_object_id, git_util::GitImportOptions,
+    },
+};
 use sley::{ObjectId, Repository as SleyRepository};
 use tempfile::TempDir;
 

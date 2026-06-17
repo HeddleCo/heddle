@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! State resolution helpers for the Repository.
 
-use objects::object::{Agent, ChangeId};
-use objects::store::ObjectStore;
+use objects::{
+    object::{Agent, ChangeId},
+    store::ObjectStore,
+};
 
 use super::{HeddleError, Repository, Result};
 
@@ -134,8 +136,10 @@ fn resolve_short_change_id(repo: &Repository, spec: &str) -> Result<Option<Chang
 mod tests {
     use std::fs;
 
-    use objects::object::{ChangeId, MarkerName};
-    use objects::store::ObjectStore;
+    use objects::{
+        object::{ChangeId, MarkerName},
+        store::ObjectStore,
+    };
     use tempfile::TempDir;
 
     use crate::{HeddleError, Repository};

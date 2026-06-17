@@ -2514,8 +2514,7 @@ mod tests {
     use std::fs;
 
     use clap::Parser as _;
-    use repo::AgentUsageSummary;
-    use repo::Repository;
+    use repo::{AgentUsageSummary, Repository};
     use serde_json::Value;
     use tempfile::TempDir;
 

@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Reference manager: threads, markers, HEAD, and packed refs.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use objects::{
     error::{HeddleError, Result},

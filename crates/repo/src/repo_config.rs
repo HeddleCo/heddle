@@ -3,8 +3,7 @@
 
 use std::{io::Read, path::Path};
 
-use objects::fs_atomic::write_file_atomic;
-use objects::object::VisibilityTier;
+use objects::{fs_atomic::write_file_atomic, object::VisibilityTier};
 use serde::{Deserialize, Serialize};
 
 use super::Result;

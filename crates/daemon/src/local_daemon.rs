@@ -274,8 +274,7 @@ fn process_exe_path(pid: i32) -> Option<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn process_exe_path(pid: i32) -> Option<PathBuf> {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
 
     let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     // SAFETY: buf is owned and large enough per the macOS contract.

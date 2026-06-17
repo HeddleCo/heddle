@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::ObjectStore;
 use std::{collections::BTreeSet, path::Path};
 
 use anyhow::Result;
 use chrono::Utc;
-use objects::object::ThreadName;
+use objects::{object::ThreadName, store::ObjectStore};
 use repo::{
     GitOverlayImportHint, GitRemoteTrackingStatus, OperationKind, OperationScope, Repository,
     RepositoryOperationStatus, ThreadFreshness, ThreadIntegrationPolicy, ThreadManager,
@@ -745,10 +744,11 @@ mod tests {
     // and fail validation (the render failure Codex flagged for thread ids).
     #[test]
     fn validated_resolve_action_with_spaced_path_passes_only_when_quoted() {
+        use repo::shell_quote;
+
         use crate::cli::commands::next_action::{
             NextActionValidationContext, validated_json_string,
         };
-        use repo::shell_quote;
 
         let path = "my conflicted file.txt";
         let context = NextActionValidationContext::without_repo(&["continue"]);
@@ -794,10 +794,11 @@ mod tests {
     // P1 cannot recur.
     #[test]
     fn blocked_land_with_unvalidated_thread_id_passes_only_when_quoted() {
+        use repo::shell_quote;
+
         use crate::cli::commands::next_action::{
             NextActionValidationContext, validated_json_string,
         };
-        use repo::shell_quote;
 
         // Simulates a `new_unchecked` / historical / `agent reserve` id that
         // never went through `ThreadId::new`.

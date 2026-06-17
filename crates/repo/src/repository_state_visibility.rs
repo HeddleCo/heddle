@@ -35,8 +35,10 @@ use objects::{
 };
 use oplog::{OpLogBackend, OpRecord, VisibilitySidecarSnapshots};
 
-use crate::namespace_policy::{VisibilityResolutionContext, resolve_default_visibility};
-use crate::repository::Repository;
+use crate::{
+    namespace_policy::{VisibilityResolutionContext, resolve_default_visibility},
+    repository::Repository,
+};
 
 /// Outcome of a visibility put that captured its before/after images
 /// **atomically under the write lock** (heddle#317 / PR #529 P1 r5). The

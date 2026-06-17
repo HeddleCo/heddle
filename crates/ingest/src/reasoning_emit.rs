@@ -44,11 +44,13 @@
 //! (`session:{session_id}`), so operators can traverse from an
 //! annotation back to the transcript on disk.
 
-use objects::store::ObjectStore;
 use std::collections::HashMap;
 
 use chrono::Utc;
-use objects::object::{Annotation, AnnotationScope, AnnotationStatus, ContextBlob, ContextTarget};
+use objects::{
+    object::{Annotation, AnnotationScope, AnnotationStatus, ContextBlob, ContextTarget},
+    store::ObjectStore,
+};
 use repo::Repository;
 use tracing::debug;
 

@@ -20,15 +20,14 @@
 //!      top of the transitive ref-tip guarantee); and
 //!   3. `git fsck --full` on the export reports no corruption.
 
-use std::collections::BTreeMap;
-use std::path::Path;
-use std::process::Command;
+use std::{collections::BTreeMap, path::Path, process::Command};
 
-use cli::ObjectStore;
-use cli::Repository;
-use cli::bridge::git_core::GitBridge;
-use cli::bridge::git_import::import_all_with_options;
-use cli::bridge::git_util::GitImportOptions;
+use cli::{
+    ObjectStore, Repository,
+    bridge::{
+        git_core::GitBridge, git_import::import_all_with_options, git_util::GitImportOptions,
+    },
+};
 use tempfile::TempDir;
 
 /// Deterministic identity + dates so every fixture produces stable SHAs
@@ -446,8 +445,7 @@ fn roundtrip_empty_and_nested_trees() {
 /// Run a git command feeding `stdin`, returning trimmed stdout. The `git`
 /// helper above can't write stdin, which `hash-object --stdin` needs.
 fn git_stdin(dir: &Path, args: &[&str], stdin: &[u8]) -> String {
-    use std::io::Write;
-    use std::process::Stdio;
+    use std::{io::Write, process::Stdio};
     let mut child = Command::new("git")
         .args(args)
         .current_dir(dir)
