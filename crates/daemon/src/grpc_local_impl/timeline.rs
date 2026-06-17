@@ -8,11 +8,31 @@ use grpc::heddle::v1::{
     AgentTimelineOperationDraft, AgentTimelineOperationRecord, AgentTimelineStateSummary,
     AgentTimelineStatus, AgentTimelineStepSummary, AgentTimelineToolCallFinished,
     AgentTimelineToolCallStarted, AgentTimelineToolPayload, CreateTimelineBranchRequest,
-    CreateTimelineBranchResponse, GetTimelineOperationRequest, GetTimelineStatusRequest,
-    ListTimelineStepsRequest, ListTimelineStepsResponse, RecordTimelineOperationRequest,
-    ResolveNativeToolCallRequest, SeekTimelineToNativeToolCallRequest, SeekTimelineToStepRequest,
-    TimelineCursorMoveResponse, TimelineCursorRequest, agent_timeline_operation_draft,
-    agent_timeline_operation_record, timeline_service_server::TimelineService,
+    CreateTimelineBranchResponse, ForkTimelineFromSelectorRequest,
+    ForkTimelineFromSelectorResponse, GetTimelineNavigationRequest, GetTimelineOperationRequest,
+    GetTimelineStatusRequest, ListTimelineStepsRequest, ListTimelineStepsResponse,
+    MaterializeTimelineCursorRequest, PreviewTimelineSeekRequest, RecordTimelineOperationRequest,
+    RecoverTimelineMaterializationRequest, RecoverTimelineMaterializationResponse,
+    ResetTimelineCursorRequest, ResetTimelineCursorResponse, ResolveNativeToolCallRequest,
+    SeekTimelineToNativeToolCallRequest, SeekTimelineToStepRequest, TimelineCursorMoveResponse,
+    TimelineCursorRequest, TimelineCursorSelector,
+    TimelineMaterializationBlocker as WireTimelineMaterializationBlocker,
+    TimelineMaterializationBlockerKind,
+    TimelineMaterializationRecoveryBlocker as WireTimelineMaterializationRecoveryBlocker,
+    TimelineMaterializationRecoveryBlockerKind,
+    TimelineMaterializationRecoveryStatus as WireTimelineMaterializationRecoveryStatus,
+    TimelineMaterializeMode, TimelineMaterializeResponse,
+    TimelineMaterializeStatus as WireTimelineMaterializeStatus,
+    TimelineNavigationActionAvailability as WireTimelineNavigationActionAvailability,
+    TimelineNavigationBranch as WireTimelineNavigationBranch,
+    TimelineNavigationCursor as WireTimelineNavigationCursor,
+    TimelineNavigationRecovery as WireTimelineNavigationRecovery,
+    TimelineNavigationRecoveryStatus as WireTimelineNavigationRecoveryStatus,
+    TimelineNavigationSnapshot as WireTimelineNavigationSnapshot,
+    TimelineNavigationStep as WireTimelineNavigationStep, TimelineSeekNativeToolCallSelector,
+    TimelineSeekPreview, TimelineSeekSelector, TimelineSeekStepSelector,
+    agent_timeline_operation_draft, agent_timeline_operation_record, timeline_seek_selector,
+    timeline_service_server::TimelineService,
 };
 use objects::object::{
     BranchCreatedV1, ChangeId, ContentHash, CursorMovedV1, NativeToolCallRefV1, TimelineBranchId,
@@ -22,7 +42,15 @@ use objects::object::{
 };
 use prost::Message;
 use repo::{
-    TimelineCursorMoveRecord, TimelineNativeToolKey, TimelineSeekTarget, TimelineStepSummary,
+    TimelineCursorMoveRecord, TimelineMaterializationBlocker,
+    TimelineMaterializationRecoveryBlocker, TimelineMaterializationRecoveryOutcome,
+    TimelineMaterializationRecoveryStatus, TimelineMaterializeMode as RepoTimelineMaterializeMode,
+    TimelineMaterializeOutcome, TimelineMaterializeStatus, TimelineNativeToolKey,
+    TimelineNavigationRecoveryStatus as RepoTimelineNavigationRecoveryStatus,
+    TimelineNavigationSnapshot as RepoTimelineNavigationSnapshot,
+    TimelineNavigationStep as RepoTimelineNavigationStep, TimelineSeekBranchConstraint,
+    TimelineSeekPreview as RepoTimelineSeekPreview,
+    TimelineSeekSelector as RepoTimelineSeekSelector, TimelineSeekTarget, TimelineStepSummary,
     TimelineStore, TimelineThreadStatus, TimelineView,
 };
 use tonic::{Request, Response, Status};
@@ -98,6 +126,15 @@ impl TimelineService for LocalTimelineService {
         let req = request.into_inner();
         let (_store, view) = open_timeline_store_and_view(&self.inner)?;
         Ok(Response::new(status_for_thread(&view, &req.thread)))
+    }
+
+    async fn get_timeline_navigation(
+        &self,
+        request: Request<GetTimelineNavigationRequest>,
+    ) -> Result<Response<WireTimelineNavigationSnapshot>, Status> {
+        let req = request.into_inner();
+        let snapshot = get_timeline_navigation_impl(&self.inner, req)?;
+        Ok(Response::new(snapshot))
     }
 
     async fn list_timeline_steps(
@@ -248,6 +285,99 @@ impl TimelineService for LocalTimelineService {
 
         Ok(Response::new(response))
     }
+
+    async fn preview_timeline_seek(
+        &self,
+        request: Request<PreviewTimelineSeekRequest>,
+    ) -> Result<Response<TimelineSeekPreview>, Status> {
+        let req = request.into_inner();
+        let preview = preview_timeline_seek_impl(&self.inner, req)?;
+        Ok(Response::new(preview))
+    }
+
+    async fn materialize_timeline_cursor(
+        &self,
+        request: Request<MaterializeTimelineCursorRequest>,
+    ) -> Result<Response<TimelineMaterializeResponse>, Status> {
+        let req = request.into_inner();
+        let body = req.encode_to_vec();
+        let client_op = req.client_operation_id.clone();
+        let inner = self.inner.clone();
+
+        let response = with_idempotency(
+            &self.inner,
+            &client_op,
+            "TimelineService.MaterializeTimelineCursor",
+            &body,
+            move || async move { materialize_timeline_cursor_impl(&inner, req).await },
+        )
+        .await?;
+
+        Ok(Response::new(response))
+    }
+
+    async fn fork_timeline_from_selector(
+        &self,
+        request: Request<ForkTimelineFromSelectorRequest>,
+    ) -> Result<Response<ForkTimelineFromSelectorResponse>, Status> {
+        let req = request.into_inner();
+        let body = req.encode_to_vec();
+        let client_op = req.client_operation_id.clone();
+        let inner = self.inner.clone();
+
+        let response = with_idempotency(
+            &self.inner,
+            &client_op,
+            "TimelineService.ForkTimelineFromSelector",
+            &body,
+            move || async move { fork_timeline_from_selector_impl(&inner, req).await },
+        )
+        .await?;
+
+        Ok(Response::new(response))
+    }
+
+    async fn reset_timeline_cursor(
+        &self,
+        request: Request<ResetTimelineCursorRequest>,
+    ) -> Result<Response<ResetTimelineCursorResponse>, Status> {
+        let req = request.into_inner();
+        let body = req.encode_to_vec();
+        let client_op = req.client_operation_id.clone();
+        let inner = self.inner.clone();
+
+        let response = with_idempotency(
+            &self.inner,
+            &client_op,
+            "TimelineService.ResetTimelineCursor",
+            &body,
+            move || async move { reset_timeline_cursor_impl(&inner, req).await },
+        )
+        .await?;
+
+        Ok(Response::new(response))
+    }
+
+    async fn recover_timeline_materialization(
+        &self,
+        request: Request<RecoverTimelineMaterializationRequest>,
+    ) -> Result<Response<RecoverTimelineMaterializationResponse>, Status> {
+        let req = request.into_inner();
+        let body = req.encode_to_vec();
+        let client_op = req.client_operation_id.clone();
+        let inner = self.inner.clone();
+
+        let response = with_idempotency(
+            &self.inner,
+            &client_op,
+            "TimelineService.RecoverTimelineMaterialization",
+            &body,
+            move || async move { recover_timeline_materialization_impl(&inner, req).await },
+        )
+        .await?;
+
+        Ok(Response::new(response))
+    }
 }
 
 async fn seek_to_step_impl(
@@ -363,6 +493,834 @@ async fn create_timeline_branch_impl(
         from_step_id: target.step_id.map(|id| id.to_string()).unwrap_or_default(),
         operation: Some(record),
     })
+}
+
+fn get_timeline_navigation_impl(
+    inner: &GrpcLocalService,
+    req: GetTimelineNavigationRequest,
+) -> Result<WireTimelineNavigationSnapshot, Status> {
+    if req.thread.trim().is_empty() {
+        return Err(Status::invalid_argument("thread is required"));
+    }
+    let store = TimelineStore::open(inner.repo().heddle_dir()).map_err(to_status)?;
+    let snapshot = inner
+        .repo()
+        .timeline_navigation_snapshot(&store, &req.thread)
+        .map_err(to_status)?;
+    let view = TimelineView::rebuild(&store).map_err(to_status)?;
+    Ok(timeline_navigation_snapshot_to_proto(&view, snapshot))
+}
+
+fn preview_timeline_seek_impl(
+    inner: &GrpcLocalService,
+    req: PreviewTimelineSeekRequest,
+) -> Result<TimelineSeekPreview, Status> {
+    let selection = repo_seek_selection(req.selector)?;
+    let mode = repo_materialize_mode(req.mode);
+    let store = TimelineStore::open(inner.repo().heddle_dir()).map_err(to_status)?;
+    let preview = inner
+        .repo()
+        .preview_timeline_seek_constrained(
+            &store,
+            &selection.thread,
+            &selection.selector,
+            mode,
+            selection.branch_constraint.as_ref(),
+        )
+        .map_err(to_status)?;
+    let view = TimelineView::rebuild(&store).map_err(to_status)?;
+    Ok(repo_seek_preview_to_proto(&view, &preview))
+}
+
+async fn materialize_timeline_cursor_impl(
+    inner: &GrpcLocalService,
+    req: MaterializeTimelineCursorRequest,
+) -> Result<TimelineMaterializeResponse, Status> {
+    let selection = repo_seek_selection(req.selector)?;
+    let mode = repo_materialize_mode(req.mode);
+    let store = TimelineStore::open(inner.repo().heddle_dir()).map_err(to_status)?;
+    let before_view = TimelineView::rebuild(&store).map_err(to_status)?;
+
+    let outcome = inner
+        .repo()
+        .materialize_timeline_cursor_constrained(
+            &store,
+            &selection.thread,
+            &selection.selector,
+            mode,
+            selection.branch_constraint.as_ref(),
+            now_ms(),
+        )
+        .map_err(to_status)?;
+    materialize_response_from_outcome(&store, &before_view, &selection.thread, outcome)
+}
+
+async fn fork_timeline_from_selector_impl(
+    inner: &GrpcLocalService,
+    req: ForkTimelineFromSelectorRequest,
+) -> Result<ForkTimelineFromSelectorResponse, Status> {
+    let selection = repo_seek_selection(req.selector)?;
+    let branch_id = non_empty(req.branch_id).map(TimelineBranchId::new);
+    let reason = parse_branch_reason_or_default(&req.reason)?;
+    let store = TimelineStore::open(inner.repo().heddle_dir()).map_err(to_status)?;
+    let outcome = inner
+        .repo()
+        .fork_timeline_from_selector(
+            &store,
+            &selection.thread,
+            &selection.selector,
+            selection.branch_constraint.as_ref(),
+            branch_id,
+            reason,
+            now_ms(),
+        )
+        .map_err(to_status)?;
+    let operation = record_from_store(&store, outcome.operation_id)?;
+    let view = TimelineView::rebuild(&store).map_err(to_status)?;
+
+    Ok(ForkTimelineFromSelectorResponse {
+        navigation: Some(timeline_navigation_snapshot_to_proto(
+            &view,
+            outcome.navigation,
+        )),
+        operation: Some(operation),
+        branch_id: outcome.branch_id.to_string(),
+        parent_branch_id: outcome.parent_branch_id.to_string(),
+        from_step_id: outcome
+            .from_step_id
+            .map(|step_id| step_id.to_string())
+            .unwrap_or_default(),
+    })
+}
+
+async fn reset_timeline_cursor_impl(
+    inner: &GrpcLocalService,
+    req: ResetTimelineCursorRequest,
+) -> Result<ResetTimelineCursorResponse, Status> {
+    let selection = repo_seek_selection(req.selector)?;
+    let mode = repo_materialize_mode(req.mode);
+    let store = TimelineStore::open(inner.repo().heddle_dir()).map_err(to_status)?;
+    let before_view = TimelineView::rebuild(&store).map_err(to_status)?;
+    let outcome = inner
+        .repo()
+        .reset_timeline_cursor(
+            &store,
+            &selection.thread,
+            &selection.selector,
+            mode,
+            selection.branch_constraint.as_ref(),
+            req.materialize_checkout,
+            now_ms(),
+        )
+        .map_err(to_status)?;
+    let cursor_operation = outcome
+        .cursor_operation_id
+        .map(|id| record_from_store(&store, id))
+        .transpose()?;
+    let materialization = outcome
+        .materialization
+        .map(|materialization| {
+            materialize_response_from_outcome(
+                &store,
+                &before_view,
+                &selection.thread,
+                materialization,
+            )
+        })
+        .transpose()?;
+    let view = TimelineView::rebuild(&store).map_err(to_status)?;
+
+    Ok(ResetTimelineCursorResponse {
+        navigation: Some(timeline_navigation_snapshot_to_proto(
+            &view,
+            outcome.navigation,
+        )),
+        cursor_operation,
+        materialization,
+    })
+}
+
+async fn recover_timeline_materialization_impl(
+    inner: &GrpcLocalService,
+    req: RecoverTimelineMaterializationRequest,
+) -> Result<RecoverTimelineMaterializationResponse, Status> {
+    if req.thread.trim().is_empty() {
+        return Err(Status::invalid_argument("thread is required"));
+    }
+    let store = TimelineStore::open(inner.repo().heddle_dir()).map_err(to_status)?;
+    let outcome = inner
+        .repo()
+        .recover_timeline_materialization_action(&store, &req.thread)
+        .map_err(to_status)?;
+    let recovered_cursor_operation = outcome
+        .recovery
+        .cursor_operation_id
+        .map(|id| record_from_store(&store, id))
+        .transpose()?;
+    let recovery_status = recovery_status_to_wire_code(&outcome.recovery);
+    let recovery_blockers = recovery_blockers_to_wire_details(&outcome.recovery);
+    let view = TimelineView::rebuild(&store).map_err(to_status)?;
+
+    Ok(RecoverTimelineMaterializationResponse {
+        navigation: Some(timeline_navigation_snapshot_to_proto(
+            &view,
+            outcome.navigation,
+        )),
+        recovered_cursor_operation,
+        recovery_status: recovery_status as i32,
+        recovery_blockers,
+    })
+}
+
+fn materialize_response_from_outcome(
+    store: &TimelineStore,
+    before_view: &TimelineView,
+    thread: &str,
+    outcome: TimelineMaterializeOutcome,
+) -> Result<TimelineMaterializeResponse, Status> {
+    let status = outcome.status.clone();
+    let cursor_operation = outcome
+        .cursor_operation_id
+        .map(|id| record_from_store(store, id))
+        .transpose()?;
+    let recovered_cursor_operation = outcome
+        .recovery
+        .cursor_operation_id
+        .map(|id| record_from_store(store, id))
+        .transpose()?;
+    let after_view = TimelineView::rebuild(store).map_err(to_status)?;
+    let blockers = blockers_to_wire_details(&outcome.preview.blockers);
+    let recovery_blockers = recovery_blockers_to_wire_details(&outcome.recovery);
+
+    Ok(TimelineMaterializeResponse {
+        updated_status: Some(status_for_thread(&after_view, thread)),
+        preview: Some(repo_seek_preview_to_proto(before_view, &outcome.preview)),
+        cursor_operation,
+        materialized: matches!(
+            status,
+            TimelineMaterializeStatus::Materialized | TimelineMaterializeStatus::AlreadyAtTarget
+        ),
+        blockers,
+        status: materialize_status_to_wire_code(&status) as i32,
+        recovered_cursor_operation,
+        recovery_status: recovery_status_to_wire_code(&outcome.recovery) as i32,
+        recovery_blockers,
+    })
+}
+
+struct RepoSeekSelection {
+    thread: String,
+    selector: RepoTimelineSeekSelector,
+    branch_constraint: Option<TimelineSeekBranchConstraint>,
+}
+
+fn repo_seek_selection(
+    selector: Option<TimelineSeekSelector>,
+) -> Result<RepoSeekSelection, Status> {
+    let selector = selector.ok_or_else(|| Status::invalid_argument("selector is required"))?;
+    let target = selector
+        .target
+        .ok_or_else(|| Status::invalid_argument("selector target is required"))?;
+
+    match target {
+        timeline_seek_selector::Target::Step(step) => repo_step_selection(step),
+        timeline_seek_selector::Target::NativeToolCall(native) => repo_native_selection(native),
+        timeline_seek_selector::Target::Undo(cursor) => {
+            repo_cursor_selection(cursor, RepoTimelineSeekSelector::Undo)
+        }
+        timeline_seek_selector::Target::Redo(cursor) => {
+            repo_cursor_selection(cursor, RepoTimelineSeekSelector::Redo)
+        }
+        timeline_seek_selector::Target::CurrentCursor(cursor) => {
+            repo_cursor_selection(cursor, RepoTimelineSeekSelector::CurrentCursor)
+        }
+    }
+}
+
+fn repo_step_selection(selector: TimelineSeekStepSelector) -> Result<RepoSeekSelection, Status> {
+    if selector.thread.trim().is_empty() {
+        return Err(Status::invalid_argument("selector.step.thread is required"));
+    }
+    if selector.step_id.trim().is_empty() {
+        return Err(Status::invalid_argument(
+            "selector.step.step_id is required",
+        ));
+    }
+    let branch_constraint = non_empty(selector.branch_id)
+        .map(TimelineBranchId::new)
+        .map(TimelineSeekBranchConstraint::Target);
+    Ok(RepoSeekSelection {
+        thread: selector.thread,
+        selector: RepoTimelineSeekSelector::StepId(TimelineStepId::new(selector.step_id)),
+        branch_constraint,
+    })
+}
+
+fn repo_native_selection(
+    selector: TimelineSeekNativeToolCallSelector,
+) -> Result<RepoSeekSelection, Status> {
+    if selector.thread.trim().is_empty() {
+        return Err(Status::invalid_argument(
+            "selector.native_tool_call.thread is required",
+        ));
+    }
+    if selector.harness.trim().is_empty() {
+        return Err(Status::invalid_argument(
+            "selector.native_tool_call.harness is required",
+        ));
+    }
+    if selector.tool_call_id.trim().is_empty() {
+        return Err(Status::invalid_argument(
+            "selector.native_tool_call.tool_call_id is required",
+        ));
+    }
+    Ok(RepoSeekSelection {
+        thread: selector.thread,
+        selector: RepoTimelineSeekSelector::NativeToolCall(TimelineNativeToolKey {
+            harness: selector.harness,
+            session_id: non_empty(selector.session_id),
+            message_id: non_empty(selector.message_id),
+            tool_call_id: selector.tool_call_id,
+        }),
+        branch_constraint: None,
+    })
+}
+
+fn repo_cursor_selection(
+    selector: TimelineCursorSelector,
+    repo_selector: RepoTimelineSeekSelector,
+) -> Result<RepoSeekSelection, Status> {
+    if selector.thread.trim().is_empty() {
+        return Err(Status::invalid_argument(
+            "selector cursor thread is required",
+        ));
+    }
+    let branch_constraint = non_empty(selector.branch_id)
+        .map(TimelineBranchId::new)
+        .map(TimelineSeekBranchConstraint::Current);
+    Ok(RepoSeekSelection {
+        thread: selector.thread,
+        selector: repo_selector,
+        branch_constraint,
+    })
+}
+
+fn repo_seek_preview_to_proto(
+    view: &TimelineView,
+    preview: &RepoTimelineSeekPreview,
+) -> TimelineSeekPreview {
+    let current_step = preview
+        .current_step_id
+        .as_ref()
+        .and_then(|step_id| view.step(&preview.thread, step_id))
+        .map(step_summary_to_proto);
+    let current_step_for_state = preview
+        .current_step_id
+        .as_ref()
+        .and_then(|step_id| view.step(&preview.thread, step_id))
+        .map(step_summary_to_proto);
+    let target_step = preview
+        .target
+        .step_id
+        .as_ref()
+        .and_then(|step_id| view.step(&preview.thread, step_id));
+    let worktree_dirty = preview
+        .worktree_status
+        .as_ref()
+        .is_some_and(|status| !status.is_clean());
+    let blockers = blockers_to_wire_details(&preview.blockers);
+    let materialization_supported = !preview
+        .blockers
+        .iter()
+        .any(|blocker| matches!(blocker, TimelineMaterializationBlocker::UnsupportedMode(_)));
+
+    TimelineSeekPreview {
+        current_status: Some(AgentTimelineStatus {
+            thread: preview.thread.clone(),
+            current_branch_id: preview
+                .current_branch_id
+                .as_ref()
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+            current_step_id: preview
+                .current_step_id
+                .as_ref()
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+            current_state: preview
+                .current_state
+                .map(|state| AgentTimelineStateSummary {
+                    state_id: state.as_bytes().to_vec(),
+                    display_id: state.to_string_full(),
+                    source_step_id: preview
+                        .current_step_id
+                        .as_ref()
+                        .map(|id| id.to_string())
+                        .unwrap_or_default(),
+                    payload: current_step_for_state.and_then(|step| step.payload),
+                }),
+            branch_count: view.branch_count(&preview.thread) as u32,
+            step_count: view.step_count(&preview.thread) as u32,
+        }),
+        current_step,
+        target_branch_id: preview.target.branch_id.to_string(),
+        target_step_id: preview
+            .target
+            .step_id
+            .as_ref()
+            .map(|step_id| step_id.to_string())
+            .unwrap_or_default(),
+        target_state: preview.target.state.as_bytes().to_vec(),
+        target_state_display_id: preview.target.state.to_string_full(),
+        target_step: target_step.map(step_summary_to_proto),
+        current_state: preview
+            .current_state
+            .map(|state| state.as_bytes().to_vec())
+            .unwrap_or_default(),
+        current_state_display_id: preview
+            .current_state
+            .map(|state| state.to_string_full())
+            .unwrap_or_default(),
+        changed_paths: preview.changed_paths.clone(),
+        worktree_dirty,
+        worktree_dirty_known: preview.worktree_status.is_some(),
+        blockers,
+        materialization_supported,
+        checkout_state: preview
+            .checkout_state
+            .map(|state| state.as_bytes().to_vec())
+            .unwrap_or_default(),
+        checkout_state_display_id: preview
+            .checkout_state
+            .map(|state| state.to_string_full())
+            .unwrap_or_default(),
+        can_materialize: preview.can_materialize(),
+    }
+}
+
+fn timeline_navigation_snapshot_to_proto(
+    view: &TimelineView,
+    snapshot: RepoTimelineNavigationSnapshot,
+) -> WireTimelineNavigationSnapshot {
+    WireTimelineNavigationSnapshot {
+        thread: snapshot.thread.clone(),
+        cursor: Some(timeline_navigation_cursor_to_proto(snapshot.cursor)),
+        branches: snapshot
+            .branches
+            .into_iter()
+            .map(timeline_navigation_branch_to_proto)
+            .collect(),
+        steps: snapshot
+            .steps
+            .into_iter()
+            .map(timeline_navigation_step_to_proto)
+            .collect(),
+        active_branch_path: snapshot
+            .active_branch_path
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        actions: Some(WireTimelineNavigationActionAvailability {
+            can_undo: snapshot.actions.can_undo,
+            can_redo: snapshot.actions.can_redo,
+        }),
+        recovery: snapshot.recovery.map(timeline_navigation_recovery_to_proto),
+        status: Some(status_for_thread(view, &snapshot.thread)),
+    }
+}
+
+fn timeline_navigation_cursor_to_proto(
+    cursor: repo::TimelineNavigationCursor,
+) -> WireTimelineNavigationCursor {
+    WireTimelineNavigationCursor {
+        branch_id: cursor
+            .branch_id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+        step_id: cursor
+            .step_id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+        state: cursor
+            .state
+            .map(|state| state.as_bytes().to_vec())
+            .unwrap_or_default(),
+        state_display_id: cursor
+            .state
+            .map(|state| state.to_string_full())
+            .unwrap_or_default(),
+    }
+}
+
+fn timeline_navigation_branch_to_proto(
+    branch: repo::TimelineNavigationBranch,
+) -> WireTimelineNavigationBranch {
+    WireTimelineNavigationBranch {
+        branch_id: branch.branch_id.to_string(),
+        parent_branch_id: branch
+            .parent_branch_id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+        forked_from_step_id: branch
+            .forked_from_step_id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+        forked_from_state: branch
+            .forked_from_state
+            .map(|state| state.as_bytes().to_vec())
+            .unwrap_or_default(),
+        forked_from_state_display_id: branch
+            .forked_from_state
+            .map(|state| state.to_string_full())
+            .unwrap_or_default(),
+        reason: branch
+            .reason
+            .as_ref()
+            .map(branch_reason_to_wire)
+            .unwrap_or_default()
+            .to_string(),
+        created_at_ms: branch.created_at_ms.unwrap_or_default(),
+        operation_ids: branch
+            .operation_ids
+            .iter()
+            .map(|id| id.as_bytes().to_vec())
+            .collect(),
+        operation_display_ids: branch
+            .operation_ids
+            .iter()
+            .map(TimelineOperationId::to_string_full)
+            .collect(),
+        step_ids: branch.step_ids.iter().map(ToString::to_string).collect(),
+        is_active: branch.is_active,
+        is_on_active_path: branch.is_on_active_path,
+    }
+}
+
+fn timeline_navigation_step_to_proto(
+    step: RepoTimelineNavigationStep,
+) -> WireTimelineNavigationStep {
+    let cursor_state = step.cursor_state;
+    WireTimelineNavigationStep {
+        step: Some(AgentTimelineStepSummary {
+            thread: step.thread,
+            step_id: step.step_id.to_string(),
+            branch_id: step.branch_id.to_string(),
+            parent_step_id: step
+                .parent_step_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            native: step.native.map(native_to_proto),
+            tool_name: step.tool_name.unwrap_or_default(),
+            status: step
+                .status
+                .as_ref()
+                .map(tool_call_status_to_wire)
+                .unwrap_or_default()
+                .to_string(),
+            changed: step.changed.unwrap_or(false),
+            touched_paths: step.touched_paths,
+            before_state: step
+                .before_state
+                .map(|state| state.as_bytes().to_vec())
+                .unwrap_or_default(),
+            after_state: step
+                .after_state
+                .map(|state| state.as_bytes().to_vec())
+                .unwrap_or_default(),
+            capture_state: step
+                .capture_state
+                .map(|state| state.as_bytes().to_vec())
+                .unwrap_or_default(),
+            payload: timeline_navigation_payload_to_proto(step.payload_summary, step.payload_hash),
+            labels: step.labels.iter().map(label_to_wire).collect(),
+            started_at_ms: step.started_at_ms.unwrap_or_default(),
+            finished_at_ms: step.finished_at_ms.unwrap_or_default(),
+            operation_ids: step
+                .operation_ids
+                .iter()
+                .map(|id| id.as_bytes().to_vec())
+                .collect(),
+            operation_display_ids: step
+                .operation_ids
+                .iter()
+                .map(TimelineOperationId::to_string_full)
+                .collect(),
+            capture_oplog_batch_id: step.capture_oplog_batch_id,
+        }),
+        cursor_state: cursor_state
+            .map(|state| state.as_bytes().to_vec())
+            .unwrap_or_default(),
+        cursor_state_display_id: cursor_state
+            .map(|state| state.to_string_full())
+            .unwrap_or_default(),
+        is_current: step.is_current,
+        is_on_active_branch_path: step.is_on_active_branch_path,
+        can_seek: step.can_seek,
+        can_fork: step.can_fork,
+        can_reset: step.can_reset,
+        can_materialize: step.can_materialize,
+        has_boundary_warning: step.has_boundary_warning,
+    }
+}
+
+fn timeline_navigation_payload_to_proto(
+    summary: Option<String>,
+    hash: Option<ContentHash>,
+) -> Option<AgentTimelineToolPayload> {
+    if summary.is_none() && hash.is_none() {
+        return None;
+    }
+    Some(AgentTimelineToolPayload {
+        summary: summary.unwrap_or_default(),
+        hash: hash
+            .map(|hash| hash.as_bytes().to_vec())
+            .unwrap_or_default(),
+    })
+}
+
+fn timeline_navigation_recovery_to_proto(
+    recovery: repo::TimelineNavigationRecovery,
+) -> WireTimelineNavigationRecovery {
+    WireTimelineNavigationRecovery {
+        status: timeline_navigation_recovery_status_to_proto(recovery.status) as i32,
+        thread: recovery.thread,
+        branch_id: recovery.branch_id.to_string(),
+        from_step_id: recovery
+            .from_step_id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+        to_step_id: recovery
+            .to_step_id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+        from_state: recovery.from_state.as_bytes().to_vec(),
+        from_state_display_id: recovery.from_state.to_string_full(),
+        to_state: recovery.to_state.as_bytes().to_vec(),
+        to_state_display_id: recovery.to_state.to_string_full(),
+        reason: cursor_reason_to_wire(&recovery.reason).to_string(),
+        moved_at_ms: recovery.moved_at_ms,
+        checkout_state: recovery
+            .checkout_state
+            .map(|state| state.as_bytes().to_vec())
+            .unwrap_or_default(),
+        checkout_state_display_id: recovery
+            .checkout_state
+            .map(|state| state.to_string_full())
+            .unwrap_or_default(),
+        checkout_state_known: recovery.checkout_state.is_some(),
+    }
+}
+
+fn timeline_navigation_recovery_status_to_proto(
+    status: RepoTimelineNavigationRecoveryStatus,
+) -> WireTimelineNavigationRecoveryStatus {
+    match status {
+        RepoTimelineNavigationRecoveryStatus::PendingCursorRecord => {
+            WireTimelineNavigationRecoveryStatus::PendingCursorRecord
+        }
+        RepoTimelineNavigationRecoveryStatus::Blocked => {
+            WireTimelineNavigationRecoveryStatus::Blocked
+        }
+        RepoTimelineNavigationRecoveryStatus::AlreadyApplied => {
+            WireTimelineNavigationRecoveryStatus::AlreadyApplied
+        }
+    }
+}
+
+fn repo_materialize_mode(value: i32) -> RepoTimelineMaterializeMode {
+    match TimelineMaterializeMode::try_from(value).unwrap_or(TimelineMaterializeMode::Unspecified) {
+        TimelineMaterializeMode::Unspecified | TimelineMaterializeMode::FailIfDirty => {
+            RepoTimelineMaterializeMode::FailIfDirty
+        }
+        TimelineMaterializeMode::CaptureCurrentThenSeek => {
+            RepoTimelineMaterializeMode::CaptureCurrentThenSeek
+        }
+    }
+}
+
+fn repo_materialize_mode_to_wire(mode: RepoTimelineMaterializeMode) -> &'static str {
+    match mode {
+        RepoTimelineMaterializeMode::FailIfDirty => "fail-if-dirty",
+        RepoTimelineMaterializeMode::CaptureCurrentThenSeek => "capture-current-then-seek",
+    }
+}
+
+fn repo_materialize_mode_to_wire_code(
+    mode: RepoTimelineMaterializeMode,
+) -> TimelineMaterializeMode {
+    match mode {
+        RepoTimelineMaterializeMode::FailIfDirty => TimelineMaterializeMode::FailIfDirty,
+        RepoTimelineMaterializeMode::CaptureCurrentThenSeek => {
+            TimelineMaterializeMode::CaptureCurrentThenSeek
+        }
+    }
+}
+
+fn materialize_status_to_wire_code(
+    status: &TimelineMaterializeStatus,
+) -> WireTimelineMaterializeStatus {
+    match status {
+        TimelineMaterializeStatus::Materialized => WireTimelineMaterializeStatus::Materialized,
+        TimelineMaterializeStatus::AlreadyAtTarget => {
+            WireTimelineMaterializeStatus::AlreadyAtTarget
+        }
+        TimelineMaterializeStatus::Refused => WireTimelineMaterializeStatus::Refused,
+        TimelineMaterializeStatus::Unsupported => WireTimelineMaterializeStatus::Unsupported,
+        TimelineMaterializeStatus::RecoveryBlocked => {
+            WireTimelineMaterializeStatus::RecoveryBlocked
+        }
+    }
+}
+
+fn recovery_status_to_wire_code(
+    recovery: &TimelineMaterializationRecoveryOutcome,
+) -> WireTimelineMaterializationRecoveryStatus {
+    match recovery.status {
+        TimelineMaterializationRecoveryStatus::NoPending => {
+            WireTimelineMaterializationRecoveryStatus::NoPending
+        }
+        TimelineMaterializationRecoveryStatus::CursorRecorded => {
+            WireTimelineMaterializationRecoveryStatus::CursorRecorded
+        }
+        TimelineMaterializationRecoveryStatus::AlreadyApplied => {
+            WireTimelineMaterializationRecoveryStatus::AlreadyApplied
+        }
+        TimelineMaterializationRecoveryStatus::Blocked => {
+            WireTimelineMaterializationRecoveryStatus::Blocked
+        }
+    }
+}
+
+fn recovery_blockers_to_wire_details(
+    recovery: &TimelineMaterializationRecoveryOutcome,
+) -> Vec<WireTimelineMaterializationRecoveryBlocker> {
+    recovery
+        .blocker
+        .iter()
+        .map(recovery_blocker_to_wire_detail)
+        .collect()
+}
+
+fn recovery_blocker_to_wire(blocker: &TimelineMaterializationRecoveryBlocker) -> String {
+    match blocker {
+        TimelineMaterializationRecoveryBlocker::CheckoutNotAtTarget {
+            checkout_state,
+            target_state,
+        } => {
+            let checkout = checkout_state
+                .map(|state| state.to_string_full())
+                .unwrap_or_else(|| "unknown".to_string());
+            format!(
+                "pending timeline materialization target is {}, but checkout is at {}",
+                target_state.to_string_full(),
+                checkout
+            )
+        }
+    }
+}
+
+fn recovery_blocker_to_wire_detail(
+    blocker: &TimelineMaterializationRecoveryBlocker,
+) -> WireTimelineMaterializationRecoveryBlocker {
+    match blocker {
+        TimelineMaterializationRecoveryBlocker::CheckoutNotAtTarget {
+            checkout_state,
+            target_state,
+        } => WireTimelineMaterializationRecoveryBlocker {
+            kind: TimelineMaterializationRecoveryBlockerKind::CheckoutNotAtTarget as i32,
+            message: recovery_blocker_to_wire(blocker),
+            checkout_state: checkout_state
+                .as_ref()
+                .map(|state| state.as_bytes().to_vec())
+                .unwrap_or_default(),
+            checkout_state_display_id: checkout_state
+                .as_ref()
+                .map(|state| state.to_string_full())
+                .unwrap_or_default(),
+            checkout_state_known: checkout_state.is_some(),
+            target_state: target_state.as_bytes().to_vec(),
+            target_state_display_id: target_state.to_string_full(),
+        },
+    }
+}
+
+fn blockers_to_wire_details(
+    blockers: &[TimelineMaterializationBlocker],
+) -> Vec<WireTimelineMaterializationBlocker> {
+    blockers.iter().map(blocker_to_wire_detail).collect()
+}
+
+fn blocker_to_wire(blocker: &TimelineMaterializationBlocker) -> String {
+    match blocker {
+        TimelineMaterializationBlocker::UnsupportedMode(mode) => format!(
+            "timeline materialization mode '{}' is not supported",
+            repo_materialize_mode_to_wire(*mode)
+        ),
+        TimelineMaterializationBlocker::DirtyWorktree { paths } if paths.is_empty() => {
+            "worktree has local changes".to_string()
+        }
+        TimelineMaterializationBlocker::DirtyWorktree { paths } => {
+            format!("worktree has local changes: {}", paths.join(", "))
+        }
+        TimelineMaterializationBlocker::CheckoutStateUnknown => {
+            "checkout state is unknown".to_string()
+        }
+        TimelineMaterializationBlocker::MissingTree(state) => {
+            format!("tree for state {} is unavailable", state.to_string_full())
+        }
+    }
+}
+
+fn blocker_to_wire_detail(
+    blocker: &TimelineMaterializationBlocker,
+) -> WireTimelineMaterializationBlocker {
+    match blocker {
+        TimelineMaterializationBlocker::UnsupportedMode(mode) => {
+            WireTimelineMaterializationBlocker {
+                kind: TimelineMaterializationBlockerKind::UnsupportedMode as i32,
+                message: blocker_to_wire(blocker),
+                unsupported_mode: repo_materialize_mode_to_wire_code(*mode) as i32,
+                paths: Vec::new(),
+                state: Vec::new(),
+                state_display_id: String::new(),
+            }
+        }
+        TimelineMaterializationBlocker::DirtyWorktree { paths } => {
+            WireTimelineMaterializationBlocker {
+                kind: TimelineMaterializationBlockerKind::DirtyWorktree as i32,
+                message: blocker_to_wire(blocker),
+                unsupported_mode: TimelineMaterializeMode::Unspecified as i32,
+                paths: paths.clone(),
+                state: Vec::new(),
+                state_display_id: String::new(),
+            }
+        }
+        TimelineMaterializationBlocker::CheckoutStateUnknown => {
+            WireTimelineMaterializationBlocker {
+                kind: TimelineMaterializationBlockerKind::CheckoutStateUnknown as i32,
+                message: blocker_to_wire(blocker),
+                unsupported_mode: TimelineMaterializeMode::Unspecified as i32,
+                paths: Vec::new(),
+                state: Vec::new(),
+                state_display_id: String::new(),
+            }
+        }
+        TimelineMaterializationBlocker::MissingTree(state) => WireTimelineMaterializationBlocker {
+            kind: TimelineMaterializationBlockerKind::MissingTree as i32,
+            message: blocker_to_wire(blocker),
+            unsupported_mode: TimelineMaterializeMode::Unspecified as i32,
+            paths: Vec::new(),
+            state: state.as_bytes().to_vec(),
+            state_display_id: state.to_string_full(),
+        },
+    }
 }
 
 fn write_cursor_move(
@@ -950,14 +1908,19 @@ fn branch_reason_to_wire(reason: &TimelineBranchReason) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{fs, sync::Arc};
 
     use grpc::heddle::v1::{
         AgentTimelineNativeToolCall, AgentTimelineOperationDraft, AgentTimelineToolCallFinished,
-        AgentTimelineToolCallStarted, GetTimelineOperationRequest, GetTimelineStatusRequest,
-        ListTimelineStepsRequest, RecordTimelineOperationRequest, ResolveNativeToolCallRequest,
-        SeekTimelineToNativeToolCallRequest, SeekTimelineToStepRequest,
-        agent_timeline_operation_draft, timeline_service_server::TimelineService,
+        AgentTimelineToolCallStarted, ForkTimelineFromSelectorRequest,
+        GetTimelineNavigationRequest, GetTimelineOperationRequest, GetTimelineStatusRequest,
+        ListTimelineStepsRequest, MaterializeTimelineCursorRequest, PreviewTimelineSeekRequest,
+        RecordTimelineOperationRequest, RecoverTimelineMaterializationRequest,
+        ResetTimelineCursorRequest, ResolveNativeToolCallRequest,
+        SeekTimelineToNativeToolCallRequest, SeekTimelineToStepRequest, TimelineCursorSelector,
+        TimelineMaterializeMode, TimelineSeekNativeToolCallSelector, TimelineSeekSelector,
+        TimelineSeekStepSelector, agent_timeline_operation_draft, timeline_seek_selector,
+        timeline_service_server::TimelineService,
     };
     use repo::{Repository, operation_dedup::OperationDedupStore};
     use tempfile::TempDir;
@@ -1004,6 +1967,64 @@ mod tests {
                             capture_oplog_batch_id: Some(finished_at_ms as u64),
                             changed: true,
                             touched_paths: vec![format!("src/{step_id}.rs")],
+                            payload: None,
+                            finished_at_ms,
+                        },
+                    )),
+                }),
+                client_operation_id: String::new(),
+            }))
+            .await
+            .unwrap();
+    }
+
+    fn write_repo_state(
+        service: &LocalTimelineService,
+        root: &std::path::Path,
+        path: &str,
+        content: &str,
+    ) -> ChangeId {
+        fs::write(root.join(path), content).unwrap();
+        service
+            .inner
+            .repo()
+            .snapshot(Some(path.to_string()), None)
+            .unwrap()
+            .change_id
+    }
+
+    async fn record_finished_step_for_states(
+        service: &LocalTimelineService,
+        step_id: &str,
+        tool_call_id: &str,
+        before: ChangeId,
+        after: ChangeId,
+        touched_path: &str,
+        finished_at_ms: i64,
+    ) {
+        service
+            .record_operation(Request::new(RecordTimelineOperationRequest {
+                repo_path: String::new(),
+                operation: Some(AgentTimelineOperationDraft {
+                    labels: vec!["repo-reversible".to_string()],
+                    body: Some(agent_timeline_operation_draft::Body::ToolCallFinished(
+                        AgentTimelineToolCallFinished {
+                            thread: "main".to_string(),
+                            step_id: step_id.to_string(),
+                            branch_id: "tlb-main".to_string(),
+                            native: Some(AgentTimelineNativeToolCall {
+                                harness: "opencode".to_string(),
+                                session_id: "session-1".to_string(),
+                                message_id: "message-1".to_string(),
+                                tool_call_id: tool_call_id.to_string(),
+                            }),
+                            status: "succeeded".to_string(),
+                            before_state: before.as_bytes().to_vec(),
+                            after_state: after.as_bytes().to_vec(),
+                            capture_state: after.as_bytes().to_vec(),
+                            capture_oplog_batch_id: Some(finished_at_ms as u64),
+                            changed: true,
+                            touched_paths: vec![touched_path.to_string()],
                             payload: None,
                             finished_at_ms,
                         },
@@ -1151,5 +2172,335 @@ mod tests {
         let moved_status = moved.status.unwrap();
         assert_eq!(moved_status.current_step_id, "tls-step-2");
         assert_eq!(moved_status.current_state.unwrap().state_id, vec![3; 16]);
+    }
+
+    #[tokio::test]
+    async fn get_timeline_navigation_returns_cursor_actions_and_native_ids() {
+        let (_temp, service) = fresh_service();
+        record_finished_step(&service, "tls-step-1", "call-1", 1, 2, 1_700_000_000_000).await;
+        record_finished_step(&service, "tls-step-2", "call-2", 2, 3, 1_700_000_000_100).await;
+
+        let navigation = service
+            .get_timeline_navigation(Request::new(GetTimelineNavigationRequest {
+                repo_path: String::new(),
+                thread: "main".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(navigation.thread, "main");
+        assert_eq!(navigation.cursor.unwrap().step_id, "tls-step-2");
+        assert_eq!(navigation.branches.len(), 1);
+        assert_eq!(navigation.active_branch_path, vec!["tlb-main"]);
+        assert!(navigation.actions.as_ref().unwrap().can_undo);
+        assert!(!navigation.actions.as_ref().unwrap().can_redo);
+        assert!(navigation.recovery.is_none());
+
+        let current = navigation
+            .steps
+            .iter()
+            .find(|step| step.is_current)
+            .expect("current step");
+        let summary = current.step.as_ref().unwrap();
+        assert_eq!(summary.step_id, "tls-step-2");
+        assert_eq!(summary.native.as_ref().unwrap().harness, "opencode");
+        assert_eq!(summary.native.as_ref().unwrap().tool_call_id, "call-2");
+        assert_eq!(current.cursor_state, vec![3; 16]);
+    }
+
+    #[tokio::test]
+    async fn preview_timeline_seek_resolves_step_and_native_selectors() {
+        let (temp, service) = fresh_service();
+        let state0 = service.inner.repo().head().unwrap().unwrap();
+        let state1 = write_repo_state(&service, temp.path(), "tracked.txt", "one\n");
+        let state2 = write_repo_state(&service, temp.path(), "tracked.txt", "two\n");
+        record_finished_step_for_states(
+            &service,
+            "tls-step-1",
+            "call-1",
+            state0,
+            state1,
+            "tracked.txt",
+            1_700_000_000_000,
+        )
+        .await;
+        record_finished_step_for_states(
+            &service,
+            "tls-step-2",
+            "call-2",
+            state1,
+            state2,
+            "tracked.txt",
+            1_700_000_000_100,
+        )
+        .await;
+
+        let by_step = service
+            .preview_timeline_seek(Request::new(PreviewTimelineSeekRequest {
+                repo_path: String::new(),
+                selector: Some(TimelineSeekSelector {
+                    target: Some(timeline_seek_selector::Target::Step(
+                        TimelineSeekStepSelector {
+                            thread: "main".to_string(),
+                            branch_id: "tlb-main".to_string(),
+                            step_id: "tls-step-1".to_string(),
+                        },
+                    )),
+                }),
+                mode: TimelineMaterializeMode::FailIfDirty as i32,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(
+            by_step.current_status.unwrap().current_step_id,
+            "tls-step-2"
+        );
+        assert_eq!(by_step.current_state, state2.as_bytes().to_vec());
+        assert_eq!(by_step.checkout_state, state2.as_bytes().to_vec());
+        assert_eq!(by_step.target_branch_id, "tlb-main");
+        assert_eq!(by_step.target_step_id, "tls-step-1");
+        assert_eq!(by_step.target_state, state1.as_bytes().to_vec());
+        assert_eq!(by_step.changed_paths, vec!["tracked.txt"]);
+        assert!(by_step.worktree_dirty_known);
+        assert!(!by_step.worktree_dirty);
+        assert!(by_step.materialization_supported);
+        assert!(by_step.can_materialize);
+        assert!(by_step.blockers.is_empty());
+
+        let by_native = service
+            .preview_timeline_seek(Request::new(PreviewTimelineSeekRequest {
+                repo_path: String::new(),
+                selector: Some(TimelineSeekSelector {
+                    target: Some(timeline_seek_selector::Target::NativeToolCall(
+                        TimelineSeekNativeToolCallSelector {
+                            thread: "main".to_string(),
+                            harness: "opencode".to_string(),
+                            session_id: "session-1".to_string(),
+                            message_id: "message-1".to_string(),
+                            tool_call_id: "call-2".to_string(),
+                        },
+                    )),
+                }),
+                mode: TimelineMaterializeMode::FailIfDirty as i32,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(by_native.target_step_id, "tls-step-2");
+        assert_eq!(by_native.target_state, state2.as_bytes().to_vec());
+
+        let current_cursor = service
+            .preview_timeline_seek(Request::new(PreviewTimelineSeekRequest {
+                repo_path: String::new(),
+                selector: Some(TimelineSeekSelector {
+                    target: Some(timeline_seek_selector::Target::CurrentCursor(
+                        TimelineCursorSelector {
+                            thread: "main".to_string(),
+                            branch_id: "tlb-main".to_string(),
+                        },
+                    )),
+                }),
+                mode: TimelineMaterializeMode::FailIfDirty as i32,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(current_cursor.target_step_id, "tls-step-2");
+        assert_eq!(current_cursor.target_state, state2.as_bytes().to_vec());
+        assert!(current_cursor.can_materialize);
+
+        let unsupported = service
+            .preview_timeline_seek(Request::new(PreviewTimelineSeekRequest {
+                repo_path: String::new(),
+                selector: Some(TimelineSeekSelector {
+                    target: Some(timeline_seek_selector::Target::CurrentCursor(
+                        TimelineCursorSelector {
+                            thread: "main".to_string(),
+                            branch_id: "tlb-main".to_string(),
+                        },
+                    )),
+                }),
+                mode: TimelineMaterializeMode::CaptureCurrentThenSeek as i32,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!unsupported.can_materialize);
+        assert_eq!(unsupported.blockers.len(), 1);
+        assert_eq!(
+            unsupported.blockers[0].kind,
+            TimelineMaterializationBlockerKind::UnsupportedMode as i32
+        );
+        assert_eq!(
+            unsupported.blockers[0].unsupported_mode,
+            TimelineMaterializeMode::CaptureCurrentThenSeek as i32
+        );
+    }
+
+    #[tokio::test]
+    async fn materialize_timeline_cursor_moves_checkout_and_records_cursor() {
+        let (temp, service) = fresh_service();
+        let state0 = service.inner.repo().head().unwrap().unwrap();
+        let state1 = write_repo_state(&service, temp.path(), "tracked.txt", "one\n");
+        let state2 = write_repo_state(&service, temp.path(), "tracked.txt", "two\n");
+        record_finished_step_for_states(
+            &service,
+            "tls-step-1",
+            "call-1",
+            state0,
+            state1,
+            "tracked.txt",
+            1_700_000_000_000,
+        )
+        .await;
+        record_finished_step_for_states(
+            &service,
+            "tls-step-2",
+            "call-2",
+            state1,
+            state2,
+            "tracked.txt",
+            1_700_000_000_100,
+        )
+        .await;
+
+        let response = service
+            .materialize_timeline_cursor(Request::new(MaterializeTimelineCursorRequest {
+                repo_path: String::new(),
+                selector: Some(TimelineSeekSelector {
+                    target: Some(timeline_seek_selector::Target::Step(
+                        TimelineSeekStepSelector {
+                            thread: "main".to_string(),
+                            branch_id: "tlb-main".to_string(),
+                            step_id: "tls-step-1".to_string(),
+                        },
+                    )),
+                }),
+                mode: TimelineMaterializeMode::FailIfDirty as i32,
+                client_operation_id: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(response.materialized);
+        assert_eq!(
+            response.status,
+            WireTimelineMaterializeStatus::Materialized as i32
+        );
+        assert_eq!(
+            response.recovery_status,
+            WireTimelineMaterializationRecoveryStatus::NoPending as i32
+        );
+        assert!(response.recovered_cursor_operation.is_none());
+        assert!(response.recovery_blockers.is_empty());
+        assert_eq!(response.cursor_operation.unwrap().kind, "cursor_moved");
+        assert_eq!(
+            response.preview.as_ref().unwrap().target_step_id,
+            "tls-step-1"
+        );
+        assert_eq!(
+            response.updated_status.unwrap().current_step_id,
+            "tls-step-1",
+            "materialization should update the logical cursor after moving the checkout"
+        );
+        assert!(response.blockers.is_empty());
+        assert_eq!(service.inner.repo().head().unwrap(), Some(state1));
+        assert_eq!(
+            fs::read_to_string(temp.path().join("tracked.txt")).unwrap(),
+            "one\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn timeline_action_rpcs_return_navigation_and_records() {
+        let (_temp, service) = fresh_service();
+        record_finished_step(&service, "tls-step-1", "call-1", 1, 2, 1_700_000_000_000).await;
+        record_finished_step(&service, "tls-step-2", "call-2", 2, 3, 1_700_000_000_100).await;
+
+        let fork = service
+            .fork_timeline_from_selector(Request::new(ForkTimelineFromSelectorRequest {
+                repo_path: String::new(),
+                selector: Some(TimelineSeekSelector {
+                    target: Some(timeline_seek_selector::Target::NativeToolCall(
+                        TimelineSeekNativeToolCallSelector {
+                            thread: "main".to_string(),
+                            harness: "opencode".to_string(),
+                            session_id: "session-1".to_string(),
+                            message_id: "message-1".to_string(),
+                            tool_call_id: "call-1".to_string(),
+                        },
+                    )),
+                }),
+                branch_id: "tlb-child".to_string(),
+                reason: "fan-out".to_string(),
+                client_operation_id: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(fork.branch_id, "tlb-child");
+        assert_eq!(fork.parent_branch_id, "tlb-main");
+        assert_eq!(fork.from_step_id, "tls-step-1");
+        assert_eq!(fork.operation.unwrap().kind, "branch_created");
+        assert!(
+            fork.navigation
+                .as_ref()
+                .unwrap()
+                .branches
+                .iter()
+                .any(|branch| branch.branch_id == "tlb-child")
+        );
+
+        let reset = service
+            .reset_timeline_cursor(Request::new(ResetTimelineCursorRequest {
+                repo_path: String::new(),
+                selector: Some(TimelineSeekSelector {
+                    target: Some(timeline_seek_selector::Target::Step(
+                        TimelineSeekStepSelector {
+                            thread: "main".to_string(),
+                            branch_id: "tlb-main".to_string(),
+                            step_id: "tls-step-1".to_string(),
+                        },
+                    )),
+                }),
+                mode: TimelineMaterializeMode::FailIfDirty as i32,
+                materialize_checkout: false,
+                client_operation_id: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(reset.cursor_operation.unwrap().kind, "cursor_moved");
+        assert!(reset.materialization.is_none());
+        assert_eq!(
+            reset.navigation.unwrap().cursor.unwrap().step_id,
+            "tls-step-1"
+        );
+
+        let recovery = service
+            .recover_timeline_materialization(Request::new(RecoverTimelineMaterializationRequest {
+                repo_path: String::new(),
+                thread: "main".to_string(),
+                client_operation_id: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(
+            recovery.recovery_status,
+            WireTimelineMaterializationRecoveryStatus::NoPending as i32
+        );
+        assert!(recovery.recovered_cursor_operation.is_none());
+        assert!(recovery.recovery_blockers.is_empty());
     }
 }

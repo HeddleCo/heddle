@@ -13,7 +13,7 @@ use crate::cli::{
     ActorCommands, AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands,
     HookCommands, IntegrationCommands, MaintenanceCommands, OplogCommands, PurgeCommands,
     RedactCommands, RedactTrustCommands, RemoteCommands, SessionCommands, ShellCommands,
-    StashCommands, ThreadCommands, ThreadMarkerCommands, VisibilityCommands,
+    StashCommands, ThreadCommands, ThreadMarkerCommands, TimelineCommands, VisibilityCommands,
     cli_args::{DiscussCommands, ReviewCommands, TransactionCommands},
     render::shell_quote,
 };
@@ -2704,6 +2704,49 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
+    entry(&["timeline"], surface(GROUP, "automation")),
+    entry(
+        &["timeline", "fork"],
+        surface(
+            json_discriminators(
+                MUTATING,
+                &[json_discriminator(
+                    Some("timeline fork"),
+                    "output_kind",
+                    "timeline_action",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["timeline", "reset"],
+        surface(
+            json_discriminators(
+                WORKTREE_MUTATION,
+                &[json_discriminator(
+                    Some("timeline reset"),
+                    "output_kind",
+                    "timeline_action",
+                )],
+            ),
+            "automation",
+        ),
+    ),
+    entry(
+        &["timeline", "recover"],
+        surface(
+            json_discriminators(
+                MUTATING,
+                &[json_discriminator(
+                    Some("timeline recover"),
+                    "output_kind",
+                    "timeline_action",
+                )],
+            ),
+            "automation",
+        ),
+    ),
     entry(&["transaction"], hidden(GROUP)),
     entry(
         &["transaction", "begin"],
@@ -4310,6 +4353,11 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 }
                 ThreadMarkerCommands::Show { .. } => vec!["thread", "marker", "show"],
             },
+        },
+        Commands::Timeline(args) => match &args.command {
+            TimelineCommands::Fork(_) => vec!["timeline", "fork"],
+            TimelineCommands::Reset(_) => vec!["timeline", "reset"],
+            TimelineCommands::Recover(_) => vec!["timeline", "recover"],
         },
         Commands::Shell { command } => match command {
             ShellCommands::Init { .. } => vec!["shell", "init"],

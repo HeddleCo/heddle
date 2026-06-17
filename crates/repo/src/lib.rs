@@ -52,6 +52,9 @@ mod thread_record_store;
 mod thread_stack;
 mod thread_storage;
 mod thread_worktree_target;
+mod timeline_actions;
+mod timeline_materialize;
+mod timeline_navigation;
 mod timeline_store;
 mod timeline_view;
 pub mod visibility;
@@ -127,7 +130,20 @@ pub use thread_storage::{SyncedThreadMetadata, Thread, ThreadManager};
 pub use thread_worktree_target::{
     ThreadWorktreeTargetDisposition, ThreadWorktreeTargetError, validate_thread_worktree_target,
 };
-pub use timeline_store::TimelineStore;
+pub use timeline_actions::{TimelineForkOutcome, TimelineRecoverOutcome, TimelineResetOutcome};
+pub use timeline_materialize::{
+    TimelineMaterializationBlocker, TimelineMaterializationBoundaryStatus,
+    TimelineMaterializationRecoveryBlocker, TimelineMaterializationRecoveryOutcome,
+    TimelineMaterializationRecoveryStatus, TimelineMaterializeMode, TimelineMaterializeOutcome,
+    TimelineMaterializeStatus, TimelineSeekBranchConstraint, TimelineSeekPreview,
+    TimelineSeekSelector,
+};
+pub use timeline_navigation::{
+    TimelineNavigationActionAvailability, TimelineNavigationBranch, TimelineNavigationCursor,
+    TimelineNavigationRecovery, TimelineNavigationRecoveryStatus, TimelineNavigationSnapshot,
+    TimelineNavigationStep,
+};
+pub use timeline_store::{TimelineMaterializationRecoveryRecord, TimelineStore};
 pub use timeline_view::{
     TimelineBranchKey, TimelineBranchSummary, TimelineCursorMoveRecord, TimelineNativeToolKey,
     TimelineSeekTarget, TimelineStepKey, TimelineStepSummary, TimelineThreadStatus, TimelineView,

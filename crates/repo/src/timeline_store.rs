@@ -10,17 +10,67 @@ use std::{
 use objects::{
     error::{HeddleError, Result},
     fs_atomic::write_file_atomic,
-    lock::RepoLock,
-    object::{TimelineCodecError, TimelineOperationEnvelope, TimelineOperationId},
+    lock::{RepoLock, WriteLockGuard},
+    object::{
+        ChangeId, TimelineBranchId, TimelineCodecError, TimelineCursorMoveReason,
+        TimelineOperationEnvelope, TimelineOperationId, TimelineStepId,
+    },
 };
+use serde::{Deserialize, Serialize};
 
+use crate::thread_manifest::encode_thread_segment;
+
+pub const TIMELINE_MATERIALIZATION_RECOVERY_SCHEMA_VERSION: u16 = 1;
 const TIMELINE_DIR: &str = "timeline";
 const OPS_DIR: &str = "ops";
 const INDEXES_DIR: &str = "indexes";
 const VIEWS_DIR: &str = "views";
 const SYNC_DIR: &str = "sync";
+const RECOVERY_DIR: &str = "recovery";
+const LOCKS_DIR: &str = "locks";
 const TMP_DIR: &str = "tmp";
 const LOCK_FILE: &str = "timeline.lock";
+const MATERIALIZATION_RECOVERY_EXT: &str = "materialization.msgpack";
+
+/// Versioned sidecar used to complete a timeline cursor move after crash.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimelineMaterializationRecoveryRecord {
+    pub schema_version: u16,
+    pub thread: String,
+    pub branch_id: TimelineBranchId,
+    pub from_step_id: Option<TimelineStepId>,
+    pub to_step_id: Option<TimelineStepId>,
+    pub from_state: ChangeId,
+    pub to_state: ChangeId,
+    pub reason: TimelineCursorMoveReason,
+    pub moved_at_ms: i64,
+}
+
+impl TimelineMaterializationRecoveryRecord {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        thread: impl Into<String>,
+        branch_id: TimelineBranchId,
+        from_step_id: Option<TimelineStepId>,
+        to_step_id: Option<TimelineStepId>,
+        from_state: ChangeId,
+        to_state: ChangeId,
+        reason: TimelineCursorMoveReason,
+        moved_at_ms: i64,
+    ) -> Self {
+        Self {
+            schema_version: TIMELINE_MATERIALIZATION_RECOVERY_SCHEMA_VERSION,
+            thread: thread.into(),
+            branch_id,
+            from_step_id,
+            to_step_id,
+            from_state,
+            to_state,
+            reason,
+            moved_at_ms,
+        }
+    }
+}
 
 /// Durable local store for content-addressed timeline operations.
 pub struct TimelineStore {
@@ -51,6 +101,8 @@ impl TimelineStore {
         fs::create_dir_all(self.root.join(INDEXES_DIR))?;
         fs::create_dir_all(self.root.join(VIEWS_DIR))?;
         fs::create_dir_all(self.root.join(SYNC_DIR))?;
+        fs::create_dir_all(self.root.join(RECOVERY_DIR))?;
+        fs::create_dir_all(self.root.join(LOCKS_DIR))?;
         fs::create_dir_all(self.root.join(TMP_DIR))?;
         OpenOptions::new()
             .create(true)
@@ -114,6 +166,79 @@ impl TimelineStore {
         self.ops_dir().join(prefix).join(format!("{rest}.msgpack"))
     }
 
+    pub fn stage_materialization_recovery(
+        &self,
+        record: &TimelineMaterializationRecoveryRecord,
+    ) -> Result<()> {
+        let path = self.materialization_recovery_path(&record.thread);
+        let bytes = rmp_serde::to_vec_named(record)
+            .map_err(|err| HeddleError::Serialization(err.to_string()))?;
+        let _guard = self.lock.write().map_err(timeline_lock_error)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        write_file_atomic(&path, &bytes)?;
+        Ok(())
+    }
+
+    pub fn read_materialization_recovery(
+        &self,
+        thread: &str,
+    ) -> Result<Option<TimelineMaterializationRecoveryRecord>> {
+        let path = self.materialization_recovery_path(thread);
+        let _guard = self.lock.read().map_err(timeline_lock_error)?;
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+        let record: TimelineMaterializationRecoveryRecord = rmp_serde::from_slice(&bytes)
+            .map_err(|err| HeddleError::InvalidObject(err.to_string()))?;
+        if record.schema_version != TIMELINE_MATERIALIZATION_RECOVERY_SCHEMA_VERSION {
+            return Err(HeddleError::InvalidObject(format!(
+                "unsupported timeline materialization recovery schema version {}",
+                record.schema_version
+            )));
+        }
+        if record.thread != thread {
+            return Err(HeddleError::InvalidObject(format!(
+                "timeline materialization recovery thread mismatch: expected '{thread}', found '{}'",
+                record.thread
+            )));
+        }
+        Ok(Some(record))
+    }
+
+    pub fn clear_materialization_recovery(&self, thread: &str) -> Result<()> {
+        let path = self.materialization_recovery_path(thread);
+        let _guard = self.lock.write().map_err(timeline_lock_error)?;
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn materialization_recovery_path(&self, thread: &str) -> PathBuf {
+        self.root.join(RECOVERY_DIR).join(format!(
+            "{}.{MATERIALIZATION_RECOVERY_EXT}",
+            encode_thread_segment(thread)
+        ))
+    }
+
+    pub fn lock_materialization(&self, thread: &str) -> Result<WriteLockGuard> {
+        RepoLock::at(self.materialization_lock_path(thread))
+            .write()
+            .map_err(timeline_lock_error)
+    }
+
+    pub fn materialization_lock_path(&self, thread: &str) -> PathBuf {
+        self.root.join(LOCKS_DIR).join(format!(
+            "{}.materialization.lock",
+            encode_thread_segment(thread)
+        ))
+    }
+
     fn ops_dir(&self) -> PathBuf {
         self.root.join(OPS_DIR)
     }
@@ -169,6 +294,8 @@ mod tests {
         assert!(store.root().join("indexes").is_dir());
         assert!(store.root().join("views").is_dir());
         assert!(store.root().join("sync").is_dir());
+        assert!(store.root().join("recovery").is_dir());
+        assert!(store.root().join("locks").is_dir());
         assert!(store.root().join("tmp").is_dir());
         assert!(store.root().join("timeline.lock").is_file());
         assert!(store.operation_path(&id).is_file());
@@ -178,6 +305,47 @@ mod tests {
         assert_eq!(
             store.read_operation_bytes(&id).unwrap().unwrap(),
             envelope.encode().unwrap()
+        );
+    }
+
+    #[test]
+    fn timeline_store_round_trips_materialization_recovery_record() {
+        let temp = TempDir::new().unwrap();
+        let heddle_dir = temp.path().join(".heddle");
+        let store = TimelineStore::open(&heddle_dir).unwrap();
+        let record = TimelineMaterializationRecoveryRecord::new(
+            "feature/slashed",
+            TimelineBranchId::new("tlb-main"),
+            Some(TimelineStepId::new("tls-before")),
+            Some(TimelineStepId::new("tls-after")),
+            ChangeId::from_bytes([1; 16]),
+            ChangeId::from_bytes([2; 16]),
+            TimelineCursorMoveReason::SeekToolCall,
+            42,
+        );
+
+        store.stage_materialization_recovery(&record).unwrap();
+
+        assert!(
+            store
+                .materialization_recovery_path("feature/slashed")
+                .is_file()
+        );
+        assert_eq!(
+            store
+                .read_materialization_recovery("feature/slashed")
+                .unwrap(),
+            Some(record)
+        );
+
+        store
+            .clear_materialization_recovery("feature/slashed")
+            .unwrap();
+        assert!(
+            store
+                .read_materialization_recovery("feature/slashed")
+                .unwrap()
+                .is_none()
         );
     }
 }

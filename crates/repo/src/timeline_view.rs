@@ -275,10 +275,26 @@ impl TimelineView {
             .get(&TimelineBranchKey::new(thread, branch_id.clone()))
     }
 
+    /// Branch summaries for a thread in deterministic key order.
+    pub fn branches_for_thread(&self, thread: &str) -> Vec<&TimelineBranchSummary> {
+        self.branches
+            .iter()
+            .filter_map(|(key, branch)| (key.thread == thread).then_some(branch))
+            .collect()
+    }
+
     /// Step summary for a thread-local step id.
     pub fn step(&self, thread: &str, step_id: &TimelineStepId) -> Option<&TimelineStepSummary> {
         self.steps
             .get(&TimelineStepKey::new(thread, step_id.clone()))
+    }
+
+    /// Step summaries for a thread in deterministic key order.
+    pub fn steps_for_thread(&self, thread: &str) -> Vec<&TimelineStepSummary> {
+        self.steps
+            .iter()
+            .filter_map(|(key, step)| (key.thread == thread).then_some(step))
+            .collect()
     }
 
     /// Ordered step summaries for a branch.

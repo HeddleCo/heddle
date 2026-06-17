@@ -312,6 +312,7 @@ pub struct SwitchArgs {
 Examples:
   heddle log                          # walk the current thread
   heddle log --oneline -n 20          # 20 most recent states in compact form
+  heddle log --timeline               # show agent timeline tool-call cursor
   heddle log --reflog                 # include re-attributed history
   heddle log --path src/auth.rs       # restrict to states touching a path
 ")]
@@ -339,6 +340,14 @@ pub struct LogArgs {
     #[arg(long)]
     pub reflog: bool,
 
+    /// Show agent timeline tool-call navigation instead of capture history.
+    #[arg(long)]
+    pub timeline: bool,
+
+    /// Timeline thread to render with `--timeline`.
+    #[arg(long, default_value = "main")]
+    pub thread: String,
+
     /// Filter by agent model.
     #[arg(long)]
     pub agent: Option<String>,
@@ -354,6 +363,118 @@ pub struct LogArgs {
     /// applied first, then the result is trimmed to `--limit`.
     #[arg(long, value_name = "STATE")]
     pub since: Option<String>,
+}
+
+/// Arguments for `heddle timeline`.
+#[derive(Clone, Debug, clap::Args)]
+pub struct TimelineArgs {
+    #[command(subcommand)]
+    pub command: TimelineCommands,
+}
+
+/// Timeline navigation action commands.
+#[derive(Clone, Debug, clap::Subcommand)]
+pub enum TimelineCommands {
+    /// Fork a timeline branch from a step or native harness tool call.
+    #[command(after_help = "\
+Examples:
+  heddle timeline fork --step tls-abc --branch tlb-experiment
+  heddle timeline fork --tool-call call_123 --session ses_456 --branch tlb-alt
+")]
+    Fork(TimelineForkArgs),
+
+    /// Reset the logical timeline cursor, optionally materializing checkout files.
+    #[command(after_help = "\
+Examples:
+  heddle timeline reset --step tls-abc
+  heddle timeline reset --tool-call call_123 --materialize
+")]
+    Reset(TimelineResetArgs),
+
+    /// Recover a pending timeline materialization after an interrupted reset/seek.
+    Recover(TimelineRecoverArgs),
+}
+
+/// Shared selector arguments for timeline action commands.
+#[derive(Clone, Debug, clap::Args)]
+pub struct TimelineTargetArgs {
+    /// Timeline thread to target.
+    #[arg(long, default_value = "main")]
+    pub thread: String,
+
+    /// Constrain the target to this branch when selecting by step/current cursor.
+    #[arg(long = "from-branch", value_name = "BRANCH")]
+    pub from_branch: Option<String>,
+
+    /// Target a timeline step id.
+    #[arg(long, conflicts_with_all = ["tool_call", "undo", "redo", "current"])]
+    pub step: Option<String>,
+
+    /// Target a native harness tool call id, such as an OpenCode tool call id.
+    #[arg(long = "tool-call", conflicts_with_all = ["step", "undo", "redo", "current"])]
+    pub tool_call: Option<String>,
+
+    /// Native harness name for `--tool-call`.
+    #[arg(long, default_value = "opencode")]
+    pub harness: String,
+
+    /// Native harness session id for `--tool-call`.
+    #[arg(long)]
+    pub session: Option<String>,
+
+    /// Native harness message id for `--tool-call`.
+    #[arg(long)]
+    pub message: Option<String>,
+
+    /// Target the previous step from the current cursor.
+    #[arg(long, conflicts_with_all = ["step", "tool_call", "redo", "current"])]
+    pub undo: bool,
+
+    /// Target the next step from the current cursor.
+    #[arg(long, conflicts_with_all = ["step", "tool_call", "undo", "current"])]
+    pub redo: bool,
+
+    /// Target the current logical cursor.
+    #[arg(long, conflicts_with_all = ["step", "tool_call", "undo", "redo"])]
+    pub current: bool,
+}
+
+/// Arguments for `heddle timeline fork`.
+#[derive(Clone, Debug, clap::Args)]
+pub struct TimelineForkArgs {
+    #[command(flatten)]
+    pub target: TimelineTargetArgs,
+
+    /// New timeline branch id. Generated when omitted.
+    #[arg(long, value_name = "BRANCH")]
+    pub branch: Option<String>,
+
+    /// Branch reason: explicit-fork, edit-from-rewound-cursor, retry, fan-out.
+    #[arg(long, default_value = "explicit-fork")]
+    pub reason: String,
+}
+
+/// Arguments for `heddle timeline reset`.
+#[derive(Clone, Debug, clap::Args)]
+pub struct TimelineResetArgs {
+    #[command(flatten)]
+    pub target: TimelineTargetArgs,
+
+    /// Materialize checkout files to the target state after moving the cursor.
+    #[arg(long)]
+    pub materialize: bool,
+
+    /// Materialization mode: fail-if-dirty or capture-current-then-seek.
+    #[arg(long, default_value = "fail-if-dirty")]
+    pub mode: String,
+}
+
+/// Arguments for `heddle timeline recover`.
+#[derive(Clone, Debug, clap::Args)]
+pub struct TimelineRecoverArgs {
+    /// Timeline thread to recover.
+    #[arg(long, default_value = "main")]
+    pub thread: String,
 }
 
 /// Arguments for the `retro` command.

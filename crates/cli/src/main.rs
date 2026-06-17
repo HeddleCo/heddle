@@ -34,8 +34,8 @@ use cli::{
             cmd_resolve, cmd_retro, cmd_revert, cmd_review, cmd_run, cmd_schemas, cmd_session_end,
             cmd_session_list, cmd_session_segment, cmd_session_show, cmd_session_start, cmd_shell,
             cmd_show, cmd_snapshot, cmd_start, cmd_stash, cmd_status, cmd_switch_compat,
-            cmd_sync_smart, cmd_thread, cmd_transaction, cmd_try, cmd_undo, cmd_verify, cmd_watch,
-            command_runtime_contract_for_command, print_error_with_hint,
+            cmd_sync_smart, cmd_thread, cmd_timeline, cmd_transaction, cmd_try, cmd_undo,
+            cmd_verify, cmd_watch, command_runtime_contract_for_command, print_error_with_hint,
             print_parse_error_json_envelope,
         },
         render::write_json_stdout,
@@ -417,6 +417,8 @@ async fn async_main() -> Result<()> {
             graph,
             oneline,
             reflog,
+            timeline,
+            thread,
             agent,
             paths,
             since,
@@ -430,6 +432,8 @@ async fn async_main() -> Result<()> {
                     graph: *graph,
                     oneline: *oneline,
                     reflog: *reflog,
+                    timeline: *timeline,
+                    thread: thread.clone(),
                     agent: agent.clone(),
                     paths: paths.clone(),
                     since: since.clone(),
@@ -439,6 +443,8 @@ async fn async_main() -> Result<()> {
         }
 
         Commands::Show { state } => cmd_show(&cli, state.clone()),
+
+        Commands::Timeline(args) => cmd_timeline(&cli, args.clone()),
 
         Commands::Retro(RetroArgs {
             since,
