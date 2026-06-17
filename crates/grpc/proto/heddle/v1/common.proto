@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package heddle.v1;
+
+message RefEntry {
+  string name = 1;
+  bytes change_id = 2;
+  bool is_thread = 3;
+}
+
+// Five-level role grants on hosted namespaces and repositories. Used
+// wherever a role appears on the wire — `HostedGrant.role`,
+// `Invitation.role`, `ApprovalGroupMember.required_role`,
+// `ThreadPolicy.required_role`, etc.
+enum HostedRole {
+  HOSTED_ROLE_UNSPECIFIED = 0;
+  HOSTED_ROLE_READER = 1;
+  HOSTED_ROLE_DEVELOPER = 2;
+  HOSTED_ROLE_MAINTAINER = 3;
+  HOSTED_ROLE_ADMIN = 4;
+  HOSTED_ROLE_OWNER = 5;
+}
+
+// Review-signature kinds. `READ` is a human reviewer; the agent variants
+// distinguish what an AI signing a state was actually doing — preview
+// (passive read-through) vs co-review (mutating suggestions).
+enum ReviewKind {
+  REVIEW_KIND_UNSPECIFIED = 0;
+  REVIEW_KIND_READ = 1;
+  REVIEW_KIND_AGENT_PREVIEW = 2;
+  REVIEW_KIND_AGENT_CO_REVIEW = 3;
+}
+
+// State publication status. Captures whether a state is in-progress
+// (`DRAFT`) or pinned as the published shape of the work (`PUBLISHED`).
+enum StateStatus {
+  STATE_STATUS_UNSPECIFIED = 0;
+  STATE_STATUS_DRAFT = 1;
+  STATE_STATUS_PUBLISHED = 2;
+}
+
+// Grants are scoped to either a namespace or a repository — never both,
+// never neither. The `target` oneof is the wire-level form of that
+// "exactly one of" guarantee. Server-side `classify_grant_target`
+// translates it to a `GrantTarget` enum without runtime branching.
+message GrantTargetRef {
+  oneof target {
+    string namespace_path = 1;
+    string repo_path = 2;
+  }
+}
+
+message DeleteResponse {
+  bool deleted = 1;
+}
+
+message UsageSummary {
+  optional uint64 input_tokens = 1;
+  optional uint64 output_tokens = 2;
+  optional uint64 reasoning_tokens = 3;
+  optional uint64 tool_calls = 4;
+  optional uint64 cost_micros_usd = 5;
+}

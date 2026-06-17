@@ -8,7 +8,7 @@ use std::{
 use objects::object::{ChangeId, ContentHash, MarkerName, ThreadName};
 use tempfile::TempDir;
 
-use super::{OpLog, OpRecord, oplog_backend::OpLogBackend};
+use super::{OpLog, OpLogRecorder, OpRecord, oplog_backend::OpLogBackend};
 
 fn create_oplog() -> (TempDir, OpLog) {
     let temp_dir = TempDir::new().unwrap();
@@ -893,7 +893,7 @@ mod default_backend {
 
     use super::{
         super::oplog_types::{OpBatch, OpEntry, OpRecord},
-        OpLogBackend,
+        OpLogBackend, OpLogRecorder,
     };
 
     #[derive(Default)]
@@ -1009,12 +1009,10 @@ mod default_backend {
         assert!(second.is_none());
     }
 
-    /// The `record_*` convenience wrappers on `OpLogBackend` are *default*
-    /// trait methods. On `OpLog` they are shadowed by the inherent
-    /// `oplog_records.rs` methods, so a backend that does NOT redefine them
-    /// (the `MemOpLog` mock, like the Postgres backend) is the only way to
-    /// drive the default bodies. Calls each through the trait and asserts the
-    /// expected variant landed in a recorded batch.
+    /// The `record_*` convenience wrappers on `OpLogRecorder` are default trait
+    /// methods layered above `OpLogBackend`. A backend that only implements the
+    /// storage contract can still opt into this domain recorder surface, and
+    /// these calls assert that the expected variants land in recorded batches.
     #[test]
     fn default_record_wrappers_emit_expected_variants() {
         use objects::object::{ChangeId, ContentHash, MarkerName, ThreadName};

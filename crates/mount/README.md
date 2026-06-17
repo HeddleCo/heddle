@@ -402,10 +402,10 @@ the cargo / git path doesn't need it.
 - macOS FSKit shell: scaffolded. The C ABI between the Swift
   adapter and the Rust trampolines is wired end-to-end; the
   `PlatformShell` dispatch is exercised by the unit test. The
-  `FSModuleHost.register(...)` step that publishes the volume to
-  the kernel is **stubbed** — the Swift `mount(at:)` returns
-  `ENOSYS` today. Finishing this needs a `.fsmodule` bundle and
-  the FSKit entitlement, which are release-engineering tasks.
+  volume is published through the `.fsmodule` System Extension
+  path; the CLI no longer exposes an in-process FSKit mount stub.
+  Finishing this needs release-engineering ownership of the
+  `.fsmodule` bundle and FSKit entitlement.
 - Windows ProjFS shell: production-ready (heddle#75). The CLI
   routes Windows daily-use traffic through `ProjFsShell` with an
   NFS fallback when the optional feature is missing. Production
@@ -427,7 +427,7 @@ FSKit dispatch is a follow-up:
 
 1. Add a `#[cfg(all(target_os = "macos", feature = "mount"))]`
    sibling module that mirrors the existing `linux` module but
-   uses `FSKitShell` and `FSKitSession`.
+   launches the `.fsmodule` System Extension bootstrap path.
 2. Re-export `MountHandle` / `spawn_mount_for_thread` /
    `unmount_thread_if_mounted` from whichever module is
    compiled in.

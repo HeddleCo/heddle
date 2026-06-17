@@ -1,0 +1,206 @@
+syntax = "proto3";
+
+package heddle.v1;
+
+import "google/protobuf/timestamp.proto";
+import "heddle/v1/common.proto";
+
+// =====================================================================
+// Foundation services for the Review and Agent-First CLI epics.
+//
+// Idempotency contract: every state-changing RPC defined below carries
+// `string client_operation_id = 100` (UUID v4 string, optional). When
+// the server sees the same id twice with the same request body it
+// returns the original outcome bit-identical; the same id with a
+// different body returns FAILED_PRECONDITION. New state-changing RPCs
+// added to existing services should reserve tag 100 for the same field
+// going forward — the value of 100 is grep-able and leaves room for
+// pre-existing fields below it.
+// =====================================================================
+
+// State review surface. Distinct from the GitHub-PR-focused ReviewService
+// above. Ships the review payload that powers both the CLI's
+// `heddle review show` and the web's state-review route.
+service StateReviewService {
+  rpc GetReviewPayload(GetReviewPayloadRequest) returns (ReviewPayload);
+  rpc SignState(SignStateRequest) returns (SignStateResponse);
+  rpc ListSignatures(ListSignaturesRequest) returns (ListSignaturesResponse);
+}
+
+message GetReviewPayloadRequest {
+  string repo_path = 1;
+  bytes state_id = 2;
+  // When true, the response includes `all_signals` populated.
+  bool include_all_signals = 3;
+}
+
+message ReviewPayload {
+  bytes state_id = 1;
+  ReviewSummary summary = 2;
+  // Agent-authored narrative captured at snapshot time. Empty when
+  // the state has no agent attribution.
+  string agent_narrative = 3;
+  ReadingOrderPartition partition = 4;
+  repeated RiskSignal in_budget_signals = 5;
+  // Full set of fired signals; only populated when the request set
+  // `include_all_signals = true`.
+  repeated RiskSignal all_signals = 6;
+  uint32 tick_budget = 7;
+  repeated AnchoredDiscussion discussions = 8;
+  repeated MergeRequirement merge_requirements = 9;
+  SigningFooter signing_footer = 10;
+}
+
+message ReviewSummary {
+  string headline = 1;
+  uint32 files_changed = 2;
+  uint32 added_lines = 3;
+  uint32 removed_lines = 4;
+  uint32 in_budget_signal_count = 5;
+  uint32 hidden_signal_count = 6;
+}
+
+message ReadingOrderPartition {
+  repeated PathSymbolRef structural = 1;
+  repeated PathSymbolRef consequence = 2;
+  repeated PathSymbolRef tests_and_docs = 3;
+}
+
+message PathSymbolRef {
+  string file = 1;
+  string symbol = 2;
+}
+
+message RiskSignal {
+  // Snake-case wire vocabulary matching `objects::object::RiskSignalKind`.
+  string kind = 1;
+  SignalAnchor anchor = 2;
+  string reason = 3;
+  string producer_module = 4;
+  uint32 producer_version = 5;
+  google.protobuf.Timestamp computed_at = 6;
+  // Render-time tier — `visible` or `hidden`. Set by the server-side
+  // budgeter so clients render without re-budgeting.
+  string visibility = 7;
+}
+
+message SignalAnchor {
+  string file = 1;
+  string symbol = 2;
+  // Empty when the signal is file-level rather than symbol-level.
+  uint32 start_line = 3;
+  uint32 end_line = 4;
+}
+
+message AnchoredDiscussion {
+  string id = 1;
+  PathSymbolRef anchor = 2;
+  bytes opened_against_state = 3;
+  google.protobuf.Timestamp opened_at = 4;
+  repeated DiscussionTurn turns = 5;
+  DiscussionResolution resolution = 6;
+  bool body_changed_since_open = 7;
+  bool orphaned = 8;
+  string visibility = 9;
+}
+
+message DiscussionTurn {
+  string author_name = 1;
+  string author_email = 2;
+  string body = 3;
+  google.protobuf.Timestamp posted_at = 4;
+}
+
+// Resolution state of a discussion. `Open` means unresolved; the
+// other three variants carry the artifact that closed it. Discussions
+// progress strictly Open → resolved/dismissed; the oneof guarantees
+// exactly one shape on the wire.
+message DiscussionResolution {
+  oneof state {
+    Open open = 1;
+    ResolvedIntoAnnotation into_annotation = 2;
+    ResolvedByEdit by_edit = 3;
+    Dismissed dismissed = 4;
+  }
+
+  message Open {}
+  message ResolvedIntoAnnotation {
+    string annotation_id = 1;
+  }
+  message ResolvedByEdit {
+    bytes state_id = 1;
+  }
+  message Dismissed {
+    string reason = 1;
+  }
+}
+
+message MergeRequirement {
+  string description = 1;
+  bool satisfied = 2;
+}
+
+message SigningFooter {
+  // Permitted review kinds for this state — server filters out kinds
+  // that don't apply (e.g. AGENT_CO_REVIEW hidden when caller isn't
+  // an agent).
+  repeated ReviewKind available_kinds = 1;
+}
+
+message SignStateRequest {
+  string repo_path = 1;
+  bytes state_id = 2;
+  ReviewKind kind = 3;
+  ReviewScope scope = 4;
+  string justification = 5;
+  string algorithm = 6;
+  bytes public_key = 7;
+  // Raw signature bytes over the canonical signing payload.
+  bytes signature = 8;
+  // Unix timestamp (seconds) the client signed at. The server rejects values
+  // skewed more than `SIGN_TIMESTAMP_SKEW_SECS` from its own clock so the
+  // signature can be reproduced and verified deterministically.
+  google.protobuf.Timestamp signed_at = 9;
+  string client_operation_id = 15;
+}
+
+// Scope of a review signature — either the whole change or a list of
+// individual symbols. The oneof guarantees exactly one shape on the
+// wire.
+message ReviewScope {
+  oneof scope {
+    WholeChange whole_change = 1;
+    SymbolList symbols = 2;
+  }
+  message WholeChange {}
+  message SymbolList {
+    repeated PathSymbolRef symbols = 1;
+  }
+}
+
+message SignStateResponse {
+  string signature_id = 1;
+  bytes state_id = 2;
+}
+
+message ListSignaturesRequest {
+  string repo_path = 1;
+  bytes state_id = 2;
+}
+
+message ListSignaturesResponse {
+  repeated ReviewSignature signatures = 1;
+}
+
+message ReviewSignature {
+  string signature_id = 1;
+  string actor_name = 2;
+  string actor_email = 3;
+  ReviewKind kind = 4;
+  ReviewScope scope = 5;
+  string justification = 6;
+  google.protobuf.Timestamp signed_at = 7;
+  string algorithm = 8;
+  bytes public_key = 9;
+  bytes signature = 10;
+}

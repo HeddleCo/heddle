@@ -175,7 +175,6 @@ impl HostedGrpcClient {
     ) -> Result<PushComplete, ProtocolError> {
         let _ = self.transport.chunk_size;
         let _ = self.transport.resume_attempts;
-        let _ = self.transport.negotiated.chunk_size();
         let objects = proto::enumerate_state_closure(repo.store(), local_state)?;
         let transfer_id = push_transfer_id(repo_path, local_state, target_thread);
         let transport_mode = preferred_transport_mode(&self.transport, objects.len());

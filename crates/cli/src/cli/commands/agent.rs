@@ -10,7 +10,6 @@ use daemon::local_daemon::{
     serve,
 };
 use repo::Repository;
-use schemars::JsonSchema;
 use serde::Serialize;
 
 use super::{
@@ -22,7 +21,7 @@ use crate::cli::{
     should_output_json,
 };
 
-#[derive(Serialize, JsonSchema)]
+#[derive(Serialize)]
 pub(crate) struct AgentServeOutput {
     pub output_kind: &'static str,
     pub status: String,
@@ -34,7 +33,7 @@ pub(crate) struct AgentServeOutput {
     pub trust: RepositoryVerificationState,
 }
 
-#[derive(Serialize, JsonSchema)]
+#[derive(Serialize)]
 pub(crate) struct AgentStatusOutput {
     output_kind: &'static str,
     running: bool,
@@ -45,7 +44,7 @@ pub(crate) struct AgentStatusOutput {
     trust: RepositoryVerificationState,
 }
 
-#[derive(Serialize, JsonSchema)]
+#[derive(Serialize)]
 pub(crate) struct AgentStopOutput {
     output_kind: &'static str,
     stopped: bool,

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! macOS FSKit end-to-end mount test.
+//! macOS FSKit session bootstrap smoke test.
 //!
 //! Marked `#[ignore]` and additionally gated on the
 //! `HEDDLE_FSKIT_AVAILABLE=1` env var so CI only opts in on
@@ -27,10 +27,10 @@ use tempfile::TempDir;
 
 #[test]
 #[ignore = "requires macOS 26.0 + FSKit entitlement; opt-in via HEDDLE_FSKIT_AVAILABLE=1"]
-fn fskit_mount_serves_blob_content() {
+fn fskit_session_constructs_for_extension_bootstrap() {
     if env::var("HEDDLE_FSKIT_AVAILABLE").as_deref() != Ok("1") {
         eprintln!(
-            "skipping fskit_mount_serves_blob_content: \
+            "skipping fskit_session_constructs_for_extension_bootstrap: \
              set HEDDLE_FSKIT_AVAILABLE=1 to enable"
         );
         return;
@@ -49,37 +49,6 @@ fn fskit_mount_serves_blob_content() {
     repo.snapshot(Some("fixture".into()), None).unwrap();
 
     let mount = ContentAddressedMount::new(repo, "main").unwrap();
-    let mountpoint = TempDir::new().unwrap();
-
-    // FSKit on macOS 26.0+ has no programmatic in-process
-    // `mount(at:)`. A real mount requires a code-signed
-    // `.fsmodule` System Extension that this CLI doesn't ship
-    // yet (release-engineering follow-up, tracked in
-    // `crates/mount/README.md`). Until that lands, the Swift
-    // `mount(at:)` returns ENOSYS — the assertion below pins
-    // the contract: construct + mount returns the documented
-    // not-implemented errno, drop cleans up.
     let shell = FSKitShell::new(mount).expect("construct FSKit session");
-    match shell.mount_background(mountpoint.path()) {
-        Ok(session) => {
-            // Future-proof: once the System Extension lands, the
-            // mount succeeds and the read assertion below pins
-            // the round-trip.
-            let target = mountpoint.path().join("hello.txt");
-            let read = std::fs::read_to_string(&target).expect("read mounted file");
-            assert_eq!(read, "world");
-            drop(session);
-        }
-        Err(err) => {
-            // Accepted intermediate state while the `.fsmodule`
-            // packaging is still pending — surface the errno so a
-            // reviewer can confirm it's ENOSYS, not something
-            // unrelated.
-            let msg = err.to_string();
-            assert!(
-                msg.contains("Function not implemented") || msg.contains("ENOSYS"),
-                "expected ENOSYS until .fsmodule lands, got: {msg}"
-            );
-        }
-    }
+    drop(shell);
 }

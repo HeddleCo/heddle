@@ -1,0 +1,302 @@
+syntax = "proto3";
+
+package heddle.v1;
+
+import "google/protobuf/timestamp.proto";
+import "heddle/v1/common.proto";
+import "heddle/v1/policies.proto";
+import "heddle/v1/support.proto";
+import "heddle/v1/threads.proto";
+
+service HostedUserService {
+  rpc GetCurrentUserNamespace(GetCurrentUserNamespaceRequest) returns (HostedNamespace);
+  rpc CreateNamespace(CreateNamespaceRequest) returns (HostedNamespace);
+  rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse);
+  rpc UpdateNamespace(UpdateNamespaceRequest) returns (HostedNamespace);
+  rpc DeleteNamespace(DeleteNamespaceRequest) returns (DeleteResponse);
+  rpc CreateRepository(CreateRepositoryRequest) returns (HostedRepository);
+  rpc ListRepositories(ListRepositoriesRequest) returns (ListRepositoriesResponse);
+  rpc UpdateRepository(UpdateRepositoryRequest) returns (HostedRepository);
+  rpc DeleteRepository(DeleteRepositoryRequest) returns (DeleteResponse);
+  rpc CreateGrant(CreateGrantRequest) returns (HostedGrant);
+  rpc ListGrants(ListGrantsRequest) returns (ListGrantsResponse);
+  rpc UpdateGrant(UpdateGrantRequest) returns (HostedGrant);
+  rpc DeleteGrant(DeleteGrantRequest) returns (DeleteResponse);
+
+  // ── Thread merge approvals ───────────────────────────────────────
+  rpc ApproveThread(ApproveThreadRequest) returns (ThreadApproval);
+  rpc RevokeApproval(RevokeApprovalRequest) returns (DeleteResponse);
+  rpc ListThreadApprovals(ListThreadApprovalsRequest) returns (ListThreadApprovalsResponse);
+  rpc CheckMergeEligibility(CheckMergeEligibilityRequest) returns (CheckMergeEligibilityResponse);
+
+  // ── Namespace-scoped invitations and members (formerly admin) ────
+  rpc CreateInvitation(CreateInvitationRequest) returns (Invitation);
+  rpc ListInvitations(ListInvitationsRequest) returns (ListInvitationsResponse);
+  rpc RevokeInvitation(RevokeInvitationRequest) returns (DeleteResponse);
+  rpc ListMembers(ListMembersRequest) returns (ListMembersResponse);
+
+  // ── Approval groups (reusable approver pools) ────────────────────
+  // Admin role on the repo's parent namespace required to create or
+  // mutate; Reader is enough to list.
+  rpc CreateApprovalGroup(CreateApprovalGroupRequest) returns (ApprovalGroup);
+  rpc ListApprovalGroups(ListApprovalGroupsRequest) returns (ListApprovalGroupsResponse);
+  rpc DeleteApprovalGroup(DeleteApprovalGroupRequest) returns (DeleteResponse);
+  rpc AddApprovalGroupMember(AddApprovalGroupMemberRequest) returns (ApprovalGroupMember);
+  rpc RemoveApprovalGroupMember(RemoveApprovalGroupMemberRequest) returns (DeleteResponse);
+
+  // ── Thread policies (branch protection) ──────────────────────────
+  rpc CreateThreadPolicy(CreateThreadPolicyRequest) returns (ThreadPolicy);
+  rpc ListThreadPolicies(ListThreadPoliciesRequest) returns (ListThreadPoliciesResponse);
+  rpc DeleteThreadPolicy(DeleteThreadPolicyRequest) returns (DeleteResponse);
+  rpc AddPolicyGroupRequirement(AddPolicyGroupRequirementRequest) returns (PolicyGroupRequirement);
+  rpc RemovePolicyGroupRequirement(RemovePolicyGroupRequirementRequest) returns (DeleteResponse);
+
+  // ── Operator-only listings (gate on staff scope) ─────────────────
+  rpc ListActors(ListActorsRequest) returns (ListActorsResponse);
+  rpc ListWorktrees(ListWorktreesRequest) returns (ListWorktreesResponse);
+
+  // ── Support access — customer-issued temporary admin grants for
+  // Heddle staff. The grantor must hold Admin on the namespace/repo;
+  // the grantee is a staff email. The server materialises a real
+  // `hosted_grants` row plus a `support_access_audit` row, both
+  // bounded by the supplied TTL.
+  rpc GrantSupportAccess(GrantSupportAccessRequest) returns (SupportAccessGrant);
+  rpc ListSupportAccessGrants(ListSupportAccessGrantsRequest) returns (ListSupportAccessGrantsResponse);
+  rpc RevokeSupportAccess(RevokeSupportAccessRequest) returns (DeleteResponse);
+}
+
+// Namespace kinds in the hosted control plane. `USER` namespaces are
+// per-account and auto-created at first sign-in; `ORG` and `TEAM` are
+// explicit organisational containers.
+enum NamespaceKind {
+  NAMESPACE_KIND_UNSPECIFIED = 0;
+  NAMESPACE_KIND_USER = 1;
+  NAMESPACE_KIND_ORG = 2;
+  NAMESPACE_KIND_TEAM = 3;
+}
+
+message ListNamespacesRequest {}
+
+message GetCurrentUserNamespaceRequest {}
+
+message CreateNamespaceRequest {
+  NamespaceKind kind = 1;
+  string slug = 2;
+  string parent_path = 3;
+  string display_name = 4;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message UpdateNamespaceRequest {
+  string full_path = 1;
+  string new_slug = 2;
+  string display_name = 3;
+  bool clear_display_name = 4;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message DeleteNamespaceRequest {
+  string full_path = 1;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message ListRepositoriesRequest {
+  string namespace_path = 1;
+}
+
+message CreateRepositoryRequest {
+  string namespace_path = 1;
+  string slug = 2;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message UpdateRepositoryRequest {
+  string full_path = 1;
+  string new_slug = 2;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message DeleteRepositoryRequest {
+  string full_path = 1;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message ListGrantsRequest {
+  string resource = 1;
+}
+
+message CreateGrantRequest {
+  string subject = 1;
+  HostedRole role = 2;
+  GrantTargetRef target = 3;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message UpdateGrantRequest {
+  string subject = 1;
+  HostedRole role = 2;
+  GrantTargetRef target = 3;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message DeleteGrantRequest {
+  string subject = 1;
+  GrantTargetRef target = 2;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message ListActorsRequest {}
+
+message ListWorktreesRequest {}
+
+message HostedNamespace {
+  string namespace_id = 1;
+  NamespaceKind kind = 2;
+  string slug = 3;
+  string full_path = 4;
+  string parent_id = 5;
+  string display_name = 6;
+}
+
+message HostedRepository {
+  string repo_id = 1;
+  string namespace_id = 2;
+  string slug = 3;
+  string path = 4;
+  string full_path = 5;
+}
+
+message HostedGrant {
+  string subject = 1;
+  HostedRole role = 2;
+  GrantTargetRef target = 3;
+}
+
+message ActorSummary {
+  string session_id = 1;
+  string thread = 2;
+  optional string path = 3;
+  bytes base_state = 4;
+  google.protobuf.Timestamp started_at = 5;
+  optional string provider = 6;
+  optional string model = 7;
+  string status = 8;
+  optional string heddle_session_id = 9;
+  optional string harness = 10;
+  optional string thinking_level = 11;
+  UsageSummary usage_summary = 12;
+  optional google.protobuf.Timestamp last_progress_at = 13;
+  optional string report_flush_state = 14;
+  optional string client_instance_id = 15;
+  optional string attach_reason = 16;
+  optional string native_actor_key = 17;
+  optional string native_parent_actor_key = 18;
+  optional string probe_source = 19;
+  optional float probe_confidence = 20;
+}
+
+message WorktreeSummary {
+  string id = 1;
+  string name = 2;
+  bytes base_state = 3;
+  optional string thread = 4;
+  uint32 changes = 5;
+  optional string session_id = 6;
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp modified_at = 8;
+  bool is_current = 9;
+}
+
+message ListActorsResponse {
+  repeated ActorSummary actors = 1;
+}
+
+message ListWorktreesResponse {
+  repeated WorktreeSummary worktrees = 1;
+}
+
+// --- Invitations (Track D) -------------------------------------------------
+
+message Invitation {
+  string id = 1;
+  string email = 2;
+  string namespace_path = 3;
+  HostedRole role = 4;
+  string invited_by = 5;
+  google.protobuf.Timestamp created_at = 6; // unix seconds
+  google.protobuf.Timestamp expires_at = 7; // 0 if no expiry
+  google.protobuf.Timestamp accepted_at = 8; // 0 if pending
+  string accepted_by = 9; // "" if pending
+  string metadata = 10; // stringified JSON — small, avoids pulling in struct
+}
+
+message CreateInvitationRequest {
+  string email = 1;
+  string namespace_path = 2;
+  HostedRole role = 3;
+  google.protobuf.Timestamp expires_at = 4; // 0 = no expiry
+  string metadata = 5; // optional caller-supplied JSON; pass "{}" if none
+
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message ListInvitationsRequest {
+  string namespace_path = 1;
+  bool include_accepted = 2; // default false = pending only
+}
+
+message ListInvitationsResponse {
+  repeated Invitation invitations = 1;
+}
+
+message RevokeInvitationRequest {
+  string id = 1;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+// Members = direct grants + pending invitations for a namespace.
+message MemberEntry {
+  // Exactly one of these is populated.
+  oneof entry {
+    Grant grant = 1;
+    Invitation invitation = 2;
+  }
+  message Grant {
+    string subject = 1;
+    HostedRole role = 2;
+    string resource_path = 3;
+    string resource_kind = 4; // "namespace" or "repository"
+  }
+}
+
+message ListMembersRequest {
+  string namespace_path = 1;
+  bool include_descendants = 2; // include grants on child namespaces + repos
+}
+
+message ListMembersResponse {
+  repeated MemberEntry entries = 1;
+}
+
+message ListNamespacesResponse {
+  repeated HostedNamespace namespaces = 1;
+}
+
+message ListRepositoriesResponse {
+  repeated HostedRepository repositories = 1;
+}
+
+message ListGrantsResponse {
+  repeated HostedGrant grants = 1;
+}

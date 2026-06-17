@@ -109,7 +109,7 @@ pub use thread_model::{
     ThreadIdError, ThreadImpactCategory, ThreadIntegrationPolicy, ThreadMode, ThreadRecord,
     ThreadRuntimeOverlay, ThreadState, ThreadVerificationSummary, ThreadView, validate_thread_id,
 };
-pub use thread_record_store::{FilesystemThreadRecordStore, ThreadRecordStore};
+pub use thread_record_store::FilesystemThreadRecordStore;
 pub use thread_stack::{
     PlanRebaseError, StackNode, StackRebasePlan, StackRebaseStep, ThreadStack, compute_stacks,
     plan_stack_rebase, stack_for,

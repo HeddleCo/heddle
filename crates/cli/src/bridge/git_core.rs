@@ -2792,7 +2792,7 @@ fn collect_ref_updates_for_fetch(
     }
 }
 
-fn collect_import_source_ref_updates(
+pub(crate) fn collect_import_source_ref_updates(
     repo: &SleyRepository,
     refs: &[String],
 ) -> GitResult<Vec<RefUpdate>> {
@@ -2804,9 +2804,7 @@ fn collect_import_source_ref_updates(
     let wanted: HashSet<&str> = refs.iter().map(String::as_str).collect();
     Ok(updates
         .into_iter()
-        .filter(|update| {
-            matches_import_ref(update, &wanted) || matches!(update.namespace, RefNamespace::Note)
-        })
+        .filter(|update| matches_import_ref(update, &wanted))
         .collect())
 }
 
@@ -4015,6 +4013,45 @@ mod tests {
                 "+refs/notes/*:refs/notes/*".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn scoped_import_ref_updates_do_not_include_notes_implicitly() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo = SleyRepository::init_bare(tmp.path()).expect("init bare repo");
+        let main = seed_commit(&repo, "main");
+        let other = seed_commit(&repo, "other");
+        let notes = seed_commit(&repo, "notes");
+        set_reference(
+            &repo,
+            "refs/heads/main",
+            main,
+            RefPrecondition::MustNotExist,
+            "test: main",
+        )
+        .expect("write main");
+        set_reference(
+            &repo,
+            "refs/heads/other",
+            other,
+            RefPrecondition::MustNotExist,
+            "test: other",
+        )
+        .expect("write other");
+        set_reference(
+            &repo,
+            "refs/notes/heddle",
+            notes,
+            RefPrecondition::MustNotExist,
+            "test: notes",
+        )
+        .expect("write notes");
+
+        let updates = collect_import_source_ref_updates(&repo, &["main".to_string()])
+            .expect("collect scoped updates");
+        let full_names = updates.iter().map(full_ref_name).collect::<Vec<_>>();
+
+        assert_eq!(full_names, vec!["refs/heads/main".to_string()]);
     }
 
     #[test]

@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Translate git commits into Heddle [`State`]s.
 //!
-//! The state writer is the glue between [`GitSource`](crate::git_walk::GitSource)
-//! (git reads), [`TreeTranslator`](crate::tree_translate::TreeTranslator)
-//! (tree/blob translation), and the [`ObjectStore`] (Heddle writes). One call
-//! to [`StateWriter::write_commit`] turns one [`CommitEntry`] into one
-//! `State`, records the `git_sha → ChangeId` mapping in the [`ShaMap`],
-//! and returns the new `ChangeId`.
+//! The active importer owns tree/blob translation, parent-map validation,
+//! and object persistence. This module owns the narrower commit-metadata
+//! translation: identity, attribution, timestamps, raw git fidelity fields,
+//! status, and intent.
 //!
 //! # Parent ordering
 //!
@@ -32,76 +30,13 @@
 //! transcript matcher fills those in later.
 
 use chrono::{DateTime, Utc};
-use objects::{
-    object::{Agent, Attribution, ChangeId, ContentHash, Principal, State, Status},
-    store::ObjectStore,
-};
+use objects::object::{Agent, Attribution, ChangeId, ContentHash, Principal, State, Status};
 use serde::Deserialize;
 
 use crate::{
     IngestError,
     git_walk::{CommitEntry, GitSignature},
-    sha_map::ShaMap,
 };
-
-/// Writes Heddle [`State`]s from [`CommitEntry`] inputs. Holds short-lived
-/// borrows — construct one per commit or per batch, not a long-lived field.
-pub struct StateWriter<'a, S: ObjectStore> {
-    store: &'a S,
-    map: &'a mut ShaMap,
-}
-
-impl<'a, S: ObjectStore> StateWriter<'a, S> {
-    pub fn new(store: &'a S, map: &'a mut ShaMap) -> Self {
-        Self { store, map }
-    }
-
-    /// Persist one commit as a Heddle state and record the `git_sha →
-    /// ChangeId` mapping. The caller is responsible for having translated
-    /// the commit's root tree (pass its Heddle hash as `tree`) and for
-    /// feeding commits in parent-before-child order.
-    ///
-    /// Returns the newly-minted [`ChangeId`] — the same one the sha map
-    /// now has recorded for `commit.sha`.
-    pub fn write_commit(
-        &mut self,
-        commit: &CommitEntry,
-        tree: ContentHash,
-    ) -> crate::Result<ChangeId> {
-        // Idempotency: if we've already translated this commit, surface
-        // the existing ChangeId without double-writing.
-        if let Some(cid) = self.map.get_commit(&commit.sha) {
-            return Ok(cid);
-        }
-
-        let mut parents = Vec::with_capacity(commit.parents.len());
-        for p in &commit.parents {
-            match self.map.get_commit(p) {
-                Some(cid) => parents.push(cid),
-                None => {
-                    return Err(IngestError::Other(format!(
-                        "commit {} has parent {} that hasn't been translated yet — \
-                         feed commits in topological order",
-                        commit.sha, p
-                    )));
-                }
-            }
-        }
-
-        // The plain `StateWriter` receives an already-translated tree hash and
-        // does no tree translation itself, so it has no lossy signal to record —
-        // lossy detection lives on the tree-translating `PackedImport` path.
-        let state = state_from_commit(commit, tree, parents, false)?;
-
-        self.store.put_state(&state).map_err(IngestError::from)?;
-
-        self.map
-            .insert_commit(&commit.sha, state.change_id)
-            .map_err(IngestError::from)?;
-
-        Ok(state.change_id)
-    }
-}
 
 pub(crate) fn state_from_commit(
     commit: &CommitEntry,
@@ -376,10 +311,7 @@ fn committed_timestamp(t: &DateTime<Utc>) -> DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
-    use objects::{
-        object::{Blob, Tree},
-        store::InMemoryStore,
-    };
+    use objects::object::ContentHash;
 
     use super::*;
     use crate::git_walk::{CommitEntry, GitSignature};
@@ -408,99 +340,21 @@ mod tests {
         }
     }
 
-    fn empty_tree_hash(store: &InMemoryStore) -> ContentHash {
-        store.put_tree(&Tree::from_entries(vec![])).unwrap()
+    fn empty_tree_hash() -> ContentHash {
+        ContentHash::compute(b"empty tree")
     }
 
     #[test]
-    fn writes_root_commit_with_human_attribution() {
-        let store = InMemoryStore::new();
-        let mut map = ShaMap::new();
-        let tree = empty_tree_hash(&store);
+    fn builds_root_commit_with_human_attribution() {
+        let tree = empty_tree_hash();
         let commit = make_commit("aa".repeat(20).as_str(), vec![], "chore: initial\n");
 
-        let cid = StateWriter::new(&store, &mut map)
-            .write_commit(&commit, tree)
-            .unwrap();
+        let state = state_from_commit(&commit, tree, vec![], false).unwrap();
 
-        assert_eq!(map.get_commit(&commit.sha), Some(cid));
-        let state = store.get_state(&cid).unwrap().expect("state written");
         assert!(state.parents.is_empty());
         assert!(state.attribution.agent.is_none());
         assert_eq!(state.attribution.principal.name, "Alice");
         assert_eq!(state.intent.as_deref(), Some("chore: initial"));
-    }
-
-    #[test]
-    fn second_write_of_same_sha_is_idempotent() {
-        let store = InMemoryStore::new();
-        let mut map = ShaMap::new();
-        let tree = empty_tree_hash(&store);
-        let commit = make_commit("bb".repeat(20).as_str(), vec![], "feat: one\n");
-
-        let a = StateWriter::new(&store, &mut map)
-            .write_commit(&commit, tree)
-            .unwrap();
-        let b = StateWriter::new(&store, &mut map)
-            .write_commit(&commit, tree)
-            .unwrap();
-
-        assert_eq!(a, b);
-        // Exactly one state written, not two.
-        assert_eq!(store.list_states().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn refuses_unmapped_parent() {
-        let store = InMemoryStore::new();
-        let mut map = ShaMap::new();
-        let tree = empty_tree_hash(&store);
-        let commit = make_commit(
-            "cc".repeat(20).as_str(),
-            vec!["dd".repeat(20)],
-            "feat: child\n",
-        );
-
-        let err = StateWriter::new(&store, &mut map)
-            .write_commit(&commit, tree)
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("hasn't been translated"),
-            "expected topo-order error, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn chain_preserves_parent_order() {
-        // git: root → a → b (b merges with c). Parent[0] of b is a (target),
-        // parent[1] is c (source). Heddle must see the same order.
-        let store = InMemoryStore::new();
-        let mut map = ShaMap::new();
-        let tree = empty_tree_hash(&store);
-
-        let root = make_commit("11".repeat(20).as_str(), vec![], "root\n");
-        let a = make_commit("22".repeat(20).as_str(), vec![root.sha.clone()], "a\n");
-        let c = make_commit("33".repeat(20).as_str(), vec![root.sha.clone()], "c\n");
-        let b = make_commit(
-            "44".repeat(20).as_str(),
-            vec![a.sha.clone(), c.sha.clone()],
-            "b: merge\n",
-        );
-
-        let mut wr = StateWriter::new(&store, &mut map);
-        let root_cid = wr.write_commit(&root, tree).unwrap();
-        let a_cid = wr.write_commit(&a, tree).unwrap();
-        let c_cid = wr.write_commit(&c, tree).unwrap();
-        let b_cid = wr.write_commit(&b, tree).unwrap();
-
-        let b_state = store.get_state(&b_cid).unwrap().unwrap();
-        assert_eq!(b_state.parents, vec![a_cid, c_cid]);
-        // And root / c's lineage survives.
-        assert_eq!(
-            store.get_state(&a_cid).unwrap().unwrap().parents,
-            vec![root_cid]
-        );
     }
 
     #[test]
@@ -532,8 +386,7 @@ mod tests {
 
     #[test]
     fn heddle_note_preserves_identity_and_metadata() {
-        let store = InMemoryStore::new();
-        let tree = empty_tree_hash(&store);
+        let tree = empty_tree_hash();
         let expected_id = ChangeId::from_bytes([0x42; 16]);
         let mut commit = make_commit("12".repeat(20).as_str(), vec![], "feat: noted\n");
         commit.heddle_note = Some(
@@ -566,36 +419,14 @@ mod tests {
         assert_eq!(agent.model, "claude-opus");
     }
 
-    #[test]
-    fn preserves_blob_store_untouched_on_commit_write() {
-        // State writer shouldn't know or care about blobs. If we hand it
-        // a pre-hashed tree, no blob writes should have happened as a
-        // side effect.
-        let store = InMemoryStore::new();
-        let mut map = ShaMap::new();
-        let _ = store.put_blob(&Blob::from_slice(b"sentinel")).unwrap();
-        let tree = empty_tree_hash(&store);
-        let blobs_before = store.list_blobs().unwrap().len();
-
-        let commit = make_commit("ee".repeat(20).as_str(), vec![], "chore: quiet\n");
-        StateWriter::new(&store, &mut map)
-            .write_commit(&commit, tree)
-            .unwrap();
-
-        let blobs_after = store.list_blobs().unwrap().len();
-        assert_eq!(blobs_before, blobs_after);
-    }
-
     /// #564 step 1: a re-imported commit must round-trip every git-fidelity
     /// field — distinct committer identity, both timezone offsets, the
     /// verbatim message, and the extra headers in order (gpgsig kept inline at
     /// its captured position) — so the commit is byte-reconstructable later
     /// (#566) without the git mirror.
     #[test]
-    fn write_commit_preserves_git_fidelity_fields() {
-        let store = InMemoryStore::new();
-        let mut map = ShaMap::new();
-        let tree = empty_tree_hash(&store);
+    fn state_from_commit_preserves_git_fidelity_fields() {
+        let tree = empty_tree_hash();
 
         let mut commit = make_commit("ff".repeat(20).as_str(), vec![], "feat: thing\n\nBody.\n");
         commit.author = GitSignature {
@@ -622,10 +453,7 @@ mod tests {
             (b"encoding".to_vec(), b"ISO-8859-1".to_vec()),
         ];
 
-        let cid = StateWriter::new(&store, &mut map)
-            .write_commit(&commit, tree)
-            .unwrap();
-        let state = store.get_state(&cid).unwrap().expect("state written");
+        let state = state_from_commit(&commit, tree, vec![], false).unwrap();
 
         let committer = state.committer.expect("committer preserved");
         assert_eq!(committer.name, "Committer");

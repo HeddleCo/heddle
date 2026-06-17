@@ -61,7 +61,7 @@ pub mod nfs;
 pub use fuser::BackgroundSession;
 
 #[cfg(all(target_os = "macos", feature = "fskit"))]
-pub use crate::fskit::{FSKitSession, FSKitShell};
+pub use crate::fskit::FSKitShell;
 #[cfg(all(target_os = "linux", feature = "fuse"))]
 pub use crate::fuse::FuseShell;
 #[cfg(feature = "nfs")]

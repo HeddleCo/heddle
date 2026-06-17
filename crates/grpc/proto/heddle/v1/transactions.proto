@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package heddle.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Transactions buffer multiple state-changing operations and apply
+// them atomically on commit.
+service TransactionService {
+  rpc BeginTransaction(BeginTransactionRequest) returns (BeginTransactionResponse);
+  rpc CommitTransaction(CommitTransactionRequest) returns (CommitTransactionResponse);
+  rpc AbortTransaction(AbortTransactionRequest) returns (AbortTransactionResponse);
+  rpc GetTransactionStatus(GetTransactionStatusRequest) returns (TransactionStatus);
+}
+
+message BeginTransactionRequest {
+  string repo_path = 1;
+  string thread = 2;
+  string message = 3;
+  string client_operation_id = 15;
+}
+
+message BeginTransactionResponse {
+  string transaction_id = 1;
+  google.protobuf.Timestamp started_at = 2;
+}
+
+message CommitTransactionRequest {
+  string repo_path = 1;
+  string transaction_id = 2;
+  string client_operation_id = 15;
+}
+
+message CommitTransactionResponse {
+  bytes state_id = 1;
+  uint32 op_count = 2;
+}
+
+message AbortTransactionRequest {
+  string repo_path = 1;
+  string transaction_id = 2;
+  string reason = 3;
+  string client_operation_id = 15;
+}
+
+message AbortTransactionResponse {
+  bool aborted = 1;
+}
+
+message GetTransactionStatusRequest {
+  string repo_path = 1;
+  string transaction_id = 2;
+}
+
+message TransactionStatus {
+  string transaction_id = 1;
+  // "active" | "committed" | "aborted"
+  string state = 2;
+  google.protobuf.Timestamp started_at = 3;
+  uint32 buffered_ops = 4;
+}

@@ -1,0 +1,165 @@
+syntax = "proto3";
+
+package heddle.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service ReviewService {
+  rpc StartReviewAnalysis(StartReviewAnalysisRequest) returns (StartReviewAnalysisResponse);
+  rpc GetReviewAnalysisStatus(GetReviewAnalysisStatusRequest) returns (GetReviewAnalysisStatusResponse);
+  rpc GetReviewAnalysisResult(GetReviewAnalysisResultRequest) returns (GetReviewAnalysisResultResponse);
+}
+
+message StartReviewAnalysisRequest {
+  string provider = 1;
+  string owner = 2;
+  string repo = 3;
+  uint32 pr_number = 4;
+  bool force_refresh = 5;
+}
+
+message StartReviewAnalysisResponse {
+  string job_id = 1;
+  string head_sha = 2;
+}
+
+enum ReviewJobStatus {
+  REVIEW_JOB_STATUS_UNSPECIFIED = 0;
+  REVIEW_JOB_STATUS_PENDING = 1;
+  REVIEW_JOB_STATUS_ANALYZING = 2;
+  REVIEW_JOB_STATUS_POSTED = 3;
+  REVIEW_JOB_STATUS_FAILED = 4;
+}
+
+enum ReviewJobPhase {
+  REVIEW_JOB_PHASE_UNSPECIFIED = 0;
+  REVIEW_JOB_PHASE_FETCH = 1;
+  REVIEW_JOB_PHASE_HIGHLIGHT = 2;
+  REVIEW_JOB_PHASE_FINALIZE = 3;
+  REVIEW_JOB_PHASE_COMPLETE = 4;
+  REVIEW_JOB_PHASE_FAILED = 5;
+}
+
+message GetReviewAnalysisStatusRequest {
+  string job_id = 1;
+  string provider = 2;
+  string owner = 3;
+  string repo = 4;
+  uint32 pr_number = 5;
+}
+
+message GetReviewAnalysisStatusResponse {
+  string job_id = 1;
+  ReviewJobStatus status = 2;
+  ReviewJobPhase phase = 3;
+  uint32 current = 4;
+  uint32 total = 5;
+  string label = 6;
+  google.protobuf.Timestamp updated_at = 7;
+  string head_sha = 8;
+}
+
+message ReviewPrAuthor {
+  string login = 1;
+  string avatar_url = 2;
+}
+
+message ReviewPrLabel {
+  string name = 1;
+  string color = 2;
+}
+
+message ReviewPrMetadata {
+  string title = 1;
+  string body = 2;
+  string state = 3;
+  bool draft = 4;
+  uint32 changed_files = 5;
+  uint32 additions = 6;
+  uint32 deletions = 7;
+  string head_sha = 8;
+  string base_branch = 9;
+  string head_branch = 10;
+  ReviewPrAuthor author = 11;
+  repeated ReviewPrLabel labels = 12;
+  google.protobuf.Timestamp created_at = 13;
+  google.protobuf.Timestamp updated_at = 14;
+  google.protobuf.Timestamp merged_at = 15;
+}
+
+message ReviewContributor {
+  string name = 1;
+  string email = 2;
+  bool is_agent = 3;
+}
+
+message ReviewNoiseFile {
+  string path = 1;
+  string reason = 2;
+  uint32 additions = 3;
+  uint32 deletions = 4;
+}
+
+message ReviewSemanticChange {
+  string change_type = 1;
+  string description = 2;
+  string path = 3;
+  uint32 additions = 4;
+  uint32 deletions = 5;
+  uint32 impact = 6;
+}
+
+message ReviewPacket {
+  uint32 files_changed = 1;
+  uint32 semantic_changes = 2;
+  uint32 noise_filtered = 3;
+  repeated ReviewSemanticChange changes = 4;
+  repeated ReviewNoiseFile noise = 5;
+  repeated ReviewContributor contributors = 6;
+  uint32 agents = 7;
+  uint32 humans = 8;
+  string narrative = 9;
+}
+
+message ReviewCommentAuthor {
+  string login = 1;
+  string avatar_url = 2;
+}
+
+message ReviewComment {
+  ReviewCommentAuthor author = 1;
+  string body = 2;
+  google.protobuf.Timestamp created_at = 3;
+  bool is_review_comment = 4;
+}
+
+message ReviewFileArtifact {
+  uint32 index = 1;
+  string change_type = 2;
+  string description = 3;
+  string path = 4;
+  uint32 additions = 5;
+  uint32 deletions = 6;
+  uint32 impact = 7;
+  string patch = 8;
+  bool truncated = 9;
+  repeated string highlights = 10;
+}
+
+message GetReviewAnalysisResultRequest {
+  string job_id = 1;
+  string provider = 2;
+  string owner = 3;
+  string repo = 4;
+  uint32 pr_number = 5;
+}
+
+message GetReviewAnalysisResultResponse {
+  string job_id = 1;
+  string head_sha = 2;
+  ReviewPrMetadata metadata = 3;
+  ReviewPacket packet = 4;
+  repeated ReviewComment comments = 5;
+  repeated ReviewFileArtifact files = 6;
+  google.protobuf.Timestamp completed_at = 7;
+}

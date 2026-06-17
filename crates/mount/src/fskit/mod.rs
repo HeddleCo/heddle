@@ -28,12 +28,9 @@
 //! ## Realistic scope
 //!
 //! The C ABI, the Rust trampolines, the Swift session lifecycle,
-//! and the [`PlatformShell`] dispatch are all wired. The piece
-//! that's stubbed is the actual `FSModuleHost.register(...)` call
-//! that publishes the volume to the kernel — that needs a
-//! code-signed `.fsmodule` bundle and the `fskit.fsmodule`
-//! entitlement, which is a release-engineering task, not a coding
-//! task. See `crates/mount/README.md` for the install steps.
+//! and the [`PlatformShell`] dispatch are all wired. Publishing a
+//! volume to the kernel is owned by the `.fsmodule` System Extension
+//! path; the CLI process does not host an in-process FSKit mount.
 //!
 //! What works today:
 //!   * `FSKitShell::new` constructs a session (erroring, not
@@ -42,15 +39,10 @@
 //!     wired through to the trait.
 //!   * [`Self::is_runtime_available`] reports whether the host can
 //!     actually load FSKit.
-//!
-//! What's stubbed (returns `ENOSYS` on `mount_background`):
-//!   * `FSModuleHost` registration.
-//!   * Programmatic `FSResource.mount(...)` invocation.
 
 use std::{
-    ffi::{CStr, CString, OsStr, c_char, c_int, c_void},
+    ffi::{c_char, c_int, c_void, CStr, CString, OsStr},
     os::unix::ffi::OsStrExt,
-    path::Path,
     sync::Arc,
 };
 
@@ -71,9 +63,8 @@ pub mod readiness;
 // throughout this file so any signature change in `c_abi` propagates
 // here at the type-checker, not at runtime.
 use c_abi::{
-    HeddleEnumerateEmit, HeddleFSKitSessionHandle, heddle_fskit_is_available,
-    heddle_fskit_session_free, heddle_fskit_session_mount, heddle_fskit_session_new,
-    heddle_fskit_session_unmount,
+    heddle_fskit_is_available, heddle_fskit_session_free, heddle_fskit_session_new,
+    HeddleEnumerateEmit, HeddleFSKitSessionHandle,
 };
 
 // ----------------------------------------------------------------
@@ -158,8 +149,7 @@ impl FSKitShell {
     }
 
     /// Returns true when the host OS can actually load the FSKit
-    /// framework (macOS 15.4+). When this is false, `mount_background`
-    /// will return an error rather than a usable session.
+    /// framework (macOS 15.4+).
     pub fn is_runtime_available() -> bool {
         // SAFETY: pure Swift function, no preconditions.
         unsafe { heddle_fskit_is_available() == 1 }
@@ -177,38 +167,6 @@ impl FSKitShell {
         std::mem::forget(self);
         handle
     }
-
-    /// Mount in a background session. Caller holds the returned
-    /// [`FSKitSession`]; dropping it triggers an unmount.
-    ///
-    /// Currently the underlying Swift implementation returns
-    /// `ENOSYS` because the `FSModuleHost.register` step is stubbed
-    /// (see module-level docs). The constructor lifecycle and the
-    /// callback wiring are exercised; the actual kernel publish is
-    /// a follow-up.
-    pub fn mount_background(self, mountpoint: impl AsRef<Path>) -> Result<FSKitSession> {
-        let path = mountpoint.as_ref();
-        let c_path = CString::new(path.as_os_str().as_bytes())
-            .map_err(|e| MountError::Stale(format!("mountpoint contains NUL: {e}")))?;
-        // Take ownership of the handle out of `self` so the `Drop`
-        // for `FSKitShell` doesn't double-free when this scope ends
-        // and ownership transfers to `FSKitSession`.
-        let handle = self.handle;
-        std::mem::forget(self);
-
-        let rc = unsafe { heddle_fskit_session_mount(handle, c_path.as_ptr()) };
-        if rc != 0 {
-            // Mount failed — clean up the session ourselves since
-            // the caller never sees the handle.
-            unsafe { heddle_fskit_session_free(handle) };
-            return Err(MountError::Store(objects::error::HeddleError::Io(
-                std::io::Error::from_raw_os_error(rc),
-            )));
-        }
-        Ok(FSKitSession {
-            handle: Some(handle),
-        })
-    }
 }
 
 impl Drop for FSKitShell {
@@ -218,56 +176,6 @@ impl Drop for FSKitShell {
         if !self.handle.is_null() {
             unsafe { heddle_fskit_session_free(self.handle) };
         }
-    }
-}
-
-// ----------------------------------------------------------------
-// FSKitSession — RAII unmount handle
-// ----------------------------------------------------------------
-
-/// Live FSKit mount session. Drop unmounts.
-pub struct FSKitSession {
-    // Option so explicit `unmount()` can drain it before Drop.
-    handle: Option<HeddleFSKitSessionHandle>,
-}
-
-// SAFETY: see FSKitShell.
-unsafe impl Send for FSKitSession {}
-unsafe impl Sync for FSKitSession {}
-
-impl FSKitSession {
-    /// Force the mount to unmount immediately. Equivalent to
-    /// dropping the session, but surfaces the unmount errno.
-    pub fn unmount(mut self) -> Result<()> {
-        let Some(handle) = self.handle.take() else {
-            return Ok(());
-        };
-        let rc = unsafe { heddle_fskit_session_unmount(handle) };
-        let unmount_err = if rc != 0 {
-            Some(MountError::Store(objects::error::HeddleError::Io(
-                std::io::Error::from_raw_os_error(rc),
-            )))
-        } else {
-            None
-        };
-        unsafe { heddle_fskit_session_free(handle) };
-        match unmount_err {
-            Some(err) => Err(err),
-            None => Ok(()),
-        }
-    }
-}
-
-impl Drop for FSKitSession {
-    fn drop(&mut self) {
-        let Some(handle) = self.handle.take() else {
-            return;
-        };
-        let rc = unsafe { heddle_fskit_session_unmount(handle) };
-        if rc != 0 {
-            warn!(rc, "fskit session unmount returned non-zero on drop");
-        }
-        unsafe { heddle_fskit_session_free(handle) };
     }
 }
 
@@ -731,8 +639,6 @@ mod tests {
             "HeddleDropCallback",
             // Function prototypes.
             "heddle_fskit_session_new",
-            "heddle_fskit_session_mount",
-            "heddle_fskit_session_unmount",
             "heddle_fskit_session_free",
             "heddle_fskit_is_available",
             "heddle_fskit_open_thread",

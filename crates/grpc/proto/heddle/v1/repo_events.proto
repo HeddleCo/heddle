@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package heddle.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service RepoEventService {
+  rpc SubscribeRepoEvents(SubscribeRepoEventsRequest) returns (stream RepoEvent);
+}
+
+message SubscribeRepoEventsRequest {
+  string repo_id = 1;
+  string thread = 2;
+  int64 after_event_id = 3;
+  repeated string event_types = 4;
+}
+
+message RepoEvent {
+  int64 event_id = 1;
+  string repo_id = 2;
+  string event_type = 3;
+  string thread = 4;
+  string ref_name = 5;
+  bool is_thread = 6;
+  string old_state = 7;
+  string new_state = 8;
+  string actor_subject = 9;
+  string payload_json = 10;
+  google.protobuf.Timestamp created_at = 11;
+}

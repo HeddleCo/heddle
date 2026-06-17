@@ -13,8 +13,8 @@ use objects::{
     object::{ChangeId, ContentHash, MarkerName, ThreadName, VisibilityTier},
 };
 use oplog::{
-    ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpLogBackend, OpRecord,
-    ThreadUpdateSnapshots, isolation_keys_for_record,
+    ConditionalCommitOutcome, IsolationKey, IsolationPrecondition, OpLogBackend, OpLogRecorder,
+    OpRecord, ThreadUpdateSnapshots, isolation_keys_for_record,
 };
 use refs::{Head, RefExpectation, RefManager, RefUpdate};
 use tempfile::TempDir;

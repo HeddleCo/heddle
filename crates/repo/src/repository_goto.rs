@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use objects::{lock::RepositoryLockExt, object::ChangeId, store::ObjectStore};
-use oplog::OpLogBackend;
+use oplog::OpLogRecorder;
 use refs::Head;
 use tracing::debug;
 

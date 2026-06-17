@@ -13,7 +13,7 @@ use objects::{
     object::{ChangeId, State, ThreadName, Tree},
     store::{AgentEntry, AgentRegistry, AgentStatus, ObjectStore, current_boot_id},
 };
-use oplog::OpLogBackend;
+use oplog::OpLogRecorder;
 use refs::{Head, RefExpectation, RefUpdate};
 use repo::{
     AgentUsageSummary, GitOverlayBranchTip, GitOverlayImportHint, GitRemoteTrackingStatus,

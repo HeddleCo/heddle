@@ -63,10 +63,23 @@ fn every_state_changing_rpc_routes_through_dedup() {
         .join("grpc")
         .join("proto")
         .join("heddle")
-        .join("v1")
-        .join("service.proto");
-    let proto_src =
-        std::fs::read_to_string(&proto).unwrap_or_else(|e| panic!("read {}: {e}", proto.display()));
+        .join("v1");
+    // The v1 schema was split into per-domain proto files; concatenate them all
+    // so the harvest finds state-changing messages (now in the per-domain files)
+    // and their rpcs (in service.proto) regardless of which file each lives in.
+    let mut proto_paths: Vec<PathBuf> = std::fs::read_dir(&proto)
+        .unwrap_or_else(|e| panic!("read dir {}: {e}", proto.display()))
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().map(|x| x == "proto").unwrap_or(false))
+        .collect();
+    proto_paths.sort();
+    let proto_src = proto_paths
+        .iter()
+        .map(|p| {
+            std::fs::read_to_string(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
     // Step 1: messages that carry `client_operation_id = 15`. Those
     // are the wire shape of every state-changing request.

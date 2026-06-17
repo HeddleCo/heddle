@@ -14,7 +14,7 @@ use objects::{
     object::{DiffKind, Session, ThreadName, Tree},
     store::{AgentEntry, AgentRegistry, AgentStatus, AgentUsageSummary, ObjectStore},
 };
-use oplog::OpLogBackend;
+use oplog::OpLogRecorder;
 use proto::{
     HarnessIdentity, ProgressCheckpoint, SessionDiffSummary, SessionReportEnvelope,
     TranscriptAttachmentRef, UsageTotals, WorktreeChangeBaseline,

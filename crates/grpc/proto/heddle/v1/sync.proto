@@ -1,0 +1,229 @@
+syntax = "proto3";
+
+package heddle.v1;
+
+import "heddle/v1/common.proto";
+import "heddle/v1/threads.proto";
+
+service RepoSyncService {
+  rpc ListRefs(ListRefsRequest) returns (ListRefsResponse);
+  rpc UpdateRef(UpdateRefRequest) returns (UpdateRefResponse);
+  rpc Push(stream PushMessage) returns (stream PushMessage);
+  rpc Pull(stream PullMessage) returns (stream PullMessage);
+}
+
+message ListRefsRequest {
+  string repo_path = 1;
+}
+
+message ListRefsResponse {
+  string head_thread = 1;
+  bytes head_state = 2;
+  repeated RefEntry refs = 3;
+}
+
+message UpdateRefRequest {
+  string repo_path = 1;
+  string name = 2;
+  bool is_thread = 3;
+  bool force = 4;
+  string old_value = 5;
+  string new_value = 6;
+  ThreadMetadata thread_metadata = 7;
+  // Idempotency (audit-idempotency enforces tag 15).
+  string client_operation_id = 15;
+}
+
+message UpdateRefResponse {
+  bool success = 1;
+  string old_value = 2;
+  string error = 3;
+}
+
+enum TransportMode {
+  TRANSPORT_MODE_UNSPECIFIED = 0;
+  // Native pack is the steady-state sync transport for hosted repo pull/push.
+  TRANSPORT_MODE_NATIVE_PACK = 1;
+}
+
+enum ObjectAvailabilityStatus {
+  OBJECT_AVAILABILITY_STATUS_UNSPECIFIED = 0;
+  OBJECT_AVAILABILITY_STATUS_PRESENT = 1;
+  OBJECT_AVAILABILITY_STATUS_MISSING = 2;
+  OBJECT_AVAILABILITY_STATUS_RESUMABLE = 3;
+  OBJECT_AVAILABILITY_STATUS_LAZY = 4;
+}
+
+enum PartialFetchStatus {
+  PARTIAL_FETCH_STATUS_UNSPECIFIED = 0;
+  PARTIAL_FETCH_STATUS_DISABLED = 1;
+  PARTIAL_FETCH_STATUS_ENABLED = 2;
+  PARTIAL_FETCH_STATUS_REQUIRED = 3;
+}
+
+message TransferCheckpoint {
+  string transfer_id = 1;
+  TransportMode transport_mode = 2;
+  uint64 resume_offset = 3;
+  uint32 chunk_index = 4;
+  bytes checkpoint = 5;
+  bool is_complete = 6;
+}
+
+message ObjectDescriptor {
+  string id = 1;
+  string object_type = 2;
+  ObjectAvailabilityStatus availability_status = 3;
+  string availability_note = 4;
+}
+
+message PushRequest {
+  string repo_path = 1;
+  string local_state = 2;
+  string target_thread = 3;
+  bool create_thread = 4;
+  bool force = 5;
+  repeated ObjectDescriptor objects = 6;
+  TransferCheckpoint transfer = 7;
+  PartialFetchStatus partial_fetch_status = 8;
+  bool allow_partial_fetch = 9;
+  ThreadMetadata thread_metadata = 10;
+  // Idempotency on the stream-opening message. The PushMessage
+  // envelope itself isn't the operation — PushRequest is.
+  string client_operation_id = 15;
+}
+
+message PushReady {
+  string remote_head = 1;
+  repeated ObjectDescriptor have_objects = 2;
+  repeated ObjectDescriptor want_objects = 3;
+  TransferCheckpoint transfer = 4;
+  PartialFetchStatus partial_fetch_status = 5;
+  repeated ObjectDescriptor missing_objects = 6;
+}
+
+// Legacy object-by-object chunking is no longer used for normal repo sync.
+// The schema stays here only for narrow, non-steady-state object transfer paths.
+message ObjectChunk {
+  string id = 1;
+  string object_type = 2;
+  bytes data = 3;
+  bool is_delta = 4;
+  TransferCheckpoint transfer = 5;
+  uint32 chunk_length = 6;
+  bool is_final_chunk = 7;
+}
+
+enum PackStreamKind {
+  PACK_STREAM_KIND_UNSPECIFIED = 0;
+  PACK_STREAM_KIND_PACK = 1;
+  PACK_STREAM_KIND_INDEX = 2;
+}
+
+message PackChunk {
+  PackStreamKind stream_kind = 1;
+  bytes data = 2;
+  TransferCheckpoint transfer = 3;
+  uint32 chunk_length = 4;
+  bool is_final_chunk = 5;
+}
+
+message PushComplete {
+  bool success = 1;
+  string new_state = 2;
+  string error = 3;
+  TransferCheckpoint transfer = 4;
+}
+
+// Out-of-pack transport for redaction sidecars. Sidecars live
+// structurally outside `.heddle/objects/` (so GC can't reach them)
+// and therefore can't ride the native-pack object channel. The
+// sender emits one `RedactionTransfer` per blob hash with an active
+// redaction in the state closure; the receiver routes through
+// `Repository::accept_wire_redactions` for signature + trust-list
+// verification.
+//
+// `blob_hash` is the hex-encoded ContentHash of the *redacted blob*
+// (the redactions store is keyed by that hash, not by the
+// redaction-record content hash).
+// `redactions_blob` is the rmp-encoded `RedactionsBlob` byte payload
+// — byte-identical to what `Repository::put_redaction` wrote on the
+// sender's disk.
+message RedactionTransfer {
+  string blob_hash = 1;
+  bytes redactions_blob = 2;
+}
+
+// Out-of-pack transport for state-visibility sidecars. State visibility
+// records live outside `.heddle/objects/` and are keyed by the state id
+// whose audience tier they declare.
+//
+// `state_id` is the hex-encoded ChangeId of the state.
+// `state_visibility_blob` is the rmp-encoded `StateVisibilityBlob` byte
+// payload.
+message StateVisibilityTransfer {
+  string state_id = 1;
+  bytes state_visibility_blob = 2;
+}
+
+message PushMessage {
+  oneof body {
+    PushRequest request = 1;
+    PushReady ready = 2;
+    PackChunk pack = 3;
+    PushComplete complete = 4;
+    RedactionTransfer redaction = 5;
+    StateVisibilityTransfer state_visibility = 6;
+  }
+}
+
+message PullRequest {
+  string repo_path = 1;
+  string remote_thread = 2;
+  string local_thread = 3;
+  string target_state = 4;
+  uint32 depth = 5;
+  repeated string exclude_states = 6;
+  TransferCheckpoint transfer = 7;
+  PartialFetchStatus partial_fetch_status = 8;
+  bool allow_partial_fetch = 9;
+  bool fresh_full_pull = 10;
+  // Idempotency on the stream-opening message. The PullMessage
+  // envelope itself isn't the operation — PullRequest is.
+  string client_operation_id = 15;
+}
+
+message PullReady {
+  string remote_state = 1;
+  repeated ObjectDescriptor objects_to_fetch = 2;
+  TransferCheckpoint transfer = 3;
+  PartialFetchStatus partial_fetch_status = 4;
+  repeated ObjectDescriptor missing_objects = 5;
+  bool full_closure_available = 6;
+  uint32 object_count = 7;
+}
+
+message WantObjects {
+  repeated ObjectDescriptor objects = 1;
+  TransferCheckpoint transfer = 2;
+  bool want_full_closure = 3;
+}
+
+message PullComplete {
+  bool success = 1;
+  string new_state = 2;
+  string error = 3;
+  TransferCheckpoint transfer = 4;
+}
+
+message PullMessage {
+  oneof body {
+    PullRequest request = 1;
+    PullReady ready = 2;
+    WantObjects want = 3;
+    PackChunk pack = 4;
+    PullComplete complete = 5;
+    RedactionTransfer redaction = 6;
+    StateVisibilityTransfer state_visibility = 7;
+  }
+}

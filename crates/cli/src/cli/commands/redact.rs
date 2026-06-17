@@ -25,7 +25,7 @@ use objects::{
     store::ObjectStore,
     worktree::should_ignore,
 };
-use oplog::OpLogBackend;
+use oplog::OpLogRecorder;
 use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 

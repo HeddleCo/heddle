@@ -75,11 +75,6 @@ extern HeddleFSKitSessionHandle heddle_fskit_session_new(void *user_data,
                                                          HeddleFlushCallback flush,
                                                          HeddleDropCallback drop);
 
-extern int32_t heddle_fskit_session_mount(HeddleFSKitSessionHandle handle,
-                                          const char *mountpoint_utf8);
-
-extern int32_t heddle_fskit_session_unmount(HeddleFSKitSessionHandle handle);
-
 extern void heddle_fskit_session_free(HeddleFSKitSessionHandle handle);
 
 extern int32_t heddle_fskit_is_available(void);
