@@ -46,6 +46,7 @@ impl Repository {
         reason: TimelineBranchReason,
         created_at_ms: i64,
     ) -> Result<TimelineForkOutcome> {
+        let _record_guard = store.lock_recording(thread)?;
         let view = TimelineView::rebuild(store)?;
         let target = resolve_timeline_selector(&view, thread, selector)?;
         if let Some(constraint) = branch_constraint {
@@ -91,6 +92,7 @@ impl Repository {
         materialize_checkout: bool,
         moved_at_ms: i64,
     ) -> Result<TimelineResetOutcome> {
+        let _record_guard = store.lock_recording(thread)?;
         if materialize_checkout {
             let materialization = self.materialize_timeline_cursor_constrained_with_reason(
                 store,

@@ -370,6 +370,11 @@ jobs:
           cargo test --locked -p heddle-cli --test cli_integration fault_injection:: \
             -- --ignored --test-threads=1 --nocapture
 
+      - name: Timeline materialization crash tests
+        run: |
+          cargo test --locked -p heddle-repo --test timeline_materialize_fault \
+            -- --ignored --test-threads=1 --nocapture
+
       - name: sccache stats
         run: sccache --show-stats
 

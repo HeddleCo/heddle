@@ -718,11 +718,12 @@ fn record_timeline_tool_finished<E: HarnessTimelineExtractor>(
         .unwrap_or(fallback_state);
     let has_worktree_changes_before_capture =
         !collect_worktree_changes(&runtime.repo)?.is_empty();
+    let mut capture_failed = false;
     let capture_state = if !has_worktree_changes_before_capture {
         None
     } else {
         let intent = extractor.capture_intent(&native, payload);
-        create_snapshot(
+        match create_snapshot(
             &runtime.repo,
             &runtime.user_config,
             Some(intent),
@@ -736,8 +737,14 @@ fn record_timeline_tool_finished<E: HarnessTimelineExtractor>(
                 no_policy: false,
                 no_agent: false,
             },
-        )?;
-        runtime.repo.head()?
+        ) {
+            Ok(_) => runtime.repo.head()?,
+            Err(err) => {
+                capture_failed = true;
+                tracing::warn!(?err, "heddle timeline tool capture failed");
+                None
+            }
+        }
     };
     let after_state = current_change_id(&runtime.repo)?.unwrap_or(fallback_state);
     let mut touched_paths = extractor.touched_paths(payload);
@@ -746,7 +753,10 @@ fn record_timeline_tool_finished<E: HarnessTimelineExtractor>(
         changed_paths_between_states(&runtime.repo, before_state, after_state)?,
     );
     let changed = before_state != after_state;
-    let labels = extractor.finished_labels(changed, payload);
+    let mut labels = extractor.finished_labels(changed, payload);
+    if capture_failed {
+        merge_timeline_labels(&mut labels, vec![TimelineLabel::CaptureFailed]);
+    }
     let envelope = TimelineOperationEnvelope::new(
         TimelineOperationBodyV1::ToolCallFinished(ToolCallFinishedV1 {
             thread,
@@ -927,6 +937,14 @@ fn merge_string_vec(target: &mut Vec<String>, incoming: Vec<String>) {
     for item in incoming {
         if !item.trim().is_empty() && !target.contains(&item) {
             target.push(item);
+        }
+    }
+}
+
+fn merge_timeline_labels(target: &mut Vec<TimelineLabel>, incoming: Vec<TimelineLabel>) {
+    for label in incoming {
+        if !target.contains(&label) {
+            target.push(label);
         }
     }
 }
@@ -3298,6 +3316,8 @@ struct FlushReportsResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn init_repo() -> (tempfile::TempDir, Repository) {
         let temp = tempfile::TempDir::new().unwrap();
@@ -4213,6 +4233,51 @@ mod tests {
         );
         assert!(!step.payload_summary.as_deref().unwrap().contains("SECRET"));
         assert!(step.payload_hash.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relay_opencode_tool_execute_after_records_capture_failed_without_ambient_paths() {
+        let (_temp, repo) = init_repo();
+        let root = repo.root().to_path_buf();
+        std::fs::write(root.join("seed.txt"), b"seed\n").unwrap();
+        let seed = repo.snapshot(Some("seed".into()), None).unwrap();
+        let mut runtime = HarnessBridgeRuntime::new(repo, UserConfig::default());
+        let mut payload = opencode_tool_payload("call-capture-failed");
+        payload["tool"]["input"]["file_path"] = serde_json::json!("hinted.txt");
+        let hooks_dir = root.join(".heddle/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let hook_path = hooks_dir.join("pre-snapshot");
+        std::fs::write(&hook_path, "#!/bin/sh\nexit 1\n").unwrap();
+        let mut perms = std::fs::metadata(&hook_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&hook_path, perms).unwrap();
+
+        relay_opencode(&mut runtime, "tool.execute.before", &payload).unwrap();
+        std::fs::write(root.join("ambient.txt"), b"dirty but uncaptured\n").unwrap();
+        relay_opencode(&mut runtime, "tool.execute.after", &payload).unwrap();
+
+        assert_eq!(
+            runtime.repo.head().unwrap(),
+            Some(seed.change_id),
+            "capture failure must not advance HEAD"
+        );
+        let store = TimelineStore::open(runtime.repo.heddle_dir()).unwrap();
+        let view = TimelineView::rebuild(&store).unwrap();
+        let steps = view.steps_for_thread("main");
+        assert_eq!(steps.len(), 1, "before/after should merge by native id");
+        let step = steps[0];
+        assert_eq!(step.operation_ids.len(), 2);
+        assert_eq!(step.before_state, Some(seed.change_id));
+        assert_eq!(step.after_state, Some(seed.change_id));
+        assert_eq!(step.capture_state, None);
+        assert_eq!(step.changed, Some(false));
+        assert!(step.labels.contains(&TimelineLabel::CaptureFailed));
+        assert!(
+            !step.labels.contains(&TimelineLabel::RepoReversible),
+            "failed captures are not repo-reversible"
+        );
+        assert_eq!(step.touched_paths, vec!["hinted.txt"]);
     }
 
     #[test]

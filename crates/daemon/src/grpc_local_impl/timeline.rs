@@ -384,7 +384,9 @@ async fn seek_to_step_impl(
     inner: &GrpcLocalService,
     req: SeekTimelineToStepRequest,
 ) -> Result<TimelineCursorMoveResponse, Status> {
-    let (store, view) = open_timeline_store_and_view(inner)?;
+    let store = TimelineStore::open(inner.repo().heddle_dir()).map_err(to_status)?;
+    let _record_guard = store.lock_recording(&req.thread).map_err(to_status)?;
+    let view = TimelineView::rebuild(&store).map_err(to_status)?;
     let target = view
         .resolve_seek_target(&req.thread, &TimelineStepId::new(req.step_id.clone()))
         .ok_or_else(|| Status::not_found("timeline step not found"))?;
@@ -400,7 +402,9 @@ async fn seek_to_native_tool_call_impl(
     inner: &GrpcLocalService,
     req: SeekTimelineToNativeToolCallRequest,
 ) -> Result<TimelineCursorMoveResponse, Status> {
-    let (store, view) = open_timeline_store_and_view(inner)?;
+    let store = TimelineStore::open(inner.repo().heddle_dir()).map_err(to_status)?;
+    let _record_guard = store.lock_recording(&req.thread).map_err(to_status)?;
+    let view = TimelineView::rebuild(&store).map_err(to_status)?;
     let target = view
         .resolve_seek_to_native_call(&req.thread, &native_key_from_parts(&req))
         .ok_or_else(|| Status::not_found("native tool call not found"))?
@@ -413,7 +417,9 @@ async fn move_cursor_by_delta_impl(
     req: TimelineCursorRequest,
     delta: i32,
 ) -> Result<TimelineCursorMoveResponse, Status> {
-    let (store, view) = open_timeline_store_and_view(inner)?;
+    let store = TimelineStore::open(inner.repo().heddle_dir()).map_err(to_status)?;
+    let _record_guard = store.lock_recording(&req.thread).map_err(to_status)?;
+    let view = TimelineView::rebuild(&store).map_err(to_status)?;
     if !req.branch_id.is_empty()
         && view
             .status(&req.thread)
@@ -446,7 +452,9 @@ async fn create_timeline_branch_impl(
     inner: &GrpcLocalService,
     req: CreateTimelineBranchRequest,
 ) -> Result<CreateTimelineBranchResponse, Status> {
-    let (store, view) = open_timeline_store_and_view(inner)?;
+    let store = TimelineStore::open(inner.repo().heddle_dir()).map_err(to_status)?;
+    let _record_guard = store.lock_recording(&req.thread).map_err(to_status)?;
+    let view = TimelineView::rebuild(&store).map_err(to_status)?;
     let target = if req.from_step_id.is_empty() {
         let status = view.status(&req.thread).ok_or_else(|| {
             Status::failed_precondition("from_step_id is required when the cursor has no step")
