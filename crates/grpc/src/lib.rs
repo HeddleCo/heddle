@@ -20,5 +20,6 @@ pub use heddle::v1::{
     signal_service_server::SignalServiceServer,
     state_review_service_server::StateReviewServiceServer,
     thread_workflow_service_server::ThreadWorkflowServiceServer,
+    timeline_service_server::TimelineServiceServer,
     transaction_service_server::TransactionServiceServer,
 };

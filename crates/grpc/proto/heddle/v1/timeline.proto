@@ -1,0 +1,230 @@
+syntax = "proto3";
+
+package heddle.v1;
+
+// Agent timeline object store. This service is the local daemon bridge used by
+// harnesses like OpenCode: clients submit typed operations, while the daemon
+// stores canonical versioned Heddle timeline operation objects and returns
+// their content-addressed ids.
+service TimelineService {
+  rpc RecordOperation(RecordTimelineOperationRequest) returns (AgentTimelineOperationRecord);
+  rpc GetOperation(GetTimelineOperationRequest) returns (AgentTimelineOperationRecord);
+  rpc GetTimelineStatus(GetTimelineStatusRequest) returns (AgentTimelineStatus);
+  rpc ListTimelineSteps(ListTimelineStepsRequest) returns (ListTimelineStepsResponse);
+  rpc ResolveNativeToolCall(ResolveNativeToolCallRequest) returns (AgentTimelineStepSummary);
+  rpc SeekToStep(SeekTimelineToStepRequest) returns (TimelineCursorMoveResponse);
+  rpc SeekToNativeToolCall(SeekTimelineToNativeToolCallRequest) returns (TimelineCursorMoveResponse);
+  rpc UndoToolCall(TimelineCursorRequest) returns (TimelineCursorMoveResponse);
+  rpc RedoToolCall(TimelineCursorRequest) returns (TimelineCursorMoveResponse);
+  rpc CreateTimelineBranch(CreateTimelineBranchRequest) returns (CreateTimelineBranchResponse);
+}
+
+message RecordTimelineOperationRequest {
+  string repo_path = 1;
+  AgentTimelineOperationDraft operation = 2;
+  string client_operation_id = 15;
+}
+
+message GetTimelineOperationRequest {
+  string repo_path = 1;
+  bytes operation_id = 2;
+}
+
+message GetTimelineStatusRequest {
+  string repo_path = 1;
+  string thread = 2;
+}
+
+message ListTimelineStepsRequest {
+  string repo_path = 1;
+  string thread = 2;
+  string branch_id = 3;
+  uint32 limit = 4;
+}
+
+message ListTimelineStepsResponse {
+  repeated AgentTimelineStepSummary steps = 1;
+  AgentTimelineStatus status = 2;
+}
+
+message ResolveNativeToolCallRequest {
+  string repo_path = 1;
+  string thread = 2;
+  string harness = 3;
+  string session_id = 4;
+  string message_id = 5;
+  string tool_call_id = 6;
+}
+
+message SeekTimelineToStepRequest {
+  string repo_path = 1;
+  string thread = 2;
+  string branch_id = 3;
+  string step_id = 4;
+  string reason = 5;
+  string client_operation_id = 15;
+}
+
+message SeekTimelineToNativeToolCallRequest {
+  string repo_path = 1;
+  string thread = 2;
+  string harness = 3;
+  string session_id = 4;
+  string message_id = 5;
+  string tool_call_id = 6;
+  string reason = 7;
+  string client_operation_id = 15;
+}
+
+message TimelineCursorRequest {
+  string repo_path = 1;
+  string thread = 2;
+  string branch_id = 3;
+  string client_operation_id = 15;
+}
+
+message TimelineCursorMoveResponse {
+  AgentTimelineStatus status = 1;
+  AgentTimelineOperationRecord operation = 2;
+}
+
+message CreateTimelineBranchRequest {
+  string repo_path = 1;
+  string thread = 2;
+  string from_step_id = 3;
+  string branch_id = 4;
+  string reason = 5;
+  string client_operation_id = 15;
+}
+
+message CreateTimelineBranchResponse {
+  AgentTimelineStatus status = 1;
+  string branch_id = 2;
+  string parent_branch_id = 3;
+  string from_step_id = 4;
+  AgentTimelineOperationRecord operation = 5;
+}
+
+message AgentTimelineOperationDraft {
+  repeated string labels = 1;
+  oneof body {
+    AgentTimelineToolCallStarted tool_call_started = 10;
+    AgentTimelineToolCallFinished tool_call_finished = 11;
+    AgentTimelineCursorMoved cursor_moved = 12;
+    AgentTimelineBranchCreated branch_created = 13;
+  }
+}
+
+message AgentTimelineOperationRecord {
+  bytes operation_id = 1;
+  string display_id = 2;
+  uint32 schema_version = 3;
+  string kind = 4;
+  repeated string labels = 5;
+  oneof body {
+    AgentTimelineToolCallStarted tool_call_started = 10;
+    AgentTimelineToolCallFinished tool_call_finished = 11;
+    AgentTimelineCursorMoved cursor_moved = 12;
+    AgentTimelineBranchCreated branch_created = 13;
+  }
+  bytes envelope = 20;
+}
+
+message AgentTimelineStatus {
+  string thread = 1;
+  string current_branch_id = 2;
+  string current_step_id = 3;
+  AgentTimelineStateSummary current_state = 4;
+  uint32 branch_count = 5;
+  uint32 step_count = 6;
+}
+
+message AgentTimelineStateSummary {
+  bytes state_id = 1;
+  string display_id = 2;
+  string source_step_id = 3;
+  AgentTimelineToolPayload payload = 4;
+}
+
+message AgentTimelineStepSummary {
+  string thread = 1;
+  string step_id = 2;
+  string branch_id = 3;
+  string parent_step_id = 4;
+  AgentTimelineNativeToolCall native = 5;
+  string tool_name = 6;
+  string status = 7;
+  bool changed = 8;
+  repeated string touched_paths = 9;
+  bytes before_state = 10;
+  bytes after_state = 11;
+  bytes capture_state = 12;
+  AgentTimelineToolPayload payload = 13;
+  repeated string labels = 14;
+  int64 started_at_ms = 15;
+  int64 finished_at_ms = 16;
+  repeated bytes operation_ids = 17;
+  repeated string operation_display_ids = 18;
+  optional uint64 capture_oplog_batch_id = 19;
+}
+
+message AgentTimelineToolPayload {
+  string summary = 1;
+  bytes hash = 2;
+}
+
+message AgentTimelineNativeToolCall {
+  string harness = 1;
+  string session_id = 2;
+  string message_id = 3;
+  string tool_call_id = 4;
+}
+
+message AgentTimelineToolCallStarted {
+  string thread = 1;
+  string step_id = 2;
+  string branch_id = 3;
+  string parent_step_id = 4;
+  AgentTimelineNativeToolCall native = 5;
+  string tool_name = 6;
+  bytes before_state = 7;
+  AgentTimelineToolPayload payload = 8;
+  int64 started_at_ms = 9;
+}
+
+message AgentTimelineToolCallFinished {
+  string thread = 1;
+  string step_id = 2;
+  string branch_id = 3;
+  AgentTimelineNativeToolCall native = 4;
+  string status = 5;
+  bytes before_state = 6;
+  bytes after_state = 7;
+  bytes capture_state = 8;
+  optional uint64 capture_oplog_batch_id = 9;
+  bool changed = 10;
+  repeated string touched_paths = 11;
+  AgentTimelineToolPayload payload = 12;
+  int64 finished_at_ms = 13;
+}
+
+message AgentTimelineCursorMoved {
+  string thread = 1;
+  string branch_id = 2;
+  string from_step_id = 3;
+  string to_step_id = 4;
+  bytes from_state = 5;
+  bytes to_state = 6;
+  string reason = 7;
+  int64 moved_at_ms = 8;
+}
+
+message AgentTimelineBranchCreated {
+  string thread = 1;
+  string branch_id = 2;
+  string parent_branch_id = 3;
+  string from_step_id = 4;
+  bytes from_state = 5;
+  string reason = 6;
+  int64 created_at_ms = 7;
+}

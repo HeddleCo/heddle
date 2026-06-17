@@ -24,6 +24,7 @@ mod state_provenance;
 mod state_review;
 mod state_visibility;
 mod structured_conflict;
+mod timeline;
 mod tree;
 mod tree_diff;
 mod visibility_tier;
@@ -68,6 +69,13 @@ pub use state_visibility::{
 };
 pub use structured_conflict::{
     ConflictError, ConflictResolution, ConflictSide, ConflictSymbol, StructuredConflict,
+};
+pub use timeline::{
+    BranchCreatedV1, CursorMovedV1, NativeToolCallRefV1, TIMELINE_OPERATION_SCHEMA_VERSION,
+    TimelineBranchId, TimelineBranchReason, TimelineCodecError, TimelineCursorMoveReason,
+    TimelineLabel, TimelineOperationBodyV1, TimelineOperationEnvelope, TimelineOperationId,
+    TimelineOperationIdParseError, TimelineOperationKind, TimelineStepId, TimelineToolCallStatus,
+    TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
 };
 pub use tree::{
     EntryType, FileMode, Tree, TreeEntry, TreeError, validate_name as validate_tree_entry_name,

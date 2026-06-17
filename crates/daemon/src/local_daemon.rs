@@ -36,7 +36,7 @@ use std::{
 
 use grpc::{
     DiscussionServiceServer, HookServiceServer, OperationLogQueryServiceServer,
-    SignalServiceServer, StateReviewServiceServer, TransactionServiceServer,
+    SignalServiceServer, StateReviewServiceServer, TimelineServiceServer, TransactionServiceServer,
 };
 use objects::error::{HeddleError, Result};
 use repo::{Repository, operation_dedup::OperationDedupStore};
@@ -46,7 +46,7 @@ use tonic::transport::Server;
 
 use crate::grpc_local_impl::{
     GrpcLocalService, LocalDiscussionService, LocalHookService, LocalOperationLogQueryService,
-    LocalSignalService, LocalStateReviewService, LocalTransactionService,
+    LocalSignalService, LocalStateReviewService, LocalTimelineService, LocalTransactionService,
 };
 
 const PRIVATE_SOCKET_UMASK: libc::mode_t = 0o177;
@@ -389,6 +389,7 @@ pub async fn serve(
     let signal = SignalServiceServer::new(LocalSignalService::new(inner.clone()));
     let query =
         OperationLogQueryServiceServer::new(LocalOperationLogQueryService::new(inner.clone()));
+    let timeline = TimelineServiceServer::new(LocalTimelineService::new(inner.clone()));
     let transaction = TransactionServiceServer::new(LocalTransactionService::new(inner.clone()));
     let hook = HookServiceServer::new(LocalHookService::new(inner));
 
@@ -404,6 +405,7 @@ pub async fn serve(
         .add_service(discussion)
         .add_service(signal)
         .add_service(query)
+        .add_service(timeline)
         .add_service(transaction)
         .add_service(hook)
         .serve_with_incoming_shutdown(incoming, shutdown)
