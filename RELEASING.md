@@ -55,14 +55,16 @@ release-plz → push-to-main flow documented in
      the commit that passed the ancestry check.
 
    If `validate-tag` fails, no build, sign, or publish step runs. If it
-   passes, the matrix proceeds to:
+   passes, the release jobs proceed to:
 
-   - build the `heddle` binary natively on five GitHub-hosted runners
+   - build the non-mac `heddle` binaries natively on Linux/Windows
+     GitHub-hosted runners
    - package each into a versioned archive (`.tar.gz` for unix,
      `.zip` for windows)
-   - build a signed, notarized universal macOS DMG containing
+   - build macOS once in `build-macos-cask`, then package both standalone
+     macOS CLI tarballs and the signed, notarized universal DMG containing
      `Heddle.app`, with the CLI bundled at
-     `Heddle.app/Contents/Resources/bin/heddle`
+     `Heddle.app/Contents/Resources/bin/heddle`, from those same binaries
    - emit a `.sha256` next to each archive
    - sign each archive/DMG with `cosign` keyless (Sigstore public-good
      instance; trust is rooted in the GitHub OIDC token for this run)
@@ -256,15 +258,18 @@ cosign verify-blob \
 
 ## Build strategy: native matrix vs. cross-compilation
 
-We build natively (one GitHub-hosted runner per target) rather than
-cross-compiling from a single host. Trade-off:
+We build natively rather than cross-compiling from a single host, but
+macOS is intentionally consolidated into one job: `build-macos-cask`
+builds both Apple targets once, packages the standalone CLI tarballs, and
+then signs/notarizes the universal app DMG from the same build outputs.
+Trade-off:
 
-- **Targeted matrix (chosen)**: five parallel runners (~5–10 min each
-  with `Swatinem/rust-cache`). No `cross`, no sysroot juggling, no
-  Apple-codesign-on-Linux contortions later if/when we add notarization.
-  Linux ARM stays on `ubuntu-22.04-arm` for the glibc floor; both macOS
-  CLI legs run on `macos-26` so the standalone tarballs and cask app use
-  the same FSKit SDK/deployment floor.
+- **Targeted native jobs (chosen)**: Linux/Windows use a small parallel
+  matrix, while Apple artifacts are built once on `macos-26`. No `cross`,
+  no sysroot juggling, no duplicate macOS CLI builds. Linux ARM stays on
+  `ubuntu-22.04-arm` for the glibc floor; macOS stays on `macos-26` so
+  the standalone tarballs and cask app use the same FSKit SDK/deployment
+  floor.
 - **Cross-compilation**: one runner, more setup. Wins on cost only if
   we hit a parallelism cap, which we won't at our release cadence.
 
@@ -283,9 +288,10 @@ passes:
 - **Smoke (grep).** Cheap content checks: the five target triples, the
   strict-semver push trigger, presence of the `validate-tag` trust gate
   with its ancestry check, packaging/checksum/signing/upload steps, the
-  macOS cask DMG job, the Homebrew cask PR wiring, the
-  draft+prerelease keying off `validate-tag.outputs.kind`, and the
-  stable-tag-refusal on the dispatch path.
+  macOS cask DMG job, the macOS archive ownership by that cask job, the
+  Homebrew cask PR wiring, the draft+prerelease keying off
+  `validate-tag.outputs.kind`, and the stable-tag-refusal on the dispatch
+  path.
 - **Strict (parsed YAML).** Per-job structural checks: `validate-tag`
   exports `tag_sha`, and every downstream job (`build`,
   `build-macos-cask`, `release`, `publish-manifests`) both declares

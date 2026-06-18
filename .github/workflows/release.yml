@@ -5,8 +5,8 @@ name: Release binaries
 # Trigger: stable-semver tag push (vX.Y.Z) OR manual workflow_dispatch
 # with an existing tag (used for RC dry-runs). The job tree:
 #
-#   validate-tag ──► build (matrix, 5 CLI targets) ──┐
-#              └──► build-macos-cask ────────────────┤
+#   validate-tag ──► build (matrix, non-mac CLI targets) ─┐
+#              └──► build-macos-cask (macOS CLI + DMG) ───┤
 #                                                    ├─► sign + checksum
 #                                                    ├─► release (aggregates, publishes, posts SHA256SUMS)
 #                                                    └─► publish-manifests (stable only)
@@ -19,10 +19,12 @@ name: Release binaries
 # the raw trigger ref. This keeps the answer to "is this a sanctioned
 # release?" in exactly one place.
 #
-# Strategy: one build-matrix leg per target. Rationale lives in
-# RELEASING.md — short version: Linux keeps a pinned glibc floor,
-# Windows stays on an MSVC host, and macOS legs run on macos-26 so
-# every Apple artifact compiles against the same FSKit SDK floor.
+# Strategy: one build-matrix leg per non-mac target; the macOS cask job owns
+# the Apple builds once and packages both the standalone CLI tarballs and the
+# signed DMG from those same binaries. Rationale lives in RELEASING.md —
+# short version: Linux keeps a pinned glibc floor, Windows stays on an MSVC
+# host, and macOS runs on macos-26 so every Apple artifact compiles against
+# the same FSKit SDK floor.
 #
 # Signing: cosign keyless via the Sigstore public-good instance. No
 # stored secrets — the GitHub OIDC token is the trust anchor. Verifying
@@ -208,23 +210,15 @@ jobs:
           echo "publish_release=${publish_release}" >> "$GITHUB_OUTPUT"
 
   build:
-    name: build ${{ matrix.target }}
+    name: build non-mac ${{ matrix.target }}
     needs: validate-tag
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.branch_dry_run }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: aarch64-apple-darwin
-            runner: macos-26
-            archive: tar.gz
-          - target: x86_64-apple-darwin
-            # Keep standalone CLI tarballs on the same macOS 26 image
-            # as the cask builder so FSKit's SDK/deployment floor never
-            # splits across release artifacts.
-            runner: macos-26
-            archive: tar.gz
           - target: aarch64-unknown-linux-gnu
             # glibc floor: ubuntu-22.04 ships glibc 2.35, so the -gnu
             # binaries run on Debian 12 (2.36) and Ubuntu 22.04+ forward.
@@ -439,30 +433,59 @@ jobs:
           HEDDLE_NOTARY_ISSUER_ID: ${{ secrets.HEDDLE_NOTARY_ISSUER_ID }}
         run: scripts/build-macos-cask-artifact.sh
 
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
-
-      - name: Sign macOS cask artifact (cosign keyless)
+      - name: Stage macOS CLI artifacts
         shell: bash
         env:
           TAG: ${{ needs.validate-tag.outputs.tag }}
         run: |
           set -euo pipefail
-          asset="dist/Heddle-${TAG}-macos-universal.dmg"
-          cosign sign-blob --yes \
-            --output-signature "${asset}.sig" \
-            --output-certificate "${asset}.pem" \
-            "$asset"
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            stage="heddle-${TAG}-${target}"
+            mkdir -p "dist/${stage}"
+            cp "target/${target}/release/${BIN_NAME}" "dist/${stage}/"
+            cp README.md LICENSE NOTICE "dist/${stage}/"
+            tar -C dist -czf "dist/${stage}.tar.gz" "${stage}"
+            ( cd dist && shasum -a 256 "${stage}.tar.gz" > "${stage}.tar.gz.sha256" )
+          done
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign macOS artifacts (cosign keyless)
+        shell: bash
+        env:
+          TAG: ${{ needs.validate-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          assets=(
+            "dist/Heddle-${TAG}-macos-universal.dmg"
+            "dist/heddle-${TAG}-aarch64-apple-darwin.tar.gz"
+            "dist/heddle-${TAG}-x86_64-apple-darwin.tar.gz"
+          )
+          for asset in "${assets[@]}"; do
+            cosign sign-blob --yes \
+              --output-signature "${asset}.sig" \
+              --output-certificate "${asset}.pem" \
+              "$asset"
+          done
 
       - name: Upload macOS cask outputs
         uses: actions/upload-artifact@v4
         with:
-          name: heddle-macos-cask
+          name: heddle-macos-artifacts
           path: |
             dist/Heddle-${{ needs.validate-tag.outputs.tag }}-macos-universal.dmg
             dist/Heddle-${{ needs.validate-tag.outputs.tag }}-macos-universal.dmg.sha256
             dist/Heddle-${{ needs.validate-tag.outputs.tag }}-macos-universal.dmg.sig
             dist/Heddle-${{ needs.validate-tag.outputs.tag }}-macos-universal.dmg.pem
+            dist/heddle-${{ needs.validate-tag.outputs.tag }}-aarch64-apple-darwin.tar.gz
+            dist/heddle-${{ needs.validate-tag.outputs.tag }}-aarch64-apple-darwin.tar.gz.sha256
+            dist/heddle-${{ needs.validate-tag.outputs.tag }}-aarch64-apple-darwin.tar.gz.sig
+            dist/heddle-${{ needs.validate-tag.outputs.tag }}-aarch64-apple-darwin.tar.gz.pem
+            dist/heddle-${{ needs.validate-tag.outputs.tag }}-x86_64-apple-darwin.tar.gz
+            dist/heddle-${{ needs.validate-tag.outputs.tag }}-x86_64-apple-darwin.tar.gz.sha256
+            dist/heddle-${{ needs.validate-tag.outputs.tag }}-x86_64-apple-darwin.tar.gz.sig
+            dist/heddle-${{ needs.validate-tag.outputs.tag }}-x86_64-apple-darwin.tar.gz.pem
           if-no-files-found: error
           retention-days: 7
 
