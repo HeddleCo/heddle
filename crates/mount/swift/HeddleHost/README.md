@@ -11,7 +11,7 @@ is to be a discoverable bundle in `/Applications` so LaunchServices
 can register the embedded `.appex`. The app remains quiet by default: the
 `LSUIElement = YES` Info.plist key suppresses the Dock icon, and
 no window opens on launch unless the user explicitly opens the
-app from Finder or the CLI deep-links to it after FSKit needs approval.
+app from Finder for the visual setup guide.
 
 ## Target user experience
 
@@ -19,8 +19,10 @@ app from Finder or the CLI deep-links to it after FSKit needs approval.
 $ brew install --cask heddleco/heddle/heddle
 $ heddle start mybranch --workspace virtualized
    ⚠  Heddle FSKit extension not enabled.
-      Opening System Settings — toggle "Heddle" on under
-      File System Extensions.
+      Press Enter to open System Settings.
+[user presses Enter]
+      Opening System Settings — switch File System Extensions to
+      By Category / Extension Type, then toggle "Heddle" on.
 [user toggles while the command is still running]
    ✓ mounted at .repo-heddle-mounts/mybranch (via FSKit)
 ```
@@ -83,7 +85,7 @@ Possible results:
 | State | What CLI does |
 |---|---|
 | `Ready` (line starts with `+`) | Runs `mount -F -t heddle -o t=<thread> <repo> <mp>` via the kernel route; `-F` forces FSKit routing, and the extension declares `-o` in `FSActivateOptionSyntax` and parses `t=` from that payload |
-| `NeedsApproval` (line starts with `-`) | Prints a setup block with `System Settings → General → Login Items & Extensions → File System Extensions → enable 'Heddle'`, opens System Settings with a version-aware deep link, polls readiness for about 60 seconds, then mounts via FSKit as soon as the probe reports `Ready`; if the timer elapses, falls back to NFS for this run |
+| `NeedsApproval` (line starts with `-`) | Prints a setup block with `System Settings → General → Login Items & Extensions → File System Extensions`, explains that macOS owns the approval gate, tells the user to switch the sheet to By Category / Extension Type before enabling `Heddle`, lets interactive users press Enter before Heddle opens System Settings with a version-aware deep link, then waits with an inline spinner until the probe reports `Ready` |
 | `NotInstalled` (no line for our ID) | Prints a one-line host-app install hint, then falls back to NFS |
 | `UnsupportedMacOS` (macOS < 26.0) | Prints an older-macOS notice, then falls back to NFS because URL-backed FSKit resources are unavailable |
 | `Unknown` (`pluginkit` failed) | Silent fallback to NFS |
@@ -231,8 +233,9 @@ In `System Settings → General → Login Items & Extensions → File
 System Extensions`, the **app-grouped** view (default) shows the
 toggle but tapping it does nothing — the module stays disabled.
 Switching to the **category-grouped** view (the picker at the top
-of the panel) makes the toggle work. Tell users this in the setup
-hint.
+of the panel) makes the toggle work. The CLI setup hint calls this
+out as macOS-controlled permission UI so users do not treat it as a
+Heddle mount failure.
 
 If even that fails, the toggle state lives in:
 ```

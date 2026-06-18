@@ -278,10 +278,11 @@ mod linux {
 #[cfg(all(target_os = "macos", feature = "mount"))]
 mod macos {
     use std::{
+        io::{self, IsTerminal, Write},
         path::{Path, PathBuf},
         process::Command,
         sync::Mutex,
-        time::{Duration, Instant},
+        time::Duration,
     };
 
     use anyhow::{Context, Result, anyhow};
@@ -295,14 +296,18 @@ mod macos {
     use crate::{cli::commands::mount_lifecycle::FskitReadinessReport, util::OnceMap};
 
     const MIN_FSKIT_MACOS_MAJOR: u64 = 26;
-    const SETTINGS_PATH: &str = "System Settings → General → Login Items & Extensions → File System Extensions → enable 'Heddle'";
+    const SETTINGS_PATH: &str =
+        "System Settings → General → Login Items & Extensions → File System Extensions";
     const SETTINGS_LOGIN_ITEMS_URL: &str =
         "x-apple.systempreferences:com.apple.LoginItems-Settings.extension";
     const SETTINGS_SEQUOIA_FILE_EXTENSIONS_URL: &str =
         "x-apple.systempreferences:com.apple.LoginItems-Settings.extension?Extensions";
     const FSKIT_INSTALL_HINT: &str = "FSKit fast path available — install the host app: brew install --cask heddle (or download from https://github.com/HeddleCo/heddle/releases)";
     const FSKIT_POLL_INTERVAL: Duration = Duration::from_millis(1_500);
-    const FSKIT_POLL_CAP: Duration = Duration::from_secs(60);
+    const FSKIT_WAIT_MESSAGE: &str =
+        "Waiting for macOS to report Heddle enabled in File System Extensions";
+    const FSKIT_SPINNER_FRAMES: [char; 4] = ['|', '/', '-', '\\'];
+    const FSKIT_LINE_CLEAR_PADDING: &str = "                                                ";
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct MacOsVersion {
@@ -489,36 +494,23 @@ mod macos {
                 Readiness::NeedsApproval => {
                     let settings_url = settings_deep_link().url;
                     print_needs_approval_block(settings_url);
+                    wait_for_enter_to_open_settings(settings_url);
                     open_settings(settings_url);
-                    if wait_for_fskit_ready() {
-                        info!(
-                            thread = thread_id,
-                            "FSKit extension enabled during poll; using `mount -F -t heddle`"
-                        );
-                        mount_via_fskit_or_nfs(
-                            &root,
-                            thread_id,
-                            mountpoint,
-                            FsKitMountReport {
-                                state: "ready_after_approval",
-                                action: "mounted_after_poll",
-                                settings_url: Some(settings_url),
-                            },
-                        )?
-                    } else {
-                        eprintln!(
-                            "Heddle FSKit extension still disabled after 60s; using NFS for this run. Enable it and re-run for the fast path."
-                        );
-                        MacOsMountOutcome::nfs(
-                            mount_via_nfs(&root, thread_id, mountpoint)?,
-                            Some(FskitReadinessReport {
-                                state: "needs_approval",
-                                backend: "nfs",
-                                action: "poll_timeout_fell_back",
-                                settings_url: Some(settings_url),
-                            }),
-                        )
-                    }
+                    wait_for_fskit_ready();
+                    info!(
+                        thread = thread_id,
+                        "FSKit extension enabled during poll; using `mount -F -t heddle`"
+                    );
+                    mount_via_fskit_or_nfs(
+                        &root,
+                        thread_id,
+                        mountpoint,
+                        FsKitMountReport {
+                            state: "ready_after_approval",
+                            action: "mounted_after_poll",
+                            settings_url: Some(settings_url),
+                        },
+                    )?
                 }
                 Readiness::NotInstalled => {
                     eprintln!("{FSKIT_INSTALL_HINT}");
@@ -638,32 +630,74 @@ mod macos {
 
     fn print_needs_approval_block(settings_url: &'static str) {
         eprintln!(
-            "\nHeddle FSKit extension is installed but disabled.\n\
+            "\nHeddle FSKit extension is installed, but macOS has not enabled it yet.\n\
+             \n\
+             macOS requires this approval in System Settings; Heddle cannot turn this permission on itself.\n\
              \n\
              Enable the fast path:\n\
-             1. {SETTINGS_PATH}\n\
-             2. Return here; this command will continue automatically when FSKit is ready.\n\
+             1. Open {SETTINGS_PATH}.\n\
+             2. In that sheet, switch the picker to By Category / Extension Type, then turn on Heddle.\n\
+             3. If the By App view does not apply the change, stay on By Category / Extension Type; macOS controls this approval UI.\n\
              \n\
-             Opening System Settings: {settings_url}\n"
+             Settings URL: {settings_url}\n\
+             Heddle will keep waiting here until macOS reports the extension enabled. Press Ctrl-C to stop.\n"
         );
+    }
+
+    fn wait_for_enter_to_open_settings(settings_url: &str) {
+        if io::stdin().is_terminal() {
+            let mut stderr = io::stderr();
+            let _ = write!(
+                stderr,
+                "Press Enter to open System Settings, or Ctrl-C to stop."
+            );
+            let _ = stderr.flush();
+
+            let mut input = String::new();
+            let _ = io::stdin().read_line(&mut input);
+            let _ = writeln!(stderr, "Opening System Settings: {settings_url}");
+        } else {
+            eprintln!("Opening System Settings: {settings_url}");
+        }
     }
 
     fn open_settings(url: &str) {
         let _ = Command::new("open").arg(url).status();
     }
 
-    fn wait_for_fskit_ready() -> bool {
-        let started = Instant::now();
+    fn wait_for_fskit_ready() {
+        let mut stderr = io::stderr();
+        let interactive = stderr.is_terminal();
+        let mut frame_index = 0usize;
+
+        if !interactive {
+            eprintln!("{FSKIT_WAIT_MESSAGE}. Press Ctrl-C to stop waiting.");
+        }
+
         loop {
             if readiness::probe() == Readiness::Ready {
-                return true;
+                if interactive {
+                    let _ = writeln!(
+                        stderr,
+                        "\rHeddle FSKit extension enabled; continuing. {FSKIT_LINE_CLEAR_PADDING}"
+                    );
+                } else {
+                    eprintln!("Heddle FSKit extension enabled; continuing.");
+                }
+                return;
             }
-            let elapsed = started.elapsed();
-            if elapsed >= FSKIT_POLL_CAP {
-                return false;
+
+            if interactive {
+                let frame = FSKIT_SPINNER_FRAMES[frame_index % FSKIT_SPINNER_FRAMES.len()];
+                let _ = write!(
+                    stderr,
+                    "\r{frame} {FSKIT_WAIT_MESSAGE}. Press Ctrl-C to stop."
+                );
+                let _ = stderr.flush();
+                frame_index = frame_index.wrapping_add(1);
             }
-            let remaining = FSKIT_POLL_CAP - elapsed;
-            std::thread::sleep(std::cmp::min(FSKIT_POLL_INTERVAL, remaining));
+
+            std::thread::sleep(FSKIT_POLL_INTERVAL);
         }
     }
 

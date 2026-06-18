@@ -10,6 +10,7 @@
 #   - all 5 target triples
 #   - tarball/zip packaging for CLI targets
 #   - signed/notarized macOS cask DMG
+#   - final-DMG app signature verification
 #   - sha256 checksums
 #   - signing step
 #   - GitHub Release upload
@@ -170,6 +171,30 @@ if ! grep -F "com.apple.security.temporary-exception.files." \
   ok "FSKit extension avoids profile-gated temporary path exceptions"
 else
   err "FSKit extension must not request temporary-exception.files entitlements; Developer ID profiles do not authorize them"
+fi
+
+staged_app_verify_count="$(grep -F 'verify_app_signature "$STAGED_APP"' scripts/build-macos-cask-artifact.sh | wc -l | tr -d ' ')"
+if [[ "$staged_app_verify_count" -ge 2 ]]; then
+  ok "macOS cask build verifies app signature before and after app notarization"
+else
+  err "macOS cask build must verify Heddle.app signature before and after app notarization/stapling"
+fi
+
+final_dmg_app_verify_count="$(grep -F 'verify_dmg_app_signature "$DMG_PATH"' scripts/build-macos-cask-artifact.sh | wc -l | tr -d ' ')"
+if [[ "$final_dmg_app_verify_count" -ge 2 ]] \
+   && grep -F 'HEDDLE_DMG_VERIFY_APP_SIGNATURE=1' scripts/build-macos-cask-artifact.sh >/dev/null \
+   && grep -F 'HEDDLE_DMG_VERIFY_APP_SIGNATURE' crates/mount/swift/HeddleHost/dmg/make-dmg.sh >/dev/null; then
+  ok "macOS cask build verifies app signature inside staged and final DMGs"
+else
+  err "macOS cask build must verify Heddle.app inside the staged and final DMG, not only before packaging"
+fi
+
+dmg_signature_verify_count="$(grep -F 'codesign --verify --strict --verbose=4 "$DMG_PATH"' scripts/build-macos-cask-artifact.sh | wc -l | tr -d ' ')"
+if [[ "$dmg_signature_verify_count" -ge 2 ]] \
+   && grep -F 'xcrun stapler validate "$DMG_PATH"' scripts/build-macos-cask-artifact.sh >/dev/null; then
+  ok "macOS cask build verifies DMG signature before and after DMG notarization"
+else
+  err "macOS cask build must verify the DMG code signature before and after DMG notarization/stapling"
 fi
 
 if [[ -x scripts/render-homebrew-cask.sh ]] \

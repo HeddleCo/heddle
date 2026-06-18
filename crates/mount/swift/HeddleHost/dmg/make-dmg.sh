@@ -10,6 +10,7 @@ APPEARANCE="${HEDDLE_DMG_APPEARANCE:-light}"
 VOLNAME="${HEDDLE_DMG_VOLUME:-Heddle}"
 DMG_FORMAT="${HEDDLE_DMG_FORMAT:-UDZO}"
 ZLIB_LEVEL="${HEDDLE_DMG_ZLIB_LEVEL:-9}"
+VERIFY_APP_SIGNATURE="${HEDDLE_DMG_VERIFY_APP_SIGNATURE:-0}"
 
 if [[ -d "$INPUT_PATH" && "$INPUT_PATH" == *.app ]]; then
   LAYOUT="app"
@@ -46,9 +47,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
+verify_app_signature() {
+  local app="$1"
+
+  if [[ "$VERIFY_APP_SIGNATURE" != "1" ]]; then
+    return 0
+  fi
+
+  echo "Verifying DMG app signature: $app"
+  codesign --verify --deep --strict --verbose=4 "$app" || return $?
+}
+
 mkdir -p "$STAGE_DIR" "$MOUNT_DIR"
 if [[ "$LAYOUT" == "app" ]]; then
-  ditto "$INPUT_PATH" "$STAGE_DIR/$STAGED_ITEM"
+  ditto --norsrc --noextattr --noqtn --noacl "$INPUT_PATH" "$STAGE_DIR/$STAGED_ITEM"
+  verify_app_signature "$STAGE_DIR/$STAGED_ITEM"
   ln -s /Applications "$STAGE_DIR/Applications"
 else
   cp "$INPUT_PATH" "$STAGE_DIR/$STAGED_ITEM"
@@ -113,6 +126,9 @@ end tell
 APPLESCRIPT
 
 sync
+if [[ "$LAYOUT" == "app" ]]; then
+  verify_app_signature "$MOUNT_DIR/$STAGED_ITEM"
+fi
 hdiutil detach "$MOUNT_DIR" -quiet
 CONVERT_ARGS=(
   -format "$DMG_FORMAT"
