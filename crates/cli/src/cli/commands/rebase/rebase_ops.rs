@@ -410,14 +410,13 @@ fn apply_commit(
                         &parent.hash,
                         &existing.hash,
                         &new.hash,
-                    )? {
-                        if let Some(mode) = merge_file_mode(&parent, &existing, &new) {
-                            let mut merged = new;
-                            merged.hash = merged_hash;
-                            merged.mode = mode;
-                            updated_entries.push(merged);
-                            continue;
-                        }
+                    )? && let Some(mode) = merge_file_mode(&parent, &existing, &new)
+                    {
+                        let mut merged = new;
+                        merged.hash = merged_hash;
+                        merged.mode = mode;
+                        updated_entries.push(merged);
+                        continue;
                     }
                     if blob_contains_both(repo, &new.hash, &existing.hash, &parent.hash)?
                         && let Some(mode) = merge_file_mode(&parent, &existing, &new)
