@@ -39,8 +39,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag to build (vX.Y.Z or vX.Y.Z-(rc|alpha|beta)[.N]). Dispatch-triggered runs always publish as prerelease+draft.'
+        description: 'Existing tag to build (vX.Y.Z or vX.Y.Z-(rc|alpha|beta)[.N]); or a synthetic prerelease tag when branch_dry_run is true.'
         required: true
+      branch_dry_run:
+        description: 'TEMP: build from the selected branch/ref without publishing a GitHub Release.'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write   # create release + upload assets
@@ -66,6 +71,7 @@ jobs:
       # SHA, not refs/tags/<tag> — see TOCTOU note in the classify step.
       tag_sha: ${{ steps.classify.outputs.tag_sha }}
       kind: ${{ steps.classify.outputs.kind }}
+      publish_release: ${{ steps.classify.outputs.publish_release }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -80,6 +86,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           PUSH_REF: ${{ github.ref }}
           DISPATCH_TAG: ${{ inputs.tag }}
+          BRANCH_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.branch_dry_run }}
         run: |
           set -euo pipefail
 
@@ -106,26 +113,7 @@ jobs:
             exit 1
           fi
 
-          # 2. Reject anything that is not a real tag in this repo. This
-          #    catches workflow_dispatch with 'main', a typo, or a
-          #    deleted tag — none of which should reach the build job.
-          if ! git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
-            echo "::error::'${tag}' is not a tag in this repository"
-            exit 1
-          fi
-
-          # 3. The pipeline only ships releases from main. A tag pointed
-          #    at a feature branch (deliberately or accidentally) must
-          #    not produce signed binaries with the heddle release OIDC
-          #    identity. The tag-push trigger does not enforce branch
-          #    ancestry on its own, so we do it here.
-          tag_sha="$(git rev-parse "refs/tags/${tag}^{commit}")"
-          if ! git merge-base --is-ancestor "$tag_sha" "refs/remotes/origin/main"; then
-            echo "::error::tag '${tag}' (commit ${tag_sha}) is not reachable from origin/main — refusing to release"
-            exit 1
-          fi
-
-          # 4. Classify. Tag pattern decides the *shape* of release;
+          # 2. Classify. Tag pattern decides the *shape* of release;
           #    event source decides whether it ships as a final release.
           #    Dispatch runs are *always* prerelease+draft so an operator
           #    dry-run cannot accidentally publish a public, non-draft
@@ -140,7 +128,49 @@ jobs:
             exit 1
           fi
 
-          if [[ "$EVENT" == "workflow_dispatch" ]]; then
+          # TEMP: branch_dry_run is for PR validation of release-only
+          # signing/notarization paths. It builds artifacts from the
+          # manually selected workflow ref, skips the GitHub Release job,
+          # and still requires a prerelease-shaped synthetic tag so asset
+          # names remain realistic. Remove once the release artifact guard
+          # has been verified in CI.
+          if [[ "$EVENT" == "workflow_dispatch" && "$BRANCH_DRY_RUN" == "true" ]]; then
+            if [[ "$PUSH_REF" != refs/heads/* ]]; then
+              echo "::error::branch_dry_run must be dispatched from a branch ref, got: $PUSH_REF"
+              exit 1
+            fi
+            if [[ "$tag" =~ $stable_re ]]; then
+              echo "::error::branch_dry_run requires a prerelease-shaped synthetic tag (vX.Y.Z-rc.N), got stable tag '${tag}'"
+              exit 1
+            fi
+            tag_sha="$(git rev-parse HEAD)"
+            kind=prerelease
+            publish_release=false
+            echo "::notice::TEMP branch_dry_run building ${tag} from ${PUSH_REF} (${tag_sha}) without publishing a GitHub Release"
+          else
+            # 3. Reject anything that is not a real tag in this repo. This
+            #    catches workflow_dispatch with 'main', a typo, or a
+            #    deleted tag — none of which should reach the release job.
+            if ! git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
+              echo "::error::'${tag}' is not a tag in this repository"
+              exit 1
+            fi
+
+            # 4. The pipeline only ships releases from main. A tag pointed
+            #    at a feature branch (deliberately or accidentally) must
+            #    not produce signed release assets with the heddle release
+            #    OIDC identity. The tag-push trigger does not enforce
+            #    branch ancestry on its own, so we do it here.
+            tag_sha="$(git rev-parse "refs/tags/${tag}^{commit}")"
+            if ! git merge-base --is-ancestor "$tag_sha" "refs/remotes/origin/main"; then
+              echo "::error::tag '${tag}' (commit ${tag_sha}) is not reachable from origin/main — refusing to release"
+              exit 1
+            fi
+
+            publish_release=true
+          fi
+
+          if [[ "$EVENT" == "workflow_dispatch" && "$BRANCH_DRY_RUN" != "true" ]]; then
             # Dispatch is the RC/dry-run path. Stable tags MUST go through
             # the push trigger so they cannot be retroactively downgraded:
             # softprops/action-gh-release UPDATES an existing release when
@@ -154,9 +184,9 @@ jobs:
               exit 1
             fi
             kind=prerelease
-          elif [[ "$tag" =~ $stable_re ]]; then
+          elif [[ "$EVENT" == "push" && "$tag" =~ $stable_re ]]; then
             kind=stable
-          else
+          elif [[ "$EVENT" == "push" ]]; then
             # Push trigger but the tag is not strict semver. The push
             # filter should have blocked this; if it slipped through,
             # fail loudly rather than silently downgrading.
@@ -175,6 +205,7 @@ jobs:
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "tag_sha=${tag_sha}" >> "$GITHUB_OUTPUT"
           echo "kind=${kind}" >> "$GITHUB_OUTPUT"
+          echo "publish_release=${publish_release}" >> "$GITHUB_OUTPUT"
 
   build:
     name: build ${{ matrix.target }}
@@ -438,6 +469,7 @@ jobs:
   release:
     name: publish release
     needs: [validate-tag, build, build-macos-cask]
+    if: needs.validate-tag.outputs.publish_release == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

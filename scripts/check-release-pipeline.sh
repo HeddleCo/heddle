@@ -11,6 +11,7 @@
 #   - tarball/zip packaging for CLI targets
 #   - signed/notarized macOS cask DMG
 #   - final-DMG app signature verification
+#   - non-publishing branch dry-run path for release-only verification
 #   - sha256 checksums
 #   - signing step
 #   - GitHub Release upload
@@ -85,6 +86,14 @@ if grep -F 'workflow_dispatch refuses stable tag' "$WF" >/dev/null; then
   ok "validate-tag refuses stable tags from workflow_dispatch (downgrade-attack guard)"
 else
   err "validate-tag must refuse stable tags (vX.Y.Z) from workflow_dispatch; see RELEASING.md and release.yml comment on softprops update-if-exists"
+fi
+
+if grep -F 'branch_dry_run:' "$WF" >/dev/null \
+   && grep -F 'publish_release=false' "$WF" >/dev/null \
+   && grep -F "if: needs.validate-tag.outputs.publish_release == 'true'" "$WF" >/dev/null; then
+  ok "temporary branch dry-run path skips GitHub Release publication"
+else
+  err "temporary branch dry-run path must be explicit and must skip GitHub Release publication"
 fi
 
 # All five active target triples (win-arm64 parked, see below).
@@ -308,7 +317,7 @@ else
   else
     oks << "validate-tag exports tag_sha output"
   end
-  errors << "validate-tag must declare 'tag' and 'kind' outputs" unless outs.key?("tag") && outs.key?("kind")
+  errors << "validate-tag must declare 'tag', 'kind', and 'publish_release' outputs" unless outs.key?("tag") && outs.key?("kind") && outs.key?("publish_release")
 end
 
 downstream = ["build", "build-macos-cask", "release", "publish-manifests"]
@@ -461,6 +470,8 @@ else:
         oks.append("validate-tag exports tag_sha output")
     if "tag" not in outs or "kind" not in outs:
         errors.append("validate-tag must declare 'tag' and 'kind' outputs")
+    if "publish_release" not in outs:
+        errors.append("validate-tag must declare a 'publish_release' output so dry-runs cannot publish releases")
 
 # Every job that runs AFTER validate-tag (i.e. that produces or ships
 # artifacts) must declare it as a needs dependency. Listing the set
